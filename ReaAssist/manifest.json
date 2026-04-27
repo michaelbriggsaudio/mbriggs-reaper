@@ -1,0 +1,121 @@
+{
+  "version": "1.0.3",
+  "files": [
+    {
+      "name": "CHANGELOG.md",
+      "sha256": "d87c0c83f91aca65fdcc7130ec6e4fc9f05a6d4f1a47a2caedb8939660b8b948"
+    },
+    {
+      "name": "LICENSE.txt",
+      "sha256": "3918d0bba78468c6b23ab0af4e68f62aa56001960d0acfca1b481488751df4c2"
+    },
+    {
+      "name": "README.md",
+      "sha256": "19f498d0444e9ed294e6e13e52df9b95ed4a95f2da7db9c91d0261553eaa1441"
+    },
+    {
+      "name": "ReaAssist.lua",
+      "sha256": "0b2ee21d92a9cb6338ed1350f5f3dc69717dce2c3f905327651d6fd572d65a35"
+    },
+    {
+      "name": "Resources/ReEQ/Dependencies/firhalfband.jsfx-inc",
+      "sha256": "803138717878e9fe1bc546ccbc033614c0637b6c0d66018486d498f43b0d2ec0"
+    },
+    {
+      "name": "Resources/ReEQ/Dependencies/spectrum.jsfx-inc",
+      "sha256": "caa388dd5df5c8c85120f8a16e78016e2628bea7106bfe4fd1573fc6c2c43b9e"
+    },
+    {
+      "name": "Resources/ReEQ/Dependencies/svf_filter.jsfx-inc",
+      "sha256": "e1162241f9097a3a866b9db692733fd2aa059b1c793ee4190c581670880e81bd"
+    },
+    {
+      "name": "Resources/ReEQ/LICENSE.txt",
+      "sha256": "9e0332342bcaa078724b5daa6a711e037378daa230a8a766b10694bcfd185cd0"
+    },
+    {
+      "name": "Resources/ReEQ/ReEQ.jsfx",
+      "sha256": "f32d3fa5c30b934cd0f1707d61d795f3d0a8f8eba505d0d52782a67e76bb4a9e"
+    },
+    {
+      "name": "Resources/ReaAssist_API_Ref.md",
+      "sha256": "e170685024a7b11531ebebbd045afad7163e944212cce0b7686b167b71d8fa15"
+    },
+    {
+      "name": "Resources/ReaAssist_API_Ref_Extended.md",
+      "sha256": "5fb5d765a5bc8a45e9828079bb79daac58ea86da0723692abb7a54333f64f9e2"
+    },
+    {
+      "name": "Resources/ReaAssist_Help.md",
+      "sha256": "827ea42d81393877705e26142832cdd4beeb547500e107b3920ead7800af8e4b"
+    },
+    {
+      "name": "Resources/ReaAssist_JSFX_Prompt.md",
+      "sha256": "0f37daef910428d02f48c0c635ed000615e3086897d4ad71bd8109470addb604"
+    },
+    {
+      "name": "Resources/ReaAssist_MIDI_Ref.md",
+      "sha256": "fbba6f4343fbc6eb39ab899e20deffa9afff8773ab20d11ed881ba50c9d419d3"
+    },
+    {
+      "name": "Resources/ReaAssist_Plugin_Prompt.md",
+      "sha256": "24633c934b540e59f0f68b315c5fe47508c996dcda181c1b857a42404e154d74"
+    },
+    {
+      "name": "Resources/ReaAssist_Plugin_Ref.md",
+      "sha256": "728560a26b9ddea06ca7b8c0d294b6fd419c31660856d604fe68a28eca1dd420"
+    },
+    {
+      "name": "Resources/ReaAssist_Relaunch.lua",
+      "sha256": "4c7544dd58e77ed54187f8c66f9ea8d0dce69ba9db05ba5d4b22fd8ca50655c0"
+    },
+    {
+      "name": "Resources/ReaAssist_System_Prompt.md",
+      "sha256": "00c47fbb2463ca506989232b38a9ba7a4e3514333dbf5f0b21dc81f21e457d36"
+    },
+    {
+      "name": "Resources/ReaAssist_Theme_Prompt.md",
+      "sha256": "ed97c8b705981785958561208e70fb5f0282a423f6997546d21308eecf2af3b5"
+    },
+    {
+      "name": "Resources/ReaAssist_Theme_Ref.md",
+      "sha256": "9c0023bc08645536e9a9710fb9afe0aaf6e1e9c2289f5219c59b8c1e01c58df1"
+    },
+    {
+      "name": "Resources/ReaAssist_UI.lua",
+      "sha256": "8ff4fe409bc08594f25dab633879ad5d59defe78c4c356765231471208abdf90"
+    },
+    {
+      "name": "Resources/fonts/Inter_18pt-Bold.ttf",
+      "sha256": "30a5c45ec23a594af2effe8d3b589ad22c2dede27441050a1604d00ff82fd0dc"
+    },
+    {
+      "name": "Resources/fonts/Inter_18pt-Light.ttf",
+      "sha256": "f0e82b52327efcb68e1b181019ad81d6773bc5ee2addb0b3588d5712740054cd"
+    },
+    {
+      "name": "Resources/fonts/Inter_18pt-Regular.ttf",
+      "sha256": "3e5f90a0138b38de4cf4d779ad78391974ea1df776b9164842bdcbb60ce383c5"
+    },
+    {
+      "name": "Resources/fonts/Inter_18pt-SemiBold.ttf",
+      "sha256": "a8b276e25bb13dfa39cface35cc92aff9a7d5f1b96143f0df8c66351ccfed2a4"
+    },
+    {
+      "name": "Resources/fonts/JetBrainsMono-Medium.ttf",
+      "sha256": "23d57b8a635d023c3717a9c7ac1721199d0f8c6fe4b06d4d5ba3af2170fcbaa2"
+    },
+    {
+      "name": "Resources/fonts/JetBrainsMono-Regular.ttf",
+      "sha256": "b6b1ff4ddefe36d7f2a6174e1d001cab374e594519ee9049af028d577b64c5f5"
+    },
+    {
+      "name": "Resources/fonts/JetBrainsMono-SemiBold.ttf",
+      "sha256": "55987f26bab41b3fc9f13ce5ca9db9d99a75e3be4bba0f7341d3c026ff6e4706"
+    },
+    {
+      "name": "Resources/fonts/lucide.ttf",
+      "sha256": "6dc6f20366cff6214d93fdb69d6fa216146810d6d2858f4ae61cd129c2103bc3"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+This repository contains REAPER scripts and tools by Michael Briggs.
+
+Each package in this repository is licensed individually. See the LICENSE
+file inside each package's directory for the applicable terms:
+
+- ReaAssist: ReaAssist/LICENSE.txt

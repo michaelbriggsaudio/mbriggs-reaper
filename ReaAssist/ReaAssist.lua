@@ -275,7 +275,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.0.4", -- public release version
+  VERSION           = "1.0.5", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -412,13 +412,13 @@ S = {
   -- MIDI reference (auto-injected when user prompt contains "midi", or
   -- on-demand via <context_needed>midi</context_needed>). Mirrors api_ref:
   -- once set, prepended to every request as a synthetic user/assistant pair.
+  -- Body content lives in API_Ref.md (SECTION:midi); served via CTX.midi.
   midi_ref_message  = nil,     -- pinned MIDI ref message, or nil
-  midi_ref_cache    = nil,     -- cached file content (loaded once)
   -- Theme reference (on-demand via <context_needed>theme</context_needed>).
   -- Auto-injected when user prompt contains "theme" + color-related keywords.
   -- Once set, prepended to every request as a synthetic message, like api_ref.
+  -- Body content lives in API_Ref.md (SECTION:theme); served via CTX.theme.
   theme_ref_message = nil,     -- pinned theme ref message, or nil
-  theme_ref_cache   = nil,     -- cached file content (loaded once)
   -- Gemini explicit context cache (paid tier only, when api_ref is loaded).
   -- Caches system_instruction + api_ref priming exchange to reduce per-turn
   -- input token cost. Created lazily at send time; deleted on invalidation.
@@ -2484,7 +2484,6 @@ FONT_FILES = {
   inter_bold  = "Inter_18pt-Bold.ttf",
   mono_reg    = "JetBrainsMono-Regular.ttf",
   mono_med    = "JetBrainsMono-Medium.ttf",
-  mono_semi   = "JetBrainsMono-SemiBold.ttf",
   -- Lucide icon font (MIT). Icons are addressed by their Private Use Area
   -- codepoints; see the ICON table below. Ship as Resources/fonts/lucide.ttf.
   lucide      = "lucide.ttf",
@@ -2510,7 +2509,6 @@ FONT.inter_semi  = _mkfont(FONT_FILES.inter_semi)
 FONT.inter_bold  = _mkfont(FONT_FILES.inter_bold)
 FONT.mono_reg    = _mkfont(FONT_FILES.mono_reg)
 FONT.mono_med    = _mkfont(FONT_FILES.mono_med)
-FONT.mono_semi   = _mkfont(FONT_FILES.mono_semi)
 FONT.lucide      = _mkfont(FONT_FILES.lucide)
 RA.bold_font = FONT.inter_bold
 RA.code_font = FONT.mono_reg
@@ -5809,22 +5807,28 @@ function CTX.fx_params(proj, filter_names)
 end
 
 -- =============================================================================
--- CTX.docs
+-- CTX.docs / CTX.midi / CTX.theme
 -- =============================================================================
--- Loads the REAPER Lua API reference from a single file in the script's
--- Resources folder (API_Ref.md). The file contains seven buckets
--- delimited by `<!-- SECTION:name -->` markers: core (always-pinned when
--- "Always include REAPER API reference" is on; otherwise fetched on-demand
--- via the docs bucket), extended (less-common surface; on-demand via the
--- docs_extended bucket), and items / envelopes / take_fx / routing / tempo
--- (each on-demand via docs:NAME). The whole file is read once per session
--- and parsed into S.api_ref_section_cache, but each bucket is still served
--- individually -- only the requested bucket is sent to the model. Does not
--- take a proj argument because the API reference is project-independent.
+-- Loads the REAPER Lua API + workflow reference from a single file in the
+-- script's Resources folder (API_Ref.md). The file contains nine buckets
+-- delimited by `<!-- SECTION:name -->` markers:
+--   core      always-pinned when "Always include REAPER API reference" is
+--             on; otherwise fetched on-demand via the docs bucket.
+--   extended  less-common API surface; on-demand via docs_extended.
+--   items / envelopes / take_fx / routing / tempo
+--             on-demand via docs:NAME.
+--   midi      MIDI workflow reference; auto-injected on midi prompts or
+--             on-demand via the midi bucket. Served by CTX.midi.
+--   theme     theme color reference; auto-injected on theme+color prompts
+--             or on-demand via the theme bucket. Served by CTX.theme.
+-- The whole file is read once per session and parsed into
+-- S.api_ref_section_cache, but each bucket is still served individually
+-- -- only the requested bucket is sent to the model. Does not take a proj
+-- argument because the reference is project-independent.
 --
--- The file's leading 3-line HTML-comment header sits before the first
--- SECTION marker so it is naturally ignored by the marker parser; it never
--- ships to the model.
+-- The file's leading HTML-comment header sits before the first SECTION
+-- marker so it is naturally ignored by the marker parser; it never ships
+-- to the model.
 --
 -- Returns the formatted reference string on success, or nil + error message
 -- on failure. Callers MUST check for nil and show the error to the user in
@@ -5848,21 +5852,25 @@ local function _read_ref_file(path, filename)
   return content
 end
 
--- The REAPER Lua API reference lives in a single physical file
--- (Resources/API_Ref.md) with seven buckets delimited by
+-- The REAPER Lua API + workflow reference lives in a single physical file
+-- (Resources/API_Ref.md) with nine buckets delimited by
 -- `<!-- SECTION:name -->` ... `<!-- /SECTION:name -->` markers:
 --   core      always-pinned default reference (CTX.docs)
 --   extended  on-demand via <context_needed>docs_extended</context_needed>
 --   items, envelopes, take_fx, routing, tempo
 --             on-demand via <context_needed>docs:NAME</context_needed>
+--   midi      auto-injected on midi prompts / on-demand via
+--             <context_needed>midi</context_needed> (CTX.midi)
+--   theme     auto-injected on theme+color prompts / on-demand via
+--             <context_needed>theme</context_needed> (CTX.theme)
 -- The file is read once per session and parsed into S.api_ref_section_cache
 -- keyed by bucket name. Each bucket is still served individually -- only
 -- the requested name is sent to the model -- but the loader and cache are
--- unified, replacing what used to be three separate per-file loaders.
+-- unified, replacing what used to be five separate per-file loaders.
 local API_REF_FILE = "API_Ref.md"
 -- Buckets the model can request. The dispatcher gates docs:<x> against
 -- DOCS_SECTION_NAMES (the on-demand-section subset); the loader parses
--- the full set including core/extended.
+-- the full set including core/extended/midi/theme.
 local API_REF_SECTION_NAMES = {
   core      = true,
   extended  = true,
@@ -5871,6 +5879,8 @@ local API_REF_SECTION_NAMES = {
   take_fx   = true,
   routing   = true,
   tempo     = true,
+  midi      = true,
+  theme     = true,
 }
 local DOCS_SECTION_NAMES = {
   items     = true,
@@ -6104,33 +6114,17 @@ end
 -- =============================================================================
 -- CTX.midi
 -- =============================================================================
--- Loads MIDI_Ref.md from the script folder. Contains MIDI workflow
--- patterns, PPQ explainer, value ranges, function signatures, and worked
--- examples for note/CC/event manipulation. Cached after first read like
--- CTX.docs().
---
--- Returns the formatted reference string on success, or nil + error message
--- on failure.
+-- Returns the MIDI workflow reference (PPQ explainer, value ranges, function
+-- signatures, worked examples). Body content lives in API_Ref.md under
+-- SECTION:midi; the unified API-ref loader caches every bucket on first
+-- access. Returns the formatted reference string on success, or nil + error
+-- message on failure.
 function CTX.midi()
-  if not S.midi_ref_cache then
-    local ref_path = RA.RESOURCES_DIR .. "MIDI_Ref.md"
-    local f = io.open(ref_path, "r")
-    if not f then
-      return nil, "MIDI reference file not found at:\n" .. ref_path
-        .. "\n\nPlace MIDI_Ref.md in the Resources/ subfolder "
-        .. "next to this script."
-    end
-    local content = f:read("*a")
-    f:close()
-    if #content > CFG.MAX_API_REF_BYTES then
-      return nil, str_format(
-        "MIDI reference file is too large (%.1f KB, max %d KB).\n"
-        .. "Expected MIDI_Ref.md.",
-        #content / 1024, CFG.MAX_API_REF_BYTES / 1024)
-    end
-    S.midi_ref_cache = content
+  _load_api_ref_file()
+  if S._api_ref_section_err.midi then
+    return nil, S._api_ref_section_err.midi
   end
-  return "REAPER MIDI WORKFLOW REFERENCE:\n" .. S.midi_ref_cache
+  return "REAPER MIDI WORKFLOW REFERENCE:\n" .. S.api_ref_section_cache.midi
 end
 
 -- =============================================================================
@@ -6270,29 +6264,17 @@ end
 -- theme color ini_key names for SetThemeColor/GetThemeColor, plus usage patterns.
 -- On-demand bucket: injected when the user asks about changing theme colors or
 -- appearance. Also auto-injected when the prompt contains theme + color keywords.
+-- Body content lives in API_Ref.md under SECTION:theme; served by the unified
+-- API-ref loader.
 --
 -- Returns the formatted reference string on success, or nil + error message
 -- on failure.
 function CTX.theme()
-  if not S.theme_ref_cache then
-    local ref_path = RA.RESOURCES_DIR .. "Theme_Ref.md"
-    local f = io.open(ref_path, "r")
-    if not f then
-      return nil, "Theme reference file not found at:\n" .. ref_path
-        .. "\n\nPlace Theme_Ref.md in the Resources/ subfolder "
-        .. "next to this script."
-    end
-    local content = f:read("*a")
-    f:close()
-    if #content > CFG.MAX_API_REF_BYTES then
-      return nil, str_format(
-        "Theme reference file is too large (%.1f KB, max %d KB).\n"
-        .. "Expected Theme_Ref.md.",
-        #content / 1024, CFG.MAX_API_REF_BYTES / 1024)
-    end
-    S.theme_ref_cache = content
+  _load_api_ref_file()
+  if S._api_ref_section_err.theme then
+    return nil, S._api_ref_section_err.theme
   end
-  return "REAPER THEME COLOR REFERENCE:\n" .. S.theme_ref_cache
+  return "REAPER THEME COLOR REFERENCE:\n" .. S.api_ref_section_cache.theme
 end
 
 -- =============================================================================
@@ -6463,27 +6445,49 @@ function CTX.ensure_plugin_ref_cache()
   local content = f:read("*a")
   f:close()
 
-  -- Parse into sections keyed by "## <name>" headers. Full trailing string
-  -- captured + trimmed so multi-word headers like "## Pro-Q 4" cache as
-  -- "pro-q 4" (not "pro-q").
+  -- Parse only `<!-- PLUGIN:Name --> ... <!-- /PLUGIN:Name -->` blocks. Other
+  -- `## Heading` lines (e.g. "ENUM PARAM NORMS", "FALLBACK CHAINS", or any
+  -- future explanatory section) are intentionally NOT cached so they can't
+  -- silently become bogus plugin keys reachable via plugin_ref:<heading>.
+  -- Marker lines themselves are stripped from the cached body; everything
+  -- between (including the `## Name` header) is preserved.
   CTX._plugin_ref_cache = {}
   local cur_name = nil
   local cur_lines = {}
   for line in content:gmatch("[^\n]+") do
-    local sec_name = line:match("^##%s+(.-)%s*$")
-    if sec_name then
+    local open_name  = line:match("^<!%-%- PLUGIN:(.-) %-%->%s*$")
+    local close_name = line:match("^<!%-%- /PLUGIN:(.-) %-%->%s*$")
+    if open_name then
+      cur_name = open_name
+      cur_lines = {}
+    elseif close_name then
       if cur_name then
         CTX._plugin_ref_cache[cur_name:lower()] = tbl_concat(cur_lines, "\n")
       end
-      cur_name = sec_name
-      cur_lines = { line }
+      cur_name = nil
+      cur_lines = {}
     elseif cur_name then
       cur_lines[#cur_lines+1] = line
     end
   end
-  if cur_name then
-    CTX._plugin_ref_cache[cur_name:lower()] = tbl_concat(cur_lines, "\n")
+
+  -- Validation: warn if any PLUGIN_REF_ALIASES target doesn't resolve to a
+  -- parsed plugin block. Catches typos in the alias map and stale aliases
+  -- that point at plugins removed from Plugin_Ref.md. Runs once per
+  -- session (this function is idempotent via the cache check at the top).
+  local missing, seen = {}, {}
+  for _, target in pairs(PLUGIN_REF_ALIASES) do
+    if not CTX._plugin_ref_cache[target] and not seen[target] then
+      seen[target] = true
+      missing[#missing + 1] = target
+    end
   end
+  if #missing > 0 then
+    table.sort(missing)
+    Log.line("plugin_ref",
+      "alias targets missing from Plugin_Ref.md: " .. tbl_concat(missing, ", "))
+  end
+
   return true
 end
 
@@ -10038,6 +10042,46 @@ function Updater.local_path_for(filename)
   return RA.script_path .. rel
 end
 
+-- Paths the orphan-cleanup pass must never delete, even if a manifest
+-- listed them in removed_files. System_Prompt_Custom.md is the documented
+-- power-user override -- the loader prefers it over the stock prompt and
+-- it's intentionally untracked so updates don't touch it. Debug.log and
+-- FX_Cache.json are runtime artifacts the script itself authors. None of
+-- these are ever in our manifest's files list, so they could only end up
+-- on a removed_files list via a malformed or malicious manifest; this set
+-- is the runtime backstop for that case.
+local PROTECTED_FROM_REMOVAL = {
+  ["Resources/System_Prompt_Custom.md"] = true,
+  ["Resources/Debug.log"]                = true,
+  ["Resources/FX_Cache.json"]            = true,
+}
+
+-- Predicate gating per-path orphan deletes. All four checks must hold:
+--   1. is_safe_filename: path-traversal, absolute paths, backslashes,
+--      hidden segments, and non-allowlisted extensions all rejected here.
+--   2. Inside ReaAssist's install zone: ReaAssist.lua, the three top-level
+--      docs, or anything under Resources/. Anything else is out of scope
+--      for the package and never something we shipped.
+--   3. Not in PROTECTED_FROM_REMOVAL: user-override + runtime artifacts.
+--   4. Not also in the current manifest's files list: defensive double-
+--      lock against an inconsistent manifest where a path appears in both
+--      `files` and `removed_files`. gen_manifest.py guards against this
+--      at authoring time; this is belt-and-suspenders.
+function Updater.should_remove_orphan(name, current_files)
+  if type(name) ~= "string" then return false end
+  if not Updater.is_safe_filename(name) then return false end
+  if current_files and current_files[name] then return false end
+  local owned =
+       name == "ReaAssist.lua"
+    or name == "CHANGELOG.md"
+    or name == "LICENSE.txt"
+    or name == "README.md"
+    or name:sub(1, 10) == "Resources/"
+  if not owned then return false end
+  if PROTECTED_FROM_REMOVAL[name] then return false end
+  return true
+end
+
 function Updater.download_start()
   -- Accept both triggers: "available" (new version on server) and
   -- "repair_available" (version matches but some files are missing or
@@ -10422,6 +10466,54 @@ function Updater.advance_after_rename(dest)
   else
     for _, applied in ipairs(update.applied_files) do
       os.remove(applied.path .. ".bak")
+    end
+    -- Per-version stale-file cleanup. The new manifest's removed_files
+    -- list (auto-populated by gen_manifest.py from the diff between this
+    -- release and the prior, plus carry-forward of older deletions for
+    -- users skipping versions) names files we previously shipped and no
+    -- longer do. Without this step a renamed file's old name would
+    -- linger on disk forever -- the rest of the updater only writes new
+    -- files and overwrites existing ones, never deletes. Three layers
+    -- of safety make removing user-facing files here safe:
+    --   1. Authoring layer: gen_manifest.py only ever populates this
+    --      list from prior manifests we ourselves shipped. A user-
+    --      dropped file in the install dir cannot end up there.
+    --   2. is_safe_filename: rejects path-traversal, absolute paths,
+    --      backslashes, hidden segments, and unknown extensions.
+    --   3. should_remove_orphan: enforces the "owned path" zone and the
+    --      PROTECTED_FROM_REMOVAL set (custom system prompt override,
+    --      runtime debug log, FX cache).
+    -- os.remove failures are logged but do not fail the update; the
+    -- new files are already in place, lingering orphans are cosmetic.
+    do
+      local removed = update.manifest and update.manifest.removed_files
+      if type(removed) == "table" then
+        local current_files = {}
+        for _, entry in ipairs(update.manifest.files or {}) do
+          if type(entry) == "table" and type(entry.name) == "string" then
+            current_files[entry.name] = true
+          end
+        end
+        for _, name in ipairs(removed) do
+          if Updater.should_remove_orphan(name, current_files) then
+            local path = Updater.local_path_for(name)
+            if reaper.file_exists and reaper.file_exists(path) then
+              local ok = os.remove(path)
+              Log.line("UPDATE", string.format(
+                "removed orphan %s: %s",
+                name, ok and "ok" or "failed"))
+            end
+          elseif type(name) == "string" then
+            -- Loud about rejected entries so a malformed manifest doesn't
+            -- silently get past the predicate. Only log the first ~20
+            -- chars of the name to keep the log line short on
+            -- pathological inputs.
+            Log.line("UPDATE", string.format(
+              "removed_files: refused %s (outside owned zone or "
+              .. "protected)", tostring(name):sub(1, 80)))
+          end
+        end
+      end
     end
     update.state   = "done"
     update.applied = true

@@ -1,9 +1,14 @@
 {
-  "version": "1.0.4",
+  "version": "1.0.5",
+  "removed_files": [
+    "Resources/MIDI_Ref.md",
+    "Resources/Theme_Ref.md",
+    "Resources/fonts/JetBrainsMono-SemiBold.ttf"
+  ],
   "files": [
     {
       "name": "CHANGELOG.md",
-      "sha256": "2b20761f7a35ceea3840086071a215df792ecd085e476f6113c3db31f10a9868"
+      "sha256": "235d00f2d11382660ff1d8e991cc421d830226e430bfbdfa2fc3c010e258e729"
     },
     {
       "name": "LICENSE.txt",
@@ -15,23 +20,19 @@
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "c9941165bb843e8ade78a2b16e574674e93a186c01fed8b8a1e2066d527619eb"
+      "sha256": "51e116db03912e30c3afd0379b127689b65fadd05e7e0ffeed3a1dd96c93e49e"
     },
     {
       "name": "Resources/API_Ref.md",
-      "sha256": "89fa1816f4773fa9241238082cf9527c4f56c546d882b46130a8258e7e130b10"
+      "sha256": "247f4622767318cddbfe5264b9c5cb219335d1cefb40de8185ba74509ad59d01"
     },
     {
       "name": "Resources/Help.md",
       "sha256": "b19a438da355895bc8970c9d03a672b7a415e42fb88a16f5bb548ef8653acab1"
     },
     {
-      "name": "Resources/MIDI_Ref.md",
-      "sha256": "fbba6f4343fbc6eb39ab899e20deffa9afff8773ab20d11ed881ba50c9d419d3"
-    },
-    {
       "name": "Resources/Plugin_Ref.md",
-      "sha256": "986292398ab415ba0b22e283938a06bc23a35bd528c41c66f6eed50b0c33ce8f"
+      "sha256": "7985999c4e39f91a61d398d6fe6c5b8cf6550faf34016ddfce580fead121a5f0"
     },
     {
       "name": "Resources/Prompts.md",
@@ -66,10 +67,6 @@
       "sha256": "ddd3a576cc39afca646682f83e3d1e09e080cecb3ba0b0d0c12337a261107481"
     },
     {
-      "name": "Resources/Theme_Ref.md",
-      "sha256": "9c0023bc08645536e9a9710fb9afe0aaf6e1e9c2289f5219c59b8c1e01c58df1"
-    },
-    {
       "name": "Resources/UI.lua",
       "sha256": "8f9e70677317e975a73c3a63cae61df9df0a33a683350e85c52fe33e5915e2e7"
     },
@@ -98,12 +95,8 @@
       "sha256": "b6b1ff4ddefe36d7f2a6174e1d001cab374e594519ee9049af028d577b64c5f5"
     },
     {
-      "name": "Resources/fonts/JetBrainsMono-SemiBold.ttf",
-      "sha256": "55987f26bab41b3fc9f13ce5ca9db9d99a75e3be4bba0f7341d3c026ff6e4706"
-    },
-    {
       "name": "Resources/fonts/lucide.ttf",
-      "sha256": "6dc6f20366cff6214d93fdb69d6fa216146810d6d2858f4ae61cd129c2103bc3"
+      "sha256": "eb0d9d466aa84a650e190b6c2c4e31a31b24c4497b5f29207bda3c6e8c223890"
     }
   ]
 }

@@ -1,3 +1,9 @@
+<!-- Plugin_Ref.md - markers are PLUGIN:Name (NOT SECTION:) because each block -->
+<!-- is a typed, addressable plugin entry served as plugin_ref:Name. SECTION: -->
+<!-- is reserved for generic on-demand buckets in API_Ref.md / Prompts.md.    -->
+<!-- The two markers are deliberately distinct so the parser can tell plugin -->
+<!-- entries apart from the ## sub-headings inside each plugin's body.       -->
+
 # Plugin Parameter Reference
 
 Curated parameter data for plugins ReaAssist supports first-class. Includes
@@ -85,6 +91,7 @@ pitch_correction:     || ReaTune
 pitch_shift:          || ReaPitch
 ```
 
+<!-- PLUGIN:ReaEQ -->
 ## ReaEQ
 
 AddByName string: "ReaEQ"
@@ -279,6 +286,9 @@ reaper.defer(function()
 end)
 ```
 
+<!-- /PLUGIN:ReaEQ -->
+
+<!-- PLUGIN:ReaComp -->
 ## ReaComp
 
 AddByName string: "ReaComp"
@@ -413,6 +423,9 @@ reaper.defer(function()
 end)
 ```
 
+<!-- /PLUGIN:ReaComp -->
+
+<!-- PLUGIN:ReaXcomp -->
 ## ReaXcomp
 
 REAPER's stock multiband compressor. Fixed 4-band split with per-band threshold,
@@ -666,6 +679,9 @@ reaper.defer(function()
 end)
 ```
 
+<!-- /PLUGIN:ReaXcomp -->
+
+<!-- PLUGIN:ReaGate -->
 ## ReaGate
 
 AddByName string: "ReaGate"
@@ -736,6 +752,9 @@ Default is 0.0 (-inf dB), meaning the gate is fully open by default.
   reaper.TrackFX_SetParamNormalized(tr, fx, 4, 0.005)   -- Hold: ~5ms
 ```
 
+<!-- /PLUGIN:ReaGate -->
+
+<!-- PLUGIN:ReaDelay -->
 ## ReaDelay
 
 AddByName string: "ReaDelay"
@@ -782,6 +801,9 @@ set_param_display on "Length (time)".
   reaper.TrackFX_SetParamNormalized(tr, fx, 5, 0.25)    -- Feedback: ~-12dB
 ```
 
+<!-- /PLUGIN:ReaDelay -->
+
+<!-- PLUGIN:ReaLimit -->
 ## ReaLimit
 
 AddByName string: "ReaLimit"
@@ -816,6 +838,9 @@ Ceiling default 1.0 = 0dB. Sets the output ceiling.
   set_param_display(tr, fx, 1, -1.0)   -- Ceiling: -1dB
 ```
 
+<!-- /PLUGIN:ReaLimit -->
+
+<!-- PLUGIN:ReaPitch -->
 ## ReaPitch
 
 AddByName string: "ReaPitch"
@@ -867,6 +892,9 @@ Both are centered at 0.5 = no shift. Use set_param_display for precise values.
   reaper.TrackFX_SetParamNormalized(tr, fx, 1, 0.5)  -- Dry: -6dB (blend)
 ```
 
+<!-- /PLUGIN:ReaPitch -->
+
+<!-- PLUGIN:ReaVerbate -->
 ## ReaVerbate
 
 AddByName string: "ReaVerbate"
@@ -909,6 +937,9 @@ idx  Name        Default val   Min    Max    Notes
   reaper.TrackFX_SetParamNormalized(tr, fx, 5, 0.05)    -- Pre-delay: small
 ```
 
+<!-- /PLUGIN:ReaVerbate -->
+
+<!-- PLUGIN:ReaSynth -->
 ## ReaSynth
 
 AddByName string: "ReaSynth"
@@ -959,6 +990,9 @@ by setting Square/Saw/Triangle mix > 0. Values are additive.
   reaper.TrackFX_SetParamNormalized(tr, fx, 1, 0.1)     -- Release: 100ms
 ```
 
+<!-- /PLUGIN:ReaSynth -->
+
+<!-- PLUGIN:ReaTune -->
 ## ReaTune
 
 AddByName string: "ReaTune"
@@ -978,6 +1012,9 @@ idx  Name        Default   Min    Max    Notes
 
 ---
 
+<!-- /PLUGIN:ReaTune -->
+
+<!-- PLUGIN:Deesser -->
 ## Deesser
 
 Stock JSFX by Liteon. Single-band de-esser with bandpass or hipass detection.
@@ -1039,6 +1076,9 @@ For enum params (indices 0, 1, 2, 7), pass the integer index from the Notes colu
 
 ---
 
+<!-- /PLUGIN:Deesser -->
+
+<!-- PLUGIN:Saturation -->
 ## Saturation
 
 Stock JSFX by LOSER. Simple single-knob saturation (tape/tube-ish soft clipping).
@@ -1074,6 +1114,9 @@ Amount is the raw percentage passed to `TrackFX_SetParam`:
 
 ---
 
+<!-- /PLUGIN:Saturation -->
+
+<!-- PLUGIN:Chorus -->
 ## Chorus
 
 Stock JSFX by Stillwell (chorus_stereo). True stereo chorus with tempo-sync option.
@@ -1136,6 +1179,9 @@ use Tempo Sync (idx 7) to pick the note fraction:
 
 ---
 
+<!-- /PLUGIN:Chorus -->
+
+<!-- PLUGIN:Phaser -->
 ## Phaser
 
 Stock JSFX: "4-Tap Phaser" (Guitar/phaser). 4-stage analog-style phaser with
@@ -1190,6 +1236,9 @@ is fully dry.
 
 ---
 
+<!-- /PLUGIN:Phaser -->
+
+<!-- PLUGIN:ReEQ -->
 ## ReEQ
 
 Third-party JSFX EQ by Justin Johnson (MIT licensed). ReaAssist ships a bundled
@@ -1514,6 +1563,9 @@ All FabFilter params use TrackFX_SetParamNormalized (values 0..1). Raw ranges
 are not documented here since the normalized slider values are what scripts
 actually write.
 
+<!-- /PLUGIN:ReEQ -->
+
+<!-- PLUGIN:Pro-DS -->
 ## Pro-DS
 
 FabFilter Pro-DS is a single-band de-esser with automatic range detection
@@ -1699,6 +1751,9 @@ reaper.defer(function()
 end)
 ```
 
+<!-- /PLUGIN:Pro-DS -->
+
+<!-- PLUGIN:Pro-G -->
 ## Pro-G
 
 FabFilter Pro-G is a gate / expander with upward and downward processing.
@@ -1828,6 +1883,9 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 7, 0.247)  -- Release: 50 ms
 reaper.TrackFX_SetParamNormalized(tr, fx, 8, 0.15)   -- Hold: ~5 ms
 ```
 
+<!-- /PLUGIN:Pro-G -->
+
+<!-- PLUGIN:Pro-L 2 -->
 ## Pro-L 2
 
 FabFilter Pro-L 2 is a true peak limiter with 8 character styles, true-peak
@@ -1953,6 +2011,9 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 1,  0.0)    -- Style: Transparent
 reaper.TrackFX_SetParamNormalized(tr, fx, 18, 0.950)  -- Ceiling: -1.5 dBTP
 ```
 
+<!-- /PLUGIN:Pro-L 2 -->
+
+<!-- PLUGIN:Pro-C 3 -->
 ## Pro-C 3
 
 FabFilter Pro-C 3 is a transparent / character compressor with 14 styles,
@@ -2141,6 +2202,9 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 7, 0.0)     -- Attack: fastest
 reaper.TrackFX_SetParamNormalized(tr, fx, 8, 0.15)    -- Release: ~30 ms
 ```
 
+<!-- /PLUGIN:Pro-C 3 -->
+
+<!-- PLUGIN:Pro-MB -->
 ## Pro-MB
 
 FabFilter Pro-MB is a dynamic-range processor that can compress OR expand
@@ -2306,6 +2370,9 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 31, 0.05)    -- Attack: 5% (fast)
 reaper.TrackFX_SetParamNormalized(tr, fx, 32, 0.10)    -- Release: 10%
 ```
 
+<!-- /PLUGIN:Pro-MB -->
+
+<!-- PLUGIN:Pro-R 2 -->
 ## Pro-R 2
 
 FabFilter Pro-R 2 is a natural-sounding reverb with macro-style controls
@@ -2455,6 +2522,9 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 9, 0.30)    -- Mix: 30%
 reaper.TrackFX_SetParamNormalized(tr, fx, 16, 0.49)   -- Predelay: ~50 ms
 ```
 
+<!-- /PLUGIN:Pro-R 2 -->
+
+<!-- PLUGIN:Saturn 2 -->
 ## Saturn 2
 
 FabFilter Saturn 2 is a multiband saturation/distortion processor with 21+
@@ -2611,6 +2681,9 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 10, 0.05)   -- Band 1 Style: Clean Tub
 reaper.TrackFX_SetParamNormalized(tr, fx, 11, 0.25)   -- Band 1 Drive: 25%
 ```
 
+<!-- /PLUGIN:Saturn 2 -->
+
+<!-- PLUGIN:Timeless 3 -->
 ## Timeless 3
 
 FabFilter Timeless 3 is a creative delay with tape / digital / extreme read
@@ -2799,6 +2872,9 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 85, 0.05)   -- Feedback: 10% (single e
 reaper.TrackFX_SetParamNormalized(tr, fx, 160, 0.20)  -- Mix: 20%
 ```
 
+<!-- /PLUGIN:Timeless 3 -->
+
+<!-- PLUGIN:Pro-Q 4 -->
 ## Pro-Q 4
 
 FabFilter Pro-Q 4 is a surgical / musical parametric EQ with up to 24 bands,
@@ -3084,3 +3160,5 @@ reaper.defer(function()
   reaper.Undo_EndBlock("Add Pro-Q 4: vocal EQ chain", -1)
 end)
 ```
+
+<!-- /PLUGIN:Pro-Q 4 -->

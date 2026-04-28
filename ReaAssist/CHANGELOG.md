@@ -1,5 +1,11 @@
 # ReaAssist - Changelog
 
+## v1.0.5 - 2026-04-28
+
+- Update flow now cleans up files dropped or renamed in a new release. Previously such files lingered on disk forever after an in-plugin update; ReaPack handled this on its end, but the in-plugin updater had no equivalent. Manifest-driven and safety-gated (path-traversal blocked, install zone enforced, user-state files protected: System_Prompt_Custom.md, Debug.log, FX_Cache.json).
+- Lucide icon font now ships subsetted to only the glyphs ReaAssist uses (~7 KB, down from the ~815 KB upstream font). Unused JetBrainsMono-SemiBold weight dropped. Roughly 1 MB lighter per install.
+- MIDI and theme reference content folded into the main API reference file (Resources/API_Ref.md) as new SECTION blocks. Same bucket names exposed to the model, same auto-injection rules - two fewer files in Resources/, one fewer code path in the loader.
+
 ## v1.0.4 - 2026-04-28
 
 ### Plugin & FX fidelity

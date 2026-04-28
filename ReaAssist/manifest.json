@@ -1,13 +1,13 @@
 {
-  "version": "1.0.3",
+  "version": "1.0.4",
   "files": [
     {
       "name": "CHANGELOG.md",
-      "sha256": "d87c0c83f91aca65fdcc7130ec6e4fc9f05a6d4f1a47a2caedb8939660b8b948"
+      "sha256": "2b20761f7a35ceea3840086071a215df792ecd085e476f6113c3db31f10a9868"
     },
     {
       "name": "LICENSE.txt",
-      "sha256": "3918d0bba78468c6b23ab0af4e68f62aa56001960d0acfca1b481488751df4c2"
+      "sha256": "ee866e370188e92b5ac35bf47e286b071b8a14fd1ef7a0ded18f61a0564cad25"
     },
     {
       "name": "README.md",
@@ -15,7 +15,27 @@
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "0b2ee21d92a9cb6338ed1350f5f3dc69717dce2c3f905327651d6fd572d65a35"
+      "sha256": "c9941165bb843e8ade78a2b16e574674e93a186c01fed8b8a1e2066d527619eb"
+    },
+    {
+      "name": "Resources/API_Ref.md",
+      "sha256": "89fa1816f4773fa9241238082cf9527c4f56c546d882b46130a8258e7e130b10"
+    },
+    {
+      "name": "Resources/Help.md",
+      "sha256": "b19a438da355895bc8970c9d03a672b7a415e42fb88a16f5bb548ef8653acab1"
+    },
+    {
+      "name": "Resources/MIDI_Ref.md",
+      "sha256": "fbba6f4343fbc6eb39ab899e20deffa9afff8773ab20d11ed881ba50c9d419d3"
+    },
+    {
+      "name": "Resources/Plugin_Ref.md",
+      "sha256": "986292398ab415ba0b22e283938a06bc23a35bd528c41c66f6eed50b0c33ce8f"
+    },
+    {
+      "name": "Resources/Prompts.md",
+      "sha256": "704f7109be097c5d5c47d6f5aeda3736c339c610b77ec9d837a303819007050e"
     },
     {
       "name": "Resources/ReEQ/Dependencies/firhalfband.jsfx-inc",
@@ -38,52 +58,20 @@
       "sha256": "f32d3fa5c30b934cd0f1707d61d795f3d0a8f8eba505d0d52782a67e76bb4a9e"
     },
     {
-      "name": "Resources/ReaAssist_API_Ref.md",
-      "sha256": "e170685024a7b11531ebebbd045afad7163e944212cce0b7686b167b71d8fa15"
+      "name": "Resources/Relaunch.lua",
+      "sha256": "1a38f0519b00449a765dd946c45e4cfbd088011e35a9c95707a1f77498502cee"
     },
     {
-      "name": "Resources/ReaAssist_API_Ref_Extended.md",
-      "sha256": "5fb5d765a5bc8a45e9828079bb79daac58ea86da0723692abb7a54333f64f9e2"
+      "name": "Resources/System_Prompt.md",
+      "sha256": "ddd3a576cc39afca646682f83e3d1e09e080cecb3ba0b0d0c12337a261107481"
     },
     {
-      "name": "Resources/ReaAssist_Help.md",
-      "sha256": "827ea42d81393877705e26142832cdd4beeb547500e107b3920ead7800af8e4b"
-    },
-    {
-      "name": "Resources/ReaAssist_JSFX_Prompt.md",
-      "sha256": "0f37daef910428d02f48c0c635ed000615e3086897d4ad71bd8109470addb604"
-    },
-    {
-      "name": "Resources/ReaAssist_MIDI_Ref.md",
-      "sha256": "fbba6f4343fbc6eb39ab899e20deffa9afff8773ab20d11ed881ba50c9d419d3"
-    },
-    {
-      "name": "Resources/ReaAssist_Plugin_Prompt.md",
-      "sha256": "24633c934b540e59f0f68b315c5fe47508c996dcda181c1b857a42404e154d74"
-    },
-    {
-      "name": "Resources/ReaAssist_Plugin_Ref.md",
-      "sha256": "728560a26b9ddea06ca7b8c0d294b6fd419c31660856d604fe68a28eca1dd420"
-    },
-    {
-      "name": "Resources/ReaAssist_Relaunch.lua",
-      "sha256": "4c7544dd58e77ed54187f8c66f9ea8d0dce69ba9db05ba5d4b22fd8ca50655c0"
-    },
-    {
-      "name": "Resources/ReaAssist_System_Prompt.md",
-      "sha256": "00c47fbb2463ca506989232b38a9ba7a4e3514333dbf5f0b21dc81f21e457d36"
-    },
-    {
-      "name": "Resources/ReaAssist_Theme_Prompt.md",
-      "sha256": "ed97c8b705981785958561208e70fb5f0282a423f6997546d21308eecf2af3b5"
-    },
-    {
-      "name": "Resources/ReaAssist_Theme_Ref.md",
+      "name": "Resources/Theme_Ref.md",
       "sha256": "9c0023bc08645536e9a9710fb9afe0aaf6e1e9c2289f5219c59b8c1e01c58df1"
     },
     {
-      "name": "Resources/ReaAssist_UI.lua",
-      "sha256": "8ff4fe409bc08594f25dab633879ad5d59defe78c4c356765231471208abdf90"
+      "name": "Resources/UI.lua",
+      "sha256": "8f9e70677317e975a73c3a63cae61df9df0a33a683350e85c52fe33e5915e2e7"
     },
     {
       "name": "Resources/fonts/Inter_18pt-Bold.ttf",

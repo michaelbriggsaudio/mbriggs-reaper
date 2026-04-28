@@ -1,4 +1,4 @@
--- ReaAssist_Relaunch.lua
+-- Relaunch.lua
 -- -----------------------
 -- Marker: CFG.VERSION (consumed by Updater post-download integrity check
 -- in ReaAssist.lua; required literal string for any .lua file in the

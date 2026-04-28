@@ -4,13 +4,9 @@ Permission is granted to download, install, and use this software through
 the official ReaPack repository, the official GitHub repository, or other
 distribution channels authorized by Michael Briggs.
 
-Users may modify the software locally for their own personal use,
-including the documented ReaAssist_System_Prompt_Custom.md override
-mechanism.
-
 You may not redistribute, resell, sublicense, repackage, or present this
 software (modified or unmodified) as your own without prior written
 permission from Michael Briggs.
 
 This software bundles ReEQ (under Resources/ReEQ/), which is distributed
-under its own license; see Resources/ReEQ/LICENSE.txt.
+under its own MIT license; see Resources/ReEQ/LICENSE.txt.

@@ -1,5 +1,5 @@
 -- =============================================================================
--- ReaAssist_UI.lua -- UI subsystem (Render namespace)
+-- UI.lua -- UI subsystem (Render namespace)
 -- =============================================================================
 -- This file is dofile()'d from ReaAssist.lua during startup. It populates
 -- the global `Render` table (declared in ReaAssist.lua as `Render = {}`)
@@ -33,6 +33,26 @@
 -- chunk has its own upvalue table, so file-scope aliases cannot cross
 -- the dofile boundary and must be redeclared here.
 -- =============================================================================
+
+-- ---------------------------------------------------------------------------
+-- Direct-run guard
+-- ---------------------------------------------------------------------------
+-- UI.lua is a fragment of ReaAssist that depends on globals (RA, CFG, S,
+-- prefs, Render, etc.) set up by ReaAssist.lua. Running it on its own from
+-- REAPER's action list or a Lua CLI yields cryptic "attempt to index a nil
+-- value" errors. Detect that case via the RA sentinel and bail with a
+-- friendly message instead.
+if type(RA) ~= "table" then
+  local msg = "Resources/UI.lua is part of ReaAssist and cannot be run "
+           .. "directly.\n\nPlease run ReaAssist.lua in the parent folder "
+           .. "instead."
+  if type(reaper) == "table" and reaper.MB then
+    reaper.MB(msg, "ReaAssist", 0)
+  else
+    print(msg)
+  end
+  return
+end
 
 -- ---------------------------------------------------------------------------
 -- Performance aliases (ImGui hot-path + stdlib functions used by screens)
@@ -96,6 +116,7 @@ local _DETAILS_GROUP_OF = {
   ["FX Cache"]   = "context",
   ["Tokens"]     = "usage",
   ["Cache"]      = "usage",
+  ["API Calls"]  = "usage",
   ["Time"]       = "cost",   -- grouped with Est. Cost so the "bill" sits together
   ["Thinking"]   = "reasoning",
   ["Est. Cost"]  = "cost",
@@ -103,7 +124,7 @@ local _DETAILS_GROUP_OF = {
 local _DETAILS_ROW_ORDER = {
   "Model", "Complexity",
   "Context", "FX Cache",
-  "Tokens", "Cache", "Time",
+  "Tokens", "Cache", "API Calls", "Time",
   "Thinking",
   "Est. Cost",
 }
@@ -114,6 +135,7 @@ local _DETAILS_FIELD_TOOLTIPS = {
   ["Tokens"]     = "Input tokens / output tokens used in this exchange. Input covers your prompt plus the bundled context; output is the model's reply.",
   ["Time"]       = "How long the model took to return its response.",
   ["Cache"]      = "Tokens read from the prompt cache / tokens newly written to the cache this turn. Cache reads are billed at a fraction of the normal input-token rate.",
+  ["API Calls"]  = "How many round-trips to the model this turn took. 1 means a single clean request. >1 means a silent retry fired (docs auto-fetch, beta-header fallback, cache-expiration refresh, intra-turn context fetch); the Tokens / Cache / Time / Cost values reflect only the LAST request, so when this is >1 the visible numbers undercount the true work for the turn.",
   ["Complexity"] = "Auto-computed complexity score of your prompt (0-10). Higher = a more involved request. The parenthesised label shows which tier Auto mode picked for this turn: Fast (simple prompts), Balanced (mid-range), or Smart (complex work).",
   ["Thinking"]   = "Reasoning effort level used for this response (only relevant for models that support extended thinking).",
   ["FX Cache"]   = "Filter applied to the FX cache this turn (limits which plugins contribute to the Context bundle).",
@@ -1047,7 +1069,6 @@ function UI.hero_band_v5(phase)
       api_keys.saved_chat_font_idx        = prefs.chat_font_idx
       api_keys.saved_include_snapshot     = prefs.include_snapshot
       api_keys.saved_include_api_ref      = prefs.include_api_ref
-      api_keys.saved_max_tokens_idx       = prefs.max_tokens_idx
       api_keys.saved_cloud_request_timeout = prefs.cloud_request_timeout
       -- Section-open state (per Settings session; not persisted across
       -- script reloads). API KEYS + PREFERENCES default open, ADVANCED
@@ -1388,7 +1409,16 @@ function UI.session_strip_v5()
   local now = time_precise()
   local cur_state = reaper.GetProjectStateChangeCount
                     and reaper.GetProjectStateChangeCount(0) or -1
-  if cur_state ~= _session_cache.state or now - _session_cache.t > 5 then
+  -- Throttle state-dirty rebuilds to once per 100ms. During heavy edits
+  -- (drag-resize, large multi-select moves) GetProjectStateChangeCount
+  -- ticks per micro-edit, so the strip would otherwise re-walk every
+  -- track + count items + count FX every frame -- the bulk of the
+  -- strip's per-frame cost on 100+ track sessions. The strip is
+  -- informational, not interactive, so 100ms staleness is invisible.
+  -- The 5s fallback still covers non-undoable changes (like project
+  -- swaps) that don't bump the state counter.
+  local age = now - _session_cache.t
+  if (cur_state ~= _session_cache.state and age > 0.1) or age > 5 then
     local proj_path = select(2, reaper.EnumProjects(-1)) or ""
     local proj_name = proj_path:match("[^\\/]+$")
     if not proj_name or proj_name == "" then proj_name = "unsaved" end
@@ -1658,8 +1688,12 @@ function UI.mode_model_row_v5()
   local function _tier_hint_msg()
     local function _title(m)
       if m.chip_label then
+        -- chip_label values in the PROVIDERS schema are uppercase
+        -- ("HAIKU", "SONNET", "FLASH LITE", ...), so the first-letter
+        -- :upper() is a no-op -- only :lower() on the tail is needed
+        -- to produce title case.
         return (m.chip_label:gsub("(%w)(%w*)", function(f, r)
-          return f:upper() .. r:lower()
+          return f .. r:lower()
         end))
       end
       return m.label or "this model"
@@ -1819,12 +1853,20 @@ function UI.mode_model_row_v5()
     local max_descr, max_right = 0, 0
     local is_custom = p_active.is_custom or false
     for i, raw_m in ipairs(raw_models) do
-      -- Coerce the three-way AND to a strict boolean. Without `not not`,
+      -- Coerce the three-way AND to a strict boolean. Without `or false`,
       -- Lua's short-circuit leaves `locked` as `nil` when raw_m.paid_only
       -- is nil, and ReaImGui's BeginDisabled treats nil differently from
       -- false on some builds -- silently greying every row.
+      -- Use `~= true` (not `== false`) so the lock is also engaged when
+      -- the tier is `nil` (untested, or just-cleared by a fresh tier
+      -- test that hasn't resolved yet). This matches the model-list
+      -- filter at ReaAssist.lua's MODELS.refresh, which strips paid_only
+      -- entries unless tier is strictly `true`. Without this match,
+      -- raw_models still renders Pro for any non-`false` tier but the
+      -- click handler can't find it in the filtered MODELS list, so
+      -- the row looks selectable yet silently swallows clicks.
       local locked = (raw_m.paid_only and prov_id == "google"
-                      and S.gemini_paid_tier == false) or false
+                      and S.gemini_paid_tier ~= true) or false
       local d = ""
       if not is_custom then
         d = model_descriptor(i, total_models) or ""
@@ -1844,12 +1886,20 @@ function UI.mode_model_row_v5()
     end
 
     for i, raw_m in ipairs(raw_models) do
-      -- Coerce the three-way AND to a strict boolean. Without `not not`,
+      -- Coerce the three-way AND to a strict boolean. Without `or false`,
       -- Lua's short-circuit leaves `locked` as `nil` when raw_m.paid_only
       -- is nil, and ReaImGui's BeginDisabled treats nil differently from
       -- false on some builds -- silently greying every row.
+      -- Use `~= true` (not `== false`) so the lock is also engaged when
+      -- the tier is `nil` (untested, or just-cleared by a fresh tier
+      -- test that hasn't resolved yet). This matches the model-list
+      -- filter at ReaAssist.lua's MODELS.refresh, which strips paid_only
+      -- entries unless tier is strictly `true`. Without this match,
+      -- raw_models still renders Pro for any non-`false` tier but the
+      -- click handler can't find it in the filtered MODELS list, so
+      -- the row looks selectable yet silently swallows clicks.
       local locked = (raw_m.paid_only and prov_id == "google"
-                      and S.gemini_paid_tier == false) or false
+                      and S.gemini_paid_tier ~= true) or false
       -- Map this raw model to its position in the filtered MODELS list. For
       -- built-in providers, match by id: the Google free-tier filter may
       -- drop paid-only rows so raw/usable indices diverge. For custom
@@ -2398,7 +2448,6 @@ function UI.footer_rail_v5()
         api_keys.saved_chat_font_idx        = prefs.chat_font_idx
         api_keys.saved_include_snapshot     = prefs.include_snapshot
         api_keys.saved_include_api_ref      = prefs.include_api_ref
-        api_keys.saved_max_tokens_idx       = prefs.max_tokens_idx
         api_keys.saved_cloud_request_timeout = prefs.cloud_request_timeout
         -- Section-open state (per Settings session; not persisted across
         -- script reloads). API KEYS + PREFERENCES default open, ADVANCED
@@ -3953,7 +4002,7 @@ end
 -- -----------------------------------------------------------------------------
 -- Full-window help overlay with styled section headers, clickable table of
 -- contents, and smooth-scroll navigation.
--- Parses ReaAssist_Help.md into structured sections on first load.
+-- Parses Help.md into structured sections on first load.
 -- HELP_SECTIONS stays local: it's a one-time markdown parse cache that
 -- never needs to cross chunks or survive a session reset.
 -- help_section_ys stays local: rebuilt during each help-screen render
@@ -3969,7 +4018,7 @@ local help_search_buf = ""  -- Help-screen search input buffer; was previously
 
 local function load_help_sections()
   if HELP_SECTIONS then return HELP_SECTIONS end
-  local path = RA.RESOURCES_DIR .. "ReaAssist_Help.md"
+  local path = RA.RESOURCES_DIR .. "Help.md"
   local f = io.open(path, "r")
   if not f then
     HELP_SECTIONS = {{ title = "Error", lines = {"Help file not found.", "Expected: " .. path} }}
@@ -4656,7 +4705,7 @@ function Render.bug_report_screen()
         "Save the diagnostic report to a .txt file for email attachment",
         ACT_W) then
       local report = Diag.build_report()
-      local default_name = str_format("ReaAssist_Diagnostic_%s.txt",
+      local default_name = str_format("Diagnostic_%s.txt",
         os.date("%Y-%m-%d_%H%M%S"))
       local default_dir = reaper.GetResourcePath() or ""
       local saved_path
@@ -5023,7 +5072,7 @@ function Render.bug_report_screen()
       else
         local content = f:read("*a") or ""
         f:close()
-        local default_name = str_format("ReaAssist_Debug_%s.log",
+        local default_name = str_format("Debug_%s.log",
           os.date("%Y-%m-%d_%H%M%S"))
         local default_dir = reaper.GetResourcePath() or ""
         local saved_path
@@ -5408,10 +5457,10 @@ function Render._factory_reset_execute()
   S._suppress_os_theme_cache = true  -- stops detect_os_theme from re-caching
   -- Reset every in-memory pref to its documented default. Without this,
   -- any pref the running script later writes via SetExtState (provider
-  -- switch, max_tokens slider, debug-logging toggle, etc.) would re-
-  -- persist its OLD in-memory value into the just-cleared .ini, leaving
-  -- the user with a non-default config that "factory reset" was supposed
-  -- to wipe. Schema mirror of the prefs table at ReaAssist.lua:1014-1045.
+  -- switch, debug-logging toggle, etc.) would re-persist its OLD
+  -- in-memory value into the just-cleared .ini, leaving the user with
+  -- a non-default config that "factory reset" was supposed to wipe.
+  -- Schema mirror of the prefs table at ReaAssist.lua:1014-1045.
   prefs.auto_run              = false
   prefs.auto_backup           = true
   prefs.show_details          = false
@@ -5421,7 +5470,6 @@ function Render._factory_reset_execute()
   prefs.update_check          = true
   prefs.test_force_cold_cache = false
   prefs.cloud_request_timeout = CFG.CLOUD_TIMEOUT_DEFAULT
-  prefs.max_tokens_idx        = 3   -- index into CFG.MAX_TOKENS_OPTIONS
   prefs.provider_idx          = 1   -- 1=Claude
   prefs.model_idx             = 2   -- MODELS.refresh sets the real value when a provider becomes active
   prefs.thinking_idx          = 0   -- 0 = no thinking; MODELS.refresh sets per-provider
@@ -5717,7 +5765,6 @@ local function _exit_settings_screen()
   api_keys.saved_chat_font_idx         = nil
   api_keys.saved_include_snapshot      = nil
   api_keys.saved_include_api_ref       = nil
-  api_keys.saved_max_tokens_idx        = nil
   api_keys.saved_cloud_request_timeout = nil
   api_keys.section_open = nil
   -- Restore previous-screen context (if the footer gear opened Settings
@@ -5796,7 +5843,6 @@ function Render._shared_key_screen_impl()
   -- handles overflow -- same pattern as Render.help_screen.
   local win_w    = ImGui.ImGui_GetWindowWidth(RA.ctx)
   local pad_x    = ImGui.ImGui_GetStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding())
-  local sb_w     = ImGui.ImGui_GetStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ScrollbarSize())
   -- V5: symmetric SC(22) horizontal inset from the window edge on both
   -- sides, matching the JSX reference's "padding: 14px 22px 8px" body
   -- rule. api_indent adds just enough to the ambient WindowPadding.x to
@@ -6555,9 +6601,9 @@ function Render._shared_key_screen_impl()
   end -- PREFERENCES collapsible section
 
   -- ADVANCED section -- collapsible, closed by default. Houses the
-  -- power-user prefs (snapshot/api_ref/max_tokens/timeout) and the
-  -- maintenance actions (FX Cache / Reset Warnings / Reset Window /
-  -- Factory Reset). Factory Reset is the destructive one.
+  -- power-user prefs (snapshot/api_ref/timeout) and the maintenance
+  -- actions (FX Cache / Reset Warnings / Reset Window / Factory Reset).
+  -- Factory Reset is the destructive one.
   Dummy(RA.ctx, 1, RA.SC(14))
   api_keys.section_open.adv = UI.v5_section_label("ADVANCED",
     api_keys.section_open.adv)
@@ -6595,41 +6641,19 @@ function Render._shared_key_screen_impl()
     end
     Dummy(RA.ctx, 1, RA.SC(6))
 
-    -- 2-column select grid: Max Tokens + Cloud Timeout. Timeout
-    -- uses preset values; custom stored values survive by being
+    -- Cloud Timeout select row. (Was paired with a Max Tokens dropdown in
+    -- a 2-column grid; the Max Tokens knob was removed once each model's
+    -- output ceiling became metadata -- Anthropic gets the model's published
+    -- max sent in the request, OpenAI/Gemini omit the field so the server
+    -- applies its own per-model default. The dropdown was a footgun: a
+    -- fixed cap could be entirely consumed by reasoning tokens and produce
+    -- empty visible output (observed on GPT-5.x with reasoning_effort set).)
+    -- Timeout uses preset values; custom stored values survive by being
     -- inserted in-order into the preset list.
     do
-      local GRID_GAP2 = RA.SC(6)
-      local col2_w    = math_floor((inner_w - GRID_GAP2) / 2)
+      local col2_w    = inner_w
       local row_sx2   = GetCursorPosX(RA.ctx)
       local row_sy2   = ImGui.ImGui_GetCursorPosY(RA.ctx)
-
-      -- tok_combo_str is invariant -- CFG.MAX_TOKENS_OPTIONS doesn't
-      -- mutate at runtime. Cache the assembled "\0"-delimited combo
-      -- string at module scope so this Settings sub-page doesn't
-      -- rebuild + concat every frame while open.
-      if not UI._tok_combo_str then
-        local tok_labels = {}
-        for _, v in ipairs(CFG.MAX_TOKENS_OPTIONS) do
-          tok_labels[#tok_labels+1] = math.floor(v / 1024) .. "K"
-        end
-        UI._tok_combo_str = table.concat(tok_labels, "\0") .. "\0"
-      end
-      local tok_combo_str = UI._tok_combo_str
-      ImGui.ImGui_SetCursorPos(RA.ctx, row_sx2, row_sy2)
-      local tok_changed, tok_new = UI.v5_select_row("##adv_max_tokens",
-        "Max Tokens", tok_combo_str, prefs.max_tokens_idx - 1,
-        "Upper limit on the model's response length per message "
-          .. "(1K \xe2\x89\x88 750 words). Raise it if responses get cut off "
-          .. "mid-sentence or mid-code-block, especially for reasoning "
-          .. "models that spend tokens 'thinking' before answering. "
-          .. "Lower it to cap cost per call and encourage concise replies. "
-          .. "Default 16K fits most prompts.",
-        col2_w)
-      if tok_changed then
-        prefs.max_tokens_idx = tok_new + 1
-        CFG.MAX_TOKENS = CFG.MAX_TOKENS_OPTIONS[prefs.max_tokens_idx]
-      end
 
       -- Cloud-timeout combo: cached on cur_to's identity so the table
       -- assembly + sort + concat only re-fire when the saved timeout
@@ -6665,7 +6689,7 @@ function Render._shared_key_screen_impl()
       local to_combo_str = UI._to_combo_str
       local to_values    = UI._to_combo_values
       local to_cur_idx   = UI._to_combo_cur_idx
-      ImGui.ImGui_SetCursorPos(RA.ctx, row_sx2 + col2_w + GRID_GAP2, row_sy2)
+      ImGui.ImGui_SetCursorPos(RA.ctx, row_sx2, row_sy2)
       local to_changed, to_new_idx = UI.v5_select_row("##adv_cloud_timeout",
         "Cloud Timeout", to_combo_str, to_cur_idx,
         "How long to wait for a Claude/ChatGPT/Gemini response before "
@@ -6835,8 +6859,6 @@ function Render._shared_key_screen_impl()
           prefs.include_snapshot and "1" or "0", true)
         reaper.SetExtState(CFG.EXT_NS, "include_api_ref",
           prefs.include_api_ref and "1" or "0", true)
-        reaper.SetExtState(CFG.EXT_NS, "max_tokens_idx",
-          tostring(prefs.max_tokens_idx), true)
         reaper.SetExtState(CFG.EXT_NS, "cloud_request_timeout",
           tostring(prefs.cloud_request_timeout), true)
         _exit_settings_screen()
@@ -6869,10 +6891,6 @@ function Render._shared_key_screen_impl()
         end
         if api_keys.saved_include_api_ref ~= nil then
           prefs.include_api_ref = api_keys.saved_include_api_ref
-        end
-        if api_keys.saved_max_tokens_idx then
-          prefs.max_tokens_idx = api_keys.saved_max_tokens_idx
-          CFG.MAX_TOKENS = CFG.MAX_TOKENS_OPTIONS[prefs.max_tokens_idx]
         end
         if api_keys.saved_cloud_request_timeout then
           prefs.cloud_request_timeout = api_keys.saved_cloud_request_timeout
@@ -6935,14 +6953,12 @@ function Render._shared_key_screen_impl()
     and prefs.include_snapshot ~= api_keys.saved_include_snapshot
   local ref_changed     = api_keys.saved_include_api_ref ~= nil
     and prefs.include_api_ref ~= api_keys.saved_include_api_ref
-  local tok_changed     = api_keys.saved_max_tokens_idx
-    and prefs.max_tokens_idx ~= api_keys.saved_max_tokens_idx
   local to_changed      = api_keys.saved_cloud_request_timeout
     and prefs.cloud_request_timeout ~= api_keys.saved_cloud_request_timeout
 
   local any_pref_changed = scale_changed or theme_changed
     or upd_changed or bak_changed or font_changed
-    or snap_changed or ref_changed or tok_changed or to_changed
+    or snap_changed or ref_changed or to_changed
 
   -- has_any_key flips true if any provider is usable: a built-in with
   -- a saved key in api_key_map, OR a custom provider record (the loop
@@ -7250,11 +7266,6 @@ function Render._shared_key_screen_impl()
         prefs.include_api_ref and "1" or "0", true)
       api_keys.saved_include_api_ref = nil
     end
-    if api_keys.saved_max_tokens_idx then
-      reaper.SetExtState(CFG.EXT_NS, "max_tokens_idx",
-        tostring(prefs.max_tokens_idx), true)
-      api_keys.saved_max_tokens_idx = nil
-    end
     if api_keys.saved_cloud_request_timeout then
       reaper.SetExtState(CFG.EXT_NS, "cloud_request_timeout",
         tostring(prefs.cloud_request_timeout), true)
@@ -7304,6 +7315,27 @@ function Render._shared_key_screen_impl()
         -- removed keys or just toggled prefs. First-run: user has a
         -- custom provider already configured (has_any_key) and isn't
         -- pasting a cloud key. Either way, exit the screen.
+        -- If the active provider's key was just removed (built-in with
+        -- nothing left in api_key_map), snap prefs.provider_idx to the
+        -- first usable provider before exiting. Otherwise the home
+        -- chip shows a stranded selection that the dropdown filter
+        -- has already hidden -- the model list still populates and the
+        -- send button stays disabled because S.api_key is nil. Mirrors
+        -- the same failsafe in the Custom LLM save path.
+        do
+          local act = PROVIDERS.active()
+          if act and not act.is_custom and not S.api_key_map[act.id] then
+            for i, p in ipairs(PROVIDERS) do
+              if p.is_custom or S.api_key_map[p.id] then
+                prefs.provider_idx = i
+                reaper.SetExtState(CFG.EXT_NS, "provider_idx",
+                  tostring(prefs.provider_idx), true)
+                MODELS.refresh()
+                break
+              end
+            end
+          end
+        end
         api_keys.screen       = nil
         api_keys.is_reentry   = false
         api_keys.key_bufs     = {}
@@ -7719,7 +7751,7 @@ function Render.custom_providers_screen()
   -- Delete-confirmation popup. Modal; if any record was flagged for delete
   -- above, this paints once per frame until the user picks Confirm / Cancel.
   do
-    local del_w, del_h = RA.SC(340), RA.SC(156)
+    local del_w, del_h = RA.SC(380), RA.SC(184)
     if update._main_w then
       ImGui.ImGui_SetNextWindowPos(RA.ctx,
         update._main_x + (update._main_w - del_w) * 0.5,
@@ -8185,19 +8217,29 @@ function Render.custom_llm_screen()
       "Fill in the DeepSeek endpoint URL (API key required)")
     SameLine(RA.ctx, 0, RA.SC(6))
     -- Kimi (Moonshot): opinionated fill. The models list is considered
-    -- "default / empty" when it has exactly one row with a blank id, which
-    -- is the shape enter_custom_new() seeds -- in that case we replace it
-    -- with a fully-configured kimi-k2.6 row so the user can click Save
-    -- immediately. If they've typed anything into the existing rows, we
-    -- only fill URL + label and leave the rest alone.
+    -- "default / empty" when it has exactly one row that still matches
+    -- the shape enter_custom_new() seeds (blank id, "0" prices, default
+    -- context window, blank notes / extra_body). Only in that case do we
+    -- replace it with a fully-configured kimi-k2.6 row -- if the user
+    -- has typed ANY field on row 1 (id, prices, context, notes, extra
+    -- body), we fill URL + label and leave the row alone. Without the
+    -- broader check, a user who typed prices or a context window but
+    -- not the id yet would lose those values just by clicking Kimi.
     if ImGui.ImGui_Button(RA.ctx, "Kimi##cus_ep_kimi") then
       edit.endpoint        = "https://api.moonshot.ai/v1/chat/completions"
       edit.errors.endpoint = nil
       if (edit.label or ""):match("^%s*$") then
         edit.label = "Kimi"
       end
+      local m0 = edit.models[1]
       local models_are_default = #edit.models == 1
-        and (edit.models[1].id or "") == ""
+        and (m0.id or "")             == ""
+        and (m0.price_in or "")       == "0"
+        and (m0.price_cache_r or "")  == "0"
+        and (m0.price_out or "")      == "0"
+        and (m0.context_window or "") == tostring(CUSTOM_DEFAULT_CTX)
+        and (m0.notes or "")          == ""
+        and (m0.extra_body or "")     == ""
       if models_are_default then
         edit.models[1] = {
           id             = "kimi-k2.6",
@@ -8300,7 +8342,7 @@ function Render.custom_llm_screen()
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
     Text(RA.ctx, "MODEL IDENTIFIER")
     UI.tooltip("The model name as your server expects it (e.g. llama3.1:8b, "
-      .. "kimi-k2.6, claude-opus-4-6). Open Details to set prices, context, "
+      .. "kimi-k2.6, claude-opus-4-7). Open Details to set prices, context, "
       .. "a short notes tag shown in the dropdown, and extra JSON body fields.")
     PopStyleColor(RA.ctx)
     PopFont(RA.ctx)
@@ -8514,8 +8556,8 @@ function Render.custom_llm_screen()
         row.context_window = new_ctxw
         UI.tooltip("Maximum combined input + output token capacity for this "
           .. "model. The preflight check warns if a pending send would "
-          .. "overflow this window. Kimi k2.6 = 262144, Claude Opus 4.x = "
-          .. "200000, most local 8B models = 8192.")
+          .. "overflow this window. Kimi k2.6 = 262144, Claude Opus 4.7 = "
+          .. "1000000, most local 8B models = 8192.")
 
         Dummy(RA.ctx, 1, RA.SC(10))
 
@@ -10954,7 +10996,7 @@ function Render.fx_cache_screen()
         PopFont(RA.ctx)
         if ImGui.ImGui_IsItemHovered(RA.ctx) then
           UI.tooltip("Curated parameter docs live in "
-            .. "Resources/ReaAssist_Plugin_Ref.md. The assistant uses those "
+            .. "Resources/Plugin_Ref.md. The assistant uses those "
             .. "directly. No scan needed and none can be triggered.")
         end
       end
@@ -11437,7 +11479,6 @@ function Render.main_window()
       api_keys.saved_chat_font_idx        = nil
       api_keys.saved_include_snapshot     = nil
       api_keys.saved_include_api_ref      = nil
-      api_keys.saved_max_tokens_idx       = nil
       api_keys.saved_cloud_request_timeout = nil
       api_keys.section_open               = nil
       api_keys.is_reentry                 = false
@@ -11517,18 +11558,8 @@ function Render.main_window()
     local V5_KEYCAP_GUTTER = RA.SC(40)
     local V5_CLIP_W        = RA.SC(32)
     local V5_PROMPT_FONT   = RA.SC(13)
-    -- Derive line height from ImGui's actual font metrics under the pushed
-    -- font so 2 lines fills the text area exactly on every DPI / UI scale.
-    -- Hardcoded px values were fragile across font configurations.
-    local V5_LINE_H
-    do
-      PushFont(RA.ctx, FONT.inter_reg, V5_PROMPT_FONT)
-      V5_LINE_H = ImGui.ImGui_GetTextLineHeight(RA.ctx)
-      PopFont(RA.ctx)
-    end
     local V5_card_visual_w = avail_w - (V5_BTN_SEND + V5_BTN_GAP) - V5_ROW_INSET * 2
     local V5_prompt_w      = V5_card_visual_w - V5_KEYCAP_GUTTER
-    local V5_text_area_w   = V5_prompt_w - V5_CLIP_W * 2
     -- Dynamic expand: widget is 1 line tall by default, 2 lines tall when
     -- the buffer contains a user \n (from Shift+Enter). Bottom stays pinned
     -- to the controls row so the prompt visually expands UP.
@@ -11903,18 +11934,37 @@ function Render.main_window()
           local wrap_at = USER_MAX_W - USER_PAD_H * 2
           local avg_char_w = ImGui.ImGui_GetFontSize(RA.ctx) * 0.48
           bubble_cpl = math_floor(math_max(wrap_at / avg_char_w, 20))
-          local _, _, wrap_lines = UI.get_wrap_cached(msg.content, bubble_cpl)
-          local max_line_w = 0
-          for i = 1, #wrap_lines do
-            local line = wrap_lines[i]
-            if #line > 0 then
-              local lw = CalcTextSize(RA.ctx, line)
-              if lw > max_line_w then max_line_w = lw end
+          -- Cache max_line_w / bubble_w on the message keyed on the inputs
+          -- that affect them: bubble_cpl (which already absorbs font-size
+          -- changes via avg_char_w above), chat_font_idx (paranoia for
+          -- callers that tweak font without touching cpl), and
+          -- ui_scale_idx (RA.SC inside the bubble_w formula). Skipping
+          -- the per-line CalcTextSize loop is the win on long messages
+          -- with many wrapped lines, where N visible bubbles * N lines *
+          -- 60fps was the dominant cost.
+          local _font_idx  = prefs.chat_font_idx or 2
+          local _scale_idx = prefs.ui_scale_idx or 3
+          if msg._bubble_w == nil
+             or msg._bubble_w_cpl   ~= bubble_cpl
+             or msg._bubble_w_font  ~= _font_idx
+             or msg._bubble_w_scale ~= _scale_idx then
+            local _, _, wrap_lines = UI.get_wrap_cached(msg.content, bubble_cpl)
+            local max_line_w = 0
+            for i = 1, #wrap_lines do
+              local line = wrap_lines[i]
+              if #line > 0 then
+                local lw = CalcTextSize(RA.ctx, line)
+                if lw > max_line_w then max_line_w = lw end
+              end
             end
+            msg._bubble_w = math_max(USER_MIN_W,
+                            math_min(USER_MAX_W,
+                                     max_line_w + USER_PAD_H * 2 + RA.SC(2)))
+            msg._bubble_w_cpl   = bubble_cpl
+            msg._bubble_w_font  = _font_idx
+            msg._bubble_w_scale = _scale_idx
           end
-          bubble_w = math_max(USER_MIN_W,
-                     math_min(USER_MAX_W,
-                              max_line_w + USER_PAD_H * 2 + RA.SC(2)))
+          bubble_w = msg._bubble_w
         end
         local content_w = bubble_w - USER_PAD_H * 2
         -- Two adjustments to measure_stripped_height's return:
@@ -12143,64 +12193,117 @@ function Render.main_window()
           -- rather than per frame the details card is open, which on a
           -- long conversation is the difference between a handful of
           -- gsubs per frame and zero.
-          if msg._ctx_display_src ~= msg.ctx_label then
-            msg._ctx_display_src = msg.ctx_label
-            msg._ctx_display     = (msg.ctx_label
-              :gsub("snapshot", "Session")
-              :gsub("api_ref",  "API"))
-          end
-          local field_map = {}
-          field_map["Context"] = msg._ctx_display
-          if msg.model_label then
-            if msg._model_display_src ~= msg.model_label then
-              msg._model_display_src = msg.model_label
-              msg._model_display     = msg.model_label:gsub(" %b()", "")
+          --
+          -- The whole field_map / color_map is also cached on the message
+          -- with per-input stamps -- post-completion, msg.tok_in /
+          -- response_time / cost / cache counters / thinking / fx_cache
+          -- never change, and ctx_label / model_label only flip on edge
+          -- cases (and have their own _src checks anyway). For a long
+          -- conversation with details on, this drops ~9 small string
+          -- allocs + the rows-array build per visible bubble per frame
+          -- to one nil-equality test chain. UI.invalidate_palette_caches
+          -- nulls these on theme switch since color_map embeds u32 from
+          -- TK.accent.
+          if msg._details_field_map        == nil
+             or msg._details_fm_ctx       ~= msg.ctx_label
+             or msg._details_fm_model     ~= msg.model_label
+             or msg._details_fm_tok_in    ~= msg.tok_in
+             or msg._details_fm_tok_out   ~= msg.tok_out
+             or msg._details_fm_cost      ~= msg.cost
+             or msg._details_fm_free_tier ~= msg.free_tier
+             or msg._details_fm_resp_time ~= msg.response_time
+             or msg._details_fm_cache_r   ~= msg.tok_cache_read
+             or msg._details_fm_cache_c   ~= msg.tok_cache_create
+             or msg._details_fm_thinking  ~= msg.thinking_label
+             or msg._details_fm_fx_cache  ~= msg.fx_cache_label
+             or msg._details_fm_api_calls ~= msg.api_calls then
+            if msg._ctx_display_src ~= msg.ctx_label then
+              msg._ctx_display_src = msg.ctx_label
+              msg._ctx_display     = (msg.ctx_label
+                :gsub("snapshot", "Session")
+                :gsub("api_ref",  "API"))
             end
-            field_map["Model"] = msg._model_display
-          end
-          if msg.tok_in and msg.cost then
-            -- "~" prefix marks the value as approximate (matches the "Est."
-            -- in the label -- belt-and-suspenders so scanning either side
-            -- makes the estimation clear). Free-tier Gemini exchanges cost
-            -- the user $0 on the actual API bill, but the token math still
-            -- produces a number; frame it as "would have been" so the user
-            -- sees the break they're getting without being confused into
-            -- thinking they're being charged.
-            if msg.free_tier then
-              field_map["Est. Cost"] = "Free Tier (would have been ~"
-                .. MODELS.format_cost(msg.cost) .. ")"
-            else
-              field_map["Est. Cost"] = "~" .. MODELS.format_cost(msg.cost)
+            local field_map = {}
+            field_map["Context"] = msg._ctx_display
+            if msg.model_label then
+              if msg._model_display_src ~= msg.model_label then
+                msg._model_display_src = msg.model_label
+                msg._model_display     = msg.model_label:gsub(" %b()", "")
+              end
+              field_map["Model"] = msg._model_display
             end
-          end
-          if msg.tok_in then
-            field_map["Tokens"] = str_format("%s in / %s out",
-              fmt_num(msg.tok_in), fmt_num(msg.tok_out))
-          end
-          if msg.response_time then
-            field_map["Time"] = str_format("%.1fs", msg.response_time)
-          end
-          do
-            local cr = msg.tok_cache_read   or 0
-            local cc = msg.tok_cache_create or 0
-            if cr > 0 or cc > 0 then
-              field_map["Cache"] = str_format("%s read, %s created",
-                fmt_num(cr), fmt_num(cc))
+            if msg.tok_in and msg.cost then
+              -- "~" prefix marks the value as approximate (matches the "Est."
+              -- in the label -- belt-and-suspenders so scanning either side
+              -- makes the estimation clear). Free-tier Gemini exchanges cost
+              -- the user $0 on the actual API bill, but the token math still
+              -- produces a number; frame it as "would have been" so the user
+              -- sees the break they're getting without being confused into
+              -- thinking they're being charged.
+              if msg.free_tier then
+                field_map["Est. Cost"] = "Free Tier (would have been ~"
+                  .. MODELS.format_cost(msg.cost) .. ")"
+              else
+                field_map["Est. Cost"] = "~" .. MODELS.format_cost(msg.cost)
+              end
             end
-          end
-          if msg.thinking_label then
-            field_map["Thinking"] = msg.thinking_label
-          end
-          if msg.fx_cache_label then
-            field_map["FX Cache"] = msg.fx_cache_label
-          end
+            if msg.tok_in then
+              field_map["Tokens"] = str_format("%s in / %s out",
+                fmt_num(msg.tok_in), fmt_num(msg.tok_out))
+            end
+            if msg.response_time then
+              field_map["Time"] = str_format("%.1fs", msg.response_time)
+            end
+            do
+              local cr = msg.tok_cache_read   or 0
+              local cc = msg.tok_cache_create or 0
+              if cr > 0 or cc > 0 then
+                field_map["Cache"] = str_format("%s read, %s created",
+                  fmt_num(cr), fmt_num(cc))
+              end
+            end
+            if msg.thinking_label then
+              field_map["Thinking"] = msg.thinking_label
+            end
+            if msg.fx_cache_label then
+              field_map["FX Cache"] = msg.fx_cache_label
+            end
+            -- Always render the API Calls row when the counter is set:
+            -- "1" is positive confirmation that no silent retry fired
+            -- (no docs-gate, no beta-fallback, no cache-expiry refresh),
+            -- which is itself useful signal -- otherwise the user can't
+            -- tell whether the visible Tokens / Cache / Time / Cost are
+            -- the whole story or just the last of N requests. >1 still
+            -- carries the "visible numbers undercount" warning per the
+            -- field tooltip.
+            if msg.api_calls then
+              field_map["API Calls"] = tostring(msg.api_calls)
+            end
 
-          -- Per-field value colour overrides. Est. Cost uses a darkened
-          -- accent -- the "receipt total" line visually weighted against
-          -- the rest of the muted metadata.
-          local accent_dk = UI.lerp_u32(TK.accent, 0x000000FF, 0.18)
-          local color_map = {}
-          if field_map["Est. Cost"] then color_map["Est. Cost"] = accent_dk end
+            -- Per-field value colour overrides. Est. Cost uses a darkened
+            -- accent -- the "receipt total" line visually weighted against
+            -- the rest of the muted metadata.
+            local accent_dk = UI.lerp_u32(TK.accent, 0x000000FF, 0.18)
+            local color_map = {}
+            if field_map["Est. Cost"] then color_map["Est. Cost"] = accent_dk end
+
+            msg._details_field_map    = field_map
+            msg._details_color_map    = color_map
+            msg._details_fm_ctx       = msg.ctx_label
+            msg._details_fm_model     = msg.model_label
+            msg._details_fm_tok_in    = msg.tok_in
+            msg._details_fm_tok_out   = msg.tok_out
+            msg._details_fm_cost      = msg.cost
+            msg._details_fm_free_tier = msg.free_tier
+            msg._details_fm_resp_time = msg.response_time
+            msg._details_fm_cache_r   = msg.tok_cache_read
+            msg._details_fm_cache_c   = msg.tok_cache_create
+            msg._details_fm_thinking  = msg.thinking_label
+            msg._details_fm_fx_cache  = msg.fx_cache_label
+            msg._details_fm_api_calls = msg.api_calls
+          end
+          local field_map = msg._details_field_map
+          local color_map = msg._details_color_map
 
           -- Hoisted lookup tables (file-scope constants near top of file)
           -- replace the per-frame table literals: _DETAILS_GROUP_OF for the
@@ -12435,7 +12538,11 @@ function Render.main_window()
         -- switch does not retarget the wrong entry. Buttons auto-hide once
         -- the relevant ceiling/floor is reached.
         if msg.recovery == "token_limit" then
-          local can_bump = prefs.max_tokens_idx < #CFG.MAX_TOKENS_OPTIONS
+          -- Bump-Max-Tokens recovery has been retired: max_tokens is no longer
+          -- a user-tunable knob (cloud providers send the model's published
+          -- ceiling automatically; OpenAI/Gemini omit the field so the server
+          -- applies its own default). For empty-output-from-thinking failures
+          -- the only meaningful client-side recovery is Lower Thinking.
           local rec_prov = msg.provider_id and PROVIDERS.get(msg.provider_id) or PROVIDERS.active()
           local tkey, cur_idx
           if rec_prov and rec_prov.thinking_levels then
@@ -12446,11 +12553,11 @@ function Render.main_window()
           end
           local can_lower = cur_idx and cur_idx > 1
           -- Retry hides until the user has applied a fix (msg.recovery_used is
-          -- stamped below by Bump / Lower). Also gated on idle/error status so
-          -- the button can't fire mid-request.
+          -- stamped below by Lower). Also gated on idle/error status so the
+          -- button can't fire mid-request.
           local can_retry = msg.recovery_used
             and (S.status == "idle" or S.status == "error")
-          if msg.truncated or can_bump or can_lower or can_retry then
+          if msg.truncated or can_lower or can_retry then
             ImGui.ImGui_Spacing(RA.ctx)
           end
           -- Truncation banner: placed just above the recovery buttons so the
@@ -12461,7 +12568,7 @@ function Render.main_window()
               "##trunc_" .. i, content_w, COL.WARN)
             Dummy(RA.ctx, 1, RA.SC(6))
           end
-          if can_bump or can_lower or can_retry then
+          if can_lower or can_retry then
             -- V5 secondary-button palette filled with TK.card_hover so the
             -- buttons read as tactile chips rather than outline-only ghosts.
             -- Hover / active lerp toward the accent for feedback. 1 px border,
@@ -12498,23 +12605,7 @@ function Render.main_window()
               PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  V5_ACC_ACT)
               PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          V5_ACC_TXT)
             end
-            if can_bump then
-              local next_val = CFG.MAX_TOKENS_OPTIONS[prefs.max_tokens_idx + 1]
-              local next_lbl = math_floor(next_val / 1024) .. "K"
-              _push_sec()
-              if ImGui.ImGui_Button(RA.ctx, "Bump Max Tokens to " .. next_lbl .. "##rec_bump_" .. i, 0, 0) then
-                prefs.max_tokens_idx = prefs.max_tokens_idx + 1
-                CFG.MAX_TOKENS = CFG.MAX_TOKENS_OPTIONS[prefs.max_tokens_idx]
-                reaper.SetExtState(CFG.EXT_NS, "max_tokens_idx",
-                  tostring(prefs.max_tokens_idx), true)
-                msg.recovery_used = true
-              end
-              UI.tooltip("Raise the output-token cap and save to Settings.")
-              PopStyleColor(RA.ctx, 4)
-              drew_any = true
-            end
             if can_lower then
-              if drew_any then SameLine(RA.ctx, 0, RA.SC(4)) end
               local lower = rec_prov.thinking_levels[cur_idx - 1]
               _push_sec()
               if ImGui.ImGui_Button(RA.ctx, "Lower Thinking to " .. (lower.label or "?") .. "##rec_think_" .. i, 0, 0) then
@@ -15456,6 +15547,12 @@ end
 -- Wraps at word boundaries; hard-breaks individual words that exceed the column.
 -- Existing \n characters are preserved as paragraph separators.
 function UI.wrap_text(text, chars_per_line)
+  -- Defensive clamp: a 0 or negative width would never let the inner
+  -- slicing loop (str_sub(combo, 1, chars_per_line) below) advance,
+  -- producing an infinite loop / UI freeze. No current caller passes
+  -- such a value, but the function is reusable enough to be worth
+  -- guarding.
+  chars_per_line = math.max(1, tonumber(chars_per_line) or 80)
   local out = {}
   local pos = 1
   local len = #text
@@ -15679,6 +15776,12 @@ function UI.invalidate_palette_caches()
       m._hl_src   = nil
       m._hl_lang  = nil
       m._hl_lines = nil
+      -- Details-card field/color cache: color_map embeds u32 from
+      -- TK.accent (Est. Cost line). Setting field_map to nil triggers
+      -- the first arm of the cache-validity check next render, which
+      -- rebuilds both maps in lockstep with the new palette.
+      m._details_field_map = nil
+      m._details_color_map = nil
     end
   end
 end

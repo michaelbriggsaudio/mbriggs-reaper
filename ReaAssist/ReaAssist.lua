@@ -4,7 +4,7 @@
 --
 -- Use of this software is permitted through official distribution channels
 -- (ReaPack, GitHub release downloads). Users may modify it locally for
--- personal use, including the documented ReaAssist_System_Prompt_Custom.md
+-- personal use, including the documented System_Prompt_Custom.md
 -- override mechanism. Redistribution, resale, sublicensing, repackaging,
 -- and presenting this software (modified or unmodified) as your own are
 -- prohibited without prior written permission. See LICENSE.txt.
@@ -28,7 +28,7 @@
 --   - First-run flow: Terms of Use screen, then API key entry with validation.
 --
 -- Requirements: ReaImGui (via ReaPack), at least one provider key, curl on PATH,
--- and ReaAssist_System_Prompt.md in Resources/. See CHANGELOG.md for features.
+-- and System_Prompt.md in Resources/. See CHANGELOG.md for features.
 
 -- ReaImGui constraints for this environment -- DO NOT REMOVE:
 --   - ImGui_End must be paired with every ImGui_Begin (standard Dear
@@ -76,7 +76,7 @@ local ImGui = reaper  -- secondary alias used for ImGui calls (reads as ImGui.Im
 -- =============================================================================
 -- RA: shared-state namespace for cross-file access
 -- =============================================================================
--- Shared state namespace read by both files (main + Resources/ReaAssist_UI.lua).
+-- Shared state namespace read by both files (main + Resources/UI.lua).
 -- Covers items that would otherwise be bare globals: the ImGui context,
 -- UI-scale helper, path constants, OS flags, shared font handles, and
 -- the sel_cb EEL callback. Pre-existing namespaces (S, CFG, TK, COL,
@@ -213,11 +213,11 @@ do
     true)
   reaper.AddRemoveReaScript(false, 0,
     RA.script_path .. "Resources" .. sep .. ".." .. sep
-      .. "Resources" .. sep .. "ReaAssist_Relaunch.lua",
+      .. "Resources" .. sep .. "Relaunch.lua",
     true)
 
   RELAUNCHER_PATH = RA.script_path .. "Resources" .. sep
-                 .. "ReaAssist_Relaunch.lua"
+                 .. "Relaunch.lua"
 
   -- Defensively unregister any stale relauncher entry. commit=false
   -- was supposed to make the previous run's try_auto_restart
@@ -249,7 +249,7 @@ reaper.RecursiveCreateDirectory(JSFX_DIR, 0)
 RA.RESOURCES_DIR = RA.script_path .. "Resources" .. RA.SEP
 reaper.RecursiveCreateDirectory(RA.RESOURCES_DIR, 0)
 
-RA.FX_CACHE_PATH = RA.RESOURCES_DIR .. "ReaAssist_FX_Cache.json"
+RA.FX_CACHE_PATH = RA.RESOURCES_DIR .. "FX_Cache.json"
 
 -- =============================================================================
 -- Toolbar toggle support
@@ -268,21 +268,20 @@ end
 -- If a second instance is launched, it signals the first to close and exits.
 -- ExtState key "running" stores "instance_id|timestamp" so stale locks from
 -- hard crashes (process kill, BSOD) can be detected. If the lock is older than
--- 60 seconds, it is treated as stale and claimed by this instance.
+-- STALE_LOCK_SECS (15 seconds; see Single-instance handshake block below),
+-- it is treated as stale and claimed by this instance.
 -- "request_close" carries the new instance's ID. The running instance checks
 -- that the value differs from its own ID to avoid self-shutdown from stale
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.0.3", -- public release version
+  VERSION           = "1.0.4", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
   CLOUD_TIMEOUT_MAX     = 1800,
   EXTEND_BY_SECS    = 60,        -- "Extend by Ns" button bumps timeout by this many seconds per click
   EXTEND_SHOW_BEFORE_TIMEOUT = 30,  -- show the Extend button when within this many seconds of timeout
-  MAX_TOKENS        = 8192,      -- max output tokens per API call (overridden by pref)
-  MAX_TOKENS_OPTIONS = { 4096, 8192, 16384, 32768, 65536 },  -- dropdown choices
   UI_SCALE_OPTIONS   = { 0.75, 0.85, 1.0, 1.25, 1.5, 2.0 },  -- UI zoom choices
   UI_SCALE_LABELS    = { "75%", "85%", "100%", "125%", "150%", "200%" },
   CHAT_FONT_SIZES    = { 10, 12, 14 },   -- Small, Medium, Large (px before SC).
@@ -401,10 +400,15 @@ S = {
   -- resets on script reload, which is fine (worst case: one 400 per session).
   anthropic_beta_disabled = false,
   pending_attachments     = nil,  -- snapshot of attachments for rebuild retries
-  -- API reference (core = always-pinned portion, extended = on-demand portion)
-  api_ref_message       = nil, -- pinned API ref message, or nil
-  api_ref_cache_core    = nil, -- cached pre-marker content (loaded once)
-  api_ref_cache_extended = nil,-- cached post-marker content (loaded once)
+  -- API reference. Single physical file (Resources/API_Ref.md)
+  -- with seven SECTION-marker buckets (core, extended, items, envelopes,
+  -- take_fx, routing, tempo). One loader populates the cache; each bucket
+  -- is still served individually via CTX.docs / CTX.docs_extended /
+  -- CTX.docs_section.
+  api_ref_message        = nil, -- pinned API ref message, or nil
+  api_ref_section_cache  = nil, -- {[bucket]=content} parsed from the API ref file; lazy-init
+  api_ref_loaded         = nil, -- bool: true after the API ref file has been read (success or fail)
+  _api_ref_section_err   = nil, -- {[bucket]=err_string} per-bucket error map; lazy-init
   -- MIDI reference (auto-injected when user prompt contains "midi", or
   -- on-demand via <context_needed>midi</context_needed>). Mirrors api_ref:
   -- once set, prepended to every request as a synthetic user/assistant pair.
@@ -437,6 +441,7 @@ S = {
   key_install_moved = false,   -- true if key decode failed due to moved install
   key_test_pending  = false,   -- true while validation request is in flight
   key_test_provider = nil,     -- provider id being tested (for multi-key validation)
+  key_test_armed    = nil,     -- {provider, armed_at}: deferred fire when curl_pid was busy at fire_key_test time; loop fires it once curl clears (30s ceiling)
   gemini_paid_tier    = nil,   -- nil=unknown, true=paid, false=free
   gemini_tier_pending = false, -- true while tier test is in flight
   show_gemini_free_warn = false, -- triggers free-tier warning popup next frame
@@ -453,6 +458,9 @@ S = {
   pending_snapshot       = nil,    -- snapshot from original send
   docs_already_sent      = false,  -- one-shot guard per turn
   docs_extended_already_sent = false,  -- one-shot guard per turn (extended)
+  docs_section_sent      = {},     -- {[section]=true} per-turn dedup; mirrors plugin_ref_sent
+                                   -- shape so a repeat <context_needed>docs:envelopes</context_needed>
+                                   -- silently dedups instead of refetching
   docs_fetched_session   = false,  -- session-level flag: docs has been inlined
                                    -- into history at least once this chat.
                                    -- Used by the docs-gate to know whether
@@ -467,6 +475,10 @@ S = {
   pending_pref_plugin_types= {},   -- preferred_plugins types accumulated before a popup bailed the parse loop
   context_loop_retries     = 0,    -- per-turn counter -- model re-asking for already-provided context (max 1 retry)
   api_validator_retries    = 0,    -- per-turn counter -- model emitted nonexistent reaper.* calls (max 1 retry)
+  defer_validator_retries  = 0,    -- per-turn counter -- model emitted plugin param calls outside reaper.defer (max 1 retry)
+  helper_validator_retries = 0,    -- per-turn counter -- model called helper functions without including their definitions (max 1 retry)
+  length_retry_used        = false,-- per-turn flag -- empty-text-from-length retry already fired with thinking forced off
+  thinking_override_idx    = nil,  -- per-turn override for prefs.thinking_idx (set during length auto-retry to force "none")
   fx_list_already_sent   = false,
   fx_chains_already_sent = false,
   track_flags_already_sent = false,
@@ -475,7 +487,9 @@ S = {
   theme_already_sent     = false,
   fx_inspect_already_sent = false,
   prompt_bundle_sent       = {},   -- set of prompt-bundle names sent in this session (per-name, NOT reset per turn -- bundles are system-prompt content and stay pinned until Clear)
-  prompt_bundle_cache      = nil,  -- file-content cache: {[name]=formatted payload}; nil until first load
+  prompt_bundle_cache      = nil,  -- {[name]=formatted payload} parsed from Resources/Prompts.md; lazy-init
+  prompts_loaded           = nil,  -- bool: true after the prompts file has been read (success or fail)
+  _prompt_bundle_err       = nil,  -- {[name]=err_string} per-bundle error map; lazy-init
   pending_display_idx    = nil,    -- index into display_messages for current user msg
   pending_project        = nil,    -- captured project pointer at send time
   -- Resolve-type popup (Phase 5b): blocks the round when the user has no
@@ -892,7 +906,7 @@ ImGui.ImGui_Attach(RA.ctx, RA.sel_cb)
 -- `discard_newline = 1` only on frames where Enter is pressed WITHOUT
 -- Shift; multi-line paste still works because the same frame won't
 -- have a fresh Enter keypress, so discard_newline stays 0 and pasted
--- newlines pass through. Keypath: ReaAssist_UI.lua's prompt render.
+-- newlines pass through. Keypath: UI.lua's prompt render.
 RA.prompt_charfilter = ImGui.ImGui_CreateFunctionFromEEL([[
   EventChar == 10 && discard_newline ? EventChar = 0;
 ]])
@@ -1041,7 +1055,6 @@ prefs = {
   include_api_ref  = reaper.GetExtState(CFG.EXT_NS, "include_api_ref")  == "1",  -- default off (prompt-bundle era; request docs on-demand)
   include_snapshot = reaper.GetExtState(CFG.EXT_NS, "include_snapshot") ~= "0", -- default on
   update_check     = reaper.GetExtState(CFG.EXT_NS, "update_check")    ~= "0", -- default on
-  max_tokens_idx   = 3,  -- index into CFG.MAX_TOKENS_OPTIONS (default 3 = 16384)
   provider_idx     = 1,  -- set below from ExtState (1=Claude, 2=ChatGPT, 3=Gemini)
   model_idx        = 2,  -- set below by MODELS.refresh() per active provider
   thinking_idx     = 0,  -- 0 = provider has no thinking; set by MODELS.refresh()
@@ -1071,7 +1084,7 @@ prefs = {
 -- reassigns this upvalue rather than shadowing it.
 local JSON
 -- PROVIDERS, MODELS, FXCache, and Net are cross-file shared state and
--- live as plain globals so both ReaAssist.lua and Resources/ReaAssist_UI.lua
+-- live as plain globals so both ReaAssist.lua and Resources/UI.lua
 -- can read and write them. Their `= {}` initializers appear later in
 -- this file; before those run the names are nil, so any code that touches
 -- them at load time must appear after the initializers.
@@ -1098,7 +1111,7 @@ Log = {}
 -- is per-machine so neither sees the other's lock, and the synced log file
 -- could see interleaved appends. If you hit that scenario, the workaround
 -- is to disable debug logging on all but one machine.
-Log.path = RA.RESOURCES_DIR .. "ReaAssist_Debug.log"
+Log.path = RA.RESOURCES_DIR .. "Debug.log"
 Log.enabled = function() return prefs.debug_logging end
 
 -- Simple append-at-bottom log (standard chronological order). On first request
@@ -1271,7 +1284,7 @@ local function _render_content(content, pad)
 end
 
 -- Decode the request body JSON and produce a readable view. The system prompt
--- content is deliberately omitted (it lives in ReaAssist_System_Prompt.md and
+-- content is deliberately omitted (it lives in System_Prompt.md and
 -- is versioned with the script) -- only its length is reported.
 local function _render_request(body)
   local ok, req = pcall(JSON.decode, body)
@@ -1306,7 +1319,7 @@ local function _render_request(body)
       end
     end
     out[#out+1] = "System prompt: " .. sys_len
-      .. " chars (omitted -- content is in ReaAssist_System_Prompt.md)"
+      .. " chars (omitted -- content is in System_Prompt.md)"
   end
 
   if type(req.tools) == "table" and #req.tools > 0 then
@@ -1574,6 +1587,12 @@ Log.exchange_summary = function(dmsg)
       end
     end
   end
+  -- Mirror the UI Details tile's API Calls row so the log records when
+  -- a turn fired more than one round-trip (silent retries: docs-gate,
+  -- beta-header fallback, cache-expired refresh, intra-turn fetch).
+  if dmsg.api_calls then
+    L[#L+1] = "API calls: " .. tostring(dmsg.api_calls)
+  end
   if dmsg.response_time then
     L[#L+1] = string.format("Response time: %.1fs", dmsg.response_time)
   end
@@ -1639,11 +1658,10 @@ local function _build_sysinfo()
     L[#L+1] = "Auto-backup:     " .. tostring(prefs.auto_backup)
     L[#L+1] = "Snapshot ctx:    " .. tostring(prefs.include_snapshot)
     L[#L+1] = "API ref:         " .. tostring(prefs.include_api_ref)
-    local max_tok = try(function() return CFG and CFG.MAX_TOKENS_OPTIONS and CFG.MAX_TOKENS_OPTIONS[prefs.max_tokens_idx] end)
-    L[#L+1] = "Max tokens:      " .. tostring(max_tok or "?")
   end
   L[#L+1] = "Max history:     " .. tostring(CFG and CFG.MAX_HISTORY_TURNS or "?")
-  L[#L+1] = "API ref loaded:  " .. tostring((S and S.api_ref_cache_core) ~= nil)
+  L[#L+1] = "API ref loaded:  " .. tostring(
+    S and S.api_ref_section_cache and S.api_ref_section_cache.core ~= nil)
 
   -- FX cache size (plugin-count only; names can be identifying so we omit them).
   local cache_count = try(function()
@@ -1723,13 +1741,17 @@ PROVIDERS = {
     -- price_cache_w reflects the 1-hour cache write rate (2x input). All cache
     -- breakpoints in build_body_anthropic use ttl="1h" via the
     -- extended-cache-ttl-2025-04-11 beta header. (5-min writes would be 1.25x.)
+    -- max_output: per-model output-token ceiling (Anthropic Messages API
+    -- enforces server-side; we send this as max_tokens). Sourced from
+    -- Anthropic's published model docs as of April 2026. Update when
+    -- ceilings change.
     models = {
       { label = "Haiku 4.5",  chip_label = "HAIKU",  id = "claude-haiku-4-5",
-        price_in = 1.00,  price_out = 5.00,  price_cache_r = 0.10, price_cache_w = 2.00  },
+        price_in = 1.00,  price_out = 5.00,  price_cache_r = 0.10, price_cache_w = 2.00,  max_output = 64000  },
       { label = "Sonnet 4.6", chip_label = "SONNET", id = "claude-sonnet-4-6",
-        price_in = 3.00,  price_out = 15.00, price_cache_r = 0.30, price_cache_w = 6.00  },
-      { label = "Opus 4.6",   chip_label = "OPUS",   id = "claude-opus-4-6",
-        price_in = 5.00,  price_out = 25.00, price_cache_r = 0.50, price_cache_w = 10.00 },
+        price_in = 3.00,  price_out = 15.00, price_cache_r = 0.30, price_cache_w = 6.00,  max_output = 64000  },
+      { label = "Opus 4.7",   chip_label = "OPUS",   id = "claude-opus-4-7",
+        price_in = 5.00,  price_out = 25.00, price_cache_r = 0.50, price_cache_w = 10.00, max_output = 128000 },
     },
   },
   {
@@ -1757,13 +1779,18 @@ PROVIDERS = {
       { label = "High",   value = "high"   },
     },
     default_thinking_idx = 3,  -- Medium
+    -- max_output: per-model output-token ceiling. OpenAI accepts but does
+    -- not require max_tokens / max_completion_tokens; we omit it from the
+    -- request so the server applies its own default (= the ceiling). The
+    -- value here is used for the preflight context-budget reserve only.
+    -- All current GPT-5.x models share the same 128K ceiling.
     models = {
       { label = "GPT-5.4 nano", chip_label = "NANO", id = "gpt-5.4-nano",
-        price_in = 0.20,  price_out = 1.25,  price_cache_r = 0.02  },
+        price_in = 0.20,  price_out = 1.25,  price_cache_r = 0.02,  max_output = 128000 },
       { label = "GPT-5.4 mini", chip_label = "MINI", id = "gpt-5.4-mini",
-        price_in = 0.75,  price_out = 4.50,  price_cache_r = 0.075 },
+        price_in = 0.75,  price_out = 4.50,  price_cache_r = 0.075, max_output = 128000 },
       { label = "GPT-5.4",      chip_label = "FULL", id = "gpt-5.4",
-        price_in = 2.50,  price_out = 15.00, price_cache_r = 0.25  },
+        price_in = 2.50,  price_out = 15.00, price_cache_r = 0.25,  max_output = 128000 },
     },
   },
   {
@@ -1793,13 +1820,17 @@ PROVIDERS = {
     -- prompt-size tier. Audio cache reads are ~2x and >200K Pro requests are
     -- billed at 2x; the script has no per-request tier tracking so the
     -- lower-tier value is used for the displayed cost estimate.
+    -- max_output: per-model output-token ceiling. Gemini accepts but does
+    -- not require maxOutputTokens; we omit it from the request so the
+    -- server applies its own default. Used here for the preflight reserve
+    -- only. All current Gemini 3.x models share the same 65,536 ceiling.
     models = {
       { label = "Flash Lite 3.1", chip_label = "FLASH LITE", id = "gemini-3.1-flash-lite-preview",
-        price_in = 0.25,  price_out = 1.50, price_cache_r = 0.025, is_flash = true },
+        price_in = 0.25,  price_out = 1.50, price_cache_r = 0.025, is_flash = true,    max_output = 65536 },
       { label = "Flash 3",        chip_label = "FLASH",      id = "gemini-3-flash-preview",
-        price_in = 0.50,  price_out = 3.00, price_cache_r = 0.05,  is_flash = true },
+        price_in = 0.50,  price_out = 3.00, price_cache_r = 0.05,  is_flash = true,    max_output = 65536 },
       { label = "Pro 3.1",        chip_label = "PRO",        id = "gemini-3.1-pro-preview",
-        price_in = 2.00,  price_out = 12.00, price_cache_r = 0.20, paid_only = true },
+        price_in = 2.00,  price_out = 12.00, price_cache_r = 0.20, paid_only = true,   max_output = 65536 },
     },
   },
 }
@@ -1853,11 +1884,8 @@ function PROVIDERS.active()   return PROVIDERS[prefs.provider_idx] end
 --                                          per-request basis.
 --   custom_<id>_models                  -- newline-delimited rows, pipe-delimited
 --                                          fields with optional tab-prefixed
---                                          extra_body suffix. Full 6-field form:
+--                                          extra_body suffix. Row format:
 --                                            id|price_in|price_out|context|price_cache_r|notes[\t<extra_body_json>]
---                                          4- and 5-field legacy shapes are still
---                                          accepted on read; writes always use
---                                          the 6-field canonical form.
 --   api_key_<id>                        -- optional Bearer token, encoded via Key.encode
 --
 -- The record id doubles as the provider id in the PROVIDERS table, so every
@@ -2040,14 +2068,10 @@ end
 -- rejected at save time if it contains "|" or "\t", so it's safe inside the
 -- pipe-delimited main part.
 --
--- Row formats accepted (parser chooses by pipe-field count, then peels off
--- optional extra_body after the first tab):
---   4 fields: id|price_in|price_out|context                            (original)
---   5 fields: id|price_in|price_out|context|price_cache_r              (+cache hit)
---   6 fields: id|price_in|price_out|context|price_cache_r|notes        (+notes)
---   ...any of the above + "\t" + JSON                                  (+extra_body)
+-- Row format:
+--   id|price_in|price_out|context|price_cache_r|notes[\t<extra_body_json>]
 --
--- Empty / malformed rows are dropped. Missing optional fields default to 0/"".
+-- Empty / malformed rows are dropped.
 local function parse_models_blob(raw)
   local out = {}
   if not raw or raw == "" then return out end
@@ -2058,15 +2082,6 @@ local function parse_models_blob(raw)
       if not main then main = line end
       local id, pin, pout, ctx, pcache, notes =
         main:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
-      if not id then
-        id, pin, pout, ctx, pcache =
-          main:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
-        notes = ""
-      end
-      if not id then
-        id, pin, pout, ctx = main:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
-        pcache, notes = "", ""
-      end
       if id and id ~= "" then
         local ctx_n = tonumber(ctx) or CUSTOM_DEFAULT_CTX
         if ctx_n < CUSTOM_MIN_CTX then ctx_n = CUSTOM_MIN_CTX end
@@ -2433,13 +2448,6 @@ end
 
 prefs.provider_idx = _prefs_load_idx("provider_idx", 1, PROVIDERS)
 
--- Load max_tokens_idx (default 3 = 16384 / 16K). 16K gives ~5x headroom
--- over the largest responses ReaAssist typically generates (~2-3K tokens)
--- without inflating the rare-failure cost ceiling that a higher default
--- would create. Apply to CFG.MAX_TOKENS immediately.
-prefs.max_tokens_idx = _prefs_load_idx("max_tokens_idx", 3, CFG.MAX_TOKENS_OPTIONS)
-CFG.MAX_TOKENS = CFG.MAX_TOKENS_OPTIONS[prefs.max_tokens_idx]
-
 -- Load cloud_request_timeout (default CFG.CLOUD_TIMEOUT_DEFAULT = 180s). Clamp
 -- to [CLOUD_TIMEOUT_MIN, CLOUD_TIMEOUT_MAX] so a corrupt ExtState value can't
 -- break the watchdog.
@@ -2646,6 +2654,15 @@ do
   local tier_str = reaper.GetExtState(CFG.EXT_NS, "gemini_paid_tier")
   if tier_str == "true" then S.gemini_paid_tier = true
   elseif tier_str == "false" then S.gemini_paid_tier = false
+  end
+  -- If tier is unknown but a Google key is configured, schedule an auto
+  -- retest on the first loop tick. Net isn't defined yet at this point in
+  -- script init, so we set a flag and let the main loop dispatch it once
+  -- everything is wired up. Handles the common case where a previous test
+  -- got an ambiguous response (503 UNAVAILABLE on Pro, transient network
+  -- blip) -- restart picks up the retry without manual Test-API-Keys.
+  if S.gemini_paid_tier == nil and S.api_key_map.google then
+    S.gemini_auto_retest_pending = true
   end
   -- If force-cold-cache is persisted on from a prior session, mint a fresh
   -- stamp for this session. The stamp lives per script lifetime, so
@@ -2972,7 +2989,7 @@ function apply_palette(palette)
   -- Drop any palette-derived caches in the UI module so chat code blocks
   -- and other cached color tables rebuild against the new COL.* slots on
   -- next render. Guarded because apply_palette runs once at boot before
-  -- ReaAssist_UI.lua is loaded; UI.invalidate_palette_caches is nil then.
+  -- UI.lua is loaded; UI.invalidate_palette_caches is nil then.
   if UI and UI.invalidate_palette_caches then
     UI.invalidate_palette_caches()
   end
@@ -3150,7 +3167,7 @@ UI = {}
 UI.MODEL_TIPS = {
   ["claude-haiku-4-5"]               = "Fastest + cheapest Claude. Best for quick questions, simple edits, and short scripts.",
   ["claude-sonnet-4-6"]              = "Balanced Claude default. Best for most coding, debugging, and session-analysis tasks.",
-  ["claude-opus-4-6"]                = "Smartest Claude. Best for complex architecture, tricky bugs, and nuanced audio advice.",
+  ["claude-opus-4-7"]                = "Smartest Claude. Best for complex architecture, tricky bugs, and nuanced audio advice.",
   ["gpt-5.4-nano"]                   = "Fastest + cheapest GPT. Best for simple lookups and short replies.",
   ["gpt-5.4-mini"]                   = "Balanced GPT default. Solid reasoning at moderate cost.",
   ["gpt-5.4"]                        = "Flagship GPT. Best for deep reasoning, tough debugging, and nuanced prompts.",
@@ -3895,10 +3912,10 @@ end -- attachment system scope
 -- =============================================================================
 -- System prompt
 -- =============================================================================
--- Loaded from ReaAssist_System_Prompt.md at startup. {VERSION} is replaced
+-- Loaded from System_Prompt.md at startup. {VERSION} is replaced
 -- with CFG.VERSION.
 --
--- Power-user override: if ReaAssist_System_Prompt_Custom.md exists in the
+-- Power-user override: if System_Prompt_Custom.md exists in the
 -- same Resources/ folder, it is loaded INSTEAD of the stock prompt. The
 -- custom file is not in the update manifest, so it survives updates and
 -- is never touched by repair. The stock file may still change across
@@ -3914,8 +3931,8 @@ local SYSTEM_PROMPT_IS_CUSTOM = false
 -- can fix it) or shows a message box (custom override is the user's file
 -- and bootstrap cannot restore it).
 local function load_system_prompt()
-  local stock_path  = RA.RESOURCES_DIR .. "ReaAssist_System_Prompt.md"
-  local custom_path = RA.RESOURCES_DIR .. "ReaAssist_System_Prompt_Custom.md"
+  local stock_path  = RA.RESOURCES_DIR .. "System_Prompt.md"
+  local custom_path = RA.RESOURCES_DIR .. "System_Prompt_Custom.md"
   local prompt_path = stock_path
   if reaper.file_exists(custom_path) then
     prompt_path = custom_path
@@ -3926,14 +3943,14 @@ local function load_system_prompt()
     if SYSTEM_PROMPT_IS_CUSTOM then
       reaper.ShowMessageBox(
         "Could not load system prompt file:\n" .. prompt_path
-        .. "\n\nPlease make sure ReaAssist_System_Prompt.md is in the "
+        .. "\n\nPlease make sure System_Prompt.md is in the "
         .. "Resources/ subfolder next to ReaAssist.lua.",
         "ReaAssist", 0)
       return false
     end
     S.bootstrap_active = true
     S.bootstrap_missing[#S.bootstrap_missing + 1] =
-      "Resources/ReaAssist_System_Prompt.md"
+      "Resources/System_Prompt.md"
     Updater._set_failure("system_prompt_load",
       "System prompt file is missing.")
     return false
@@ -3966,7 +3983,7 @@ local function load_system_prompt()
       if not SYSTEM_PROMPT:find(anchor, 1, true) then
         S.bootstrap_active = true
         S.bootstrap_missing[#S.bootstrap_missing + 1] =
-          "Resources/ReaAssist_System_Prompt.md (corrupt)"
+          "Resources/System_Prompt.md (corrupt)"
         Updater._set_failure("system_prompt_load",
           "System prompt file is corrupted (missing anchor: "
           .. anchor .. ").")
@@ -3978,7 +3995,7 @@ local function load_system_prompt()
   -- "weird model output" reports. No-op if debug logging is disabled.
   if SYSTEM_PROMPT_IS_CUSTOM then
     Log.line("PROMPT",
-      "Using ReaAssist_System_Prompt_Custom.md (override active)")
+      "Using System_Prompt_Custom.md (override active)")
   end
   return true
 end
@@ -4276,7 +4293,7 @@ end
 -- =============================================================================
 -- PLUGIN AUTO-ASSIGN / POPUP FLOW
 -- -------------------------------
--- Single source of truth: the ```chains block in Resources/ReaAssist_Plugin_Ref.md.
+-- Single source of truth: the ```chains block in Resources/Plugin_Ref.md.
 -- Line format:
 --   type: chain1 | chain2 | ... || stock-fallback [optional alias]
 --
@@ -4317,7 +4334,7 @@ end
 -- See Dev/Plugin Scanner Script/README.md for the full integration recipe.
 -- -----------------------------------------------------------------------------
 
--- Reads the ```chains code block from Resources/ReaAssist_Plugin_Ref.md.
+-- Reads the ```chains code block from Resources/Plugin_Ref.md.
 -- Line format:
 --   type: chain1 | chain2 | ... || stock-fallback
 -- Any entry (chain or stock) may have an optional display alias in brackets:
@@ -4345,7 +4362,7 @@ end
 function Code.get_fallback_chains()
   if _fallback_chains then return _fallback_chains end
   _fallback_chains = {}
-  local ref_path = RA.RESOURCES_DIR .. "ReaAssist_Plugin_Ref.md"
+  local ref_path = RA.RESOURCES_DIR .. "Plugin_Ref.md"
   local f = io.open(ref_path, "r")
   if not f then
     Log.line("CHAIN", "Plugin_Ref.md not found; no fallback chains loaded")
@@ -4796,14 +4813,14 @@ function Diag.build_report(opts)
   parts[#parts + 1] = "Auto-backup:       " .. _onoff(prefs.auto_backup)
   parts[#parts + 1] = "Include snapshot:  " .. _onoff(prefs.include_snapshot)
   parts[#parts + 1] = "Include API ref:   " .. _onoff(prefs.include_api_ref)
-  parts[#parts + 1] = "Max tokens:        " .. (CFG.MAX_TOKENS_OPTIONS[prefs.max_tokens_idx] or "?")
   parts[#parts + 1] = "Max history turns: " .. CFG.MAX_HISTORY_TURNS
   -- Cloud request timeout (seconds) -- affects "request hung" /
   -- "503 / timeout" bug reports directly.
   if prefs.cloud_request_timeout then
     parts[#parts + 1] = "Cloud timeout:     " .. tostring(prefs.cloud_request_timeout) .. "s"
   end
-  parts[#parts + 1] = "API ref loaded:    " .. _onoff(S.api_ref_cache_core ~= nil)
+  parts[#parts + 1] = "API ref loaded:    " .. _onoff(
+    S.api_ref_section_cache and S.api_ref_section_cache.core ~= nil)
   parts[#parts + 1] = "UI theme:          " .. tostring(prefs.theme_id or "default")
   local scale_val = CFG.UI_SCALE_OPTIONS[prefs.ui_scale_idx or 3] or 1.0
   parts[#parts + 1] = str_format("UI scale:          %.2fx", scale_val)
@@ -4863,7 +4880,7 @@ function Diag.build_report(opts)
   end
   -- Plugin_Ref.md status. Missing / unreadable file breaks chains + curated
   -- injection; size signals whether it looks truncated.
-  local ref_path = RA.RESOURCES_DIR .. "ReaAssist_Plugin_Ref.md"
+  local ref_path = RA.RESOURCES_DIR .. "Plugin_Ref.md"
   local rf = io.open(ref_path, "r")
   if rf then
     local sz = rf:seek("end") or 0
@@ -5038,7 +5055,7 @@ end
 -- Unified FX parameter cache (JSON)
 -- =============================================================================
 -- Persists plugin parameter metadata (names, indices, defaults, enum values)
--- to ReaAssist_FX_Cache.json. Two top-level maps:
+-- to FX_Cache.json. Two top-level maps:
 --
 --   preferred_types  -- user preferences (one plugin per type). Values are
 --                       the chain-entry form (format-agnostic), e.g.
@@ -5275,17 +5292,52 @@ end
 -- the pipe-delimited row format the snapshot uses. Pipes are exceedingly
 -- rare in real REAPER track names; the substitution keeps the format
 -- parseable even when they do appear.
-local function _scrub_pipes(s) return (tostring(s or ""):gsub("|", "_")) end
+local function _scrub_pipes(s)
+  s = tostring(s or "")
+  -- gsub allocates a new string regardless of whether it matched; pipes
+  -- are exceedingly rare in real REAPER track names, so short-circuit
+  -- the common case. Called hundreds of times per snapshot on large
+  -- sessions.
+  if not s:find("|", 1, true) then return s end
+  return (s:gsub("|", "_"))
+end
+
+-- Resolve a project pointer for snapshot / context use. S.pending_project
+-- is captured at user-send time; long-running scans, popups, or provider
+-- round-trips can race with the user closing or swapping the project tab,
+-- leaving the cached userdata stale. Walking a snapshot off a stale
+-- pointer would emit garbage (or crash on subsequent CTX.* calls). The
+-- helper revalidates via ValidatePtr2 before each use; on failure it
+-- falls back to the active project so the snapshot is built fresh against
+-- the tab the user is now looking at.
+local function _resolve_pending_project()
+  local p = S.pending_project
+  if p and reaper.ValidatePtr2(0, p, "ReaProject*") then
+    return p
+  end
+  if p then
+    Log.line("CTX", "pending_project pointer is stale "
+      .. "(project tab closed mid-request); falling back to "
+      .. "active project")
+  end
+  return reaper.EnumProjects(-1)
+end
 
 function CTX.tracks(proj)
   local count = R_CountTracks(proj)
   if count == 0 then return "Tracks: none" end
   local lines = { str_format("Tracks (N=%d) [idx|name|items]:", count) }
   for i = 0, count - 1 do
-    local tr         = R_GetTrack(proj, i)
-    local _, nm      = R_GetTrackName(tr)
-    local item_count = R_CountTrackMediaItems(tr)
-    lines[#lines+1] = str_format("%d|%s|%d", i + 1, _scrub_pipes(nm), item_count)
+    -- Long-lived defer scripts can race with project tab close / reload
+    -- between R_CountTracks and the following R_GetTrack: the count
+    -- snapshot becomes stale and R_GetTrack returns nil for indices the
+    -- count thought existed. R_GetTrackName(nil) would then crash.
+    local tr = R_GetTrack(proj, i)
+    if tr then
+      local _, nm      = R_GetTrackName(tr)
+      local item_count = R_CountTrackMediaItems(tr)
+      lines[#lines+1] = str_format("%d|%s|%d", i + 1, _scrub_pipes(nm), item_count)
+    end
   end
   return tbl_concat(lines, "\n")
 end
@@ -5297,14 +5349,16 @@ function CTX.track_flags(proj)
   local rows = {}
   for i = 0, count - 1 do
     local tr = R_GetTrack(proj, i)
-    local flags = {}
-    if R_GetMediaTrackInfo_Value(tr, "B_MUTE")   == 1 then flags[#flags+1] = "muted"  end
-    if R_GetMediaTrackInfo_Value(tr, "I_SOLO")   ~= 0 then flags[#flags+1] = "soloed" end
-    if R_GetMediaTrackInfo_Value(tr, "I_RECARM") == 1 then flags[#flags+1] = "armed"  end
-    if #flags > 0 then
-      local _, nm = R_GetTrackName(tr)
-      rows[#rows+1] = str_format("%d|%s|%s",
-        i + 1, _scrub_pipes(nm), tbl_concat(flags, ","))
+    if tr then
+      local flags = {}
+      if R_GetMediaTrackInfo_Value(tr, "B_MUTE")   == 1 then flags[#flags+1] = "muted"  end
+      if R_GetMediaTrackInfo_Value(tr, "I_SOLO")   ~= 0 then flags[#flags+1] = "soloed" end
+      if R_GetMediaTrackInfo_Value(tr, "I_RECARM") == 1 then flags[#flags+1] = "armed"  end
+      if #flags > 0 then
+        local _, nm = R_GetTrackName(tr)
+        rows[#rows+1] = str_format("%d|%s|%s",
+          i + 1, _scrub_pipes(nm), tbl_concat(flags, ","))
+      end
     end
   end
   if #rows == 0 then return "Track flags: none (no tracks muted/soloed/armed)" end
@@ -5322,22 +5376,24 @@ function CTX.fx(proj)
   local count = R_CountTracks(proj)
   local sel_with_fx, other_with_fx = {}, {}
   for i = 0, count - 1 do
-    local tr       = R_GetTrack(proj, i)
-    local fx_count = R_TrackFX_GetCount(tr)
-    if fx_count > 0 then
-      local _, nm = R_GetTrackName(tr)
-      local fx_names = {}
-      for f = 0, fx_count - 1 do
-        local _, fx_nm = R_TrackFX_GetFXName(tr, f, "")
-        -- Include 0-based index so the assistant can pass it directly to TrackFX_* functions.
-        fx_names[#fx_names+1] = str_format("[%d]%s", f, _scrub_pipes(fx_nm))
-      end
-      local entry = str_format("%d|%s|%s",
-        i + 1, _scrub_pipes(nm), tbl_concat(fx_names, ","))
-      if R_IsTrackSelected(tr) then
-        sel_with_fx[#sel_with_fx+1] = entry
-      else
-        other_with_fx[#other_with_fx+1] = entry
+    local tr = R_GetTrack(proj, i)
+    if tr then
+      local fx_count = R_TrackFX_GetCount(tr)
+      if fx_count > 0 then
+        local _, nm = R_GetTrackName(tr)
+        local fx_names = {}
+        for f = 0, fx_count - 1 do
+          local _, fx_nm = R_TrackFX_GetFXName(tr, f, "")
+          -- Include 0-based index so the assistant can pass it directly to TrackFX_* functions.
+          fx_names[#fx_names+1] = str_format("[%d]%s", f, _scrub_pipes(fx_nm))
+        end
+        local entry = str_format("%d|%s|%s",
+          i + 1, _scrub_pipes(nm), tbl_concat(fx_names, ","))
+        if R_IsTrackSelected(tr) then
+          sel_with_fx[#sel_with_fx+1] = entry
+        else
+          other_with_fx[#other_with_fx+1] = entry
+        end
       end
     end
   end
@@ -5366,7 +5422,7 @@ function CTX.selected(proj)
   local selected = {}
   for i = 0, count - 1 do
     local tr = R_GetTrack(proj, i)
-    if R_IsTrackSelected(tr) then
+    if tr and R_IsTrackSelected(tr) then
       local _, nm = R_GetTrackName(tr)
       selected[#selected+1] = str_format("%q (index %d)", nm, i + 1)
     end
@@ -5642,98 +5698,105 @@ function CTX.fx_params(proj, filter_names)
   local matched_fx = 0  -- count of FX blocks actually written
 
   for ti = 0, track_count - 1 do
-    local tr       = R_GetTrack(proj, ti)
-    local _, nm    = R_GetTrackName(tr)
-    local fx_count = R_TrackFX_GetCount(tr)
-    local track_lines = {}  -- buffered so we only emit the track header when
-                            -- at least one FX on this track matches the filter
+    -- Nil-guard R_GetTrack against project-tab close races: track_count
+    -- was sampled at the top of fx_params, but on long FX walks the user
+    -- can swap or close the project tab mid-loop. R_GetTrackName(nil)
+    -- would crash; skipping the iteration is safe (we just emit fewer
+    -- track entries than the header announced).
+    local tr = R_GetTrack(proj, ti)
+    if tr then
+      local _, nm    = R_GetTrackName(tr)
+      local fx_count = R_TrackFX_GetCount(tr)
+      local track_lines = {}  -- buffered so we only emit the track header when
+                              -- at least one FX on this track matches the filter
 
-    for fi = 0, fx_count - 1 do
-      local _, fx_nm = R_TrackFX_GetFXName(tr, fi, "")
+      for fi = 0, fx_count - 1 do
+        local _, fx_nm = R_TrackFX_GetFXName(tr, fi, "")
 
-      -- Skip this FX if the name does not match any filter term.
-      if not CTX.fx_name_matches(fx_nm, filter_names) then
-        goto continue_fx
-      end
-
-      matched_fx = matched_fx + 1
-
-      -- Emit the track header once on the first matching FX for this track.
-      if #track_lines == 0 then
-        track_lines[#track_lines+1] = str_format("Track %d %q:", ti + 1, nm)
-      end
-
-      track_lines[#track_lines+1] = str_format("  FX [%d] %s:", fi, fx_nm)
-      -- Look up cached enum data for this plugin (if available).
-      local cached_key, cached_plugin = FXCache.find_plugin(fx_nm)
-      local cached_enums = {}  -- idx -> enum list
-      local cached_ranges = {} -- idx -> {display_min, display_max}
-      if cached_plugin and cached_plugin.params then
-        if S._fx_cache_events then
-          local t = S._fx_cache_events
-          t.hit = t.hit or {}
-          t.hit[#t.hit+1] = cached_key or fx_nm
+        -- Skip this FX if the name does not match any filter term.
+        if not CTX.fx_name_matches(fx_nm, filter_names) then
+          goto continue_fx
         end
-        for _, cp in ipairs(cached_plugin.params) do
-          if cp.enum then cached_enums[cp.idx] = cp.enum end
-          if cp.display_min and cp.display_max then
-            cached_ranges[cp.idx] = { cp.display_min, cp.display_max }
+
+        matched_fx = matched_fx + 1
+
+        -- Emit the track header once on the first matching FX for this track.
+        if #track_lines == 0 then
+          track_lines[#track_lines+1] = str_format("Track %d %q:", ti + 1, nm)
+        end
+
+        track_lines[#track_lines+1] = str_format("  FX [%d] %s:", fi, fx_nm)
+        -- Look up cached enum data for this plugin (if available).
+        local cached_key, cached_plugin = FXCache.find_plugin(fx_nm)
+        local cached_enums = {}  -- idx -> enum list
+        local cached_ranges = {} -- idx -> {display_min, display_max}
+        if cached_plugin and cached_plugin.params then
+          if S._fx_cache_events then
+            local t = S._fx_cache_events
+            t.hit = t.hit or {}
+            t.hit[#t.hit+1] = cached_key or fx_nm
+          end
+          for _, cp in ipairs(cached_plugin.params) do
+            if cp.enum then cached_enums[cp.idx] = cp.enum end
+            if cp.display_min and cp.display_max then
+              cached_ranges[cp.idx] = { cp.display_min, cp.display_max }
+            end
           end
         end
-      end
-      local param_count = R_TrackFX_GetNumParams(tr, fi)
-      local param_shown = 0
-      for pi = 0, param_count - 1 do
-        local _, param_nm = R_TrackFX_GetParamName(tr, fi, pi, "")
-        -- Filter MIDI CC automation parameters (VST3 plugins expose 2000+).
-        if param_nm:match("^CC %d") or param_nm:match("^MIDI CC") then
-          goto continue_param
-        end
-        -- Filter MIDI message params injected by the host.
-        if param_nm == "Channel Pressure" or param_nm == "Poly Pressure"
-           or param_nm == "Pitch Bend" or param_nm == "Program Change" then
-          goto continue_param
-        end
-        -- Filter generic unnamed params with no useful display value.
-        local _, disp = R_TrackFX_GetFormattedParamValue(tr, fi, pi, "")
-        disp = disp or ""  -- ReaImGui binding can return nil on unusual plugins
-        if (param_nm:match("^Param %d+$") or param_nm:match("^Parameter %d+$"))
-           and (disp == "" or disp:match("^[%d%.%%]*$")) then
-          goto continue_param
-        end
-        -- Filter VST3 host-appended params (Bypass/Wet/Delta/Internal at tail).
-        if _is_vst3_tail(param_nm, pi) then
-          if disp == "normal" or disp == "-" or disp:match("^%d+$") then
+        local param_count = R_TrackFX_GetNumParams(tr, fi)
+        local param_shown = 0
+        for pi = 0, param_count - 1 do
+          local _, param_nm = R_TrackFX_GetParamName(tr, fi, pi, "")
+          -- Filter MIDI CC automation parameters (VST3 plugins expose 2000+).
+          if param_nm:match("^CC %d") or param_nm:match("^MIDI CC") then
             goto continue_param
           end
+          -- Filter MIDI message params injected by the host.
+          if param_nm == "Channel Pressure" or param_nm == "Poly Pressure"
+             or param_nm == "Pitch Bend" or param_nm == "Program Change" then
+            goto continue_param
+          end
+          -- Filter generic unnamed params with no useful display value.
+          local _, disp = R_TrackFX_GetFormattedParamValue(tr, fi, pi, "")
+          disp = disp or ""  -- ReaImGui binding can return nil on unusual plugins
+          if (param_nm:match("^Param %d+$") or param_nm:match("^Parameter %d+$"))
+             and (disp == "" or disp:match("^[%d%.%%]*$")) then
+            goto continue_param
+          end
+          -- Filter VST3 host-appended params (Bypass/Wet/Delta/Internal at tail).
+          if _is_vst3_tail(param_nm, pi) then
+            if disp == "normal" or disp == "-" or disp:match("^%d+$") then
+              goto continue_param
+            end
+          end
+          local val, mn, mx = R_TrackFX_GetParam(tr, fi, pi)
+          local norm = 0
+          if mx ~= mn then norm = (val - mn) / (mx - mn) end
+          -- Annotate with [enum:] or [range:] if we have cached data for this param.
+          local suffix = ""
+          if cached_enums[pi] then
+            suffix = "  [enum: " .. tbl_concat(cached_enums[pi], ", ") .. "]"
+          elseif cached_ranges[pi] then
+            suffix = "  [range: " .. cached_ranges[pi][1] .. ".." .. cached_ranges[pi][2] .. "]"
+          end
+          -- Display value first (human-readable), normalized in brackets.
+          track_lines[#track_lines+1] = str_format(
+            "    [%d] %s: %s  [norm: %.4f]%s",
+            pi, param_nm, disp, norm, suffix)
+          param_shown = param_shown + 1
+          ::continue_param::
         end
-        local val, mn, mx = R_TrackFX_GetParam(tr, fi, pi)
-        local norm = 0
-        if mx ~= mn then norm = (val - mn) / (mx - mn) end
-        -- Annotate with [enum:] or [range:] if we have cached data for this param.
-        local suffix = ""
-        if cached_enums[pi] then
-          suffix = "  [enum: " .. tbl_concat(cached_enums[pi], ", ") .. "]"
-        elseif cached_ranges[pi] then
-          suffix = "  [range: " .. cached_ranges[pi][1] .. ".." .. cached_ranges[pi][2] .. "]"
+        if param_shown < param_count then
+          track_lines[#track_lines+1] = str_format(
+            "    (%d host/uninformative params filtered)", param_count - param_shown)
         end
-        -- Display value first (human-readable), normalized in brackets.
-        track_lines[#track_lines+1] = str_format(
-          "    [%d] %s: %s  [norm: %.4f]%s",
-          pi, param_nm, disp, norm, suffix)
-        param_shown = param_shown + 1
-        ::continue_param::
-      end
-      if param_shown < param_count then
-        track_lines[#track_lines+1] = str_format(
-          "    (%d host/uninformative params filtered)", param_count - param_shown)
+
+        ::continue_fx::
       end
 
-      ::continue_fx::
+      -- Append this track's lines to the master list if any FX matched.
+      for _, l in ipairs(track_lines) do lines[#lines+1] = l end
     end
-
-    -- Append this track's lines to the master list if any FX matched.
-    for _, l in ipairs(track_lines) do lines[#lines+1] = l end
   end
 
   if matched_fx == 0 then
@@ -5748,23 +5811,24 @@ end
 -- =============================================================================
 -- CTX.docs
 -- =============================================================================
--- Loads the REAPER Lua API reference from two files in the script's Resources
--- folder: ReaAssist_API_Ref.md (core, pinned only when "Always include REAPER
--- API reference" is on; otherwise fetched on-demand via the docs bucket) and
--- ReaAssist_API_Ref_Extended.md (less-common surface; on-demand only via
--- the docs_extended bucket). Contents are cached in S.api_ref_cache_core /
--- S.api_ref_cache_extended so subsequent calls within a session do not hit
--- the filesystem. Does not take a proj argument because the API reference is
--- project-independent.
+-- Loads the REAPER Lua API reference from a single file in the script's
+-- Resources folder (API_Ref.md). The file contains seven buckets
+-- delimited by `<!-- SECTION:name -->` markers: core (always-pinned when
+-- "Always include REAPER API reference" is on; otherwise fetched on-demand
+-- via the docs bucket), extended (less-common surface; on-demand via the
+-- docs_extended bucket), and items / envelopes / take_fx / routing / tempo
+-- (each on-demand via docs:NAME). The whole file is read once per session
+-- and parsed into S.api_ref_section_cache, but each bucket is still served
+-- individually -- only the requested bucket is sent to the model. Does not
+-- take a proj argument because the API reference is project-independent.
 --
--- For the extended file, leading HTML-comment header lines (and blank lines
--- between them) are skipped so file-level dev commentary doesn't leak into
--- the model-facing payload. Caller-visible content begins at the first
--- non-comment, non-blank line.
+-- The file's leading 3-line HTML-comment header sits before the first
+-- SECTION marker so it is naturally ignored by the marker parser; it never
+-- ships to the model.
 --
--- Returns the formatted reference string on success, or nil + error message on
--- failure. Callers MUST check for nil and show the error to the user in chat
--- rather than sending the error text to the assistant.
+-- Returns the formatted reference string on success, or nil + error message
+-- on failure. Callers MUST check for nil and show the error to the user in
+-- chat rather than sending the error text to the assistant.
 
 local function _read_ref_file(path, filename)
   local f = io.open(path, "r")
@@ -5784,108 +5848,263 @@ local function _read_ref_file(path, filename)
   return content
 end
 
-local function _strip_leading_html_comments(s)
-  -- Consume any leading run of `<!-- ... -->` lines + blank lines so the
-  -- file-level dev header added to ReaAssist_API_Ref_Extended.md (three
-  -- single-line HTML comments) doesn't ship to the model.
-  local i = 1
-  while true do
-    local _, e = s:find("^%s*<!%-%-.-%-%->%s*\n", i)
-    if not e then break end
-    i = e + 1
-  end
-  return s:sub(i)
+-- The REAPER Lua API reference lives in a single physical file
+-- (Resources/API_Ref.md) with seven buckets delimited by
+-- `<!-- SECTION:name -->` ... `<!-- /SECTION:name -->` markers:
+--   core      always-pinned default reference (CTX.docs)
+--   extended  on-demand via <context_needed>docs_extended</context_needed>
+--   items, envelopes, take_fx, routing, tempo
+--             on-demand via <context_needed>docs:NAME</context_needed>
+-- The file is read once per session and parsed into S.api_ref_section_cache
+-- keyed by bucket name. Each bucket is still served individually -- only
+-- the requested name is sent to the model -- but the loader and cache are
+-- unified, replacing what used to be three separate per-file loaders.
+local API_REF_FILE = "API_Ref.md"
+-- Buckets the model can request. The dispatcher gates docs:<x> against
+-- DOCS_SECTION_NAMES (the on-demand-section subset); the loader parses
+-- the full set including core/extended.
+local API_REF_SECTION_NAMES = {
+  core      = true,
+  extended  = true,
+  items     = true,
+  envelopes = true,
+  take_fx   = true,
+  routing   = true,
+  tempo     = true,
+}
+local DOCS_SECTION_NAMES = {
+  items     = true,
+  envelopes = true,
+  take_fx   = true,
+  routing   = true,
+  tempo     = true,
+}
+-- Singular / hyphenated / spaced variants the model commonly emits. Map
+-- each to its canonical key in DOCS_SECTION_NAMES. Always lookup against
+-- a lowercased key.
+local DOCS_SECTION_ALIASES = {
+  ["take-fx"]  = "take_fx",
+  ["takefx"]   = "take_fx",
+  ["take fx"]  = "take_fx",
+  ["sends"]    = "routing",
+  ["receives"] = "routing",
+  ["envelope"] = "envelopes",
+  ["item"]     = "items",
+  ["send"]     = "routing",
+  ["receive"]  = "routing",
+}
+-- Normalize an incoming docs:<payload> to a canonical section key, or
+-- nil if the payload is not a known section. Used by both the dispatcher
+-- and the pre-pin scanner so they agree on what's a valid section.
+local function _docs_section_canonical(payload)
+  if type(payload) ~= "string" or payload == "" then return nil end
+  local lower = payload:lower():match("^%s*(.-)%s*$")
+  local canonical = DOCS_SECTION_ALIASES[lower] or lower
+  if DOCS_SECTION_NAMES[canonical] then return canonical end
+  return nil
+end
+-- Sorted list of canonical on-demand section names for error messages.
+local function _docs_section_list()
+  local names = {}
+  for k in pairs(DOCS_SECTION_NAMES) do names[#names+1] = k end
+  table.sort(names)
+  return tbl_concat(names, ", ")
 end
 
-local function _load_api_ref_split()
-  if S.api_ref_cache_core then return end
-  local core_path = RA.RESOURCES_DIR .. "ReaAssist_API_Ref.md"
-  local ext_path  = RA.RESOURCES_DIR .. "ReaAssist_API_Ref_Extended.md"
-  local core, core_err = _read_ref_file(core_path, "ReaAssist_API_Ref.md")
-  if not core then S._api_ref_load_err = core_err; return end
-  local ext,  ext_err  = _read_ref_file(ext_path,  "ReaAssist_API_Ref_Extended.md")
-  if not ext  then S._api_ref_load_err = ext_err;  return end
-  S.api_ref_cache_core     = core:gsub("%s+$", "")
-  S.api_ref_cache_extended = _strip_leading_html_comments(ext):gsub("%s+$", "")
+-- Load and parse the API reference file once per session. After this
+-- returns, S.api_ref_section_cache[name] holds the body for each
+-- successfully parsed bucket, and S._api_ref_section_err[name] holds
+-- the error string for any bucket that failed (file-level read error,
+-- duplicate marker, or bucket missing from the allowlist's expected
+-- set). S.api_ref_loaded is the sentinel: subsequent calls return
+-- without re-reading the file. A missing/corrupt file in this session
+-- stays missing -- the user can't fix it mid-session anyway, and the
+-- error table holds a clear reason for any CTX.docs* call.
+local function _load_api_ref_file()
+  if S.api_ref_loaded then return end
+  S.api_ref_section_cache = {}
+  S._api_ref_section_err  = {}
+  local content, err = _read_ref_file(
+    RA.RESOURCES_DIR .. API_REF_FILE, API_REF_FILE)
+  if not content then
+    -- File-level failure: mark every known bucket so any CTX.docs* call
+    -- surfaces a real error instead of "section not loaded".
+    for name in pairs(API_REF_SECTION_NAMES) do
+      S._api_ref_section_err[name] = err
+    end
+    S.api_ref_loaded = true
+    return
+  end
+  -- Whitespace-tolerant marker pattern (matches both `<!--SECTION:items-->`
+  -- and `<!-- SECTION:items -->`). The %1 back-reference forces the
+  -- closing marker to name the same section.
+  local pattern =
+    "<!%-%-%s*SECTION:([%w_]+)%s*%-%->%s*(.-)%s*<!%-%-%s*/SECTION:%1%s*%-%->"
+  local seen = {}
+  for name, body in content:gmatch(pattern) do
+    if not API_REF_SECTION_NAMES[name] then
+      S._api_ref_section_err[name] =
+        "Unknown section '" .. name .. "' in " .. API_REF_FILE
+    elseif seen[name] then
+      -- Duplicate marker block: fail loud rather than silently
+      -- overwriting. Catches accidental copy/paste in the source file.
+      S._api_ref_section_err[name] =
+        "Duplicate SECTION:" .. name .. " block in " .. API_REF_FILE
+      S.api_ref_section_cache[name] = nil
+    else
+      seen[name] = true
+      S.api_ref_section_cache[name] = body:gsub("%s+$", "")
+    end
+  end
+  -- Mark missing buckets (declared in allowlist but not parsed out).
+  for name in pairs(API_REF_SECTION_NAMES) do
+    if not S.api_ref_section_cache[name]
+        and not S._api_ref_section_err[name] then
+      S._api_ref_section_err[name] =
+        "Section '" .. name .. "' missing from " .. API_REF_FILE
+    end
+  end
+  S.api_ref_loaded = true
 end
 
 function CTX.docs()
-  _load_api_ref_split()
-  if S._api_ref_load_err then return nil, S._api_ref_load_err end
-  return "REAPER LUA API REFERENCE:\n" .. S.api_ref_cache_core
+  _load_api_ref_file()
+  if S._api_ref_section_err.core then
+    return nil, S._api_ref_section_err.core
+  end
+  return "REAPER LUA API REFERENCE:\n" .. S.api_ref_section_cache.core
 end
 
 function CTX.docs_extended()
-  _load_api_ref_split()
-  if S._api_ref_load_err then return nil, S._api_ref_load_err end
-  return "REAPER LUA API REFERENCE (EXTENDED):\n" .. S.api_ref_cache_extended
+  _load_api_ref_file()
+  if S._api_ref_section_err.extended then
+    return nil, S._api_ref_section_err.extended
+  end
+  return "REAPER LUA API REFERENCE (EXTENDED):\n"
+    .. S.api_ref_section_cache.extended
+end
+
+-- Returns the formatted on-demand section payload, or nil + error string.
+-- The caller is responsible for sticky_set'ing it under "docs:<name>" --
+-- this loader just produces the content. Section name MUST be a canonical
+-- key from DOCS_SECTION_NAMES (use _docs_section_canonical to normalize).
+-- Defensive early-out for unknown names: don't trigger a file load on
+-- bad input. The dispatcher already validates via _docs_section_canonical,
+-- but CTX.docs_section is module-public and could be called directly with
+-- a bad name from future code.
+function CTX.docs_section(name)
+  if not DOCS_SECTION_NAMES[name] then
+    return nil, "Unknown docs section: '" .. tostring(name) .. "'. "
+      .. "Valid: " .. _docs_section_list() .. "."
+  end
+  _load_api_ref_file()
+  if S._api_ref_section_err[name] then
+    return nil, S._api_ref_section_err[name]
+  end
+  if not S.api_ref_section_cache[name] then
+    return nil, "Section '" .. tostring(name) .. "' not loaded."
+  end
+  return "REAPER LUA API REFERENCE (" .. name:upper() .. "):\n"
+    .. S.api_ref_section_cache[name]
 end
 
 -- =============================================================================
 -- CTX.prompt_bundle
 -- =============================================================================
--- Loads a conditional prompt bundle file from the Resources/ folder. Bundles
--- carry sections of the system prompt that only apply to certain request types
--- (plugin workflow, JSFX generation, theme color changes). They are fetched
--- on-demand when the model emits <context_needed>prompt_bundle:NAME</context_needed>
--- so the always-on system prompt can stay small. Once fetched, the bundle
--- stays pinned via sticky_context for the rest of the conversation.
+-- Conditional prompt bundles -- sections of the system prompt that apply only
+-- to certain request types. They live in a single physical file
+-- (Resources/Prompts.md) with four buckets delimited by
+-- `<!-- SECTION:name -->` ... `<!-- /SECTION:name -->` markers:
+--   plugin          plugin / FX add + configure workflow
+--   plugin_helpers  parameter-helper code patterns (find_param, etc.)
+--   jsfx            JSFX (EEL2) generation rules
+--   theme           SetThemeColor backup safety rule
+-- Each is fetched on-demand when the model emits
+-- `<context_needed>prompt_bundle:NAME</context_needed>` so the always-on
+-- system prompt can stay small. Once fetched, the bundle pins via
+-- sticky_context for the rest of the conversation.
 --
--- Name mapping (lowercase request -> Resources filename):
---   plugin -> ReaAssist_Plugin_Prompt.md
---   jsfx   -> ReaAssist_JSFX_Prompt.md
---   theme  -> ReaAssist_Theme_Prompt.md
--- Unknown names return a nil + error string so the caller can surface a clean
--- error to the user instead of silently no-op'ing.
-local PROMPT_BUNDLE_FILES = {
-  plugin = "ReaAssist_Plugin_Prompt.md",
-  jsfx   = "ReaAssist_JSFX_Prompt.md",
-  theme  = "ReaAssist_Theme_Prompt.md",
+-- The whole file is read once per session and parsed into
+-- S.prompt_bundle_cache; each bundle is still served individually --
+-- only the requested name is sent to the model. Unknown names return
+-- nil + error string so callers can surface a clean error.
+local PROMPTS_FILE = "Prompts.md"
+local PROMPT_BUNDLE_NAMES = {
+  plugin         = true,
+  plugin_helpers = true,
+  jsfx           = true,
+  theme          = true,
 }
+
+local function _prompt_bundle_list()
+  local names = {}
+  for k in pairs(PROMPT_BUNDLE_NAMES) do names[#names+1] = k end
+  table.sort(names)
+  return tbl_concat(names, ", ")
+end
+
+local function _load_prompts_file()
+  if S.prompts_loaded then return end
+  S.prompt_bundle_cache = {}
+  S._prompt_bundle_err  = {}
+  local content, err = _read_ref_file(
+    RA.RESOURCES_DIR .. PROMPTS_FILE, PROMPTS_FILE)
+  if not content then
+    for n in pairs(PROMPT_BUNDLE_NAMES) do S._prompt_bundle_err[n] = err end
+    S.prompts_loaded = true
+    return
+  end
+  -- Same whitespace-tolerant pattern as the API ref loader.
+  local pattern =
+    "<!%-%-%s*SECTION:([%w_]+)%s*%-%->%s*(.-)%s*<!%-%-%s*/SECTION:%1%s*%-%->"
+  local seen = {}
+  for n, body in content:gmatch(pattern) do
+    if not PROMPT_BUNDLE_NAMES[n] then
+      S._prompt_bundle_err[n] =
+        "Unknown bundle '" .. n .. "' in " .. PROMPTS_FILE
+    elseif seen[n] then
+      S._prompt_bundle_err[n] =
+        "Duplicate SECTION:" .. n .. " block in " .. PROMPTS_FILE
+      S.prompt_bundle_cache[n] = nil
+    else
+      seen[n] = true
+      local header = "PROMPT BUNDLE (" .. n:upper() .. "):\n"
+      S.prompt_bundle_cache[n] = header .. body:gsub("%s+$", "")
+    end
+  end
+  for n in pairs(PROMPT_BUNDLE_NAMES) do
+    if not S.prompt_bundle_cache[n] and not S._prompt_bundle_err[n] then
+      S._prompt_bundle_err[n] =
+        "Bundle '" .. n .. "' missing from " .. PROMPTS_FILE
+    end
+  end
+  S.prompts_loaded = true
+end
 
 function CTX.prompt_bundle(name)
   if type(name) ~= "string" or name == "" then
-    return nil, "prompt_bundle requires a bundle name (plugin / jsfx / theme)."
+    return nil, "prompt_bundle requires a bundle name ("
+      .. _prompt_bundle_list() .. ")."
   end
   name = name:lower()
-  local filename = PROMPT_BUNDLE_FILES[name]
-  if not filename then
+  if not PROMPT_BUNDLE_NAMES[name] then
     return nil, "Unknown prompt bundle: '" .. name .. "'. "
-      .. "Valid names: plugin, jsfx, theme."
+      .. "Valid names: " .. _prompt_bundle_list() .. "."
   end
-  S.prompt_bundle_cache = S.prompt_bundle_cache or {}
-  if S.prompt_bundle_cache[name] then return S.prompt_bundle_cache[name] end
-  local path = RA.RESOURCES_DIR .. filename
-  local f = io.open(path, "r")
-  if not f then
-    return nil, "Prompt bundle file not found at:\n" .. path
-      .. "\n\nPlace " .. filename .. " in the Resources/ subfolder "
-      .. "next to this script."
+  _load_prompts_file()
+  if S._prompt_bundle_err[name] then
+    return nil, S._prompt_bundle_err[name]
   end
-  local content = f:read("*a")
-  f:close()
-  if #content > CFG.MAX_API_REF_BYTES then
-    return nil, str_format(
-      "%s is too large (%.1f KB, max %d KB). "
-      .. "This may not be the correct file.",
-      filename, #content / 1024, CFG.MAX_API_REF_BYTES / 1024)
+  if not S.prompt_bundle_cache[name] then
+    return nil, "Bundle '" .. name .. "' not loaded."
   end
-  -- Strip the leading HTML-comment header (dev metadata: "served by X",
-  -- "requested via Y", etc.) so it doesn't ship with the model-facing
-  -- payload. Saves ~70 tokens per bundle per turn and prevents the
-  -- model from seeing internal routing detail that isn't relevant to
-  -- its task. Files stay fully readable for humans editing them.
-  content = _strip_leading_html_comments(content)
-  local header = "PROMPT BUNDLE (" .. name:upper() .. "):\n"
-  local payload = header .. content:gsub("%s+$", "")
-  S.prompt_bundle_cache[name] = payload
-  return payload
+  return S.prompt_bundle_cache[name]
 end
 
 -- =============================================================================
 -- CTX.midi
 -- =============================================================================
--- Loads ReaAssist_MIDI_Ref.md from the script folder. Contains MIDI workflow
+-- Loads MIDI_Ref.md from the script folder. Contains MIDI workflow
 -- patterns, PPQ explainer, value ranges, function signatures, and worked
 -- examples for note/CC/event manipulation. Cached after first read like
 -- CTX.docs().
@@ -5894,11 +6113,11 @@ end
 -- on failure.
 function CTX.midi()
   if not S.midi_ref_cache then
-    local ref_path = RA.RESOURCES_DIR .. "ReaAssist_MIDI_Ref.md"
+    local ref_path = RA.RESOURCES_DIR .. "MIDI_Ref.md"
     local f = io.open(ref_path, "r")
     if not f then
       return nil, "MIDI reference file not found at:\n" .. ref_path
-        .. "\n\nPlace ReaAssist_MIDI_Ref.md in the Resources/ subfolder "
+        .. "\n\nPlace MIDI_Ref.md in the Resources/ subfolder "
         .. "next to this script."
     end
     local content = f:read("*a")
@@ -5906,7 +6125,7 @@ function CTX.midi()
     if #content > CFG.MAX_API_REF_BYTES then
       return nil, str_format(
         "MIDI reference file is too large (%.1f KB, max %d KB).\n"
-        .. "Expected ReaAssist_MIDI_Ref.md.",
+        .. "Expected MIDI_Ref.md.",
         #content / 1024, CFG.MAX_API_REF_BYTES / 1024)
     end
     S.midi_ref_cache = content
@@ -6056,11 +6275,11 @@ end
 -- on failure.
 function CTX.theme()
   if not S.theme_ref_cache then
-    local ref_path = RA.RESOURCES_DIR .. "ReaAssist_Theme_Ref.md"
+    local ref_path = RA.RESOURCES_DIR .. "Theme_Ref.md"
     local f = io.open(ref_path, "r")
     if not f then
       return nil, "Theme reference file not found at:\n" .. ref_path
-        .. "\n\nPlace ReaAssist_Theme_Ref.md in the Resources/ subfolder "
+        .. "\n\nPlace Theme_Ref.md in the Resources/ subfolder "
         .. "next to this script."
     end
     local content = f:read("*a")
@@ -6068,7 +6287,7 @@ function CTX.theme()
     if #content > CFG.MAX_API_REF_BYTES then
       return nil, str_format(
         "Theme reference file is too large (%.1f KB, max %d KB).\n"
-        .. "Expected ReaAssist_Theme_Ref.md.",
+        .. "Expected Theme_Ref.md.",
         #content / 1024, CFG.MAX_API_REF_BYTES / 1024)
     end
     S.theme_ref_cache = content
@@ -6079,7 +6298,7 @@ end
 -- =============================================================================
 -- CTX.plugin_ref
 -- =============================================================================
--- Loads ReaAssist_Plugin_Ref.md and returns ONLY the sections matching
+-- Loads Plugin_Ref.md and returns ONLY the sections matching
 -- the requested plugin names (e.g. {"ReaVerbate", "ReaComp"}). The full file
 -- is parsed once into a per-plugin cache; subsequent calls just look up keys.
 --
@@ -6192,16 +6411,53 @@ local PLUGIN_REF_ALIASES = {
   ["vst3: timeless 3 (fabfilter)"] = "timeless 3",
 }
 
+-- =============================================================================
+-- CURATED_IDENT
+-- =============================================================================
+-- Maps chain-entry identifiers (as stored in preferred_types) to the matching
+-- curated section name in Plugin_Ref.md. Entries here trigger plugin_ref:<Name>
+-- injection (verified indices, scale formulas, recipes) instead of the thinner
+-- live-scan preferred_plugins:<type>. Chain entries that aren't in this map
+-- fall through to live-scan fallback. Extend as more curated plugins are added
+-- to Plugin_Ref.md.
+local CURATED_IDENT = {
+  -- Stock plugins. Multiple ReEQ keys because REAPER's EnumInstalledFX
+  -- returns the JSFX file path on Windows ("JS: ReJJ/ReEQ/ReEQ.jsfx") but
+  -- the JSFX `desc:` line on macOS ("JS: ReEQ - Parametric Graphic
+  -- Equalizer"); whichever string the user picks from the Pref Plugins
+  -- autocomplete becomes the saved pref_types value, and we need to
+  -- recognise both forms (with and without the "JS: " prefix that the save
+  -- path may or may not strip) so the curated plugin_ref:ReEQ content fires
+  -- regardless of platform.
+  ["ReJJ/ReEQ/ReEQ.jsfx"]                       = "ReEQ",
+  ["JS: ReJJ/ReEQ/ReEQ.jsfx"]                   = "ReEQ",
+  ["ReEQ - Parametric Graphic Equalizer"]       = "ReEQ",
+  ["JS: ReEQ - Parametric Graphic Equalizer"]   = "ReEQ",
+  ["ReaEQ"]               = "ReaEQ",
+  ["ReaComp"]             = "ReaComp",
+  ["ReaXcomp"]            = "ReaXcomp",
+  -- FabFilter (format-agnostic chain entries)
+  ["Pro-Q 4"]             = "Pro-Q 4",
+  ["Pro-C 3"]             = "Pro-C 3",
+  ["Pro-L 2"]             = "Pro-L 2",
+  ["Pro-MB"]              = "Pro-MB",
+  ["Pro-R 2"]             = "Pro-R 2",
+  ["Pro-DS"]              = "Pro-DS",
+  ["Pro-G"]               = "Pro-G",
+  ["Saturn 2"]            = "Saturn 2",
+  ["Timeless 3"]          = "Timeless 3",
+}
+
 -- Build the per-plugin section cache from Plugin_Ref.md. Idempotent;
 -- lazy -- call before reading CTX._plugin_ref_cache. Returns true on
 -- success, false + error string if the file is missing.
 function CTX.ensure_plugin_ref_cache()
   if CTX._plugin_ref_cache then return true end
-  local ref_path = RA.RESOURCES_DIR .. "ReaAssist_Plugin_Ref.md"
+  local ref_path = RA.RESOURCES_DIR .. "Plugin_Ref.md"
   local f = io.open(ref_path, "r")
   if not f then
     return false, "Plugin reference file not found at:\n" .. ref_path
-      .. "\n\nPlace ReaAssist_Plugin_Ref.md in the Resources/ subfolder "
+      .. "\n\nPlace Plugin_Ref.md in the Resources/ subfolder "
       .. "next to this script."
   end
   local content = f:read("*a")
@@ -6482,6 +6738,13 @@ end
 function CTX.scan_fx_params(tr, fx_idx)
   local params = {}
   local param_count = R_TrackFX_GetNumParams(tr, fx_idx)
+  -- A stale FX handle (plugin removed mid-scan, track deleted) can make
+  -- REAPER return nil / -1 instead of a real count. Without this guard
+  -- the `param_count - 1` upper bound below and the log concat above
+  -- would throw before we get a chance to report a clean failure.
+  if type(param_count) ~= "number" or param_count <= 0 then
+    return params, 0, 0, false
+  end
   Log.line("SCAN", "scan_fx_params start: param_count=" .. param_count)
 
   -- Readback-lag detection: some VST3 plugins (e.g. Soundtoys) process param
@@ -6697,6 +6960,12 @@ function CTX.scan_fx_params_deep_body(tr, fx_idx)
   local params = {}
   local max_group = 0
   local param_count = R_TrackFX_GetNumParams(tr, fx_idx)
+  -- See CTX.scan_fx_params for the same guard's rationale; a stale FX
+  -- handle here would crash on the log concat and the `0, param_count - 1`
+  -- loop below.
+  if type(param_count) ~= "number" or param_count <= 0 then
+    return params, 0, 0
+  end
   Log.line("DEEP_SCAN", "scan_fx_params_deep start: param_count=" .. param_count)
 
   -- Release the UI-refresh lock that fx_inspect_load held. Holding
@@ -7150,6 +7419,11 @@ end
 -- budget, so the bar simply completes early -- acceptable.)
 local function _estimate_deep_probes(tr, fx_idx)
   local n = R_TrackFX_GetNumParams(tr, fx_idx)
+  -- A stale FX handle could return nil / -1; the `0, n - 1` loop below
+  -- would then crash on the comparison. Returning 0 makes the caller
+  -- treat the budget as "no work to do", which is correct -- the scan
+  -- body's matching guard will refuse to run anyway.
+  if type(n) ~= "number" or n <= 0 then return 0 end
   local total = 0
   local kept = 0
   for pi = 0, n - 1 do
@@ -8185,11 +8459,151 @@ CTX._snapshot_heavy_cache = nil
 -- that data from an earlier turn) or already marked sent for this turn.
 --
 -- Returns a list of preemption-reason strings for the debug log.
+--
+-- CHAIN_PHRASE_HINTS extends the trigger surface beyond single-keyword
+-- matches: broad multi-FX phrases (e.g. "drum kit", "vocal chain", "mix
+-- bus") strongly imply specific plugin types without naming them by type
+-- word. When a phrase matches, the preempt loop treats each implied type
+-- as if its own keyword had hit, pre-pinning that type's plugin_ref + pref
+-- hint and saving the <context_needed>resolve:X</context_needed> round-trip
+-- the model would otherwise emit. Each entry is {pattern, {implied_types}};
+-- only types the user actually has a pref for get pinned (the main loop
+-- iterates pref_types keys, so unconfigured types fall through naturally).
+-- Saved per matched phrase: one full API round-trip (~2s + small request
+-- cost) on the common drum-kit / vocal-chain / mix-bus creation requests.
+local CHAIN_PHRASE_HINTS = {
+  { "drum%s+kit",         {"eq", "compressor", "gate"} },
+  { "drum%s+chain",       {"eq", "compressor", "gate"} },
+  { "drum%s+bus",         {"eq", "compressor"} },
+  { "vocal%s+chain",      {"eq", "compressor", "deesser", "reverb"} },
+  { "vocal%s+bus",        {"eq", "compressor"} },
+  { "guitar%s+chain",     {"eq", "compressor", "saturation"} },
+  { "bass%s+chain",       {"eq", "compressor"} },
+  { "mix%s+bus",          {"eq", "compressor", "limiter"} },
+  { "master%s+bus",       {"eq", "compressor", "limiter"} },
+  { "mastering%s+chain",  {"eq", "compressor", "limiter"} },
+  { "recording%s+chain",  {"eq", "compressor", "gate"} },
+}
+
+-- DOCS_PHRASE_HINTS: keyword/phrase -> docs:<section> pre-pin map. When the
+-- user prompt contains any of these, the matched section is loaded into
+-- sticky_context BEFORE the first API call, saving the round-trip the
+-- model would otherwise spend emitting <context_needed>docs:envelopes</context_needed>
+-- (or whichever). Only fires for sections in DOCS_SECTION_NAMES; the
+-- canonical key is what gets pinned.
+--
+-- Pattern style: multi-word phrases (e.g. "send to") use literal substring
+-- match; common single words use the %f[%w]X%f[%W] frontier syntax for
+-- whole-word boundaries (Lua has no \b). The frontier pattern requires the
+-- bracket sets -- a bare %f without [...] errors out.
+--
+-- "automation" -> docs:envelopes intentionally. REAPER's "automation items"
+-- are media-item-shaped objects layered onto envelopes, but the scripting
+-- surface (Envelope_*, GetSetEnvelope*, InsertEnvelopePoint, etc.) lives
+-- in the envelopes section. Users saying "automate the volume" or "add
+-- automation" need envelope functions, not item functions.
+local DOCS_PHRASE_HINTS = {
+  -- envelopes
+  { "envelope",              "envelopes" },
+  { "automation",            "envelopes" },
+  { "automate",              "envelopes" },
+  -- routing (multi-word phrases avoid frontier-pattern needs)
+  { "sidechain",             "routing"   },
+  { "send to",               "routing"   },
+  { "receive from",          "routing"   },
+  { "%f[%w]route%f[%W]",     "routing"   },
+  { "%f[%w]routing%f[%W]",   "routing"   },
+  { "%f[%w]bus%f[%W]",       "routing"   },
+  { "%f[%w]aux%f[%W]",       "routing"   },
+  { "return track",          "routing"   },
+  { "hardware output",       "routing"   },
+  -- take_fx. The phrase set covers both explicit "take FX" wording and
+  -- the more common item-scoped FX targeting ("add an EQ to the selected
+  -- item", "on this clip", "to the active take") -- when the user
+  -- targets an item rather than a track, the model needs TakeFX_* not
+  -- TrackFX_*, and reaching for core's TrackFX_* by default is the
+  -- semantic mistake we want to prevent. Phrases are chosen to imply
+  -- "applying FX TO X" (preposition + item/take noun) so plain item
+  -- queries like "trim the selected item" or "count selected items"
+  -- don't trigger an unnecessary take_fx pin.
+  { "take fx",               "take_fx"   },
+  { "take effect",           "take_fx"   },
+  { "item fx",               "take_fx"   },
+  { "per%-item fx",          "take_fx"   },
+  { "to the selected item",  "take_fx"   },
+  { "on the selected item",  "take_fx"   },
+  { "to this item",          "take_fx"   },
+  { "on this item",          "take_fx"   },
+  { "to this clip",          "take_fx"   },
+  { "on this clip",          "take_fx"   },
+  { "to the active take",    "take_fx"   },
+  { "on the active take",    "take_fx"   },
+  { "to the take",           "take_fx"   },
+  { "on the take",           "take_fx"   },
+  -- items (markers/regions stay in core, so don't pin items on those words)
+  { "razor edit",            "items"     },
+  { "razor area",            "items"     },
+  { "media item",            "items"     },
+  -- tempo (markers/regions stay in core, so don't pin tempo on those words)
+  { "%f[%w]tempo%f[%W]",     "tempo"     },
+  { "time signature",        "tempo"     },
+}
+
 function CTX.preempt_buckets_for_prompt(user_text)
   if not user_text or user_text == "" then return {} end
   local text = user_text:lower()
   local cache = FXCache.load()
   local pref_types = cache.preferred_types or {}
+
+  -- Scan chain-phrase hints first. Builds tkey -> matching_phrase so the
+  -- main loop below can treat phrase hits identically to keyword hits and
+  -- the log line can attribute the trigger.
+  local phrase_implied = {}
+  for _, hint in ipairs(CHAIN_PHRASE_HINTS) do
+    if text:find(hint[1]) then
+      for _, t in ipairs(hint[2]) do
+        if not phrase_implied[t] then phrase_implied[t] = hint[1] end
+      end
+    end
+  end
+
+  -- injected: collected sticky_context keys we pre-pin this call. Hoisted
+  -- above the docs-phrase scan so both the docs scan and the existing
+  -- preferred-types loop below append to the same list. Returned at the end
+  -- as the caller's "what we just preempted" log payload.
+  local injected = {}
+
+  -- Scan docs-phrase hints. Each match pre-pins the docs:<section> bucket
+  -- so the model doesn't need to emit <context_needed>docs:envelopes</context_needed>
+  -- (etc.) on a follow-up. Idempotent via S.docs_section_sent + the sticky
+  -- "already pinned" check. Errors are non-fatal (logged) -- a missing
+  -- section file doesn't block the user's request.
+  S.docs_section_sent = S.docs_section_sent or {}
+  local sec_seen = {}
+  for _, hint in ipairs(DOCS_PHRASE_HINTS) do
+    if text:find(hint[1]) then
+      local section = hint[2]
+      if not sec_seen[section] then
+        sec_seen[section] = true
+        local sticky_key = "docs:" .. section
+        if not S.sticky_context[sticky_key]
+           and not S.docs_section_sent[section] then
+          local sec_content, sec_err = CTX.docs_section(section)
+          if sec_content then
+            Net.sticky_set(sticky_key, sec_content)
+            S.docs_section_sent[section] = true
+            injected[#injected+1] = sticky_key
+            Log.line("PREEMPT",
+              "injected " .. sticky_key .. " (docs phrase: '" .. hint[1] .. "')")
+          else
+            Log.line("PREEMPT",
+              "wanted to inject " .. sticky_key
+              .. " but loader failed: " .. (sec_err or "?"))
+          end
+        end
+      end
+    end
+  end
   -- Dev-only: when the FabFilter-hide flag is on, treat matching entries
   -- in preferred_types as absent so the preempt path falls through to
   -- "no pref set" behavior (emits resolve:<type> and fires the popup we
@@ -8198,55 +8612,32 @@ function CTX.preempt_buckets_for_prompt(user_text)
   -- main loop. Matches the same gate applied in CTX.preferred_plugins
   -- and CTX.load_pref_plugins.
   local hide_ff = reaper.GetExtState(CFG.EXT_NS, "dev_hide_fabfilter") == "1"
-  local injected = {}
   -- Sorted key iteration for deterministic sticky_context ordering (keeps
   -- provider caches stable across turns when the same set of types hits).
   local keys = {}
   for k in pairs(pref_types) do keys[#keys+1] = k end
   table.sort(keys)
-  -- Identifier -> curated plugin_ref section name. When the user's saved
-  -- preference for a type points at one of these, prefer the curated
-  -- plugin_ref content (golden-ratio recipes, per-band examples) over the
-  -- live-scanned preferred_plugins block (just raw param values). Extend
-  -- this map as more curated plugins get added to Plugin_Ref.md.
-  -- Maps chain-entry identifiers (as stored in preferred_types) to the
-  -- matching curated section name in Plugin_Ref.md. Entries here trigger
-  -- plugin_ref:<Name> preempt injection instead of the thinner live-scan
-  -- preferred_plugins:<type>. Chain entries that aren't in this map fall
-  -- through to live-scan fallback.
-  local CURATED_IDENT = {
-    -- Stock plugins. Multiple ReEQ keys because REAPER's EnumInstalledFX
-    -- returns the JSFX file path on Windows ("JS: ReJJ/ReEQ/ReEQ.jsfx")
-    -- but the JSFX `desc:` line on macOS ("JS: ReEQ - Parametric Graphic
-    -- Equalizer"); whichever string the user picks from the Pref Plugins
-    -- autocomplete becomes the saved pref_types value, and we need to
-    -- recognise both forms (with and without the "JS: " prefix that the
-    -- save path may or may not strip) so the curated plugin_ref:ReEQ
-    -- content fires regardless of platform.
-    ["ReJJ/ReEQ/ReEQ.jsfx"]                       = "ReEQ",
-    ["JS: ReJJ/ReEQ/ReEQ.jsfx"]                   = "ReEQ",
-    ["ReEQ - Parametric Graphic Equalizer"]       = "ReEQ",
-    ["JS: ReEQ - Parametric Graphic Equalizer"]   = "ReEQ",
-    ["ReaEQ"]               = "ReaEQ",
-    ["ReaComp"]             = "ReaComp",
-    ["ReaXcomp"]            = "ReaXcomp",
-    -- FabFilter (format-agnostic chain entries)
-    ["Pro-Q 4"]             = "Pro-Q 4",
-    ["Pro-C 3"]             = "Pro-C 3",
-    ["Pro-L 2"]             = "Pro-L 2",
-    ["Pro-MB"]              = "Pro-MB",
-    ["Pro-R 2"]             = "Pro-R 2",
-    ["Pro-DS"]              = "Pro-DS",
-    ["Pro-G"]               = "Pro-G",
-    ["Saturn 2"]            = "Saturn 2",
-    ["Timeless 3"]          = "Timeless 3",
-  }
+  -- Curated-pref dispatch shared with the resolve handler: when the user's
+  -- saved preference for a type matches a CURATED_IDENT entry, both paths
+  -- route through plugin_ref:<Name> instead of the live-scan
+  -- preferred_plugins:<type>. The map lives at module scope (see
+  -- CURATED_IDENT definition near PLUGIN_REF_ALIASES) so both the preempt
+  -- and resolve paths stay in lockstep when the list is extended.
   for _, tkey in ipairs(keys) do
     -- Word-boundary match so "eq" doesn't fire on "equal" / "sequence".
     -- %b pattern wouldn't help here; %f[%w] + %f[%W] brackets catch whole
     -- words including hyphenated ones like "de-esser".
+    -- ALSO trigger when a CHAIN_PHRASE_HINTS entry implied this type (e.g.
+    -- "drum kit" implies eq + compressor + gate). The phrase scan above
+    -- populated phrase_implied[tkey] with the matching pattern so the log
+    -- can attribute the trigger.
     local pat = "%f[%w]" .. tkey:gsub("(%W)", "%%%1") .. "%f[%W]"
-    if text:find(pat) then
+    local kw_hit     = text:find(pat) ~= nil
+    local phrase_hit = phrase_implied[tkey]
+    if kw_hit or phrase_hit then
+      local trigger = kw_hit
+        and ("keyword match in user prompt")
+        or  ("chain-phrase match: '" .. phrase_hit .. "'")
       local ident = pref_types[tkey]
       if hide_ff and _is_fabfilter_ident(ident) then
         ident = nil
@@ -8296,9 +8687,14 @@ function CTX.preempt_buckets_for_prompt(user_text)
             -- co-pinning here saves the round-trip where the model would
             -- otherwise emit <context_needed>prompt_bundle:plugin</context_needed>.
             Net.copin_plugin_bundle(injected)
+            -- Same rationale for docs core: every plugin add/configure task
+            -- needs reaper.* signatures (TrackFX_*, defer, Undo_*). Without
+            -- this, the rich plugin context biases the model into bypassing
+            -- the API REF REQUIREMENT rule and the docs-gate has to retry.
+            Net.copin_docs_core(injected)
             injected[#injected+1] = pr_key
             Log.line("PREEMPT",
-              "injected " .. pr_key .. " (curated content, keyword match)"
+              "injected " .. pr_key .. " (curated content, " .. trigger .. ")"
               .. (exact_ident and (" exact=" .. exact_ident) or ""))
             -- Co-pin a compact pref:<tkey> hint. Without it, the model
             -- sees plugin_ref:<Name> pinned but can't tell whether the name
@@ -8338,12 +8734,15 @@ function CTX.preempt_buckets_for_prompt(user_text)
             -- Mark sent so the model's <context_needed>preferred_plugins:tkey
             -- (if it emits one anyway) gets deduped by the bucket dispatcher.
             if S.pref_plugins_sent then S.pref_plugins_sent[tkey] = true end
-            -- Co-pin plugin bundle (same rationale as the plugin_ref branch
-            -- above: every pref-plugin pin drives a plugin task).
+            -- Co-pin plugin bundle + docs core (same rationale as the
+            -- plugin_ref branch above: every pref-plugin pin drives a
+            -- plugin task that needs both the workflow guide and the
+            -- reaper.* signatures).
             Net.copin_plugin_bundle(injected)
+            Net.copin_docs_core(injected)
             injected[#injected+1] = pp_key
             Log.line("PREEMPT",
-              "injected " .. pp_key .. " (keyword match in user prompt)")
+              "injected " .. pp_key .. " (" .. trigger .. ")")
           end
         end
       end
@@ -8828,7 +9227,7 @@ end
 --
 -- Pure-Lua SHA-256 throughput on commodity hardware sits around ~1 MB/s
 -- on Lua 5.4. The two largest manifest files (ReaAssist.lua and
--- ReaAssist_UI.lua, ~700 KB each) take 600+ ms each in single-shot mode
+-- UI.lua, ~700 KB each) take 600+ ms each in single-shot mode
 -- which is a visible REAPER hitch. The chunked interface lets
 -- Updater.tick_sha_diff process work for a per-frame time budget
 -- (CFG.UPDATE_SHA_TIME_BUDGET), spreading the same total work across
@@ -8966,7 +9365,7 @@ Updater = {}
 -- Stamp a structured failure reason onto the update state so the
 -- Bootstrap repair prompt can show the user *why* the last attempt
 -- failed instead of silently re-rendering the Repair button. Also
--- emits a Log.line so Resources/ReaAssist_Debug.log records the same
+-- emits a Log.line so Resources/Debug.log records the same
 -- detail for post-mortem.
 function Updater._set_failure(step, err)
   update.last_step  = step
@@ -9548,7 +9947,7 @@ function Updater.check_poll()
 end
 
 -- Validate a manifest filename: no path traversal, no absolute paths, safe extension.
--- Forward-slash subpaths are allowed (e.g. "Resources/ReaAssist_Help.md",
+-- Forward-slash subpaths are allowed (e.g. "Resources/Help.md",
 -- "Resources/ReEQ/Dependencies/svf_filter.jsfx-inc") so the manifest can mirror
 -- the on-disk layout. Backslashes, leading slashes, drive letters, and any
 -- ".." or hidden ("."-prefixed) path segments are rejected.
@@ -9723,14 +10122,18 @@ function Updater.download_start()
     end
   end
   -- If every file already matches (user manually swapped files, or re-invoked
-  -- an update that already ran), close the popup silently and stay idle --
-  -- the manifest version stamp is handled by the next startup check.
+  -- an update that already ran), close the popup and stay idle -- the
+  -- manifest version stamp is handled by the next startup check. Surface a
+  -- short toast so the click on "Update Now" doesn't silently appear to do
+  -- nothing; without it the popup just disappears and the user has no
+  -- confirmation that the action completed.
   if #update.download_queue == 0 then
     Log.line("UPDATE", string.format(
       "download_start: all %d manifest files already match local SHA; "
       .. "nothing to download.", update.skipped_count))
     update.show_dialog = false
     update.state       = "idle"
+    UI.show_float_toast("Already up to date", "ok")
     return
   end
   Log.line("UPDATE", string.format(
@@ -9855,7 +10258,7 @@ function Updater.download_poll()
     end
   end
   -- Write to a .tmp file first, then rename. Manifest entries may include
-  -- forward-slash subpaths (e.g. "Resources/ReaAssist_Help.md"); the path
+  -- forward-slash subpaths (e.g. "Resources/Help.md"); the path
   -- helper normalizes them to the platform separator. Ensure the parent
   -- directory exists so fresh installs can create the Resources/ tree on
   -- first update.
@@ -10031,8 +10434,8 @@ function Updater.advance_after_rename(dest)
     -- improvements worth keeping. Persistent (3rd arg true) so it
     -- survives the auto-restart that follows.
     do
-      local stock_pp  = RA.RESOURCES_DIR .. "ReaAssist_System_Prompt.md"
-      local custom_pp = RA.RESOURCES_DIR .. "ReaAssist_System_Prompt_Custom.md"
+      local stock_pp  = RA.RESOURCES_DIR .. "System_Prompt.md"
+      local custom_pp = RA.RESOURCES_DIR .. "System_Prompt_Custom.md"
       local prompt_changed = false
       for _, applied in ipairs(update.applied_files) do
         if applied.path == stock_pp then prompt_changed = true; break end
@@ -10043,7 +10446,7 @@ function Updater.advance_after_rename(dest)
     end
     -- Stage 3.4 auto-restart: schedule a short delay (so the user sees
     -- the "Applied" confirmation), then re-launch the script via the
-    -- sidecar relauncher (ReaAssist_Relaunch.lua). The relauncher re-
+    -- sidecar relauncher (Relaunch.lua). The relauncher re-
     -- registers ReaAssist via AddRemoveReaScript and fires it from its
     -- own script context, so auto-restart works regardless of how this
     -- instance was launched. File-existence check (cheap, no action-
@@ -10506,6 +10909,64 @@ function Net.copin_plugin_bundle(out_list)
   if out_list then out_list[#out_list+1] = pb_key end
 end
 
+-- Pre-pin prompt_bundle:plugin_helpers (DECIDE FIRST flowchart, helper
+-- function source, API DISPLAY RANGE MISMATCH guidance) into sticky_context.
+-- Called when the dispatcher resolves a path that's about to write plugin
+-- params with non-anchor values: fx_inspect (ADD + CONFIGURE), and fx_params
+-- / preferred_plugins under a write-intent prompt. Most curated-plugin tasks
+-- with verified-anchor values never need helpers and skip this co-pin.
+--
+-- No-op when:
+--   - prompt_bundle:plugin_helpers is already in sticky_context (loaded
+--     earlier this session; eviction is exempted same as docs sections).
+--   - prompt_bundle_sent[plugin_helpers] is already true (defensive guard
+--     against rapid double-co-pin within the same dispatch).
+--   - The bundle file fails to load (logged via CTX.prompt_bundle error
+--     path; the helper-definition validator is the safety net at gen time).
+function Net.copin_plugin_helpers(out_list)
+  local ph_key = "prompt_bundle:plugin_helpers"
+  if S.sticky_context[ph_key] then return end
+  if S.prompt_bundle_sent and S.prompt_bundle_sent["plugin_helpers"] then return end
+  local ph_content, _ = CTX.prompt_bundle("plugin_helpers")
+  if not ph_content then return end
+  Net.sticky_set(ph_key, ph_content)
+  if S.prompt_bundle_sent then S.prompt_bundle_sent["plugin_helpers"] = true end
+  if out_list then out_list[#out_list+1] = ph_key end
+end
+
+-- Pre-pin docs (core API ref) into S.api_ref_message. Called alongside
+-- copin_plugin_bundle from every preempt / resolve site that signals plugin
+-- work. Without this, the chain-phrase / resolve preempts pre-pin a rich
+-- plugin context (plugin_ref + pref + bundle) but NO docs -- the model then
+-- bypasses the API-REF-REQUIREMENT rule, writes reaper.* code anyway, and
+-- the docs-gate at Code.process_response_content silently force-fetches +
+-- retries. Net: 2 round-trips instead of 1, +30K cache_write on the retry,
+-- and the user-visible cost/time display only shows the FIRST request,
+-- understating the true cost. Co-pinning docs alongside the plugin context
+-- adds ~5K cache_write on the first turn but eliminates the retry's ~30K
+-- and the wasted assistant turn. Net: smaller AND faster on every plugin
+-- session that goes through preempt / resolve.
+--
+-- No-ops when:
+--   - api_ref_message is already set (user has "Always include API ref" on,
+--     or docs was force-fetched / requested earlier this session)
+--   - docs file fails to load (logged via CTX.docs error path; docs-gate
+--     still acts as the safety net on response)
+--
+-- Sets S.docs_already_sent so a same-turn <context_needed>docs</context_needed>
+-- (e.g. from a model that's belt-and-suspenders) hits the dispatcher's
+-- dedup branch instead of re-fetching. Also sets S.docs_fetched_session
+-- so the docs-gate sees docs as available and doesn't trigger.
+function Net.copin_docs_core(out_list)
+  if S.api_ref_message then return end
+  local content, _err = CTX.docs()
+  if not content then return end
+  S.api_ref_message      = content
+  S.docs_already_sent    = true
+  S.docs_fetched_session = true
+  if out_list then out_list[#out_list+1] = "docs" end
+end
+
 -- Returns two text blobs, stable + growing, emitted in sticky_context_order.
 --   stable : prompt_bundle:* payloads. Effectively never change once pinned
 --            (a bundle is a chunk of system-prompt content for a task type,
@@ -10538,7 +10999,16 @@ function Net.sticky_parts()
   if S.sticky_context_order then
     for _, k in ipairs(S.sticky_context_order) do
       if S.sticky_context[k] then
-        if k:find("^prompt_bundle:") then
+        -- Most prompt_bundle:* entries are stable (pinned once at the start
+        -- of a plugin/jsfx/theme task and don't change). prompt_bundle:plugin_helpers
+        -- is the exception: it's added LATER in a session (when the model
+        -- decides it needs helpers, or when fx_inspect/fx_params/preferred_plugins
+        -- co-pins it for a write-intent task), so routing it to stable would
+        -- invalidate the bundle's cache rung on the turn it gets added.
+        -- Slot 3 (growing) already absorbs incremental additions routinely
+        -- via plugin_ref / docs:section / fx_*, so plugin_helpers fits there
+        -- without disturbing the bigger plugin core bundle in Slot 2.
+        if k:find("^prompt_bundle:") and k ~= "prompt_bundle:plugin_helpers" then
           stable_keys[#stable_keys+1] = k
         else
           growing_keys[#growing_keys+1] = k
@@ -10603,9 +11073,11 @@ function Net.sticky_parts()
   return stable_text, growing_text
 end
 
--- Legacy single-blob accessor for providers without multi-breakpoint caching
--- (or for logging / diagnostics). Concatenates stable + growing preserving
--- insertion order. Returns nil when both sides are empty.
+-- Single-blob accessor for providers without Anthropic-style multi-breakpoint
+-- caching (OpenAI / Gemini paths use this; Anthropic uses sticky_parts()
+-- directly to keep the stable rung in its own cache breakpoint). Concatenates
+-- stable + growing preserving insertion order. Returns nil when both sides
+-- are empty.
 function Net.sticky_text()
   local s, g = Net.sticky_parts()
   if not s and not g then return nil end
@@ -10646,10 +11118,20 @@ function Net.sticky_evict(user_text)
     end
   end
   -- Drop stale keys + clean up orphaned age entries.
+  -- Exemption: docs:* and docs_extended are stable session-wide reference
+  -- material, not per-task context that should churn. The full set of doc
+  -- payloads totals ~5K tokens; once loaded, cheaper to keep than to
+  -- re-fetch on a follow-up keyword mention. Also makes the system prompt's
+  -- "stays pinned for the rest of the conversation" promise truthful.
+  -- Trade-off: a misfired pre-pin stays alive forever (bounded ~850-1800
+  -- tokens × cache rolls; if this becomes a problem, a softer "evict at
+  -- 25 turns of no-keyword-mention" rule could be added).
   local evicted
   for k, t in pairs(age) do
     if not S.sticky_context[k] then
       age[k] = nil
+    elseif k == "docs_extended" or k:find("^docs:") then
+      -- exempt; see comment above.
     elseif (now - t) > STICKY_MAX_AGE then
       Net.sticky_unset(k)   -- also removes k from sticky_context_order
       age[k] = nil
@@ -10691,15 +11173,15 @@ end
 -- Snapshot injected as a separate content block in the last user message.
 --
 -- Cache breakpoints (max 4 allowed by Anthropic, we use up to 4):
---   1. System prompt           -- 1h TTL (never changes within a session)
---   2. API ref user message    -- 1h TTL (only present when api_ref loaded)
---   3. MIDI ref user message   -- 1h TTL (only present when midi_ref loaded)
---   4. Last assistant message  -- 1h TTL (moving breakpoint, prefix grows
---                                  one user/assistant pair per turn)
--- All use the extended 1-hour TTL via the extended-cache-ttl-2025-04-11
--- beta header. The 2x write cost is recouped after a single saved refresh,
--- which happens easily in typical ReaAssist sessions where the user reads
--- docs or tests generated code between sends.
+--   1. System prompt           (always)
+--   2. API ref user message    (only present when api_ref loaded)
+--   3. MIDI ref user message   (only present when midi_ref loaded)
+--   4. Last assistant message  (moving breakpoint, prefix grows one
+--                               user/assistant pair per turn)
+-- TTL is adaptive: cold first turns use 5m (1.25x write cost) since one-shot
+-- sessions never read the cache back; warm turns (turn 2+) escalate to 1h
+-- (2x write cost) once multi-turn intent is proven, so the read/run/refine
+-- gap between sends still hits cache. See cache_mark selection below.
 local CACHE_1H = ',"cache_control":{"type":"ephemeral","ttl":"1h"}'
 -- Fallback cache marker used when the extended-cache-ttl beta header has been
 -- rejected by the API (see S.anthropic_beta_disabled). 5-minute ephemeral
@@ -10707,11 +11189,29 @@ local CACHE_1H = ',"cache_control":{"type":"ephemeral","ttl":"1h"}'
 local CACHE_5M = ',"cache_control":{"type":"ephemeral"}'
 
 function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
-  -- Pick the cache marker based on whether the beta header is still accepted.
-  -- If Anthropic ever deprecates extended-cache-ttl-2025-04-11, a single 400
-  -- trip through the error handler flips the flag and all subsequent sends
-  -- land in the 5-minute branch below.
-  local cache_mark = S.anthropic_beta_disabled and CACHE_5M or CACHE_1H
+  -- Pick the cache marker based on whether the beta header is still accepted
+  -- AND the session's proven multi-turn intent.
+  --   - If the extended-cache-ttl beta has been rejected, fall back to 5m.
+  --   - Otherwise: on the cold first user turn, use 5m (1.25x write cost).
+  --     One-shot script-gen sessions (a single send finishes the task) never
+  --     read the cache back, so the 1h TTL's 2x write premium is pure waste.
+  --     5m still covers the common "user reads the response and immediately
+  --     follows up" rhythm. Once the user sends a 2nd turn, the session is
+  --     proven multi-turn -- escalate to 1h so the next read/run/refine gap
+  --     (typically >5 min while the user tests the generated script) still
+  --     hits cache. Turn 1 saves ~$0.07 per 33K-token write at the cost of
+  --     a possible re-write on T2 if the gap exceeds 5 min; the T1 saving
+  --     dominates the average across one-shot + rapid-iteration sessions.
+  --   S.turn_counter is bumped by Net.sticky_evict() at the top of the user
+  --   send (line ~12675), BEFORE build_body runs, so the very first send sees
+  --   turn_counter=1. The follow-up executor request within the same turn
+  --   re-enters build_body without a re-bump, so it inherits the same TTL.
+  local cache_mark
+  if S.anthropic_beta_disabled or (S.turn_counter or 0) <= 1 then
+    cache_mark = CACHE_5M
+  else
+    cache_mark = CACHE_1H
+  end
 
   local system_json = str_format(
     '[{"type":"text","text":"%s"%s}]',
@@ -10841,9 +11341,15 @@ function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
     end
   end
 
+  -- Anthropic Messages API REQUIRES max_tokens (omitting returns 400). Send
+  -- the active model's published output ceiling so the model can write up to
+  -- the maximum it supports. Falls back to 64K if the model entry is missing
+  -- max_output (older entries; defensive, all current entries have it).
+  local active_m = MODELS[prefs.model_idx] or MODELS[1]
+  local max_out  = (active_m and active_m.max_output) or 64000
   return str_format(
     '{"model":"%s","max_tokens":%d,"system":%s,"messages":[%s]}',
-    MODELS.active_id(), CFG.MAX_TOKENS, system_json, tbl_concat(msg_parts, ","))
+    MODELS.active_id(), max_out, system_json, tbl_concat(msg_parts, ","))
 end
 
 -- =============================================================================
@@ -10925,10 +11431,14 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
   -- reasoning_effort: top-level string on the Chat Completions API.
   -- Valid values: "minimal" | "low" | "medium" | "high". The dropdown's "none"
   -- entry means "do not send the field" -- omitting it disables reasoning.
+  -- S.thinking_override_idx (when set) wins over prefs.thinking_idx -- the
+  -- length auto-retry path uses this to force "none" for one round-trip
+  -- when reasoning consumed the entire output budget on the first attempt.
+  local effective_thinking_idx = S.thinking_override_idx or prefs.thinking_idx
   local reasoning = ""
-  if prefs.thinking_idx > 0 then
-    if p.thinking_levels and p.thinking_levels[prefs.thinking_idx] then
-      local val = p.thinking_levels[prefs.thinking_idx].value
+  if effective_thinking_idx > 0 then
+    if p.thinking_levels and p.thinking_levels[effective_thinking_idx] then
+      local val = p.thinking_levels[effective_thinking_idx].value
       if val and val ~= "none" then
         reasoning = str_format(',"reasoning_effort":"%s"', val)
       end
@@ -10979,9 +11489,30 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
       end
     end
   end
+  -- max_completion_tokens: optional on the OpenAI Chat Completions API. For
+  -- cloud OpenAI, omit it entirely so the server applies its own per-model
+  -- ceiling -- avoids the GPT-5-thinking failure mode where a fixed cap got
+  -- consumed by reasoning tokens and produced empty visible output. For
+  -- custom providers (Ollama / LM Studio / vLLM / OpenRouter etc.), keep
+  -- the cap derived from the per-model context_window field on the API Keys
+  -- page, since local servers commonly run with tight context windows that
+  -- need a real bound on output.
+  local max_tokens_field = ""
+  if p.is_custom then
+    local custom_active = MODELS[prefs.model_idx]
+    local ctx_window    = (custom_active and tonumber(custom_active.context_window))
+                          or CUSTOM_DEFAULT_CTX
+    -- Reserve at most 10% of the local context for output, with a hard
+    -- ceiling at 16K so a misconfigured huge context_window doesn't lead
+    -- to absurd output budgets that don't match what local hardware can
+    -- actually generate in a reasonable time.
+    local custom_cap = math_min(16384, math_floor(ctx_window * 0.1))
+    if custom_cap < 256 then custom_cap = 256 end
+    max_tokens_field = str_format(',"max_completion_tokens":%d', custom_cap)
+  end
   return str_format(
-    '{"model":"%s","max_completion_tokens":%d,"prompt_cache_key":"%s","messages":[%s]%s%s}',
-    model_id, CFG.MAX_TOKENS, JSON.escape(S.INSTANCE_ID),
+    '{"model":"%s"%s,"prompt_cache_key":"%s","messages":[%s]%s%s}',
+    model_id, max_tokens_field, JSON.escape(S.INSTANCE_ID),
     tbl_concat(msg_parts, ","), reasoning, extra_suffix)
 end
 
@@ -11068,12 +11599,16 @@ function Net.build_body_google(msgs, snapshot, msg_attachments)
   end
 
   local thinking = ""
-  if prefs.thinking_idx > 0 then
+  -- S.thinking_override_idx (when set) wins over prefs.thinking_idx -- the
+  -- length auto-retry path uses this to force "none" for one round-trip
+  -- when reasoning consumed the entire output budget on the first attempt.
+  local effective_thinking_idx = S.thinking_override_idx or prefs.thinking_idx
+  if effective_thinking_idx > 0 then
     local p = PROVIDERS.active()
     local m = MODELS[prefs.model_idx] or MODELS[1]
     if p.thinking_levels then
       -- If Pro model and MINIMAL selected, bump to LOW (MINIMAL is flash-only)
-      local tidx = prefs.thinking_idx
+      local tidx = effective_thinking_idx
       local tl = p.thinking_levels[tidx]
       if tl and tl.flash_only and not m.is_flash then
         tidx = math_min(tidx + 1, #p.thinking_levels)  -- next level (LOW)
@@ -11084,15 +11619,22 @@ function Net.build_body_google(msgs, snapshot, msg_attachments)
       end
     end
   end
+  -- maxOutputTokens: optional in Gemini's generationConfig. Omit it so the
+  -- server applies its own per-model ceiling (~64K on Gemini 3.x). Same
+  -- rationale as the OpenAI path: a fixed cap can be entirely consumed by
+  -- thinking tokens, leaving zero visible output. Letting the server cap
+  -- naturally avoids that failure mode.
   if use_cache then
     -- system_instruction lives inside the cache; omit it from the live body.
     return str_format(
-      '{"contents":[%s],"cachedContent":"%s","generationConfig":{"maxOutputTokens":%d%s}}',
-      tbl_concat(msg_parts, ","), S.gemini_cache_name, CFG.MAX_TOKENS, thinking)
+      '{"contents":[%s],"cachedContent":"%s","generationConfig":{%s}}',
+      tbl_concat(msg_parts, ","), S.gemini_cache_name,
+      thinking:gsub("^,", ""))
   end
   return str_format(
-    '{"contents":[%s],"systemInstruction":{"parts":[{"text":"%s"}]},"generationConfig":{"maxOutputTokens":%d%s}}',
-    tbl_concat(msg_parts, ","), JSON.escape(Net.system_prompt_text()), CFG.MAX_TOKENS, thinking)
+    '{"contents":[%s],"systemInstruction":{"parts":[{"text":"%s"}]},"generationConfig":{%s}}',
+    tbl_concat(msg_parts, ","), JSON.escape(Net.system_prompt_text()),
+    thinking:gsub("^,", ""))
 end
 
 -- =============================================================================
@@ -11152,14 +11694,33 @@ function Net.fire_curl(body, opts)
   -- TCP/TLS handshake timeout (seconds). Default 10 for cloud providers;
   -- per-record override for customs set below.
   local connect_timeout = 10
-  -- Guard against double-send.
-  if S.curl_pid then return false end
+  -- Guard against double-send. Return a reason so callers can distinguish
+  -- "another request in flight" (transient, deferrable) from genuine
+  -- failures like disk/IO errors. Plain `if not fire_curl()` callers stay
+  -- compatible -- the second return value is ignored unless inspected.
+  if S.curl_pid then return false, "in_flight" end
 
   local method   = (opts and opts.method) or "POST"
   local is_get   = (method == "GET")
 
+  -- Per-message API-call counter. Incremented for every POST that's tied
+  -- to the user's pending display message: the initial send AND any
+  -- silent retries (docs-gate auto-fetch, beta-header fallback, cache-
+  -- expired refresh, fx-inspect intra-turn fetches). Surfaced in the
+  -- Details box so the user can see when an "invisible" retry doubled
+  -- the work -- the cost / time fields only reflect the LAST request,
+  -- so without this counter the user has no indication that the visible
+  -- numbers are missing one or more earlier round-trips. GET is a probe
+  -- (auth check, /v1/models scan) and never a user-message API call, so
+  -- it stays out of the count.
+  if not is_get and S.pending_display_idx
+     and S.display_messages[S.pending_display_idx] then
+    local dmsg = S.display_messages[S.pending_display_idx]
+    dmsg.api_calls = (dmsg.api_calls or 0) + 1
+  end
+
   if not is_get then
-    if not Code.safe_write(tmp.body, body) then return false end
+    if not Code.safe_write(tmp.body, body) then return false, "io_error" end
   end
 
   local p = PROVIDERS.active()
@@ -11216,7 +11777,7 @@ function Net.fire_curl(body, opts)
     and S.api_key ~= nil and S.api_key ~= ""
   if use_auth_file then
     local auth_value = (p.auth_prefix or "") .. S.api_key
-    if not Code.safe_write(tmp.auth, p.auth_header .. ": " .. auth_value) then return false end
+    if not Code.safe_write(tmp.auth, p.auth_header .. ": " .. auth_value) then return false, "io_error" end
   end
 
   -- Clear any stale exit code / pid / response file from a previous request.
@@ -11492,50 +12053,75 @@ function Net.fire_key_test(provider_override)
   elseif p.id == "google" then
     body = '{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"maxOutputTokens":1}}'
   end
+  -- Defer if another curl is in flight (typically the auto-retest Gemini
+  -- tier test that fires on startup). Without this guard, fire_curl's
+  -- in_flight return would cascade through the queue, marking every
+  -- provider as "Could not reach the X API. Check your internet connection"
+  -- in seconds even though the actual problem is just timing. The loop
+  -- handler below polls and re-fires once curl_pid clears, with a 30s
+  -- ceiling so a stuck pending state doesn't trap the queue indefinitely.
+  if S.curl_pid then
+    S.key_test_armed = {
+      provider = p,
+      armed_at = time_precise(),
+    }
+    S.status = "waiting"
+    return
+  end
   S.key_test_pending  = true
   S.key_test_provider = p.id
   S.status            = "waiting"
   Code.safe_write(tmp.out, "")
-  if not Net.fire_curl(body, curl_opts) then
+  local fired, reason = Net.fire_curl(body, curl_opts)
+  if not fired then
     S.key_test_pending  = false
     S.key_test_provider = nil
     S.status            = "error"
     local label = p.label
+    -- "in_flight" should have been caught by the pre-check above; this
+    -- branch covers the I/O-error reasons (disk full, AV lock on tmp.body
+    -- / tmp.auth, etc.) and any future failure modes added to fire_curl.
+    local in_flight = (reason == "in_flight")
+    local short_msg, detail_msg, hint
+    if in_flight then
+      short_msg  = "Another request is in progress. Try again in a moment."
+      detail_msg = "Couldn't start the " .. label .. " key test -- "
+        .. "another request is already in flight."
+      hint       = "Wait a few seconds and click Test API Keys again."
+    else
+      short_msg  = "Couldn't start the " .. label .. " key test (local "
+        .. "error writing temp files)."
+      detail_msg = "Couldn't start the " .. label .. " key test. "
+        .. "ReaAssist failed to write its temporary request files."
+      hint       = "Check that your REAPER Resources directory is writable "
+        .. "and that no antivirus is locking files in it."
+    end
     -- Custom-LLM row-test mode: record failure and advance the queue.
     if api_keys.custom_conn_test and api_keys.custom_conn_test.active
        and api_keys.screen == "custom_llm" and p.is_custom then
-      CTX.custom_conn_test_advance(false,
-        "Could not launch request to " .. label .. ".")
+      CTX.custom_conn_test_advance(false, short_msg)
       return
     end
     -- Multi-key test mode: record failure and advance queue.
     if #api_keys.test_queue > 0 and (api_keys.screen == "first_run" or api_keys.screen == "settings") then
-      Net.advance_key_test_queue(p.id, false,
-        "Could not reach the " .. label .. " API. Check your internet connection.")
+      Net.advance_key_test_queue(p.id, false, short_msg)
       return
     end
     if (api_keys.screen == "first_run" or api_keys.screen == "settings") then
       api_keys.key_validating = false
-      api_keys.key_error      = "Could not reach the " .. label .. " API to "
-        .. "validate your key. This usually means your internet connection "
-        .. "is down. Check your connection and try again."
+      api_keys.key_error      = short_msg
       -- Show error popup.
       api_keys.show_key_error_popup = true
       api_keys.key_error_provider   = label
-      api_keys.key_error_detail     = "Could not reach the " .. label .. " API."
-      api_keys.key_error_hint       = "Check your internet connection and try again. "
-        .. "If you're behind a firewall or VPN, make sure it allows outbound HTTPS traffic."
+      api_keys.key_error_detail     = detail_msg
+      api_keys.key_error_hint       = hint
       api_keys.key_error_url        = nil
       api_keys.key_error_url_label  = nil
     else
       -- Append rather than clobber: if the user somehow triggered a key test
       -- while a conversation was on screen, wiping S.display_messages would
       -- destroy their chat. Log.add_error is the shared append path.
-      Log.add_error(
-        "Could not reach the " .. label .. " API to validate your key. "
-          .. "This usually means your internet connection is down or "
-          .. "another request is still in progress.\n\n"
-          .. "Check your connection and click the Settings button to try again.")
+      Log.add_error(short_msg)
     end
   end
 end
@@ -11902,7 +12488,17 @@ function Net.fire_gemini_tier_test()
   end
   if not pro_id then return end
 
-  local body = '{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"maxOutputTokens":1}}'
+  -- Pin thinkingLevel=LOW (the lowest setting Gemini Pro allows -- there is
+  -- no "off" for Pro models) so the tier-test request doesn't burn 20-60s on
+  -- internal reasoning before hitting the 1-token output cap. Without this,
+  -- Pro defaults to MEDIUM thinking and the tier test routinely exceeds
+  -- curl --max-time 30, leaving us at the mercy of the 180s watchdog and
+  -- producing the "ambiguous (timeout)" classification on slow connections.
+  -- The tier test only needs to know whether Pro is *callable*, not whether
+  -- it produces a useful response, so cheap thinking is fine.
+  local body = '{"contents":[{"role":"user","parts":[{"text":"hi"}]}],'
+    .. '"generationConfig":{"maxOutputTokens":1,'
+    .. '"thinkingConfig":{"thinkingLevel":"LOW","includeThoughts":false}}}'
   if not Code.safe_write(tmp.body, body) then return end
 
   -- Write the Gemini auth header to a temp file so it stays off the command
@@ -11958,6 +12554,12 @@ function Net.fire_gemini_tier_test()
   S.gemini_tier_pending = true
   S.curl_pid            = true
   S.send_time           = time_precise()
+  -- Sticky floating toast so the user sees something is happening. Replaced
+  -- by handle_gemini_tier_test (and the timeout / curl-exit branches) once
+  -- the test resolves, with a result-specific message.
+  if UI and UI.show_float_toast then
+    UI.show_float_toast("Verifying Gemini tier...", "ok", true)
+  end
 end
 
 -- =============================================================================
@@ -11965,10 +12567,12 @@ end
 -- =============================================================================
 -- Parses the Pro model test response. Paid is set only on a positive signal
 -- (successful generation); free is set on an explicit 429/403 error or the
--- legacy "free_tier" substring. Ambiguous responses default to free (with no
--- popup) so the Pro filter stays engaged without falsely accusing a paid
--- account after a transient network blip. Matches the timeout / curl-exit
--- branches in try_finish_curl which also default to free on ambiguity.
+-- legacy "free_tier" substring. Ambiguous responses leave S.gemini_paid_tier
+-- unchanged (and do NOT persist) so the next session or Test-API-Keys click
+-- retries instead of inheriting a bad classification. The Pro filter stays
+-- engaged in the meantime (it gates on `~= true`), so users on the free tier
+-- still don't see Pro -- they just don't get the "(Free)" label or the
+-- explanatory popup until detection succeeds.
 function Net.handle_gemini_tier_test(raw)
   S.gemini_tier_pending = false
   local is_paid, is_free
@@ -11986,21 +12590,37 @@ function Net.handle_gemini_tier_test(raw)
         is_paid = true
       end
     end
-    -- Legacy substring backstop: the older detection pre-dated the error-code
-    -- path and caught a broader set of quota bodies. Retained so a response
-    -- shape we haven't mapped still trips free detection.
-    if not is_paid and not is_free and raw:find("free_tier") then
-      is_free = true
-    end
   end
+  local interpretation
   if is_paid then
     S.gemini_paid_tier = true
-  else
+    reaper.SetExtState(CFG.EXT_NS, "gemini_paid_tier", "true", true)
+    interpretation = "paid"
+    if UI and UI.show_float_toast then
+      UI.show_float_toast("Gemini Pro available", "ok")
+    end
+  elseif is_free then
     S.gemini_paid_tier = false
+    reaper.SetExtState(CFG.EXT_NS, "gemini_paid_tier", "false", true)
+    S.show_gemini_free_warn = true
+    interpretation = "free"
+    -- Free-tier popup handles the user-facing notice; just clear the
+    -- in-flight sticky toast so it doesn't sit there indefinitely.
+    S.float_toast = nil
+  else
+    -- Ambiguous: leave S.gemini_paid_tier and the persisted ExtState entry
+    -- untouched so the next opportunity (app restart, Test API Keys click)
+    -- can retry. Persisting `false` here would bake in a wrong answer that
+    -- only manual ExtState surgery could undo.
+    interpretation = "ambiguous"
+    if UI and UI.show_float_toast then
+      UI.show_float_toast(
+        "Couldn't verify Gemini tier - will retry on next start", "err")
+    end
   end
-  reaper.SetExtState(CFG.EXT_NS, "gemini_paid_tier", tostring(S.gemini_paid_tier), true)
+  Log.line("TIER-TEST", string.format("interpreted as: %s (raw bytes=%d)",
+    interpretation, raw and #raw or 0))
   if PROVIDERS.active().id == "google" then MODELS.refresh() end
-  if is_free then S.show_gemini_free_warn = true end
   Code.safe_write(tmp.out, "")  -- clear stale tier test response
 end
 
@@ -12443,6 +13063,7 @@ function Net.send_to_api(user_text)
   S.pending_code          = nil
   S.docs_already_sent     = false
   S.docs_extended_already_sent = false
+  S.docs_section_sent     = {}
   S.session_already_sent  = false
   S.fx_params_already_sent = false
   S.plugin_ref_sent        = {}
@@ -12451,6 +13072,10 @@ function Net.send_to_api(user_text)
   S.pending_pref_plugin_types = {}
   S.context_loop_retries   = 0
   S.api_validator_retries  = 0
+  S.defer_validator_retries = 0
+  S.helper_validator_retries = 0
+  S.length_retry_used      = false
+  S.thinking_override_idx  = nil
   S._context_reuse_hint    = nil
   S._mixed_output_hint     = nil
   S.fx_list_already_sent   = false
@@ -12595,6 +13220,17 @@ function Net.send_to_api(user_text)
   -- this turn's adds don't get accidentally evicted by their own arrival.
   Net.sticky_evict(user_text)
   CTX.preempt_buckets_for_prompt(user_text)
+  -- Re-evaluate ref-injected flags: preempt's copin_docs_core (and the
+  -- chain-phrase preempt path generally) can set S.api_ref_message AFTER
+  -- the initial ref_injected probe ran above. Without this, the ctx_label
+  -- assembled below misses the "api_ref" tag for any session where docs
+  -- was co-pinned only via the preempt path -- the request ships docs
+  -- correctly but the Details / Context display omits it. Mirror midi /
+  -- theme for symmetry (no preempt path sets them today, but future
+  -- co-pin helpers should not need a second touch-up here).
+  if S.api_ref_message   then ref_injected   = true end
+  if S.midi_ref_message  then midi_injected  = true end
+  if S.theme_ref_message then theme_injected = true end
 
   -- 4. Build the history content: just "USER REQUEST:\n" + prompt.
   -- The API ref is no longer stored in history -- it lives in S.api_ref_message
@@ -12729,16 +13365,18 @@ function Net.send_to_api(user_text)
       end
     end
   end
-  -- Reserve output space inside the context window. Cloud providers have huge
-  -- context (200K+) so reserving the full MAX_TOKENS (8192) is fine. Custom
-  -- local LLMs often have tight windows (16K-32K) where reserving 8K leaves
-  -- almost no room for the API ref + prompt. For custom providers the server
-  -- enforces the real limit (finish_reason=length if output overflows), so we
-  -- only need a small sanity reserve here -- enough to guarantee the model can
-  -- emit at least a short reply, but not so much that it blocks valid requests.
+  -- Reserve output space inside the context window. Each cloud model has
+  -- its own published output ceiling (max_output, 64K-128K); reserve that
+  -- so a maxed-out reply doesn't blow the model's context window. Custom
+  -- local LLMs often have tight context windows (16K-32K) where reserving
+  -- the full output cap would leave almost no room for the API ref + prompt
+  -- -- cap the reserve at 10% of context. The custom server enforces its
+  -- own real limit (finish_reason=length if output overflows), so the reserve
+  -- only needs to guarantee a short reply has room.
+  local cloud_output_cap = (active_model and tonumber(active_model.max_output)) or 16384
   local output_reserve = active_provider.is_custom
-    and math_min(CFG.MAX_TOKENS, math_floor(MODEL_CONTEXT_LIMIT * 0.1))
-    or CFG.MAX_TOKENS
+    and math_min(cloud_output_cap, math_floor(MODEL_CONTEXT_LIMIT * 0.1))
+    or cloud_output_cap
   local token_budget   = MODEL_CONTEXT_LIMIT - output_reserve
 
   if estimated_tokens > token_budget then
@@ -12845,6 +13483,7 @@ function Net.clear_conversation()
   -- Per-turn one-shot guards
   S.docs_already_sent          = false
   S.docs_extended_already_sent = false
+  S.docs_section_sent          = {}
   S.session_already_sent       = false
   S.fx_params_already_sent     = false
   S.fx_list_already_sent       = false
@@ -12857,6 +13496,10 @@ function Net.clear_conversation()
   S.pref_plugins_sent          = {}
   S.context_loop_retries       = 0
   S.api_validator_retries      = 0
+  S.defer_validator_retries    = 0
+  S.helper_validator_retries   = 0
+  S.length_retry_used          = false
+  S.thinking_override_idx      = nil
   S._context_reuse_hint        = nil
   S._mixed_output_hint         = nil
   -- Defensive clear of fx_inspect -> fx_params handoff state (also reset per
@@ -12993,6 +13636,354 @@ function Code.suggest_reaper_alternatives(bad_name, max_results)
   table.sort(matches)
   while #matches > max_results do matches[#matches] = nil end
   return matches
+end
+
+-- =============================================================================
+-- Code.find_param_calls_outside_defer
+-- =============================================================================
+-- Behavioral validator for the MANDATORY DEFER RULE in
+-- prompt_bundle:plugin. Generated scripts that call TrackFX/TakeFX
+-- param Get/Set helpers OUTSIDE a `reaper.defer(function() ... end)`
+-- block can silently fail on some VST3 plugins -- the script appears
+-- to succeed (even logs "Script completed OK") but the parameters
+-- never actually change. The existing API validator only checks that
+-- function NAMES exist, not WHERE they're called, so this check fills
+-- the gap.
+--
+-- Returns a sorted, deduplicated list of violating function names, or
+-- nil if every param call is inside a defer scope (or the script has
+-- no param calls at all).
+--
+-- Algorithm:
+--   1. Replace line comments with same-length spaces so byte offsets
+--      stay aligned with the original source while comments don't
+--      pollute pattern matches. Block comments / strings containing
+--      reaper.* calls are rare in generated code; accepted as a
+--      pragmatic limitation rather than building a full Lua tokenizer.
+--   2. Walk the cleaned text. For each `reaper.defer(function()`
+--      opening, find the matching `end)` by tracking Lua block depth
+--      (function/if/repeat increment; for/while + do also increment;
+--      end and until decrement). Record each defer body as a [start,
+--      end] byte range.
+--   3. Scan for every `reaper.<NAME>` call. If NAME is in the
+--      param-touching set AND the byte position is not inside any
+--      recorded defer range, flag it.
+--
+-- False-positive risk: low. The model would have to either pass a
+-- named function to defer (e.g. `reaper.defer(my_callback)`) or wrap
+-- params in a helper called from outside defer. Both are anti-patterns
+-- per the plugin bundle and worth flagging anyway.
+local _DEFER_OPEN_PAT = "reaper%.defer%s*%(%s*function%s*%(%s*%)"
+local _PARAM_CALL_NAMES = {
+  TrackFX_GetParam              = true,
+  TrackFX_GetParamNormalized    = true,
+  TrackFX_SetParam              = true,
+  TrackFX_SetParamNormalized    = true,
+  TrackFX_GetParamName          = true,
+  TrackFX_GetNumParams          = true,
+  TrackFX_GetFormattedParamValue= true,
+  TakeFX_GetParam               = true,
+  TakeFX_GetParamNormalized     = true,
+  TakeFX_SetParam               = true,
+  TakeFX_SetParamNormalized     = true,
+  TakeFX_GetParamName           = true,
+  TakeFX_GetNumParams           = true,
+  TakeFX_GetFormattedParamValue = true,
+}
+
+local function _strip_line_comments_preserving_offsets(code)
+  -- Replace each line-comment span with same-length spaces so positions
+  -- discovered in the cleaned text map 1:1 to the original source.
+  return (code:gsub("%-%-[^\n]*", function(s) return string.rep(" ", #s) end))
+end
+
+-- Walk forward from `start_i` tracking Lua block depth (function/if/for/
+-- while/repeat/do as opens, end/until as closes). Returns the byte index
+-- one past the matching close, or nil if no matching close was found.
+-- Shared by both the defer-region scan and the local-function-body scan.
+local function _walk_to_matching_end(stripped, start_i, initial_depth)
+  local depth = initial_depth
+  local saw_loop_header = false
+  local i = start_i
+  while i <= #stripped and depth > 0 do
+    local prev = i > 1 and stripped:sub(i-1, i-1) or ""
+    local is_word_start = not prev:match("[%w_]")
+    if is_word_start then
+      local word = stripped:sub(i):match("^([%w_]+)")
+      if word == "function" or word == "if" or word == "repeat" then
+        depth = depth + 1
+        saw_loop_header = false
+        i = i + #word
+      elseif word == "for" or word == "while" then
+        saw_loop_header = true
+        i = i + #word
+      elseif word == "do" then
+        depth = depth + 1
+        saw_loop_header = false
+        i = i + #word
+      elseif word == "end" or word == "until" then
+        depth = depth - 1
+        saw_loop_header = false
+        i = i + #word
+      elseif word then
+        i = i + #word
+      else
+        i = i + 1
+      end
+    else
+      i = i + 1
+    end
+  end
+  if depth == 0 then return i end
+  return nil
+end
+
+local function _find_defer_regions(stripped)
+  local regions = {}
+  local pos = 1
+  while true do
+    local s, e = stripped:find(_DEFER_OPEN_PAT, pos)
+    if not s then break end
+    local body_start = e + 1
+    local body_end_plus1 = _walk_to_matching_end(stripped, body_start, 1)
+    if body_end_plus1 then
+      regions[#regions+1] = { body_start, body_end_plus1 - 1 }
+      pos = body_end_plus1
+    else
+      pos = e + 1
+    end
+  end
+  return regions
+end
+
+-- Returns list of { name, body_start, body_end } for each `local function
+-- NAME(...) ... end` definition in the script. Used by the defer validator
+-- to recognize that helper-function bodies whose NAME is called inside a
+-- defer block are transitively "deferred" -- the helper's reaper.* calls
+-- only execute when the helper is invoked, and that invocation happens
+-- inside defer.
+local function _find_local_function_regions(stripped)
+  local fns = {}
+  local pos = 1
+  while true do
+    local s, e, name = stripped:find("local%s+function%s+([%w_]+)%s*%(", pos)
+    if not s then break end
+    -- Skip past the parameter list to find the body start.
+    local i = e
+    while i <= #stripped and stripped:sub(i, i) ~= ")" do i = i + 1 end
+    if i > #stripped then break end
+    i = i + 1  -- past `)`
+    local body_start = i
+    local body_end_plus1 = _walk_to_matching_end(stripped, body_start, 1)
+    if body_end_plus1 then
+      fns[#fns+1] = { name = name, body_start = body_start, body_end = body_end_plus1 - 1 }
+      -- Advance INTO the body, not past its end. The model commonly wraps
+      -- the whole script in `local function main() ... end main()` and
+      -- defines helpers (set_param_display, find_param, etc.) as nested
+      -- local functions inside main. Skipping past main's end would
+      -- therefore miss every helper, leaving the defer validator unable
+      -- to recognize their bodies as transitively in-defer when called
+      -- from within reaper.defer().
+      pos = body_start
+    else
+      pos = e + 1
+    end
+  end
+  return fns
+end
+
+function Code.find_param_calls_outside_defer(lua_code)
+  if not lua_code or lua_code == "" then return nil end
+  local stripped = _strip_line_comments_preserving_offsets(lua_code)
+  local regions  = _find_defer_regions(stripped)
+
+  -- Expand regions to include local-function bodies whose name is called
+  -- inside any current "in-defer" region. The conventional script shape
+  -- defines helpers (set_param_display, find_param, custom nil-safe
+  -- wrappers like setp) at the script top OR inside main()'s body BEFORE
+  -- the reaper.defer block, then CALLS them from inside defer. The
+  -- reaper.* calls inside the helper's source body don't execute when
+  -- the helper is defined; they only execute when the helper is invoked
+  -- (which is inside defer). Without this expansion, the validator
+  -- false-positive-flags every helper-internal SetParamNormalized call
+  -- and blocks auto-run on perfectly-correct scripts. Iterative pass
+  -- handles transitivity (helper A calls helper B, A is called from
+  -- defer -> B is also "in defer").
+  local fns = _find_local_function_regions(stripped)
+  local function _name_called_in_regions(fn_name, regs)
+    -- Pattern: NAME followed by `(`, preceded by a non-identifier and
+    -- non-`.` character so we don't match obj.NAME() field accesses.
+    -- Method-call syntax `obj:NAME()` is technically a different binding
+    -- (it's calling obj.NAME, not the local), but the model doesn't write
+    -- `obj:set_param_display(...)`-shape calls in practice -- a tolerable
+    -- false-positive risk in exchange for simpler matching.
+    local pat = "[^%w_%.]" .. fn_name .. "%s*%("
+    local ps = 1
+    while true do
+      local cs = stripped:find(pat, ps)
+      if not cs then return false end
+      for _, r in ipairs(regs) do
+        if cs >= r[1] and cs <= r[2] then return true end
+      end
+      ps = cs + 1
+    end
+  end
+  local known_in_defer = {}
+  local added = true
+  while added do
+    added = false
+    for _, fn in ipairs(fns) do
+      if not known_in_defer[fn]
+         and _name_called_in_regions(fn.name, regions) then
+        regions[#regions+1] = { fn.body_start, fn.body_end }
+        known_in_defer[fn] = true
+        added = true
+      end
+    end
+  end
+
+  local violations = {}
+  local seen = {}
+  local s = 1
+  while true do
+    local hs, he, name = stripped:find("reaper%.([%w_]+)", s)
+    if not hs then break end
+    if _PARAM_CALL_NAMES[name] then
+      local in_defer = false
+      for _, r in ipairs(regions) do
+        if hs >= r[1] and hs <= r[2] then in_defer = true; break end
+      end
+      if not in_defer and not seen[name] then
+        seen[name] = true
+        violations[#violations+1] = name
+      end
+    end
+    s = he + 1
+  end
+  if #violations == 0 then return nil end
+  table.sort(violations)
+  return violations
+end
+
+-- =============================================================================
+-- Code.find_helper_calls_without_definition
+-- =============================================================================
+-- Behavioral validator for the prompt_bundle:plugin_helpers contract.
+-- Helpers (find_param, set_param_display, set_param_enum, set_param_enum_paced)
+-- are LOCAL FUNCTIONS, not REAPER built-ins. The model has seen them in
+-- training data and CAN write the calls from memory without including the
+-- function source -- which produces a runtime `attempt to call a nil value`
+-- crash on the deferred tick. The plugin_helpers bundle exists so the model
+-- has the source available; this validator catches the case where the call
+-- is emitted without the source.
+--
+-- Returns a sorted, deduplicated list of helper names that are CALLED but
+-- not DEFINED in the same script, or nil if every called helper has a
+-- matching `local function NAME(` definition.
+local _HELPER_NAMES = {
+  find_param           = true,
+  set_param_display    = true,
+  set_param_enum       = true,
+  set_param_enum_paced = true,
+}
+
+function Code.find_helper_calls_without_definition(lua_code)
+  if not lua_code or lua_code == "" then return nil end
+  -- Strip line comments preserving offsets so positions remain consistent
+  -- with the rest of the validator pass (block comments rare in generated
+  -- code; accept the false-positive risk).
+  local stripped = (lua_code:gsub("%-%-[^\n]*",
+    function(s) return string.rep(" ", #s) end))
+  -- For each helper name, check whether it's both called AND defined.
+  -- Definition pattern: `local function NAME(` (the standard form the
+  -- bundle uses). Also accept `function NAME(` (without local) and
+  -- `local NAME = function(` since those are equivalent semantically.
+  -- Call pattern: NAME followed by `(` after a non-identifier boundary,
+  -- so we don't false-match against substrings of other identifiers.
+  local violations, seen = {}, {}
+  for name in pairs(_HELPER_NAMES) do
+    -- Definition check (any of the three forms).
+    local has_def =
+         stripped:find("local%s+function%s+" .. name .. "%s*%(") ~= nil
+      or stripped:find("[^%w_]function%s+" .. name .. "%s*%(") ~= nil
+      or stripped:find("^function%s+" .. name .. "%s*%(")       ~= nil
+      or stripped:find("local%s+" .. name .. "%s*=%s*function") ~= nil
+      or stripped:find("[^%w_]" .. name .. "%s*=%s*function")   ~= nil
+    -- Call check (NAME followed by `(`, not preceded by an identifier or
+    -- a `.` (which would make it a method/field access on something else).
+    -- We deliberately scan for "called but not defined" only -- a defined-
+    -- but-uncalled helper is fine (the bundle's "only include helpers you
+    -- call" guidance is about size, not correctness).
+    local has_call = false
+    local s = 1
+    while true do
+      local hs, he = stripped:find("[^%w_%.]" .. name .. "%s*%(", s)
+      if not hs then break end
+      has_call = true
+      break
+    end
+    -- Also catch line-start call (no preceding char).
+    if not has_call then
+      if stripped:find("^" .. name .. "%s*%(") then has_call = true end
+    end
+    if has_call and not has_def and not seen[name] then
+      seen[name] = true
+      violations[#violations+1] = name
+    end
+  end
+  if #violations == 0 then return nil end
+  table.sort(violations)
+  return violations
+end
+
+-- =============================================================================
+-- Code.prompt_has_param_write_intent
+-- =============================================================================
+-- Returns true if the user's prompt looks like a request to WRITE plugin
+-- parameter values (vs. a pure-read query like "what is X set to?").
+-- Used by the dispatcher to gate the plugin_helpers co-pin on fx_params
+-- and preferred_plugins paths -- pure reads don't need helpers; writes do.
+--
+-- Two-signal detection: a write verb AND a value-shape pattern. Either
+-- signal alone is too weak (a mention of "set" without a value, or a
+-- value pattern without a write verb, are both weak signals). Conjunction
+-- catches the high-signal cases without spamming co-pin on weak prompts.
+local _WRITE_VERBS = {
+  "set", "change", "configure", "adjust", "make", "turn",
+  "boost", "cut", "raise", "lower", "lift", "drop", "tune",
+  "tweak", "dial", "increase", "decrease", "shift", "move",
+}
+-- Value-shape patterns: number followed by a unit, or a colon-separated
+-- ratio. Lua patterns; %d is digit, %s is whitespace.
+local _VALUE_PATTERNS = {
+  "%d+%s*[dD][bB]",         -- 6 dB, 6dB, 6 DB
+  "%d+%s*[hH][zZ]",         -- 100 Hz, 100hz
+  "%d+%s*[kK][hH][zZ]",     -- 5 kHz
+  "%d+%s*ms",               -- 50 ms
+  "%d+%s*sec",              -- 2 sec
+  "%d+%s*%%",               -- 65%
+  "%d+%s*[cC][eE][nN][tT]", -- 50 cents, 50 cent
+  "%d+%s*[sS][eE][mM][iI]", -- 12 semitones
+  "%d+:%d+",                -- 4:1, 10:1
+  "%d+%.%d+",               -- 0.75, 1.5 (bare decimal -- looks intentional)
+  "[Qq]%s*=%s*%d",          -- Q=2, Q = 1.5
+  "[Qq]%s+of%s+%d",         -- Q of 2
+}
+
+function Code.prompt_has_param_write_intent(text)
+  if type(text) ~= "string" or text == "" then return false end
+  local lo = text:lower()
+  -- Verb scan with word-boundary frontier so "settle" doesn't match "set".
+  local has_verb = false
+  for _, v in ipairs(_WRITE_VERBS) do
+    if lo:find("%f[%w]" .. v .. "%f[%W]") then has_verb = true; break end
+  end
+  if not has_verb then return false end
+  -- Value-shape scan.
+  for _, pat in ipairs(_VALUE_PATTERNS) do
+    if lo:find(pat) then return true end
+  end
+  return false
 end
 
 -- =============================================================================
@@ -13682,10 +14673,18 @@ function Net.process_response_buckets(text)
 
   local wants_docs        = false
   local wants_docs_extended = false
+  local wants_docs_section = false
+  local docs_section_names  = {}  -- canonical section names to fetch this turn
+  local bogus_docs_sections = {}  -- raw payloads that failed allowlist; for nudge
   local wants_session     = false
   local wants_fx_params   = false
   local wants_plugin_ref  = false
   local plugin_ref_names  = {}  -- plugin names for plugin_ref scoped bucket
+  local curated_pref_hints = {} -- {tkey, ident, curated} tuples accumulated by
+                                -- the resolve handler when a user-pref ident
+                                -- matches CURATED_IDENT; finalize emits a
+                                -- slim pref:<tkey> hint for each so the model
+                                -- knows the curated content IS the user's pref
   local wants_fx_list     = false
   local wants_fx_chains   = false
   local wants_track_flags = false
@@ -13759,6 +14758,23 @@ function Net.process_response_buckets(text)
     if kw == "session" and not S.session_already_sent then
       wants_session = true
       last_scoped = nil
+    elseif kw == "docs" and payload ~= "" then
+      -- docs:<section> -- on-demand API ref section. MUST come before the
+      -- bare-docs branch below: that branch matches kw=="docs" regardless
+      -- of payload and would silently drop the section name. Validate via
+      -- the allowlist; unknown names land in bogus_docs_sections so the
+      -- handler can emit a recoverable nudge instead of a silent drop.
+      local canonical = _docs_section_canonical(payload)
+      if canonical then
+        S.docs_section_sent = S.docs_section_sent or {}
+        if not S.docs_section_sent[canonical] then
+          wants_docs_section = true
+          docs_section_names[#docs_section_names+1] = canonical
+        end
+      else
+        bogus_docs_sections[#bogus_docs_sections+1] = payload
+      end
+      last_scoped = "docs"  -- enables "docs:items, envelopes" continuation
     elseif kw == "docs" and not S.docs_already_sent then
       wants_docs = true
       last_scoped = nil
@@ -13826,7 +14842,7 @@ function Net.process_response_buckets(text)
       --                            fires until the user clicks.
       --
       -- Supported types must match the set the system prompt is allowed to
-      -- emit (see ReaAssist_System_Prompt.md "resolve:Type bucket").
+      -- emit (see System_Prompt.md "resolve:Type bucket").
       last_scoped = nil
       local rtype = payload:lower()
       if not VALID_RESOLVE_TYPES[rtype] then
@@ -13868,7 +14884,28 @@ function Net.process_response_buckets(text)
         if pref_ident and pref_ident ~= "" then
           Log.line("RESOLVE", rtype .. " -> user_pref ("
             .. tostring(pref_ident) .. ")")
-          if not S.pref_plugins_sent[rtype] then
+          -- If the user's preferred plugin matches a curated section in
+          -- Plugin_Ref.md, route through plugin_ref:<Name>
+          -- instead of the live-scan preferred_plugins:<type> bucket.
+          -- The curated ref carries verified indices, scale formulas, and
+          -- per-recipe normalized values that the live param scan lacks.
+          -- Mirrors the preempt path's curated handling so both routes
+          -- deliver the same content for the same pref identifier.
+          local curated = CURATED_IDENT[pref_ident]
+          if curated then
+            if not S.plugin_ref_sent[curated] then
+              wants_plugin_ref = true
+              plugin_ref_names[#plugin_ref_names+1] = curated
+              curated_pref_hints[#curated_pref_hints+1] = {
+                tkey = rtype, ident = pref_ident, curated = curated,
+              }
+            end
+            -- Mark pref_plugins_sent so a same-turn re-emission of
+            -- resolve:<rtype> hits the already_covered branch above (the
+            -- model already has the user's pref data, just under a
+            -- plugin_ref: key instead of a pref: key).
+            S.pref_plugins_sent[rtype] = true
+          elseif not S.pref_plugins_sent[rtype] then
             wants_pref_plugins = true
             pref_plugin_types[#pref_plugin_types+1] = rtype
           end
@@ -13961,6 +14998,19 @@ function Net.process_response_buckets(text)
           wants_prompt_bundle = true
           prompt_bundle_names[#prompt_bundle_names+1] = nlo
         end
+      elseif last_scoped == "docs" then
+        -- Continuation of a "docs:items, envelopes" tag. Each subsequent
+        -- bare token is another section name (with the same allowlist gate).
+        local canonical = _docs_section_canonical(name)
+        if canonical then
+          S.docs_section_sent = S.docs_section_sent or {}
+          if not S.docs_section_sent[canonical] then
+            wants_docs_section = true
+            docs_section_names[#docs_section_names+1] = canonical
+          end
+        else
+          bogus_docs_sections[#bogus_docs_sections+1] = name
+        end
       end
     end
   end
@@ -13978,11 +15028,11 @@ function Net.process_response_buckets(text)
     fx_list_search = {}
   end
 
-  if wants_docs or wants_docs_extended or wants_session or wants_fx_params or wants_plugin_ref or wants_fx_list or wants_fx_chains or wants_track_flags or wants_midi or wants_pref_plugins or wants_theme or wants_fx_inspect or wants_preempt_hint or wants_prompt_bundle then
+  if wants_docs or wants_docs_extended or wants_docs_section or wants_session or wants_fx_params or wants_plugin_ref or wants_fx_list or wants_fx_chains or wants_track_flags or wants_midi or wants_pref_plugins or wants_theme or wants_fx_inspect or wants_preempt_hint or wants_prompt_bundle or #bogus_docs_sections > 0 then
     -- Build a fresh session snapshot if requested and not already present.
     if wants_session then
       S.session_already_sent = true
-      S.pending_project  = S.pending_project or reaper.EnumProjects(-1)
+      S.pending_project  = _resolve_pending_project()
       S.pending_snapshot = CTX.build_snapshot(S.pending_project)
     end
 
@@ -13992,7 +15042,18 @@ function Net.process_response_buckets(text)
     -- completes first.
     if wants_fx_params then
       S.fx_params_already_sent = true
-      S.pending_project = S.pending_project or reaper.EnumProjects(-1)
+      S.pending_project = _resolve_pending_project()
+      -- Co-pin plugin helpers when the prompt looks like a write intent
+      -- ("set X to Y", "change A to B", numeric-with-unit patterns). fx_params
+      -- on a pure read ("what is X set to?") doesn't need helpers; on a
+      -- read-then-write request, the model gets back live values AND will
+      -- need set_param_display etc. to write the new ones. Co-pinning
+      -- here means the helpers ride the same follow-up build instead of
+      -- requiring an extra <context_needed>prompt_bundle:plugin_helpers
+      -- round-trip after the model sees fx_params.
+      if Code.prompt_has_param_write_intent(S.pending_orig_prompt) then
+        Net.copin_plugin_helpers(fetched_to_sticky)
+      end
 
       -- Auto-cache: if any matched FX has no cached param data, route the
       -- first uncached plugin through fx_inspect (silent: result populates
@@ -14019,22 +15080,24 @@ function Net.process_response_buckets(text)
         for _ti = 0, _tc - 1 do
           if found_search then break end
           local _tr = R_GetTrack(_proj, _ti)
-          local _fc = R_TrackFX_GetCount(_tr)
-          for _fi = 0, _fc - 1 do
-            local _, _fxnm = R_TrackFX_GetFXName(_tr, _fi, "")
-            if CTX.fx_name_matches(_fxnm, fx_filter_names) then
-              local _ck, _cp = FXCache.find_plugin(_fxnm)
-              if not _cp then
-                -- Use the user's filter term that matched as the search
-                -- input for fx_inspect_load (cleaner than full bracketed
-                -- VST3 identifier).
-                for _, fn in ipairs(fx_filter_names) do
-                  if _fxnm:lower():find(fn:lower(), 1, true) then
-                    found_search = fn; break
+          if _tr then
+            local _fc = R_TrackFX_GetCount(_tr)
+            for _fi = 0, _fc - 1 do
+              local _, _fxnm = R_TrackFX_GetFXName(_tr, _fi, "")
+              if CTX.fx_name_matches(_fxnm, fx_filter_names) then
+                local _ck, _cp = FXCache.find_plugin(_fxnm)
+                if not _cp then
+                  -- Use the user's filter term that matched as the search
+                  -- input for fx_inspect_load (cleaner than full bracketed
+                  -- VST3 identifier).
+                  for _, fn in ipairs(fx_filter_names) do
+                    if _fxnm:lower():find(fn:lower(), 1, true) then
+                      found_search = fn; break
+                    end
                   end
+                  found_search = found_search or _fxnm
+                  break
                 end
-                found_search = found_search or _fxnm
-                break
               end
             end
           end
@@ -14111,6 +15174,37 @@ function Net.process_response_buckets(text)
         wants_docs_extended = false
       end
     end
+    if wants_docs_section then
+      -- Each section is loaded + sticky_set under its own "docs:<name>" key
+      -- so it lands in sticky_growing alongside docs_extended (see
+      -- Net.sticky_parts). Per-name sent-flag dedups intra-turn re-emits;
+      -- the eviction exemption keeps the section alive session-wide.
+      S.docs_section_sent = S.docs_section_sent or {}
+      for _, name in ipairs(docs_section_names) do
+        local sec_content, sec_err = CTX.docs_section(name)
+        if sec_content then
+          Net.sticky_set("docs:" .. name, sec_content)
+          S.docs_section_sent[name] = true
+          fetched_to_sticky[#fetched_to_sticky+1] = "docs:" .. name
+        else
+          Log.add_error(sec_err or ("Failed to load docs:" .. name))
+        end
+      end
+    end
+    if #bogus_docs_sections > 0 then
+      -- Recoverable nudge for unknown section names. Without this, the
+      -- model sees no acknowledgment of its <context_needed>docs:<bogus>
+      -- and may keep re-emitting the same invalid tag. Inject a brief
+      -- ack listing the valid section names so the model can correct.
+      local valid = _docs_section_list()
+      for _, raw in ipairs(bogus_docs_sections) do
+        Log.line("DOCS-SECTION", "unknown name '" .. tostring(raw)
+          .. "'; valid: " .. valid)
+        fetched_to_sticky[#fetched_to_sticky+1] =
+          "(docs:" .. raw .. " is not a valid section; valid: " .. valid
+          .. ". Use plain `docs` for the core reference.)"
+      end
+    end
     if wants_plugin_ref then
       local rp_content, rp_err = CTX.plugin_ref(plugin_ref_names)
       if rp_content then
@@ -14131,11 +15225,58 @@ function Net.process_response_buckets(text)
           and ("plugin_ref:" .. tbl_concat(plugin_ref_names, "/")) or "plugin_ref"
         Net.sticky_set(rp_key, rp_content)
         fetched_to_sticky[#fetched_to_sticky+1] = rp_key
-        -- Co-pin plugin bundle (same rationale as the preempt path).
+        -- Co-pin plugin bundle + docs core (same rationale as the preempt
+        -- path). docs core matters here too: plugin_ref payload is rich
+        -- enough that the model often skips emitting <context_needed>docs
+        -- </context_needed> and the docs-gate has to retry.
         Net.copin_plugin_bundle(fetched_to_sticky)
+        Net.copin_docs_core(fetched_to_sticky)
+        -- Co-pin plugin helpers when the prompt has write intent. Curated
+        -- plugin_ref data carries verified anchors but NOT a per-arbitrary-
+        -- value mapping (Pro-C 3 Release is non-linear; the ref shows
+        -- 100ms/200ms/500ms/1sec/2sec anchors but interpolating between
+        -- them gives wrong values). Without helpers in the same follow-up
+        -- build, the model sees a non-anchor target ("247ms"), notices it
+        -- doesn't match any anchor, and either makes a second round-trip
+        -- for plugin_helpers OR (observed live) skips the round-trip and
+        -- linearly interpolates -- which crashes the displayed value on
+        -- non-linear curves. Co-pinning here makes set_param_display the
+        -- easy path for non-anchor curated targets, no extra round-trip.
+        if Code.prompt_has_param_write_intent(S.pending_orig_prompt) then
+          Net.copin_plugin_helpers(fetched_to_sticky)
+        end
       else
         Log.add_error(rp_err)
         wants_plugin_ref = false  -- clear flag so ctx_label is not updated below
+      end
+    end
+    -- Curated user-pref slim hints: when the resolve handler routed a
+    -- preferred plugin through plugin_ref:<Name> (because pref_ident
+    -- matched CURATED_IDENT), pin a small pref:<tkey> entry pointing at
+    -- the curated bundle just emitted above. Without this, the model sees
+    -- plugin_ref:Pro-G in sticky but can't tell whether Pro-G is the
+    -- user's saved preference or curated default content -- weak models
+    -- defensively re-emit <context_needed>resolve:gate</context_needed>.
+    -- Format mirrors the preempt path's hint byte-for-byte so byte-prefix
+    -- caching stays stable when the same hint comes from either route.
+    if wants_plugin_ref and #curated_pref_hints > 0 then
+      CTX.populate_installed_fx()
+      for _, h in ipairs(curated_pref_hints) do
+        local pp_key = "pref:" .. h.tkey
+        if not S.sticky_context[pp_key] then
+          local exact_ident = nil
+          if Code.resolve_chain_entry and CTX._installed_fx_list then
+            exact_ident = Code.resolve_chain_entry(h.ident, CTX._installed_fx_list)
+          end
+          local hint = "PREFERRED PLUGINS:\n"
+            .. "  " .. h.tkey .. " = " .. (exact_ident or h.ident or h.curated) .. "\n"
+            .. "(User's saved preference; full parameter reference above "
+            .. "in plugin_ref:" .. h.curated .. ". Use this plugin directly "
+            .. "and do NOT emit <context_needed>resolve:" .. h.tkey
+            .. "</context_needed>.)"
+          Net.sticky_set(pp_key, hint)
+          fetched_to_sticky[#fetched_to_sticky+1] = pp_key
+        end
       end
     end
     if wants_prompt_bundle then
@@ -14174,12 +15315,12 @@ function Net.process_response_buckets(text)
     end
     if wants_fx_chains then
       S.fx_chains_already_sent = true
-      local proj = S.pending_project or reaper.EnumProjects(-1)
+      local proj = _resolve_pending_project()
       history_content = history_content .. CTX.fx(proj) .. "\n\n"
     end
     if wants_track_flags then
       S.track_flags_already_sent = true
-      local proj = S.pending_project or reaper.EnumProjects(-1)
+      local proj = _resolve_pending_project()
       history_content = history_content .. CTX.track_flags(proj) .. "\n\n"
     end
     -- MIDI ref is loaded into the persistent slot (S.midi_ref_message)
@@ -14231,8 +15372,20 @@ function Net.process_response_buckets(text)
           and ("pref:" .. tbl_concat(pref_plugin_types, "/")) or "pref_plugins"
         Net.sticky_set(pp_key, pp_content)
         fetched_to_sticky[#fetched_to_sticky+1] = pp_key
-        -- Co-pin plugin bundle (every pref-plugin pin drives a plugin task).
+        -- Co-pin plugin bundle + docs core (every pref-plugin pin drives a
+        -- plugin task that needs both the workflow guide and reaper.*
+        -- signatures).
         Net.copin_plugin_bundle(fetched_to_sticky)
+        Net.copin_docs_core(fetched_to_sticky)
+        -- Co-pin plugin helpers when the prompt looks like a write intent.
+        -- preferred_plugins for non-curated types returns live-scan param
+        -- data without verified anchors; if the user asked for a specific
+        -- value that doesn't match a cached point, the model needs
+        -- set_param_display to probe at runtime. Pure "what plugin is my
+        -- preferred X?" or generic "add a compressor" requests skip this.
+        if Code.prompt_has_param_write_intent(S.pending_orig_prompt) then
+          Net.copin_plugin_helpers(fetched_to_sticky)
+        end
       else
         Log.add_error(pp_err)
         wants_pref_plugins = false
@@ -14246,6 +15399,13 @@ function Net.process_response_buckets(text)
     -- cleanup) runs inside finalize_context after a one-frame defer.
     if wants_fx_inspect then
       S.fx_inspect_already_sent = true
+      -- fx_inspect IS the "ADD + CONFIGURE with values" signal -- the model
+      -- requested it specifically because the user asked to set specific
+      -- param values that need runtime probing. Always co-pin plugin_helpers
+      -- here so the follow-up build contains both fx_inspect data AND helper
+      -- definitions in one round-trip (no second context_needed for helpers
+      -- after the model sees the param map).
+      Net.copin_plugin_helpers(fetched_to_sticky)
       local tmp_tr, fx_idx, identifier, err, cached = CTX.fx_inspect_load(fx_inspect_names)
       if err then
         if S._fx_inspect_silent_for_fx_params then
@@ -14582,7 +15742,7 @@ function Net.process_response_buckets(text)
       -- always re-capture (when snapshots are enabled) rather than sending
       -- stale "at the cursor" / "to the selected item" context.
       if prefs.include_snapshot then
-        S.pending_project  = S.pending_project or reaper.EnumProjects(-1)
+        S.pending_project  = _resolve_pending_project()
         S.pending_snapshot = CTX.build_snapshot(S.pending_project)
       end
       S.status = "waiting"
@@ -14708,6 +15868,7 @@ function Net.process_response_buckets(text)
       S.prompt_bundle_sent           = {}
       S.docs_already_sent            = false
       S.docs_extended_already_sent   = false
+      S.docs_section_sent            = {}
       S.session_already_sent         = false
       S.fx_params_already_sent       = false
       S.fx_list_already_sent         = false
@@ -14871,10 +16032,17 @@ function Net._handle_watchdog_timeout()
   S.curl_pid  = nil
   S.send_time = nil
   if S.gemini_tier_pending then
-    -- Tier test timed out - assume free to be safe.
+    -- Tier test timed out: ambiguous result. Don't persist `false` -- a
+    -- transient timeout shouldn't bake in a wrong tier classification.
+    -- Pro filter still treats `nil` as "not paid" (gates on `~= true`),
+    -- so the user doesn't gain Pro access; they just get a retest on
+    -- next opportunity instead of being stuck.
     S.gemini_tier_pending = false
-    S.gemini_paid_tier = false
-    reaper.SetExtState(CFG.EXT_NS, "gemini_paid_tier", "false", true)
+    Log.line("TIER-TEST", "interpreted as: ambiguous (timeout; not persisted)")
+    if UI and UI.show_float_toast then
+      UI.show_float_toast(
+        "Couldn't verify Gemini tier - will retry on next start", "err")
+    end
     if PROVIDERS.active().id == "google" then MODELS.refresh() end
     return true
   end
@@ -14952,9 +16120,16 @@ function Net._handle_curl_exit_failure()
     or "A network error occurred. Please check your internet "
        .. "connection and try again."
   if S.gemini_tier_pending then
+    -- Tier test curl errored: ambiguous result. Same rationale as the
+    -- watchdog branch above -- don't persist a wrong classification on
+    -- a transient network failure. Retest fires on next opportunity.
     S.gemini_tier_pending = false
-    S.gemini_paid_tier = false
-    reaper.SetExtState(CFG.EXT_NS, "gemini_paid_tier", "false", true)
+    Log.line("TIER-TEST", string.format(
+      "interpreted as: ambiguous (curl exit=%d; not persisted)", exit_code))
+    if UI and UI.show_float_toast then
+      UI.show_float_toast(
+        "Couldn't verify Gemini tier - will retry on next start", "err")
+    end
     if PROVIDERS.active().id == "google" then MODELS.refresh() end
     return true
   end
@@ -15519,9 +16694,80 @@ function Net.try_finish_curl()
       end
     end
 
+    -- Empty-text-from-length auto-retry. When the model burned the full
+    -- output budget on internal reasoning and emitted no visible reply
+    -- (observed on gpt-5.4-mini with reasoning_effort=medium and a 16K
+    -- cap; mostly defanged by the no-cap-sent change for cloud, but the
+    -- failure can still happen at the model's real 128K ceiling on long
+    -- complex prompts), silently re-fire the same user prompt with
+    -- thinking forced to "none" and a terse "code-only" repair nudge.
+    -- Single retry per user prompt -- if even thinking-off doesn't fit,
+    -- fall through to the visible error so the user can intervene.
+    -- Skipped when the active provider doesn't expose thinking levels
+    -- (Anthropic today): nothing to retry-with-different-thinking.
+    local _retry_prov = PROVIDERS.active()
+    if empty_reason == "length"
+       and not S.length_retry_used
+       and _retry_prov.thinking_levels
+       and (S.thinking_override_idx or prefs.thinking_idx) > 0 then
+      S.length_retry_used     = true
+      S.thinking_override_idx = 0  -- "none"
+      local detail = ""
+      if reasoning_only_tokens and reasoning_only_tokens > 0 then
+        detail = " (" .. reasoning_only_tokens
+          .. " reasoning tokens, " .. (raw_tok_out or 0) .. " visible)"
+      end
+      Log.line("LENGTH-RETRY",
+        "empty response from length cap" .. detail
+        .. "; retrying with thinking=none (user-invisible)")
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+        .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply consumed "
+        .. "the entire output token budget on internal reasoning and "
+        .. "produced zero visible output. This retry is firing with "
+        .. "reasoning disabled. Deliver the answer concisely: a short "
+        .. "lead sentence, the code block, and the standard tip line. "
+        .. "Skip recap tables, explanations of decision steps, and any "
+        .. "prose beyond what the user actually needs. Respond as if this "
+        .. "is your FIRST reply -- do NOT apologize, do NOT say 'let me "
+        .. "try again', do NOT mention the retry.)\n\n"
+        .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      if #S.history > 0 and S.history[#S.history].role == "assistant" then
+        S.history[#S.history] = nil
+      end
+      if #S.history > 0 and S.history[#S.history].role == "user" then
+        S.history[#S.history] = nil
+      end
+      S.history[#S.history+1] = { role = "user", content = history_content }
+      if S.pending_display_idx
+         and S.display_messages[S.pending_display_idx] then
+        local dmsg = S.display_messages[S.pending_display_idx]
+        local existing = dmsg.ctx_label or ""
+        if not existing:find("length_retry", 1, true) then
+          dmsg.ctx_label = existing ~= ""
+            and (existing .. " + length_retry") or "length_retry"
+        end
+      end
+      if prefs.include_snapshot then
+        S.pending_project  = _resolve_pending_project()
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project)
+      end
+      S.status = "waiting"
+      S.request_start_time = nil
+      Code.safe_write(tmp.out, "")
+      if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments)) then
+        Log.add_error("Auto-retry after empty length-capped reply did not "
+          .. "go through. Please resend the last message.")
+      end
+      S.scroll_to_bottom = true
+      return
+    end
+
     -- Pick a precise label and message based on what the parser captured.
-    -- recovery_kind = "token_limit" tells Log.add_error to render inline
-    -- bump/lower buttons so the user can fix the cause in one click.
+    -- recovery_kind = "token_limit" tells Log.add_error to render the inline
+    -- Lower-Thinking + Retry recovery row. (Bump-Max-Tokens was retired
+    -- alongside the Max Tokens dropdown -- max_tokens is now per-model
+    -- metadata, already at the model's published ceiling for cloud.)
     local label, msg, recovery_kind
     if empty_reason == "length" then
       label = "out of tokens"
@@ -15536,8 +16782,8 @@ function Net.try_finish_curl()
       msg = "The model hit its output token limit before producing any "
         .. "visible response" .. detail .. ".\n"
         .. (has_thinking
-          and "Try lowering the Thinking level or increasing the Max Output Tokens on the Settings page."
-          or  "Try increasing the Max Output Tokens on the Settings page, or rephrase your message.")
+          and "Try lowering the Thinking level, or rephrase your message to require less reasoning."
+          or  "Try rephrasing your message to require a shorter response, or switch to a different model.")
     elseif empty_reason == "content_filter" then
       label = "filtered"
       msg = "The provider's safety filter blocked the response.\n\n"
@@ -15553,8 +16799,8 @@ function Net.try_finish_curl()
       msg = "The model's response was empty after processing. This can happen when "
         .. "the model uses all its output for internal reasoning.\n"
         .. (has_thinking2
-          and "Try lowering the Thinking level or increasing the Max Output Tokens on the Settings page."
-          or  "Try increasing the Max Output Tokens on the Settings page, or switching to a different model.")
+          and "Try lowering the Thinking level, or rephrase your message to require less reasoning."
+          or  "Try rephrasing your message, or switch to a different model.")
     end
 
     if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
@@ -15602,12 +16848,19 @@ function Net.try_finish_curl()
     local dmsg = S.display_messages[S.pending_display_idx]
     if not dmsg.ctx_label then dmsg.ctx_label = prefs.include_snapshot and "snapshot" or "" end
     if raw_tok_in > 0 or raw_tok_out > 0 then
-      dmsg.tok_in           = raw_tok_in
-      dmsg.tok_out          = raw_tok_out
-      dmsg.tok_cache_read   = tok_in_read
-      dmsg.tok_cache_create = tok_in_create
-      S.session_tok_in        = S.session_tok_in  + dmsg.tok_in
-      S.session_tok_out       = S.session_tok_out + dmsg.tok_out
+      -- Accumulate token / cache / cost across multiple round-trips in the
+      -- same turn. The docs-gate retry, beta-header fallback, and intra-
+      -- turn context fetches all re-enter this block; without accumulation
+      -- the visible Details tile shows ONLY the last request's metrics
+      -- and the user can't see they paid for two requests when api_calls=2.
+      -- Session totals add the raw per-call values directly so they don't
+      -- double-count the accumulated dmsg fields.
+      dmsg.tok_in           = (dmsg.tok_in           or 0) + raw_tok_in
+      dmsg.tok_out          = (dmsg.tok_out          or 0) + raw_tok_out
+      dmsg.tok_cache_read   = (dmsg.tok_cache_read   or 0) + tok_in_read
+      dmsg.tok_cache_create = (dmsg.tok_cache_create or 0) + tok_in_create
+      S.session_tok_in        = S.session_tok_in  + raw_tok_in
+      S.session_tok_out       = S.session_tok_out + raw_tok_out
       -- Cost estimation: look up model entry from the provider/model indices
       -- that were snapshotted at send time, with a fallback linear search.
       local tok_in_base = raw_tok_in - tok_in_read - tok_in_create
@@ -15621,7 +16874,9 @@ function Net.try_finish_curl()
       if not mentry then
         mentry = MODELS[mi] or MODELS[1]
       end
-      dmsg.cost = MODELS.calc_cost(mentry, tok_in_base, tok_in_read, tok_in_create, raw_tok_out)
+      local this_cost = MODELS.calc_cost(
+        mentry, tok_in_base, tok_in_read, tok_in_create, raw_tok_out)
+      dmsg.cost = (dmsg.cost or 0) + this_cost
       -- Gemini Free Tier stamp: every request on the free API tier costs
       -- the user nothing, but the token-math estimate reflects the paid
       -- per-million rates. Record the free-tier context on the message so
@@ -15635,18 +16890,18 @@ function Net.try_finish_curl()
       -- counter in the footer would climb as if the user were paying,
       -- undermining the "free tier" label everywhere else in the UI.
       if not dmsg.free_tier then
-        S.session_cost = S.session_cost + dmsg.cost
+        S.session_cost = S.session_cost + this_cost
       end
     end
     if S.request_start_time then
       dmsg.response_time = reaper.time_precise() - S.request_start_time
       -- DO NOT nil request_start_time here. The docs-gate auto-retry below
-      -- (at line ~15806) re-fires a curl after this cleanup runs, and the
-      -- in-flight "Thinking..." timer reads request_start_time to stay
-      -- ticking across the silent retry. Nil-ing here would freeze the
-      -- timer at 0:00 for the duration of the retry. The actual clear
-      -- happens at end-of-turn (status -> idle) at the bottom of
-      -- Net.process_response, after the docs-gate decision is made.
+      -- re-fires a curl after this cleanup runs, and the in-flight
+      -- "Thinking..." timer reads request_start_time to stay ticking
+      -- across the silent retry. Nil-ing here would freeze the timer at
+      -- 0:00 for the duration of the retry. The same logic applies to
+      -- S.pending_display_idx (see comment below). Both are cleared at
+      -- end-of-turn (status -> idle) at the bottom of Net.process_response.
     end
     if S._fx_cache_events then
       local parts = {}
@@ -15667,7 +16922,14 @@ function Net.try_finish_curl()
     Log.exchange_summary(dmsg)
   end
   S._fx_cache_events = nil
-  S.pending_display_idx = nil
+  -- DO NOT nil S.pending_display_idx here. The docs-gate auto-retry below
+  -- re-fires a curl, and Net.fire_curl reads pending_display_idx to
+  -- increment dmsg.api_calls (the silent-retry counter shown in Details).
+  -- The retry's response also re-enters this block to overwrite dmsg with
+  -- the FINAL request's tokens / cost / time -- which is what the user
+  -- actually got -- and the docs-gate appends "+ docs" to ctx_label via
+  -- the same idx. Nil-ing here breaks all three. End-of-turn cleanup at
+  -- the bottom of Net.process_response handles the actual clear.
 
   -- Before appending the assistant turn, strip any bucket content that was
   -- baked into the user history entry during mid-turn context fetches.
@@ -15815,7 +17077,20 @@ function Net.try_finish_curl()
   -- error so the user can investigate. Flag docs_gate_hit for chat-bubble
   -- banner rendering on that fallback path.
   local docs_gate_hit = false
-  local docs_available = S.api_ref_message ~= nil or S.docs_fetched_session
+  -- "docs available" means the model has been given SOME flavor of API
+  -- reference: full core (S.api_ref_message), the in-session core flag
+  -- (S.docs_fetched_session), or any on-demand docs:<x> section already
+  -- pinned via S.docs_section_sent. The original gate only checked the
+  -- first two and would fire a wasted retry every time a fresh session
+  -- used a section without first hitting core -- adding ~22 KB of
+  -- redundant core docs to a turn the section had already covered.
+  -- The API VALIDATOR below catches hallucinated calls regardless of
+  -- which slice of docs is pinned, so the gate's role is just "confirm
+  -- the model actually consulted docs at all" -- a single section is
+  -- enough to satisfy that.
+  local docs_available = S.api_ref_message ~= nil
+    or S.docs_fetched_session
+    or (S.docs_section_sent and next(S.docs_section_sent) ~= nil)
   if lua_code and not docs_available
      and lua_code:find("reaper%.[%w_]") then
     local ref_content, ref_err = CTX.docs()
@@ -15893,7 +17168,7 @@ function Net.try_finish_curl()
       -- display_message append -- the next response produces the real
       -- assistant reply.
       if prefs.include_snapshot then
-        S.pending_project  = S.pending_project or reaper.EnumProjects(-1)
+        S.pending_project  = _resolve_pending_project()
         S.pending_snapshot = CTX.build_snapshot(S.pending_project)
       end
       S.status = "waiting"
@@ -16005,7 +17280,7 @@ function Net.try_finish_curl()
           end
         end
         if prefs.include_snapshot then
-          S.pending_project  = S.pending_project or reaper.EnumProjects(-1)
+          S.pending_project  = _resolve_pending_project()
           S.pending_snapshot = CTX.build_snapshot(S.pending_project)
         end
         S.status = "waiting"
@@ -16033,12 +17308,188 @@ function Net.try_finish_curl()
     end
   end
 
+  -- DEFER VALIDATOR: After the API validator passes, scan the generated
+  -- script for plugin-param Get/Set calls outside reaper.defer(function()
+  -- ... end). Per the MANDATORY DEFER RULE in prompt_bundle:plugin, those
+  -- calls MUST run inside a deferred callback -- some VST3 plugins silently
+  -- ignore parameter writes that arrive in the same execution frame as
+  -- TrackFX_AddByName. Without defer, the script appears to succeed (the
+  -- API-VALIDATOR scan passes, "Script completed OK" gets logged) but the
+  -- audio doesn't change. Observed in the cross-provider test matrix on
+  -- gpt-5.4-mini with thinking=none -- the script ran cleanly and was
+  -- behaviorally wrong. Same recovery shape as the API validator: model-
+  -- only nudge, scrub the bad turn from history, single retry per user
+  -- prompt, surface a visible error if the retry still fails.
+  local defer_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit then
+    local violations = Code.find_param_calls_outside_defer(lua_code)
+    if violations and #violations > 0 then
+      if (S.defer_validator_retries or 0) < 1 then
+        S.defer_validator_retries = (S.defer_validator_retries or 0) + 1
+        Log.line("DEFER-VALIDATOR",
+          "param-touching calls outside reaper.defer (" .. #violations
+          .. "): " .. tbl_concat(violations, ", ")
+          .. "; retrying with hint (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply called "
+          .. "REAPER plugin parameter functions OUTSIDE a reaper.defer() "
+          .. "block. Per the MANDATORY DEFER RULE in your plugin workflow, "
+          .. "these calls MUST run inside `reaper.defer(function() ... end)`:\n"
+          .. "  - reaper." .. tbl_concat(violations, "\n  - reaper.")
+          .. "\n\nWithout defer, some VST3 plugins silently ignore parameter "
+          .. "changes -- the script appears to succeed but the audio doesn't "
+          .. "change. Regenerate the code with all plugin param Get/Set "
+          .. "calls inside a reaper.defer block (the standard pattern: do "
+          .. "all FX add/insert work synchronously, then put a single "
+          .. "reaper.defer(function() ... end) around all the param work + "
+          .. "Undo_BeginBlock/EndBlock). Respond as if this is your FIRST "
+          .. "reply to the user's request -- do NOT apologize, do NOT say "
+          .. "'let me try again' or mention a retry. Just deliver the "
+          .. "correct code with a normal brief description.)\n\n"
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history+1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("defer_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + defer_retry") or "defer_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
+            S.pending_snapshot, S.pending_attachments)) then
+          Log.add_error("Auto-retry for missing reaper.defer wrap did not "
+            .. "go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      -- Retry already used and the model STILL has param calls outside
+      -- defer. Block auto-run + surface the diagnostic so the user can
+      -- review/edit before clicking Run manually.
+      defer_gate_hit = true
+      Log.line("DEFER-VALIDATOR",
+        "param-touching calls still outside defer after retry: "
+        .. tbl_concat(violations, ", ") .. "; auto-run blocked")
+      Log.add_error("The model emitted plugin parameter calls (reaper."
+        .. tbl_concat(violations, ", reaper.")
+        .. ") outside a reaper.defer() block, even after a retry. "
+        .. "Some VST3 plugins silently ignore parameter changes that "
+        .. "arrive in the same execution frame as TrackFX_AddByName -- "
+        .. "the script may appear to run successfully but produce no "
+        .. "audible change. Auto-run is blocked; review the code and "
+        .. "wrap the param calls in `reaper.defer(function() ... end)` "
+        .. "before clicking Run manually.")
+    end
+  end
+
+  -- HELPER-DEFINITION VALIDATOR: After defer-compliance check, scan for
+  -- helper function calls (find_param, set_param_display, set_param_enum,
+  -- set_param_enum_paced) that lack a matching `local function NAME(`
+  -- definition in the same script. The model has seen these helpers in
+  -- training data and CAN write the calls from memory without including
+  -- the source -- producing a runtime `attempt to call a nil value` crash
+  -- on the deferred tick. The plugin_helpers prompt bundle is the source
+  -- of truth; this validator catches the case where the call ships without
+  -- the definition. Same recovery shape as the other validators: model-
+  -- only nudge with the helper bundle pinned, single retry per turn,
+  -- auto-run block + visible error if it persists.
+  local helper_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+     and not defer_gate_hit then
+    local missing = Code.find_helper_calls_without_definition(lua_code)
+    if missing and #missing > 0 then
+      if (S.helper_validator_retries or 0) < 1 then
+        S.helper_validator_retries = (S.helper_validator_retries or 0) + 1
+        Log.line("HELPER-VALIDATOR",
+          "helper calls without definitions (" .. #missing .. "): "
+          .. tbl_concat(missing, ", ")
+          .. "; pinning prompt_bundle:plugin_helpers + retrying (user-invisible)")
+        -- Co-pin helpers in case they aren't already pinned -- the model
+        -- needs the source to copy into the retry script.
+        Net.copin_plugin_helpers(nil)
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply called "
+          .. "helper function(s) WITHOUT including the function definition(s) "
+          .. "in the script. These helpers are LOCAL FUNCTIONS, not REAPER "
+          .. "built-ins -- the script will crash at runtime with `attempt to "
+          .. "call a nil value`.\n\nMissing definitions for:\n  - "
+          .. tbl_concat(missing, "\n  - ")
+          .. "\n\nThe definitions are in `prompt_bundle:plugin_helpers` (now "
+          .. "pinned above). Regenerate the script with EACH called helper's "
+          .. "`local function NAME(...) ... end` source pasted near the top, "
+          .. "before the helper is called. Only include the helpers you "
+          .. "actually call. Respond as if this is your FIRST reply to the "
+          .. "user's request -- do NOT apologize, do NOT say 'let me try "
+          .. "again', do NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history+1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("helper_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + helper_retry") or "helper_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
+            S.pending_snapshot, S.pending_attachments)) then
+          Log.add_error("Auto-retry for missing helper definitions did not "
+            .. "go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      -- Retry already used and the model STILL emitted helper calls without
+      -- definitions. Block auto-run + surface diagnostic.
+      helper_gate_hit = true
+      Log.line("HELPER-VALIDATOR",
+        "helper calls still missing definitions after retry: "
+        .. tbl_concat(missing, ", ") .. "; auto-run blocked")
+      Log.add_error("The model called helper function(s) without including "
+        .. "their definitions, even after a retry: "
+        .. tbl_concat(missing, ", ")
+        .. ". These are local functions (not REAPER built-ins), so the "
+        .. "script will crash at runtime with 'attempt to call a nil value' "
+        .. "when these are reached. Auto-run is blocked; either paste the "
+        .. "helper function definitions from prompt_bundle:plugin_helpers "
+        .. "into the script before clicking Run, or refactor to use "
+        .. "SetParamNormalized directly with verified normalized values.")
+    end
+  end
+
   -- Auto-run handling.
   local jsfx_auto_status = nil
   local jsfx_saved_path_for_msg = nil   -- saved path to carry on the message
   local jsfx_saved_fx_name_for_msg = nil -- FX ref name to carry on the message
   local auto_ran_ok = false             -- V5: flag for the AUTO-RAN pill below code
-  if prefs.auto_run and not docs_gate_hit and not validator_gate_hit then
+  if prefs.auto_run and not docs_gate_hit and not validator_gate_hit and not defer_gate_hit and not helper_gate_hit then
     -- JSFX: auto-save to Effects/ReaAssist/ folder ONLY when a Lua companion
     -- block is also present (meaning the user asked for it on a track).
     -- If the user just asked for an example, there is no Lua block and the
@@ -16197,7 +17648,7 @@ do
   -- Derive CRITICAL_FILES from FONT_FILES (the same table _mkfont calls
   -- consume) so the two lists cannot drift: add a font to FONT_FILES
   -- and the bootstrap check picks it up automatically.
-  local CRITICAL_FILES = { "Resources/ReaAssist_UI.lua" }
+  local CRITICAL_FILES = { "Resources/UI.lua" }
   -- Sort font filenames so the bootstrap-missing list is presented in
   -- a stable order across launches. `pairs` order is hash-bucket-
   -- dependent; without sorting, the recovery screen's "first 6 missing"
@@ -16254,14 +17705,14 @@ else
   -- file that exists but is syntactically corrupt or throws a top-level
   -- runtime error routes into bootstrap recovery instead of crashing
   -- before the recovery screen can render.
-  local ok_ui, err_ui = pcall(dofile, RA.RESOURCES_DIR .. "ReaAssist_UI.lua")
+  local ok_ui, err_ui = pcall(dofile, RA.RESOURCES_DIR .. "UI.lua")
   if not ok_ui then
     S.bootstrap_active = true
     S.bootstrap_missing[#S.bootstrap_missing + 1] =
-      "Resources/ReaAssist_UI.lua (load error)"
+      "Resources/UI.lua (load error)"
     Updater._set_failure("ui_load", tostring(err_ui))
     Log.line("BOOTSTRAP", string.format(
-      "ReaAssist_UI.lua failed to load: %s", tostring(err_ui)))
+      "UI.lua failed to load: %s", tostring(err_ui)))
   end
 end
 
@@ -16271,7 +17722,7 @@ end
 -- Registered via reaper.defer() at the bottom of the file; runs every frame.
 -- Handles close-signal handoff, curl polling, auto-retry on transient
 -- errors, and dispatches the ImGui draw via Render.main_window (which
--- lives in Resources/ReaAssist_UI.lua).
+-- lives in Resources/UI.lua).
 local Loop = {}
 
 -- Second-instance close signal. request_close carries the new instance's ID;
@@ -16434,6 +17885,51 @@ local function loop()
 
   Loop.pump_curl_or_retry()
 
+  -- Gemini tier auto-retest: armed at startup if the last result was
+  -- ambiguous (so persisted tier is nil) and a Google key is configured.
+  -- Wait until no other curl is in flight before firing -- the tier test
+  -- shares the curl plumbing and would no-op silently otherwise.
+  if S.gemini_auto_retest_pending and not S.curl_pid then
+    S.gemini_auto_retest_pending = false
+    Net.fire_gemini_tier_test()
+  end
+
+  -- Deferred key-test: fire_key_test parked here when curl_pid was busy
+  -- (typically because the auto-retest tier test was in flight). Re-fire
+  -- once curl clears. 30s armed-at ceiling so a stuck pending state
+  -- can't trap the queue indefinitely -- surface the failure through
+  -- the normal in-flight error path so the user gets a clear message
+  -- instead of waiting forever.
+  if S.key_test_armed and not S.curl_pid then
+    local armed = S.key_test_armed
+    if time_precise() - armed.armed_at > 30 then
+      S.key_test_armed = nil
+      local label   = armed.provider.label
+      local prov_id = armed.provider.id
+      local short_msg = "Another request was in progress for too long. "
+        .. "Try Test API Keys again."
+      if #api_keys.test_queue > 0
+         and (api_keys.screen == "first_run" or api_keys.screen == "settings") then
+        Net.advance_key_test_queue(prov_id, false, short_msg)
+      elseif (api_keys.screen == "first_run" or api_keys.screen == "settings") then
+        api_keys.key_validating = false
+        api_keys.key_error      = short_msg
+        api_keys.show_key_error_popup = true
+        api_keys.key_error_provider   = label
+        api_keys.key_error_detail     = short_msg
+        api_keys.key_error_hint       = "Wait for any in-flight request "
+          .. "to finish, then try again."
+        api_keys.key_error_url        = nil
+        api_keys.key_error_url_label  = nil
+      else
+        Log.add_error(short_msg)
+      end
+    else
+      S.key_test_armed = nil
+      Net.fire_key_test(armed.provider)
+    end
+  end
+
   -- Gemini cache-create poll runs independently of the main send pipeline
   -- (separate tmp files), so a cache create can complete in parallel with a
   -- user send without interfering with the response parse path.
@@ -16522,7 +18018,7 @@ local function loop()
   -- after_main_window first-frame boot-guard label), balancing
   -- PopStyleColor/PopStyleVar/PopFont, and the separate
   -- Update-Available / Repair dialog. Lives in
-  -- Resources/ReaAssist_UI.lua as Render.main_window so the UI half
+  -- Resources/UI.lua as Render.main_window so the UI half
   -- owns the draw path. Returns `open` so we can still detect the
   -- window's X button below (outside the visible-block scope).
   local open = Render.main_window()
@@ -16593,7 +18089,7 @@ end
 Bootstrap = {}
 
 -- Self-contained newline-aware TextWrapped used by Bootstrap.* render
--- functions. Bootstrap may run with Resources/ReaAssist_UI.lua missing
+-- functions. Bootstrap may run with Resources/UI.lua missing
 -- or unloadable, in which case UI.text_multiline does not exist; this
 -- helper mirrors the no-newline rule (ImGui_TextWrapped corrupts window
 -- state when fed a literal \n) without depending on the UI namespace.
@@ -16653,7 +18149,7 @@ function Bootstrap.render_prompt()
         string.format("Previous attempt failed (%s):",
                       tostring(update.last_step or "unknown")))
       -- Use the self-contained bootstrap helper instead of UI.text_multiline:
-      -- if Resources/ReaAssist_UI.lua is missing/corrupt the UI namespace
+      -- if Resources/UI.lua is missing/corrupt the UI namespace
       -- is empty, and TextWrapped corrupts window state when fed a literal \n.
       bootstrap_text_multiline(update.last_error)
       ImGui.ImGui_Spacing(RA.ctx)
@@ -16744,7 +18240,7 @@ function Bootstrap.render_failed()
     ImGui.ImGui_TextColored(RA.ctx, 0xFF8080FF,
       string.format("Reason (%s):",
                     tostring(update.last_step or "unknown")))
-    -- Self-contained helper: UI.text_multiline lives in ReaAssist_UI.lua,
+    -- Self-contained helper: UI.text_multiline lives in UI.lua,
     -- which may not be loaded in bootstrap mode.
     bootstrap_text_multiline(update.last_error)
   end

@@ -59,7 +59,7 @@ Pick a model from the dropdown next to each provider chip. Your choice is rememb
 
 Tested on complex multi-plugin rock-vocal stress prompts and on simpler requests.
 
-- **S-tier (handles anything)**: Claude Sonnet 4.6, Claude Opus 4.6, GPT-5.4 full, Gemini Pro 3.1, Gemini Flash 3.
+- **S-tier (handles anything)**: Claude Sonnet 4.6, Claude Opus 4.7, GPT-5.4 full, Gemini Pro 3.1, Gemini Flash 3.
   - **Sonnet 4.6**: most thoroughly tested. Consistent rule-following across single-track edits, multi-plugin chains, MIDI / theme work, and complex third-party plugins.
   - **GPT-5.4 full**: comparable. Slightly more likely to shortcut a nuanced rule on edge cases but code works.
   - **Gemini Pro 3.1**: comparable. Occasionally picks a suboptimal parameter-setting strategy but code works.
@@ -184,7 +184,7 @@ Set default plugins for generic types (EQ, compressor, reverb, etc.) so the assi
 - **Rescan All** / **Rescan** (per row): force a fresh parameter scan, e.g. after a plugin update.
 - **Clear All** wipes every preferred-plugin mapping (confirmation popup). Cached parameter data is kept, so re-picking the same plugin later doesn't force a rescan.
 - Leave a row blank for types you don't need; the assistant raises a resolve popup or falls back to a stock REAPER plugin when appropriate.
-- Preferences and cached parameter data live together in `ReaAssist_FX_Cache.json` in the script folder. Back that file up to preserve your setup.
+- Preferences and cached parameter data live together in `FX_Cache.json` in the script folder. Back that file up to preserve your setup.
 
 ## FX Parameter Cache
 
@@ -196,7 +196,7 @@ Whenever a plugin's parameters are scanned (through Preferred Plugins, the resol
   - **Deep**: defer-paced scan with a per-probe delay. Use only when a normal Rescan returns garbage values, typically VST3 plugins that report parameters one frame late (e.g. Soundtoys). Shows live progress and can be cancelled.
   - **Remove**: drop this entry from the cache. It will be re-scanned the next time it's needed.
 - A `needs deep scan` label (in amber) next to a plugin's param count means the normal scan couldn't read clean values; click Deep to finish it.
-- The cache is unified with your preferred-plugin mappings in `ReaAssist_FX_Cache.json`, so "Clear All" here only wipes parameter data, not your type → plugin choices.
+- The cache is unified with your preferred-plugin mappings in `FX_Cache.json`, so "Clear All" here only wipes parameter data, not your type → plugin choices.
 
 ## Plugin Resolve Prompts
 

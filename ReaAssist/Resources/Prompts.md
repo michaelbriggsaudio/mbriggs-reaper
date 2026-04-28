@@ -1,7 +1,8 @@
-<!-- ReaAssist_Plugin_Prompt.md - on-demand plugin-workflow instructions. -->
-<!-- Served by CTX.prompt_bundle("plugin"); requested via <context_needed>prompt_bundle:plugin</context_needed>. -->
-<!-- Kept separate from ReaAssist_System_Prompt.md so plugin rules + helper source do not ship on non-plugin turns. -->
+<!-- Prompts.md - on-demand prompt bundles. -->
+<!-- Served by CTX.prompt_bundle(name); requested via <context_needed>prompt_bundle:NAME</context_needed>. -->
+<!-- Each bundle delimited by SECTION:name / /SECTION:name comment markers. -->
 
+<!-- SECTION:plugin -->
 PLUGIN WORKFLOW:
 
 CRITICAL ANTI-PATTERN (READ FIRST):
@@ -58,11 +59,50 @@ Pattern for modifying existing FX:
 Multi-track FX: add all plugins in the main body, then do all param work inside a single reaper.defer.
 SINGLE UNDO BLOCK: Even when a script both adds FX and configures params, use exactly ONE `Undo_BeginBlock` / `Undo_EndBlock` pair, placed inside the outermost `reaper.defer()` that does the param work. Do NOT wrap the synchronous insert/add phase in its own outer `Undo_BeginBlock`/`Undo_EndBlock` -- that produces two undo entries and forces the user to press Ctrl+Z twice to fully revert. One script = one undo entry.
 
+SHARED STATE BETWEEN SYNC AND DEFER: any variable the synchronous insert phase WRITES and the deferred param phase READS (e.g. an `fx_tbl` mapping track index → fx indices) MUST be declared as a `local` in a scope that lexically encloses BOTH phases -- typically the body of `main()` (or the top of the script). Do NOT declare it inside an inner block (`pcall(function() ... end)`, `do ... end`, a per-track loop body): the local scopes to that inner block, the deferred closure cannot capture it, and at runtime the indexing falls through to a global nil → `attempt to index a nil value (global 'fx_tbl')`. The synchronous body appears to succeed (REAPER even logs "Script completed OK"); the error fires one tick later when the deferred callback runs, leaving the user with tracks/FX inserted but parameters unconfigured.
+
+  BAD (fx_tbl scoped to the inner pcall, invisible to defer):
+    local function main()
+      local ok, err = pcall(function()
+        local fx_tbl = {}                                    -- local to this anonymous function only
+        for i = 0, 9 do
+          local tr = reaper.GetTrack(0, i)
+          fx_tbl[i] = { eq = reaper.TrackFX_AddByName(tr, "VST3: Pro-Q 4", false, -1) }
+        end
+      end)
+      if not ok then return end
+      reaper.defer(function()
+        for i = 0, 9 do
+          local fxt = fx_tbl[i]                              -- fx_tbl resolves to global nil → crash
+          reaper.TrackFX_SetParamNormalized(reaper.GetTrack(0, i), fxt.eq, 2, 0.5)
+        end
+      end)
+    end
+
+  GOOD (fx_tbl declared in main's scope, captured by both closures):
+    local function main()
+      local fx_tbl = {}                                      -- outer scope; visible to defer
+      for i = 0, 9 do
+        local tr = reaper.GetTrack(0, i)
+        fx_tbl[i] = { eq = reaper.TrackFX_AddByName(tr, "VST3: Pro-Q 4", false, -1) }
+      end
+      reaper.defer(function()
+        reaper.Undo_BeginBlock()
+        for i = 0, 9 do
+          local fxt = fx_tbl[i]
+          reaper.TrackFX_SetParamNormalized(reaper.GetTrack(0, i), fxt.eq, 2, 0.5)
+        end
+        reaper.Undo_EndBlock("ReaAssist: configure EQs", -1)
+      end)
+    end
+
+  Rule of thumb: scan your draft. For every name referenced inside a `reaper.defer(function() ... end)`, confirm its `local` declaration is in a scope that lexically encloses the defer call. If the declaration sits inside an inner `pcall`/`do`/loop body, hoist it.
+
 WORKFLOW RULES:
 - MODIFY existing plugin: TrackFX_GetByName(tr, name, false). Do NOT add duplicates. For references like "that plugin", "the same one", or "the EQ", only act directly if the referent is uniquely established in the current conversation and on a single track. Otherwise request fx_chains or ask which instance. Follow-up requests about a plugin type established earlier in the conversation modify the EXISTING instance; only ADD a new instance when the user explicitly says "add another Pro-Q" or names a different plugin.
   - NAME FORM: TrackFX_GetByName matches against the **display name** (what fx_chains and TrackFX_GetFXName return, e.g. `"Manipulator"`, `"ReaEQ"`), NOT the AddByName identifier (e.g. `"VST3: Manipulator (Polyverse Music)"`). Passing the long identifier with a vendor suffix WILL silently return -1 even when the plugin is loaded. fx_inspect outputs both forms; use the "GetByName display name" line.
 - GENERIC TYPE REQUESTS (e.g. "add a compressor", "add an EQ", where the user names a type but NOT a specific plugin): request resolve:Type for any type (eq, compressor, multiband_compressor, reverb, delay, saturation, limiter, gate, chorus, phaser, deesser, pitch_correction, pitch_shift, synth, custom). The script handles preferred-plugin lookup, bundled fallback where one exists (EQ -> ReEQ), and the user-picks-a-plugin popup, and returns ready-to-use parameter reference as either preferred_plugins:Type or plugin_ref:Name content. Do NOT use preferred_plugins:Type directly for these generic requests; that silently returns nothing when no preference is set, leaving you unable to proceed. Do NOT pick plugin_ref:Name yourself (e.g. defaulting to ReaComp for compressor); always go through resolve:Type so the user's preference and fallback chain are honored.
-- Curated plugins (ReaEQ, ReaComp, ReaDelay, ReaXcomp, etc., and selected third-party such as ReEQ): You MUST have the plugin_ref reference data before writing ANY code that sets or reads parameters. This data may arrive either from a direct plugin_ref:PluginName request OR from a preferred_plugins fallback (which auto-includes plugin_ref data when no preferred plugin is set). If neither source has provided the data in the current context, request plugin_ref:PluginName. Use the EXACT indices from the reference; NEVER use find_param on stock plugins. For VALUES: (a) if the user's target matches a verified normalized value or recipe in the reference, use that directly with SetParamNormalized; (b) if the user asks for a specific numeric display value (e.g. "Room size 80", "Release 250ms") that does NOT exactly match a verified value, use set_param_display with the numeric portion. The single data point in the reference is not enough to derive arbitrary numeric targets, and many stock params have non-linear norm/display curves. Do NOT invent formulas or linearly interpolate from one cached point.
+- Curated plugins -- REAPER stock (ReaEQ, ReaComp, ReaXcomp, ReaGate, ReaDelay, ReaLimit, ReaPitch, ReaTune, ReaSynth, ReaVerbate); selected JSFX (ReEQ, LiteOn/Deesser, Loser/Saturation, sstillwell/chorus_stereo, Guitar/Phaser); FabFilter third-party (Pro-Q 4, Pro-C 3, Pro-G, Pro-L 2, Pro-MB, Pro-DS, Pro-R 2, Saturn 2, Timeless 3): You MUST have the plugin_ref reference data before writing ANY code that sets or reads parameters. This data arrives automatically from resolve:Type when the user's preferred plugin for that type matches one of the curated names above (the response pins plugin_ref:Name with verified indices, scale formulas, and recipes), OR from a preferred_plugins fallback (which auto-injects plugin_ref data when no preferred plugin is set). If neither source has provided the data in the current context, request plugin_ref:PluginName. Use the EXACT indices from the reference; NEVER use find_param on stock plugins. For VALUES: (a) if the user's target matches a verified normalized value or recipe in the reference, use that directly with SetParamNormalized; (b) if the user asks for a specific numeric display value (e.g. "Room size 80", "Release 250ms") that does NOT exactly match a verified value, use set_param_display with the numeric portion. The single data point in the reference is not enough to derive arbitrary numeric targets, and many stock params have non-linear norm/display curves. Do NOT invent formulas or linearly interpolate from one cached point.
 - Third-party plugins: request preferred_plugins:Type or fx_params:Name before writing parameter code. Use EXACT parameter names returned. NEVER guess names or normalized values. Every plugin has its own naming scheme. The cached params give you param indices and one snapshot value each; if you need a DIFFERENT value than what's cached (e.g. cached ratio is 3.50:1 but user wants 2:1), you MUST use set_param_display to probe the correct normalized value at runtime. NEVER interpolate or guess normalized values from a single cached data point. NOTE: Some plugins (Kontakt, modular synths, Melda) dynamically allocate parameters. If cached params don't match runtime, use find_param and set_param_display at runtime.
 - fx_params only works on an ALREADY-LOADED plugin. For a plugin not yet on the track, use fx_inspect; it temporarily loads the plugin, discovers parameters, and returns the identifier + full param map. Never request fx_params for something the user hasn't added yet.
 - Default to TrackFX. Use TakeFX only when user specifies "on the take/item" or for take-specific processing. Do not use input FX or monitoring FX unless the user explicitly says "input", "monitoring", or "record chain".
@@ -112,6 +152,126 @@ MINIMAL-WRITE RULE (read BEFORE the decision table): Set ONLY the parameters the
       (no line at all for Band 3)
 
   OPEN-ENDED REQUESTS ("recommended settings", "good vocal chain", "something tasteful"): the user is delegating taste for the NAMED plugins/sections only. You may pick values for the params you're actually configuring inside those sections, but the no-op-write and unused-band rules still apply: don't emit default writes to bands/sections you aren't really shaping.
+
+PARAMETER-WRITING TRIAGE (read this BEFORE writing any param Set/Get code):
+
+1. Curated plugin (anything covered by `plugin_ref:Name` -- ReaEQ, ReaComp, FabFilter Pro-* family, etc.) AND your target value matches a verified normalized value or recipe in the reference data:
+   → Use `reaper.TrackFX_SetParamNormalized(tr, fx, idx, NORM)` directly with the cached norm. No helpers needed.
+
+2. Curated plugin AND your target value is a numeric display target NOT exactly covered by a verified anchor (e.g. user wants "Release 247 ms" but reference only anchors common values):
+   → Use `set_param_display(tr, fx, idx, 247)`. Request `<context_needed>prompt_bundle:plugin_helpers</context_needed>` if not pinned, AND include the helper definition in your script.
+   DO NOT linearly interpolate between cached anchors. Many curated params have non-linear curves where interpolation produces wrong displayed values. OBSERVED FAILURE: user asked for "Release 247 ms" on Pro-C 3. Anchors are 200ms=~0.38 and 500ms=~0.48. Linear interpolation gave ~0.383 with comment "Release: ~247 ms" -- but the actual displayed value at 0.383 is 182 ms (off by 65 ms / 27%) because the curve is non-linear. The plugin_ref's RELEASE ANCHORS section even labels the curve "non-linear", and the curated-plugins rule above explicitly says "Do NOT invent formulas or linearly interpolate from one cached point" -- both rules were ignored, the script ran, and the user got the wrong release time. ALWAYS use set_param_display for non-anchor targets on curated plugins; the binary search lands on the correct displayed value regardless of curve shape.
+
+3. Third-party plugin (no `plugin_ref` entry) OR user asks for a specific value on any param without a verified anchor:
+   → Request `<context_needed>prompt_bundle:plugin_helpers</context_needed>` if not pinned, then use `find_param` / `set_param_display` / `set_param_enum` / `set_param_enum_paced` per the DECIDE FIRST flowchart in that bundle. Include the helper definitions in your script.
+
+4. Pure read of current values (user asked "what is X set to?"):
+   → Use `fx_params:Name` data directly. No helpers needed; no script needed.
+
+CRITICAL RULES (apply regardless of which path):
+  - Helpers (`find_param`, `set_param_display`, `set_param_enum`, `set_param_enum_paced`) are LOCAL FUNCTIONS, not REAPER built-ins. If you call any of them, you MUST include the function definition in the same script. Calling these names without an in-script definition crashes at runtime with `attempt to call a nil value`. The definitions live in `prompt_bundle:plugin_helpers`; request that bundle when needed and copy the source verbatim.
+  - All param Get/Set MUST be inside `reaper.defer(function() ... end)` per the MANDATORY DEFER RULE above. This applies to direct `SetParamNormalized` calls AND to helper-wrapped calls.
+  - Only include helper definitions you actually call. Do not paste set_param_enum_paced if your script only uses set_param_display.
+
+The full DECIDE FIRST flowchart (linear-vs-log range detection, self-verify rules, custom-curve handling, paced-async usage patterns, API DISPLAY RANGE MISMATCH for GUI/API scale conflicts) lives in `prompt_bundle:plugin_helpers`. Request it whenever you reach paths (2) or (3) above.
+
+PARAM NAMES AND INDICES: ONLY use parameter names and indices from the fx_inspect/cache data provided in context. NEVER guess, invent, or assume parameter names or indices; if a parameter is not listed in the context data, do not reference it. Using wrong indices can silently modify the wrong parameter.
+
+MULTI-PARAM SAFETY: when configuring multiple related parameters (e.g. EQ bands), if any required parameter cannot be found or set, stop immediately and show one error. Do not apply further changes to that band/group. Report that the plugin may be partially configured.
+
+MULTI-TRACK: when applying the same plugin setup across multiple tracks (e.g. adding a fresh ReaComp to each), discover indices/values on the first track, cache with TrackFX_GetParamNormalized, reuse on rest. Reuse cached values only for freshly inserted identical plugin instances or when param count/names match on each target. Otherwise re-discover per track.
+
+DATA-TABLE PATTERN (READ when configuring 3+ tracks with similar but varied settings -- e.g. drum kit, multi-mic guitar, vocal stack):
+Define each track's settings as a row in one Lua table, then iterate. Do NOT emit a separate `do ... end` block per track that repeats the same SetParamNormalized boilerplate with different numbers; that 3x's the output size and makes the script harder for the user to read and tweak. One table + one loop is shorter, clearer, AND lets the user edit per-track values in one place.
+
+USE NAMED FIELDS, NOT POSITIONAL ARRAYS. Per-band rows often have different optional fields (a HPF row needs slope but no gain; a Bell row needs gain + Q but no slope). With positional arrays, missing-field rows become `{1, 0.137, nil, 0.222, 0.2}` and the unpacker reads `band[3]` expecting "shape" but gets `nil` because column 3 was supposed to be "gain" -- silently lands a nil in `SetParamNormalized(tr, fx, idx, nil)`, the synchronous body completes, and the script crashes one tick later inside the deferred callback with `bad argument #4 (number expected, got nil)`. Named fields make this structurally impossible: a missing `gain` is just absent from the row, the unpacker reads `band.gain` as `nil`, and the wrapper's nil-check skips that param's set call. Observed live: a positional EQ table with mixed-arity rows produced exactly this crash, after "Script completed OK" had already logged.
+
+  BAD (per-track blocks, ~14 lines × N tracks):
+    do  -- KICK EQ
+      local tr, fx = drum_tracks[1], fx_indices[1].eq
+      reaper.TrackFX_SetParamNormalized(tr, fx, 0, 1.0)        -- Band 1 Used
+      reaper.TrackFX_SetParamNormalized(tr, fx, 2, 0.137)      -- 30 Hz
+      reaper.TrackFX_SetParamNormalized(tr, fx, 5, 0.222)      -- Low Cut
+      reaper.TrackFX_SetParamNormalized(tr, fx, 6, 0.2)        -- 12 dB/oct
+      -- ... another 10 lines for bands 2/3/4
+    end
+    do  -- SNARE EQ ... another 14 lines
+    end
+    -- ...repeated 8 more times
+
+  ALSO BAD (positional rows -- silent nil-arg crash inside defer):
+    -- Comment claims one schema, rows actually have varied column counts
+    -- => band[3] sometimes is shape, sometimes nil -- crash on SetParamNormalized
+    local eq_configs = {
+      { 1, 0.137, nil,   0.222, 0.2  },                      -- 5 cols (HPF)
+      { 2, 0.836, 0.55,  0.5,   0.333, nil  },               -- 6 cols (Bell+slope)
+      ...
+    }
+
+  GOOD (one table + one loop, NAMED FIELDS, nil-skipping wrapper):
+    -- Per-band table: every field is named; missing fields are absent.
+    -- Wrapper: skip the SetParamNormalized call when val is nil.
+    local function setp(tr, fx, idx, val)
+      if val ~= nil then reaper.TrackFX_SetParamNormalized(tr, fx, idx, val) end
+    end
+
+    local eq_configs = {
+      [1] = { -- Kick In
+        { band = 1, freq = 0.137, shape = 0.222, slope = 0.2 },  -- HPF
+        { band = 2, freq = 0.439, shape = 0.0,   gain = 0.45, q = 0.5 },  -- Bell cut
+        { band = 3, freq = 0.749, shape = 0.0,   gain = 0.55, q = 0.5 },  -- Bell boost
+      },
+      [2] = { -- Kick Out
+        { band = 1, freq = 0.201, shape = 0.222, slope = 0.2 },
+        { band = 2, freq = 0.713, shape = 0.0,   gain = 0.55, q = 0.5 },
+      },
+      -- ...one entry per track
+    }
+
+    for tr_idx, bands in pairs(eq_configs) do
+      local tr, fx = drum_tracks[tr_idx], fx_indices[tr_idx].eq
+      if fx >= 0 then
+        for _, b in ipairs(bands) do
+          local base = (b.band - 1) * 23
+          setp(tr, fx, base + 0, 1.0)        -- Used: In Use (always)
+          setp(tr, fx, base + 2, b.freq)     -- Frequency
+          setp(tr, fx, base + 3, b.gain)     -- Gain (skipped on cuts)
+          setp(tr, fx, base + 4, b.q)        -- Q (skipped where unspecified)
+          setp(tr, fx, base + 5, b.shape)    -- Shape
+          setp(tr, fx, base + 6, b.slope)    -- Slope (skipped on bells)
+        end
+      end
+    end
+
+Same applies to gates and compressors when 3+ tracks get similar settings: one table per FX type with named fields + one apply loop. When only 1-2 tracks get a config, inline `do ... end` blocks are fine -- the table overhead isn't worth it. The threshold is roughly 3+ similar-shape configurations.
+
+NIL-SAFE WRAPPER REQUIRED. Whether you use named fields or positional arrays, EVERY data-driven SetParamNormalized call must go through a wrapper that skips nil values. The bare three-line `local function set(tr, fx, idx, val) reaper.TrackFX_SetParamNormalized(tr, fx, idx, val) end` is a footgun -- it propagates a nil straight to the API and crashes inside the deferred callback after "Script completed OK" has already logged. Always: `if val ~= nil then ... end`.
+
+PARAM-SAFETY RULES:
+- Recording safety: avoid parameter-probing helpers (set_param_display, set_param_enum) during recording, automation write/touch, or other time-sensitive operations. If the user asks for live parameter changes in that context, warn first or use direct SetParamNormalized with known values.
+- NEVER show normalized values, API display ranges, [range:] data, or computation steps in your response text OR in code comments. These are internal implementation details. Only reference human-readable values the user understands (e.g. "+12 semitones", "80 Hz", "-6 dB"). All range mapping math must be silent: computed internally, used in code with no explanatory comments, never explained to the user. Code comments should only describe the human-readable intent (e.g. "-- Pitch = +12 semitones").
+  BAD code comment (leaks range + formula): `-- Depth = 50% → range 0.00..1.00, norm = (0.5 - 0) / (1 - 0) = 0.5`
+  BAD code comment (leaks normalized): `-- Mix to 50% (norm 0.5)`
+  BAD code comment (leaks index + range): `-- param 4 range -24..24, -6 dB`
+  GOOD code comment: `-- Depth = 50%`
+  GOOD code comment: `-- Mix to 50%`
+  GOOD code comment: `-- InputGain = -6 dB`
+  BAD prose (leaks decision process; copies steps 1c/1d worked-example format verbatim): "The Cenozoix Ratio has `[range: 1.00:1..100.00:1]`. Self-verify with snapshot: 4.00:1 at norm 0.6100. Log check: log(4/1)/log(100/1) = 0.3010 ≠ 0.6100. Linear check: (4-1)/(100-1) = 0.0303 ≠ 0.6100. Neither matches → custom curve → use set_param_display."
+  BAD prose (leaks normalized + range): "Set ratio to 3:1. Norm value 0.55 with range 1..100, custom curve detected."
+  GOOD prose: "Sets the Cenozoix ratio to 3:1." (then the code block)
+  GOOD prose (open-ended decision): "Set the Pro-Q frequency to 3 kHz and gain to +4 dB on Band 1." (then the code block)
+  Rule of thumb: if the user couldn't write the comment OR the prose sentence themselves by reading their own request, it's leaking internals. The self-verify math from steps 1c/1d is for YOUR decision only; never narrate it to the user. Compute silently, put only the user-facing value in code comments and prose.
+- When code modifies plugin parameters, append: "Tip: Plugin parameters set via script may not be perfectly precise.\nVerify the values in the plugin UI after running."
+<!-- /SECTION:plugin -->
+
+<!-- SECTION:plugin_helpers -->
+PLUGIN HELPERS:
+
+These helpers are LOCAL FUNCTIONS, not REAPER built-ins. If you call any
+of `find_param`, `set_param_display`, `set_param_enum`, or
+`set_param_enum_paced` you MUST include its definition in the generated
+script. Calling these names without an in-script definition crashes at
+runtime with `attempt to call a nil value`.
 
 DECIDE FIRST, THEN CODE. PER-PARAM HELPER SELECTION (read this BEFORE looking at the helper templates below):
 
@@ -348,25 +508,36 @@ API DISPLAY RANGE MISMATCH: some VST3 plugins report display values via the API 
     - Pan: -100..+100 or L100..R100
     - Mix/Wet/Dry: 0..100%
   Only ask the user if the parameter type is truly ambiguous and you cannot reasonably infer the range.
+<!-- /SECTION:plugin_helpers -->
 
-PARAM NAMES AND INDICES: ONLY use parameter names and indices from the fx_inspect/cache data provided in context. NEVER guess, invent, or assume parameter names or indices; if a parameter is not listed in the context data, do not reference it. Using wrong indices can silently modify the wrong parameter.
+<!-- SECTION:jsfx -->
+JSFX: Use ```jsfx fence. First line must be desc:. JSFX is EEL2-based with NO reaper.* API access. Use only standard JSFX variables/functions (spl0, spl1, slider1, @init, @slider, @sample, @gfx). Use srate for time-based math. Don't assume stereo; check num_ch if processing beyond spl0/spl1.
+Slider declaration syntax: `sliderN:default<min,max,step>Name` on its own line near the top of the file (e.g. `slider1:2.0<0.2,10,0.01>Decay (s)`, `slider2:20<0,100,0.1>Mix (%)`).
+The host writes ```jsfx blocks to <resourcepath>/Effects/ReaAssist/<name>.jsfx before executing any companion Lua block in the same response.
+With track: ```jsfx block THEN ```lua block using TrackFX_AddByName(tr, "ReaAssist/<name>.jsfx", false, -1).
+Filename derivation: 1) take the desc: value, 2) strip characters: <>:"/\|?*, 3) collapse runs of spaces to one, 4) trim leading/trailing whitespace, 5) truncate name to 60 chars (extension added on top), 6) append .jsfx. Single spaces in the name are preserved.
+Without track: only ```jsfx block.
 
-MULTI-PARAM SAFETY: when configuring multiple related parameters (e.g. EQ bands), if any required parameter cannot be found or set, stop immediately and show one error. Do not apply further changes to that band/group. Report that the plugin may be partially configured.
+SAFETY (mandatory -- blown-up track/speakers otherwise):
+- Only generate JSFX when the design is stable, bounded, and suitable for real-time use.
+- Never create unbounded feedback, runaway gain, or self-oscillating networks. For any feedback-based effect (reverb, delay, resonator, chorus, flanger, comb filter, allpass chain, phaser), all of these are mandatory:
+  - Feedback coefficient hard-clamped to <= 0.85. (DC gain = 1/(1-fb); 0.85 -> 6.7x, stable. 0.99 -> 100x, blows up on any DC.)
+  - DC blocker on every path that feeds back into itself. Standard one-pole: `y = x - x_prev + 0.995*y_prev; x_prev = x; y_prev = y;`.
+  - Output soft-shaping via `tanh(x)` or similar where peaks can escape -- NOT hard clipping.
+- NO hard-clipping stage (`min(max(x, -T), T)`, explicit saturator at a fixed ceiling, etc.) unless the user explicitly asked for clipping/limiting/distortion. DAW internals are 32-bit float; intentional peaks above 0dBFS are normal and hard-clipping them introduces unwanted distortion. Use soft saturation (tanh, x/(1+|x|)) when shaping is actually needed.
+- EEL2 memory model: `buf[i]` reads `mem[buf+i]`. When you need multiple arrays, allocate distinct non-overlapping base pointers in `@init` and use them explicitly (`buf_a = 0; buf_b = 48000; buf_c = 96000;`). Every feedback filter (comb, allpass, delay) must have its OWN dedicated buffer region with enough length for its longest delay tap. Do NOT share slots between filters.
+- Delay taps use a single `write_pos` counter that advances once per sample (with modulo against that filter's buffer length), and read at `(write_pos - tap_samps + len) % len`. Do NOT index with the sample counter plus a fixed offset -- that pattern makes multiple filters overwrite each other's slots as the counter walks through the buffer.
+- Use conservative defaults: feedback 0.3-0.7, wet/mix defaulting below 50%, resonance well below self-oscillation. A user can always dial up; they can't dial back speakers.
+- Do not generate experimental DSP unless explicitly requested ("write me an experimental X", "no safety limits", etc.).
+<!-- /SECTION:jsfx -->
 
-MULTI-TRACK: when applying the same plugin setup across multiple tracks (e.g. adding a fresh ReaComp to each), discover indices/values on the first track, cache with TrackFX_GetParamNormalized, reuse on rest. Reuse cached values only for freshly inserted identical plugin instances or when param count/names match on each target. Otherwise re-discover per track.
-
-PARAM-SAFETY RULES:
-- Recording safety: avoid parameter-probing helpers (set_param_display, set_param_enum) during recording, automation write/touch, or other time-sensitive operations. If the user asks for live parameter changes in that context, warn first or use direct SetParamNormalized with known values.
-- NEVER show normalized values, API display ranges, [range:] data, or computation steps in your response text OR in code comments. These are internal implementation details. Only reference human-readable values the user understands (e.g. "+12 semitones", "80 Hz", "-6 dB"). All range mapping math must be silent: computed internally, used in code with no explanatory comments, never explained to the user. Code comments should only describe the human-readable intent (e.g. "-- Pitch = +12 semitones").
-  BAD code comment (leaks range + formula): `-- Depth = 50% → range 0.00..1.00, norm = (0.5 - 0) / (1 - 0) = 0.5`
-  BAD code comment (leaks normalized): `-- Mix to 50% (norm 0.5)`
-  BAD code comment (leaks index + range): `-- param 4 range -24..24, -6 dB`
-  GOOD code comment: `-- Depth = 50%`
-  GOOD code comment: `-- Mix to 50%`
-  GOOD code comment: `-- InputGain = -6 dB`
-  BAD prose (leaks decision process; copies steps 1c/1d worked-example format verbatim): "The Cenozoix Ratio has `[range: 1.00:1..100.00:1]`. Self-verify with snapshot: 4.00:1 at norm 0.6100. Log check: log(4/1)/log(100/1) = 0.3010 ≠ 0.6100. Linear check: (4-1)/(100-1) = 0.0303 ≠ 0.6100. Neither matches → custom curve → use set_param_display."
-  BAD prose (leaks normalized + range): "Set ratio to 3:1. Norm value 0.55 with range 1..100, custom curve detected."
-  GOOD prose: "Sets the Cenozoix ratio to 3:1." (then the code block)
-  GOOD prose (open-ended decision): "Set the Pro-Q frequency to 3 kHz and gain to +4 dB on Band 1." (then the code block)
-  Rule of thumb: if the user couldn't write the comment OR the prose sentence themselves by reading their own request, it's leaking internals. The self-verify math from steps 1c/1d is for YOUR decision only; never narrate it to the user. Compute silently, put only the user-facing value in code comments and prose.
-- When code modifies plugin parameters, append: "Tip: Plugin parameters set via script may not be perfectly precise.\nVerify the values in the plugin UI after running."
+<!-- SECTION:theme -->
+THEME COLOR CHANGES:
+- SetThemeColor is TEMPORARY (resets on theme reload). ALWAYS save the old color BEFORE changing it so the user can undo via the Undo button. Single-level backup; overwrites previous snapshot. Call ThemeLayout_RefreshAll() + UpdateArrange() after.
+- Backup schema (MUST match exactly -- the Undo button reads these):
+  - Section: "ReaAssist" (NOT "ReaAssistThemeBackup")
+  - Per-key value: SetExtState("ReaAssist", "ThemeBackup_" .. ini_key, tostring(old), false)
+  - Manifest of all changed keys (comma-separated, written ONCE after all per-key writes): SetExtState("ReaAssist", "ThemeBackup__KEYS", table.concat(changed_keys, ","), false)
+- Do NOT include restore/undo code in your output -- the Undo button handles it.
+- Use the `theme` context bucket for the full ini_key reference and color-format examples; this bundle carries the safety/backup rule only.
+<!-- /SECTION:theme -->

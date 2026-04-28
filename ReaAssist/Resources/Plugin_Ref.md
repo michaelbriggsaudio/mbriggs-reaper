@@ -24,7 +24,7 @@ Precedence when setting an enum param:
    if it disagrees with live data.
 2. **Curated per-plugin enum table** in this file -- fallback only when
    no live data exists (e.g. the plugin is being newly added this turn
-   and no `fx:` / `fx_inspect:` bucket is pinned).
+   and no `fx_params:` / `fx_inspect:` bucket is pinned).
 3. **Recipe norm literals** -- illustrative stamps that may drift.
    The `-- Style: NAME` comment is canonical intent; the number is the
    stamp. When the live enum and the curated table disagree, the

@@ -1,5 +1,5 @@
 <!-- API_Ref.md - REAPER Lua API + workflow reference, parsed into 9 buckets at runtime. -->
-<!-- core: always-pinned. extended: docs_extended. items/envelopes/take_fx/routing/tempo: docs:NAME. -->
+<!-- core: pinned by default (when "Always include REAPER API reference" is on; otherwise on-demand via the docs bucket). extended: docs_extended. items/envelopes/take_fx/routing/tempo: docs:NAME. -->
 <!-- midi: midi bucket (auto-injected on midi prompts). theme: theme bucket (on-demand). -->
 <!-- Each bucket delimited by SECTION:name / /SECTION:name comment markers. -->
 
@@ -10,56 +10,45 @@ Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.67)
 Lua-only. All functions called as reaper.FunctionName().
 Use proj=0 for active project. Track/item indices in the API are 0-based.
 
-This is the CORE reference -- it covers tracks, FX, undo, scripting patterns,
-markers, transport, MIDI gateway, and common pitfalls. Less-common surface
-lives in on-demand sections requested via `<context_needed>docs:NAME</context_needed>`:
-  docs:items      -- media items, item grouping, takes
-  docs:take_fx    -- take FX (TakeFX_*)
-  docs:routing    -- sends, receives, channel bit-packing
-  docs:envelopes  -- envelopes, automation points, scaling
-  docs:tempo      -- tempo, time signature, time map / beats / QN
-Plus `docs_extended` for media sources, project, file/system, ext state,
-colors, UI & display, named-action calls, misc utilities.
+This is the CORE reference -- value scales, common patterns, tracks, track FX,
+markers, transport, undo, performance tips, and common pitfalls. Less-common
+surface lives in on-demand sections requested via `<context_needed>docs:NAME</context_needed>`:
+  docs:items      -- media items, takes, item grouping, splits, fades, item properties, P_RAZOREDITS
+  docs:take_fx    -- take FX (TakeFX_*); per-item / per-clip / per-take effects
+  docs:routing    -- sends, receives, sidechain routing, hardware outputs, channel bit-packing, MIDI channel routing
+  docs:envelopes  -- envelopes, automation, automation points, automation modes, envelope scaling, volume/pan envelopes
+  docs:tempo      -- tempo, BPM, time signature, time map, beats, quarter notes (QN), measures, bar positions
+Plus `docs_extended` for media sources, project metadata, file/system, ext
+state, colors, UI & display, named-action calls (Main_OnCommand), misc
+utilities. MIDI workflow (notes, CCs, PPQ, MIDI editor) lives in the `midi`
+bucket (auto-injected on midi prompts); theme color reference (ini_keys,
+SetThemeColor) lives in the `theme` bucket.
 
-## MOST COMMON TASKS (quick reference)
+## VALUE SCALES (read first -- silent-wrong-value bugs come from these)
 
-```lua
--- Set volume of selected tracks to -6 dB:
-for i = 0, reaper.CountSelectedTracks(0) - 1 do
-  local tr = reaper.GetSelectedTrack(0, i)
-  reaper.SetMediaTrackInfo_Value(tr, "D_VOL", 0.5)  -- 0.5 = -6dB
-end
+INDICES (0-based vs 1-based):
+- API track/item indices are 0-based. GetTrack(0, 0) = Track 1.
+- IP_TRACKNUMBER returns 1-based; subtract 1 when passing back to GetTrack.
+- Context buckets report 1-based for readability; the API is 0-based.
 
--- Rename selected track:
-local tr = reaper.GetSelectedTrack(0, 0)
-if tr then reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "New Name", true) end
+VOLUME (D_VOL is LINEAR AMPLITUDE, not dB and not slider position):
+  0=-inf, 0.5=-6dB, 1.0=+0dB, 2.0=+6dB.
+- amp -> dB: `db = 20 * math.log(amp, 10)` (clamp `amp <= 0` to "-inf"
+  or skip the log; passing 0 yields -inf).
+- dB -> amp: `amp = 10 ^ (db / 20)`.
+- DO NOT pass D_VOL through SLIDER2DB / DB2SLIDER -- those operate on
+  REAPER's 0..1000 fader-position scale (where 540 = 0dB), not linear
+  amplitude. Feeding D_VOL=1.0 (which is 0dB) into SLIDER2DB returns
+  a deeply negative dB value (~ -150 to -1000). The same caveat applies
+  to D_VOL on items, takes, and sends; envelope volumes have their own
+  scaling -- see the envelopes bucket.
 
--- Add FX to selected track:
-local tr = reaper.GetSelectedTrack(0, 0)
-if tr then reaper.TrackFX_AddByName(tr, "ReaEQ", false, -1) end  -- -1 = find or add
+COLORS:
+- I_CUSTOMCOLOR and track/item colors require ColorToNative(r,g,b)|0x1000000.
+  Without the |0x1000000 high bit, REAPER reads the value as "no custom
+  color" and shows the default.
 
--- Mute/unmute selected tracks:
-for i = 0, reaper.CountSelectedTracks(0) - 1 do
-  local tr = reaper.GetSelectedTrack(0, i)
-  local muted = reaper.GetMediaTrackInfo_Value(tr, "B_MUTE")
-  reaper.SetMediaTrackInfo_Value(tr, "B_MUTE", muted == 1 and 0 or 1)
-end
-
--- Delete all tracks:
-for i = reaper.CountTracks(0) - 1, 0, -1 do  -- iterate backwards when deleting
-  reaper.DeleteTrack(reaper.GetTrack(0, i))
-end
-
--- Get/set time selection:
-local ts, te = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
-reaper.GetSet_LoopTimeRange(true, false, 0.0, 4.0, false)  -- set 0-4s
-
--- Move edit cursor to bar 5:
-local pos = reaper.TimeMap2_beatsToTime(0, 0, 5)  -- bar 5, beat 0
-reaper.SetEditCurPos(pos, true, false)
-```
-
-## SCRIPTING PATTERNS
+## COMMON PATTERNS
 
 ```lua
 -- Standard wrapper for any state-changing script:
@@ -81,29 +70,57 @@ for i = 0, reaper.CountSelectedTracks(0) - 1 do
   local tr = reaper.GetSelectedTrack(0, i)
 end
 
--- Iterate all items on a track:
+-- Iterate items on a track:
 for i = 0, reaper.CountTrackMediaItems(tr) - 1 do
   local item = reaper.GetTrackMediaItem(tr, i)
 end
 
--- Iterate all items in project:
+-- Iterate items in project:
 for i = 0, reaper.CountMediaItems(0) - 1 do
   local item = reaper.GetMediaItem(0, i)
   local tr   = reaper.GetMediaItem_Track(item)
 end
 
--- Always nil-check pointers before use:
-local tr = reaper.GetSelectedTrack(0, 0)
-if not tr then return end
+-- Iterate backwards when deleting (avoids index shift):
+for i = reaper.CountTracks(0) - 1, 0, -1 do
+  reaper.DeleteTrack(reaper.GetTrack(0, i))
+end
 
--- Script loop with defer (for persistent/UI scripts):
+-- Nil-check pattern with user error message:
+local tr = reaper.GetSelectedTrack(0, 0)
+if not tr then
+  reaper.ShowMessageBox("No track selected.", "Error", 0)
+  return
+end
+
+-- Set volume / mute on selected tracks (D_VOL is linear amplitude -- see VALUE SCALES):
+for i = 0, reaper.CountSelectedTracks(0) - 1 do
+  local tr = reaper.GetSelectedTrack(0, i)
+  reaper.SetMediaTrackInfo_Value(tr, "D_VOL", 0.5)  -- -6dB
+  local muted = reaper.GetMediaTrackInfo_Value(tr, "B_MUTE")
+  reaper.SetMediaTrackInfo_Value(tr, "B_MUTE", muted == 1 and 0 or 1)
+end
+
+-- Rename a track:
+local tr = reaper.GetSelectedTrack(0, 0)
+if tr then reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "New Name", true) end
+
+-- Add FX to a track (use -1 to find existing OR add):
+local tr = reaper.GetSelectedTrack(0, 0)
+if tr then reaper.TrackFX_AddByName(tr, "ReaEQ", false, -1) end
+
+-- Get/set time selection:
+local ts, te = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+reaper.GetSet_LoopTimeRange(true, false, 0.0, 4.0, false)  -- set 0-4s
+
+-- Persistent script loop (UI scripts, watchers):
 local function loop()
   -- work each frame
   reaper.defer(loop)
 end
 loop()
 
--- Single-instance guard using ExtState:
+-- Single-instance guard via ExtState:
 local EXT_NS = "my_script"
 if reaper.GetExtState(EXT_NS, "running") ~= "" then
   reaper.SetExtState(EXT_NS, "request_close", "1", false)
@@ -114,26 +131,12 @@ reaper.atexit(function()
   reaper.SetExtState(EXT_NS, "running", "", false)
 end)
 
--- Run a REAPER action by command ID (see COMMON ACTION IDS section below for a full list):
+-- Run a REAPER action (for COMMON ACTION IDs see docs_extended):
 reaper.Main_OnCommand(40029, 0)  -- Undo
 
--- Look up a named command (e.g. SWS):
+-- Look up a named/SWS command:
 local cmd = reaper.NamedCommandLookup("_SWS_AWCONSOL")
 if cmd ~= 0 then reaper.Main_OnCommand(cmd, 0) end
-
--- Standard nil-check + user error message pattern:
-local tr = reaper.GetSelectedTrack(0, 0)
-if not tr then
-  reaper.ShowMessageBox("No track selected.", "Error", 0)
-  return
-end
-
--- Safe FX operation: find FX index before using it:
-local fx_idx = reaper.TrackFX_GetByName(tr, "ReaEQ", false)
-if fx_idx == -1 then
-  reaper.ShowMessageBox("ReaEQ not found on track.", "Error", 0)
-  return
-end
 ```
 
 ## RETURN VALUE UNPACKING
@@ -250,11 +253,14 @@ Empty string = no razor edit areas on this track.
 ```
 
 ```lua
--- Read all razor edit areas on a track:
+-- Read all razor edit areas on a track. The third token is always quoted in
+-- the storage format -- "" for the track itself, "{GUID}" for an envelope
+-- lane -- so a single quoted-string capture handles both. (Lua patterns do
+-- NOT support | alternation; do not write `("..."|...)`.)
 local _, razor = reaper.GetSetMediaTrackInfo_String(tr, "P_RAZOREDITS", "", false)
 local areas = {}
--- Iterate triples: start, end, env_guid (env_guid may be quoted "{...}")
-for s, e, g in razor:gmatch('([%d%.%-]+) ([%d%.%-]+) ("[^"]*"|[^%s]*)') do
+for s, e, g in razor:gmatch('([%d%.%-]+) ([%d%.%-]+) "([^"]*)"') do
+  -- g is the inner GUID text without quotes ("" for track-level, GUID for env-lane)
   areas[#areas+1] = { start = tonumber(s), fin = tonumber(e), env = g }
 end
 -- Simpler version when you only care about track-level areas (env_guid = ""):
@@ -284,6 +290,24 @@ scripts the plain P_RAZOREDITS field is what you want.
 
 ## TRACK FX
 
+ADDBYNAME vs GETBYNAME (read first -- the most common FX-script bug):
+- `TrackFX_AddByName(tr, name, false, -1)` finds OR adds. Use this when your
+  script needs the FX to exist on the track.
+- `TrackFX_GetByName(tr, name, false)` NEVER adds, only searches. Returns -1
+  if not found. Reserve for read-only existence checks.
+- After AddByName, defer param access to the next cycle -- the FX may not be
+  fully initialized in the same execution frame, and GetNumParams returns nil.
+- Function name is `GetNumParams`, NOT `GetParamCount` (common hallucination).
+
+```lua
+  local fx = reaper.TrackFX_AddByName(tr, "ReaEQ", false, -1)
+  reaper.defer(function()
+    if fx < 0 then return end
+    local n = reaper.TrackFX_GetNumParams(tr, fx)
+    -- set params here
+  end)
+```
+
 `integer reaper.TrackFX_GetCount(MediaTrack track)`
   Count FX on a track.
 
@@ -303,34 +327,11 @@ scripts the plain P_RAZOREDITS field is what you want.
      0 = find existing only, never add
      1 = always add a new instance even if one exists (causes duplicates -- avoid)
 
-```lua
-  -- PITFALL: Do NOT use TrackFX_GetByName when you need to add an FX. GetByName never
-  -- adds; it only finds. If the FX is not already on the track, GetByName returns -1
-  -- and calling GetNumParams on that -1 index will crash with a nil error.
-  -- Rule: if your script needs the FX to exist, always use TrackFX_AddByName with -1.
-  -- PITFALL: After adding a new FX with AddByName, do NOT call GetNumParams or any
-  -- param functions in the same execution frame. The FX may not be fully initialized.
-  -- Always defer param access to the next cycle using reaper.defer().
-  -- Pattern:
-  --   local fx = reaper.TrackFX_AddByName(tr, "ReaEQ", false, -1)
-  --   reaper.defer(function()
-  --     if fx == -1 then return end
-  --     local n = reaper.TrackFX_GetNumParams(tr, fx)
-  --     -- set params here
-  --   end)
-```
-
 `boolean reaper.TrackFX_Delete(MediaTrack track, integer fx)`
   Remove FX from chain.
 
 `integer reaper.TrackFX_GetNumParams(MediaTrack track, integer fx)`
-  Count parameters on an FX.
-
-```lua
-  -- NOTE: there is NO TrackFX_GetParamCount. The correct function is TrackFX_GetNumParams.
-  -- Common hallucination: do NOT call reaper.TrackFX_GetParamCount() -- it does not exist.
-  -- PITFALL: Returns nil if called in the same frame as TrackFX_AddByName. Always defer.
-```
+  Count parameters on an FX. (Returns nil in same frame as AddByName -- defer.)
 
 `number retval, number minval, number maxval reaper.TrackFX_GetParam(MediaTrack track, integer fx, integer param)`
   Get FX parameter value and min/max range.
@@ -357,13 +358,7 @@ scripts the plain P_RAZOREDITS field is what you want.
   showFlag: 0=hide FX chain window, 1=show FX chain window, 2=hide floating window, 3=show floating window.
 
 `integer reaper.TrackFX_GetByName(MediaTrack track, string fxname, boolean instantiate)`
-  Find FX index by name. Returns -1 if not found. NEVER adds an FX.
-
-```lua
-  -- PITFALL: Confused with TrackFX_AddByName. GetByName only searches; it will never
-  -- instantiate an FX. Use TrackFX_AddByName(tr, name, false, -1) when you need the
-  -- FX to exist on the track. Reserve GetByName for read-only checks only.
-```
+  Find FX index by name. Returns -1 if not found. NEVER adds (see ADDBYNAME vs GETBYNAME above).
 
 `boolean reaper.TrackFX_CopyToTrack(MediaTrack src_track, integer src_fx, MediaTrack dest_track, integer dest_fx, boolean is_move)`
   Copy or move FX to another track.
@@ -407,10 +402,14 @@ scripts the plain P_RAZOREDITS field is what you want.
   Add marker/region with color (ColorToNative(r,g,b)|0x1000000, or 0 for default).
 
 `boolean reaper.DeleteProjectMarker(ReaProject proj, integer markrgnindexnumber, boolean isrgn)`
-  Delete marker/region by displayed index.
+  Delete marker/region by DISPLAYED number (the 1, 2, 3... shown in REAPER), NOT the internal index.
 
 `boolean reaper.DeleteProjectMarkerByIndex(ReaProject proj, integer markrgnidx)`
   Delete marker/region by internal zero-based index.
+
+PITFALL: AddProjectMarker returns the assigned INTERNAL index. To delete a
+marker you just added, use DeleteProjectMarkerByIndex (NOT DeleteProjectMarker,
+which expects the displayed number).
 
 `integer markeridx, integer regionidx reaper.GetLastMarkerAndCurRegion(ReaProject proj, number time)`
   Get last marker before time and region containing time.
@@ -446,34 +445,6 @@ scripts the plain P_RAZOREDITS field is what you want.
 `reaper.Undo_DoUndo2(ReaProject proj)`
 `reaper.Undo_DoRedo2(ReaProject proj)`
 
-## MIDI
-
-MIDI functions live in a dedicated reference bucket to keep this file lean.
-Request <context_needed>midi</context_needed> when working with MIDI items,
-notes, CCs, the MIDI editor, or any MIDI_* / MIDIEditor_* function. The midi
-bucket includes function signatures, the PPQ explainer, value ranges, the
-bulk-ops rule, and worked examples for transpose/quantize/insert/delete.
-
-The bucket is auto-injected when the user prompt contains the word "midi";
-request it explicitly for prompts that imply MIDI without saying it (e.g.
-"transpose those notes", "quantize the take").
-
-## NOTES
-- All API calls use reaper.* prefix.
-- API track/item indices are 0-based. Context buckets report 1-based for readability.
-- D_VOL is LINEAR AMPLITUDE (0=-inf, 0.5=-6dB, 1=+0dB, 2=+6dB).
-  - amp -> dB: `db = 20 * math.log(amp, 10)` (clamp `amp <= 0` to "-inf"
-    or skip the log; passing 0 yields -inf).
-  - dB -> amp: `amp = 10 ^ (db / 20)`.
-  - DO NOT pass D_VOL through SLIDER2DB / DB2SLIDER -- those operate on
-    REAPER's 0..1000 fader-position scale (where 540 = 0dB), not linear
-    amplitude. Feeding D_VOL=1.0 (which is 0dB) into SLIDER2DB returns
-    a deeply negative dB value (~ -150 to -1000). The same caveat applies
-    to D_VOL on items, takes, and sends; envelope volumes have their own
-    scaling -- see ENVELOPES.
-- I_CUSTOMCOLOR and track colors require ColorToNative(r,g,b)|0x1000000.
-- See COMMON PITFALLS below for undo, nil-check, and index guidance.
-
 ## PERFORMANCE TIPS
 
 ```lua
@@ -501,37 +472,21 @@ end
 ## COMMON PITFALLS
 
 ```lua
--- PITFALL: 0-based API vs 1-based display.
--- GetTrack(0, 0) = Track 1. GetTrack(0, 9) = Track 10.
--- IP_TRACKNUMBER returns 1-based; subtract 1 when passing back to GetTrack.
-
 -- PITFALL: Forgetting Undo_BeginBlock / Undo_EndBlock.
--- Without the pair, the action cannot be undone and may corrupt the undo history.
--- Always wrap even single-line state changes.
-
--- PITFALL: Not nil-checking pointer returns.
--- GetSelectedTrack returns nil if nothing is selected.
--- GetTrack returns nil if index is out of range.
--- GetActiveTake returns nil if item has no takes.
--- Passing nil to any API function causes a silent error or crash.
-
--- PITFALL: Calling UpdateArrange inside a loop.
--- Call it ONCE after all operations are complete, not inside the loop.
--- Same for PreventUIRefresh(-1) and TrackList_AdjustWindows.
-
--- PITFALL: GetTrackName ignoring the first return value.
--- Wrong:  local name = reaper.GetTrackName(tr)  -- gets retval (true), not name
--- Right:  local _, name = reaper.GetTrackName(tr)
+-- Without the pair, the action cannot be undone and may corrupt the undo
+-- history. Always wrap even single-line state changes.
 
 -- PITFALL: Using CountSelectedTracks inside a loop that changes selection.
--- Cache the count before the loop; changing selection mid-loop alters the count.
+-- Cache the count before the loop; changing selection mid-loop alters the
+-- count and skips items.
 local count = reaper.CountSelectedTracks(0)
-for i = 0, count - 1 do ... end
+for i = 0, count - 1 do
+  -- ... your work here ...
+end
 
--- PITFALL: AddProjectMarker index vs displayed number.
--- wantidx=-1 lets REAPER assign; the return value is the assigned internal index.
--- DeleteProjectMarker takes the DISPLAYED number, not the internal index.
--- Use DeleteProjectMarkerByIndex for the internal index.
+-- PITFALL: Calling UpdateArrange / TrackList_AdjustWindows inside a loop.
+-- Call them ONCE after all operations are complete. Same for
+-- PreventUIRefresh(-1).
 ```
 <!-- /SECTION:core -->
 
@@ -1017,6 +972,11 @@ inspect, filter, or programmatically pick which items go in which group.
 `TrackEnvelope reaper.GetSelectedEnvelope(ReaProject proj)`
   Get currently selected envelope (nil if none).
 
+`integer reaper.GetEnvelopeScalingMode(TrackEnvelope env)`
+  Get the envelope's scaling mode. Native API (no SWS required).
+  0 = no scaling (linear amplitude for Volume envelopes; raw value otherwise).
+  1 = fader scaling (used by some Volume / Pan envelopes when "fader scaling" is on).
+
 `number reaper.ScaleToEnvelopeMode(integer scaling_mode, number val)`
   Convert a real-world value (e.g. dB amplitude or pan position) to the
   envelope's internal scaled storage value. Pass the result to
@@ -1028,33 +988,21 @@ inspect, filter, or programmatically pick which items go in which group.
 
 ```
 CRITICAL: Volume envelope values are NOT the same as track D_VOL.
-The "Volume (Pre-FX)" / "Volume" envelopes use a non-linear scaling that
-depends on the envelope's scaling_mode. You MUST round-trip values through
+The "Volume (Pre-FX)" / "Volume" envelopes use a scaling that depends on
+the envelope's scaling_mode. You MUST round-trip values through
 ScaleToEnvelopeMode / ScaleFromEnvelopeMode or your points will land at the
 wrong dB. Pan envelopes have a similar issue when "fader scaling" is on.
 
-Get the scaling mode for an envelope:
-  local _, _, _, _, _, _, _, _, _, _, _, scaling_mode =
-    reaper.BR_EnvGetProperties(env)   -- requires SWS
-  -- OR parse the envelope chunk's "VOLTYPE" / "ACT" lines via GetSetEnvelopeStateChunk
-
-Most modern projects use scaling_mode 0 (linear amplitude, 1.0 = 0dB) for
-volume envelopes, so the conversion is identity. But NEVER assume -- always
-call ScaleToEnvelopeMode before writing a point. The cost is one function
+Always read the scaling mode with the native GetEnvelopeScalingMode(env)
+before writing a point. NEVER assume mode 0 -- the cost is one function
 call; the cost of getting it wrong is silently broken automation.
 ```
 
 ```lua
 -- Pattern: write a -6 dB volume envelope point at time 4.0.
--- BR_EnvGetProperties is part of SWS; if SWS is not present, fall back to
--- assuming scaling_mode 0 (the default for new volume envelopes).
 local env = reaper.GetTrackEnvelopeByName(tr, "Volume")
 if not env then return end
-local mode = 0
-if reaper.BR_EnvGetProperties then
-  local _,_,_,_,_,_,_,_,_,_,_,m = reaper.BR_EnvGetProperties(env)
-  mode = m or 0
-end
+local mode = reaper.GetEnvelopeScalingMode(env)
 -- Volume envelopes (scaling_mode 0) store LINEAR AMPLITUDE, same as D_VOL.
 -- Convert dB -> amplitude with `10 ^ (db / 20)`. ScaleToEnvelopeMode then
 -- handles any non-default scaling mode the envelope is set to. Do NOT
@@ -1072,10 +1020,11 @@ reaper.Envelope_SortPoints(env)
 
 Take FX live on a MediaItem_Take, NOT a track. Use this section when the user
 wants to apply an effect to a specific item rather than the whole track. The
-TakeFX_* API mirrors TrackFX_* exactly -- same arguments, same return shapes,
-same defer-after-add requirement -- but operates on a take. If you need to
-work with the same FX types you already know from TrackFX, the only change is
-swapping `tr` for `take` and the function prefix.
+TakeFX_* API parallels TrackFX_* in semantics (same defer-after-add rule,
+same param/preset/UI surface), but it is NOT identical: in particular,
+TakeFX_AddByName takes 3 args (take, fxname, instantiate) while TrackFX_AddByName
+takes 4 (track, fxname, recFX, instantiate). Always use the take-prefixed
+function and the take-shaped argument list documented below.
 
 Choosing track FX vs take FX:
 - "Add an EQ to the track" / "to the bass track" -> TrackFX_*
@@ -1117,7 +1066,7 @@ Choosing track FX vs take FX:
 `boolean reaper.TakeFX_GetOpen(MediaItem_Take take, integer fx)`
 `reaper.TakeFX_SetOpen(MediaItem_Take take, integer fx, boolean open)`
 `reaper.TakeFX_Show(MediaItem_Take take, integer fx, integer showFlag)`
-  UI open/close/show. showFlag: 0=hide, 1=show, 2=toggle, 3=show in chain.
+  Show/hide FX UI. showFlag: 0=hide chain window, 1=show chain window, 2=hide floating window, 3=show floating window. (Same flags as TrackFX_Show.)
 
 `boolean reaper.TakeFX_CopyToTrack(MediaItem_Take src_take, integer src_fx, MediaTrack dest_track, integer dest_fx, boolean is_move)`
 `boolean reaper.TakeFX_CopyToTake(MediaItem_Take src_take, integer src_fx, MediaItem_Take dest_take, integer dest_fx, boolean is_move)`
@@ -1169,44 +1118,38 @@ end)
 ### CHANNEL BIT-PACKING (I_SRCCHAN / I_DSTCHAN)
 
 I_SRCCHAN and I_DSTCHAN are NOT plain channel numbers -- they are packed
-integers encoding both the first channel and the channel count. Misreading
-them is the most common send-routing bug.
+integers. Misreading them is the most common send-routing bug.
 
 ```
-Encoding (both fields use the same format):
-  packed = first_chan | (((num_chans / 2) - 1) << 10)
-
-  first_chan: 0-based first channel (0 = ch1, 2 = ch3, 4 = ch5, ...)
-  num_chans:  channel count (must be EVEN: 2, 4, 6, ...). Mono = special.
-
-Common values:
+Verified-safe stereo cases (both fields, low 10 bits = first 0-based channel):
   0           = stereo, channels 1+2  (default for new sends)
   2           = stereo, channels 3+4
   4           = stereo, channels 5+6
-  1024 | 0    = 4-channel, starting at ch1   ((4/2-1)=1, 1<<10 = 1024)
-  1024 | 2    = 4-channel, starting at ch3
-  2048 | 0    = 6-channel, starting at ch1
   -1          = audio routing disabled (no audio sent)
 
-Mono routing (special case):
-  packed = 1024 | first_chan, with the high bit set differently --
-  mono pins are NOT representable via the same formula. For mono sends,
-  the user usually wants stereo with both channels driven; if a true mono
-  routing is required, ask the user to set it in the UI and operate on the
-  existing send, since the encoding has REAPER-version-specific quirks.
+The high bits (bit 10 = 1024 and above) encode mono mix and channel-count
+hints, but the EXACT encoding differs between I_SRCCHAN and I_DSTCHAN and has
+varied between REAPER versions. For ANY routing that isn't plain stereo
+(multi-channel sends, mono mix, mono pin routing), do NOT compute the packed
+value yourself -- ask the user to set it in the REAPER UI and operate on the
+existing send. The few extra cents of UI friction are cheaper than silently
+landing audio on the wrong channels.
 
 I_MIDI_SRCCHAN / I_MIDI_DSTCHAN:
   Plain integers, NOT bit-packed. -1 = disabled. 0..15 = MIDI channel 1..16.
   Subtract 1 when converting from user input ("MIDI channel 5" -> 4).
+  (Newer REAPER builds also expose I_MIDIFLAGS as a unified bit-packed
+  replacement; if the script needs MIDI channel routing and these older
+  attributes return -1 unexpectedly, fall back to reading I_MIDIFLAGS.)
 ```
 
 ```lua
--- Pattern: send selected track to track 1, channels 3+4
+-- Pattern: send selected track to track 1, stereo to channels 3+4
 local src = reaper.GetSelectedTrack(0, 0)
 local dst = reaper.GetTrack(0, 0)
 if not src or not dst then return end
 local sidx = reaper.CreateTrackSend(src, dst)
-reaper.SetTrackSendInfo_Value(src, 0, sidx, "I_SRCCHAN", 0)    -- ch1+2 from source
+reaper.SetTrackSendInfo_Value(src, 0, sidx, "I_SRCCHAN", 0)    -- stereo from ch1+2
 reaper.SetTrackSendInfo_Value(src, 0, sidx, "I_DSTCHAN", 2)    -- to ch3+4 on dest
 ```
 <!-- /SECTION:routing -->
@@ -1335,6 +1278,15 @@ hang REAPER on hundreds of notes. Pass noSortIn=true to every Insert/Set call.
 This applies to MIDI_InsertNote, MIDI_InsertCC, MIDI_SetNote, MIDI_SetCC,
 MIDI_DeleteNote, MIDI_DeleteCC. Single-event calls do not need it.
 
+For VERY large operations (>1000 events, e.g. importing a whole MIDI file or
+generating dense CC streams), even the DisableSort+InsertNote loop can feel
+slow. The fast-path is `MIDI_GetAllEvts` / `MIDI_SetAllEvts`, which read/write
+the take's entire event list as one binary string of MIDI bytes
+(deltatime-encoded). It's ~10x faster than per-event calls but requires
+parsing/building the raw byte format yourself. Reach for it only when the
+DisableSort loop is actually the bottleneck; the simple loop is fine for
+typical user requests.
+
 ## FUNCTION SIGNATURES
 
 `MediaItem reaper.CreateNewMIDIItemInProj(MediaTrack track, number starttime, number endtime, optional boolean qnIn)`
@@ -1397,10 +1349,26 @@ MIDI_DeleteNote, MIDI_DeleteCC. Single-event calls do not need it.
 
   Convert PPQ to seconds (project time).
 
+`number reaper.MIDI_GetPPQPosFromProjQN(MediaItem_Take take, number projqn)`
+
+  Convert quarter notes (project QN, from project start) to PPQ. PREFERRED
+  over the time-based path for musical positions -- tempo-map-correct without
+  any `60/bpm` math.
+
+`number reaper.MIDI_GetProjQNFromPPQPos(MediaItem_Take take, number ppqpos)`
+
+  Convert PPQ to project QN.
+
 `number reaper.MIDI_GetPPQPos_StartOfMeasure(MediaItem_Take take, number ppqpos)`
 `number reaper.MIDI_GetPPQPos_EndOfMeasure(MediaItem_Take take, number ppqpos)`
 
   Snap a PPQ position to the nearest measure boundary.
+
+`number swing, number note_len_qn reaper.MIDI_GetGrid(MediaItem_Take take)`
+
+  Get the MIDI editor grid for this take. Returns swing amount (-1..1) and
+  grid resolution in QN (0.25 = 16th note, 0.5 = 8th, 1.0 = quarter).
+  Use for snapping/quantizing to the user's chosen grid instead of hard-coding.
 
 `HWND reaper.MIDIEditor_GetActive()`
 
@@ -1459,18 +1427,18 @@ MIDI_DeleteNote, MIDI_DeleteCC. Single-event calls do not need it.
 
 ```lua
   -- notes = {{pitch=60, beat=0, dur=1}, {pitch=62, beat=1, dur=1}, ...}
+  -- "beat" here = quarter notes from item start. Tempo-map-correct (no 60/bpm math).
   local item = reaper.GetMediaItemTake_Item(take)
   local item_t = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
-  local _, bpm = reaper.GetProjectTimeSignature2(0)
-  local sec_per_beat = 60 / bpm
+  local item_qn = reaper.TimeMap2_timeToQN(0, item_t)
 
   reaper.Undo_BeginBlock()
   reaper.MIDI_DisableSort(take)
   for _, note in ipairs(notes) do
-    local t_start = item_t + note.beat * sec_per_beat
-    local t_end   = t_start + note.dur * sec_per_beat
-    local ppq_st  = reaper.MIDI_GetPPQPosFromProjTime(take, t_start)
-    local ppq_en  = reaper.MIDI_GetPPQPosFromProjTime(take, t_end)
+    local qn_start = item_qn + note.beat
+    local qn_end   = qn_start + note.dur
+    local ppq_st   = reaper.MIDI_GetPPQPosFromProjQN(take, qn_start)
+    local ppq_en   = reaper.MIDI_GetPPQPosFromProjQN(take, qn_end)
     reaper.MIDI_InsertNote(take, false, false, ppq_st, ppq_en, 0, note.pitch, 100, true)
   end
   reaper.MIDI_Sort(take)
@@ -1496,21 +1464,21 @@ MIDI_DeleteNote, MIDI_DeleteCC. Single-event calls do not need it.
 ### WORKFLOW 6: Quantize all notes to the nearest grid division
 
 ```lua
-  -- grid_qn = 0.25 for 16th notes, 0.5 for 8ths, 1.0 for quarters
+  -- grid_qn = 0.25 for 16th notes, 0.5 for 8ths, 1.0 for quarters.
+  -- Or read the user's MIDI editor grid: local _, grid_qn = reaper.MIDI_GetGrid(take)
+  -- QN-based math is tempo-map-correct without 60/bpm.
   local item = reaper.GetMediaItemTake_Item(take)
   local item_t = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
-  local _, bpm = reaper.GetProjectTimeSignature2(0)
-  local sec_per_beat = 60 / bpm
-  local grid_secs = grid_qn * sec_per_beat
+  local item_qn = reaper.TimeMap2_timeToQN(0, item_t)
 
   reaper.Undo_BeginBlock()
   reaper.MIDI_DisableSort(take)
   local _, n_notes = reaper.MIDI_CountEvts(take)
   for i = 0, n_notes - 1 do
     local _, _, _, ppq_st, ppq_en = reaper.MIDI_GetNote(take, i)
-    local t_st = reaper.MIDI_GetProjTimeFromPPQPos(take, ppq_st) - item_t
-    local snap = math.floor(t_st / grid_secs + 0.5) * grid_secs
-    local new_ppq_st = reaper.MIDI_GetPPQPosFromProjTime(take, item_t + snap)
+    local qn_st = reaper.MIDI_GetProjQNFromPPQPos(take, ppq_st) - item_qn
+    local snap_qn = math.floor(qn_st / grid_qn + 0.5) * grid_qn
+    local new_ppq_st = reaper.MIDI_GetPPQPosFromProjQN(take, item_qn + snap_qn)
     local len = ppq_en - ppq_st
     reaper.MIDI_SetNote(take, i, nil, nil, new_ppq_st, new_ppq_st + len, nil, nil, nil, true)
   end
@@ -1536,23 +1504,21 @@ MIDI_DeleteNote, MIDI_DeleteCC. Single-event calls do not need it.
 ### WORKFLOW 8: Create a brand-new empty MIDI item, 4 bars long
 
 ```lua
-  local _, bpm = reaper.GetProjectTimeSignature2(0)
-  local cur    = reaper.GetCursorPosition()
-  local len    = (60 / bpm) * 4 * 4  -- 4 bars at 4 beats/bar
-  local item   = reaper.CreateNewMIDIItemInProj(track, cur, cur + len, false)
+  -- Use qnIn=true so REAPER respects the project's tempo map. Length below
+  -- assumes 4/4; for other time signatures multiply 4 by the actual bpi.
+  local cur_qn = reaper.TimeMap2_timeToQN(0, reaper.GetCursorPosition())
+  local len_qn = 4 * 4  -- 4 bars * 4 quarter-notes per bar (4/4)
+  local item   = reaper.CreateNewMIDIItemInProj(track, cur_qn, cur_qn + len_qn, true)
   local take   = reaper.GetActiveTake(item)
   -- now you can MIDI_InsertNote into `take`
 ```
 
 ## PITFALLS
 
-- Seconds → PPQ always. Use MIDI_GetPPQPosFromProjTime; passing seconds to Insert/SetNote is silent corruption.
-- Forgetting MIDI_Sort after a bulk op. Symptoms: editor looks right, playback is wrong, or subsequent reads return stale data.
-- Iterating forward while deleting. Indices shift on each delete, you skip half the events. ALWAYS iterate backwards when deleting.
-- Channel 1 vs 0. User says "channel 1"; API expects 0. Subtract 1 from user input.
+- Iterating forward while deleting. Indices shift on each delete; you skip half the events. ALWAYS iterate backwards when deleting.
 - Pitch / velocity out of range. Clamp to 0..127; MIDI_InsertNote silently fails or wraps.
 - Velocity 0 = note off in the MIDI spec. Use 1 as the practical minimum.
-- Calling MIDI functions on a non-MIDI take. Check reaper.TakeIsMIDI(take) first when the source is uncertain.
+- Calling MIDI functions on a non-MIDI take. Check `reaper.TakeIsMIDI(take)` first when the source is uncertain.
 - CC chanmsg confusion. Plain MIDI CCs are 0xB0, NOT 0xC0 (program change). Pitch bend is 0xE0.
 <!-- /SECTION:midi -->
 
@@ -1565,15 +1531,13 @@ Always call ThemeLayout_RefreshAll() + UpdateArrange() after changing colors.
 
 ## QUICK USAGE
 
-MANDATORY: ALWAYS save old colors to ExtState BEFORE changing them so the user
-can undo/restore. Use the key prefix "ThemeBackup_" + ini_key under the
-"ReaAssist" section. After saving all individual keys, ALWAYS write a manifest
-entry listing ALL changed keys (comma-separated) so the Undo button can find
-them:
-  reaper.SetExtState("ReaAssist", "ThemeBackup__KEYS", "key1,key2,key3", false)
+MANDATORY: save old colors to ExtState BEFORE changing them so the Undo button
+can revert. The pattern below shows the required schema (per-key
+`ThemeBackup_<key>` values + a `ThemeBackup__KEYS` manifest entry listing every
+changed key, comma-separated).
 
 ```lua
--- REQUIRED PATTERN: save old color, then set new one
+-- Single color: save old, then set new.
 local key = "col_arrangebg"
 local old = reaper.GetThemeColor(key, 0)
 reaper.SetExtState("ReaAssist", "ThemeBackup_" .. key, tostring(old), false)
@@ -1584,7 +1548,7 @@ reaper.UpdateArrange()
 ```
 
 ```lua
--- REQUIRED PATTERN: save + set multiple colors
+-- Multiple colors: per-key save, then ONE manifest write at the end.
 local keys_and_colors = {
   {"col_main_bg2",   {30, 30, 35}},
   {"col_main_text",  {220, 220, 220}},
@@ -1604,10 +1568,6 @@ reaper.PreventUIRefresh(-1)
 reaper.ThemeLayout_RefreshAll()
 reaper.UpdateArrange()
 ```
-
-IMPORTANT: Do NOT include restore/undo code in your response. The Undo button
-handles reverting theme changes automatically via the saved ExtState backups.
-Only output the code that APPLIES the requested color changes.
 
 ```lua
 -- Read current track panel text color
@@ -1643,13 +1603,9 @@ local r, g, b = reaper.ColorFromNative(native)
 
 ## IMPORTANT NOTES
 
-- REAPER's built-in undo system does not track theme color changes, so the ExtState backup (see QUICK USAGE pattern) is the only way to revert. The Undo button uses these backups automatically; do not generate restore scripts yourself.
 - SetThemeColor changes are TEMPORARY. After applying color changes, add this exact note: 'These changes are temporary and will reset if you reload your theme. Use the Undo button to revert, or click the "Save Theme" button under the code block above to make them permanent.'
-- Always use ColorToNative(r,g,b) | 0x1000000 for the color value.
-- Always call ThemeLayout_RefreshAll() after setting colors.
-- Call UpdateArrange() to refresh the arrange view immediately.
-- Wrap bulk changes in PreventUIRefresh(1) / PreventUIRefresh(-1) to avoid flicker.
-- Keys ending in _drawmode are blend mode flags, not colors. Do not set RGB values on them.
+- Do NOT include restore/undo code in your response. REAPER's built-in undo doesn't track theme changes; the Undo button reads the ExtState backups automatically. Only output the code that APPLIES the requested changes.
+- Keys ending in `_drawmode` are blend mode flags, not colors. Do not set RGB values on them.
 - Some keys have no visible effect depending on the active theme's image assets.
 
 ## COLOR KEYS

@@ -2919,7 +2919,7 @@ Offset  Name                          Type        Notes
 +3      N Gain                        continuous  dB -30..+30 linear
 +4      N Q                           continuous  0.025..40 (see Q scale)
 +5      N Shape                       enum        10 shapes (see Shape enum)
-+6      N Slope                       enum        dB/oct (see Slope enum)
++6      N Slope                       numeric     dB/oct (see Slope param -- typed input, NOT a strict enum)
 +7      N Stereo Placement            enum        Stereo / L / R / Mid / Side
 +8      N Speakers                    enum        Speaker routing selection
 +9      N Dynamic Range               continuous  dB -30..+30 bipolar (0=off)
@@ -3056,23 +3056,38 @@ Value  Shape         Slider target    Uses Gain?   Uses Q?   Uses Slope?
 9      All Pass      1.000            no           yes       no
 ```
 
-### SLOPE ENUM (offset +6, 6 slopes for cut types)
+### SLOPE PARAM (offset +6, cut types only)
 
-Applies to Low Cut and High Cut shapes. Formula: slider = slope_index / 5.
+Applies to Low Cut and High Cut shapes only (Shape values 2 and 4; see
+Shape enum above). Slope is **NOT** a strict enum: Pro-Q 4 exposes a dropdown
+of preset values AND accepts arbitrary typed values (e.g. "27 dB/oct").
+Treat it as a numeric display target, not a fixed enum.
+
+The dropdown presets observed on a current Pro-Q 4 install (subject to
+change across versions):
 
 ```
-Value  dB/oct   Slider target
------  -------  -------------
-0      6        0.000
-1      12       0.200 *       (default)
-2      18       0.400
-3      24       0.600
-4      48       0.800
-5      96       1.000
+0 dB/oct  6 dB/oct  12 dB/oct  18 dB/oct  24 dB/oct  30 dB/oct
+36 dB/oct  48 dB/oct  72 dB/oct  96 dB/oct  Brickwall
 ```
 
-(Higher slope values may exist -- Pro-Q 4 manual lists up to 96 dB/oct. Exact
-count confirmed: 6 slopes.)
+The preset count has varied across Pro-Q versions (older revs had as few
+as 6 entries). **Do NOT trust any static norm for this parameter** -- a
+hard-coded value like `0.6` lands on a different displayed slope on
+different installs (e.g. 24 dB/oct on a 6-entry build vs 36 dB/oct on
+the 11-entry build above).
+
+**ALWAYS use `set_param_display` for Slope:**
+
+```lua
+set_param_display(tr, fx, slope_idx, 24)   -- lands on "24 dB/oct"
+set_param_display(tr, fx, slope_idx, 27)   -- lands on typed value 27
+```
+
+This is robust to version drift and works whether the user wants a
+preset value or a non-preset typed value. Direct `SetParamNormalized` is
+ONLY safe when `fx_params:Pro-Q 4` for THIS instance is pinned in the
+current context (the cached `[norm:]` then reflects this exact install).
 
 ### COMMON RECIPES
 
@@ -3083,7 +3098,7 @@ count confirmed: 6 slopes.)
 reaper.TrackFX_SetParamNormalized(tr, fx, 0, 1.0)      -- Used: In Use
 reaper.TrackFX_SetParamNormalized(tr, fx, 2, 0.266)    -- Frequency: 80 Hz
 reaper.TrackFX_SetParamNormalized(tr, fx, 5, 0.222)    -- Shape: Low Cut
-reaper.TrackFX_SetParamNormalized(tr, fx, 6, 0.6)      -- Slope: 24 dB/oct
+set_param_display(tr, fx, 6, 24)                       -- Slope: 24 dB/oct
 ```
 
 **"Vocal de-mud (pull -3 dB around 350 Hz with Q=1):"**
@@ -3121,6 +3136,10 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 11, 0.0)     -- Dynamics: Auto thresho
 
 **"Full vocal chain EQ (HPF + cut mud + boost presence + roll top):"**
 
+(Recipe is illustrative -- shows indices and the right tools. When generating
+a runnable script, include the `set_param_display` helper definition from
+`prompt_bundle:plugin_helpers`; calling it without the definition crashes.)
+
 ```lua
 local tr = reaper.GetTrack(0, 0)
 reaper.Undo_BeginBlock()
@@ -3133,7 +3152,7 @@ reaper.defer(function()
   reaper.TrackFX_SetParamNormalized(tr, fx, 0,  1.0)
   reaper.TrackFX_SetParamNormalized(tr, fx, 2,  0.266)
   reaper.TrackFX_SetParamNormalized(tr, fx, 5,  0.222)
-  reaper.TrackFX_SetParamNormalized(tr, fx, 6,  0.6)
+  set_param_display(tr, fx, 6, 24)                       -- Slope: 24 dB/oct (typed/version-safe)
 
   -- Band 2: -3 dB bell at 370 Hz, Q 1
   reaper.TrackFX_SetParamNormalized(tr, fx, 23, 1.0)
@@ -3153,7 +3172,7 @@ reaper.defer(function()
   reaper.TrackFX_SetParamNormalized(tr, fx, 69, 1.0)
   reaper.TrackFX_SetParamNormalized(tr, fx, 71, 0.925)
   reaper.TrackFX_SetParamNormalized(tr, fx, 74, 0.444)
-  reaper.TrackFX_SetParamNormalized(tr, fx, 75, 0.2)
+  set_param_display(tr, fx, 75, 12)                      -- Slope: 12 dB/oct (typed/version-safe)
 
   reaper.PreventUIRefresh(-1)
   reaper.UpdateArrange()

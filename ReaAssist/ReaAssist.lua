@@ -275,7 +275,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.0.5", -- public release version
+  VERSION           = "1.0.6", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -325,6 +325,33 @@ CFG = {
   -- well inside a 16.67 ms 60 Hz frame, with headroom for the ImGui
   -- redraw and any other per-frame work.
   UPDATE_SHA_TIME_BUDGET = 0.005,
+  -- Higher per-frame budget for verifies the user is actively waiting on
+  -- (manual "Check for Updates" click or forced repair). The background
+  -- piggyback check stays at the conservative 5 ms budget because the user
+  -- is reading the chat response and any frame stutter is visible. A
+  -- manual / forced verify happens behind a "Checking..." toast, so trading
+  -- a little frame smoothness for ~2-3x faster wall-clock is the right
+  -- call. 12 ms keeps each frame well under the 16.67 ms 60 Hz budget; on
+  -- a slower main loop the value still bounds per-frame cost without
+  -- starving ImGui.
+  UPDATE_SHA_TIME_BUDGET_MANUAL = 0.012,
+  -- Watchdog seconds for the native SHA-256 subprocess (PowerShell
+  -- Get-FileHash on Windows, sha256sum / shasum on POSIX). Native hashing
+  -- of ~3.6 MB across 23 files is sub-second; the dominant cost is process
+  -- spawn (~200 ms warm) and I/O. 15 s gives generous slack for cold spawn
+  -- on slow disks or AV scanning, after which tick_native_sha falls back
+  -- to the pure-Lua incremental verifier as the reliability floor.
+  UPDATE_NATIVE_SHA_TIMEOUT = 15,
+  -- Seconds to wait after the first idle->waiting (Send) edge before firing
+  -- the once-per-session update check. The chat curl's own PowerShell-launch
+  -- ExecProcess freezes the main thread for ~1-3 s cold; firing the update
+  -- check on the immediately-next frame stacks another ~200 ms PS-spawn onto
+  -- the perceived Send-press freeze. Deferring lets the chat-curl freeze
+  -- complete and lands the update spawn during "Thinking..." where the
+  -- spinner is up and a brief hitch goes unnoticed. 400 ms covers the warm
+  -- chat-curl PS exit (~200 ms) with margin and is short enough that the
+  -- update check still completes well before the typical chat response.
+  UPDATE_CHECK_DEFER = 0.4,
   _PRODUCT          = "ReaAssist",  -- product identity token
 }
 if CFG.EXT_NS ~= CFG._PRODUCT:lower() then return end
@@ -372,6 +399,11 @@ S = {
   -- matters (e.g. "after 6h the UI froze").
   session_start_ts  = reaper.time_precise(),
   send_time         = nil,     -- time_precise() at curl launch; for watchdog
+  timeout_extensions = 0,      -- # of "Extend by Ns" clicks against the current
+                               -- in-flight curl. Reset to 0 in Net.fire_curl
+                               -- since send_time is reset there too -- previous
+                               -- extensions are baked into history. Used by UI
+                               -- to display poll_timeout + extensions*EXTEND_BY_SECS.
   -- Token accumulators (reset each script run)
   session_tok_in    = 0,
   session_tok_out   = 0,
@@ -388,6 +420,10 @@ S = {
   last_poll_time    = 0,       -- timestamp of last poll-loop file check
   pending_provider_idx = nil,  -- provider index snapshot at send time (for response parsing)
   pending_model_idx    = nil,  -- model index snapshot at send time
+  pending_jsfx_intent  = nil,  -- mirror of CTX.prompt_indicates_jsfx for the in-flight
+                               -- turn, so the JSFX validator-retry path can rebuild the
+                               -- snapshot with the same minimal-tracks trim used on the
+                               -- first request
   -- Retry state for 529 auto-retry
   retry_count       = 0,
   retry_scheduled   = false,
@@ -475,9 +511,16 @@ S = {
   pending_pref_plugin_types= {},   -- preferred_plugins types accumulated before a popup bailed the parse loop
   context_loop_retries     = 0,    -- per-turn counter -- model re-asking for already-provided context (max 1 retry)
   api_validator_retries    = 0,    -- per-turn counter -- model emitted nonexistent reaper.* calls (max 1 retry)
+  arity_validator_retries  = 0,    -- per-turn counter -- model emitted reaper.* call with wrong fixed arg count (max 1 retry)
+  fxcheck_validator_retries = 0,   -- per-turn counter -- model emitted unchecked TrackFX_AddByName result (max 1 retry)
+  upsert_validator_retries = 0,    -- per-turn counter -- chain-build script violated upsert pairing (Get without Add, or Add without Get) (max 1 retry)
+  helper_int_validator_retries = 0,-- per-turn counter -- model rewrote a bundled helper body (e.g. dropped parens on the range-guard) (max 1 retry)
   defer_validator_retries  = 0,    -- per-turn counter -- model emitted plugin param calls outside reaper.defer (max 1 retry)
   helper_validator_retries = 0,    -- per-turn counter -- model called helper functions without including their definitions (max 1 retry)
+  parse_retry_used         = false,-- per-turn flag -- extracted ```lua block failed Lua syntax check; one hidden retry with the parser error
+  jsfx_validator_retries   = 0,    -- per-turn counter -- generated JSFX failed Code.validate_jsfx (max 1 retry)
   length_retry_used        = false,-- per-turn flag -- empty-text-from-length retry already fired with thinking forced off
+  empty_retry_used         = false,-- per-turn flag -- generic-empty-response retry already fired (finish_reason=stop with no content)
   thinking_override_idx    = nil,  -- per-turn override for prefs.thinking_idx (set during length auto-retry to force "none")
   fx_list_already_sent   = false,
   fx_chains_already_sent = false,
@@ -950,6 +993,17 @@ do
   -- runs independently without trampling API request/response files.
   tmp.update_out  = tmp_dir .. "reaassist_update_"     .. tmp_suffix .. ".txt"
   tmp.update_exit = tmp_dir .. "reaassist_uexit_"      .. tmp_suffix .. ".txt"
+  -- Native SHA-256 verification I/O. Separate from tmp.update_out / _exit
+  -- so a verify can run while the next manifest fetch is being prepared,
+  -- and so polling reads never race the manifest pipeline. _in is the
+  -- newline-delimited list of absolute paths to hash; _out receives one
+  -- "<hex>\t<path>" line per file; _exit is the inner-process exit code;
+  -- _ps is the .ps1 script body on Windows (avoids nested-quote escape
+  -- hell when the inner PowerShell is invoked from cmd from PowerShell).
+  tmp.update_sha_in   = tmp_dir .. "reaassist_shain_"   .. tmp_suffix .. ".txt"
+  tmp.update_sha_out  = tmp_dir .. "reaassist_shaout_"  .. tmp_suffix .. ".txt"
+  tmp.update_sha_exit = tmp_dir .. "reaassist_shaexit_" .. tmp_suffix .. ".txt"
+  tmp.update_sha_ps   = tmp_dir .. "reaassist_sha_"     .. tmp_suffix .. ".ps1"
   tmp.screenshot  = tmp_dir .. "reaassist_screenshot_" .. tmp_suffix .. ".png"
   tmp.clipboard   = tmp_dir .. "reaassist_clipboard_"  .. tmp_suffix .. ".png"
 end
@@ -970,6 +1024,10 @@ os.remove(tmp.cache_out)
 os.remove(tmp.cache_exit)
 os.remove(tmp.update_out)
 os.remove(tmp.update_exit)
+os.remove(tmp.update_sha_in)
+os.remove(tmp.update_sha_out)
+os.remove(tmp.update_sha_exit)
+os.remove(tmp.update_sha_ps)
 os.remove(tmp.screenshot)
 os.remove(tmp.clipboard)
 
@@ -1139,11 +1197,18 @@ end
 -- Known static reference-doc prefixes. Their content is versioned with the
 -- script and available in the repo; the log only needs to show that they were
 -- injected, not their bodies.
+--
+-- Order matters: longer / more-specific variants must come first so the
+-- substring search matches "REAPER LUA API REFERENCE (EXTENDED):" before
+-- the shorter "REAPER LUA API REFERENCE:" prefix would, which would otherwise
+-- swallow the "(EXTENDED)" tag into the elided body.
 local _STATIC_REF_PREFIXES = {
+  "REAPER LUA API REFERENCE (",
   "REAPER LUA API REFERENCE:",
   "REAPER MIDI WORKFLOW REFERENCE:",
   "REAPER THEME COLOR REFERENCE:",
-  "PLUGIN PARAMETER REFERENCE:",
+  "PLUGIN PARAMETER REFERENCE (",
+  "PROMPT BUNDLE (",
 }
 
 -- Explicit list of known top-level context section markers. The elision
@@ -1151,10 +1216,13 @@ local _STATIC_REF_PREFIXES = {
 -- (exact match, not regex) so that "NOTE:" or "IMPORTANT:" lines INSIDE a
 -- reference doc don't falsely terminate the elision.
 local _SECTION_MARKERS = {
+  "REAPER LUA API REFERENCE (",
   "REAPER LUA API REFERENCE:",
   "REAPER MIDI WORKFLOW REFERENCE:",
   "REAPER THEME COLOR REFERENCE:",
-  "PLUGIN PARAMETER REFERENCE:",
+  "PLUGIN PARAMETER REFERENCE (",
+  "PROMPT BUNDLE (",
+  "PINNED REFERENCES ",
   "INSTALLED FX MATCHING ",
   "PREFERRED PLUGINS:",
   "SESSION CONTEXT:",
@@ -1163,6 +1231,7 @@ local _SECTION_MARKERS = {
   "FX INSPECT ERROR:",
   "FX PARAMETER VALUES",
   "Track flags:",
+  "PREVIOUS_RUN_ERROR",
   "USER REQUEST:",
 }
 
@@ -1185,7 +1254,11 @@ local function _elide_static_refs(s)
     while true do
       local hs = s:find(hdr, pos, true)
       if not hs then break end
-      local he = hs + #hdr
+      -- Some prefixes are partial (e.g. "PROMPT BUNDLE (" -- the bucket name
+      -- and trailing colon vary). Scan to the end of the header LINE so the
+      -- full header ("PROMPT BUNDLE (PLUGIN):") stays visible in the log;
+      -- the placeholder lands inline on the same line as the header.
+      local he = s:find("\n", hs + #hdr, true) or (#s + 1)
       local section_end = #s + 1
       local scan = he
       while true do
@@ -1267,6 +1340,35 @@ local function _render_block(block, pad)
     return pad .. "[" .. bt .. "]\n" .. _indent(JSON.encode(block), pad .. "  ")
   end
 end
+
+-- Sum the byte length of every text-bearing block in a message's content.
+-- Handles Anthropic's `[{type="text", text="..."}, ...]` shape, OpenAI's
+-- string-or-parts shape, and Gemini's `[{text="..."}, ...]` shape. Non-text
+-- blocks (images, tool_use) contribute 0 by design -- they're already short
+-- and the elision is targeted at long replayed prose / code.
+local function _assistant_text_len(content)
+  if content == nil then return 0 end
+  if type(content) == "string" then return #content end
+  if type(content) ~= "table" then return 0 end
+  local n = 0
+  for _, b in ipairs(content) do
+    if type(b) == "string" then
+      n = n + #b
+    elseif type(b) == "table" then
+      if type(b.text) == "string" then
+        n = n + #b.text
+      end
+    end
+  end
+  return n
+end
+
+-- Threshold for replacing a replayed assistant turn with a one-line placeholder
+-- in the request rendering. Short acks ("Understood.", "OK", brief confirmations)
+-- stay visible; long replays (code blocks, multi-paragraph explanations) are
+-- elided since the canonical full text lives in an earlier RESPONSE block in
+-- the same log file.
+local _ASST_HISTORY_TRIM_THRESHOLD = 500
 
 -- Render the `content` or `parts` field of a message (string or array).
 local function _render_content(content, pad)
@@ -1368,7 +1470,23 @@ local function _render_request(body)
       if i ~= openai_sys_idx then
         out[#out+1] = ""
         out[#out+1] = "  [" .. i .. "] role=" .. tostring(m.role or "?")
-        out[#out+1] = _render_content(m.content or m.parts, "      ")
+        local content = m.content or m.parts
+        -- Replayed assistant turns are duplicates of the corresponding earlier
+        -- RESPONSE block in the same log file. Elide long ones so a 6-turn
+        -- conversation's request log doesn't grow quadratically with prior
+        -- code-gen output. Short acks ("Understood.") fall through and render
+        -- normally.
+        if m.role == "assistant" then
+          local len = _assistant_text_len(content)
+          if len > _ASST_HISTORY_TRIM_THRESHOLD then
+            out[#out+1] = "      [assistant turn replay -- " .. len
+              .. " chars; full text in earlier RESPONSE block]"
+          else
+            out[#out+1] = _render_content(content, "      ")
+          end
+        else
+          out[#out+1] = _render_content(content, "      ")
+        end
       end
     end
   end
@@ -1660,8 +1778,14 @@ local function _build_sysinfo()
     L[#L+1] = "API ref:         " .. tostring(prefs.include_api_ref)
   end
   L[#L+1] = "Max history:     " .. tostring(CFG and CFG.MAX_HISTORY_TURNS or "?")
-  L[#L+1] = "API ref loaded:  " .. tostring(
-    S and S.api_ref_section_cache and S.api_ref_section_cache.core ~= nil)
+  -- Coerce to a strict bool so the display reads "true"/"false" instead of
+  -- "nil" when the API-ref file hasn't been read yet (Lua `and` chains
+  -- short-circuit to nil rather than false when an early operand is nil,
+  -- and tostring(nil) prints "nil" -- visible in the debug log header).
+  local _api_ref_loaded =
+    (S and S.api_ref_section_cache and S.api_ref_section_cache.core ~= nil)
+      and true or false
+  L[#L+1] = "API ref loaded:  " .. tostring(_api_ref_loaded)
 
   -- FX cache size (plugin-count only; names can be identifying so we omit them).
   local cache_count = try(function()
@@ -3385,6 +3509,7 @@ local TEXT_EXTENSIONS = {
   json = true, xml = true, html = true, css = true, md = true, yaml = true,
   yml = true, ini = true, cfg = true, conf = true, sh = true, bat = true,
   log = true, rpp = true, reascript = true, c = true, cpp = true, h = true,
+  jsfx = true, ["jsfx-inc"] = true, eel = true,
 }
 
 -- get_file_extension(path) -> lowercase extension without dot, or ""
@@ -4146,12 +4271,620 @@ function Code.derive_filename_jsfx(code)
 end
 
 -- =============================================================================
+-- Code.inject_output_ceiling -- runaway-feedback containment layer
+-- =============================================================================
+-- Defense-in-depth on top of the JSFX validator. The validator catches every
+-- known runaway pattern at static-analysis time; this injection adds a hard
+-- post-DSP cap on spl0..spl7 in case a future evasion slips through. Cap is
+-- user-disableable via the injected slider (drag to 40 = bypass).
+--
+-- See implementation contract in this conversation's design v2.1-final
+-- (gitignored notes). Key points enforced here:
+--
+--   * JSFX side uses `options:gmem=ReaAssist_Ceiling` (header directive),
+--     NOT `gmem_attach()` (which is Lua-side only). Host script calls
+--     `reaper.gmem_attach("ReaAssist_Ceiling")` to read the same namespace.
+--
+--   * Section-aware injection only. Append-only, no rewrites.
+--     - Header: insert slider declaration; merge `gmem=ReaAssist_Ceiling`
+--       into existing options: line OR insert a new options: line.
+--     - @init: append init block (or create section if absent).
+--     - @slider: append recompute block (or create section if absent).
+--     - @sample: append clamp+engagement block.
+--
+--   * Bail conditions skip injection (ship original, log warning):
+--       - 0 or 2+ @sample sections
+--       - source contains `import` directive
+--       - source uses `_ra_` identifier prefix already
+--       - source already has `options:gmem=...` (any value)
+--       - source uses `gmem[...]` anywhere (would silently rebind to our
+--         private namespace and break intentional cross-plugin gmem)
+--       - all slider slots 1..256 are used
+--       - ExtState slot allocator wedged or exhausted
+--
+--   * Per-FILE alert/mute identity (not per-instance). Multiple track
+--     instances of the same saved JSFX file share one gmem block. Documented
+--     v1 trade-off; per-instance identity is v2 work.
+--
+--   * gmem layout (per-file block at base B, stride 8):
+--       B+0: engagement flag (set by JSFX, cleared by host on poll)
+--       B+1: cumulative engagement-sample count (lifetime)
+--       B+2: time_precise() of most recent engagement
+--       B+3: running consecutive-engagement count (for sustained-trip mute)
+--       B+4: muted latch (set by JSFX after sustained trip; cleared by host
+--            on user reset, or by JSFX when slider goes to 40 = off)
+--       B+5..B+7: reserved
+--     Global: gmem[0] = schema version, gmem[1] = "any engagement" sentinel.
+--
+--   * Allocation is monotonic via ExtState (`ceiling_next_base`). Starts at
+--     8, increments by 8 per save. Slot 0..7 reserved for global metadata.
+--     No reuse in v1 (heartbeat/lease scheme deferred). Re-saving the same
+--     LLM-generated source ultimately writes a NEW file with a numeric
+--     suffix (slot differs => content differs => existing dedup misses).
+--     Acceptable v1 trade-off; can add original-content dedup later.
+do
+
+local CEILING_NS          = "ReaAssist_Ceiling"
+local CEILING_NEXT_BASE   = "ceiling_next_base"
+local CEILING_SLOTS_KEY   = "ceiling_slots"
+local CEILING_BASE_START  = 8
+local CEILING_STRIDE      = 8
+local CEILING_BASE_LIMIT  = 8000000  -- well under gmem's 8M cap; defensive
+local CEILING_DB_DEFAULT  = 20       -- dBFS, slider default
+local CEILING_DB_OFF      = 40       -- slider value at which clamp/mute bypass
+local SLIDER_SLOT_MAX     = 256
+
+-- gmem layout offsets (within a slot's 8-deep block; matches the JSFX
+-- injection's writes -- keep these in lockstep with render_injection_blocks).
+local CEILING_GMEM_ENGFLAG  = 0   -- per-slot engagement flag (set by JSFX)
+local CEILING_GMEM_ENGCOUNT = 1   -- per-slot lifetime engagement-sample count
+local CEILING_GMEM_MUTE     = 4   -- per-slot mute latch (0/1)
+local CEILING_GMEM_GLOBAL_ENG = 1 -- gmem[1] -- global "any-instance engagement"
+                                  -- sentinel; cheap-poll fast path. Slot 1 is
+                                  -- inside the 0..7 reserved global block, NOT
+                                  -- inside a per-slot allocation (allocations
+                                  -- start at slot 8).
+
+-- Public so host poll can reference symbolic names.
+Code.CEILING_NS              = CEILING_NS
+Code.CEILING_GMEM_MUTE       = CEILING_GMEM_MUTE
+Code.CEILING_GMEM_ENGFLAG    = CEILING_GMEM_ENGFLAG
+Code.CEILING_GMEM_ENGCOUNT   = CEILING_GMEM_ENGCOUNT
+Code.CEILING_GMEM_GLOBAL_ENG = CEILING_GMEM_GLOBAL_ENG
+
+-- Replace comment bodies and string literal contents with spaces so token
+-- scans (`gmem[`, `import`, `_ra_`, `options:gmem=`) don't match inside
+-- strings or comments. Approximate but conservative -- false positives
+-- on bail-condition checks just make us bail more often, which is safe.
+local function scrub_jsfx(src)
+  local out = src:gsub("/%*(.-)%*/", function(body)
+    return "/*" .. body:gsub("[^\n\r]", " ") .. "*/"
+  end)
+  out = out:gsub("//[^\r\n]*", function(s) return string.rep(" ", #s) end)
+  out = out:gsub('"([^"\r\n]*)"', function(body)
+    return '"' .. string.rep(" ", #body) .. '"'
+  end)
+  out = out:gsub("'([^'\r\n]*)'", function(body)
+    return "'" .. string.rep(" ", #body) .. "'"
+  end)
+  return out
+end
+
+-- Split a string into lines without terminators. Trailing newline produces
+-- no empty final element.
+local function split_lines(s)
+  local out = {}
+  for line in (s .. "\n"):gmatch("([^\r\n]*)\r?\n") do
+    out[#out + 1] = line
+  end
+  if out[#out] == "" then out[#out] = nil end
+  return out
+end
+
+-- Allocate a gmem base for this save. ExtState-backed, monotonic. Returns
+-- the base (>=8, multiple of 8) or nil + reason on failure.
+local function allocate_ceiling_slot()
+  local cur_str = reaper.GetExtState(CFG.EXT_NS, CEILING_NEXT_BASE)
+  local cur = tonumber(cur_str)
+  if not cur or cur < CEILING_BASE_START then cur = CEILING_BASE_START end
+  if cur >= CEILING_BASE_LIMIT then
+    return nil, "ExtState slot allocator exhausted"
+  end
+  -- Persist next base BEFORE returning so a crash mid-save still consumes
+  -- the slot rather than handing the same slot to the next call.
+  reaper.SetExtState(CFG.EXT_NS, CEILING_NEXT_BASE,
+                     tostring(cur + CEILING_STRIDE), true)
+  return cur
+end
+
+-- ============================================================================
+-- Slot metadata tracking
+-- ============================================================================
+-- Each successful injection records the slot it allocated alongside the
+-- saved file path, the JSFX `desc:` name, and the allocation timestamp.
+-- The host's defer poll loop iterates this list to know which gmem slots
+-- to read when checking for engaged/muted JSFX.
+--
+-- Storage: ExtState `ceiling_slots` value, JSON-encoded array. ExtState
+-- has a 64KB ceiling on values; per-entry size ~150 bytes => ~400 entries
+-- comfortably within budget. Allocation is monotonic so the array grows
+-- but never reuses slots.
+
+-- Pull the recorded slot list. Empty array if not yet written.
+function Code.ceiling_get_slots()
+  local raw = reaper.GetExtState(CFG.EXT_NS, CEILING_SLOTS_KEY)
+  if not raw or raw == "" then return {} end
+  local ok, decoded = pcall(JSON.decode, raw)
+  if not ok or type(decoded) ~= "table" then return {} end
+  return decoded
+end
+
+-- Append a new slot entry to the list. info comes from
+-- Code.inject_output_ceiling; saved_path is the path Code.auto_save_jsfx
+-- wrote (may be nil if the JSFX was not saved -- e.g. JSFX-only response
+-- without a Lua companion -- in which case we skip the record entirely
+-- since there's no on-disk file to diagnose later).
+function Code.ceiling_record_slot(info, saved_path, desc)
+  if not info or not info.slot_base or not saved_path then return end
+  local list = Code.ceiling_get_slots()
+  list[#list + 1] = {
+    slot      = info.slot_base,
+    file      = saved_path,
+    desc      = desc or "",
+    alloc_ts  = os.time(),
+  }
+  local enc = JSON.encode(list)
+  if enc then reaper.SetExtState(CFG.EXT_NS, CEILING_SLOTS_KEY, enc, true) end
+end
+
+-- Forget the slot whose recorded file is `path`. Called when the user
+-- Reset-All-then-clears or when a saved file is detected missing during a
+-- poll (orphaned slot). Allocation never reuses the slot index, so this
+-- only prunes the metadata; gmem state for the slot stays whatever the
+-- last write left it as.
+function Code.ceiling_forget_slot_for_path(path)
+  if not path or path == "" then return end
+  local list = Code.ceiling_get_slots()
+  local kept = {}
+  for _, e in ipairs(list) do
+    if e.file ~= path then kept[#kept + 1] = e end
+  end
+  if #kept ~= #list then
+    reaper.SetExtState(CFG.EXT_NS, CEILING_SLOTS_KEY, JSON.encode(kept), true)
+  end
+end
+
+-- Bulk garbage-collect slots in ExtState. Drops any entry whose:
+--   (a) recorded file is missing from disk, OR
+--   (b) file exists but no longer contains `_ra_slot = <N>;` matching
+--       the recorded slot (file was overwritten or re-injected with
+--       a different slot allocation).
+--
+-- Caller MUST have already called `reaper.gmem_attach(CEILING_NS)`
+-- so the per-slot mute mirror clears land on the right region. In
+-- practice the only caller is the poll loop, which attaches before
+-- doing anything else.
+--
+-- Reads only the first 4 KB of each file -- the marker + `_ra_slot`
+-- are emitted at the very top of the @init injection, well within
+-- that window. Allocation is monotonic so pruned slot indices are
+-- never reused; this just trims the metadata + gmem cruft.
+--
+-- Returns the number of slots pruned (0 if everything still valid).
+function Code.ceiling_gc_slots()
+  local list = Code.ceiling_get_slots()
+  if #list == 0 then return 0 end
+  local kept = {}
+  local pruned = 0
+  for _, e in ipairs(list) do
+    local keep = false
+    if e.file and e.file ~= "" and e.slot then
+      local f = io.open(e.file, "rb")
+      if f then
+        local head = f:read(4096) or ""
+        f:close()
+        -- Match `_ra_slot = N;` (whitespace tolerant). The injector
+        -- emits exactly this in @init right under the header marker.
+        local pat = "_ra_slot%s*=%s*" .. tostring(e.slot) .. "%s*;"
+        if head:find(pat) then keep = true end
+      end
+    end
+    if keep then
+      kept[#kept + 1] = e
+    else
+      pruned = pruned + 1
+      -- Zero the mute mirror so an orphaned `1` doesn't pollute any
+      -- future allocation that happens to land on a neighbour slot.
+      -- Best-effort: if gmem_write isn't available, the metadata
+      -- prune still happens.
+      if reaper.gmem_write then
+        reaper.gmem_write(e.slot + CEILING_GMEM_MUTE, 0)
+      end
+    end
+  end
+  if pruned > 0 then
+    reaper.SetExtState(CFG.EXT_NS, CEILING_SLOTS_KEY,
+      JSON.encode(kept), true)
+    if Log and Log.line then
+      Log.line("CEILING-GC",
+        ("pruned %d stale slot(s); kept %d"):format(pruned, #kept))
+    end
+  end
+  return pruned
+end
+
+-- Host-side mute clear: write gmem[slot+4] = 0. Caller must have
+-- previously called `reaper.gmem_attach(CEILING_NS)`.
+function Code.ceiling_clear_mute(slot)
+  if not slot or slot < CEILING_BASE_START then return end
+  reaper.gmem_write(slot + CEILING_GMEM_MUTE, 0)
+end
+
+-- Render the three injection blocks parameterised on slot base + slider id.
+--
+-- Slider semantics (UX simplification, 2026-04-29 follow-up):
+-- The slider value is ALWAYS the ceiling level in dBFS. There is no magic
+-- "off" position. At the slider's max (40 dBFS = 100x linear), the ceiling
+-- is so permissive that real audio in normal use never reaches it -- so
+-- 40 is "effectively off" without needing a special bypass code path.
+-- This avoids the earlier "is 40 really off, or just at +40 dBFS?" UX
+-- confusion: now it's unambiguously "the ceiling is at this dBFS value,
+-- always."
+--
+-- The mute latch is cleared on ANY slider change. Touching the control =
+-- explicit user acknowledgement that they've seen something happened and
+-- want to continue. Simpler than a dedicated reset position on the slider.
+--
+-- We avoid a `1e30`-style "infinity" literal here because REAPER's JSFX
+-- parser rejected it in some contexts (observed: bare `1e30` inside a
+-- ternary RHS produced `@init: syntax error`). Always-compute via pow()
+-- is defensible regardless of the literal-parsing rules.
+local function render_injection_blocks(slot, slider_n)
+  -- @init resets local mute state AND clears the gmem mirror slots for
+  -- this allocation. Without the gmem clear, gmem state from a previous
+  -- session (gmem persists in REAPER project files) could lie to the
+  -- host's poll loop on reopen -- the JSFX's _ra_muted is fresh-zero but
+  -- gmem[slot+4] could still carry an old `1` from a prior run.
+  local INIT_INJ = ([[
+// --- ReaAssist output ceiling (auto-injected; do not edit) ---
+_ra_slot = %d;
+_ra_mute_samples = srate * 0.05;
+_ra_sus = 0;
+_ra_muted = 0;
+_ra_prev_slider = slider%d;
+_ra_ceil_lin = pow(10, slider%d/20);
+gmem[_ra_slot+0] = 0;
+gmem[_ra_slot+1] = 0;
+gmem[_ra_slot+4] = 0;
+// ----------------------------------------------------------]])
+    :format(slot, slider_n, slider_n)
+
+  -- @slider recompute. Mute state cleared via local _ra_muted on any
+  -- slider change. gmem[slot+4] is mirrored so a slider-driven reset
+  -- stays consistent with the host's view (host poll reads gmem).
+  local SLIDER_INJ = ([[
+// --- ReaAssist output ceiling recompute (auto-injected) ---
+_ra_ceil_lin = pow(10, slider%d/20);
+_ra_changed = slider%d != _ra_prev_slider ? 1 : 0;
+_ra_muted = _ra_changed ? 0 : _ra_muted;
+_ra_sus = _ra_changed ? 0 : _ra_sus;
+_ra_prev_slider = slider%d;
+gmem[_ra_slot+4] = _ra_muted;
+// ----------------------------------------------------------]])
+    :format(slider_n, slider_n, slider_n)
+
+  -- NOTE: a previous version injected an @block section to clear the mute
+  -- latch on any transport stop edge. Both the && form and a nested-ternary
+  -- form caused the per-sample mute logic to stop working entirely, even
+  -- though the inner clear should never have fired during sustained
+  -- playback. The mechanism remains unidentified -- possibly a section-
+  -- ordering quirk specific to this user's REAPER build.
+  --
+  -- Stop-edge auto-clear is therefore deferred to the host-side path: once
+  -- the gmem poll loop lands (next §9 step), the host can write
+  -- gmem[B+4] = 0 from Lua when it observes a transport stop, achieving
+  -- the same UX without injecting @block code into the JSFX.
+  --
+  -- Until then, the user can clear a latched mute by moving the ceiling
+  -- slider (the @slider injection clears on any slider change). Returning
+  -- nil here makes the create-or-append logic in inject_output_ceiling
+  -- below skip @block entirely.
+  local BLOCK_INJ = nil
+
+  -- @sample: per-channel ceiling clamp + sustained-trip mute.
+  --
+  -- This block is structurally identical to a standalone test JSFX that
+  -- the user verified WORKS (the same logic, in plain globals, not gmem,
+  -- with single-line OR-chains). The mute decision uses local _ra_muted
+  -- as the source of truth; gmem writes are pure host-visibility mirrors
+  -- (the `@slider` inj also writes through to gmem on user reset).
+  -- Slot layout matches the host-side poll constants in
+  -- `Net.ceiling_*` -- keep in lockstep.
+  --   gmem[_ra_slot+0]: engagement flag (set on any engaged sample;
+  --                     host clears after consuming the alert)
+  --   gmem[_ra_slot+1]: cumulative engagement-sample count (lifetime)
+  --   gmem[_ra_slot+4]: mute mirror (latches when _ra_muted goes 1)
+  --   gmem[1]:          global "any-instance engagement" sentinel,
+  --                     allows host's defer poll to skip the per-slot
+  --                     scan when nothing has fired anywhere
+  --
+  -- The host-side reset (Reset Mute button in the popup) writes
+  -- gmem[slot+4] = 0 directly. The injection's @slider section also
+  -- mirrors _ra_muted -> gmem[slot+4] every slider change so a slider
+  -- nudge from the JSFX side stays consistent with gmem.
+  local SAMPLE_INJ = [[
+// --- ReaAssist output ceiling (auto-injected; do not edit) ---
+_ra_muted ? (
+  spl0 = 0; spl1 = 0; spl2 = 0; spl3 = 0;
+  spl4 = 0; spl5 = 0; spl6 = 0; spl7 = 0;
+) : (
+  _ra_eng = (abs(spl0) > _ra_ceil_lin) || (abs(spl1) > _ra_ceil_lin) || (abs(spl2) > _ra_ceil_lin) || (abs(spl3) > _ra_ceil_lin) || (abs(spl4) > _ra_ceil_lin) || (abs(spl5) > _ra_ceil_lin) || (abs(spl6) > _ra_ceil_lin) || (abs(spl7) > _ra_ceil_lin);
+  spl0 = abs(spl0) > _ra_ceil_lin ? max(-_ra_ceil_lin, min(_ra_ceil_lin, spl0)) : spl0;
+  spl1 = abs(spl1) > _ra_ceil_lin ? max(-_ra_ceil_lin, min(_ra_ceil_lin, spl1)) : spl1;
+  spl2 = abs(spl2) > _ra_ceil_lin ? max(-_ra_ceil_lin, min(_ra_ceil_lin, spl2)) : spl2;
+  spl3 = abs(spl3) > _ra_ceil_lin ? max(-_ra_ceil_lin, min(_ra_ceil_lin, spl3)) : spl3;
+  spl4 = abs(spl4) > _ra_ceil_lin ? max(-_ra_ceil_lin, min(_ra_ceil_lin, spl4)) : spl4;
+  spl5 = abs(spl5) > _ra_ceil_lin ? max(-_ra_ceil_lin, min(_ra_ceil_lin, spl5)) : spl5;
+  spl6 = abs(spl6) > _ra_ceil_lin ? max(-_ra_ceil_lin, min(_ra_ceil_lin, spl6)) : spl6;
+  spl7 = abs(spl7) > _ra_ceil_lin ? max(-_ra_ceil_lin, min(_ra_ceil_lin, spl7)) : spl7;
+  _ra_sus = _ra_eng ? _ra_sus + 1 : max(0, _ra_sus - 1);
+  _ra_muted = _ra_sus >= _ra_mute_samples ? 1 : _ra_muted;
+  // Host-visibility mirrors. Mute logic above already used the local
+  // _ra_muted for the per-sample decision; these writes just expose the
+  // state to the Lua-side host poll loop.
+  gmem[_ra_slot+0] = _ra_eng ? 1 : gmem[_ra_slot+0];
+  gmem[_ra_slot+1] = _ra_eng ? gmem[_ra_slot+1] + 1 : gmem[_ra_slot+1];
+  gmem[_ra_slot+4] = _ra_muted;
+  gmem[1] = _ra_eng ? 1 : gmem[1];
+);
+// ----------------------------------------------------------]]
+
+  return INIT_INJ, SLIDER_INJ, BLOCK_INJ, SAMPLE_INJ
+end
+
+-- Main entry point. Returns (injected_src, info_table) on success, or
+-- (nil, skip_reason_string) on bail. Caller is responsible for shipping
+-- the original source on bail.
+function Code.inject_output_ceiling(src)
+  if type(src) ~= "string" or src == "" then
+    return nil, "empty source"
+  end
+
+  -- Idempotency: if the source already has our injection markers, ship it
+  -- back unmodified. Lets the response-handler path inject for the chat
+  -- display AND lets auto_save_jsfx call inject again (as a defense) without
+  -- double-injecting or burning a second slot allocation.
+  if src:find("// --- ReaAssist output ceiling", 1, true) then
+    return nil, "already injected"
+  end
+
+  -- Split into lines (preserve content; we'll rejoin with \n on output).
+  local lines = split_lines(src)
+  if #lines == 0 then return nil, "empty source" end
+
+  -- Locate section markers (`@<word>` at column 0).
+  local sections = {}        -- ordered list: { name, marker_line }
+  local sections_by_name = {}
+  for i, line in ipairs(lines) do
+    local kw = line:match("^@(%w+)")
+    if kw then
+      local entry = { name = kw, marker_line = i }
+      sections[#sections + 1] = entry
+      sections_by_name[kw] = sections_by_name[kw] or {}
+      table.insert(sections_by_name[kw], entry)
+    end
+  end
+
+  -- Compute body ranges: section i's body is lines [marker_line+1 .. next_marker_line-1].
+  for i, sec in ipairs(sections) do
+    sec.body_start = sec.marker_line + 1
+    sec.body_end = (i < #sections) and (sections[i + 1].marker_line - 1) or #lines
+  end
+  local header_end = (#sections > 0) and (sections[1].marker_line - 1) or #lines
+
+  -- Bail: must have exactly one @sample.
+  local sample_entries = sections_by_name.sample
+  if not sample_entries then return nil, "no @sample section" end
+  if #sample_entries > 1 then return nil, "multiple @sample sections" end
+
+  -- Bail: forbidden tokens in scrubbed source.
+  local scrubbed = scrub_jsfx(src)
+  if scrubbed:match("[^%w_]import%s") or scrubbed:match("^import%s") then
+    return nil, "import directive present"
+  end
+  if scrubbed:match("[^%w_]_ra_") or scrubbed:match("^_ra_") then
+    return nil, "source uses _ra_ identifier prefix"
+  end
+  if scrubbed:match("options:[^\r\n]*gmem%s*=") then
+    return nil, "existing options:gmem= directive"
+  end
+  if scrubbed:match("gmem%s*%[") then
+    return nil, "source already uses gmem[]"
+  end
+
+  -- Pick a free slider slot. Also bail if the LLM emitted any slider whose
+  -- name suggests it's already trying to be an output ceiling/limit/cap --
+  -- shipping a duplicate would put two same-purpose sliders in the UI.
+  -- The Prompts.md OUTPUT STAGE rule forbids the LLM from doing this; this
+  -- bail is the runtime defense if the rule is violated.
+  local used_sliders = {}
+  for _, line in ipairs(lines) do
+    local n, name = line:match("^slider(%d+):[^>]*>(.*)$")
+    if n then
+      used_sliders[tonumber(n)] = true
+      -- Match patterns like "Safety Output Ceiling", "Output Ceiling",
+      -- "Output Limiter", "Master Out", "Final Gain". Lowercased for
+      -- case-insensitive comparison. Conservative -- false positives just
+      -- skip the injection, which is safer than colliding with a real
+      -- output-control slider the LLM legitimately added on user request.
+      local lname = (name or ""):lower()
+      if lname:find("output ceiling", 1, true)
+         or lname:find("output limit", 1, true)
+         or lname:find("output cap", 1, true)
+         or lname:find("safety ceiling", 1, true)
+         or (lname:find("safety", 1, true) and lname:find("output", 1, true)) then
+        return nil, "source already declares an output-ceiling slider: \""
+          .. (name or "") .. "\""
+      end
+    end
+  end
+  local slider_n
+  for i = 1, SLIDER_SLOT_MAX do
+    if not used_sliders[i] then slider_n = i; break end
+  end
+  if not slider_n then
+    return nil, "all slider slots 1.." .. SLIDER_SLOT_MAX .. " used"
+  end
+
+  -- Allocate gmem slot. Persists ExtState before any source mutation; safe
+  -- to reach this point only after ALL bail conditions cleared.
+  local slot, alloc_err = allocate_ceiling_slot()
+  if not slot then return nil, alloc_err end
+
+  -- Locate or merge the header `options:` line.
+  local options_line_idx
+  for i = 1, header_end do
+    if lines[i]:match("^options:") then options_line_idx = i; break end
+  end
+  if options_line_idx then
+    -- In-place edit: append " gmem=ReaAssist_Ceiling" (space-separated per
+    -- JSFX options syntax; not comma).
+    lines[options_line_idx] = lines[options_line_idx] .. " gmem=" .. CEILING_NS
+  end
+
+  -- Build the injection plan. Each entry: { after_line = N, lines = {...} }.
+  -- Apply by walking the original line array once and inserting AFTER each
+  -- target line. Multiple entries with the same after_line are concatenated
+  -- in plan order.
+  local plan = {}
+  local function add_after(line_no, content_lines)
+    plan[line_no] = plan[line_no] or {}
+    for _, l in ipairs(content_lines) do
+      plan[line_no][#plan[line_no] + 1] = l
+    end
+  end
+
+  -- Header: options line (if not merged) + slider declaration. The slider
+  -- value is unconditionally the ceiling level in dBFS -- no magic "off"
+  -- position. Max value (CEILING_DB_OFF dBFS = high linear gain) is
+  -- effectively off because real audio in normal use never reaches it.
+  --
+  -- Collision protection lives in the bail conditions above (specifically
+  -- the "safety/output/ceiling slider already present" check). The bundle
+  -- forbids the LLM from emitting any output-control slider; the bail is
+  -- the runtime defense if it slips through anyway.
+  local slider_line = ("slider%d:%d<0,%d,1>Safety Output Ceiling (dBFS)")
+    :format(slider_n, CEILING_DB_DEFAULT, CEILING_DB_OFF)
+  local header_block = {}
+  if not options_line_idx then
+    header_block[#header_block + 1] = "options:gmem=" .. CEILING_NS
+  end
+  header_block[#header_block + 1] = slider_line
+  add_after(header_end, header_block)
+
+  -- Render section blocks.
+  local INIT_INJ, SLIDER_INJ, BLOCK_INJ, SAMPLE_INJ =
+    render_injection_blocks(slot, slider_n)
+
+  local function find_sec(name)
+    return sections_by_name[name] and sections_by_name[name][1] or nil
+  end
+
+  -- @init injection.
+  local init_sec = find_sec("init")
+  local created_init = false
+  if init_sec then
+    add_after(init_sec.body_end, split_lines(INIT_INJ))
+  else
+    -- No @init -- create one immediately after our header insertions
+    -- (which go after `header_end`). Both go through add_after(header_end).
+    -- Plan-order ensures: [options/slider header_block] [@init] [INIT_INJ].
+    add_after(header_end, { "@init" })
+    add_after(header_end, split_lines(INIT_INJ))
+    created_init = true
+  end
+
+  -- @slider injection.
+  local slider_sec = find_sec("slider")
+  local created_slider = false
+  if slider_sec then
+    add_after(slider_sec.body_end, split_lines(SLIDER_INJ))
+  else
+    -- Create @slider just before @sample's marker line.
+    local sample_sec = find_sec("sample")
+    add_after(sample_sec.marker_line - 1, { "@slider" })
+    add_after(sample_sec.marker_line - 1, split_lines(SLIDER_INJ))
+    created_slider = true
+  end
+
+  -- @block injection (transport-edge mute clear). v1: skipped entirely;
+  -- BLOCK_INJ is nil. See render_injection_blocks for rationale.
+  local created_block = false
+  if BLOCK_INJ then
+    local block_sec = find_sec("block")
+    if block_sec then
+      add_after(block_sec.body_end, split_lines(BLOCK_INJ))
+    else
+      local sample_sec = find_sec("sample")
+      add_after(sample_sec.marker_line - 1, { "@block" })
+      add_after(sample_sec.marker_line - 1, split_lines(BLOCK_INJ))
+      created_block = true
+    end
+  end
+
+  -- @sample injection (always present per bail check above).
+  local sample_sec = find_sec("sample")
+  add_after(sample_sec.body_end, split_lines(SAMPLE_INJ))
+
+  -- Walk original lines and apply insertions.
+  local out = {}
+  -- Insert any `after_line = 0` content first (before line 1).
+  if plan[0] then
+    for _, l in ipairs(plan[0]) do out[#out + 1] = l end
+  end
+  for i = 1, #lines do
+    out[#out + 1] = lines[i]
+    if plan[i] then
+      for _, l in ipairs(plan[i]) do out[#out + 1] = l end
+    end
+  end
+
+  -- desc: line lookup -- caller (host poll, popup, diagnose path) wants
+  -- the user-facing name without re-parsing.
+  local desc = src:match("^%s*desc:%s*(.-)%s*[\r\n]") or ""
+
+  return table.concat(out, "\n"), {
+    slot_base       = slot,
+    slider_num      = slider_n,
+    merged_options  = options_line_idx ~= nil,
+    created_init    = created_init,
+    created_slider  = created_slider,
+    created_block   = created_block,
+    desc            = desc,
+  }
+end
+
+end  -- close ceiling-injection scope
+
+-- =============================================================================
 -- Utility: Code.auto_save_jsfx
 -- =============================================================================
 -- Silently saves JSFX code to Effects/ReaAssist/<derived_name>.jsfx.
 -- Returns the saved path on success, nil on failure.
+--
+-- Filename is derived from `code` directly. The output-ceiling injection
+-- step now runs at chat-display time in Net.process_response_content, BEFORE
+-- this function is called -- so by the time auto_save_jsfx sees `code`, it
+-- already contains the injected ceiling slider, options:gmem= line, and
+-- @init/@slider/@block/@sample blocks. The desc: line is untouched by
+-- injection, so filename derivation produces the same name either way.
+--
+-- Dedup compares full content. Two saves of the same LLM source allocate
+-- different gmem slots at injection time, so re-saving produces a new
+-- numeric-suffixed file rather than reusing the existing one. v1 trade-off.
 function Code.auto_save_jsfx(code)
   local base_name = Code.derive_filename_jsfx(code)
+
   local name = base_name
   local stem = base_name:match("^(.+)%.jsfx$") or base_name
   local dest = JSFX_DIR .. RA.SEP .. name
@@ -4500,10 +5233,16 @@ function Code.ensure_preferred_from_chains()
       local chain_list = chains[type_key].chain or {}
       for _, entry in ipairs(chain_list) do
         if Code.resolve_chain_entry(entry, installed) then
-          cache.preferred_types[type_key] = entry
+          -- Canonicalize the chain-entry form to AddByName-ready prefixed
+          -- form before storing. Chain entries are intentionally format-
+          -- agnostic ("Twin 3"), but the model + TrackFX_AddByName work
+          -- more reliably with the prefixed form ("VST3i: Twin 3").
+          local canonical = FXCache.canonicalize_identifier(type_key, entry)
+          cache.preferred_types[type_key] = canonical
           Log.line("PREF", str_format(
-            "auto-assigned preferred_types.%s = %s%s",
-            type_key, entry,
+            "auto-assigned preferred_types.%s = %s%s%s",
+            type_key, canonical,
+            (canonical ~= entry) and " (canonicalized from " .. entry .. ")" or "",
             overridden and " (ephemeral; hide_fabfilter override of "
               .. tostring(original) .. ")" or " (from chain)"))
           assigned = assigned + 1
@@ -4513,6 +5252,12 @@ function Code.ensure_preferred_from_chains()
       end
     end
   end
+  -- One-time-per-session migration of any legacy bare-name entries that
+  -- this run didn't touch (entries that already had a value when this
+  -- function was called, so the chain-walk above skipped them). Runs
+  -- after the chain assignment so newly-assigned entries are already
+  -- canonical and the migration finds nothing to do for them.
+  FXCache.canonicalize_all_preferred_types()
   if assigned > 0 then
     if next(ephemeral_originals) then
       -- Snapshot-and-restore: write the rolled-back values to disk, then
@@ -5247,11 +5992,147 @@ function FXCache.clear_preferred_types()
   return FXCache.save(cache)
 end
 
+-- Canonicalize an identifier to AddByName-ready form by resolving against
+-- the installed-FX list (REAPER 7.42+'s EnumInstalledFX). Chain-entry form
+-- ("Twin 3", "Pro-Q 4") is portable across plugin-format namespaces and is
+-- what shows up in .RfxChain files, but TrackFX_AddByName works most
+-- reliably with the prefixed form ("VST3i: Twin 3"). The model also picks
+-- the right plugin format when it sees the prefix instead of guessing.
+--
+-- Returns (canonical, was_upgraded) where was_upgraded is true if the
+-- input was a bare chain-entry form that resolved to a prefixed form.
+-- If the identifier already has a recognized prefix, returns it as-is
+-- (no resolution attempted). If no match in installed-FX, or the FX list
+-- isn't available (REAPER < 7.42), returns the identifier unchanged.
+--
+-- type_key is used as a tie-breaker when multiple format variants of the
+-- same plugin are installed (e.g., Twin 3 as both VST3i and AUi on Mac):
+-- "synth" prefers instrument-variant prefixes (*i:); other types prefer
+-- effect-variant prefixes. Without type_key, picks the first match.
+local _ADDBYNAME_PREFIXES = {
+  "VST3i", "VST3", "VSTi", "VST",
+  "AUi", "AU",
+  "CLAPi", "CLAP",
+  "LV2i", "LV2",
+  "DXi", "DX",
+  "JS",
+}
+local _INSTRUMENT_PREFIXES = {
+  VST3i = true, VSTi = true, AUi = true, CLAPi = true,
+  LV2i = true, DXi = true,
+}
+local _INSTRUMENT_TYPES = { synth = true }
+
+local function _identifier_has_addbyname_prefix(identifier)
+  local prefix = identifier:match("^([A-Za-z][A-Za-z0-9]*):")
+  if not prefix then return false end
+  for _, p in ipairs(_ADDBYNAME_PREFIXES) do
+    if prefix == p then return true end
+  end
+  return false
+end
+
+local function _strip_vendor_suffix(name)
+  -- "VST3: Pro-Q 4 (FabFilter)" -> "VST3: Pro-Q 4". Chain-entry form
+  -- doesn't include the vendor, so the canonical form drops it too.
+  return (name:gsub("%s*%(.-%)%s*$", ""))
+end
+
+function FXCache.canonicalize_identifier(type_key, identifier)
+  if not identifier or identifier == "" then return identifier, false end
+  if _identifier_has_addbyname_prefix(identifier) then
+    return identifier, false
+  end
+  if not CTX or not CTX.populate_installed_fx then return identifier, false end
+  CTX.populate_installed_fx()
+  local installed = CTX._installed_fx_list
+  if not installed or #installed == 0 then return identifier, false end
+
+  local target = identifier:lower()
+  local prefer_instrument = type_key and _INSTRUMENT_TYPES[type_key:lower()] or false
+  -- Match against the bare base name (after stripping the AddByName prefix
+  -- and a trailing " (Vendor)" suffix) but RETURN the original installed
+  -- entry verbatim. EnumInstalledFX is the source of truth for AddByName --
+  -- mirroring its exact output keeps the canonicalizer aligned with
+  -- Code.resolve_chain_entry (which also returns the full installed
+  -- identifier) and avoids ambiguity if two plugins share a stem name
+  -- across vendors.
+  local best, best_rank = nil, -1
+  for _, full in ipairs(installed) do
+    local prefix, rest = full:match("^([A-Za-z][A-Za-z0-9]*):%s*(.+)$")
+    if prefix and rest then
+      local base = _strip_vendor_suffix(rest):lower()
+      if base == target then
+        local is_instr = _INSTRUMENT_PREFIXES[prefix] == true
+        -- Rank prefers (instrument-match for synth-type), then prefers
+        -- earlier-in-list (which is roughly REAPER's preferred load order
+        -- via _ADDBYNAME_PREFIXES).
+        local rank = (prefer_instrument == is_instr) and 1000 or 0
+        for i, p in ipairs(_ADDBYNAME_PREFIXES) do
+          if prefix == p then rank = rank + (#_ADDBYNAME_PREFIXES - i); break end
+        end
+        if rank > best_rank then
+          best, best_rank = full, rank
+        end
+      end
+    end
+  end
+  if best then return best, true end
+  return identifier, false
+end
+
 function FXCache.set_preferred_type(type_key, identifier)
+  -- Canonicalize before storing so the on-disk form is AddByName-ready.
+  -- Logs the upgrade once (per write) so the operator sees that the legacy
+  -- bare-name input was upgraded.
+  local canonical, upgraded = FXCache.canonicalize_identifier(type_key, identifier)
+  if upgraded then
+    Log.line("PREF", str_format(
+      "preferred_types.%s = %s -> %s (canonicalized on save)",
+      type_key, identifier, canonical))
+  end
   local cache = FXCache.load()
-  cache.preferred_types[type_key] = identifier
+  cache.preferred_types[type_key] = canonical
   FXCache._mutation_count = FXCache._mutation_count + 1
   return FXCache.save(cache)
+end
+
+-- One-time-per-session migration. Walks cache.preferred_types and upgrades
+-- any bare chain-entry forms ("Twin 3") to AddByName-ready prefixed form
+-- ("VST3i: Twin 3") via FXCache.canonicalize_identifier. Logs each upgrade
+-- as `preferred_types.<type> = old -> new` so legacy data drift is visible
+-- once. Saves the cache only if any entry was actually upgraded.
+--
+-- Idempotent: a second call after the first does nothing because every
+-- entry is already prefixed. Safe to call from multiple entry points
+-- (Code.ensure_preferred_from_chains startup, render-side first paint).
+function FXCache.canonicalize_all_preferred_types()
+  if FXCache._canonicalized_session then return 0 end
+  if not CTX or not CTX.populate_installed_fx then return 0 end
+  CTX.populate_installed_fx()
+  if not CTX._installed_fx_list or #CTX._installed_fx_list == 0 then
+    -- REAPER < 7.42 or empty FX library. Defer; another call may succeed
+    -- once the list is populated. Don't mark as done.
+    return 0
+  end
+  local cache = FXCache.load()
+  local upgraded_count = 0
+  for type_key, identifier in pairs(cache.preferred_types or {}) do
+    local canonical, upgraded = FXCache.canonicalize_identifier(type_key, identifier)
+    if upgraded then
+      Log.line("PREF", str_format(
+        "preferred_types.%s = %s -> %s (canonicalized on load)",
+        type_key, identifier, canonical))
+      cache.preferred_types[type_key] = canonical
+      upgraded_count = upgraded_count + 1
+    end
+  end
+  FXCache._canonicalized_session = true
+  if upgraded_count > 0 then
+    FXCache._mutation_count = FXCache._mutation_count + 1
+    FXCache.save(cache)
+  end
+  return upgraded_count
 end
 
 function FXCache.get_preferred_types()
@@ -5262,6 +6143,10 @@ end
 function FXCache.invalidate()
   _fx_cache_mem = nil
   FXCache._mutation_count = (FXCache._mutation_count or 0) + 1
+  -- Clear the session migration flag too so a fresh load (e.g., after a
+  -- corrupt-cache reset, an external edit, or a manual reload) will
+  -- re-run canonicalization on whatever's now on disk.
+  FXCache._canonicalized_session = nil
 end
 
 -- =============================================================================
@@ -5321,9 +6206,18 @@ local function _resolve_pending_project()
   return reaper.EnumProjects(-1)
 end
 
-function CTX.tracks(proj)
+-- CTX.tracks(proj, opts)
+-- opts.minimal: when true, emit ONLY selected tracks (plus a summary line
+-- with the total count). Used by JSFX-intent prompts where the snapshot
+-- ships a generic "create me an effect file" request and the per-track
+-- listing is dead weight -- the model writes EEL2 against spl0/spl1, not
+-- against any specific track. On a 80-track session this drops the tracks
+-- block from ~1.1KB to ~80 bytes.
+function CTX.tracks(proj, opts)
   local count = R_CountTracks(proj)
   if count == 0 then return "Tracks: none" end
+  local minimal = opts and opts.minimal
+  local sel_lines = {}
   local lines = { str_format("Tracks (N=%d) [idx|name|items]:", count) }
   for i = 0, count - 1 do
     -- Long-lived defer scripts can race with project tab close / reload
@@ -5334,8 +6228,29 @@ function CTX.tracks(proj)
     if tr then
       local _, nm      = R_GetTrackName(tr)
       local item_count = R_CountTrackMediaItems(tr)
-      lines[#lines+1] = str_format("%d|%s|%d", i + 1, _scrub_pipes(nm), item_count)
+      if minimal then
+        if R_IsTrackSelected(tr) then
+          sel_lines[#sel_lines+1] = str_format(
+            "%d|%s|%d", i + 1, _scrub_pipes(nm), item_count)
+        end
+      else
+        lines[#lines+1] = str_format("%d|%s|%d", i + 1, _scrub_pipes(nm), item_count)
+      end
     end
+  end
+  if minimal then
+    if #sel_lines == 0 then
+      return str_format(
+        "Tracks (N=%d): none selected (full list omitted -- JSFX prompt)",
+        count)
+    end
+    local out = {
+      str_format(
+        "Tracks (N=%d, showing selected only -- JSFX prompt) [idx|name|items]:",
+        count),
+    }
+    for _, ln in ipairs(sel_lines) do out[#out+1] = ln end
+    return tbl_concat(out, "\n")
   end
   return tbl_concat(lines, "\n")
 end
@@ -5428,6 +6343,63 @@ function CTX.selected(proj)
   return #selected > 0
     and ("Selected tracks: " .. tbl_concat(selected, ", "))
     or  "Selected tracks: none"
+end
+
+-- Returns a TARGET HINT block for the snapshot when one or more tracks are
+-- selected at request time. Lifts snapshot data into instruction-shape so
+-- the model writes code targeting the captured track(s) by index/name first
+-- and falls back to live GetSelectedTrack() only if the captured target no
+-- longer exists. Without this, the model commonly emits pure GetSelectedTrack
+-- calls and a script delayed past the user's next click produces "No track
+-- selected." Returns "" when no tracks are selected (suppresses the block).
+function CTX.target_hint(proj, user_text)
+  local count = R_CountTracks(proj)
+  local sel = {}
+  for i = 0, count - 1 do
+    local tr = R_GetTrack(proj, i)
+    if tr and R_IsTrackSelected(tr) then
+      local _, nm = R_GetTrackName(tr)
+      sel[#sel+1] = { idx = i + 1, name = nm }
+    end
+  end
+  if #sel == 0 then return "" end
+  -- Suppress on clearly create-new-track prompts. Small models have been
+  -- observed obeying the hint over the explicit user request ("Create a
+  -- new Twin 3 synth track" emitted code that targeted the existing
+  -- selected Vocal track instead). Negative-marker filter is conservative
+  -- (only suppresses on unambiguous phrases); requests that operate on
+  -- existing tracks still get the hint.
+  if user_text and user_text ~= "" then
+    local t = user_text:lower()
+    if t:find("create%s+a?%s*new%s+track")
+       or t:find("create%s+a?%s*new%s+%w+%s+track")
+       or t:find("add%s+a?%s*new%s+track")
+       or t:find("add%s+a?%s*new%s+%w+%s+track")
+       or t:find("insert%s+a?%s*new%s+track")
+       or t:find("insert%s+track") then
+      return ""
+    end
+  end
+  local lines = { "TARGET HINT:" }
+  if #sel == 1 then
+    lines[#lines+1] = str_format(
+      "Selected track at request time: index %d, name %q.", sel[1].idx, sel[1].name)
+  else
+    local list = {}
+    for _, e in ipairs(sel) do
+      list[#list+1] = str_format("index %d, name %q", e.idx, e.name)
+    end
+    lines[#lines+1] = "Selected tracks at request time: " .. tbl_concat(list, "; ") .. "."
+  end
+  lines[#lines+1] = "Use this captured target ONLY when the user request "
+    .. "refers to \"the/this/selected/current\" track or otherwise operates "
+    .. "on EXISTING tracks. IGNORE this block when the user asks to create, "
+    .. "insert, or add a new track -- those should call InsertTrackAtIndex "
+    .. "and target the freshly created track, not the captured one. When "
+    .. "honoring the hint: validate the target still exists (and preferably "
+    .. "still has the same name); fall back to reaper.GetSelectedTrack() "
+    .. "only if the captured target is invalid."
+  return tbl_concat(lines, "\n")
 end
 
 -- Uses GetSet_LoopTimeRange2 (project-aware variant) instead of the non-project
@@ -6043,6 +7015,7 @@ local PROMPT_BUNDLE_NAMES = {
   plugin         = true,
   plugin_helpers = true,
   jsfx           = true,
+  jsfx_pitch     = true,
   theme          = true,
 }
 
@@ -6429,6 +7402,43 @@ local CURATED_IDENT = {
   ["Saturn 2"]            = "Saturn 2",
   ["Timeless 3"]          = "Timeless 3",
 }
+
+-- Curated lookup that tolerates AddByName prefix + vendor suffix on the
+-- input. After preferred_types canonicalization, identifiers stored as
+-- chain-entry form ("Pro-Q 4") become AddByName form ("VST3: Pro-Q 4"
+-- or "VST3: Pro-Q 4 (FabFilter)"). A direct CURATED_IDENT[ident] lookup
+-- only matches the bare keys in the table -- which would silently
+-- bypass the curated plugin_ref:<Name> path for any canonicalized
+-- pref, regressing the Pro-Q / Pro-C / Pro-R routes that depend on it.
+--
+-- Strategy: try the original ident first (handles ReEQ JSFX paths and
+-- the legacy bare-name entries). Then strip a recognized AddByName
+-- prefix (matched against PLUGIN_REF_ALIASES so the prefix list stays
+-- authoritative in one place) and the trailing " (Vendor)" suffix and
+-- retry. Returns nil when neither form matches.
+local function _curated_for_ident(ident)
+  if not ident or ident == "" then return nil end
+  local hit = CURATED_IDENT[ident]
+  if hit then return hit end
+  -- Strip the prefix only if it looks like an AddByName format prefix
+  -- (e.g., "VST3: ", "AUi: "). A leading "ReJJ/" path component must NOT
+  -- be touched -- those paths are first-class CURATED_IDENT keys and
+  -- the direct lookup above already handles them.
+  local stripped = ident:match("^[A-Za-z][A-Za-z0-9]*:%s*(.+)$")
+  if stripped then
+    -- Drop trailing " (Vendor)" to recover the bare chain-entry form.
+    local bare = stripped:gsub("%s*%(.-%)%s*$", "")
+    hit = CURATED_IDENT[bare]
+    if hit then return hit end
+    -- Try without stripping the suffix too (some entries embed parens
+    -- in the actual name, though none do today).
+    if bare ~= stripped then
+      hit = CURATED_IDENT[stripped]
+      if hit then return hit end
+    end
+  end
+  return nil
+end
 
 -- Build the per-plugin section cache from Plugin_Ref.md. Idempotent;
 -- lazy -- call before reading CTX._plugin_ref_cache. Returns true on
@@ -7948,7 +8958,16 @@ function CTX.save_pref_plugins()
     if lbl ~= "" and name ~= "" then
       local rkey = label_to_type_key(lbl)
       if rkey ~= "" then
-        cache.preferred_types[rkey] = name
+        -- Canonicalize on save so the on-disk form is AddByName-ready
+        -- (e.g., "Twin 3" -> "VST3i: Twin 3"). Logs the upgrade once
+        -- per save when it actually changes the value.
+        local canonical, upgraded = FXCache.canonicalize_identifier(rkey, name)
+        if upgraded then
+          Log.line("PREF", str_format(
+            "preferred_types.%s = %s -> %s (canonicalized on UI save)",
+            rkey, name, canonical))
+        end
+        cache.preferred_types[rkey] = canonical
       end
     end
   end
@@ -8479,7 +9498,23 @@ local CHAIN_PHRASE_HINTS = {
   { "drum%s+kit",         {"eq", "compressor", "gate"} },
   { "drum%s+chain",       {"eq", "compressor", "gate"} },
   { "drum%s+bus",         {"eq", "compressor"} },
+  -- Vocal-chain variants: the literal "vocal%s+chain" alone misses
+  -- common phrasings like "chain of effects ... rock vocal" (observed
+  -- in a turn-2 user prompt that paid a wasted resolve round-trip
+  -- because reverb + compressor weren't preempted). Order matters
+  -- for trigger-phrase attribution: more-specific patterns first so
+  -- the debug log records the tightest match. All three entries imply
+  -- the same type set, so type-pinning is unaffected by order.
+  --
+  -- All patterns require BOTH a vocal mention AND a chain/effects
+  -- mention. "rock vocal" alone would over-preempt on add-only or
+  -- record-only prompts ("add a rock vocal track", "record a rock
+  -- vocal") that don't ask for a chain. Genre-prefixed phrasings
+  -- like "rock vocal chain" already hit via vocal%s+chain anyway,
+  -- since the substring "vocal chain" is present.
+  { "chain%s+of%s+effects.-vocal", {"eq", "compressor", "deesser", "reverb"} },
   { "vocal%s+chain",      {"eq", "compressor", "deesser", "reverb"} },
+  { "vocal.-chain",       {"eq", "compressor", "deesser", "reverb"} },
   { "vocal%s+bus",        {"eq", "compressor"} },
   { "guitar%s+chain",     {"eq", "compressor", "saturation"} },
   { "bass%s+chain",       {"eq", "compressor"} },
@@ -8553,11 +9588,75 @@ local DOCS_PHRASE_HINTS = {
   { "time signature",        "tempo"     },
 }
 
+-- JSFX-intent detection: returns true when the user's prompt explicitly
+-- asks for JSFX/EEL2/custom-DSP work. Intentionally narrow -- only fires on
+-- the literal "jsfx" / "eel2" / "reajs" tokens, the "@init" / "@sample"
+-- section markers (which only appear in JSFX code discussions), or the
+-- common phrasing "write/build/make a (custom) plugin/effect/DSP". JSFX
+-- family hints (shimmer, harmonizer, etc.) alone do NOT trigger -- those
+-- words apply equally to plugin tasks, and a false positive here would
+-- suppress plugin_ref / api_ref injection that the user actually needed.
+--
+-- Used by the send pipeline to:
+--   - Skip plugin_ref / pref / docs co-pin in the keyword loop below
+--     (saves ~25-30K input tokens per turn when user has a curated reverb
+--     pref and types "reverb" alongside "JSFX").
+--   - Trim the tracks list in the snapshot (no track is referenced when
+--     generating an effect file).
+local function _prompt_indicates_jsfx(text)
+  if type(text) ~= "string" or text == "" then return false end
+  local t = text:lower()
+  if t:find("%f[%w]jsfx%f[%W]")  then return true end
+  if t:find("%f[%w]eel2?%f[%W]") then return true end
+  if t:find("%f[%w]reajs%f[%W]") then return true end
+  if t:find("@init") or t:find("@sample") or t:find("@gfx")
+     or t:find("@slider") or t:find("@block") then return true end
+  return false
+end
+
+-- JSFX effect-family bundles. When the user prompt matches any phrase
+-- below, the corresponding prompt_bundle:jsfx_<family> gets pinned on top
+-- of the always-on prompt_bundle:jsfx core. Bundle content is in
+-- Resources/Prompts.md (one SECTION per family). False-positive pins are
+-- low-cost (one bundle, ~1.5K tokens) and don't change behavior beyond
+-- giving the model more relevant DSP recipes; bias keywords toward
+-- multi-word phrases when the single word is too generic to be safe.
+local JSFX_FAMILY_HINTS = {
+  -- jsfx_pitch: pitch shifters, shimmer reverbs, harmonizers, granular
+  -- octave effects. Single-word `pitch` is too broad ("pitch the snare"
+  -- in mixing context); require multi-word or context-specific phrasing.
+  { "shimmer",                     "jsfx_pitch" },
+  { "pitch shift",                 "jsfx_pitch" },
+  { "pitch shifter",               "jsfx_pitch" },
+  { "pitch%-shift",                "jsfx_pitch" },
+  { "octave up",                   "jsfx_pitch" },
+  { "octave down",                 "jsfx_pitch" },
+  { "%f[%w]harmoniz",              "jsfx_pitch" },  -- harmonizer / harmoniser / harmonize
+  { "%f[%w]transpose",             "jsfx_pitch" },
+  { "%f[%w]grain%f[%W]",           "jsfx_pitch" },
+  { "%f[%w]granular",              "jsfx_pitch" },
+}
+
+-- Exposed for callers outside this module (Net.send, the snapshot builder).
+-- Keep the local in scope for in-module callers that already use it.
+CTX.prompt_indicates_jsfx = _prompt_indicates_jsfx
+
 function CTX.preempt_buckets_for_prompt(user_text)
   if not user_text or user_text == "" then return {} end
   local text = user_text:lower()
   local cache = FXCache.load()
   local pref_types = cache.preferred_types or {}
+  -- JSFX-only intent suppresses the plugin_ref / pref / docs co-pin path
+  -- in the type-keyword loop below. The JSFX_FAMILY_HINTS scan still runs
+  -- (so prompt_bundle:jsfx_pitch etc. are pinned for "shimmer"-style
+  -- prompts), and DOCS_PHRASE_HINTS still runs (envelopes/routing/etc.
+  -- don't conflict with JSFX). What we skip is the `for tkey in keys` loop
+  -- that pins plugin_ref:Pro-R 2 + pref:reverb + plugin bundle + docs core
+  -- when the user has a curated pref for a type whose name appears in the
+  -- prompt. Those payloads are useless for "create a JSFX <effect>" --
+  -- the model writes EEL2, not reaper.* TrackFX_AddByName, and the docs
+  -- gate is the safety net if it does choose to add a Lua companion.
+  local jsfx_intent = _prompt_indicates_jsfx(user_text)
 
   -- Scan chain-phrase hints first. Builds tkey -> matching_phrase so the
   -- main loop below can treat phrase hits identically to keyword hits and
@@ -8576,6 +9675,52 @@ function CTX.preempt_buckets_for_prompt(user_text)
   -- preferred-types loop below append to the same list. Returned at the end
   -- as the caller's "what we just preempted" log payload.
   local injected = {}
+
+  -- Chain-build follow-up: pre-pin fx_chains so the model can honor the
+  -- ADD-VS-REUSE rule. When the prompt is a chain phrase AND there's
+  -- already prior conversation history, an earlier turn may have placed
+  -- plugins on the target track(s) -- if the model can't see what's
+  -- already there it defaults to AddByName for everything and silently
+  -- duplicates the existing plugins. The bundle's CHAIN BUILD / UPSERT
+  -- RULE describes the right behavior; this gives the model the data
+  -- it needs to actually do it. First-turn chain prompts skip this
+  -- (no prior plugins to reuse) so we don't pay for a snapshot that
+  -- adds nothing.
+  if next(phrase_implied) and #S.history > 0
+     and not S.fx_chains_already_sent
+     and not S.sticky_context["fx_chains"] then
+    local proj = S.pending_project or 0
+    local fx_snapshot = CTX.fx(proj)
+    if fx_snapshot and fx_snapshot ~= "" then
+      -- Prepend a short, high-salience upsert skeleton ahead of the
+      -- chain data. The CHAIN BUILD / UPSERT RULE in prompt_bundle:plugin
+      -- is correct but buried in a long bundle; small models often skip
+      -- past it on first draft and the UPSERT-VALIDATOR catches them on
+      -- retry. Putting the skeleton next to the data it applies to
+      -- improves first-draft compliance for ~80 bytes.
+      local upsert_header =
+           "CHAIN BUILD = UPSERT (read this rule before writing code):\n"
+        .. "  local fx = reaper.TrackFX_GetByName(tr, \"<bare name>\", false)\n"
+        .. "  if fx < 0 then\n"
+        .. "    fx = reaper.TrackFX_AddByName(tr, \"<format-prefixed id>\", false, -1)\n"
+        .. "  end\n"
+        .. "  if fx < 0 then ShowMessageBox + return end\n"
+        .. "Apply to EVERY plugin in the chain. The static UPSERT-VALIDATOR "
+        .. "rejects direct AddByName-only chains and forces a retry.\n"
+        .. "HELPERS YOU CALL MUST BE PASTED: if your script calls "
+        .. "set_param_display / set_param_enum / set_param_enum_paced / "
+        .. "find_param, paste each helper's `local function NAME(...) end` "
+        .. "source from prompt_bundle:plugin_helpers ABOVE main(). The "
+        .. "static HELPER-VALIDATOR rejects called-but-undefined helpers "
+        .. "and forces a retry.\n\n"
+      Net.sticky_set("fx_chains", upsert_header .. fx_snapshot, "preempt")
+      S.fx_chains_already_sent = true
+      injected[#injected+1] = "fx_chains"
+      Log.line("PREEMPT",
+        "injected fx_chains (chain-phrase follow-up; lets the model "
+        .. "honor ADD-VS-REUSE)")
+    end
+  end
 
   -- Scan docs-phrase hints. Each match pre-pins the docs:<section> bucket
   -- so the model doesn't need to emit <context_needed>docs:envelopes</context_needed>
@@ -8608,6 +9753,54 @@ function CTX.preempt_buckets_for_prompt(user_text)
       end
     end
   end
+  -- JSFX effect-family bundles (jsfx_pitch, jsfx_reverb, ...). Each match
+  -- pins the family bundle ON TOP OF the always-on prompt_bundle:jsfx
+  -- core. Multiple families can fire in one turn (e.g. "shimmer chorus"
+  -- would trigger jsfx_pitch + jsfx_modulation if both are registered).
+  local fam_seen = {}
+  for _, hint in ipairs(JSFX_FAMILY_HINTS) do
+    if text:find(hint[1]) then
+      local family = hint[2]
+      if not fam_seen[family] then
+        fam_seen[family] = true
+        local pb_key = "prompt_bundle:" .. family
+        local already_pinned = S.sticky_context[pb_key]
+        Net.copin_jsfx_family(family, injected)
+        if not already_pinned and S.sticky_context[pb_key] then
+          Log.line("PREEMPT",
+            "injected " .. pb_key .. " (jsfx phrase: '" .. hint[1] .. "')")
+        end
+      end
+    end
+  end
+
+  -- Whenever JSFX intent is detected -- even for a generic request like
+  -- "hall reverb" with no family-hint match -- pre-pin the base
+  -- `prompt_bundle:jsfx` and `docs` (REAPER core API ref). The base bundle
+  -- carries the safety mandates (feedback clamp, no output saturator,
+  -- output-stage rules, srate / num_ch / play_state JSFX builtins) that
+  -- weak models like GPT-5.4-mini-no-thinking won't request via
+  -- <context_needed>; they just generate from training memory and produce
+  -- typos like `samplespersec` (instead of `srate`) plus output sliders
+  -- the bundle would have forbidden. Pre-pinning closes that hole.
+  --
+  -- Idempotent via the sticky_context already-pinned check inside
+  -- Net.copin_jsfx_family / Net.copin_docs_core.
+  if jsfx_intent then
+    local base_key = "prompt_bundle:jsfx"
+    local base_already = S.sticky_context[base_key]
+    Net.copin_jsfx_family("jsfx", injected)
+    if not base_already and S.sticky_context[base_key] then
+      Log.line("PREEMPT",
+        "injected " .. base_key .. " (JSFX intent: any JSFX request)")
+    end
+    local docs_already = S.api_ref_message ~= nil
+    Net.copin_docs_core(injected)
+    if not docs_already and S.api_ref_message then
+      Log.line("PREEMPT",
+        "injected docs (co-pin for JSFX Lua-companion path)")
+    end
+  end
   -- Dev-only: when the FabFilter-hide flag is on, treat matching entries
   -- in preferred_types as absent so the preempt path falls through to
   -- "no pref set" behavior (emits resolve:<type> and fires the popup we
@@ -8627,6 +9820,98 @@ function CTX.preempt_buckets_for_prompt(user_text)
   -- preferred_plugins:<type>. The map lives at module scope (see
   -- CURATED_IDENT definition near PLUGIN_REF_ALIASES) so both the preempt
   -- and resolve paths stay in lockstep when the list is extended.
+  --
+  -- JSFX-intent skip: when the user explicitly asked for JSFX, do not pin
+  -- any plugin_ref / pref / plugin bundle / docs core via this loop. The
+  -- type-keyword match (e.g. "reverb" in "create a JSFX shimmer reverb")
+  -- triggers all four pins on a Pro-R 2 user; the model never reads any of
+  -- them while writing EEL2, and the docs co-pin alone is ~19K input
+  -- tokens of waste. The docs-gate at Code.process_response_content is
+  -- still the safety net if the model does emit a Lua companion that
+  -- needs reaper.* signatures.
+  if jsfx_intent then
+    if #keys > 0 then
+      Log.line("PREEMPT",
+        "skipped plugin_ref/pref keyword loop (JSFX intent)")
+    end
+    return injected
+  end
+
+  -- Direct curated-plugin-name preempt: when the user names a curated
+  -- plugin in the prompt ("Add Pro-Q 4 to every track..."), pin
+  -- plugin_ref:<Name> immediately even when no type-keyword ("eq")
+  -- appears. Without this, the model has to emit
+  -- <context_needed>fx_inspect:Pro-Q 4 + prompt_bundle:plugin</context_needed>
+  -- on the first turn and then a SECOND retry once the docs gate fires --
+  -- 3 calls instead of 1 for what's clearly a curated-plugin task. For
+  -- each match, also pin pref:<tkey> if any saved pref maps to the same
+  -- curated name (so the model gets the "this IS your saved pref" signal
+  -- and skips a defensive resolve emission).
+  local curated_unique = {}
+  for _, name in pairs(CURATED_IDENT) do curated_unique[name] = true end
+  for curated_name in pairs(curated_unique) do
+    if text:find(curated_name:lower(), 1, true) then
+      local pr_key = "plugin_ref:" .. curated_name
+      if not S.sticky_context[pr_key]
+         and not (S.plugin_ref_sent or {})[curated_name] then
+        local rp_content, _ = CTX.plugin_ref({curated_name})
+        if rp_content then
+          CTX.populate_installed_fx()
+          local exact_ident = nil
+          if Code.resolve_chain_entry and CTX._installed_fx_list then
+            exact_ident = Code.resolve_chain_entry(curated_name, CTX._installed_fx_list)
+          end
+          local prefix = ""
+          if exact_ident and exact_ident ~= curated_name then
+            prefix = "AddByName identifier on this system: `" .. exact_ident
+              .. "` -- use this EXACT string with TrackFX_AddByName.\n\n"
+          end
+          Net.sticky_set(pr_key, prefix .. rp_content)
+          if S.plugin_ref_sent then S.plugin_ref_sent[curated_name] = true end
+          Net.copin_plugin_bundle(injected)
+          Net.copin_docs_core(injected)
+          if Code.prompt_has_param_write_intent(user_text) then
+            Net.copin_plugin_helpers(injected, "preempt")
+          end
+          injected[#injected+1] = pr_key
+          Log.line("PREEMPT",
+            "injected " .. pr_key .. " (curated content, direct name match)"
+            .. (exact_ident and (" exact=" .. exact_ident) or ""))
+          -- Reverse-lookup pref:<tkey> if any saved pref maps to this curated.
+          for tkey, ident in pairs(pref_types) do
+            local mapped = ident and _curated_for_ident(ident) or nil
+            if mapped == curated_name then
+              if hide_ff and _is_fabfilter_ident(ident) then break end
+              local pp_key = "pref:" .. tkey
+              if not S.sticky_context[pp_key]
+                 and not (S.pref_plugins_sent or {})[tkey] then
+                local hint = "PREFERRED PLUGINS:\n"
+                  .. "  " .. tkey .. " = " .. (exact_ident or ident or curated_name) .. "\n"
+                  .. "(User's saved preference; full parameter reference above "
+                  .. "in plugin_ref:" .. curated_name .. ". Use this plugin directly "
+                  .. "and do NOT emit <context_needed>resolve:" .. tkey
+                  .. "</context_needed>. For add-only/load-only tasks (no parameter "
+                  .. "values set), use the AddByName identifier directly -- do NOT "
+                  .. "emit <context_needed>fx_inspect:" .. (exact_ident or ident or curated_name)
+                  .. "</context_needed> just to load the plugin. After every "
+                  .. "TrackFX_AddByName, the next non-blank line MUST be `if "
+                  .. "fx < 0 then ShowMessageBox(...) return end` before "
+                  .. "using fx -- the static FX-CHECK-VALIDATOR rejects "
+                  .. "unchecked AddByName results and forces a retry.)"
+                Net.sticky_set(pp_key, hint)
+                if S.pref_plugins_sent then S.pref_plugins_sent[tkey] = true end
+                injected[#injected+1] = pp_key
+                Log.line("PREEMPT",
+                  "injected " .. pp_key .. " (pref hint for curated " .. curated_name .. ")")
+              end
+              break
+            end
+          end
+        end
+      end
+    end
+  end
+
   for _, tkey in ipairs(keys) do
     -- Word-boundary match so "eq" doesn't fire on "equal" / "sequence".
     -- %b pattern wouldn't help here; %f[%w] + %f[%W] brackets catch whole
@@ -8656,7 +9941,12 @@ function CTX.preempt_buckets_for_prompt(user_text)
       if not ident or ident == "" then
         goto continue_preempt
       end
-      local curated = ident and CURATED_IDENT[ident] or nil
+      -- Use the prefix/vendor-tolerant lookup so canonicalized prefs
+      -- ("VST3: Pro-Q 4") still resolve to the curated section. A direct
+      -- CURATED_IDENT[ident] would only match bare chain-entry form and
+      -- would silently bypass curated plugin_ref content for every
+      -- FabFilter pref after the preferred_types canonicalization.
+      local curated = ident and _curated_for_ident(ident) or nil
       if curated then
         -- Curated plugin: inject plugin_ref:<Name> instead of
         -- preferred_plugins:<type>. Richer content, and doesn't depend
@@ -8696,6 +9986,28 @@ function CTX.preempt_buckets_for_prompt(user_text)
             -- this, the rich plugin context biases the model into bypassing
             -- the API REF REQUIREMENT rule and the docs-gate has to retry.
             Net.copin_docs_core(injected)
+            -- Co-pin plugin_helpers ON THE SAME TURN as plugin_bundle so
+            -- helpers rides the stable rung's first emission instead of
+            -- arriving mid-session via <context_needed>. Tagged "preempt"
+            -- so Net.sticky_parts routes it to the stable rung (along with
+            -- plugin_bundle) instead of growing -- the stable rung is
+            -- being initialized this turn anyway, so adding helpers costs
+            -- no extra cache miss but saves the helpers re-write that
+            -- would otherwise happen on every subsequent growing-rung
+            -- invalidation (each new plugin_ref / pref / fx_inspect).
+            --
+            -- Gated on prompt_has_param_write_intent so add-only prompts
+            -- ("add Pro-Q to track 1") don't pre-pin the ~17.8K-char
+            -- helpers bundle the model won't actually use. The write-intent
+            -- detector requires a write verb AND a value-shape pattern, so
+            -- it fires for "set the EQ Q to 0.7" / "boost 3 kHz by +2 dB"
+            -- but not for "add an EQ" or "make it sound brighter". The
+            -- dispatcher's existing fx_params / fx_inspect / preferred_
+            -- plugins paths still copin helpers (as "copin" -> growing)
+            -- when those triggers fire mid-flow.
+            if Code.prompt_has_param_write_intent(user_text) then
+              Net.copin_plugin_helpers(injected, "preempt")
+            end
             injected[#injected+1] = pr_key
             Log.line("PREEMPT",
               "injected " .. pr_key .. " (curated content, " .. trigger .. ")"
@@ -8718,7 +10030,10 @@ function CTX.preempt_buckets_for_prompt(user_text)
                 .. "(User's saved preference; full parameter reference above "
                 .. "in plugin_ref:" .. curated .. ". Use this plugin directly "
                 .. "and do NOT emit <context_needed>resolve:" .. tkey
-                .. "</context_needed>.)"
+                .. "</context_needed>. For add-only/load-only tasks (no parameter "
+                .. "values set), use the AddByName identifier directly -- do NOT "
+                .. "emit <context_needed>fx_inspect:" .. (exact_ident or ident or curated)
+                .. "</context_needed> just to load the plugin.)"
               Net.sticky_set(pp_key, hint)
               if S.pref_plugins_sent then S.pref_plugins_sent[tkey] = true end
               injected[#injected+1] = pp_key
@@ -8734,16 +10049,40 @@ function CTX.preempt_buckets_for_prompt(user_text)
            and not (S.pref_plugins_sent or {})[tkey] then
           local pp_content, pp_err = CTX.preferred_plugins({tkey})
           if pp_content then
-            Net.sticky_set(pp_key, pp_content)
+            -- Always-on directive (conditional in wording): tells the
+            -- model that for add-only/load-only tasks the AddByName
+            -- identifier in pp_content is sufficient, and fx_inspect
+            -- isn't needed just to load the plugin. Without this, the
+            -- model defensively emits <context_needed>fx_inspect:Name</context_needed>
+            -- on add-only synth/instrument tasks even when pref already
+            -- pins the AddByName string -- observed costing one extra
+            -- API call on a "create a synth track + MIDI item" prompt
+            -- where Twin 3 was already in pref:synth.
+            local pp_directive = "\n\nDIRECTIVE: For add-only/load-only "
+              .. "tasks (no parameter values set), use the AddByName "
+              .. "identifier above directly with TrackFX_AddByName. Do "
+              .. "NOT emit <context_needed>fx_inspect:Name</context_needed> "
+              .. "just to load the plugin -- the parameter map is only "
+              .. "needed when configuring values. After every "
+              .. "TrackFX_AddByName, the next non-blank line MUST be `if "
+              .. "fx < 0 then ShowMessageBox(...) return end` before using "
+              .. "fx -- the static FX-CHECK-VALIDATOR rejects unchecked "
+              .. "AddByName results and forces a retry."
+            Net.sticky_set(pp_key, pp_content .. pp_directive)
             -- Mark sent so the model's <context_needed>preferred_plugins:tkey
             -- (if it emits one anyway) gets deduped by the bucket dispatcher.
             if S.pref_plugins_sent then S.pref_plugins_sent[tkey] = true end
             -- Co-pin plugin bundle + docs core (same rationale as the
             -- plugin_ref branch above: every pref-plugin pin drives a
             -- plugin task that needs both the workflow guide and the
-            -- reaper.* signatures).
+            -- reaper.* signatures). Helpers rides the stable rung via
+            -- the "preempt" source tag, gated on prompt_has_param_write_
+            -- intent (see curated branch comment for why).
             Net.copin_plugin_bundle(injected)
             Net.copin_docs_core(injected)
+            if Code.prompt_has_param_write_intent(user_text) then
+              Net.copin_plugin_helpers(injected, "preempt")
+            end
             injected[#injected+1] = pp_key
             Log.line("PREEMPT",
               "injected " .. pp_key .. " (" .. trigger .. ")")
@@ -8756,11 +10095,28 @@ function CTX.preempt_buckets_for_prompt(user_text)
   return injected
 end
 
-CTX.build_snapshot = function(proj)
+-- CTX.build_snapshot(proj, opts)
+-- opts.minimal_tracks: emit a tracks-list trimmed to selected tracks +
+-- count summary instead of the full per-track listing. Used by JSFX-only
+-- prompts where the snapshot ships with a "create me an effect file"
+-- request and the per-track names/item counts are dead weight.
+-- The minimal listing bypasses the heavy-cache to keep the regular path
+-- unaffected (the cache stores the full listing; reusing it across modes
+-- would either return the wrong shape on a re-entry or require keying the
+-- cache by mode).
+CTX.build_snapshot = function(proj, opts)
+  local minimal_tracks = opts and opts.minimal_tracks
   local state_count = reaper.GetProjectStateChangeCount(proj or 0)
   local c = CTX._snapshot_heavy_cache
   local tracks_txt, markers_txt
-  if c and c.proj == proj and c.state_count == state_count then
+  if minimal_tracks then
+    tracks_txt  = CTX.tracks(proj, { minimal = true })
+    if c and c.proj == proj and c.state_count == state_count then
+      markers_txt = c.markers
+    else
+      markers_txt = CTX.markers(proj)
+    end
+  elseif c and c.proj == proj and c.state_count == state_count then
     tracks_txt  = c.tracks
     markers_txt = c.markers
   else
@@ -8791,9 +10147,12 @@ CTX.build_snapshot = function(proj)
   -- sessions vs the previous prose form. Single-value lines remain
   -- human-readable. Pipe characters in track names are scrubbed to "_" to
   -- keep parsing trivial.
-  return "SESSION CONTEXT (multi-row sections use pipe-delimited rows -- "
+  local body = "SESSION CONTEXT (multi-row sections use pipe-delimited rows -- "
     .. "see each section's [col|col|...] header for column names):\n"
     .. tbl_concat(parts, "\n") .. "\n\n"
+  local hint = CTX.target_hint(proj, S.pending_orig_prompt)
+  if hint ~= "" then body = body .. hint .. "\n\n" end
+  return body
 end
 
 -- =============================================================================
@@ -9617,106 +10976,439 @@ function Updater.manual_check()
 end
 
 -- =============================================================================
--- Incremental SHA verification (deferred across frames)
+-- SHA-256 verification pipeline (native subprocess + pure-Lua fallback)
 -- =============================================================================
--- The (former) synchronous compute_sha_diff hashed every manifest file in a
--- single call and blocked the main thread for several hundred ms when the
--- piggyback check fired after the first chat response: pure-Lua SHA-256
--- throughput on commodity hardware is ~1 MB/s, so the two ~700 KB Lua files
--- cost 600+ ms each. The functions below split the same work across many
--- frames at the 64-byte SHA block level, not the file level: each
--- tick_sha_diff() call compresses up to CFG.UPDATE_SHA_TIME_BUDGET seconds
--- of work and returns. The main loop pumps it once per frame while update.state ==
--- "verifying", identical pattern to how "checking" / "downloading" /
--- "rename_retry" are pumped. Total wall-clock time is roughly the same as
--- the synchronous version, but it is fully spread across frames so REAPER
--- stays responsive
--- throughout - no frame stalls more than ~11 ms of SHA work.
+-- start_sha_diff preflights the manifest in pure Lua (classifying each entry
+-- as missing / locked-skip / readable) and then prefers a native SHA-256
+-- subprocess (PowerShell Get-FileHash on Windows; sha256sum / shasum -a 256
+-- on POSIX) over the pure-Lua incremental hasher. Native is hundreds of MB/s
+-- vs ~1 MB/s pure-Lua, so on a ~3.6 MB manifest the verify tail drops from
+-- 5-12 s to well under 1 s.
+--
+-- The pure-Lua path remains as the reliability floor. It runs when:
+--   * The native launcher couldn't start (PowerShell missing, AV block,
+--     no sha256sum / shasum on POSIX, paths-file write error)
+--   * tick_native_sha hits a non-zero exit, watchdog timeout, or
+--     suspicious output (preflighted file readable but missing from
+--     native output)
+-- Each tick_sha_diff call compresses up to s.budget seconds of SHA work
+-- (CFG.UPDATE_SHA_TIME_BUDGET for background piggyback,
+-- CFG.UPDATE_SHA_TIME_BUDGET_MANUAL for manual / forced) at the 64-byte SHA
+-- block level, so REAPER stays responsive even if every file has to be
+-- hashed in-Lua. The main loop pumps either tick_native_sha or
+-- tick_sha_diff once per frame while update.state == "verifying", same
+-- shape as "checking" / "downloading" / "rename_retry".
 --
 -- download_start (the post-Update-Now path) keeps its own per-file
 -- file_sha256_hex calls inline -- it's fired by an explicit user click
 -- and only takes the same hash hit once, so a brief stall before the
 -- download progress UI takes over is acceptable there.
 
--- Begin incremental SHA verification. Caller passes the parsed manifest plus
--- the snapshotted manual / forced flags (so tick_sha_diff -> _complete can
--- branch on the same intent that check_poll captured). Sets state to
--- "verifying" so the main loop knows to pump tick_sha_diff each frame.
-function Updater.start_sha_diff(manifest, manual)
+-- Begin SHA verification. Caller passes the parsed manifest plus the
+-- snapshotted manual / forced flags (so tick_*_sha -> _complete can branch
+-- on the same intent that check_poll captured). Two-phase pipeline:
+--
+--   1) Preflight (in this function, in pure Lua): walk manifest, classify
+--      each entry as missing / locked-skip / readable. Missing entries are
+--      recorded directly in s.diff.missing; locked ones are logged and
+--      skipped (preserving today's "AV / editor lock = treat as intact"
+--      semantics so transient locks don't produce false Repair-Available
+--      popups). Readable entries are collected into s.to_hash[].
+--
+--   2) Hash (deferred across frames): prefer native SHA-256 via PowerShell
+--      Get-FileHash on Windows or sha256sum / shasum -a 256 on POSIX;
+--      native is hundreds of MB/s vs ~1 MB/s pure-Lua, so on a ~3.6 MB
+--      manifest the verify tail drops from 5-12 s to well under 1 s. Pure-
+--      Lua remains the reliability floor: if the native subprocess fails
+--      to launch, exits non-zero, watchdog-times-out, or produces output
+--      that doesn't match preflight, _native_to_lua_fallback flips
+--      s.mode = "lua_fallback" and tick_sha_diff walks s.to_hash from
+--      idx 1 to recompute from a known-good code path.
+--
+-- Sets state = "verifying" so the main loop knows to pump the right tick
+-- function each frame (tick_native_sha when s.mode == "native";
+-- tick_sha_diff when s.mode == "lua" or "lua_fallback").
+function Updater.start_sha_diff(manifest, manual, forced)
+  local diff = { missing = {}, mismatched = {} }
+  local to_hash = {}            -- list of { path, entry }
+  local path_to_entry = {}      -- absolute path -> entry, for native parse
+
+  for _, entry in ipairs(manifest.files or {}) do
+    if type(entry) == "table" and type(entry.name) == "string"
+        and type(entry.sha256) == "string"
+        and Updater.is_safe_filename(entry.name) then
+      local path = Updater.local_path_for(entry.name)
+      local f, open_err = io.open(path, "rb")
+      if not f then
+        if reaper.file_exists and reaper.file_exists(path) then
+          -- Locked: skip from diff entirely (treat as intact). See
+          -- tick_sha_diff's note about Repair-Available false positives.
+          Log.line("UPDATE", string.format(
+            "start_sha_diff preflight: %s exists but open failed: %s "
+            .. "(likely AV / editor lock; skipping from diff)",
+            path, tostring(open_err)))
+        else
+          diff.missing[#diff.missing+1] = entry.name
+        end
+      else
+        f:close()
+        to_hash[#to_hash+1] = { path = path, entry = entry }
+        path_to_entry[path] = entry
+      end
+    end
+    -- Malformed manifest entry: skip silently (is_safe_filename gates the
+    -- same way in download_start's inline diff).
+  end
+
   update._sha_diff = {
-    manifest    = manifest,
-    files       = manifest.files,
-    idx         = 1,
-    cur         = nil,  -- in-flight per-file SHA state (see tick_sha_diff)
-    diff        = { missing = {}, mismatched = {} },
-    manual      = manual,
-    started_at  = time_precise(),
+    manifest      = manifest,
+    files         = manifest.files,
+    to_hash       = to_hash,
+    path_to_entry = path_to_entry,
+    lua_idx       = 1,             -- pure-Lua walker pointer into to_hash
+    cur           = nil,           -- in-flight per-file SHA state (lua mode)
+    diff          = diff,
+    manual        = manual,
+    forced        = forced,
+    -- Higher per-frame budget when the user is actively waiting (manual
+    -- check or forced repair). Background piggyback checks
+    -- (manual = forced = nil/false) keep the conservative default because
+    -- they run while the user reads the chat response and any visible
+    -- stutter is undesirable. Only consulted by tick_sha_diff -- the
+    -- native path runs out-of-process and has no per-frame budget concern.
+    budget        = (manual or forced) and CFG.UPDATE_SHA_TIME_BUDGET_MANUAL
+                                       or  CFG.UPDATE_SHA_TIME_BUDGET,
+    started_at    = time_precise(),
+    mode          = "lua",         -- overridden to "native" if subprocess launches
   }
+
+  -- All entries were missing / locked / unsafe: nothing to hash, finalize.
+  if #to_hash == 0 then
+    Updater._sha_diff_complete()
+    return
+  end
+
+  -- Try native first. If launch fails (no PowerShell, AV block, file write
+  -- error, missing POSIX tool), stay in "lua" mode and the main loop's
+  -- verifying branch will pump tick_sha_diff() from lua_idx 1.
+  if Updater.fire_native_sha(to_hash) then
+    update._sha_diff.mode             = "native"
+    update._sha_diff.native_send_time = time_precise()
+  end
+
   update.state = "verifying"
 end
 
--- One tick of incremental SHA verification. Called by the main loop each
--- frame while update.state == "verifying". State machine:
---   * No current file (s.cur == nil): walk forward in the manifest looking
---     for the next entry whose local file exists. Missing files / unsafe
---     filenames / malformed entries are recorded or skipped without
---     consuming SHA budget. When a startable file is found, read it into
---     memory and create a chunked SHA state.
+-- Launch a native SHA-256 hasher subprocess for every path in to_hash.
+-- Writes one "<hex>\t<input path>" line per file to tmp.update_sha_out
+-- and the inner-process exit code to tmp.update_sha_exit. Returns true if
+-- the launch was attempted, false on prerequisite failure (paths-file
+-- write error, defensive quote rejection, PS-script write error).
+--
+-- Detached via the same Start-Process cmd pattern as fire_get on Windows
+-- and a backgrounded subshell on POSIX, so the main thread only pays
+-- launcher startup (~200 ms warm PowerShell) -- not the hash duration --
+-- and tick_native_sha polls tmp.update_sha_exit each frame for completion.
+--
+-- The Windows path emits the verbatim INPUT path (not Get-FileHash's
+-- $_.Path) so tick_native_sha's exact-match lookup in path_to_entry can't
+-- be defeated by provider-side casing or normalization. Output is written
+-- via .NET StreamWriter with UTF-8(no-BOM) for predictable encoding
+-- across PowerShell 5 / 7 / redirection differences.
+function Updater.fire_native_sha(to_hash)
+  os.remove(tmp.update_sha_in)
+  os.remove(tmp.update_sha_out)
+  os.remove(tmp.update_sha_exit)
+  os.remove(tmp.update_sha_ps)
+
+  -- Write absolute paths, one per line, UTF-8.
+  local pf, pf_err = io.open(tmp.update_sha_in, "wb")
+  if not pf then
+    Log.line("UPDATE", "fire_native_sha: paths-file open failed: "
+                       .. tostring(pf_err))
+    return false
+  end
+  for _, item in ipairs(to_hash) do
+    pf:write(item.path)
+    pf:write("\n")
+  end
+  pf:close()
+
+  if RA.IS_WINDOWS then
+    -- Defensive: literal " in any tmp path would break the inner cmd's
+    -- triple-quoted argument parse and the outer PS Start-Process arg
+    -- list. The tmp paths come from RA.script_path so should be safe,
+    -- but reject defensively rather than launching a malformed command.
+    if tmp.update_sha_in:find('"', 1, true)
+        or tmp.update_sha_out:find('"', 1, true)
+        or tmp.update_sha_exit:find('"', 1, true)
+        or tmp.update_sha_ps:find('"', 1, true) then
+      Log.line("UPDATE",
+        "fire_native_sha: refusing to launch with literal '\"' in tmp paths")
+      return false
+    end
+    local function ps_escape(p) return p:gsub("'", "''") end
+
+    -- The PS script: read paths, hash each via Get-FileHash, write
+    -- "<hex>\t<input path>" to the output file. Per-file try/catch so a
+    -- single bad file (locked / deleted between preflight and hash)
+    -- doesn't lose the rest -- tick_native_sha's missing-from-output
+    -- triage handles those cases.
+    local ps_script = string.format(
+[[$ErrorActionPreference = 'Continue'
+try {
+  $paths = Get-Content -LiteralPath '%s' -Encoding UTF8
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  $writer = New-Object System.IO.StreamWriter('%s', $false, $utf8)
+  try {
+    foreach ($p in $paths) {
+      try {
+        $h = Get-FileHash -Algorithm SHA256 -LiteralPath $p -ErrorAction Stop
+        $writer.WriteLine($h.Hash.ToLowerInvariant() + "`t" + $p)
+      } catch {
+      }
+    }
+  } finally {
+    $writer.Close()
+  }
+  exit 0
+} catch {
+  exit 1
+}
+]],
+      ps_escape(tmp.update_sha_in), ps_escape(tmp.update_sha_out))
+
+    -- Write the .ps1 with a UTF-8 BOM so PowerShell 5 reads it as UTF-8
+    -- unambiguously (PS5 default file encoding is the system codepage;
+    -- PS7 defaults to UTF-8). Matters when paths contain non-ASCII (e.g.
+    -- a user dir with Unicode characters).
+    local sf, sf_err = io.open(tmp.update_sha_ps, "wb")
+    if not sf then
+      Log.line("UPDATE", "fire_native_sha: PS-script open failed: "
+                         .. tostring(sf_err))
+      return false
+    end
+    sf:write("\239\187\191")
+    sf:write(ps_script)
+    sf:close()
+
+    -- Inner cmd: run the PS script via -File (no script-content quoting
+    -- needed -- avoids the inner-PS / cmd / outer-PS triple escape) and
+    -- capture the inner PS's exit code via cmd's %errorlevel%.
+    local cmd_line = string.format(
+      'powershell -NoProfile -ExecutionPolicy Bypass'
+      .. ' -File """%s""" & echo %%errorlevel%% > """%s"""',
+      tmp.update_sha_ps, tmp.update_sha_exit)
+
+    -- Outer PS: detach via Start-Process so ExecProcess's positive
+    -- timeout only waits for PS to spawn cmd (~200 ms warm), not for
+    -- the actual hashing. Same pattern as fire_get.
+    local ps_cmd = string.format(
+      'powershell -NoProfile -WindowStyle Hidden'
+      .. ' -Command "Start-Process cmd -ArgumentList \'/c %s\''
+      .. ' -WindowStyle Hidden"',
+      ps_escape(cmd_line))
+    reaper.ExecProcess(ps_cmd, 5000)
+  else
+    -- POSIX: prefer sha256sum (GNU; standard on Linux), fall back to
+    -- shasum -a 256 (Perl; standard on macOS). exit 127 if neither is
+    -- installed -- tick_native_sha falls back to pure-Lua. tr '\n' '\0'
+    -- piped to xargs -0 so paths with spaces survive the shell split.
+    local function sq(p) return "'" .. p:gsub("'", "'\\''") .. "'" end
+    local cmd = string.format(
+      "(if command -v sha256sum >/dev/null 2>&1; then "
+      .. "tr '\\n' '\\0' < %s | xargs -0 sha256sum > %s; rc=$?; "
+      .. "elif command -v shasum >/dev/null 2>&1; then "
+      .. "tr '\\n' '\\0' < %s | xargs -0 shasum -a 256 > %s; rc=$?; "
+      .. "else rc=127; fi; echo $rc > %s) &",
+      sq(tmp.update_sha_in), sq(tmp.update_sha_out),
+      sq(tmp.update_sha_in), sq(tmp.update_sha_out),
+      sq(tmp.update_sha_exit))
+    os.execute(cmd)
+  end
+
+  return true
+end
+
+-- One tick of the native-hash poll path. Called by the main loop each
+-- frame while update.state == "verifying" and s.mode == "native". Reads
+-- tmp.update_sha_exit; on completion (exit 0) parses tmp.update_sha_out,
+-- triages each preflighted file against the parsed output, and either
+-- commits results to s.diff or falls back to lua. On non-zero exit /
+-- watchdog timeout / read failure / suspicious output (preflighted file
+-- readable but missing from native output), transitions to lua_fallback
+-- and lets tick_sha_diff take over from a known-good code path.
+function Updater.tick_native_sha()
+  local s = update._sha_diff
+  if not s then return end
+
+  -- Watchdog: native hashing of ~3.6 MB completes in well under a second;
+  -- 15 s + 5 s slack covers cold spawn, slow disks, AV scanning. Beyond
+  -- that, fall back rather than wait further.
+  if s.native_send_time
+      and (time_precise() - s.native_send_time)
+          > (CFG.UPDATE_NATIVE_SHA_TIMEOUT + 5) then
+    Log.line("UPDATE", "tick_native_sha: watchdog timeout, "
+                       .. "falling back to pure-Lua verify")
+    Updater._native_to_lua_fallback()
+    return
+  end
+
+  -- Read exit file. While the inner process is still running, the file
+  -- doesn't exist (cmd's `& echo %errorlevel% > exit` only runs after
+  -- powershell returns). The race window where it exists but isn't
+  -- fully written is small; tonumber(nil) -> nil makes us wait one more
+  -- frame on partial reads.
+  local ok_ef, ef = pcall(io.open, tmp.update_sha_exit, "r")
+  if not ok_ef or not ef then return end
+  local exit_str = ef:read("*a"); ef:close()
+  local exit_code = tonumber(exit_str:match("(%d+)"))
+  if not exit_code then return end
+
+  if exit_code ~= 0 then
+    Log.line("UPDATE", string.format(
+      "tick_native_sha: native hasher exited %d, "
+      .. "falling back to pure-Lua verify", exit_code))
+    Updater._native_to_lua_fallback()
+    return
+  end
+
+  local of, of_err = io.open(tmp.update_sha_out, "rb")
+  if not of then
+    Log.line("UPDATE", "tick_native_sha: output read failed: "
+                       .. tostring(of_err) .. ", falling back")
+    Updater._native_to_lua_fallback()
+    return
+  end
+  local raw = of:read("*a"); of:close()
+  -- Defensive UTF-8 BOM strip. The PS script writes via UTF-8(no-BOM)
+  -- StreamWriter so this should never trigger, but POSIX redirection
+  -- behaves differently across platforms and stripping is harmless.
+  if raw:sub(1, 3) == "\239\187\191" then raw = raw:sub(4) end
+
+  -- Parse: "<64 hex>(whitespace)<path>". Both PS-pinned tab-separated
+  -- output and POSIX two-space-separated output match this pattern.
+  local hash_by_path = {}
+  for line in raw:gmatch("[^\r\n]+") do
+    local hex, rest = line:match("^([0-9a-fA-F]+)[ \t]+(.+)$")
+    if hex and #hex == 64 and rest then
+      hash_by_path[rest] = hex:lower()
+    end
+  end
+
+  -- Triage each preflighted file. Hold mismatched / additional_missing
+  -- in local tables so a fallback decision can discard them cleanly --
+  -- the lua fallback redoes the comparison from scratch and we don't
+  -- want partial native results leaking into its diff.
+  local mismatched = {}
+  local additional_missing = {}
+  local suspicious = false
+  for _, item in ipairs(s.to_hash) do
+    local local_hash = hash_by_path[item.path]
+    if local_hash then
+      if local_hash ~= item.entry.sha256:lower() then
+        mismatched[#mismatched+1] = item.entry.name
+      end
+    else
+      -- Native produced no hash for this preflight-readable file. Triage:
+      --   * file gone now: native saw a delete race -> record as missing
+      --   * file present but locked now: AV / lock race -> log + skip
+      --   * file present and readable now: native should have hashed it
+      --     but didn't -- output is suspicious, fall back to lua so the
+      --     whole result set gets recomputed from a known-good path.
+      local exists = (reaper.file_exists and reaper.file_exists(item.path))
+      if not exists then
+        additional_missing[#additional_missing+1] = item.entry.name
+      else
+        local f = io.open(item.path, "rb")
+        if not f then
+          Log.line("UPDATE", string.format(
+            "tick_native_sha: %s preflight readable but locked now "
+            .. "(skipping from diff)", item.path))
+        else
+          f:close()
+          Log.line("UPDATE", string.format(
+            "tick_native_sha: %s readable but missing from native output "
+            .. "(suspicious, falling back to pure-Lua verify)",
+            item.path))
+          suspicious = true
+          break
+        end
+      end
+    end
+  end
+
+  if suspicious then
+    Updater._native_to_lua_fallback()
+    return
+  end
+
+  -- Commit results to s.diff and finalize.
+  for _, name in ipairs(mismatched) do
+    s.diff.mismatched[#s.diff.mismatched+1] = name
+  end
+  for _, name in ipairs(additional_missing) do
+    s.diff.missing[#s.diff.missing+1] = name
+  end
+  Updater._sha_diff_complete()
+end
+
+-- Switch from native mode to pure-Lua fallback. Reset the lua walker
+-- pointer so tick_sha_diff re-walks s.to_hash from the start. Intentionally
+-- does NOT clear s.diff -- preflight-derived missing entries remain valid
+-- (they're filesystem facts, not native-tool output) and s.diff.mismatched
+-- is empty at this point because tick_native_sha only mutates it after a
+-- successful triage commit.
+function Updater._native_to_lua_fallback()
+  local s = update._sha_diff
+  if not s then return end
+  s.mode    = "lua_fallback"
+  s.lua_idx = 1
+  s.cur     = nil
+end
+
+-- One tick of incremental pure-Lua SHA verification. Called by the main
+-- loop each frame while update.state == "verifying" and s.mode == "lua"
+-- or "lua_fallback". Walks s.to_hash[] (preflighted readable files) so
+-- classification work is not duplicated -- start_sha_diff already filed
+-- missing / unsafe / locked entries.
+--
+-- State machine:
+--   * No current file (s.cur == nil): pop the next entry from to_hash.
+--     Race-handle the rare case where preflight saw the file readable
+--     but it's locked now (log + skip, mirroring start_sha_diff's
+--     locked-skip behavior) and the rare nil-read race (treat as locked).
 --   * Current file in flight: compress one tick's worth of blocks. When
---     the state is exhausted, finalize, compare to the manifest hash, and
---     clear s.cur so the next tick advances.
--- When idx walks past #files with no s.cur set, hand off to _complete.
+--     the state is exhausted, finalize, compare to manifest hash, append
+--     to s.diff.mismatched on miss, advance lua_idx.
+-- When lua_idx walks past #to_hash with no s.cur set, hand off to _complete.
 function Updater.tick_sha_diff()
   local s = update._sha_diff
   if not s then return end
-  local files = s.files
+  local to_hash = s.to_hash
 
-  -- No file in flight: scan forward until we find one we can hash, or
-  -- exhaust the manifest. Missing / unsafe / malformed entries are
-  -- handled inline and do not consume SHA budget.
   if not s.cur then
-    while s.idx <= #files do
-      local entry = files[s.idx]
-      if type(entry) == "table" and type(entry.name) == "string"
-          and type(entry.sha256) == "string"
-          and Updater.is_safe_filename(entry.name) then
-        local path = Updater.local_path_for(entry.name)
-        local f, open_err = io.open(path, "rb")
-        if not f then
-          -- Distinguish missing vs locked (AV scanner, editor handle).
-          -- Locked: skip from diff entirely (treat as intact). Listing
-          -- locked files in diff.missing produces a false-positive
-          -- "Repair Available" popup. The next check after the lock
-          -- clears will catch a genuinely-corrupt file.
-          if reaper.file_exists and reaper.file_exists(path) then
-            Log.line("UPDATE", string.format(
-              "tick_sha_diff: %s exists but open failed: %s "
-              .. "(likely AV / editor lock; skipping from diff)",
-              path, tostring(open_err)))
-          else
-            s.diff.missing[#s.diff.missing+1] = entry.name
-          end
-          s.idx = s.idx + 1
-        else
-          local content = f:read("*a")
-          f:close()
-          if content then
-            s.cur = { entry = entry, state = _SHA.create(content) }
-            break
-          else
-            -- Read failed mid-flight: same locked-vs-missing distinction.
-            -- The file existed enough to open, so we already proved it's
-            -- on disk; treat read-fail as locked.
-            Log.line("UPDATE", string.format(
-              "tick_sha_diff: %s opened but read returned nil "
-              .. "(treating as locked; skipping from diff)", path))
-            s.idx = s.idx + 1
-          end
-        end
+    while s.lua_idx <= #to_hash do
+      local item = to_hash[s.lua_idx]
+      local f, open_err = io.open(item.path, "rb")
+      if not f then
+        Log.line("UPDATE", string.format(
+          "tick_sha_diff: %s preflight readable but open failed: %s "
+          .. "(likely AV / editor lock; skipping from diff)",
+          item.path, tostring(open_err)))
+        s.lua_idx = s.lua_idx + 1
       else
-        -- Malformed manifest entry: skip silently (is_safe_filename
-        -- also gates the same way in download_start's inline diff).
-        s.idx = s.idx + 1
+        local content = f:read("*a")
+        f:close()
+        if content then
+          s.cur = { entry = item.entry, state = _SHA.create(content) }
+          break
+        else
+          Log.line("UPDATE", string.format(
+            "tick_sha_diff: %s opened but read returned nil "
+            .. "(treating as locked; skipping from diff)", item.path))
+          s.lua_idx = s.lua_idx + 1
+        end
       end
     end
     if not s.cur then
@@ -9732,7 +11424,7 @@ function Updater.tick_sha_diff()
   -- single chunk, which is still better than the previous 192-block
   -- fixed budget would have been on the same hardware).
   local tick_start = time_precise()
-  local budget = CFG.UPDATE_SHA_TIME_BUDGET
+  local budget = s.budget or CFG.UPDATE_SHA_TIME_BUDGET
   local done
   repeat
     done = _SHA.step(s.cur.state, 16)
@@ -9743,8 +11435,8 @@ function Updater.tick_sha_diff()
     if local_hash ~= s.cur.entry.sha256:lower() then
       s.diff.mismatched[#s.diff.mismatched+1] = s.cur.entry.name
     end
-    s.cur = nil
-    s.idx = s.idx + 1
+    s.cur     = nil
+    s.lua_idx = s.lua_idx + 1
   end
 end
 
@@ -9921,7 +11613,7 @@ function Updater.check_poll()
     -- with AV scanning). See Updater.start_sha_diff / tick_sha_diff for
     -- the incremental machine; main loop pumps it via the "verifying"
     -- state branch, identical control-flow shape to "checking".
-    Updater.start_sha_diff(manifest, manual)
+    Updater.start_sha_diff(manifest, manual, forced)
   elseif forced then
     -- Remote manifest is older than installed AND user explicitly asked to
     -- reinstall. Repairing against an older manifest would effectively
@@ -10942,7 +12634,7 @@ local function _sticky_evict_standalones_for_bundle(bundle_key)
   return to_evict
 end
 
-function Net.sticky_set(key, content)
+function Net.sticky_set(key, content, source)
   if not S.sticky_context_order then S.sticky_context_order = {} end
   local is_fresh = S.sticky_context[key] == nil
   -- First-time add of a singleton that's already covered by an existing
@@ -10966,12 +12658,18 @@ function Net.sticky_set(key, content)
       Log.line("STICKY", "evicted " .. tbl_concat(evicted, ", ")
         .. " (subsumed by new bundle " .. key .. ")")
     end
+    -- Record the source on first add only. Later same-key calls (idempotent
+    -- re-pins) keep the original source -- a "copin" mid-session call
+    -- shouldn't downgrade an already-"preempt" entry.
+    S.sticky_pin_source = S.sticky_pin_source or {}
+    S.sticky_pin_source[key] = source or "copin"
   end
   S.sticky_context[key] = content
 end
 
 function Net.sticky_unset(key)
   S.sticky_context[key] = nil
+  if S.sticky_pin_source then S.sticky_pin_source[key] = nil end
   if not S.sticky_context_order then return end
   for i, k in ipairs(S.sticky_context_order) do
     if k == key then
@@ -11015,15 +12713,39 @@ end
 --     against rapid double-co-pin within the same dispatch).
 --   - The bundle file fails to load (logged via CTX.prompt_bundle error
 --     path; the helper-definition validator is the safety net at gen time).
-function Net.copin_plugin_helpers(out_list)
+function Net.copin_plugin_helpers(out_list, source)
   local ph_key = "prompt_bundle:plugin_helpers"
   if S.sticky_context[ph_key] then return end
   if S.prompt_bundle_sent and S.prompt_bundle_sent["plugin_helpers"] then return end
   local ph_content, _ = CTX.prompt_bundle("plugin_helpers")
   if not ph_content then return end
-  Net.sticky_set(ph_key, ph_content)
+  -- source defaults to "copin" inside Net.sticky_set. Pass "preempt"
+  -- explicitly when called from CTX.preempt_buckets_for_prompt so the
+  -- helpers bundle rides the same stable rung that's being initialized
+  -- alongside prompt_bundle:plugin -- no extra rung-invalidation cost
+  -- because the stable rung is being rebuilt this turn anyway.
+  Net.sticky_set(ph_key, ph_content, source)
   if S.prompt_bundle_sent then S.prompt_bundle_sent["plugin_helpers"] = true end
   if out_list then out_list[#out_list+1] = ph_key end
+end
+
+-- Pre-pin a JSFX effect-family bundle (jsfx_pitch, jsfx_reverb, ...) into
+-- sticky_context. Called from the preempt path when the user prompt matches
+-- a family's keyword set. The bundle adds family-specific DSP topology +
+-- recipe content on top of the always-available prompt_bundle:jsfx core.
+-- No-op when the bundle is already pinned this session, when the bundle
+-- file is missing, or when the family name isn't registered in
+-- PROMPT_BUNDLE_NAMES.
+function Net.copin_jsfx_family(family, out_list)
+  if not family or family == "" then return end
+  local pb_key = "prompt_bundle:" .. family
+  if S.sticky_context[pb_key] then return end
+  if S.prompt_bundle_sent and S.prompt_bundle_sent[family] then return end
+  local pb_content, _ = CTX.prompt_bundle(family)
+  if not pb_content then return end
+  Net.sticky_set(pb_key, pb_content)
+  if S.prompt_bundle_sent then S.prompt_bundle_sent[family] = true end
+  if out_list then out_list[#out_list+1] = pb_key end
 end
 
 -- Pre-pin docs (core API ref) into S.api_ref_message. Called alongside
@@ -11092,15 +12814,38 @@ function Net.sticky_parts()
     for _, k in ipairs(S.sticky_context_order) do
       if S.sticky_context[k] then
         -- Most prompt_bundle:* entries are stable (pinned once at the start
-        -- of a plugin/jsfx/theme task and don't change). prompt_bundle:plugin_helpers
-        -- is the exception: it's added LATER in a session (when the model
-        -- decides it needs helpers, or when fx_inspect/fx_params/preferred_plugins
-        -- co-pins it for a write-intent task), so routing it to stable would
-        -- invalidate the bundle's cache rung on the turn it gets added.
-        -- Slot 3 (growing) already absorbs incremental additions routinely
-        -- via plugin_ref / docs:section / fx_*, so plugin_helpers fits there
-        -- without disturbing the bigger plugin core bundle in Slot 2.
-        if k:find("^prompt_bundle:") and k ~= "prompt_bundle:plugin_helpers" then
+        -- of a plugin/jsfx/theme task and don't change). prompt_bundle:
+        -- plugin_helpers is the exception: it can be pinned via three
+        -- different paths and only one of them is safe to route to stable:
+        --
+        --   "preempt"        -- co-pinned in CTX.preempt_buckets_for_prompt
+        --                       alongside prompt_bundle:plugin. The stable
+        --                       rung is already being initialized this turn,
+        --                       so adding helpers to it costs no extra
+        --                       cache miss. Route to STABLE.
+        --   "copin"          -- co-pinned mid-flow by a dispatcher write-
+        --                       intent path (fx_params / fx_inspect /
+        --                       preferred_plugins) or the helper-validator
+        --                       retry. The stable rung was cached on an
+        --                       earlier turn; adding helpers there would
+        --                       invalidate it on a turn we didn't plan to.
+        --                       Route to GROWING.
+        --   "context_needed" -- pulled in response to a model
+        --                       <context_needed>prompt_bundle:plugin_helpers
+        --                       tag. Same reasoning as "copin". Route to
+        --                       GROWING.
+        --
+        -- Default to "copin" (growing) for any helpers entry without a
+        -- recorded source -- the safe choice that matches pre-source-tag
+        -- behavior. Other prompt_bundle:* keys always go to stable; those
+        -- bundles are session-defining and don't suffer the late-add
+        -- problem helpers does.
+        local is_helpers = (k == "prompt_bundle:plugin_helpers")
+        local helpers_source = is_helpers and S.sticky_pin_source
+          and S.sticky_pin_source[k] or nil
+        if k:find("^prompt_bundle:") and not is_helpers then
+          stable_keys[#stable_keys+1] = k
+        elseif is_helpers and helpers_source == "preempt" then
           stable_keys[#stable_keys+1] = k
         else
           growing_keys[#growing_keys+1] = k
@@ -11245,16 +12990,25 @@ end
 -- packaging, message formatting, attachment encoding, and any provider-specific
 -- features (e.g. Anthropic prompt caching).
 function Net.build_body(msgs, snapshot, msg_attachments)
+  -- Phase 1 instrumentation: time spent assembling the request body.
+  -- Wraps the dispatcher rather than each provider variant so all
+  -- callers (send_to_api initial build + retries / context-needed
+  -- re-fires that call build_body inline) accumulate into the same
+  -- turn's body_build phase total.
+  Probe.mark_phase_start(S.probe_turn, "body_build")
   local p = PROVIDERS.active()
+  local result
   if p.id == "anthropic" then
-    return Net.build_body_anthropic(msgs, snapshot, msg_attachments)
+    result = Net.build_body_anthropic(msgs, snapshot, msg_attachments)
   elseif p.id == "openai" or p.is_custom then
     -- Custom providers always speak the OpenAI Chat Completions schema (the
     -- de-facto standard for OSS servers like Ollama, LM Studio, vLLM).
-    return Net.build_body_openai(msgs, snapshot, msg_attachments)
+    result = Net.build_body_openai(msgs, snapshot, msg_attachments)
   elseif p.id == "google" then
-    return Net.build_body_google(msgs, snapshot, msg_attachments)
+    result = Net.build_body_google(msgs, snapshot, msg_attachments)
   end
+  Probe.mark_phase_end(S.probe_turn, "body_build")
+  return result
 end
 
 -- =============================================================================
@@ -11265,49 +13019,83 @@ end
 -- Snapshot injected as a separate content block in the last user message.
 --
 -- Cache breakpoints (max 4 allowed by Anthropic, we use up to 4):
---   1. System prompt           (always)
---   2. API ref user message    (only present when api_ref loaded)
---   3. MIDI ref user message   (only present when midi_ref loaded)
---   4. Last assistant message  (moving breakpoint, prefix grows one
---                               user/assistant pair per turn)
--- TTL is adaptive: cold first turns use 5m (1.25x write cost) since one-shot
--- sessions never read the cache back; warm turns (turn 2+) escalate to 1h
--- (2x write cost) once multi-turn intent is proven, so the read/run/refine
--- gap between sends still hits cache. See cache_mark selection below.
-local CACHE_1H = ',"cache_control":{"type":"ephemeral","ttl":"1h"}'
--- Fallback cache marker used when the extended-cache-ttl beta header has been
--- rejected by the API (see S.anthropic_beta_disabled). 5-minute ephemeral
--- caching is the default tier and requires no beta header.
+--   1. System prompt                                 (always)
+--   2. End of static_blob + sticky_stable rung       (when either present;
+--      static_blob piggybacks on sticky_stable's mark when both are present)
+--   3. sticky_growing rung                           (when present)
+--   4. Last assistant message                        (moving breakpoint,
+--      prefix grows one user/assistant pair per turn)
+--
+-- TTL strategy: every rung uses the 5-minute default (CACHE_5M). Two
+-- constraints made anything fancier net-negative:
+--
+--   1. Anthropic forbids a 1h cache_control block from appearing AFTER any
+--      5m block in the same request: "a ttl='1h' cache_control block must
+--      not come after a ttl='5m' cache_control block" (invalid_request_error).
+--      Since our breakpoints are positionally fixed (system first,
+--      last_asst last), any per-rung mix of 5m+1h that puts 1h on
+--      last_asst gets rejected.
+--   2. Anthropic also treats the ttl field as part of the cache key, so
+--      flipping a rung from 5m to 1h between turns busts that rung's
+--      cached prefix. Earlier code stamped one TTL per request and
+--      flipped 5m -> 1h on turn 2 to "warm" 1h coverage; the observed
+--      effect was cache_read=0 on T2 (full prefix re-write) regardless
+--      of whether the gap exceeded 5 min.
+--
+-- Plan A (this code): drop the 1h escalation entirely. Always 5m, on every
+-- rung, every turn. Net effect: cache stays warm across normal read/run/
+-- refine cadences (which are typically <5 min anyway), and the rare
+-- >5-min idle gap costs one prefix re-write -- strictly cheaper than
+-- the original "flip everyone to 1h on T2" approach which paid that cost
+-- 100% of the time on multi-turn sessions.
 local CACHE_5M = ',"cache_control":{"type":"ephemeral"}'
 
+-- Cheap content fingerprint for cache-plan diagnostics. Not cryptographic --
+-- just a stable 32-bit FNV-1a in hex so the debug log can show "did this
+-- rung's bytes drift between turns" at a glance. Skipped when debug logging
+-- is off (callers gate on prefs.debug_logging via Log.line).
+local function _cache_plan_hash(s)
+  local h = 2166136261
+  for i = 1, #s do
+    h = (h ~ s:byte(i)) * 16777619
+    h = h & 0xFFFFFFFF
+  end
+  return string.format("%08x", h)
+end
+
 function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
-  -- Pick the cache marker based on whether the beta header is still accepted
-  -- AND the session's proven multi-turn intent.
-  --   - If the extended-cache-ttl beta has been rejected, fall back to 5m.
-  --   - Otherwise: on the cold first user turn, use 5m (1.25x write cost).
-  --     One-shot script-gen sessions (a single send finishes the task) never
-  --     read the cache back, so the 1h TTL's 2x write premium is pure waste.
-  --     5m still covers the common "user reads the response and immediately
-  --     follows up" rhythm. Once the user sends a 2nd turn, the session is
-  --     proven multi-turn -- escalate to 1h so the next read/run/refine gap
-  --     (typically >5 min while the user tests the generated script) still
-  --     hits cache. Turn 1 saves ~$0.07 per 33K-token write at the cost of
-  --     a possible re-write on T2 if the gap exceeds 5 min; the T1 saving
-  --     dominates the average across one-shot + rapid-iteration sessions.
-  --   S.turn_counter is bumped by Net.sticky_evict() at the top of the user
-  --   send (line ~12675), BEFORE build_body runs, so the very first send sees
-  --   turn_counter=1. The follow-up executor request within the same turn
-  --   re-enters build_body without a re-bump, so it inherits the same TTL.
-  local cache_mark
-  if S.anthropic_beta_disabled or (S.turn_counter or 0) <= 1 then
-    cache_mark = CACHE_5M
-  else
-    cache_mark = CACHE_1H
+  -- Each rung emits CACHE_5M; the helpers below also record bytes/hash into
+  -- cache_plan for the per-request CACHE-PLAN debug line. See the function
+  -- header for the constraints that motivated the always-5m strategy.
+  local cache_plan = {}
+  local function rung_cache_mark(rung_name, content)
+    cache_plan[#cache_plan+1] = {
+      name = rung_name, ttl = "5m", bytes = content and #content or 0,
+      hash = (content and prefs.debug_logging) and _cache_plan_hash(content) or "-",
+    }
+    return CACHE_5M
   end
 
+  -- Diagnostic-only registration for content that lands ahead of an
+  -- existing cache breakpoint without a marker of its own (e.g.,
+  -- static_blob when sticky_stable absorbs it onto the same rung).
+  -- Without this, the cache plan only hashes the rung-bearing block,
+  -- so drift in the absorbed content (a new static ref appearing,
+  -- reorder of api_ref / midi_ref / theme_ref) is invisible to the
+  -- log even though it busts the rung's prefix in reality.
+  local function rung_piggyback(rung_name, content)
+    cache_plan[#cache_plan+1] = {
+      name = rung_name .. "(piggyback)",
+      ttl  = "-",
+      bytes = content and #content or 0,
+      hash = (content and prefs.debug_logging) and _cache_plan_hash(content) or "-",
+    }
+  end
+
+  local system_text = Net.system_prompt_text()
   local system_json = str_format(
     '[{"type":"text","text":"%s"%s}]',
-    JSON.escape(Net.system_prompt_text()), cache_mark)
+    JSON.escape(system_text), rung_cache_mark("system", system_text))
 
   local msg_parts = {}
 
@@ -11343,7 +13131,17 @@ function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
     -- into the next rung. Keep it when sticky_stable is absent (otherwise
     -- static_blob would only cache via sticky_growing's rung, which gets
     -- invalidated frequently).
-    local static_cache_mark = sticky_stable and "" or cache_mark
+    local static_cache_mark
+    if sticky_stable then
+      -- Absorbed onto sticky_stable's rung. Register a piggyback entry
+      -- in the cache plan so static-ref drift (a new midi_ref / theme_ref
+      -- arriving, or api_ref reordering) shows up in the log even though
+      -- this block carries no cache_control marker of its own.
+      rung_piggyback("static", static_blob)
+      static_cache_mark = ""
+    else
+      static_cache_mark = rung_cache_mark("static", static_blob)
+    end
     msg_parts[#msg_parts+1] = str_format(
       '{"role":"user","content":[{"type":"text","text":"%s"%s}]}',
       JSON.escape(static_blob), static_cache_mark)
@@ -11370,8 +13168,8 @@ function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
       -- turns. Saves ~15K tokens of cache_write per ref-addition turn.
       msg_parts[#msg_parts+1] = str_format(
         '{"role":"user","content":[{"type":"text","text":"%s"%s},{"type":"text","text":"%s"%s}]}',
-        JSON.escape(sticky_stable), cache_mark,
-        JSON.escape(sticky_growing), cache_mark)
+        JSON.escape(sticky_stable), rung_cache_mark("sticky_stable", sticky_stable),
+        JSON.escape(sticky_growing), rung_cache_mark("sticky_growing", sticky_growing))
     else
       -- Single-block fallback: only one of stable/growing is populated.
       -- Concatenate in stable-first order so byte-prefix caching still wins
@@ -11379,9 +13177,14 @@ function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
       local blob = sticky_stable and sticky_growing
         and (sticky_stable .. "\n\n" .. sticky_growing)
         or  (sticky_stable or sticky_growing)
+      -- Rung name reflects which half is present so per-rung TTL state
+      -- doesn't conflate "sticky_stable alone" with "sticky_stable + growing
+      -- collapsed into one rung". In practice only one of these branches
+      -- exercises within a given session.
+      local rung = sticky_stable and "sticky_stable" or "sticky_growing"
       msg_parts[#msg_parts+1] = str_format(
         '{"role":"user","content":[{"type":"text","text":"%s"%s}]}',
-        JSON.escape(blob), cache_mark)
+        JSON.escape(blob), rung_cache_mark(rung, blob))
     end
     msg_parts[#msg_parts+1] = '{"role":"assistant","content":[{"type":"text","text":"Understood."}]}'
   end
@@ -11426,11 +13229,23 @@ function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
       -- moving cache breakpoint so the conversation prefix is cached for
       -- cheaper follow-up turns.
       local is_last_asst = (m.role == "assistant" and idx == #msgs - 1)
-      local cache = is_last_asst and cache_mark or ""
+      local cache = is_last_asst and rung_cache_mark("last_asst", m.content) or ""
       msg_parts[#msg_parts+1] = str_format(
         '{"role":"%s","content":[{"type":"text","text":"%s"%s}]}',
         m.role, JSON.escape(m.content), cache)
     end
+  end
+
+  -- Per-rung cache plan (debug only): rung=bytes/ttl/hash, comma-separated.
+  -- Lets the user diff request-to-request: if a rung's hash changes, its
+  -- prefix bytes drifted (manifest reorder, ref insertion); if its ttl
+  -- string changes, the freeze logic regressed. Either way, expect a miss.
+  if prefs.debug_logging and #cache_plan > 0 then
+    local parts = {}
+    for _, p in ipairs(cache_plan) do
+      parts[#parts+1] = str_format("%s=%dB/%s/%s", p.name, p.bytes, p.ttl, p.hash)
+    end
+    Log.line("CACHE-PLAN", tbl_concat(parts, ", "))
   end
 
   -- Anthropic Messages API REQUIRES max_tokens (omitting returns 400). Send
@@ -11737,24 +13552,241 @@ end
 -- If the first entry in the slice is an assistant message (possible if an
 -- odd number of entries were removed mid-conversation), it is dropped so
 -- the API always receives a conversation starting with a user turn.
+--
+-- When the compact_history dev flag is on, T-2 and older successful
+-- assistant turns are replaced with a fixed-format summary instead of
+-- the full code body. T-1 always stays verbatim. See
+-- Net.assistant_attach_compact_metadata + _maybe_compact_history below.
 function Net.trimmed_history()
-  if #S.history <= CFG.MAX_HISTORY_TURNS then return S.history end
-  local trimmed = {}
-  for i = #S.history - CFG.MAX_HISTORY_TURNS + 1, #S.history do
-    trimmed[#trimmed+1] = S.history[i]
+  local hist
+  if #S.history <= CFG.MAX_HISTORY_TURNS then
+    hist = S.history
+  else
+    hist = {}
+    for i = #S.history - CFG.MAX_HISTORY_TURNS + 1, #S.history do
+      hist[#hist+1] = S.history[i]
+    end
+    if #hist > 0 and hist[1].role == "assistant" then
+      tbl_remove(hist, 1)
+    end
+    if #hist == 0 then
+      -- Slice was a single assistant entry that we just dropped. Return
+      -- just the most recent message rather than falling back to the
+      -- FULL untrimmed S.history (latent overshoot of the trim budget;
+      -- only triggerable at very low MAX_HISTORY_TURNS, but the previous
+      -- behaviour silently sent every prior turn, defeating the trim).
+      hist = { S.history[#S.history] }
+    end
   end
-  if #trimmed > 0 and trimmed[1].role == "assistant" then
-    tbl_remove(trimmed, 1)
+  return Net._maybe_compact_history(hist)
+end
+
+-- Cheap fingerprint for compact_history summaries. Same FNV-1a 32-bit
+-- as the cache-plan diagnostic; reused so a turn's history-summary
+-- code-hash can be cross-referenced with cache-plan rung hashes.
+-- Attached to Net (not a file-scope local) to stay under Lua 5.4's
+-- 200-local-per-function limit on the top-level chunk.
+function Net._compact_hash(s)
+  if not s or s == "" then return "00000000" end
+  local h = 2166136261
+  for i = 1, #s do
+    h = (h ~ s:byte(i)) * 16777619
+    h = h & 0xFFFFFFFF
   end
-  if #trimmed == 0 then
-    -- Slice was a single assistant entry that we just dropped. Return
-    -- just the most recent message rather than falling back to the
-    -- FULL untrimmed S.history (latent overshoot of the trim budget;
-    -- only triggerable at very low MAX_HISTORY_TURNS, but the previous
-    -- behaviour silently sent every prior turn, defeating the trim).
-    return { S.history[#S.history] }
+  return string.format("%08x", h)
+end
+
+-- Build a fixed-format structured summary for an assistant turn. Local
+-- construction (no model call); deterministic; ~200-300 bytes vs the
+-- 3-7K of the original code body. Schema is intentionally rigid so
+-- the model can quickly skim "what was that turn?" without parsing
+-- prose. See Net.assistant_attach_compact_metadata for the per-turn
+-- inputs.
+function Net._build_compact_summary(info)
+  local lines = { "[ASSISTANT TURN -- COMPACTED SUMMARY]" }
+  local artifact = info.code_type or "none"
+  if artifact == nil or artifact == "" then artifact = "none" end
+  lines[#lines+1] = "artifact: " .. artifact
+  lines[#lines+1] = "status: " .. (info.run_status or "unknown")
+  if info.code_bytes and info.code_bytes > 0 then
+    local nlines = info.code_lines or 0
+    lines[#lines+1] = string.format(
+      "code: %dB / %d lines / hash:%s",
+      info.code_bytes, nlines, info.code_hash or "-")
   end
-  return trimmed
+  if info.user_intent and info.user_intent ~= "" then
+    -- Trim long prompts to ~120 chars so the summary stays compact even
+    -- on verbose user requests. Newlines collapsed to spaces.
+    local trimmed = info.user_intent:gsub("[\r\n]+", " ")
+    if #trimmed > 120 then trimmed = trimmed:sub(1, 117) .. "..." end
+    lines[#lines+1] = "intent: " .. trimmed
+  end
+  lines[#lines+1] = "(full code body elided; ask to "
+                 .. "modify/fix the previous script to expand)"
+  return tbl_concat(lines, "\n")
+end
+
+-- Attach compact-history metadata to S.history[hist_idx]. Called from
+-- the canonical "turn completed successfully" site at the bottom of
+-- Net.try_finish_curl. info.code is the extracted code body (lua or
+-- jsfx); info.code_type is "lua" / "jsfx" / nil; info.auto_ran_ok and
+-- info.was_truncated come from the response handler's locals;
+-- info.user_intent is S.pending_orig_prompt (the user message that
+-- triggered this turn).
+--
+-- compact_eligible only fires for the safe case: auto-ran-ok + a real
+-- code body + not truncated. Everything else (errored, manual_run,
+-- truncated, no_code, gate-hit-without-retry) stays verbatim so the
+-- model can still see the original on a "fix that" follow-up.
+function Net.assistant_attach_compact_metadata(hist_idx, info)
+  local row = S.history and S.history[hist_idx]
+  if not row or row.role ~= "assistant" then return end
+  -- run_status is mostly set already (Code.run path / risky-gate /
+  -- truncation), but if no code was extracted at all, leave it at the
+  -- "no_code" default written at append time. info.code being non-nil
+  -- means the response had an extractable, parse-clean code block.
+  local code = info.code
+  local code_bytes, code_hash, code_lines = 0, nil, 0
+  if code and code ~= "" then
+    code_bytes = #code
+    code_hash  = Net._compact_hash(code)
+    -- Cheap line count -- newlines + 1 if last char isn't newline.
+    local nl = 0
+    for _ in code:gmatch("\n") do nl = nl + 1 end
+    code_lines = nl + (code:sub(-1) == "\n" and 0 or 1)
+  end
+  -- Code exists but auto-run never ran (prefs.auto_run off, or one of
+  -- the docs/validator/jsfx/defer/helper gates blocked the auto-run
+  -- block in try_finish_curl). The row is still "no_code" because
+  -- nothing wrote a real run_status. Upgrade to "manual_run" so the
+  -- compact-history skip-reason diagnostic tells the truth -- the row
+  -- is still ineligible for compaction either way (compact_eligible
+  -- requires "ran_ok"), so behavior is unchanged, just less misleading.
+  if code_bytes > 0 and row.run_status == "no_code" then
+    row.run_status = "manual_run"
+  end
+  row.code_bytes = code_bytes
+  row.code_hash  = code_hash
+  row.code_lines = code_lines
+  row.code_type  = info.code_type or row.code_type
+  row.truncated  = info.was_truncated or row.truncated or false
+  -- Build the summary content once, now, while the inputs are fresh.
+  -- (Re-building on every send_to_api would be wasted work since the
+  -- inputs don't change after the turn closes.)
+  row.compact_summary = Net._build_compact_summary({
+    code_type   = row.code_type,
+    run_status  = row.run_status,
+    code_bytes  = row.code_bytes,
+    code_lines  = row.code_lines,
+    code_hash   = row.code_hash,
+    user_intent = info.user_intent,
+  })
+  -- Eligibility gate. Conservative: only ran_ok turns with real code
+  -- and no truncation are safe to compact. Anything else stays
+  -- verbatim with a recorded skip reason for the [HISTORY-COMPACT]
+  -- diagnostic line.
+  if row.run_status == "ran_ok" and code_bytes > 0 and not row.truncated then
+    row.compact_eligible = true
+    row.compact_skip_reason = nil
+  else
+    row.compact_eligible = false
+    row.compact_skip_reason = (row.run_status == "ran_ok") and "no_code"
+      or row.run_status or "unknown"
+  end
+end
+
+-- Conservative "modify the previous script" detector. Returns true when
+-- the most recent user turn looks like a deictic reference to prior
+-- code -- in which case _maybe_compact_history skips compaction
+-- entirely so the model can see the full history. False positives just
+-- disable savings for that turn (no correctness regression).
+-- Constants attached to Net (not file-scope locals) to stay under Lua
+-- 5.4's 200-local-per-function limit on the top-level chunk.
+Net._MODIFY_PRIOR_VERBS = "modify|tweak|fix|change|adjust|update|revise|rework"
+Net._MODIFY_PRIOR_NOUNS = "that|it|this|previous|last|script|code|one"
+function Net._is_modify_prior_followup(hist)
+  -- Last role=user turn (current turn's prompt -- already in hist as
+  -- the trailing entry).
+  local last_user
+  for i = #hist, 1, -1 do
+    if hist[i].role == "user" then last_user = hist[i].content; break end
+  end
+  if not last_user or last_user == "" then return false end
+  local lo = last_user:lower()
+  -- Look for verb followed (within ~60 chars) by a deictic noun.
+  for verb in Net._MODIFY_PRIOR_VERBS:gmatch("[^|]+") do
+    local vstart = lo:find("%f[%w]" .. verb .. "%f[%W]")
+    if vstart then
+      local window = lo:sub(vstart, vstart + 60)
+      for noun in Net._MODIFY_PRIOR_NOUNS:gmatch("[^|]+") do
+        if window:find("%f[%w]" .. noun .. "%f[%W]") then
+          return true, verb .. "-" .. noun
+        end
+      end
+    end
+  end
+  return false
+end
+
+-- Apply compaction to the trimmed history slice. Default no-op (returns
+-- hist unchanged); only fires when the compact_history ExtState flag
+-- is on. T-1 (the last assistant row) is always preserved verbatim;
+-- T-2 and older eligible rows are replaced with their compact_summary.
+function Net._maybe_compact_history(hist)
+  if reaper.GetExtState(CFG.EXT_NS, "compact_history") ~= "1" then
+    return hist
+  end
+  -- modify-prior detector short-circuits compaction entirely. False
+  -- positives only cost the savings for this one turn.
+  local is_modify, mp_match = Net._is_modify_prior_followup(hist)
+  if is_modify then
+    if prefs.debug_logging then
+      Log.line("HISTORY-COMPACT",
+        "skipped (modify-prior follow-up: " .. tostring(mp_match) .. ")")
+    end
+    return hist
+  end
+  -- Find the last assistant index in hist -- it stays verbatim.
+  local last_asst_idx = nil
+  for i = #hist, 1, -1 do
+    if hist[i].role == "assistant" then last_asst_idx = i; break end
+  end
+  local out = {}
+  local compacted, kept_asst = 0, 0
+  local skip_reasons = {}
+  for i, row in ipairs(hist) do
+    if row.role == "assistant"
+       and i ~= last_asst_idx
+       and row.compact_eligible
+       and row.compact_summary then
+      out[#out+1] = { role = "assistant", content = row.compact_summary }
+      compacted = compacted + 1
+    else
+      out[#out+1] = row
+      if row.role == "assistant" then
+        kept_asst = kept_asst + 1
+        if i ~= last_asst_idx then
+          local r = row.compact_skip_reason or "unknown"
+          skip_reasons[r] = (skip_reasons[r] or 0) + 1
+        end
+      end
+    end
+  end
+  if prefs.debug_logging then
+    local before, after = 0, 0
+    for _, r in ipairs(hist) do before = before + #(r.content or "") end
+    for _, r in ipairs(out)  do after  = after  + #(r.content or "") end
+    local skip_str = "none"
+    if next(skip_reasons) then
+      local parts = {}
+      for r, c in pairs(skip_reasons) do parts[#parts+1] = r .. "(" .. c .. ")" end
+      skip_str = tbl_concat(parts, ",")
+    end
+    Log.line("HISTORY-COMPACT", string.format(
+      "before=%dB after=%dB delta=-%dB compacted=%d kept=%d skipped=%s",
+      before, after, before - after, compacted, kept_asst, skip_str))
+  end
+  return out
 end
 
 -- =============================================================================
@@ -11995,9 +14027,19 @@ function Net.fire_curl(body, opts)
   S.curl_exited_clean     = false  -- reset partial-read guard for new request
   S.kill_pending          = false  -- a fresh request voids any stale Cancel watchdog
   S.send_time             = time_precise()
+  S.timeout_extensions    = 0      -- watchdog clock just restarted; prior
+                                   -- "Extend by Ns" clicks no longer apply
   S.retry_saved_body      = body  -- saved so a 529/overload retry can re-send
   S.pending_provider_idx  = prefs.provider_idx  -- snapshot for response parsing
   S.pending_model_idx     = prefs.model_idx
+  -- Phase 1 instrumentation: curl_wait phase begins here. The curl
+  -- process is now running; we are waiting for its response. The
+  -- corresponding mark_phase_end fires inside Net.try_finish_curl
+  -- just before JSON.decode parses the response body. This wraps
+  -- every fire_curl success path, so multi-request turns
+  -- (context-needed re-fires, validator retries) accumulate
+  -- correctly via mark_phase_end's additive timing.
+  Probe.mark_phase_start(S.probe_turn, "curl_wait")
   return true
 end
 
@@ -13150,6 +15192,24 @@ end
 --      would exceed the model's 200K context window (rough chars/4 heuristic).
 --   6. Fire curl. The snapshot is injected by Net.build_body(), not stored in S.history.
 function Net.send_to_api(user_text)
+  -- Phase 1 instrumentation: open a Probe turn at the outermost
+  -- boundary. Probe is dormant unless Dev/diagnostics_enabled exists,
+  -- so this is a no-op in shipped builds. If a previous turn somehow
+  -- didn't reach an end_turn site (re-entrance, missed exit path),
+  -- close it as "aborted" so its record is still written before we
+  -- clobber S.probe_turn with the new handle.
+  if S.probe_turn then
+    Probe.end_turn(S.probe_turn, "aborted")
+    S.probe_turn = nil
+  end
+  local probe_turn = Probe.start_turn(user_text)
+  S.probe_turn = probe_turn
+  -- Phase 1 instrumentation: preempt phase covers all per-turn setup
+  -- before the first body build (state resets, snapshot capture,
+  -- ref/midi/theme auto-injection, sticky eviction, preempt bucket
+  -- injection). Ends just before Net.build_body is first called.
+  Probe.mark_phase_start(probe_turn, "preempt")
+
   S.status                = "waiting"
   S.request_start_time    = reaper.time_precise()
   S.pending_code          = nil
@@ -13164,12 +15224,20 @@ function Net.send_to_api(user_text)
   S.pending_pref_plugin_types = {}
   S.context_loop_retries   = 0
   S.api_validator_retries  = 0
+  S.arity_validator_retries = 0
+  S.fxcheck_validator_retries = 0
+  S.upsert_validator_retries = 0
+  S.helper_int_validator_retries = 0
   S.defer_validator_retries = 0
   S.helper_validator_retries = 0
+  S.parse_retry_used       = false
+  S.jsfx_validator_retries = 0
   S.length_retry_used      = false
+  S.empty_retry_used       = false
   S.thinking_override_idx  = nil
   S._context_reuse_hint    = nil
   S._mixed_output_hint     = nil
+  S._fx_inspect_dropped    = nil
   S.fx_list_already_sent   = false
   S.fx_chains_already_sent = false
   S.track_flags_already_sent = false
@@ -13207,8 +15275,21 @@ function Net.send_to_api(user_text)
   -- 1b. Capture the active project.
   S.pending_project = reaper.EnumProjects(-1)
 
+  -- 1c. JSFX intent detection. Used by the snapshot tracks-trim and the
+  -- plugin_ref / pref / docs preempt skip. Mirrored to S.pending_jsfx_intent
+  -- so the JSFX validator-retry path, which rebuilds the snapshot from
+  -- outside Net.send_to_api, can keep the same minimal-tracks trim.
+  -- The detector is conservative (literal "jsfx" / "eel2" / "reajs" /
+  -- "@init"-style markers only) so non-JSFX prompts that happen to
+  -- contain DSP words like "shimmer" or "harmonizer" still get full
+  -- plugin treatment.
+  local jsfx_intent = CTX.prompt_indicates_jsfx(user_text)
+  S.pending_jsfx_intent = jsfx_intent or nil
+
   -- 2. Build a fresh session snapshot if enabled.
-  local snapshot = prefs.include_snapshot and CTX.build_snapshot(S.pending_project) or nil
+  local snapshot = prefs.include_snapshot
+    and CTX.build_snapshot(S.pending_project, jsfx_intent and { minimal_tracks = true } or nil)
+    or nil
   S.pending_snapshot    = snapshot        -- saved for potential docs follow-up
   S.pending_attachments = msg_attachments -- saved for beta-header fallback rebuild
 
@@ -13435,7 +15516,47 @@ function Net.send_to_api(user_text)
                                and tonumber(active_model.context_window))
                               or 200000
   local CHARS_PER_TOKEN     = 4       -- ~4 for prose, ~3 for code, ~5 for JSON keys; 4 is a safe middle
+  -- Phase 1 instrumentation: preempt phase ends here. body_build is
+  -- timed inside Net.build_body itself (entry/exit wrap), so the
+  -- gap between mark_phase_end("preempt") and Net.build_body's
+  -- internal mark_phase_start("body_build") is negligible.
+  Probe.mark_phase_end(probe_turn, "preempt")
   local body = Net.build_body(Net.trimmed_history(), snapshot, msg_attachments)
+  -- Phase 1 instrumentation: byte accounting for the request body.
+  -- Pre-escape source bytes (raw strings before JSON encoding inflates
+  -- them) for each known source bucket, plus the final assembled
+  -- JSON body bytes. Captures only the initial request -- multi-request
+  -- turns (context_needed re-fires, retries) re-build the body with
+  -- inline build_body calls and are NOT accumulated here. body_build
+  -- phase latency does accumulate across all such calls (instrumented
+  -- inside Net.build_body itself).
+  do
+    local sys = Net.system_prompt_text()
+    if sys then Probe.add_bytes(probe_turn, "system_prompt", #sys) end
+    local static_total = 0
+    if S.api_ref_message   then static_total = static_total + #S.api_ref_message   end
+    if S.midi_ref_message  then static_total = static_total + #S.midi_ref_message  end
+    if S.theme_ref_message then static_total = static_total + #S.theme_ref_message end
+    if static_total > 0 then Probe.add_bytes(probe_turn, "static_refs", static_total) end
+    local sticky_total = 0
+    for _, content in pairs(S.sticky_context or {}) do
+      if type(content) == "string" then
+        sticky_total = sticky_total + #content
+      end
+    end
+    if sticky_total > 0 then Probe.add_bytes(probe_turn, "sticky_refs", sticky_total) end
+    if snapshot then Probe.add_bytes(probe_turn, "snapshot", #snapshot) end
+    if msg_attachments then
+      local att_total = 0
+      for _, a in ipairs(msg_attachments) do
+        if a.b64       then att_total = att_total + #a.b64
+        elseif a.data  then att_total = att_total + #a.data
+        end
+      end
+      if att_total > 0 then Probe.add_bytes(probe_turn, "attachments", att_total) end
+    end
+    Probe.set_body_total(probe_turn, #body)
+  end
   local estimated_tokens = math_floor(#body / CHARS_PER_TOKEN)
   -- Base64 inflates size ~33%, so compensate: attachment tokens are more accurate
   -- than the chars/4 heuristic on the inflated base64. Subtract the base64 size
@@ -13503,10 +15624,13 @@ function Net.send_to_api(user_text)
       .. "To make it fit:\n"
       .. "- Remove large attachments\n"
       .. "- Turn off \"Always include REAPER API reference\" or Send snapshot to reduce size\n"
-      .. "- Or click Clear to start fresh",
+      .. "- Or click + new chat to start fresh",
       math_floor(estimated_tokens / 1000),
       math_floor(token_budget / 1000)))
     S.scroll_to_bottom = true
+    -- Phase 1 instrumentation: turn aborted before any HTTP traffic.
+    Probe.end_turn(probe_turn, "aborted")
+    S.probe_turn = nil
     return
   end
 
@@ -13531,9 +15655,21 @@ function Net.send_to_api(user_text)
     Log.add_error(
       "Couldn't send. Another request may still be in progress. "
       .. "Wait a moment and try again.")
+    -- Phase 1 instrumentation: turn ended at fire_curl failure. No
+    -- early-return here -- the original code falls through to the
+    -- shared scroll_to_bottom assignment, so we let it. The natural-
+    -- end Probe.end_turn below is idempotent and a no-op after this.
+    Probe.end_turn(probe_turn, "error")
+    S.probe_turn = nil
   end
 
   S.scroll_to_bottom = true
+  -- Phase 1 instrumentation: NOTE that on the success path of
+  -- send_to_api, the turn is NOT ended here. The request was just
+  -- handed off to curl; the response is still pending. The turn
+  -- handle stays alive on S.probe_turn and is ended at the canonical
+  -- "turn completed successfully" site inside Net.try_finish_curl.
+  -- Step 9 audits and adds remaining error/cancel exit paths.
 end
 
 -- =============================================================================
@@ -13558,6 +15694,15 @@ function Net.clear_conversation()
   S.sticky_context       = {}
   S.sticky_context_age   = {}
   S.sticky_context_order = {}
+  -- Per-key source tag: "preempt" (pinned by CTX.preempt_buckets_for_prompt
+  -- in the same pre-request batch as other stable bundles), "copin" (pinned
+  -- by a deterministic mid-flow path like the dispatcher write-intent paths
+  -- or the helper-validator retry), or "context_needed" (pulled in response
+  -- to a model <context_needed> tag). Drives the prompt_bundle:plugin_helpers
+  -- routing in Net.sticky_parts: only "preempt" promotes helpers to the
+  -- stable rung; the others keep helpers in the growing rung where mid-
+  -- session pins don't invalidate the bigger stable bundle.
+  S.sticky_pin_source    = {}
   S.turn_counter         = 0
   S.last_run_error       = nil
   -- Pending follow-up state (mid-flight when clear is hit)
@@ -13572,6 +15717,7 @@ function Net.clear_conversation()
   S.pending_attachments       = nil
   S.pending_provider_idx      = nil
   S.pending_model_idx         = nil
+  S.pending_jsfx_intent       = nil
   -- Per-turn one-shot guards
   S.docs_already_sent          = false
   S.docs_extended_already_sent = false
@@ -13588,12 +15734,20 @@ function Net.clear_conversation()
   S.pref_plugins_sent          = {}
   S.context_loop_retries       = 0
   S.api_validator_retries      = 0
+  S.arity_validator_retries    = 0
+  S.fxcheck_validator_retries  = 0
+  S.upsert_validator_retries   = 0
+  S.helper_int_validator_retries = 0
   S.defer_validator_retries    = 0
   S.helper_validator_retries   = 0
+  S.parse_retry_used           = false
+  S.jsfx_validator_retries     = 0
   S.length_retry_used          = false
+  S.empty_retry_used           = false
   S.thinking_override_idx      = nil
   S._context_reuse_hint        = nil
   S._mixed_output_hint         = nil
+  S._fx_inspect_dropped        = nil
   -- Defensive clear of fx_inspect -> fx_params handoff state (also reset per
   -- send_to_api; mirroring here keeps mid-flow clears from poisoning the
   -- next conversation).
@@ -13702,6 +15856,384 @@ function Code.find_unknown_reaper_calls(lua_code)
   if #unknown == 0 then return nil, total end
   table.sort(unknown)
   return unknown, total
+end
+
+-- =============================================================================
+-- Code.find_reaper_arity_mismatches
+-- =============================================================================
+-- Conservative fixed-arity check for high-confidence param-write calls. The
+-- API validator above only checks that NAMES exist; a bug like
+-- `reaper.TrackFX_SetParamNormalized(tr, fx, best_v)` (3 args, missing pidx)
+-- passes the name check but crashes at runtime inside reaper.defer with
+-- "bad argument #3 ... (number has no integer representation)" because
+-- best_v (a float) lands in the integer pidx slot. Caught in a Gemini
+-- session where the model pasted set_param_display but corrupted the
+-- final setter call.
+--
+-- Scope is intentionally narrow -- only fixed-arity functions where every
+-- documented signature has the same arg count, and where the args are
+-- always positional (no optional trailing varargs that would produce false
+-- positives). Adding a name here is opting it into the strict check; do
+-- not add unless every real call site uses the same fixed count.
+local _REAPER_FIXED_ARITY = {
+  TrackFX_SetParamNormalized      = 4,
+  TakeFX_SetParamNormalized       = 4,
+  TrackFX_SetParam                = 4,
+  TakeFX_SetParam                 = 4,
+  TrackFX_GetParamNormalized      = 3,
+  TakeFX_GetParamNormalized       = 3,
+  TrackFX_GetFormattedParamValue  = 4,
+  TakeFX_GetFormattedParamValue   = 4,
+}
+
+function Code.find_reaper_arity_mismatches(lua_code)
+  if not lua_code or lua_code == "" then return nil end
+  local stripped = lua_code:gsub("%-%-[^\n]*", "")
+  local seen, mismatches = {}, {}
+  local pos = 1
+  while true do
+    local _ms, me, name = stripped:find("reaper%.([%w_]+)%s*%(", pos)
+    if not me then break end
+    local expected = _REAPER_FIXED_ARITY[name]
+    if expected then
+      -- Walk forward from me (the open paren) tracking bracket depth +
+      -- string state. Comma at depth==1 separates top-level args.
+      -- (), {}, [] all increment/decrement depth so a nested table
+      -- literal `{1, 2, 3}` doesn't add false top-level commas.
+      local depth, args = 1, 0
+      local i = me + 1
+      local in_str = nil  -- nil, '"', or "'"
+      local saw_content = false
+      while i <= #stripped do
+        local c = stripped:sub(i, i)
+        if in_str then
+          if c == "\\" then
+            i = i + 2  -- skip escape sequence
+          else
+            if c == in_str then in_str = nil end
+            i = i + 1
+          end
+        else
+          if c == '"' or c == "'" then
+            in_str = c; saw_content = true
+          elseif c == "(" or c == "[" or c == "{" then
+            depth = depth + 1; saw_content = true
+          elseif c == ")" or c == "]" or c == "}" then
+            depth = depth - 1
+            if depth == 0 then break end
+          elseif c == "," and depth == 1 then
+            args = args + 1
+          elseif not c:match("%s") then
+            saw_content = true
+          end
+          i = i + 1
+        end
+      end
+      if depth == 0 then
+        local got = saw_content and (args + 1) or 0
+        if got ~= expected then
+          local key = name .. ":" .. got
+          if not seen[key] then
+            seen[key] = true
+            mismatches[#mismatches+1] =
+              { name = name, expected = expected, got = got }
+          end
+        end
+      end
+    end
+    pos = me + 1
+  end
+  if #mismatches == 0 then return nil end
+  table.sort(mismatches, function(a, b)
+    if a.name ~= b.name then return a.name < b.name end
+    return a.got < b.got
+  end)
+  return mismatches
+end
+
+-- =============================================================================
+-- Code.find_unchecked_addbyname_results
+-- =============================================================================
+-- Static check for unchecked TrackFX_AddByName / TakeFX_AddByName results.
+-- A common silent-failure pattern from less-careful models:
+--
+--   local fx = reaper.TrackFX_AddByName(tr, "VST3i: Twin 3", false, -1)
+--   -- ... never checks fx < 0; downstream code assumes fx is valid
+--
+-- or the silent-skip variant:
+--
+--   local fx_comp = reaper.TrackFX_AddByName(tr, ..., false, -1)
+--   if fx_comp >= 0 then
+--     ... configure ...
+--   end                            -- no else, no error, no return
+--
+-- Both forms claim the script "ran OK" while in reality a required plugin
+-- failed to load and the user gets no diagnostic. The script is dependent
+-- on the AddByName succeeding; if it doesn't, that's a broken chain the
+-- user should be told about.
+--
+-- Detection: for each `local NAME = reaper.(Track|Take)FX_AddByName(...)`,
+-- check that NAME appears in a failure-direction comparison somewhere in
+-- the script. Acceptable patterns: `NAME < 0`, `NAME == -1`, `NAME <= -1`.
+-- If only the success-direction (`NAME >= 0`, `NAME > -1`) appears, that's
+-- the silent-skip pattern -- still flagged. GetByName is intentionally
+-- NOT covered: returning -1 from GetByName is a legitimate "not present"
+-- signal in upsert patterns and forcing an early-error would break them.
+--
+-- Returns a sorted list of `{name, line}` entries (line is approximate),
+-- or nil if every AddByName-bound local is properly checked.
+function Code.find_unchecked_addbyname_results(lua_code)
+  if not lua_code or lua_code == "" then return nil end
+  local stripped = lua_code:gsub("%-%-[^\n]*", "")
+  local violations, seen = {}, {}
+  local function _scan(pattern)
+    local pos = 1
+    while true do
+      local s, e, name = stripped:find(pattern, pos)
+      if not s then break end
+      if not seen[name] then
+        seen[name] = true
+        -- Append a sentinel newline so end-of-string patterns behave
+        -- the same as mid-string ones (the trailing [^%w_%.] needs a
+        -- non-identifier byte to consume).
+        local hay = stripped .. "\n"
+        local nid = "[^%w_]"
+        local end_  = "[^%w_%.]"  -- excludes "." so "< 0.5" doesn't match "< 0"
+        local checked =
+             hay:find(nid .. name .. "%s*<%s*0"   .. end_)   -- NAME < 0
+          or hay:find(nid .. name .. "%s*==%s*%-%s*1" .. end_)  -- NAME == -1
+          or hay:find(nid .. name .. "%s*<=%s*%-%s*1" .. end_)  -- NAME <= -1
+          or hay:find(nid .. name .. "%s*<%s*%-%s*1"  .. end_)  -- NAME < -1
+        if not checked then
+          local line = 1
+          for _ in stripped:sub(1, s):gmatch("\n") do line = line + 1 end
+          violations[#violations+1] = { name = name, line = line }
+        end
+      end
+      pos = e + 1
+    end
+  end
+  _scan("local%s+([%w_]+)%s*=%s*reaper%.TrackFX_AddByName%s*%(")
+  _scan("local%s+([%w_]+)%s*=%s*reaper%.TakeFX_AddByName%s*%(")
+  if #violations == 0 then return nil end
+  table.sort(violations, function(a, b)
+    if a.line ~= b.line then return a.line < b.line end
+    return a.name < b.name
+  end)
+  return violations
+end
+
+-- =============================================================================
+-- Code.find_chain_upsert_violations
+-- =============================================================================
+-- Strict-pairing check for chain-build follow-up turns: every plugin name
+-- referenced via TrackFX_GetByName MUST also appear in a TrackFX_AddByName
+-- call (and vice-versa). Catches two opposite anti-patterns observed
+-- across providers when fx_chains is pinned and the user said "build a
+-- vocal chain" / "set up a chain":
+--
+--   GET-ONLY (ChatGPT pattern): GetByName for all required plugins,
+--   then if any returns < 0, ShowMessageBox "missing one or more chain
+--   plugins" and return. Misses the "add the missing ones" half of the
+--   upsert -- the script bails when the chain is incomplete instead of
+--   completing it.
+--
+--   ADD-ONLY (Claude pattern): AddByName for every plugin without
+--   checking whether the plugin is already on the track. Silently
+--   duplicates plugins that an earlier turn already placed.
+--
+-- The canonical pattern requires BOTH calls for the same plugin:
+--   local fx = reaper.TrackFX_GetByName(tr, "Pro-Q 4", false)
+--   if fx < 0 then
+--     fx = reaper.TrackFX_AddByName(tr, "VST3: Pro-Q 4", false, -1)
+--   end
+--   if fx < 0 then -- report failure end
+--
+-- Caller is responsible for gating: only run when the prompt is a chain-
+-- build (CHAIN_PHRASE_HINTS matched) AND fx_chains was preempted/pinned
+-- this turn. In other contexts both patterns can be legitimate
+-- (modifying an existing instance, adding a new plugin to a fresh track,
+-- etc.) and this validator would false-positive.
+--
+-- Returns a list of `{kind, bare, id}` entries (kind is "get_only" or
+-- "add_only", bare is the lowercased name without format prefix or
+-- vendor suffix, id is the original string from the call) or nil if
+-- every plugin name appears in both call types.
+function Code.find_chain_upsert_violations(lua_code)
+  if not lua_code or lua_code == "" then return nil end
+  local stripped = lua_code:gsub("%-%-[^\n]*", "")
+  local function _bare(id)
+    if not id then return nil end
+    local n = id:match("^[A-Za-z][A-Za-z0-9]*:%s*(.+)$") or id
+    n = n:gsub("%s*%(.-%)%s*$", "")
+    return n:lower()
+  end
+  -- Resolve simple `local NAME = "literal"` constants so AddByName /
+  -- GetByName calls that pass a variable instead of a literal still
+  -- match. Observed in a Gemini session that hoisted the identifier
+  -- into local id_eq = "VST3: Pro-Q 4"; reaper.TrackFX_AddByName(tr,
+  -- id_eq, ...) and slipped past the literal-only scan. Only resolves
+  -- single-line `local X = "..."` -- not concatenations, function
+  -- calls, table indexing, or reassignment.
+  local string_consts = {}
+  for ident, val in stripped:gmatch("local%s+([%w_]+)%s*=%s*\"([^\"]+)\"") do
+    string_consts[ident] = val
+  end
+  for ident, val in stripped:gmatch("local%s+([%w_]+)%s*=%s*'([^']+)'") do
+    string_consts[ident] = val
+  end
+  local function _resolve_arg(captured)
+    -- captured may be a quoted string content (already resolved by the
+    -- gmatch pattern that captured between quotes) or a bare identifier
+    -- (when the pattern matched the variable form). Caller passes both
+    -- shapes through this helper -- if it looks like an identifier and
+    -- we have a constant for it, return the constant; otherwise return
+    -- the captured value as-is.
+    if not captured then return nil end
+    if captured:match("^[%w_]+$") and string_consts[captured] then
+      return string_consts[captured]
+    end
+    return captured
+  end
+  local get_names, add_names = {}, {}
+  -- Match: TrackFX_GetByName(track_arg, "name"|'name'|IDENT, ...)
+  for cap in stripped:gmatch("TrackFX_GetByName%s*%([^,]+,%s*\"([^\"]+)\"") do
+    local b = _bare(cap); if b then get_names[b] = cap end
+  end
+  for cap in stripped:gmatch("TrackFX_GetByName%s*%([^,]+,%s*'([^']+)'") do
+    local b = _bare(cap); if b then get_names[b] = cap end
+  end
+  for cap in stripped:gmatch("TrackFX_GetByName%s*%([^,]+,%s*([%w_]+)%s*,") do
+    local resolved = _resolve_arg(cap)
+    if resolved and resolved ~= cap then  -- only count if we resolved a const
+      local b = _bare(resolved); if b then get_names[b] = resolved end
+    end
+  end
+  for cap in stripped:gmatch("TrackFX_AddByName%s*%([^,]+,%s*\"([^\"]+)\"") do
+    local b = _bare(cap); if b then add_names[b] = cap end
+  end
+  for cap in stripped:gmatch("TrackFX_AddByName%s*%([^,]+,%s*'([^']+)'") do
+    local b = _bare(cap); if b then add_names[b] = cap end
+  end
+  for cap in stripped:gmatch("TrackFX_AddByName%s*%([^,]+,%s*([%w_]+)%s*,") do
+    local resolved = _resolve_arg(cap)
+    if resolved and resolved ~= cap then
+      local b = _bare(resolved); if b then add_names[b] = resolved end
+    end
+  end
+  local violations = {}
+  for bare, id in pairs(get_names) do
+    if not add_names[bare] then
+      violations[#violations+1] = { kind = "get_only", bare = bare, id = id }
+    end
+  end
+  for bare, id in pairs(add_names) do
+    if not get_names[bare] then
+      violations[#violations+1] = { kind = "add_only", bare = bare, id = id }
+    end
+  end
+  if #violations == 0 then return nil end
+  table.sort(violations, function(a, b)
+    if a.bare ~= b.bare then return a.bare < b.bare end
+    return a.kind < b.kind
+  end)
+  return violations
+end
+
+-- =============================================================================
+-- Code.find_helper_integrity_violations
+-- =============================================================================
+-- Narrow check for known-corrupted bundled helper bodies. The plugin_helpers
+-- bundle's source is the canonical form; helpers are meant to be pasted
+-- verbatim. Models occasionally rewrite or simplify the body in ways that
+-- break safety -- the observed case from a ChatGPT 5.4 Mini session was the
+-- range-guard on set_param_display:
+--
+--   GOOD: vmin and vmax and vmin < vmax and (target < vmin or target > vmax)
+--   BAD:  vmin and vmax and target < vmin or target > vmax
+--
+-- Lua's and/or precedence makes the bad form parse as
+-- `(vmin and vmax and target < vmin) or (target > vmax)`, so the second
+-- disjunct evaluates `target > vmax` even when vmax is nil, producing
+-- "attempt to compare nil with number" inside reaper.defer (after Code.run
+-- has already logged "Script completed OK").
+--
+-- Detection is whitespace-insensitive substring matching against the
+-- canonical fragment(s). False-positive risk is low because the helper
+-- bodies are not meant to be creatively rewritten -- a model that paraphrases
+-- them is producing a different program from the bundle's tested source.
+--
+-- Returns a list of `{name, missing}` entries (missing is the canonical
+-- fragment the helper body lacks), or nil if every defined helper looks
+-- intact.
+function Code.find_helper_integrity_violations(lua_code)
+  if not lua_code or lua_code == "" then return nil end
+  -- Inlined to avoid a file-scope local slot (we're at the 200-local
+  -- limit). Trivial reconstruction cost; this validator runs at most
+  -- once per turn.
+  local required_fragments = {
+    set_param_display = {
+      -- The parenthesized range-guard. The unparenthesized form bites on
+      -- nil vmax; the parenthesized form short-circuits cleanly.
+      "vmin and vmax and vmin < vmax and (target < vmin or target > vmax)",
+      -- Nil-safe parse helper. The bare `s:gsub(...)` form crashes when
+      -- TrackFX_GetFormattedParamValue returns nil (some VST3 plugins
+      -- return that during the binary-search probe phase). The `(s or "")`
+      -- guard turns a nil into a no-op match.
+      "(s or \"\"):gsub",
+    },
+  }
+  local stripped = lua_code:gsub("%-%-[^\n]*", "")
+  -- Strip ALL whitespace from haystack and required fragments before
+  -- substring search. This makes the check insensitive to formatting
+  -- choices (line breaks across the expression, no spaces around
+  -- operators, etc.). False-positive collision risk is low because the
+  -- fragments are long, syntactically specific strings that don't appear
+  -- elsewhere in plausible REAPER scripts.
+  local function _normws(s) return (s:gsub("%s+", "")) end
+  local hay = _normws(stripped)
+  local violations = {}
+  for name, fragments in pairs(required_fragments) do
+    -- Only check helpers that are BOTH defined AND called. A pasted-
+    -- but-uncalled helper is dead code -- its corruption never executes,
+    -- so forcing a retry is wasted cost. Mirrors the dead-code exemption
+    -- the defer-validator already has. Call-site detection: NAME(
+    -- preceded by a non-identifier, non-`.` byte (so `obj.NAME(` doesn't
+    -- count and we don't false-positive on field access).
+    local defined =
+         stripped:find("local%s+function%s+" .. name .. "%s*%(", 1)
+      or stripped:find("[^%w_]function%s+" .. name .. "%s*%(", 1)
+      or stripped:find("^function%s+" .. name .. "%s*%(", 1)
+    if defined then
+      -- Scan for a call site OUTSIDE the def header. The call pattern
+      -- `[^%w_%.]NAME%s*%(` would match the space before NAME in
+      -- `function NAME(`; that match's start position is between the
+      -- definition keyword and NAME, so we accept any call-pattern hit
+      -- whose start is AFTER the matched def's end position.
+      local def_end = stripped:find(name .. "%s*%(", defined)
+      def_end = def_end and (def_end + #name) or defined
+      local call_pat = "[^%w_%.]" .. name .. "%s*%("
+      local called = false
+      local p = 1
+      while true do
+        local cs = stripped:find(call_pat, p)
+        if not cs then break end
+        if cs > def_end then called = true; break end
+        p = cs + 1
+      end
+      if called then
+        for _, frag in ipairs(fragments) do
+          if not hay:find(_normws(frag), 1, true) then
+            violations[#violations+1] = { name = name, missing = frag }
+            break  -- one violation per helper is enough to trigger retry
+          end
+        end
+      end
+    end
+  end
+  if #violations == 0 then return nil end
+  table.sort(violations, function(a, b) return a.name < b.name end)
+  return violations
 end
 
 -- For a hallucinated reaper.X name, return up to N real function names that
@@ -13868,7 +16400,7 @@ local function _find_local_function_regions(stripped)
     local body_start = i
     local body_end_plus1 = _walk_to_matching_end(stripped, body_start, 1)
     if body_end_plus1 then
-      fns[#fns+1] = { name = name, body_start = body_start, body_end = body_end_plus1 - 1 }
+      fns[#fns+1] = { name = name, def_start = s, body_start = body_start, body_end = body_end_plus1 - 1 }
       -- Advance INTO the body, not past its end. The model commonly wraps
       -- the whole script in `local function main() ... end main()` and
       -- defines helpers (set_param_display, find_param, etc.) as nested
@@ -13934,6 +16466,34 @@ function Code.find_param_calls_outside_defer(lua_code)
     end
   end
 
+  -- Dead-code exemption: a local function whose name has no call sites
+  -- OUTSIDE its own def header + body is unreachable -- its reaper.* calls
+  -- never execute, so don't flag them. This catches the common case of
+  -- the model pasting a helper (e.g. set_param_display) "just in case"
+  -- without actually invoking it. Limited to one-level reachability:
+  -- helpers called only by other dead helpers are still flagged. Acceptable
+  -- because that pattern is rare and erring on the side of flagging keeps
+  -- the validator's primary purpose intact (catch real defer violations
+  -- like `local function apply() ... end; apply()` outside defer).
+  for _, fn in ipairs(fns) do
+    if not known_in_defer[fn] then
+      local pat = "[^%w_%.]" .. fn.name .. "%s*%("
+      local ps, has_external = 1, false
+      while true do
+        local cs = stripped:find(pat, ps)
+        if not cs then break end
+        if cs < fn.def_start or cs > fn.body_end then
+          has_external = true
+          break
+        end
+        ps = cs + 1
+      end
+      if not has_external then
+        regions[#regions+1] = { fn.body_start, fn.body_end }
+      end
+    end
+  end
+
   local violations = {}
   local seen = {}
   local s = 1
@@ -13986,41 +16546,59 @@ function Code.find_helper_calls_without_definition(lua_code)
   -- code; accept the false-positive risk).
   local stripped = (lua_code:gsub("%-%-[^\n]*",
     function(s) return string.rep(" ", #s) end))
-  -- For each helper name, check whether it's both called AND defined.
-  -- Definition pattern: `local function NAME(` (the standard form the
-  -- bundle uses). Also accept `function NAME(` (without local) and
-  -- `local NAME = function(` since those are equivalent semantically.
-  -- Call pattern: NAME followed by `(` after a non-identifier boundary,
-  -- so we don't false-match against substrings of other identifiers.
+  -- For each helper name, find the earliest definition position and the
+  -- earliest call position. Two failure modes both produce the same
+  -- runtime crash ("attempt to call a nil value"); both treated as
+  -- violations so the retry hint covers them uniformly:
+  --
+  --   1. NO definition anywhere -- model called the helper without
+  --      including its source.
+  --   2. Definition exists but is LEXICALLY AFTER the first call site.
+  --      Common when the model writes main() first and helper functions
+  --      below: when Lua compiles main()'s body, the helper's `local`
+  --      slot doesn't exist yet at that source position, so the call
+  --      compiles as a global (_ENV) lookup and crashes at runtime
+  --      inside the deferred callback. Confirmed reproducible against
+  --      Lua 5.4 with the exact pattern observed in a debug log.
+  --
+  -- Definition forms accepted:
+  --   `local function NAME(`        -- standard form the bundle uses
+  --   `function NAME(`              -- bare (no local; less safe but valid)
+  --   `local NAME = function`       -- assignment form
+  --   `NAME = function` (mid-line)  -- bare assignment (creates global)
+  --
+  -- The definition-before-call check uses START position of the def
+  -- match. For a `local function NAME(` site, that's the 'l' of "local",
+  -- which is always BEFORE the call-pattern's match (the space inside
+  -- "function NAME(" that satisfies [^%w_%.]). So def-site false-call-
+  -- matches don't trigger out-of-order -- they compare def_pos < their
+  -- own call_pos.
   local violations, seen = {}, {}
   for name in pairs(_HELPER_NAMES) do
-    -- Definition check (any of the three forms).
-    local has_def =
-         stripped:find("local%s+function%s+" .. name .. "%s*%(") ~= nil
-      or stripped:find("[^%w_]function%s+" .. name .. "%s*%(") ~= nil
-      or stripped:find("^function%s+" .. name .. "%s*%(")       ~= nil
-      or stripped:find("local%s+" .. name .. "%s*=%s*function") ~= nil
-      or stripped:find("[^%w_]" .. name .. "%s*=%s*function")   ~= nil
-    -- Call check (NAME followed by `(`, not preceded by an identifier or
-    -- a `.` (which would make it a method/field access on something else).
-    -- We deliberately scan for "called but not defined" only -- a defined-
-    -- but-uncalled helper is fine (the bundle's "only include helpers you
-    -- call" guidance is about size, not correctness).
-    local has_call = false
-    local s = 1
-    while true do
-      local hs, he = stripped:find("[^%w_%.]" .. name .. "%s*%(", s)
-      if not hs then break end
-      has_call = true
-      break
+    local def_pos = nil
+    local function _take_min(pat)
+      local sp = stripped:find(pat)
+      if sp and (not def_pos or sp < def_pos) then def_pos = sp end
     end
-    -- Also catch line-start call (no preceding char).
-    if not has_call then
-      if stripped:find("^" .. name .. "%s*%(") then has_call = true end
+    _take_min("local%s+function%s+" .. name .. "%s*%(")
+    _take_min("[^%w_]function%s+" .. name .. "%s*%(")
+    _take_min("^function%s+" .. name .. "%s*%(")
+    _take_min("local%s+" .. name .. "%s*=%s*function")
+    _take_min("[^%w_]" .. name .. "%s*=%s*function")
+    -- Earliest call site (NAME followed by `(`, not preceded by an
+    -- identifier or a `.` which would make it a method/field access).
+    -- Deliberately scan for "called but not defined" only -- a defined-
+    -- but-uncalled helper is fine (the bundle's "only include helpers
+    -- you call" guidance is about size, not correctness).
+    local call_pos = stripped:find("[^%w_%.]" .. name .. "%s*%(")
+    if not call_pos and stripped:find("^" .. name .. "%s*%(") then
+      call_pos = 1
     end
-    if has_call and not has_def and not seen[name] then
-      seen[name] = true
-      violations[#violations+1] = name
+    if call_pos and not seen[name] then
+      if not def_pos or def_pos > call_pos then
+        seen[name] = true
+        violations[#violations+1] = name
+      end
     end
   end
   if #violations == 0 then return nil end
@@ -14621,83 +17199,1055 @@ local JSFX_KEYWORDS = {
 }
 
 function Code.tokenize_jsfx(src)
+  -- Each token: { type, text, pos, line, col }. Line/col track the original
+  -- source so static-validator rules report findings at user-readable
+  -- positions. Types: ws, com, str, num, kw (JSFX_KEYWORDS + @sections),
+  -- id, other.
   local tokens = {}
   local i, n = 1, #src
+  local line, col = 1, 1
+  local function advance(len)
+    for k = i, i + len - 1 do
+      if src:sub(k, k) == "\n" then line = line + 1; col = 1
+      else col = col + 1 end
+    end
+    i = i + len
+  end
   while i <= n do
+    local sl, sc, sp = line, col, i
     local c = src:sub(i, i)
+    local tok
     if c == " " or c == "\t" or c == "\n" or c == "\r" then
-      local j = i + 1
-      while j <= n do
-        local cj = src:sub(j, j)
-        if cj ~= " " and cj ~= "\t" and cj ~= "\n" and cj ~= "\r" then break end
-        j = j + 1
-      end
-      tokens[#tokens+1] = { type = "ws", text = src:sub(i, j - 1) }
-      i = j
-    -- /* block comment */
+      local j = i
+      while j <= n and src:sub(j, j):match("[ \t\n\r]") do j = j + 1 end
+      tok = { type = "ws", text = src:sub(i, j - 1) }; advance(j - i)
     elseif c == "/" and src:sub(i + 1, i + 1) == "*" then
       local close = src:find("*/", i + 2, true)
-      local stop  = close and (close + 1) or n
-      tokens[#tokens+1] = { type = "com", text = src:sub(i, stop) }
-      i = stop + 1
-    -- // line comment
+      local stop = close and (close + 1) or n
+      tok = { type = "com", text = src:sub(i, stop) }; advance(stop - i + 1)
     elseif c == "/" and src:sub(i + 1, i + 1) == "/" then
-      local nl   = src:find("\n", i, true)
+      local nl = src:find("\n", i, true)
       local stop = nl and (nl - 1) or n
-      tokens[#tokens+1] = { type = "com", text = src:sub(i, stop) }
-      i = stop + 1
-    -- JSFX section headers (@init, @sample, @block, @slider, @serialize, @gfx)
+      tok = { type = "com", text = src:sub(i, stop) }; advance(stop - i + 1)
     elseif c == "@" then
-      local rest = src:sub(i)
-      local sect = rest:match("^@%w+") or "@"
-      tokens[#tokens+1] = { type = "kw", text = sect }
-      i = i + #sect
-    -- Quoted string ("...")
+      local sect = src:sub(i):match("^@%w+") or "@"
+      tok = { type = "kw", text = sect }; advance(#sect)
     elseif c == '"' or c == "'" then
-      local quote = c
+      local q = c
       local j = i + 1
       while j <= n do
         local cj = src:sub(j, j)
-        if cj == "\\" then
-          j = j + 2
-        elseif cj == quote then
-          j = j + 1
-          break
-        elseif cj == "\n" then
-          break
-        else
-          j = j + 1
-        end
+        if cj == "\\" then j = j + 2
+        elseif cj == q then j = j + 1; break
+        elseif cj == "\n" then break
+        else j = j + 1 end
       end
-      tokens[#tokens+1] = { type = "str", text = src:sub(i, j - 1) }
-      i = j
+      tok = { type = "str", text = src:sub(i, j - 1) }; advance(j - i)
     elseif c:match("%d") then
       local rest = src:sub(i)
-      local num  = rest:match("^0[xX][%dA-Fa-f]+") or
-                   rest:match("^%d+%.?%d*[eE][%+%-]?%d+") or
-                   rest:match("^%d+%.?%d*")
+      local num = rest:match("^0[xX][%dA-Fa-f]+")
+               or rest:match("^%d+%.?%d*[eE][%+%-]?%d+")
+               or rest:match("^%d+%.?%d*")
       if num and #num > 0 then
-        tokens[#tokens+1] = { type = "num", text = num }
-        i = i + #num
+        tok = { type = "num", text = num }; advance(#num)
       else
-        tokens[#tokens+1] = { type = "other", text = c }
-        i = i + 1
+        tok = { type = "other", text = c }; advance(1)
       end
     elseif c:match("[_%a]") then
-      local rest  = src:sub(i)
-      local ident = rest:match("^[_%a][_%w]*") or c
-      tokens[#tokens+1] = {
+      local ident = src:sub(i):match("^[_%a][_%w]*") or c
+      tok = {
         type = JSFX_KEYWORDS[ident] and "kw" or "id",
         text = ident,
-      }
-      i = i + #ident
+      }; advance(#ident)
     else
-      tokens[#tokens+1] = { type = "other", text = c }
-      i = i + 1
+      tok = { type = "other", text = c }; advance(1)
     end
+    tok.line, tok.col, tok.pos = sl, sc, sp
+    tokens[#tokens + 1] = tok
   end
   return tokens
 end
+
+-- =============================================================================
+-- Code.validate_jsfx
+-- =============================================================================
+-- Static analysis for generated JSFX before auto-save / auto-run. Returns a
+-- list of findings; each: { severity, code, line, message }. Severity is
+-- "fatal" (would gate auto-run + qualify for one retry) or "warn" (advisory).
+-- Calibrated against C:\REAPER\Effects (264 standalone stock + community JSFX)
+-- to keep per-rule false-positive rates at or below ~3.5%. The audit harness
+-- lives in Dev/Tests/corpus_audit.lua (gitignored); regression tests live
+-- alongside it in Dev/Tests/test_*.lua.
+--
+-- Rules:
+--  fatal  missing_desc          first non-comment content not `desc:`
+--  fatal  reaper_api            `reaper.X` reference (JSFX has no reaper API)
+--  fatal  banned_braces         `{` or `}` outside header lines / strings / comments
+--  fatal  banned_else           bare `else` keyword (no else in EEL2)
+--  fatal  banned_math_prefix    `math.X` (EEL2 uses bare `sin`, `cos`, ...)
+--  fatal  banned_for_loop       C-style `for(...)` (use `loop()` or `while()`)
+--  fatal  feedback_unclamped    feedback-named slider can exceed 0.85 with no
+--                               `0.85` clamp visible (Prompts.md mandate)
+--  fatal  memory_no_init        `id[...]` or `mem[id+...]` indexed but `id`
+--                               is never assigned a base value (skipped when
+--                               file uses `import`)
+--  fatal  buffer_overlap        two declared buffers (`X = base; X_len = len;`
+--                               where X is used as a memory base) have spans
+--                               that intersect -- two filters writing to the
+--                               same memory addresses
+--  fatal  parallel_comb_doubled in @sample, 2+ buffer writes share the same
+--                               additive feedback RHS (`bufN[wN] = input +
+--                               <term>*<id>`). Identical content written to
+--                               parallel buffers makes their summed reads
+--                               loop-gain N*fb; runs away even with fb<=0.85
+--  fatal  hard_clip_unrequested `min(max(audio, -T), T)` with T<=1.5 on a
+--                               sample-touching expr, when user_text doesn't
+--                               request clip/limit/distort
+--  fatal  arg_count_mismatch    `id(...)` call to a built-in EEL2/JSFX
+--                               function with fixed arity uses the wrong
+--                               number of arguments (e.g. `memset(0, len)`
+--                               instead of `memset(0, 0, len)`). Catches
+--                               REAPER's `'%s' needs N prms` compile error
+--                               class. Conservative arity table -- only
+--                               functions with unambiguous fixed signatures.
+--  warn   unknown_function      `id(...)` call where id is neither in the
+--                               EEL2/JSFX whitelist nor user-defined; logged
+--                               but not gated
+do
+
+local function add(findings, sev, code, line, message)
+  findings[#findings + 1] = { severity = sev, code = code, line = line, message = message }
+end
+
+local function next_significant(tokens, from)
+  for i = from, #tokens do
+    local t = tokens[i]
+    if t.type ~= "ws" and t.type ~= "com" then return i, t end
+  end
+end
+
+local function skip_ws(tokens, i)
+  while tokens[i] and (tokens[i].type == "ws" or tokens[i].type == "com") do
+    i = i + 1
+  end
+  return tokens[i] and i or nil
+end
+
+local function read_signed_num(tokens, i)
+  i = skip_ws(tokens, i); if not i then return nil end
+  local sign = 1
+  if tokens[i].type == "other" and tokens[i].text == "-" then
+    sign = -1
+    i = skip_ws(tokens, i + 1); if not i then return nil end
+  end
+  if tokens[i].type ~= "num" then return nil end
+  return sign * tonumber(tokens[i].text), i + 1
+end
+
+local function match_seq(tokens, start, pat)
+  local i = start
+  for _, p in ipairs(pat) do
+    while tokens[i] and (tokens[i].type == "ws" or tokens[i].type == "com") do
+      i = i + 1
+    end
+    local t = tokens[i]
+    if not t then return false end
+    if p.type and t.type ~= p.type then return false end
+    if p.text and t.text ~= p.text then return false end
+    i = i + 1
+  end
+  return true
+end
+
+local function find_seq_lines(tokens, pat)
+  -- Only start matches at significant tokens. match_seq's leading-ws skip
+  -- means starting from a ws/com token would otherwise produce a duplicate
+  -- hit at the preceding line.
+  local lines = {}
+  for i = 1, #tokens do
+    local t = tokens[i]
+    if t.type ~= "ws" and t.type ~= "com" and match_seq(tokens, i, pat) then
+      lines[#lines + 1] = t.line
+    end
+  end
+  return lines
+end
+
+-- `sliderN:default<min,max,step>Name` (range optional).
+local function parse_sliders(src)
+  local out = {}
+  local cur = 0
+  for line_text in src:gmatch("([^\n]*)\n?") do
+    cur = cur + 1
+    local idx, def, rest = line_text:match("^%s*slider(%d+):([^<\n]*)(.*)$")
+    if idx then
+      local mn, mx, step, name
+      local range, after = rest:match("^<([^>]*)>(.*)$")
+      if range then
+        mn, mx, step = range:match("^([^,]*),([^,]*),([^,]*)$")
+        if not mn then mn, mx = range:match("^([^,]*),([^,]*)$") end
+        name = after
+      else
+        name = rest
+      end
+      out[#out + 1] = {
+        index = tonumber(idx),
+        default = (def or ""):gsub("^%s+", ""):gsub("%s+$", ""),
+        min  = tonumber(((mn   or ""):gsub("%s", ""))),
+        max  = tonumber(((mx   or ""):gsub("%s", ""))),
+        step = tonumber(((step or ""):gsub("%s", ""))),
+        name = (name or ""):gsub("^%s+", ""):gsub("%s+$", ""),
+        line = cur,
+      }
+    end
+  end
+  return out
+end
+
+-- Header lines (slider, desc, tags, ...) are NOT EEL2 code: `{enum}` and
+-- `[TAG]` text inside descriptions are legal there and must be skipped.
+local function build_header_lines(src)
+  local set = {}
+  local n = 0
+  for line_text in src:gmatch("([^\n]*)\n?") do
+    n = n + 1
+    if line_text:match("^%s*slider%d")
+       or line_text:match("^%s*desc:")
+       or line_text:match("^%s*filename:")
+       or line_text:match("^%s*tags:")
+       or line_text:match("^%s*author:")
+       or line_text:match("^%s*in_pin:")
+       or line_text:match("^%s*out_pin:")
+       or line_text:match("^%s*options:")
+       or line_text:match("^%s*import%s") then
+      set[n] = true
+    end
+  end
+  return set
+end
+
+local function check_desc(tokens, findings)
+  local _, t = next_significant(tokens, 1)
+  if not t then
+    add(findings, "fatal", "missing_desc", 1, "Empty source; no `desc:` line found.")
+    return
+  end
+  if not (t.type == "id" and t.text == "desc") then
+    add(findings, "fatal", "missing_desc", t.line,
+        "First non-comment content must be `desc:` line.")
+  end
+end
+
+local function check_reaper_api(tokens, findings)
+  for _, line in ipairs(find_seq_lines(tokens, {
+    { type = "id", text = "reaper" }, { type = "other", text = "." },
+  })) do
+    add(findings, "fatal", "reaper_api", line,
+        "JSFX has no access to `reaper.*` API.")
+  end
+end
+
+-- `end`, `then`, `return` are NOT reserved in EEL2 and stock JSFX uses them
+-- as identifiers (e.g. `end = 18 * (2*$pi/16)`); banning them false-positives
+-- on legit code. Only `else` is rare-enough as an identifier to keep.
+local BANNED_BARE = {
+  ["else"] = "EEL2 has no `else` keyword. Use ternary `cond ? a : b`.",
+}
+
+local function check_banned_syntax(tokens, header_lines, findings)
+  for _, t in ipairs(tokens) do
+    if t.type == "other" and (t.text == "{" or t.text == "}") then
+      if not header_lines[t.line] then
+        add(findings, "fatal", "banned_braces", t.line,
+            "EEL2 has no `{}` blocks. Group statements with `(...)`.")
+      end
+    elseif (t.type == "id" or t.type == "kw") and BANNED_BARE[t.text] then
+      add(findings, "fatal", "banned_" .. t.text, t.line, BANNED_BARE[t.text])
+    end
+  end
+  for _, line in ipairs(find_seq_lines(tokens, {
+    { type = "id", text = "math" }, { type = "other", text = "." },
+  })) do
+    add(findings, "fatal", "banned_math_prefix", line,
+        "EEL2 uses bare math functions (sin, cos, sqrt, ...). No `math.` prefix.")
+  end
+  for _, line in ipairs(find_seq_lines(tokens, {
+    { type = "id", text = "for" }, { type = "other", text = "(" },
+  })) do
+    add(findings, "fatal", "banned_for_loop", line,
+        "EEL2 has no C-style `for(...)`. Use `loop(N, ...)` or `while(cond) (...)`.")
+  end
+end
+
+-- Map slider max into a worst-case feedback coefficient under common
+-- conventions: raw 0..1, percent 0..100. Anything else is treated as risky.
+local function slider_max_coef(s)
+  if not s.max then return nil end
+  local mx = s.max
+  if mx <= 1.001 then return mx end
+  if mx <= 100.001 then return mx / 100 end
+  return 1.5
+end
+
+local FEEDBACK_NAMES = { "feedback", "regen", "regeneration", "resonance" }
+local function name_is_feedback(name)
+  local low = name:lower()
+  if low:match("%f[%w]fb%f[^%w]") then return true end
+  for _, p in ipairs(FEEDBACK_NAMES) do
+    if low:find(p, 1, true) then return true end
+  end
+  return false
+end
+
+local function check_feedback_clamp(src, sliders, findings)
+  local risky = {}
+  for _, s in ipairs(sliders) do
+    if name_is_feedback(s.name) then
+      local coef = slider_max_coef(s)
+      if coef and coef > 0.85 then risky[#risky + 1] = s end
+    end
+  end
+  if #risky == 0 then return end
+  -- Loose clamp detection: literal 0.85 or .85 anywhere in source.
+  if src:find("0?%.85") then return end
+  for _, s in ipairs(risky) do
+    add(findings, "fatal", "feedback_unclamped", s.line,
+        ("Feedback-style slider `%s` reaches >0.85 effective coefficient with no `0.85` clamp visible. Per ReaAssist's JSFX safety rule, hard-clamp the feedback coefficient to <= 0.85.")
+          :format(s.name))
+  end
+end
+
+local MEM_BUILTINS = { mem = 1, gmem = 1, spl0 = 1, spl1 = 1, spl2 = 1,
+  spl3 = 1, spl4 = 1, spl5 = 1, spl6 = 1, spl7 = 1, this = 1 }
+
+-- Has any token-level base assignment to id (`id =`, `id += ...`, etc.)?
+-- An assignment to a slot (`id[expr] =`) does NOT count.
+local function id_has_base_assignment(tokens, id_text)
+  for i = 1, #tokens do
+    local t = tokens[i]
+    if t.type == "id" and t.text == id_text then
+      local j = skip_ws(tokens, i + 1)
+      if j and tokens[j].type == "other" then
+        local jt = tokens[j].text
+        if jt == "+" or jt == "-" or jt == "*" or jt == "/" then
+          j = skip_ws(tokens, j + 1)
+        end
+        if j and tokens[j].type == "other" and tokens[j].text == "=" then
+          local k = tokens[j + 1]
+          if not (k and k.type == "other" and k.text == "=") then
+            return true
+          end
+        end
+      end
+    end
+  end
+  return false
+end
+
+local function check_memory_init(tokens, header_lines, has_imports, findings)
+  if has_imports then return end
+  local seen = {}
+
+  local function maybe_fire(id_text, line)
+    if MEM_BUILTINS[id_text] then return end
+    if id_text:match("^slider%d+$") then return end
+    if seen[id_text] then return end
+    seen[id_text] = true
+    if not id_has_base_assignment(tokens, id_text) then
+      add(findings, "fatal", "memory_no_init", line,
+          ("Indexed access on `%s[...]` but `%s` is never assigned a base value (no `%s = ...` anywhere). Initialize the buffer base in @init.")
+            :format(id_text, id_text, id_text))
+    end
+  end
+
+  for i = 1, #tokens - 1 do
+    local a = tokens[i]
+    if a.type == "id" and not header_lines[a.line] then
+      if a.text == "mem" or a.text == "gmem" then
+        -- Pattern: `mem [ id` -- the id is the buffer base.
+        local j = skip_ws(tokens, i + 1)
+        if j and tokens[j].type == "other" and tokens[j].text == "[" then
+          local k = skip_ws(tokens, j + 1)
+          if k and tokens[k].type == "id" and not header_lines[tokens[k].line] then
+            maybe_fire(tokens[k].text, tokens[k].line)
+          end
+        end
+      else
+        -- Pattern: `id [ ...` -- direct array indexing.
+        local _, b = next_significant(tokens, i + 1)
+        if b and b.type == "other" and b.text == "["
+           and not header_lines[b.line] then
+          maybe_fire(a.text, a.line)
+        end
+      end
+    end
+  end
+end
+
+-- buffer_overlap: detect pairs of declared buffer regions whose memory
+-- spans overlap. A buffer is recognized when an id has BOTH a literal-int
+-- base assignment AND a matching `<id>_len` (or `_length` / `_size`)
+-- literal assignment, AND is used somewhere as a memory base (`id[...]` or
+-- `mem[id + ...]`). Each overlapping pair fires its own fatal finding so
+-- the model can fix the layout holistically on retry.
+local LENGTH_SUFFIXES = { "_len", "_length", "_size" }
+
+local function check_buffer_overlap(tokens, findings)
+  -- Step 1: collect all `id = <integer literal>` assignments.
+  local assigns = {}
+  for i = 1, #tokens do
+    local t = tokens[i]
+    if t.type == "id" then
+      local j = skip_ws(tokens, i + 1)
+      if j and tokens[j].type == "other" and tokens[j].text == "=" then
+        local nxt = tokens[j + 1]
+        if not (nxt and nxt.type == "other" and nxt.text == "=") then
+          local v = read_signed_num(tokens, j + 1)
+          if v and v == math.floor(v) and v >= 0 then
+            assigns[t.text] = { value = v, line = t.line }
+          end
+        end
+      end
+    end
+  end
+
+  -- Step 2: pair bases with length companions.
+  local candidates = {}
+  for id, info in pairs(assigns) do
+    local is_len = false
+    for _, suf in ipairs(LENGTH_SUFFIXES) do
+      if id:sub(-#suf) == suf then is_len = true; break end
+    end
+    if not is_len then
+      for _, suf in ipairs(LENGTH_SUFFIXES) do
+        local len_info = assigns[id .. suf]
+        if len_info and len_info.value > 0 then
+          candidates[#candidates + 1] = {
+            id = id, base = info.value,
+            length = len_info.value, line = info.line,
+          }
+          break
+        end
+      end
+    end
+  end
+
+  -- Step 3: confirm each candidate is actually used as a memory base.
+  local used_as_base = {}
+  for i = 1, #tokens - 1 do
+    local t = tokens[i]
+    if t.type == "id" then
+      if t.text == "mem" or t.text == "gmem" then
+        local j = skip_ws(tokens, i + 1)
+        if j and tokens[j].type == "other" and tokens[j].text == "[" then
+          local k = skip_ws(tokens, j + 1)
+          if k and tokens[k].type == "id" then
+            used_as_base[tokens[k].text] = true
+          end
+        end
+      else
+        local j = skip_ws(tokens, i + 1)
+        if j and tokens[j].type == "other" and tokens[j].text == "[" then
+          used_as_base[t.text] = true
+        end
+      end
+    end
+  end
+
+  local buffers = {}
+  for _, c in ipairs(candidates) do
+    if used_as_base[c.id] then buffers[#buffers + 1] = c end
+  end
+
+  -- Step 4: pairwise overlap check. Each overlap fires a separate finding.
+  for i = 1, #buffers do
+    for j = i + 1, #buffers do
+      local b1, b2 = buffers[i], buffers[j]
+      local lo1, hi1 = b1.base, b1.base + b1.length - 1
+      local lo2, hi2 = b2.base, b2.base + b2.length - 1
+      if lo1 <= hi2 and lo2 <= hi1 then
+        local first, second = b1, b2
+        if first.base > second.base then first, second = second, first end
+        local overlap = math.min(hi1, hi2) - math.max(lo1, lo2) + 1
+        add(findings, "fatal", "buffer_overlap",
+            math.max(b1.line, b2.line),
+            ("Buffer `%s` (base=%d, len=%d -> owns %d..%d) overlaps buffer `%s` (base=%d, len=%d -> owns %d..%d) by %d samples. Each filter must own a non-overlapping memory region.")
+              :format(
+                first.id, first.base, first.length,
+                first.base, first.base + first.length - 1,
+                second.id, second.base, second.length,
+                second.base, second.base + second.length - 1,
+                overlap))
+      end
+    end
+  end
+end
+
+local function find_hard_clip_clamps(tokens)
+  local out = {}
+  for i = 1, #tokens do
+    local t = tokens[i]
+    if t.type == "id" and t.text == "min" then
+      local j = skip_ws(tokens, i + 1)
+      if j and tokens[j].type == "other" and tokens[j].text == "(" then
+        local k = skip_ws(tokens, j + 1)
+        if k and tokens[k].type == "id" and tokens[k].text == "max" then
+          local m = skip_ws(tokens, k + 1)
+          if m and tokens[m].type == "other" and tokens[m].text == "(" then
+            local depth = 1
+            local expr_start, expr_end = m + 1, nil
+            local q = m + 1
+            while tokens[q] do
+              local x = tokens[q]
+              if x.type == "other" then
+                if x.text == "(" then depth = depth + 1
+                elseif x.text == ")" then depth = depth - 1; if depth == 0 then break end
+                elseif x.text == "," and depth == 1 then expr_end = q - 1; break end
+              end
+              q = q + 1
+            end
+            if expr_end then
+              local lo, lo_after = read_signed_num(tokens, q + 1)
+              if lo then
+                local close_max = skip_ws(tokens, lo_after)
+                if close_max and tokens[close_max].type == "other"
+                   and tokens[close_max].text == ")" then
+                  local comma2 = skip_ws(tokens, close_max + 1)
+                  if comma2 and tokens[comma2].type == "other"
+                     and tokens[comma2].text == "," then
+                    local hi, _ = read_signed_num(tokens, comma2 + 1)
+                    if hi then
+                      local pieces = {}
+                      for r = expr_start, expr_end do
+                        if tokens[r].type ~= "ws" and tokens[r].type ~= "com" then
+                          pieces[#pieces + 1] = tokens[r].text
+                        end
+                      end
+                      out[#out + 1] = {
+                        line = t.line,
+                        threshold = math.max(math.abs(lo), math.abs(hi)),
+                        expr_text = table.concat(pieces, " "),
+                      }
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+  return out
+end
+
+local function expr_touches_audio(expr_text)
+  return expr_text:match("%f[%w]spl%d+%f[^%w]") ~= nil
+end
+
+local CLIP_INTENT = { "clip", "limit", "limiter", "brick", "wall", "fuzz",
+  "crush", "distort", "saturate", "drive", "hard" }
+
+local function user_requested_clip(user_text)
+  if not user_text or user_text == "" then return false end
+  local low = user_text:lower()
+  for _, w in ipairs(CLIP_INTENT) do
+    if low:find(w, 1, true) then return true end
+  end
+  return false
+end
+
+local function check_hard_clip(tokens, user_text, findings)
+  if user_requested_clip(user_text) then return end
+  for _, c in ipairs(find_hard_clip_clamps(tokens)) do
+    if c.threshold <= 1.5 and expr_touches_audio(c.expr_text) then
+      add(findings, "fatal", "hard_clip_unrequested", c.line,
+          ("Hard-clip pattern min(max(audio, -%g), %g) on a sample-touching expression without explicit user request for clip/limit/distort. Use soft saturation `x/(1+abs(x))` instead (tanh is NOT a JSFX built-in -- define it inline if needed).")
+            :format(math.abs(c.threshold), c.threshold))
+      return
+    end
+  end
+end
+
+-- parallel_comb_doubled: in @sample, multiple buffer writes share the same
+-- feedback-style RHS expression. Pattern signature: 2+ writes of the form
+-- `bufN[idx] = <RHS> ;` where the RHS is textually identical AND contains
+-- both a `+` operator (additive feedback structure: `input + feedback_term`)
+-- and a `<term> * <id>` subsequence (the feedback-coefficient multiplication).
+--
+-- Why this catches the runaway-feedback pattern: a Schroeder-style comb bank
+-- requires each comb's write to feed back from its OWN read (cN[wN] =
+-- input + fN * fb). When the model instead computes one shared feedback
+-- signal and writes it into N parallel combs, all N buffers hold identical
+-- content; their summed reads form a feedback path with loop gain N*fb,
+-- well above unity even when fb=0.85. From any seed the signal grows
+-- exponentially until the soft-saturator (if any) clamps -- the user hears
+-- silence -> ramp -> pinned at full scale, often loud enough to damage
+-- speakers/ears.
+--
+-- The `+` AND `*<id>` requirement filters out benign shared-write patterns
+-- (`bufL[wL] = mono; bufR[wR] = mono;`) and pure gain applications
+-- (`bufL[wL] = spl0 * gain;`). Calibrated against C:\REAPER\Effects: zero
+-- false positives on stock JSFX; fires only on ReaAssist-generated reverbs
+-- that produced the exact runaway-feedback bug.
+local function check_parallel_comb_doubled(tokens, header_lines, has_imports, findings)
+  if has_imports then return end
+
+  -- Find @sample section bounds. JSFX_KEYWORDS doesn't mark @sections as kw,
+  -- so the production tokenizer assigns them type "kw" with text "@sample"
+  -- (see Code.tokenize_jsfx; @-prefixed sections get the kw type explicitly).
+  local sample_start, sample_end
+  for i = 1, #tokens do
+    local t = tokens[i]
+    if t.type == "kw" and t.text:sub(1, 1) == "@" then
+      if t.text == "@sample" and not sample_start then
+        sample_start = i + 1
+      elseif sample_start and t.text ~= "@sample" then
+        sample_end = i - 1
+        break
+      end
+    end
+  end
+  if not sample_start then return end
+  if not sample_end then sample_end = #tokens end
+
+  -- Inner helper: walk RHS [rhs_start, rhs_end_excl) and return
+  --   pieces            -- joined text, used as fingerprint
+  --   has_plus          -- top-level `+` operator seen
+  --   has_mult_by_id    -- explicit `<term> * <id>` in this RHS
+  --   ref_ids           -- set of bare ids referenced in this RHS
+  local function scan_rhs(rhs_start, rhs_end_excl)
+    local pieces, has_plus, has_mult_by_id, ref_ids = {}, false, false, {}
+    local prev_was_star, depth3 = false, 0
+    for r = rhs_start, rhs_end_excl - 1 do
+      local tr = tokens[r]
+      if tr.type ~= "ws" and tr.type ~= "com" then
+        pieces[#pieces + 1] = tr.text
+        if tr.type == "other" then
+          if tr.text == "(" or tr.text == "[" then depth3 = depth3 + 1
+          elseif tr.text == ")" or tr.text == "]" then depth3 = depth3 - 1 end
+          if tr.text == "+" and depth3 == 0 then has_plus = true end
+        end
+        if prev_was_star and tr.type == "id" then has_mult_by_id = true end
+        if tr.type == "id" then ref_ids[tr.text] = true end
+        prev_was_star = (tr.type == "other" and tr.text == "*")
+      end
+    end
+    return table.concat(pieces, " "), has_plus, has_mult_by_id, ref_ids
+  end
+
+  -- Pass 1: collect feedback-flavored temp identifiers. The model can evade
+  -- a "RHS contains <term> * <id>" check by hoisting the multiplication into
+  -- a temp earlier in @sample (Opus 4.7 retry pattern: `combfb_L = fbL *
+  -- fb_smooth; buf_cL0[wL0] = inL + combfb_L; buf_cL1[wL1] = inL + combfb_L;
+  -- ...`). We track `id = <expr containing <id>*<id>> ;` assignments and
+  -- treat any later RHS that references one of those temps as if it had a
+  -- direct `* <id>`.
+  local feedback_temps = {}
+  do
+    local i2 = sample_start
+    while i2 <= sample_end do
+      local t = tokens[i2]
+      if t.type == "id" and not header_lines[t.line] then
+        local j = skip_ws(tokens, i2 + 1)
+        -- Look for `id = ...;` (NOT `id [ ... ] = ...;` which is a buffer
+        -- write handled in pass 2, NOT `==` which is comparison).
+        if j and tokens[j].type == "other" and tokens[j].text == "="
+           and not (tokens[j+1] and tokens[j+1].type == "other"
+                    and tokens[j+1].text == "=") then
+          local rhs_start = j + 1
+          local depth_p1, m = 0, rhs_start
+          while m <= sample_end do
+            local tm = tokens[m]
+            if tm.type == "other" then
+              if tm.text == "(" or tm.text == "[" then depth_p1 = depth_p1 + 1
+              elseif tm.text == ")" or tm.text == "]" then depth_p1 = depth_p1 - 1
+              elseif tm.text == ";" and depth_p1 == 0 then break end
+            end
+            m = m + 1
+          end
+          if m <= sample_end then
+            local _, _, has_mult = scan_rhs(rhs_start, m)
+            if has_mult then feedback_temps[t.text] = true end
+            i2 = m
+          end
+        end
+      end
+      i2 = i2 + 1
+    end
+  end
+
+  -- Pass 2: walk @sample, collect buffer-write signatures.
+  local writes = {}
+  local i = sample_start
+  while i <= sample_end do
+    local t = tokens[i]
+    if t.type == "id" and not header_lines[t.line] then
+      local j = skip_ws(tokens, i + 1)
+      if j and tokens[j].type == "other" and tokens[j].text == "[" then
+        local idx_start = j + 1
+        local depth = 1
+        local k = j + 1
+        while k <= sample_end and depth > 0 do
+          local tk = tokens[k]
+          if tk.type == "other" then
+            if tk.text == "[" then depth = depth + 1
+            elseif tk.text == "]" then depth = depth - 1 end
+          end
+          k = k + 1
+        end
+        if depth == 0 then
+          -- Capture the index expression text so two writes to the SAME
+          -- buffer at different offsets count as distinct LHS slots
+          -- (Gemini's flat-buffer-with-tap-offsets evasion).
+          local idx_pieces = {}
+          for r = idx_start, k - 2 do
+            local tr = tokens[r]
+            if tr.type ~= "ws" and tr.type ~= "com" then
+              idx_pieces[#idx_pieces + 1] = tr.text
+            end
+          end
+          local lhs_idx = table.concat(idx_pieces, " ")
+          local eq = skip_ws(tokens, k)
+          if eq and tokens[eq].type == "other" and tokens[eq].text == "=" then
+            local nxt = tokens[eq + 1]
+            if not (nxt and nxt.type == "other" and nxt.text == "=") then
+              local rhs_start = eq + 1
+              local depth2 = 0
+              local m = rhs_start
+              while m <= sample_end do
+                local tm = tokens[m]
+                if tm.type == "other" then
+                  if tm.text == "(" or tm.text == "[" then depth2 = depth2 + 1
+                  elseif tm.text == ")" or tm.text == "]" then depth2 = depth2 - 1
+                  elseif tm.text == ";" and depth2 == 0 then break end
+                end
+                m = m + 1
+              end
+              if m <= sample_end then
+                local fp, has_plus, has_mult_by_id, ref_ids =
+                  scan_rhs(rhs_start, m)
+                local has_mult_via_temp = false
+                for id_name in pairs(ref_ids) do
+                  if feedback_temps[id_name] then
+                    has_mult_via_temp = true
+                    break
+                  end
+                end
+                writes[#writes + 1] = {
+                  lhs_buf            = t.text,
+                  lhs_idx            = lhs_idx,
+                  fingerprint        = fp,
+                  line               = t.line,
+                  has_plus           = has_plus,
+                  has_mult_by_id     = has_mult_by_id,
+                  has_mult_via_temp  = has_mult_via_temp,
+                }
+                i = m
+              end
+            end
+          end
+        end
+      end
+    end
+    i = i + 1
+  end
+
+  -- Group qualifying writes by RHS fingerprint; fire when 2+ distinct
+  -- (buffer, index) write slots share the same feedback expression. The
+  -- (buffer, index) tuple catches both topologies that produce identical
+  -- content in N parallel taps:
+  --   - N distinct buffers, same RHS  (classic Schroeder error)
+  --   - 1 buffer, N distinct offsets, same RHS  (flat-buffer/tap-offset
+  --     workaround; same loop-gain explosion since each region gets the
+  --     same input-plus-shared-feedback every sample)
+  local groups = {}
+  for _, w in ipairs(writes) do
+    if w.has_plus and (w.has_mult_by_id or w.has_mult_via_temp) then
+      local g = groups[w.fingerprint]
+      if not g then g = { members = {} }; groups[w.fingerprint] = g end
+      g.members[#g.members + 1] = w
+    end
+  end
+  local reported = {}
+  for fp, g in pairs(groups) do
+    local distinct = {}
+    local distinct_bufs = {}
+    for _, mem in ipairs(g.members) do
+      distinct[mem.lhs_buf .. "[" .. mem.lhs_idx .. "]"] = true
+      distinct_bufs[mem.lhs_buf] = true
+    end
+    local slots = {}
+    for n in pairs(distinct) do slots[#slots + 1] = n end
+    local bufs = {}
+    for n in pairs(distinct_bufs) do bufs[#bufs + 1] = n end
+    if #slots >= 2 and not reported[fp] then
+      reported[fp] = true
+      table.sort(slots)
+      table.sort(bufs)
+      local first = g.members[1]
+      -- Tailor the message body to which evasion path was hit so the retry
+      -- hint sent back to the model is specific (different buffers vs same
+      -- buffer at different offsets).
+      local target_phrase
+      if #bufs >= 2 then
+        target_phrase = ("%d different buffers (%s)")
+          :format(#bufs, table.concat(bufs, ", "))
+      else
+        target_phrase = ("the same buffer `%s` at %d different offsets")
+          :format(bufs[1], #slots)
+      end
+      add(findings, "fatal", "parallel_comb_doubled", first.line,
+          ("Same feedback expression `%s` written to %s inside @sample. Each parallel comb must take its feedback from its OWN read (`cN[wN] = input + fN * fb`); writing one shared feedback signal to N parallel slots makes all N hold identical content, and the summed read path then has loop gain N*fb (well above unity for any N>=2 with fb=0.85), producing exponential runaway feedback that can damage speakers.")
+            :format(fp, target_phrase))
+    end
+  end
+end
+
+-- unknown_function: flag function calls whose name is neither in the EEL2/
+-- JSFX built-in whitelist nor user-defined in this file. Severity is `warn`
+-- (advisory only -- not gated for retry) since the whitelist may need
+-- expansion as new EEL2 functions are added by Cockos.
+local KNOWN_FUNCTIONS = {
+  -- Math
+  ["sin"]=1, ["cos"]=1, ["tan"]=1, ["asin"]=1, ["acos"]=1,
+  ["atan"]=1, ["atan2"]=1, ["sinh"]=1, ["cosh"]=1,
+  -- NOTE: `tanh` is NOT a JSFX/EEL2 built-in. REAPER's compiler reports
+  -- `'tanh' undefined`. Stock JSFX (Tukan, cookdsp) defines tanh as a
+  -- user function. Do NOT add tanh here unless Cockos adds it natively.
+  ["sqrt"]=1, ["sqr"]=1, ["pow"]=1, ["exp"]=1,
+  ["log"]=1, ["log10"]=1, ["log2"]=1,
+  ["abs"]=1, ["floor"]=1, ["ceil"]=1, ["min"]=1, ["max"]=1,
+  ["sign"]=1, ["mod"]=1, ["invsqrt"]=1, ["rand"]=1, ["sleep"]=1,
+  -- Bit (functional form)
+  ["xor"]=1, ["shl"]=1, ["shr"]=1, ["bitor"]=1, ["bitand"]=1,
+  -- Memory
+  ["memcpy"]=1, ["memset"]=1, ["__memtop"]=1, ["freembuf"]=1,
+  ["mem_set_values"]=1, ["mem_get_values"]=1, ["mem_insert_shuffle"]=1,
+  -- Stack
+  ["stack_push"]=1, ["stack_pop"]=1, ["stack_peek"]=1, ["stack_exch"]=1,
+  -- String
+  ["strlen"]=1, ["strcpy"]=1, ["strcmp"]=1, ["stricmp"]=1,
+  ["strncmp"]=1, ["strnicmp"]=1, ["strncpy"]=1, ["strcat"]=1, ["strncat"]=1,
+  ["strcpy_from"]=1, ["strcpy_substr"]=1, ["strcpy_fromslider"]=1,
+  ["str_getchar"]=1, ["str_setchar"]=1, ["str_setlen"]=1,
+  ["str_insert"]=1, ["str_delete_sub"]=1,
+  ["match"]=1, ["matchi"]=1, ["sprintf"]=1, ["printf"]=1,
+  ["atof"]=1, ["atoi"]=1,
+  -- File
+  ["file_open"]=1, ["file_close"]=1, ["file_avail"]=1, ["file_var"]=1,
+  ["file_mem"]=1, ["file_riff"]=1, ["file_string"]=1, ["file_text"]=1,
+  ["file_rewind"]=1,
+  -- FFT / MDCT
+  ["fft"]=1, ["ifft"]=1, ["fft_real"]=1, ["ifft_real"]=1,
+  ["fft_permute"]=1, ["fft_ipermute"]=1, ["convolve_c"]=1,
+  ["mdct"]=1, ["imdct"]=1, ["mdct_real"]=1, ["imdct_real"]=1,
+  -- MIDI
+  ["midisend"]=1, ["midirecv"]=1, ["midisend_buf"]=1, ["midirecv_buf"]=1,
+  ["midisyx"]=1, ["midisend_str"]=1, ["midirecv_str"]=1,
+  -- JSFX-specific
+  ["slider"]=1, ["slider_automate"]=1, ["slider_next_chg"]=1,
+  ["sliderchange"]=1, ["slider_show"]=1, ["spl"]=1,
+  ["get_pin_mapping"]=1, ["set_pin_mapping"]=1,
+  ["get_pinmapper_flags"]=1, ["set_pinmapper_flags"]=1,
+  ["get_host_numchan"]=1, ["set_host_numchan"]=1,
+  ["export_buffer_to_project"]=1,
+  -- Atomics (newer EEL2)
+  ["atomic_set"]=1, ["atomic_add"]=1, ["atomic_exch"]=1,
+  ["atomic_or"]=1, ["atomic_and"]=1, ["atomic_xor"]=1,
+  ["atomic_setifequal"]=1, ["atomic_get"]=1,
+  -- GFX
+  ["gfx_setpixel"]=1, ["gfx_getpixel"]=1, ["gfx_set"]=1, ["gfx_setcursor"]=1,
+  ["gfx_setfont"]=1, ["gfx_getfont"]=1,
+  ["gfx_line"]=1, ["gfx_lineto"]=1, ["gfx_rect"]=1, ["gfx_rectto"]=1,
+  ["gfx_circle"]=1, ["gfx_arc"]=1, ["gfx_triangle"]=1,
+  ["gfx_roundrect"]=1, ["gfx_gradrect"]=1, ["gfx_muladdrect"]=1,
+  ["gfx_deltablit"]=1, ["gfx_blit"]=1, ["gfx_blitext"]=1,
+  ["gfx_blit_ext"]=1, ["gfx_blit2"]=1, ["gfx_blitext2"]=1,
+  ["gfx_loadimg"]=1, ["gfx_setimgdim"]=1, ["gfx_getimgdim"]=1,
+  ["gfx_imgresize"]=1,
+  ["gfx_drawchar"]=1, ["gfx_drawnumber"]=1, ["gfx_drawstr"]=1,
+  ["gfx_measurestr"]=1, ["gfx_printf"]=1, ["gfx_setdest"]=1, ["gfx_clear"]=1,
+  ["gfx_showmenu"]=1, ["gfx_getchar"]=1, ["gfx_getdropfile"]=1,
+  ["gfx_blurto"]=1, ["gfx_getsyscol"]=1,
+  -- EEL2 control flow / structural (callable-form: `loop(N, ...)`)
+  ["loop"]=1, ["while"]=1, ["function"]=1, ["if"]=1,
+  ["local"]=1, ["global"]=1, ["globals"]=1, ["instance"]=1, ["this"]=1,
+  -- Time / misc
+  ["time_precise"]=1, ["time"]=1,
+  ["__denormal_likely_zero"]=1,
+}
+
+-- Built-in EEL2/JSFX functions with a strictly-fixed argument count. An
+-- arity mismatch is a compile-time error in REAPER ("'memset' needs 3 prms").
+-- Conservative list -- only functions where the signature is unambiguous in
+-- the EEL2 / JSFX docs. Variadic builtins (mem_set_values, gfx_*, midisend
+-- with optional ext bytes, etc.), default-arg builtins (rand which is 0-or-1
+-- arg), and anything I'm not 100% sure about are intentionally absent --
+-- false-fire on a legitimate call costs more than missing one or two
+-- additional bug classes.
+local FIXED_ARITY = {
+  -- Memory ops: most-frequently-misused class (LLMs often forget the
+  -- `value` arg on memset, the `count` arg on memcpy).
+  memset = 3,    -- memset(dest, value, count)
+  memcpy = 3,    -- memcpy(dest, src,   count)
+  -- Math two-arg
+  pow   = 2,     -- pow(base, exp)
+  atan2 = 2,     -- atan2(y, x)
+  -- Slider control
+  sliderchange = 1,  -- sliderchange(slider_idx)
+  -- Memory single-arg
+  freembuf = 1,  -- freembuf(start_idx)
+  -- Misc
+  sleep = 1,     -- sleep(ms)
+}
+
+-- Returns the arg count of a function call starting at the `(` token at
+-- index `paren_open`. Counts top-level commas; returns the close-paren
+-- index too (or nil if unbalanced).
+local function count_call_args(tokens, paren_open, sample_end)
+  local depth, arg_count, has_content = 1, 0, false
+  local k = paren_open + 1
+  local end_idx = sample_end or #tokens
+  while k <= end_idx and depth > 0 do
+    local tk = tokens[k]
+    if tk.type == "other" then
+      if tk.text == "(" or tk.text == "[" then depth = depth + 1
+      elseif tk.text == ")" or tk.text == "]" then depth = depth - 1
+      elseif tk.text == "," and depth == 1 then arg_count = arg_count + 1 end
+    end
+    if depth >= 1 and tk.type ~= "ws" and tk.type ~= "com" then
+      has_content = true
+    end
+    if depth == 0 then return arg_count + (has_content and 1 or 0), k end
+    k = k + 1
+  end
+  return nil, nil  -- unbalanced
+end
+
+local function check_arg_count(tokens, has_imports, findings)
+  if has_imports then return end
+
+  -- Build set of user-defined function names so we don't false-fire on
+  -- a JSFX that defined its own `function memset(...)` etc. (rare, but
+  -- legal -- the user-defined function shadows the builtin).
+  local user_defined = {}
+  for i = 1, #tokens - 1 do
+    local t = tokens[i]
+    if (t.type == "id" or t.type == "kw") and t.text == "function" then
+      local j = skip_ws(tokens, i + 1)
+      if j and tokens[j].type == "id" then
+        user_defined[tokens[j].text] = true
+      end
+    end
+  end
+
+  for i = 1, #tokens do
+    local t = tokens[i]
+    if t.type == "id" and FIXED_ARITY[t.text] and not user_defined[t.text] then
+      local j = skip_ws(tokens, i + 1)
+      if j and tokens[j].type == "other" and tokens[j].text == "(" then
+        -- Skip method-call form (preceded by `.`): `obj.memset(...)` is
+        -- a different function on a struct, not the global builtin.
+        local p = i - 1
+        while p >= 1 and (tokens[p].type == "ws" or tokens[p].type == "com") do
+          p = p - 1
+        end
+        local is_method = p >= 1 and tokens[p].type == "other"
+                       and tokens[p].text == "."
+        if not is_method then
+          local got = count_call_args(tokens, j)
+          local expected = FIXED_ARITY[t.text]
+          if got and got ~= expected then
+            add(findings, "fatal", "arg_count_mismatch", t.line,
+              ("`%s(...)` requires %d argument(s); call site has %d. EEL2 will reject this with a `'%s' needs %d prms` compile error."):format(
+                t.text, expected, got, t.text, expected))
+          end
+        end
+      end
+    end
+  end
+end
+
+local function check_unknown_function(tokens, header_lines, has_imports, findings)
+  if has_imports then return end
+
+  -- Step 1: collect user-defined function names from `function NAME(...)`.
+  local user_defined = {}
+  for i = 1, #tokens - 1 do
+    local t = tokens[i]
+    if (t.type == "id" or t.type == "kw") and t.text == "function" then
+      local j = skip_ws(tokens, i + 1)
+      if j and tokens[j].type == "id" then
+        user_defined[tokens[j].text] = true
+      end
+    end
+  end
+
+  -- Step 2: scan for `id ( ` patterns. Skip header lines (slider display
+  -- names look like calls -- `Mix (%)`), method calls (preceded by `.`),
+  -- slider variables, and `@`-prefixed section markers (those are kw-typed
+  -- by the tokenizer and `skip_ws` after them will cross the newline and
+  -- land on the first `(` of the section body, falsely flagging
+  -- `@sample(...)` / `@block(...)` etc. as unknown function calls).
+  local seen = {}
+  for i = 1, #tokens do
+    local t = tokens[i]
+    if (t.type == "id" or t.type == "kw") and not seen[t.text]
+       and not KNOWN_FUNCTIONS[t.text] and not user_defined[t.text]
+       and not t.text:match("^slider%d+$")
+       and not t.text:match("^@")
+       and not header_lines[t.line] then
+      local j = skip_ws(tokens, i + 1)
+      if j and tokens[j].type == "other" and tokens[j].text == "(" then
+        local p = i - 1
+        while p >= 1 and (tokens[p].type == "ws" or tokens[p].type == "com") do
+          p = p - 1
+        end
+        local is_method = p >= 1 and tokens[p].type == "other"
+                       and tokens[p].text == "."
+        if not is_method then
+          seen[t.text] = true
+          add(findings, "warn", "unknown_function", t.line,
+              ("Function `%s(...)` is not a documented EEL2/JSFX built-in and is not defined in this file. Verify it exists in your REAPER version, or define the function explicitly with `function %s(...) ( ... );`.")
+                :format(t.text, t.text))
+        end
+      end
+    end
+  end
+end
+
+function Code.validate_jsfx(src, user_text)
+  if not src or src == "" then return {} end
+  local findings = {}
+  local tokens = Code.tokenize_jsfx(src)
+  local sliders = parse_sliders(src)
+  local header_lines = build_header_lines(src)
+  local has_imports = src:match("\n%s*import%s+%S") ~= nil
+                   or src:match("^%s*import%s+%S") ~= nil
+  check_desc(tokens, findings)
+  check_reaper_api(tokens, findings)
+  check_banned_syntax(tokens, header_lines, findings)
+  check_feedback_clamp(src, sliders, findings)
+  check_memory_init(tokens, header_lines, has_imports, findings)
+  check_buffer_overlap(tokens, findings)
+  check_parallel_comb_doubled(tokens, header_lines, has_imports, findings)
+  check_hard_clip(tokens, user_text or "", findings)
+  check_arg_count(tokens, has_imports, findings)
+  check_unknown_function(tokens, header_lines, has_imports, findings)
+  return findings
+end
+
+-- True if any finding has fatal severity (would gate auto-run).
+function Code.jsfx_findings_have_gate(findings)
+  if not findings then return false end
+  for _, f in ipairs(findings) do
+    if f.severity == "fatal" then return true end
+  end
+  return false
+end
+
+end  -- close JSFX validator scope
 
 -- =============================================================================
 -- Net.process_response_buckets: handle <context_needed> on-demand buckets
@@ -14840,6 +18390,99 @@ function Net.process_response_buckets(text)
     end
   end
 
+  -- Pre-pass: drop tokens whose data is already in pinned context. The
+  -- model occasionally re-requests data already listed in the PINNED
+  -- REFERENCES manifest (observed: a turn 2 tag that named session +
+  -- 3 already-pinned bundles alongside a legitimate resolve, costing a
+  -- wasted inner round-trip). Per-bucket gates inside the main loop
+  -- already drop most of these silently, but coverage is uneven (some
+  -- gates set wants_preempt_hint, others fall through; `session` checks
+  -- session_already_sent but not whether the snapshot is on this very
+  -- turn). The pre-pass unifies the de-dup, logs the dropped list so
+  -- the redundancy is visible at a glance, and sets the reuse hint so
+  -- an all-redundant tag still fires a "use the data you have"
+  -- follow-up instead of leaking the model's tag-only response.
+  --
+  -- Scope: only static buckets that map 1:1 to pinned slots (sticky
+  -- bundles, static refs, or the snapshot attached to this turn).
+  -- Dynamic buckets (fx_params, fx_list, fx_chains, fx_inspect,
+  -- track_flags, resolve:*) are NOT pre-deduped -- their data is live
+  -- and the model is allowed to re-emit them to get a fresh read.
+  local dropped_pinned = {}
+  do
+    local function token_already_pinned(kw, payload)
+      if kw == "session" then
+        -- Snapshot is attached to the current user message already
+        -- (S.pending_snapshot is set whenever build_snapshot ran for
+        -- this turn). A re-fetch would just rebuild the same snapshot
+        -- the model is about to read.
+        return S.pending_snapshot ~= nil
+      elseif kw == "docs" and payload == "" then
+        return S.api_ref_message ~= nil or S.docs_already_sent
+      elseif kw == "docs_extended" then
+        return S.docs_extended_already_sent == true
+      elseif kw == "midi" then
+        return S.midi_ref_message ~= nil or S.midi_already_sent
+      elseif kw == "theme" then
+        return S.theme_ref_message ~= nil or S.theme_already_sent
+      elseif kw == "prompt_bundle" and payload ~= "" then
+        local pkey = payload:lower()
+        return (S.prompt_bundle_sent and S.prompt_bundle_sent[pkey] == true)
+          or (S.sticky_context and S.sticky_context["prompt_bundle:" .. pkey] ~= nil)
+      elseif kw == "plugin_ref" and payload ~= "" then
+        return (S.plugin_ref_sent and S.plugin_ref_sent[payload] == true)
+          or (S.sticky_context and S.sticky_context["plugin_ref:" .. payload] ~= nil)
+      elseif kw == "preferred_plugins" and payload ~= "" then
+        return (S.pref_plugins_sent and S.pref_plugins_sent[payload] == true)
+          or (S.sticky_context and S.sticky_context["pref:" .. payload] ~= nil)
+      elseif kw == "fx_chains" then
+        return S.fx_chains_already_sent == true
+      elseif kw == "track_flags" then
+        return S.track_flags_already_sent == true
+      elseif kw == "fx_params" and payload == "" then
+        return S.fx_params_already_sent == true
+      elseif kw == "fx_list" and payload == "" then
+        return S.fx_list_already_sent == true
+      elseif kw == "fx_inspect" and payload == "" then
+        return S.fx_inspect_already_sent == true
+      end
+      return false
+    end
+    local kept = {}
+    for _, tok in ipairs(raw_tokens) do
+      local kw, payload = tok:match("^([^:]+):?(.*)$")
+      kw = kw and kw:match("^%s*(.-)%s*$"):lower() or ""
+      payload = payload and payload:match("^%s*(.-)%s*$") or ""
+      if token_already_pinned(kw, payload) then
+        dropped_pinned[#dropped_pinned+1] = tok
+      else
+        kept[#kept+1] = tok
+      end
+    end
+    if #dropped_pinned > 0 then
+      if #kept == 0 then
+        Log.line("CONTEXT_ALREADY_PINNED",
+          "all requested tags already present: "
+          .. tbl_concat(dropped_pinned, ", "))
+      else
+        Log.line("DISPATCH",
+          "dropped already-pinned tokens (" .. #dropped_pinned .. "/"
+          .. (#dropped_pinned + #kept) .. "): "
+          .. tbl_concat(dropped_pinned, ", "))
+      end
+      S._context_reuse_hint = S._context_reuse_hint or {}
+      for _, t in ipairs(dropped_pinned) do
+        S._context_reuse_hint[#S._context_reuse_hint+1] = t
+      end
+      -- All tokens dropped -> no real fetch will fire below. Set the
+      -- preempt-hint sentinel so the if-wants gate at the bottom of the
+      -- function still fires a follow-up turn (carrying the reuse hint)
+      -- instead of falling through to display the tag-only response.
+      if #kept == 0 then wants_preempt_hint = true end
+    end
+    raw_tokens = kept
+  end
+
   local last_scoped = nil  -- tracks which scoped keyword ("fx_params"/"fx_list") was last seen
 
   for tok_idx, tok in ipairs(raw_tokens) do
@@ -14917,9 +18560,24 @@ function Net.process_response_buckets(text)
       end
     elseif kw == "prompt_bundle" then
       last_scoped = "prompt_bundle"
-      if payload ~= "" and not S.prompt_bundle_sent[payload:lower()] then
-        wants_prompt_bundle = true
-        prompt_bundle_names[#prompt_bundle_names+1] = payload:lower()
+      if payload ~= "" then
+        if not S.prompt_bundle_sent[payload:lower()] then
+          wants_prompt_bundle = true
+          prompt_bundle_names[#prompt_bundle_names+1] = payload:lower()
+        else
+          -- Already pinned (typically via JSFX-family co-pin: when
+          -- prompt_bundle:jsfx_pitch was pre-pinned alongside jsfx_pitch,
+          -- the base bundle and the family bundle are both in
+          -- prompt_bundle_sent already). Without this branch the request
+          -- silently drops -- fine for the dedupe but the model is still
+          -- waiting for permission to write code, so the turn stalls. Fire
+          -- a follow-up with the reuse hint so the model proceeds without
+          -- a second round-trip.
+          wants_preempt_hint     = true
+          S._context_reuse_hint  = S._context_reuse_hint or {}
+          S._context_reuse_hint[#S._context_reuse_hint+1] =
+            "prompt_bundle:" .. payload:lower()
+        end
       end
     elseif kw == "resolve" then
       -- resolve:<type> -- chokepoint for "give me a plugin of TYPE without
@@ -14959,7 +18617,8 @@ function Net.process_response_buckets(text)
           Log.line("RESOLVE", rtype
             .. " -> already covered by sticky (dedupe; no fetch)")
           wants_preempt_hint = true
-          S._context_reuse_hint = true
+          S._context_reuse_hint = S._context_reuse_hint or {}
+          S._context_reuse_hint[#S._context_reuse_hint+1] = "resolve:" .. rtype
         else
         local pref = FXCache.get_preferred_types()
         local pref_ident = pref and pref[rtype]
@@ -14982,8 +18641,10 @@ function Net.process_response_buckets(text)
           -- The curated ref carries verified indices, scale formulas, and
           -- per-recipe normalized values that the live param scan lacks.
           -- Mirrors the preempt path's curated handling so both routes
-          -- deliver the same content for the same pref identifier.
-          local curated = CURATED_IDENT[pref_ident]
+          -- deliver the same content for the same pref identifier. Uses
+          -- the prefix/vendor-tolerant lookup (preferred_types may store
+          -- canonicalized "VST3: Pro-Q 4" instead of bare "Pro-Q 4").
+          local curated = _curated_for_ident(pref_ident)
           if curated then
             if not S.plugin_ref_sent[curated] then
               wants_plugin_ref = true
@@ -15089,6 +18750,14 @@ function Net.process_response_buckets(text)
         if not S.prompt_bundle_sent[nlo] then
           wants_prompt_bundle = true
           prompt_bundle_names[#prompt_bundle_names+1] = nlo
+        else
+          -- Continuation-token form ("prompt_bundle:jsfx_pitch, jsfx") --
+          -- same dedupe-with-hint behaviour as the explicit colon form
+          -- above.
+          wants_preempt_hint     = true
+          S._context_reuse_hint  = S._context_reuse_hint or {}
+          S._context_reuse_hint[#S._context_reuse_hint+1] =
+            "prompt_bundle:" .. nlo
         end
       elseif last_scoped == "docs" then
         -- Continuation of a "docs:items, envelopes" tag. Each subsequent
@@ -15125,7 +18794,13 @@ function Net.process_response_buckets(text)
     if wants_session then
       S.session_already_sent = true
       S.pending_project  = _resolve_pending_project()
-      S.pending_snapshot = CTX.build_snapshot(S.pending_project)
+      -- Carry JSFX intent across the rebuild so the trimmed track-listing
+      -- (selected only) used on the original turn stays trimmed on this
+      -- retry/follow-up. Otherwise the rebuild would inject the full
+      -- ~80-track listing on top of the cached prefix, busting the cache
+      -- rung and re-sending tracks the JSFX writer never reads.
+      S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+        S.pending_jsfx_intent and { minimal_tracks = true } or nil)
     end
 
     -- Build the fx_params block for the requested plugins.
@@ -15383,7 +19058,12 @@ function Net.process_response_buckets(text)
         if pb_content then
           S.prompt_bundle_sent[nm] = true
           local pb_key = "prompt_bundle:" .. nm
-          Net.sticky_set(pb_key, pb_content)
+          -- Tag as "context_needed": the model asked for this bundle
+          -- mid-flow, so it's a reactive pin. Affects plugin_helpers
+          -- routing in Net.sticky_parts -- helpers pulled this way
+          -- stays in the growing rung instead of invalidating the
+          -- larger stable bundle on a turn we didn't plan to.
+          Net.sticky_set(pb_key, pb_content, "context_needed")
           fetched_to_sticky[#fetched_to_sticky+1] = pb_key
           ok = ok + 1
         else
@@ -15491,6 +19171,27 @@ function Net.process_response_buckets(text)
     -- cleanup) runs inside finalize_context after a one-frame defer.
     if wants_fx_inspect then
       S.fx_inspect_already_sent = true
+      -- Multi-plugin fx_inspect is NOT supported. fx_inspect_load picks the
+      -- single best_id from installed_fx's combined output, silently
+      -- dropping the rest. That bug let the model use one plugin's data
+      -- (e.g. Pro-C 3 Side Chain EQ "Band 1 Slope") for a different plugin
+      -- (e.g. Pro-Q 4's main "Band 1 Slope") with disastrously wrong norms.
+      -- Truncate to the first name, log the drop, and inject a warning into
+      -- history_content so the model re-requests the missing plugins.
+      if #fx_inspect_names > 1 then
+        local dropped = {}
+        for i = 2, #fx_inspect_names do
+          dropped[#dropped+1] = fx_inspect_names[i]
+        end
+        Log.line("FX_INSPECT", str_format(
+          "multi-plugin request: keeping '%s'; dropped %s. "
+          .. "Re-request hint will be injected into the follow-up turn.",
+          fx_inspect_names[1], tbl_concat(dropped, ", ")))
+        while #fx_inspect_names > 1 do
+          table.remove(fx_inspect_names)
+        end
+        S._fx_inspect_dropped = dropped  -- one-shot, consumed below
+      end
       -- fx_inspect IS the "ADD + CONFIGURE with values" signal -- the model
       -- requested it specifically because the user asked to set specific
       -- param values that need runtime probing. Always co-pin plugin_helpers
@@ -15727,15 +19428,21 @@ function Net.process_response_buckets(text)
       -- bytes on every turn. See Net.sticky_text().
       -- Loop-recovery hint: prepended when the previous response from the
       -- model was a duplicate <context_needed> for already-provided data.
-      -- See LOOP DETECTION in process_response_buckets.
-      if S._context_reuse_hint then
+      -- See LOOP DETECTION in process_response_buckets. Carries the actual
+      -- re-requested tags so the message names them rather than relying on
+      -- generic "plugin parameter / preferred plugins" copy that doesn't
+      -- match docs:* / midi / api_ref shapes.
+      local reuse_hint_fired = false
+      if S._context_reuse_hint and #S._context_reuse_hint > 0 then
+        local tags_str = tbl_concat(S._context_reuse_hint, ", ")
         history_content = history_content
-          .. "(NOTE: The reference data you requested is already present "
-          .. "earlier in this conversation (pinned PLUGIN PARAMETER REFERENCE / "
-          .. "PREFERRED PLUGINS blocks above). USE IT NOW to generate the code "
-          .. "-- the identifiers and parameter indices/names you need are above. "
-          .. "Do NOT emit another <context_needed> tag for this data.)\n\n"
+          .. "(NOTE: The reference/context data you requested ("
+          .. tags_str
+          .. ") is already present in PINNED REFERENCES above. "
+          .. "USE IT NOW to generate the code. Do NOT emit another "
+          .. "<context_needed> tag for these tags.)\n\n"
         S._context_reuse_hint = nil  -- one-shot
+        reuse_hint_fired = true
       end
       if S._mixed_output_hint then
         history_content = history_content
@@ -15746,17 +19453,38 @@ function Net.process_response_buckets(text)
           .. "prose before or after. On future turns, emit ONLY the tag.)\n\n"
         S._mixed_output_hint = nil  -- one-shot
       end
+      if S._fx_inspect_dropped then
+        history_content = history_content
+          .. "(NOTE: fx_inspect can only load ONE plugin per call. Loaded data "
+          .. "for the first name above; NOT loaded: "
+          .. tbl_concat(S._fx_inspect_dropped, ", ")
+          .. ". To get parameters for the missing plugin(s), emit a separate "
+          .. "<context_needed>fx_inspect:Name</context_needed> for each one in "
+          .. "your follow-up turn -- or <context_needed>plugin_ref:Name"
+          .. "</context_needed> if it's a curated plugin (Pro-Q 4, Pro-C 3, "
+          .. "Pro-G, Pro-L 2, ReaEQ, ReaComp, etc.). DO NOT infer the missing "
+          .. "plugin's parameters, indices, or enum mappings from the loaded "
+          .. "plugin's data; they are unrelated.)\n\n"
+        S._fx_inspect_dropped = nil  -- one-shot
+      end
       -- Pointer to the pinned sticky slot. Each fetched bucket (plugin_ref /
       -- pref_plugins / fx_inspect / fx_params / docs_extended) lives ONLY
       -- in Net.sticky_text() now -- no inline duplication in this message.
       -- The pointer tells the model its <context_needed> was satisfied and
       -- to read the data above so it doesn't re-emit another context_needed.
       if #fetched_to_sticky > 0 then
-        history_content = history_content
-          .. "(<context_needed> satisfied this turn: "
-          .. tbl_concat(fetched_to_sticky, ", ")
-          .. ". The data is in PINNED REFERENCES above -- use it directly "
-          .. "and do NOT re-request via another <context_needed>.)\n\n"
+        Log.line("DISPATCH",
+          "fetched_to_sticky=[" .. tbl_concat(fetched_to_sticky, ", ") .. "]")
+        -- Suppress when the loop-recovery hint above already fired -- it
+        -- carries stronger imperative wording naming the same tags.
+        if not reuse_hint_fired then
+          history_content = history_content
+            .. "(The data for <context_needed> tag(s) "
+            .. tbl_concat(fetched_to_sticky, ", ")
+            .. " is now present in PINNED REFERENCES above. USE IT NOW to "
+            .. "generate the code. Do NOT emit another <context_needed> tag "
+            .. "for these tags.)\n\n"
+        end
       end
       history_content = history_content .. "USER REQUEST:\n" .. S.pending_orig_prompt
 
@@ -15835,7 +19563,11 @@ function Net.process_response_buckets(text)
       -- stale "at the cursor" / "to the selected item" context.
       if prefs.include_snapshot then
         S.pending_project  = _resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project)
+        -- See JSFX-intent comment on the analogous retry sites above:
+        -- carry pending_jsfx_intent across snapshot rebuilds so the trim
+        -- survives every retry path, not just the JSFX-validator's.
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
       end
       S.status = "waiting"
       Code.safe_write(tmp.out, "")
@@ -15969,7 +19701,10 @@ function Net.process_response_buckets(text)
       S.midi_already_sent            = false
       S.theme_already_sent           = false
       S.fx_inspect_already_sent      = false
-      S._context_reuse_hint = true
+      S._context_reuse_hint = S._context_reuse_hint or {}
+      for _, t in ipairs(raw_tokens) do
+        S._context_reuse_hint[#S._context_reuse_hint+1] = t
+      end
       return Net.process_response_buckets(text)
     else
       Log.line("CONTEXT_LOOP",
@@ -16372,7 +20107,7 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth)
         .. "Wait a moment and try again; this usually clears up quickly." },
     invalid_request_error = { label = "invalid request",
       msg = "This conversation has gotten too long for the model to handle."
-        .. "\n\nTo fix this:\n- Click Clear to start fresh\n"
+        .. "\n\nTo fix this:\n- Click + new chat to start fresh\n"
         .. "- Try a shorter message\n"
         .. "- Turn off \"Always include REAPER API reference\" or Send snapshot to reduce size" },
     not_found_error       = { label = "model not found",
@@ -16483,7 +20218,13 @@ function Net.try_finish_curl()
     return
   end
 
+  -- Phase 1 instrumentation: end of curl_wait, start of response_parse.
+  -- Placed after the early-return paths above (gemini tier test, key
+  -- test) so those don't attribute curl_wait time to a regular turn.
+  Probe.mark_phase_end(S.probe_turn, "curl_wait")
+  Probe.mark_phase_start(S.probe_turn, "response_parse")
   local resp, decode_err = JSON.decode(raw)
+  Probe.mark_phase_end(S.probe_turn, "response_parse")
   if not resp or type(resp) ~= "table" then
     Net._handle_json_decode_error(raw, decode_err)
     return
@@ -16757,6 +20498,39 @@ function Net.try_finish_curl()
     reasoning_only_tokens = tonumber(usage.thoughtsTokenCount) or 0
   end
 
+  -- Phase 1 instrumentation: capture per-request metadata and usage.
+  -- Fires after each successful response extraction by any provider
+  -- branch. Multi-request turns (context-needed re-fires, validator
+  -- retries) accumulate one entry per HTTP round-trip in the turn's
+  -- requests array. Provider-internal early-return retry paths
+  -- (e.g., beta-header rejection -> retry) bypass this site by
+  -- design; step 9 audit covers those paths.
+  do
+    local model_entry = MODELS[S.pending_model_idx or prefs.model_idx]
+                     or MODELS[1]
+    local thinking_lvl
+    if p.thinking_levels and prefs.thinking_idx and prefs.thinking_idx > 0 then
+      local tl = p.thinking_levels[prefs.thinking_idx]
+      if tl then thinking_lvl = tl.id or tl.label end
+    end
+    Probe.add_request(S.probe_turn, {
+      provider       = p.id,
+      model          = model_entry and (model_entry.id or model_entry.label),
+      thinking_level = thinking_lvl,
+    })
+    local total_in     = tonumber(raw_tok_in)    or 0
+    local cache_read   = tonumber(tok_in_read)   or 0
+    local cache_create = tonumber(tok_in_create) or 0
+    local uncached_in  = total_in - cache_read - cache_create
+    if uncached_in < 0 then uncached_in = 0 end
+    Probe.add_request_usage(S.probe_turn, nil, {
+      cache_read   = cache_read,
+      cache_create = cache_create,
+      uncached_in  = uncached_in,
+      output       = tonumber(raw_tok_out) or 0,
+    })
+  end
+
   -- Common post-parse: clean up text.
   if text then
     text = text:gsub("\n\n\n+", "\n\n")
@@ -16803,6 +20577,7 @@ function Net.try_finish_curl()
        and _retry_prov.thinking_levels
        and (S.thinking_override_idx or prefs.thinking_idx) > 0 then
       S.length_retry_used     = true
+      Probe.add_validator_retry(S.probe_turn, "length")
       S.thinking_override_idx = 0  -- "none"
       local detail = ""
       if reasoning_only_tokens and reasoning_only_tokens > 0 then
@@ -16841,7 +20616,11 @@ function Net.try_finish_curl()
       end
       if prefs.include_snapshot then
         S.pending_project  = _resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project)
+        -- See JSFX-intent comment on the analogous retry sites above:
+        -- carry pending_jsfx_intent across snapshot rebuilds so the trim
+        -- survives every retry path, not just the JSFX-validator's.
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
       end
       S.status = "waiting"
       S.request_start_time = nil
@@ -16885,11 +20664,61 @@ function Net.try_finish_curl()
       msg = "The model declined to answer this request."
         .. (refusal_text and ("\n\nDetails: " .. refusal_text) or "")
     else
+      -- Generic empty response with finish_reason=stop -- the provider
+      -- said "done" but produced no visible content. Observed as
+      -- transient flakiness on ChatGPT (completion=3, body empty). Fire
+      -- one hidden auto-retry before surfacing the user-facing error;
+      -- if the retry also comes back empty, fall through to the error
+      -- and the user gets the recovery row. Same scrub-and-rebuild
+      -- pattern as the length-cap retry above.
+      if not S.empty_retry_used then
+        S.empty_retry_used = true
+        Log.line("EMPTY-RETRY",
+          "empty response from provider; retrying once (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous "
+          .. "reply was empty -- finish_reason=stop with no content. "
+          .. "Generate the response now. Respond as if this is your "
+          .. "FIRST reply -- do NOT apologize, do NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history+1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("empty_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + empty_retry") or "empty_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        S.request_start_time = nil
+        Code.safe_write(tmp.out, "")
+        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
+            S.pending_snapshot, S.pending_attachments)) then
+          Log.add_error("Auto-retry after empty response did not go "
+            .. "through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
       label = "error"
       recovery_kind = "token_limit"
       local has_thinking2 = PROVIDERS.active().thinking_levels and prefs.thinking_idx > 0
-      msg = "The model's response was empty after processing. This can happen when "
-        .. "the model uses all its output for internal reasoning.\n"
+      msg = "The model's response was empty after processing, even after a "
+        .. "retry. This can happen when the model uses all its output for "
+        .. "internal reasoning.\n"
         .. (has_thinking2
           and "Try lowering the Thinking level, or rephrase your message to require less reasoning."
           or  "Try rephrasing your message, or switch to a different model.")
@@ -16916,6 +20745,17 @@ function Net.try_finish_curl()
     -- keeping it set in the meantime keeps the in-flight timer logic
     -- consistent with the other early-return paths.
     S.request_start_time = nil
+    -- Pop the orphan user message that fired this empty turn. Without
+    -- this, the user's manual retry (via the recovery row or by
+    -- resending) appends a fresh user entry on top of the orphan and
+    -- the next request's history shows the same user prompt twice
+    -- (observed: msg [8] bare + msg [9] with snapshot). Auto-retry
+    -- paths above (length-cap retry) already do their own pop, so
+    -- this only fires when we're returning to idle without an internal
+    -- retry. Defensive role check so we never pop an assistant entry.
+    if #S.history > 0 and S.history[#S.history].role == "user" then
+      S.history[#S.history] = nil
+    end
     Log.add_error(msg, nil, nil, recovery_kind)
     return
   end
@@ -17003,6 +20843,12 @@ function Net.try_finish_curl()
         local names = S._fx_cache_events[key]
         if names and #names > 0 then
           parts[#parts+1] = labels[key] .. " (" .. tbl_concat(names, ", ") .. ")"
+          -- Phase 1 instrumentation: log the COUNT only, not the
+          -- plugin names. Privacy contract bars surfacing
+          -- plugin/track names through the diagnostics record.
+          for _ = 1, #names do
+            Probe.add_fx_cache(S.probe_turn, key)
+          end
         end
       end
       if #parts > 0 then
@@ -17038,6 +20884,18 @@ function Net.try_finish_curl()
 
   -- Store assistant turn in history.
   S.history[#S.history+1] = { role = "assistant", content = text }
+  -- Capture the row index now so per-turn run metadata writes below
+  -- (run_status, code_hash, truncated, compact_summary) all target the
+  -- same row even if some sub-call appends a defensive history entry
+  -- between here and the end of try_finish_curl. The metadata is read
+  -- by Net.trimmed_history when the compact-history flag is on; turns
+  -- without metadata default to "no_code" / not-eligible-for-compaction.
+  local _asst_hist_idx = #S.history
+  S.history[_asst_hist_idx].run_status = "no_code"
+  -- Snapshot the user prompt now -- the cleanup block at the end of
+  -- this function nils S.pending_orig_prompt before the compact-summary
+  -- builder runs, which would drop the intent: line from every summary.
+  local _compact_user_intent = S.pending_orig_prompt
 
   -- Extract fenced code blocks.
   -- A response may contain both a JSFX block and a Lua block (e.g. "create this
@@ -17088,6 +20946,63 @@ function Net.try_finish_curl()
       Log.line("EXTRACT",
         "```lua block did not parse; dropping from extraction. err="
         .. tostring(parse_err))
+      -- One-shot hidden retry with the parser error fed back in. Without
+      -- this, a model that emits a Lua block with a missing `end` (or
+      -- similar trivial syntax error) produces a "plain text" reply from
+      -- the user's perspective: the fence is dropped, the explanation
+      -- text remains, no Run button, no script ran. Same recovery shape
+      -- as the helper / defer / api validators.
+      if not S.parse_retry_used then
+        S.parse_retry_used = true
+        Probe.add_validator_retry(S.probe_turn, "parse")
+        Log.line("PARSE-RETRY",
+          "regenerating after Lua parse error (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous "
+          .. "reply contained a ```lua code block that failed Lua's "
+          .. "syntax check. Parser error:\n  "
+          .. tostring(parse_err)
+          .. "\n\nMost commonly this is a missing `end` to close a `for`, "
+          .. "`if`, `while`, or `function` block, or an extra `end` that "
+          .. "closes too early. Regenerate the FULL script in ONE complete "
+          .. "```lua ... ``` block, end-balanced. Do NOT split the script "
+          .. "across multiple fences. Do NOT emit <context_needed> -- "
+          .. "all reference data is already pinned. Respond as if this is "
+          .. "your FIRST reply -- do NOT apologize, do NOT mention a "
+          .. "retry.)\n\n"
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history+1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("parse_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + parse_retry") or "parse_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        S.request_start_time = nil
+        Code.safe_write(tmp.out, "")
+        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
+            S.pending_snapshot, S.pending_attachments)) then
+          Log.add_error("Auto-retry after Lua parse error did not go "
+            .. "through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
       lua_code = nil
     end
   end
@@ -17261,7 +21176,11 @@ function Net.try_finish_curl()
       -- assistant reply.
       if prefs.include_snapshot then
         S.pending_project  = _resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project)
+        -- See JSFX-intent comment on the analogous retry sites above:
+        -- carry pending_jsfx_intent across snapshot rebuilds so the trim
+        -- survives every retry path, not just the JSFX-validator's.
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
       end
       S.status = "waiting"
       Code.safe_write(tmp.out, "")
@@ -17276,6 +21195,7 @@ function Net.try_finish_curl()
     -- Docs fetch failed: keep the old block-and-surface behaviour so the
     -- user knows something is wrong and can fix it manually.
     docs_gate_hit = true
+    Probe.add_validator_retry(S.probe_turn, "docs")
     Log.line("DOCS-GATE",
       "reaper.* calls detected but CTX.docs() failed ("
       .. tostring(ref_err) .. "); auto-run blocked, message flagged")
@@ -17321,6 +21241,7 @@ function Net.try_finish_curl()
     if unknown then
       if (S.api_validator_retries or 0) < 1 then
         S.api_validator_retries = (S.api_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "api")
         -- Build per-bad-name suggestion lines for the retry hint.
         local sug_lines = {}
         for _, bad in ipairs(unknown) do
@@ -17373,7 +21294,11 @@ function Net.try_finish_curl()
         end
         if prefs.include_snapshot then
           S.pending_project  = _resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project)
+          -- See JSFX-intent comment on the analogous retry sites above:
+          -- carry pending_jsfx_intent across snapshot rebuilds so the trim
+          -- survives every retry path, not just the JSFX-validator's.
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
         end
         S.status = "waiting"
         Code.safe_write(tmp.out, "")
@@ -17400,6 +21325,324 @@ function Net.try_finish_curl()
     end
   end
 
+  -- ARITY VALIDATOR: After the API validator passes, scan high-confidence
+  -- fixed-arity calls (TrackFX_SetParamNormalized, etc.) for wrong arg
+  -- counts. Catches a class the API validator can't: the NAME is real, but
+  -- the call was emitted with the wrong number of arguments -- often a
+  -- model dropping the param-index and passing a value where pidx belongs,
+  -- which crashes inside reaper.defer with "bad argument #N (number has no
+  -- integer representation)". Same recovery shape as the other validators.
+  local arity_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit then
+    local arity_bad = Code.find_reaper_arity_mismatches(lua_code)
+    if arity_bad and #arity_bad > 0 then
+      if (S.arity_validator_retries or 0) < 1 then
+        S.arity_validator_retries = (S.arity_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "arity")
+        local lines = {}
+        for _, e in ipairs(arity_bad) do
+          lines[#lines+1] = "  - reaper." .. e.name
+            .. " requires " .. e.expected .. " argument(s); call site has "
+            .. e.got .. "."
+        end
+        Log.line("ARITY-VALIDATOR",
+          "fixed-arity reaper.* calls with wrong arg count ("
+          .. #arity_bad .. "): "
+          .. (function()
+              local names = {}
+              for _, e in ipairs(arity_bad) do
+                names[#names+1] = e.name .. "(got " .. e.got
+                  .. "/expected " .. e.expected .. ")"
+              end
+              return tbl_concat(names, ", ")
+            end)()
+          .. "; retrying with hint (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply called "
+          .. "REAPER API function(s) with the WRONG number of arguments. "
+          .. "These would crash at runtime:\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Common cause: dropping the param-index argument from a "
+          .. "Track/TakeFX_SetParamNormalized / GetFormattedParamValue call. "
+          .. "The signature is `reaper.TrackFX_SetParamNormalized(track, "
+          .. "fx_index, param_index, value)` -- 4 args, not 3. Check the "
+          .. "API reference for the correct signature and regenerate the "
+          .. "code. Respond as if this is your FIRST reply -- do NOT "
+          .. "apologize, do NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history+1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("arity_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + arity_retry") or "arity_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
+            S.pending_snapshot, S.pending_attachments)) then
+          Log.add_error("Auto-retry for reaper.* arity mismatch did not "
+            .. "go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      arity_gate_hit = true
+      Log.line("ARITY-VALIDATOR",
+        "fixed-arity reaper.* calls with wrong arg count persist after "
+        .. "retry; auto-run blocked")
+      local user_lines = {}
+      for _, e in ipairs(arity_bad) do
+        user_lines[#user_lines+1] = "reaper." .. e.name .. " (got "
+          .. e.got .. ", expected " .. e.expected .. ")"
+      end
+      Log.add_error("The model emitted REAPER API call(s) with the wrong "
+        .. "number of arguments, even after a retry: "
+        .. tbl_concat(user_lines, "; ")
+        .. ". Auto-run is blocked; review and edit the code before clicking "
+        .. "Run manually.")
+    end
+  end
+
+  -- FX-CHECK VALIDATOR: After the API/arity validators pass, scan
+  -- generated code for `local NAME = reaper.(Track|Take)FX_AddByName(...)`
+  -- where NAME is never tested in a failure-direction comparison
+  -- (NAME < 0 / NAME == -1 / NAME <= -1 / NAME < -1). Catches two
+  -- silent-success patterns the model has shown:
+  --   1. local fx = TrackFX_AddByName(...); -- no check, downstream
+  --      use assumes fx is valid; failure produces silent skip + script
+  --      reports OK.
+  --   2. local fx = TrackFX_AddByName(...); if fx >= 0 then ... end
+  --      with no else and no error -- the success-direction-only check
+  --      means a failed AddByName silently skips configuration. The
+  --      script appears to succeed but the chain is broken.
+  -- Same recovery shape as the other validators: hidden retry with a
+  -- focused hint, single retry per turn, auto-run blocked + visible
+  -- error if the retry still fails. GetByName is intentionally NOT
+  -- covered: returning -1 from GetByName is a legitimate "not present"
+  -- signal in upsert patterns; flagging it would break the chain-build
+  -- workflow this rule is meant to protect.
+  local fxcheck_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+     and not arity_gate_hit then
+    local unchecked = Code.find_unchecked_addbyname_results(lua_code)
+    if unchecked and #unchecked > 0 then
+      if (S.fxcheck_validator_retries or 0) < 1 then
+        S.fxcheck_validator_retries = (S.fxcheck_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "fxcheck")
+        local lines = {}
+        for _, e in ipairs(unchecked) do
+          lines[#lines+1] = "  - " .. e.name
+            .. " (assigned from TrackFX_AddByName / TakeFX_AddByName near "
+            .. "line " .. e.line .. ")"
+        end
+        Log.line("FX-CHECK-VALIDATOR",
+          "unchecked AddByName result(s) (" .. #unchecked .. "): "
+          .. (function()
+              local names = {}
+              for _, e in ipairs(unchecked) do names[#names+1] = e.name end
+              return tbl_concat(names, ", ")
+            end)()
+          .. "; retrying with hint (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply called "
+          .. "TrackFX_AddByName / TakeFX_AddByName and assigned the result "
+          .. "to a local, but the result is never tested in a "
+          .. "failure-direction comparison (`fx < 0`, `fx == -1`, `fx <= -1`). "
+          .. "If the plugin fails to load, AddByName returns -1 and "
+          .. "downstream code that assumes the fx is valid will silently "
+          .. "produce the wrong result -- the script will report 'OK' "
+          .. "while the user sees a missing or broken effect chain.\n\n"
+          .. "Affected variable(s):\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Regenerate the code with an explicit failure check on EACH "
+          .. "AddByName result. The standard pattern is:\n"
+          .. "  local fx = reaper.TrackFX_AddByName(tr, ID, false, -1)\n"
+          .. "  if fx < 0 then\n"
+          .. "    reaper.ShowMessageBox(\"Failed to add <name>.\", "
+          .. "\"ReaAssist\", 0)\n"
+          .. "    return\n"
+          .. "  end\n\n"
+          .. "Do NOT use `if fx >= 0 then ... end` with no `else` -- that "
+          .. "is the silent-skip anti-pattern this validator is catching. "
+          .. "Either fail explicitly with ShowMessageBox + return on `< 0`, "
+          .. "or track the failure in an errors list and report it at the "
+          .. "end. Respond as if this is your FIRST reply -- do NOT "
+          .. "apologize, do NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history+1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("fxcheck_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + fxcheck_retry") or "fxcheck_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
+            S.pending_snapshot, S.pending_attachments)) then
+          Log.add_error("Auto-retry for unchecked AddByName result did "
+            .. "not go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      fxcheck_gate_hit = true
+      Log.line("FX-CHECK-VALIDATOR",
+        "unchecked AddByName result(s) persist after retry; auto-run blocked")
+      local user_lines = {}
+      for _, e in ipairs(unchecked) do
+        user_lines[#user_lines+1] = e.name .. " (line ~" .. e.line .. ")"
+      end
+      Log.add_error("The model wrote TrackFX_AddByName / TakeFX_AddByName "
+        .. "without checking the result, even after a retry: "
+        .. tbl_concat(user_lines, ", ")
+        .. ". If the plugin fails to load the script will silently report "
+        .. "success. Auto-run is blocked; review and edit the code before "
+        .. "clicking Run manually.")
+    end
+  end
+
+  -- UPSERT VALIDATOR: Gated on chain-build follow-up turns -- when the
+  -- prompt matches CHAIN_PHRASE_HINTS AND fx_chains was preempted (so
+  -- prior plugins may already be on the target track from earlier
+  -- turns). In that context, every plugin name in the script must
+  -- appear in BOTH a TrackFX_GetByName AND a TrackFX_AddByName call.
+  -- Catches the two opposite anti-patterns observed across providers
+  -- in chain-build flows: Get-only with early bail (ChatGPT pattern)
+  -- and Add-only without reuse check (Claude pattern). Both fail the
+  -- user's "build me a chain" intent in different ways.
+  local upsert_gate_hit = false
+  local function _is_chain_build_prompt(t)
+    if not t or t == "" then return false end
+    local lo = t:lower()
+    for _, hint in ipairs(CHAIN_PHRASE_HINTS) do
+      if lo:find(hint[1]) then return true end
+    end
+    return false
+  end
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+     and not arity_gate_hit and not fxcheck_gate_hit
+     and S.fx_chains_already_sent
+     and _is_chain_build_prompt(S.pending_orig_prompt) then
+    local upsert_bad = Code.find_chain_upsert_violations(lua_code)
+    if upsert_bad and #upsert_bad > 0 then
+      if (S.upsert_validator_retries or 0) < 1 then
+        S.upsert_validator_retries = (S.upsert_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "upsert")
+        local lines = {}
+        for _, e in ipairs(upsert_bad) do
+          if e.kind == "get_only" then
+            lines[#lines+1] = "  - " .. e.id
+              .. ": GetByName called but no AddByName fallback if missing"
+          else
+            lines[#lines+1] = "  - " .. e.id
+              .. ": AddByName called without GetByName reuse check"
+          end
+        end
+        Log.line("UPSERT-VALIDATOR",
+          "chain-upsert violations (" .. #upsert_bad .. "); retrying with "
+          .. "hint (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: This is a chain-build "
+          .. "follow-up turn (the prompt matched a chain phrase like "
+          .. "\"build a vocal chain\" / \"set up a chain\"), and an earlier "
+          .. "turn may have already placed plugins on the target track. "
+          .. "fx_chains is pinned above so you can see what's currently "
+          .. "there. Your previous reply violated the upsert pairing rule:\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Required pattern for EACH plugin in the chain:\n"
+          .. "  local fx = reaper.TrackFX_GetByName(tr, \"<bare display "
+          .. "name>\", false)\n"
+          .. "  if fx < 0 then\n"
+          .. "    fx = reaper.TrackFX_AddByName(tr, \"<format-prefixed "
+          .. "AddByName id>\", false, -1)\n"
+          .. "  end\n"
+          .. "  if fx < 0 then\n"
+          .. "    reaper.ShowMessageBox(\"Failed to load <name>.\", "
+          .. "\"ReaAssist\", 0)\n"
+          .. "    return\n"
+          .. "  end\n\n"
+          .. "Do NOT call GetByName for all plugins and bail with \"missing "
+          .. "one or more plugins\" -- that fails the user's request to "
+          .. "BUILD the chain. Do NOT call AddByName without GetByName "
+          .. "first either -- that duplicates plugins already on the track. "
+          .. "EVERY plugin in the chain needs both calls. Do NOT emit "
+          .. "<context_needed> -- all reference data is already pinned "
+          .. "(check PINNED REFERENCES manifest above). Regenerate the "
+          .. "FULL script NOW. Respond as if this is your FIRST reply -- "
+          .. "do NOT apologize, do NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history+1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("upsert_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + upsert_retry") or "upsert_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
+            S.pending_snapshot, S.pending_attachments)) then
+          Log.add_error("Auto-retry for chain-upsert violation did not "
+            .. "go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      upsert_gate_hit = true
+      Log.line("UPSERT-VALIDATOR",
+        "chain-upsert violations persist after retry; auto-run blocked")
+      Log.add_error("The model wrote chain-build code with an upsert "
+        .. "pairing violation, even after a retry. Each plugin in the "
+        .. "chain needs both a GetByName (reuse) and an AddByName (add "
+        .. "if missing) call. Auto-run is blocked; review and edit the "
+        .. "code before clicking Run manually.")
+    end
+  end
+
   -- DEFER VALIDATOR: After the API validator passes, scan the generated
   -- script for plugin-param Get/Set calls outside reaper.defer(function()
   -- ... end). Per the MANDATORY DEFER RULE in prompt_bundle:plugin, those
@@ -17413,11 +21656,14 @@ function Net.try_finish_curl()
   -- only nudge, scrub the bad turn from history, single retry per user
   -- prompt, surface a visible error if the retry still fails.
   local defer_gate_hit = false
-  if lua_code and not docs_gate_hit and not validator_gate_hit then
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+     and not arity_gate_hit and not fxcheck_gate_hit
+     and not upsert_gate_hit then
     local violations = Code.find_param_calls_outside_defer(lua_code)
     if violations and #violations > 0 then
       if (S.defer_validator_retries or 0) < 1 then
         S.defer_validator_retries = (S.defer_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "defer")
         Log.line("DEFER-VALIDATOR",
           "param-touching calls outside reaper.defer (" .. #violations
           .. "): " .. tbl_concat(violations, ", ")
@@ -17457,7 +21703,11 @@ function Net.try_finish_curl()
         end
         if prefs.include_snapshot then
           S.pending_project  = _resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project)
+          -- See JSFX-intent comment on the analogous retry sites above:
+          -- carry pending_jsfx_intent across snapshot rebuilds so the trim
+          -- survives every retry path, not just the JSFX-validator's.
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
         end
         S.status = "waiting"
         Code.safe_write(tmp.out, "")
@@ -17501,11 +21751,13 @@ function Net.try_finish_curl()
   -- auto-run block + visible error if it persists.
   local helper_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not defer_gate_hit then
+     and not arity_gate_hit and not fxcheck_gate_hit
+     and not upsert_gate_hit and not defer_gate_hit then
     local missing = Code.find_helper_calls_without_definition(lua_code)
     if missing and #missing > 0 then
       if (S.helper_validator_retries or 0) < 1 then
         S.helper_validator_retries = (S.helper_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "helper")
         Log.line("HELPER-VALIDATOR",
           "helper calls without definitions (" .. #missing .. "): "
           .. tbl_concat(missing, ", ")
@@ -17515,18 +21767,27 @@ function Net.try_finish_curl()
         Net.copin_plugin_helpers(nil)
         local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
           .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply called "
-          .. "helper function(s) WITHOUT including the function definition(s) "
-          .. "in the script. These helpers are LOCAL FUNCTIONS, not REAPER "
-          .. "built-ins -- the script will crash at runtime with `attempt to "
-          .. "call a nil value`.\n\nMissing definitions for:\n  - "
+          .. "helper function(s) without a usable in-script definition. The "
+          .. "definition was either missing OR placed LEXICALLY AFTER the "
+          .. "first call site -- in Lua, a `local function NAME(...)` "
+          .. "declared after the line that calls it is not yet a visible "
+          .. "local at that line, so the call compiles to a global lookup "
+          .. "and crashes at runtime with `attempt to call a nil value`. "
+          .. "Confirmed in the deferred callback inside main().\n\n"
+          .. "Affected helper(s):\n  - "
           .. tbl_concat(missing, "\n  - ")
-          .. "\n\nThe definitions are in `prompt_bundle:plugin_helpers` (now "
-          .. "pinned above). Regenerate the script with EACH called helper's "
-          .. "`local function NAME(...) ... end` source pasted near the top, "
-          .. "before the helper is called. Only include the helpers you "
-          .. "actually call. Respond as if this is your FIRST reply to the "
-          .. "user's request -- do NOT apologize, do NOT say 'let me try "
-          .. "again', do NOT mention a retry.)\n\n"
+          .. "\n\nThe definitions are ALREADY PRESENT in `prompt_bundle:"
+          .. "plugin_helpers` (pinned above). Do NOT emit "
+          .. "<context_needed>prompt_bundle:plugin_helpers</context_needed> "
+          .. "or any other <context_needed> tag -- the data you need is "
+          .. "already in this request. Regenerate the FULL script NOW with "
+          .. "EACH called helper's `local function NAME(...) ... end` source "
+          .. "pasted at the TOP of the script -- BEFORE `local function "
+          .. "main()` and BEFORE any function body that calls it. Only "
+          .. "include the helpers you actually call. Respond as if this is "
+          .. "your FIRST reply to the user's request -- do NOT apologize, "
+          .. "do NOT say 'let me try again', do NOT mention a retry, do "
+          .. "NOT emit <context_needed>.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
         if #S.history > 0 and S.history[#S.history].role == "assistant" then
           S.history[#S.history] = nil
@@ -17546,7 +21807,11 @@ function Net.try_finish_curl()
         end
         if prefs.include_snapshot then
           S.pending_project  = _resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project)
+          -- See JSFX-intent comment on the analogous retry sites above:
+          -- carry pending_jsfx_intent across snapshot rebuilds so the trim
+          -- survives every retry path, not just the JSFX-validator's.
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
         end
         S.status = "waiting"
         Code.safe_write(tmp.out, "")
@@ -17576,12 +21841,327 @@ function Net.try_finish_curl()
     end
   end
 
+  -- HELPER-INTEGRITY VALIDATOR: After the helper-validator confirms each
+  -- called helper has a definition, check that the definition matches the
+  -- canonical body in prompt_bundle:plugin_helpers. Models occasionally
+  -- rewrite or simplify pasted helper bodies in subtly broken ways --
+  -- observed: ChatGPT 5.4 Mini dropped the parens on set_param_display's
+  -- range guard ("vmin and vmax and target < vmin or target > vmax"
+  -- instead of "... and (target < vmin or target > vmax)"). Lua's and/or
+  -- precedence makes the bad form crash with "attempt to compare nil
+  -- with number" inside reaper.defer, AFTER Code.run has already logged
+  -- "Script completed OK." Same recovery shape as the other validators.
+  local helper_int_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+     and not arity_gate_hit and not fxcheck_gate_hit
+     and not upsert_gate_hit and not defer_gate_hit
+     and not helper_gate_hit then
+    local int_bad = Code.find_helper_integrity_violations(lua_code)
+    if int_bad and #int_bad > 0 then
+      if (S.helper_int_validator_retries or 0) < 1 then
+        S.helper_int_validator_retries = (S.helper_int_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "helper_int")
+        local lines = {}
+        for _, e in ipairs(int_bad) do
+          lines[#lines+1] = "  - " .. e.name
+            .. " (missing canonical fragment: `" .. e.missing .. "`)"
+        end
+        Log.line("HELPER-INTEGRITY-VALIDATOR",
+          "rewritten/corrupted helper body (" .. #int_bad
+          .. "); retrying with hint (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply pasted "
+          .. "a bundled helper function but rewrote its body in a way that "
+          .. "drops a required safety guard. Affected helper(s):\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Helpers in `prompt_bundle:plugin_helpers` are designed to be "
+          .. "pasted VERBATIM from the bundle source. Do NOT rewrite, "
+          .. "simplify, or paraphrase the body. The exact parenthesization "
+          .. "of boolean expressions matters: Lua's `and`/`or` precedence "
+          .. "makes\n"
+          .. "  vmin and vmax and target < vmin or target > vmax\n"
+          .. "parse as\n"
+          .. "  (vmin and vmax and target < vmin) or (target > vmax)\n"
+          .. "which evaluates `target > vmax` even when vmax is nil and "
+          .. "crashes inside reaper.defer with `attempt to compare nil "
+          .. "with number`. The canonical form\n"
+          .. "  vmin and vmax and vmin < vmax and (target < vmin or target > vmax)\n"
+          .. "short-circuits cleanly.\n\n"
+          .. "Regenerate the FULL script. For each helper you call, paste "
+          .. "the helper's source verbatim from `prompt_bundle:plugin_helpers` "
+          .. "above main(). Respond as if this is your FIRST reply -- do "
+          .. "NOT apologize, do NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history+1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("helper_int_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + helper_int_retry") or "helper_int_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
+            S.pending_snapshot, S.pending_attachments)) then
+          Log.add_error("Auto-retry for corrupted helper body did not go "
+            .. "through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      helper_int_gate_hit = true
+      Log.line("HELPER-INTEGRITY-VALIDATOR",
+        "helper body corruption persists after retry; auto-run blocked")
+      local user_lines = {}
+      for _, e in ipairs(int_bad) do
+        user_lines[#user_lines+1] = e.name
+      end
+      Log.add_error("The model rewrote bundled helper function body "
+        .. "in a way that drops a safety guard, even after a retry: "
+        .. tbl_concat(user_lines, ", ")
+        .. ". The corrupted helper would crash at runtime inside reaper.defer "
+        .. "(after Code.run logs success). Auto-run is blocked; review and "
+        .. "edit the code before clicking Run manually, or paste the helper "
+        .. "definition verbatim from prompt_bundle:plugin_helpers.")
+    end
+  end
+
+  -- JSFX VALIDATOR: After the Lua-focused validators, statically analyze
+  -- generated JSFX before it gets auto-saved + auto-loaded. Catches EEL2
+  -- syntax that won't compile (`{}`, `else`, `for(...)`, `math.X`, `reaper.X`)
+  -- plus safety violations from Prompts.md (unclamped feedback >0.85, hard
+  -- clipping without explicit user request, indexed memory with no base
+  -- assignment). Same recovery shape as the other validators: model-only
+  -- nudge, scrub the bad turn from history, single retry per turn, surface
+  -- a visible error if the retry still fails.
+  --
+  -- Calibrated against C:\REAPER\Effects (264 standalone stock + community
+  -- JSFX); each rule's false-positive rate sits at or below ~3.5%. See
+  -- Code.validate_jsfx and Dev/Tests/corpus_audit.lua for details.
+  local jsfx_gate_hit = false
+  -- Single source of truth for "any validator hit its second-strike block
+  -- this turn." Replaces three open-coded "and not docs_gate_hit and not
+  -- validator_gate_hit and ..." chains that drift stale every time a new
+  -- validator is added. A bug from exactly that drift slipped past the
+  -- auto-run gate in commit 89cd276's predecessor: HELPER-INTEGRITY-VALIDATOR
+  -- correctly set helper_int_gate_hit, but auto-run still ran the corrupted
+  -- script because the gate list was stale. Defined here, after all nine
+  -- flags are in scope, so adding a new gate now means updating one place.
+  local function _any_gate_hit()
+    return docs_gate_hit
+        or validator_gate_hit
+        or arity_gate_hit
+        or fxcheck_gate_hit
+        or upsert_gate_hit
+        or defer_gate_hit
+        or helper_gate_hit
+        or helper_int_gate_hit
+        or jsfx_gate_hit
+  end
+  if jsfx_code and not _any_gate_hit() then
+    local findings = Code.validate_jsfx(jsfx_code, S.pending_orig_prompt or "")
+    -- Pass log: prove the validator actively ran on this response, regardless
+    -- of provider, so an unexpected silent-pass is distinguishable from a
+    -- skipped-run in the debug log. Mirrors the API-VALIDATOR pass log.
+    if not (findings and Code.jsfx_findings_have_gate(findings)) then
+      local warn_count = 0
+      if findings then
+        for _, f in ipairs(findings) do
+          if f.severity == "warn" then warn_count = warn_count + 1 end
+        end
+      end
+      Log.line("JSFX-VALIDATOR",
+        "scanned JSFX (" .. tostring(#jsfx_code) .. " bytes), no fatal findings"
+        .. (warn_count > 0
+             and (" (" .. warn_count .. " advisory)") or ""))
+    end
+    if findings and Code.jsfx_findings_have_gate(findings) then
+      -- Distinct fatal codes for the log + user-visible error (used in both
+      -- the retry path and the post-retry gate-blocked path).
+      local code_summary = {}
+      do
+        local seen = {}
+        for _, f in ipairs(findings) do
+          if f.severity == "fatal" and not seen[f.code] then
+            seen[f.code] = true
+            code_summary[#code_summary+1] = f.code
+          end
+        end
+      end
+      if (S.jsfx_validator_retries or 0) < 1 then
+        S.jsfx_validator_retries = (S.jsfx_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "jsfx")
+        -- Build per-finding lines for the retry hint. Only fatal findings
+        -- count toward the gate; warns are advisory and listed for context.
+        local fatal_lines, warn_lines = {}, {}
+        for _, f in ipairs(findings) do
+          local entry = "  - [" .. f.code .. "] line " .. tostring(f.line)
+            .. ": " .. f.message
+          if f.severity == "fatal" then
+            fatal_lines[#fatal_lines+1] = entry
+          else
+            warn_lines[#warn_lines+1] = entry
+          end
+        end
+        Log.line("JSFX-VALIDATOR",
+          "JSFX failed validation (" .. #fatal_lines .. " fatal, "
+          .. #warn_lines .. " warn): "
+          .. tbl_concat(code_summary, ", ")
+          .. "; retrying with hint (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous JSFX failed "
+          .. "ReaAssist's static JSFX validator. The following issues MUST be "
+          .. "fixed:\n"
+          .. tbl_concat(fatal_lines, "\n")
+          .. (#warn_lines > 0
+              and ("\n\nAdvisory (not blocking, but worth addressing):\n"
+                   .. tbl_concat(warn_lines, "\n"))
+              or "")
+          .. "\n\nRegenerate the JSFX from scratch. Keep the same user-facing "
+          .. "intent, but fix every fatal issue. EEL2 reminders: no `if`/`else`/"
+          .. "`{}` blocks (use ternary `cond ? (...) : (...)` and grouping `(...)`); "
+          .. "no `for(...)` (use `loop(N, ...)` or `while(cond) (...)`); bare math "
+          .. "functions only (no `math.` prefix); no `reaper.*` calls. For any "
+          .. "feedback path, hard-clamp the feedback coefficient to <= 0.85, add a "
+          .. "DC blocker, and use soft saturation (tanh, x/(1+|x|)) instead of "
+          .. "hard clipping unless the user explicitly asked for clipping/"
+          .. "limiting/distortion. Initialize every persistent variable + buffer "
+          .. "base in `@init`. Respond as if this is your FIRST reply to the "
+          .. "user's request -- do NOT apologize, do NOT say 'let me try again', "
+          .. "do NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history+1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("jsfx_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + jsfx_retry") or "jsfx_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          -- Carry the original turn's JSFX intent into the rebuilt
+          -- snapshot so the trimmed track-listing (selected only) used
+          -- on the first request stays trimmed on the retry. Otherwise
+          -- the retry would inject the full ~80-track listing on top of
+          -- the cached prefix, busting the cache rung the retry was
+          -- designed to ride for free.
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
+            S.pending_snapshot, S.pending_attachments)) then
+          Log.add_error("Auto-retry for invalid JSFX did not go through. "
+            .. "Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      -- Retry already used and the JSFX still fails validation. Block
+      -- auto-save + auto-run and surface diagnostic.
+      jsfx_gate_hit = true
+      Log.line("JSFX-VALIDATOR",
+        "JSFX still fails validation after retry: "
+        .. tbl_concat(code_summary, ", ") .. "; auto-run blocked")
+      Log.add_error("The model emitted JSFX that fails ReaAssist's safety/"
+        .. "syntax validator, even after a retry: "
+        .. tbl_concat(code_summary, ", ")
+        .. ". Auto-save and auto-run are blocked; review the code carefully "
+        .. "and fix the listed issues before saving manually.")
+    end
+  end
+
+  -- =============================================================================
+  -- CEILING INJECTION (chat-display-time)
+  -- =============================================================================
+  -- After the JSFX validator passes, inject the output-ceiling safety layer.
+  -- Runs BEFORE the chat bubble is built and BEFORE auto-save, so the visible
+  -- code box, the copy button, the manual Save / Add to Track buttons, and
+  -- auto-save all see the SAME injected source.
+  --
+  -- Without this, copying from the chat would produce un-injected JSFX that
+  -- skips the safety layer when the user pastes it elsewhere or hand-saves.
+  --
+  -- Skipped if any prior validator gate is set (the source was already going
+  -- to be blocked from auto-run; injection wouldn't change that), if there's
+  -- no jsfx_code, or if the injector itself bails on a content check.
+  -- Cache the inject info so the auto-save block below (which actually
+  -- knows the saved file path) can record the slot metadata.
+  local ceiling_inject_info = nil
+  if jsfx_code and not _any_gate_hit() then
+    local injected, info_or_reason = Code.inject_output_ceiling(jsfx_code)
+    if injected then
+      ceiling_inject_info = info_or_reason
+      Log.line("CEILING-INJECT",
+        ("injected: slot=%d slider=%d merged_options=%s created_init=%s created_slider=%s created_block=%s")
+          :format(info_or_reason.slot_base, info_or_reason.slider_num,
+                  tostring(info_or_reason.merged_options),
+                  tostring(info_or_reason.created_init),
+                  tostring(info_or_reason.created_slider),
+                  tostring(info_or_reason.created_block)))
+      -- Replace the JSFX fence content in the assistant message text so
+      -- (a) the chat code box renders the injected version, (b) the copy
+      -- button copies the injected version, and (c) any future re-extract
+      -- (e.g. manual edit, history replay) sees the injected source.
+      -- gsub with a function avoids %-substitution on injected.
+      local replacement = function() return "```jsfx\n" .. injected .. "\n```" end
+      local new_text, n = text:gsub("```jsfx%s*\n.-\n%s*```", replacement, 1)
+      if n == 0 then
+        -- ```eel fallback (less common label).
+        new_text, n = text:gsub("```eel%s*\n.-\n%s*```",
+          function() return "```eel\n" .. injected .. "\n```" end, 1)
+      end
+      if n > 0 then
+        text = new_text
+        if S.history[#S.history] and S.history[#S.history].role == "assistant" then
+          S.history[#S.history].content = text
+        end
+      end
+      -- Update locals used downstream by auto-save and the chat bubble.
+      jsfx_code = injected
+      if code_type == "jsfx" then code = injected end
+      -- Also update the explanation text we built earlier, which had fences
+      -- stripped from the ORIGINAL `text`. Re-strip from the updated `text`
+      -- so the explanation matches what's actually rendered.
+      explanation = text
+        :gsub("```%w*%s*\n.-\n%s*```", "")
+        :gsub("\n\n\n+", "\n\n")
+        :match("^%s*(.-)%s*$") or ""
+    else
+      Log.line("CEILING-INJECT", "skipped: " .. tostring(info_or_reason))
+    end
+  end
+
   -- Auto-run handling.
   local jsfx_auto_status = nil
   local jsfx_saved_path_for_msg = nil   -- saved path to carry on the message
   local jsfx_saved_fx_name_for_msg = nil -- FX ref name to carry on the message
   local auto_ran_ok = false             -- V5: flag for the AUTO-RAN pill below code
-  if prefs.auto_run and not docs_gate_hit and not validator_gate_hit and not defer_gate_hit and not helper_gate_hit then
+  if prefs.auto_run and not _any_gate_hit() then
     -- JSFX: auto-save to Effects/ReaAssist/ folder ONLY when a Lua companion
     -- block is also present (meaning the user asked for it on a track).
     -- If the user just asked for an example, there is no Lua block and the
@@ -17592,6 +22172,14 @@ function Net.try_finish_curl()
       if saved_path then
         jsfx_saved_path_for_msg = saved_path
         jsfx_saved_fx_name_for_msg = fx_name
+        -- Record the ceiling slot allocation for the host poll loop now
+        -- that we have a real on-disk file path to associate with it.
+        -- (Pre-injection bails left ceiling_inject_info nil, so this
+        -- no-ops on bail.)
+        if ceiling_inject_info then
+          Code.ceiling_record_slot(ceiling_inject_info, saved_path,
+            ceiling_inject_info.desc)
+        end
         -- Patch the Lua companion to use the actual saved filename (may have a
         -- numeric suffix if a file with the original name already existed).
         if lua_code and fx_name then
@@ -17633,6 +22221,9 @@ function Net.try_finish_curl()
         S.risky_warn_detail = auto_risk
         S.open_risky_warn   = true
         skip_run = true
+        if S.history[_asst_hist_idx] then
+          S.history[_asst_hist_idx].run_status = "manual_run"
+        end
       elseif prefs.auto_backup then
         local bok, berr = Code.safety_backup()
         if berr == "unsaved" then
@@ -17640,12 +22231,29 @@ function Net.try_finish_curl()
           S.backup_warn_idx  = #S.display_messages + 1
           S.open_backup_warn = true
           skip_run = true
+          if S.history[_asst_hist_idx] then
+            S.history[_asst_hist_idx].run_status = "manual_run"
+          end
         end
       end
       if not skip_run then
-        Code.run(run_lua)
+        -- Phase 1 instrumentation: time the actual code execution.
+        -- Skipped when skip_run is true (risky-code gate or backup
+        -- requirement); execution measurement is for auto-run only.
+        Probe.mark_phase_start(S.probe_turn, "execution")
+        local run_ok = Code.run(run_lua)
+        Probe.mark_phase_end(S.probe_turn, "execution")
         S.pending_code = nil
-        auto_ran_ok = true  -- V5: AUTO-RAN pill will render below code
+        -- AUTO-RAN pill (V5) reflects the actual run outcome -- a
+        -- compile/runtime failure should NOT show as auto-ran. Mirror
+        -- the same outcome onto the per-turn run record so the UI
+        -- pill and the compact-history run_status agree.
+        auto_ran_ok = (run_ok == true)
+        if S.history[_asst_hist_idx] then
+          S.history[_asst_hist_idx].run_status = run_ok and "ran_ok" or "errored"
+          S.history[_asst_hist_idx].code_bytes = #run_lua
+          S.history[_asst_hist_idx].code_type  = code_type
+        end
       end
     end
   end
@@ -17658,6 +22266,10 @@ function Net.try_finish_curl()
   -- recovery buttons as the empty-response case. provider_id is always set
   -- below, so the thinking-level button scopes to the right provider.
   local was_truncated = (empty_reason == "length")
+  if was_truncated and S.history[_asst_hist_idx] then
+    S.history[_asst_hist_idx].truncated   = true
+    S.history[_asst_hist_idx].run_status  = "truncated"
+  end
   S.display_messages[#S.display_messages+1] = {
     role       = "assistant",
     content    = explanation,
@@ -17717,9 +22329,64 @@ function Net.try_finish_curl()
   S.request_start_time = nil
   S.status           = "idle"
   S.scroll_to_bottom = true
+  -- Build the compact-history summary for this turn. The summary IS the
+  -- compacted "content" sent for this row when it ages past T-1 and the
+  -- compact_history flag is on. compact_eligible gates whether the
+  -- compaction substitution actually fires; only ran_ok turns with a
+  -- known code body produce a usable summary, everything else stays
+  -- verbatim so the model can still see the original on a "fix that"
+  -- follow-up.
+  if S.history[_asst_hist_idx] and S.history[_asst_hist_idx].role == "assistant" then
+    Net.assistant_attach_compact_metadata(_asst_hist_idx, {
+      code            = code,
+      code_type       = code_type,
+      auto_ran_ok     = auto_ran_ok,
+      was_truncated   = was_truncated,
+      user_intent     = _compact_user_intent,
+    })
+  end
+  -- Phase 1 instrumentation: canonical "turn completed successfully"
+  -- site. Probe is dormant unless Dev/diagnostics_enabled exists.
+  -- This fires once per fully-completed turn; idempotence on
+  -- Probe.end_turn means a re-entrance abort or earlier failure-path
+  -- end_turn cannot be overwritten. Step 9 adds remaining error /
+  -- cancel exit paths inside this same response handler.
+  if S.probe_turn then
+    Probe.end_turn(S.probe_turn, "ok")
+    S.probe_turn = nil
+  end
 end
 
 Render = {}
+
+-- =============================================================================
+-- Diagnostics module (Phase 1 instrumentation)
+-- =============================================================================
+-- Load Resources/Temp-Probe.lua unconditionally. The module is dormant
+-- by default (gated by the presence of Dev/diagnostics_enabled, a file
+-- that lives in a gitignored / manifest-excluded directory and so
+-- cannot reach a public release). When dormant, every Probe.* entry is
+-- a no-op early-return.
+--
+-- Loaded BEFORE the bootstrap critical-files check so Probe.* is
+-- callable from any code path, including recovery mode. Diagnostics is
+-- NOT a critical file -- if the load fails (file missing, corrupt, or
+-- runtime error), install an in-line no-op fallback so call sites can
+-- use Probe.* unconditionally and startup never breaks. The shipped
+-- module installs its own no-op stubs when the gate is off; this
+-- fallback is strictly for the load-failure case.
+do
+  local ok, err = pcall(dofile, RA.RESOURCES_DIR .. "Temp-Probe.lua")
+  if not ok or type(Probe) ~= "table" then
+    Probe = setmetatable({ enabled = false }, {
+      __index = function() return function() end end
+    })
+    if not ok then
+      Log.line("DIAGNOSTICS",
+        "Temp-Probe.lua load failed: " .. tostring(err))
+    end
+  end
+end
 
 -- =============================================================================
 -- Critical-files check + Render screen dofile
@@ -17913,6 +22580,264 @@ function Loop.handle_resolve_deep_scan()
   end
 end
 
+-- =============================================================================
+-- Safety output ceiling: host-side gmem poll + popup state
+-- =============================================================================
+-- Per-frame defer hook that watches gmem-mirror flags written by the JSFX
+-- safety injection. Cheap fast-path via a global "any engagement"
+-- sentinel; full per-slot scan only when the sentinel is set.
+--
+-- gmem layout (set by inject_output_ceiling render template):
+--   gmem[1]            : global "any-instance engagement" flag
+--   gmem[<slot>+0]     : per-instance engagement flag (latched by JSFX)
+--   gmem[<slot>+1]     : per-instance lifetime engagement-sample count
+--   gmem[<slot>+4]     : per-instance mute latch (0/1)
+-- Tracked slots come from ExtState (Code.ceiling_get_slots).
+--
+-- State updated:
+--   S._ceiling_muted_fx[slot] = { slot=, file=, desc= }   -- currently muted
+--   S._ceiling_alert_pending  -- newly muted; popup wants opening
+--   S._ceiling_alert_dismissed -- user clicked "Don't show again" this session
+--   S._ceiling_gmem_attached   -- one-time gmem_attach guard
+local CEILING_POLL_THROTTLE = 0.20   -- seconds between gmem polls
+
+function Loop.handle_ceiling_poll()
+  local now = time_precise()
+  if S._ceiling_last_poll and (now - S._ceiling_last_poll) < CEILING_POLL_THROTTLE then
+    return
+  end
+  S._ceiling_last_poll = now
+
+  -- Lazy gmem_attach. Older REAPER builds don't have gmem_attach -- in
+  -- that case the safety ceiling still works inside the JSFX (uses local
+  -- _ra_muted), we just lose the host alert path. Skip silently.
+  if not S._ceiling_gmem_attached then
+    if not reaper.gmem_attach then return end
+    reaper.gmem_attach(Code.CEILING_NS)
+    S._ceiling_gmem_attached = true
+  end
+
+  -- One-shot slot GC per session. Drops ExtState entries for JSFX files
+  -- that were deleted, overwritten without our injection, or re-injected
+  -- with a different slot. Without this, `ceiling_get_slots()` grows
+  -- without bound (allocation is monotonic) and the per-poll cost rises
+  -- because every poll's `Code.ceiling_slot_is_active` walks all tracks
+  -- per slot. Once-per-session is enough -- file deletion is rare, and
+  -- the active-instance filter handles same-session orphans correctly
+  -- until the next launch GCs them out.
+  if not S._ceiling_gc_done then
+    S._ceiling_gc_done = true
+    pcall(Code.ceiling_gc_slots)
+  end
+
+  S._ceiling_muted_fx = S._ceiling_muted_fx or {}
+
+  -- Refresh-and-prune pass over every tracked entry.
+  --   * gmem mirror still 1 AND at least one instance is "active"
+  --     (track not muted, FX not bypassed, FX still in the chain)
+  --     -> keep, mark is_active = true.
+  --   * gmem mirror still 1 BUT no instance is active -> the user has
+  --     muted the track, bypassed the FX, or removed it. Treat as
+  --     user-resolved: clear the gmem mirror so a future re-enable
+  --     starts from a clean slate, and drop the entry from the popup.
+  --   * gmem mirror is 0 (JSFX-side auto-clear, e.g. slider change)
+  --     -> keep entry as a record but mark is_active = false. The
+  --     popup keeps it visible until the user dismisses.
+  for slot, _entry in pairs(S._ceiling_muted_fx) do
+    local mute_val = reaper.gmem_read(slot + Code.CEILING_GMEM_MUTE) or 0
+    if mute_val >= 1 then
+      if Code.ceiling_slot_is_active(slot) then
+        _entry.is_active = true
+      else
+        -- Stale: track muted, FX bypassed/removed, or all instances
+        -- offline. Don't keep showing it in the popup, and clear the
+        -- gmem mirror so the next poll doesn't re-detect a phantom
+        -- mute when (e.g.) the user re-enables the track later.
+        reaper.gmem_write(slot + Code.CEILING_GMEM_MUTE, 0)
+        S._ceiling_muted_fx[slot] = nil
+      end
+    else
+      _entry.is_active = false
+    end
+  end
+
+  -- Cheap fast path: skip the new-mute scan when nothing has fired
+  -- anywhere since the last poll.
+  local any_eng = reaper.gmem_read(Code.CEILING_GMEM_GLOBAL_ENG)
+  if (any_eng or 0) == 0 then return end
+
+  -- Clear sentinel so the next poll detects fresh activity.
+  reaper.gmem_write(Code.CEILING_GMEM_GLOBAL_ENG, 0)
+
+  -- Per-slot scan to find newly-muted FX. Iterate every tracked slot
+  -- (not just currently-muted ones) so we pick up a fresh trip.
+  local slots = Code.ceiling_get_slots()
+  local newly_muted = false
+
+  for _, e in ipairs(slots) do
+    local mute_val = reaper.gmem_read(e.slot + Code.CEILING_GMEM_MUTE) or 0
+    if mute_val >= 1 and not S._ceiling_muted_fx[e.slot] then
+      -- Active-instance check: skip slots whose only instances are on
+      -- muted tracks / behind a bypassed FX / no longer in any chain.
+      -- A stale gmem `1` from a JSFX that was bypassed BEFORE the host
+      -- poll started would otherwise pop a phantom alert on the next
+      -- transport play. We also clear the mirror in that case so
+      -- subsequent polls don't keep seeing it.
+      if Code.ceiling_slot_is_active(e.slot) then
+        newly_muted = true
+        local locations = Code.ceiling_find_fx_locations(e.slot)
+        S._ceiling_muted_fx[e.slot] = {
+          slot      = e.slot,
+          file      = e.file,
+          desc      = e.desc or "",
+          locations = locations,
+          is_active = true,
+        }
+        Log.line("CEILING-POLL",
+          ("mute detected: slot=%d desc=%s locations=%d"):format(
+            e.slot, tostring(e.desc), #locations))
+      else
+        reaper.gmem_write(e.slot + Code.CEILING_GMEM_MUTE, 0)
+      end
+    end
+  end
+
+  if newly_muted and not S._ceiling_alert_dismissed then
+    S._ceiling_alert_pending = true
+  end
+end
+
+-- Walk every track's FX chain to find every instance of the JSFX whose
+-- recorded slot matches `slot`. Returns a list of location records:
+--   { track_idx (1-based, "M" for master), track_name, fx_idx (1-based),
+--     fx_name }
+-- The popup uses this to tell the user "Track 5 'Vocal' / FX 2: <name>"
+-- per occurrence, since the same .jsfx file can be loaded on multiple
+-- tracks and they ALL share one slot/_ra_muted state.
+function Code.ceiling_find_fx_locations(slot)
+  local out = {}
+  local target_file
+  for _, e in ipairs(Code.ceiling_get_slots()) do
+    if e.slot == slot then target_file = e.file; break end
+  end
+  if not target_file then return out end
+  local fname = target_file:match("[^/\\]+$") or target_file
+  local fx_ref_low = ("reaassist/" .. fname):lower()
+
+  local function walk(tr, idx_label, track_name)
+    local fxc = reaper.TrackFX_GetCount(tr)
+    for fi = 0, fxc - 1 do
+      local _, fxname = reaper.TrackFX_GetFXName(tr, fi, "")
+      if fxname and fxname:lower():find(fx_ref_low, 1, true) then
+        out[#out + 1] = {
+          track_idx  = idx_label,
+          track_name = track_name or "",
+          fx_idx     = fi + 1,
+          fx_name    = fxname or "",
+        }
+      end
+    end
+  end
+
+  -- Master track first.
+  local master = reaper.GetMasterTrack(0)
+  if master then
+    local _, mname = reaper.GetTrackName(master, "")
+    walk(master, "M", mname or "Master")
+  end
+  local tcount = reaper.CountTracks(0)
+  for ti = 0, tcount - 1 do
+    local tr = reaper.GetTrack(0, ti)
+    if tr then
+      local _, tname = reaper.GetTrackName(tr, "")
+      walk(tr, ti + 1, tname or "")
+    end
+  end
+  return out
+end
+
+-- Returns true if at least one instance of the JSFX bound to this slot
+-- is "live" right now -- i.e. its track is not muted AND the FX itself
+-- is enabled (not bypassed) AND it is still in a track's FX chain.
+--
+-- Used by the ceiling poll to filter out stale gmem mute mirrors when
+-- the user has muted the track or bypassed the FX. Without this filter,
+-- the mute mirror set during a previous run would sit at `1` forever
+-- (a non-running JSFX cannot clear its own gmem) and the popup would
+-- keep claiming the FX is muted on every replay -- which is the exact
+-- bug this addresses.
+--
+-- Walks fresh FX locations (rather than relying on entry.locations
+-- caches) so a moved/renamed FX is also handled correctly. The 200 ms
+-- poll throttle keeps the cost negligible for typical sessions.
+function Code.ceiling_slot_is_active(slot)
+  local locs = Code.ceiling_find_fx_locations(slot)
+  if #locs == 0 then return false end
+  for _, loc in ipairs(locs) do
+    local tr
+    if loc.track_idx == "M" then
+      tr = reaper.GetMasterTrack(0)
+    elseif type(loc.track_idx) == "number" then
+      tr = reaper.GetTrack(0, loc.track_idx - 1)
+    end
+    if tr then
+      local muted   = (reaper.GetMediaTrackInfo_Value(tr, "B_MUTE") or 0) > 0.5
+      local enabled = reaper.TrackFX_GetEnabled(tr, (loc.fx_idx or 1) - 1)
+      if (not muted) and enabled then return true end
+    end
+  end
+  return false
+end
+
+-- Diagnose-with-model: attach the JSFX file as an actual attachment and
+-- prefill the chat input with a templated diagnostic prompt. Cross-
+-- platform via Attach.file (io.open / os.* paths), no shell-out.
+function Code.ceiling_diagnose_one(slot)
+  local muted = S._ceiling_muted_fx and S._ceiling_muted_fx[slot]
+  if not muted or not muted.file then return end
+
+  -- Confirm file still exists before attempting attach (the user could
+  -- have deleted it manually since the slot was recorded).
+  local f = io.open(muted.file, "rb")
+  if not f then
+    Log.add_error("Could not read JSFX file for diagnosis: " .. tostring(muted.file))
+    return
+  end
+  f:close()
+
+  -- Use the existing attach pipeline. Attach.file handles read, size
+  -- checks, classification, and queue add. Errors land in
+  -- S.attach_error and surface in the chat input bar like any other
+  -- failed attach.
+  local ok = Attach.file(muted.file)
+  if not ok then
+    -- attach_error already set by Attach.file. User sees it next frame.
+    return
+  end
+
+  -- Templated diagnostic prompt; user reviews and sends. Keep it short --
+  -- the attached file carries the full code; the prompt just tells the
+  -- model what we want analyzed.
+  local fname = muted.file:match("[^/\\]+$") or muted.file
+  S.input_buf = ([[The attached JSFX (%s%s) is muting itself because ReaAssist's safety output ceiling detected sustained signal above the configured ceiling for >50 ms -- a likely runaway-feedback or DSP math bug producing exponential growth. Please analyze the DSP and identify what's wrong.
+
+What's causing the runaway, and what specific change would fix it? Do NOT modify the safety injection blocks (lines marked `// --- ReaAssist output ceiling`); only fix the user-facing DSP code.]]):format(
+    fname,
+    (muted.desc ~= "" and muted.desc ~= fname)
+      and (' -- "' .. muted.desc .. '"') or "")
+
+  -- Drop the entry so a fresh trip on the same slot later re-opens the
+  -- popup. Without this, S._ceiling_muted_fx[slot] would still be set
+  -- after Diagnose closes the popup, and the next mute on that slot
+  -- wouldn't be flagged "newly muted" by the poll loop.
+  S._ceiling_muted_fx     = S._ceiling_muted_fx or {}
+  S._ceiling_muted_fx[slot] = nil
+
+  -- Close the popup so the user can see the chat with the attachment.
+  S._ceiling_alert_pending = false
+  S._ceiling_alert_open    = false
+end
+
 -- Dispatch one tick of the curl pump. If a 529 retry is scheduled and its
 -- deadline has passed, re-fire the saved request body. Otherwise, when a
 -- request is in flight, throttle-poll the response file (0.1s minimum).
@@ -17976,6 +22901,7 @@ local function loop()
   end
 
   Loop.pump_curl_or_retry()
+  Loop.handle_ceiling_poll()
 
   -- Gemini tier auto-retest: armed at startup if the last result was
   -- ambiguous (so persisted tier is nil) and a Google key is configured.
@@ -18052,24 +22978,38 @@ local function loop()
   -- so by the time the response arrives the verify is usually complete
   -- and the post-response UI stays perfectly smooth.
   --
-  -- PowerShell warm-up: the chat's own curl ExecProcess fires on the
-  -- send frame and pays ~1-3 s cold-start. By the next frame (when
-  -- this loop detects the idle->waiting edge), PS is warm, so
-  -- check_start's ExecProcess pays only ~200 ms. Slight extra freeze
-  -- on the frame right after Send, immediately following the much
-  -- larger chat-curl freeze; the user perceives a single ~1.2-3.2 s
-  -- "Send pressed, REAPER busy" moment rather than two separate
-  -- freezes (one at Send, one after response).
+  -- The check is DEFERRED by CFG.UPDATE_CHECK_DEFER seconds rather than
+  -- firing on the very next frame after idle->waiting. The chat curl's
+  -- own ExecProcess fires on the send frame and blocks the main thread
+  -- for ~1-3 s cold-start of PowerShell; stacking the update-check
+  -- ExecProcess (another ~200 ms warm) onto the immediately-following
+  -- frame extended the perceived Send-press freeze. Deferring 400 ms
+  -- lands the update spawn after PS is warm and after the chat-curl
+  -- freeze is fully done, so its 200 ms hitch falls inside "Thinking..."
+  -- where the spinner is up and the user expects nothing else to happen.
+  -- ExecProcess timeoutmsec must remain >= 0 -- timeoutmsec = -1 (true
+  -- async no-wait) flashes a PowerShell/cmd window on Windows because
+  -- REAPER's async path skips the hidden-window flag.
   --
   -- _session_check_fired is a session-level guard: it ensures only ONE
   -- piggyback fires per ReaAssist launch. Users who never send a message
   -- can still trigger a check manually via Settings > Check for Updates.
+  -- _session_check_armed_at is the time of the idle->waiting edge; the
+  -- defer compares against it on each subsequent frame until the budget
+  -- elapses, then fires once and clears via _session_check_fired.
   -- check_start itself has a busy guard (Updater.is_busy) so an in-flight
   -- manual check or repair cannot be raced by this trigger.
-  if not update._session_check_fired
-      and S._prev_status == "idle" and S.status == "waiting" then
-    update._session_check_fired = true
-    Updater.check_start()
+  if not update._session_check_fired then
+    if not update._session_check_armed_at
+        and S._prev_status == "idle" and S.status == "waiting" then
+      update._session_check_armed_at = time_precise()
+    end
+    if update._session_check_armed_at
+        and (time_precise() - update._session_check_armed_at)
+            >= CFG.UPDATE_CHECK_DEFER then
+      update._session_check_fired = true
+      Updater.check_start()
+    end
   end
   S._prev_status = S.status
 
@@ -18094,7 +23034,16 @@ local function loop()
   if update.state == "checking" then
     Updater.check_poll()
   elseif update.state == "verifying" then
-    Updater.tick_sha_diff()
+    -- Dispatch to native-poll or pure-Lua tick based on which mode
+    -- start_sha_diff selected (and which mode tick_native_sha may have
+    -- since fallen back to). _sha_diff is cleared on completion so the
+    -- nil-guard handles the rare "complete-on-this-frame" race.
+    local s = update._sha_diff
+    if s and s.mode == "native" then
+      Updater.tick_native_sha()
+    else
+      Updater.tick_sha_diff()
+    end
   elseif update.state == "downloading" then
     Updater.download_poll()
   elseif update.state == "rename_retry" then
@@ -18285,12 +23234,22 @@ end
 function Bootstrap.render_checking()
   if update.state == "verifying" then
     local s = update._sha_diff
-    local total = (s and s.files) and #s.files or 0
-    local idx   = (s and s.idx)   or 0
-    if total > 0 then
-      ImGui.ImGui_Text(RA.ctx, string.format(
-        "Verifying files (%d/%d)...",
-        math.min(idx, total), total))
+    -- Per-file progress is only meaningful in pure-Lua mode; the native
+    -- subprocess hashes everything in one shot and there is no
+    -- intermediate count to surface. Show a generic "Verifying files..."
+    -- in native and lua_fallback modes (the latter resets lua_idx to 1
+    -- and re-walks, so a count would step backwards relative to native's
+    -- elapsed wall-clock).
+    if s and (s.mode == "lua") and s.to_hash then
+      local total = #s.to_hash
+      local idx   = s.lua_idx or 0
+      if total > 0 then
+        ImGui.ImGui_Text(RA.ctx, string.format(
+          "Verifying files (%d/%d)...",
+          math.min(idx, total), total))
+      else
+        ImGui.ImGui_Text(RA.ctx, "Verifying files...")
+      end
     else
       ImGui.ImGui_Text(RA.ctx, "Verifying files...")
     end
@@ -18362,7 +23321,12 @@ function Bootstrap.loop()
   -- in its dev-signal handler; we do it inline here because the normal
   -- loop never runs in bootstrap mode.
   if update.state == "checking"      then Updater.check_poll()       end
-  if update.state == "verifying"     then Updater.tick_sha_diff()    end
+  if update.state == "verifying" then
+    local s = update._sha_diff
+    if s and s.mode == "native" then Updater.tick_native_sha()
+    else                             Updater.tick_sha_diff()
+    end
+  end
   if update.state == "downloading"   then Updater.download_poll()    end
   if update.state == "rename_retry"  then Updater.rename_retry_poll() end
   -- Auto-accept: in recovery we do not show an "Update Now" confirm step.

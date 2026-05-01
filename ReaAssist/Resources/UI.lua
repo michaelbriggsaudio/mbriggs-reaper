@@ -120,18 +120,20 @@ local _DETAILS_GROUP_OF = {
   ["Time"]       = "cost",   -- grouped with Est. Cost so the "bill" sits together
   ["Thinking"]   = "reasoning",
   ["Est. Cost"]  = "cost",
+  ["Est. Total"] = "cost",
 }
 local _DETAILS_ROW_ORDER = {
   "Model", "Complexity",
   "Context", "FX Cache",
   "Tokens", "Cache", "API Calls", "Time",
   "Thinking",
-  "Est. Cost",
+  "Est. Cost", "Est. Total",
 }
 local _DETAILS_FIELD_TOOLTIPS = {
   ["Context"]    = "Which source material was bundled with your prompt. 'Session' = live state of your REAPER session (tracks, items, FX, markers, etc.). 'API' = the REAPER/ReaScript API reference. 'fx:<plugin>' = per-plugin parameter reference. 'plugin_ref:<plugin>' = general plugin documentation.",
   ["Model"]      = "Which model produced this response.",
   ["Est. Cost"]  = "Estimated cost for this exchange based on the provider's per-token pricing. May differ slightly from what the provider actually bills.",
+  ["Est. Total"] = "Running total of estimated cost across every turn in this chat up to and including this one. Hidden on turn 1 since it would just match Est. Cost.",
   ["Tokens"]     = "Input tokens / output tokens used in this exchange. Input covers your prompt plus the bundled context; output is the model's reply.",
   ["Time"]       = "How long the model took to return its response.",
   ["Cache"]      = "Tokens read from the prompt cache / tokens newly written to the cache this turn. Cache reads are billed at a fraction of the normal input-token rate.",
@@ -5725,6 +5727,300 @@ function Render._key_validation_error_popup()
       ImGui.ImGui_CloseCurrentPopup(RA.ctx)
     end
     ImGui.ImGui_EndPopup(RA.ctx)
+  end
+  UI.pop_modal_style()
+end
+
+-- =============================================================================
+-- Render._ceiling_alert_popup
+-- =============================================================================
+-- Modal that surfaces when ReaAssist's safety output ceiling tripped on one
+-- or more JSFX. State comes from the host poll loop in ReaAssist.lua
+-- (Loop.handle_ceiling_poll); the diagnose action goes through
+-- Code.ceiling_diagnose_one.
+--
+-- No "Reset Mute" button: the JSFX-side mute auto-clears on transport
+-- stopped->playing transitions, so a manual reset would be redundant.
+-- The popup is purely informational + diagnostic: tell the user what
+-- happened, where, and offer to send the JSFX to the model for analysis.
+--
+-- Open trigger: S._ceiling_alert_pending = true (set by the poll on a
+-- new mute-flag transition). Stays open until the user clicks Dismiss
+-- or the muted list goes empty (e.g. user hit Play and the JSFX-side
+-- auto-clear wiped state).
+function Render._ceiling_alert_popup()
+  if S._ceiling_alert_pending and not S._ceiling_alert_open then
+    S._ceiling_alert_pending = false
+    S._ceiling_alert_open    = true
+    ImGui.ImGui_OpenPopup(RA.ctx, "Output Ceiling Engaged##ceiling_alert")
+  end
+
+  if not S._ceiling_alert_open then return end
+
+  -- Ordered list (sort by slot for stable render). Stays open until the
+  -- user explicitly dismisses, so they see a record of what tripped this
+  -- session even after JSFX-side auto-clear releases the mute.
+  local muted = S._ceiling_muted_fx or {}
+  local entries = {}
+  for _, e in pairs(muted) do entries[#entries + 1] = e end
+  table.sort(entries, function(a, b) return a.slot < b.slot end)
+
+  -- ---------- Layout constants (V5 -- matches Settings provider cards) ----------
+  -- Each entry is rendered as a card mirroring the API-key cards in
+  -- Render._shared_key_screen_impl: TK.card bg, TK.border 1px, SC(6)
+  -- corner radius, SC(12 x 10) inner padding. The card auto-sizes to
+  -- its contents (ChildFlags_AutoResizeY).
+  local CARD_GAP = RA.SC(6)        -- vertical gap between cards
+
+  -- Both the popup AND the inner list region have FIXED dimensions, so
+  -- the Dismiss row never shifts and the list area is the only thing
+  -- that can scroll. LIST_H was tuned to fit three single-location
+  -- cards comfortably (each card is ~SC(70) tall once WindowPadding,
+  -- ItemSpacing, and the FramePadding'd Diagnose button are factored
+  -- in) -- see the math in the inline comment below. Anything above
+  -- three cards triggers the inner scrollbar; one or two cards stack
+  -- at the top of the region with empty space underneath, which is
+  -- the price for the "Dismiss never moves" UX the user asked for.
+  --
+  -- Card height empirics:
+  --   border (2) + WindowPadding y top (10) + title row (~22 button)
+  --   + ItemSpacing.y (4) + Dummy(2) + ItemSpacing.y (4)
+  --   + 1 location row (~15) + WindowPadding y bottom (10) = ~69
+  -- Three cards: 3 * 69 + 2 * (CARD_GAP + ItemSpacing.y * 2) = ~235.
+  -- LIST_H rounded up so multi-location cards still fit three at a
+  -- time more often than not (a 2-location card adds ~SC(18)).
+  local LIST_H  = RA.SC(245)
+  local pop_w   = RA.SC(500)
+  local pop_h   = RA.SC(490)
+  if update._main_w then
+    ImGui.ImGui_SetNextWindowPos(RA.ctx,
+      update._main_x + (update._main_w - pop_w) * 0.5,
+      update._main_y + (update._main_h - pop_h) * 0.5,
+      ImGui.ImGui_Cond_Appearing())
+  end
+  ImGui.ImGui_SetNextWindowSize(RA.ctx, pop_w, pop_h, ImGui.ImGui_Cond_Appearing())
+
+  UI.push_modal_style()
+  if ImGui.ImGui_BeginPopupModal(RA.ctx,
+        "Output Ceiling Engaged##ceiling_alert", true,
+        ImGui.ImGui_WindowFlags_NoScrollbar()
+          | ImGui.ImGui_WindowFlags_NoScrollWithMouse()) then
+
+    local body_avail_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+    local body_start_x = GetCursorPosX(RA.ctx)
+
+    -- ===== Headline (Inter Bold SC(15), red) =====
+    PushFont(RA.ctx, FONT.inter_bold, RA.SC(15))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.red)
+    Text(RA.ctx, "Safety ceiling tripped")
+    PopStyleColor(RA.ctx)
+    PopFont(RA.ctx)
+    Dummy(RA.ctx, 1, RA.SC(4))
+
+    -- ===== Body explanation (Inter Reg SC(12), muted, wrapped) =====
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+    ImGui.ImGui_PushTextWrapPos(RA.ctx,
+      body_start_x + body_avail_w - RA.SC(4))
+    Text(RA.ctx,
+      "These effects exceeded the safety ceiling for >50 ms and self-muted "
+      .. "to prevent runaway feedback. Mute clears on transport restart; if "
+      .. "it re-trips, click Diagnose to attach the JSFX file and ask the "
+      .. "model to analyze it.")
+    ImGui.ImGui_PopTextWrapPos(RA.ctx)
+    PopStyleColor(RA.ctx)
+    PopFont(RA.ctx)
+    Dummy(RA.ctx, 1, RA.SC(12))
+
+    -- ===== Section label "MUTED EFFECTS" with count on the right =====
+    -- Mirrors Settings-screen v5 section labels (API KEYS, PREFERENCES).
+    local count_label = (#entries == 1) and "1 effect"
+                                          or (#entries .. " effects")
+    UI.v5_section_label("MUTED EFFECTS", nil, count_label)
+
+    -- ===== Cards list (fixed-size, scrollable when content overflows) =====
+    -- Fixed LIST_H -- popup chrome + this child + footer = pop_h, all
+    -- precomputed, so the Dismiss row sits at the same Y on every
+    -- frame regardless of how many cards are present. The inner
+    -- BeginChild auto-shows its scrollbar when the stacked cards
+    -- exceed LIST_H (in practice, when there are 4 or more entries
+    -- with single-location cards). Padding 0 + transparent bg keeps
+    -- the cards reading as the only surface in this region. Muted
+    -- scrollbar matches the V5 settings palette.
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(), 0, 0)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(),            0x00000000)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarBg(),        0x00000000)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrab(),      TK.border_str)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabHovered(),
+      UI.lerp_u32(TK.border_str, TK.text, 0.30))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
+      UI.lerp_u32(TK.border_str, TK.text, 0.55))
+    if ImGui.ImGui_BeginChild(RA.ctx, "##ceiling_entries",
+          body_avail_w, LIST_H, 0) then
+      local card_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+
+      for idx, e in ipairs(entries) do
+        if idx > 1 then Dummy(RA.ctx, 1, CARD_GAP) end
+
+        -- Card: TK.card bg, 1px TK.border, SC(6) rounding, SC(12 x 10)
+        -- inner padding -- identical to the settings provider cards.
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), TK.card)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),  TK.border)
+        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildBorderSize(), 1)
+        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildRounding(),  RA.SC(6))
+        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(),
+          RA.SC(12), RA.SC(10))
+        if ImGui.ImGui_BeginChild(RA.ctx, "##ceil_card_" .. e.slot,
+              card_w, 0,
+              ImGui.ImGui_ChildFlags_AutoResizeY()
+                | ImGui.ImGui_ChildFlags_Borders()) then
+
+          -- Capture row metrics BEFORE any items so the right-aligned
+          -- Diagnose button anchors to the card's inner-right edge
+          -- regardless of label length. (Same pattern as the console
+          -- URL link in the API-key cards.)
+          local row_start_x = GetCursorPosX(RA.ctx)
+          local row_avail_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+
+          -- Pre-measure the Diagnose button so its right-anchor X is
+          -- known before we draw the title.
+          local btn_label = "Diagnose with Model"
+          PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
+          local btn_text_w = CalcTextSize(RA.ctx, btn_label)
+          PopFont(RA.ctx)
+          local btn_w = btn_text_w + RA.SC(20)
+
+          -- Status dot: red, halo'd. Drawn via InvisibleButton so it
+          -- reserves layout space and emits hover events for the
+          -- tooltip. Mirrors the green/grey provider-card dot.
+          do
+            local dot_r   = RA.SC(4)
+            local dot_dia = dot_r * 2
+            local font_h  = ImGui.ImGui_GetTextLineHeight(RA.ctx)
+            ImGui.ImGui_InvisibleButton(RA.ctx,
+              "##ceil_dot_" .. e.slot, dot_dia + 2, font_h)
+            local bx1, by1 = ImGui.ImGui_GetItemRectMin(RA.ctx)
+            local dl       = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+            local dot_cy   = by1 + font_h * 0.5 - RA.SC(1)
+            local halo_col = (TK.red & 0xFFFFFF00) | 0x40
+            ImGui.ImGui_DrawList_AddCircleFilled(dl,
+              bx1 + dot_r + 1, dot_cy, dot_r * 2, halo_col, 20)
+            ImGui.ImGui_DrawList_AddCircleFilled(dl,
+              bx1 + dot_r + 1, dot_cy, dot_r, TK.red, 16)
+            UI.tooltip("Muted: output ceiling tripped")
+            SameLine(RA.ctx, 0, RA.SC(6))
+          end
+
+          -- Effect name -- card title (Inter SemiBold SC(12), TK.text)
+          local label = (e.desc and e.desc ~= "") and e.desc
+            or (e.file and e.file:match("[^/\\]+$") or "(unknown)")
+          PushFont(RA.ctx, FONT.inter_semi, RA.SC(12))
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
+          Text(RA.ctx, label)
+          PopStyleColor(RA.ctx)
+          PopFont(RA.ctx)
+
+          -- Diagnose button, right-aligned to the card's inner-right
+          -- edge. Compact FramePadding + Inter SemiBold SC(11) so the
+          -- button height matches the title row visually.
+          SameLine(RA.ctx)
+          SetCursorPosX(RA.ctx, row_start_x + row_avail_w - btn_w)
+          PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
+          PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),
+            RA.SC(10), RA.SC(4))
+          UI.push_modal_primary_btn()
+          if ImGui.ImGui_Button(RA.ctx,
+                btn_label .. "##ceiling_diag_" .. e.slot,
+                btn_w, 0) then
+            Code.ceiling_diagnose_one(e.slot)
+          end
+          UI.pop_modal_primary_btn()
+          ImGui.ImGui_PopStyleVar(RA.ctx, 1)
+          PopFont(RA.ctx)
+
+          -- Per-location rows: Inter Reg SC(11), TK.text_muted,
+          -- indented under the title. Quiet enough to not compete
+          -- with the title, but readable.
+          Dummy(RA.ctx, 1, RA.SC(2))
+          local locs = e.locations or {}
+          PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+          if #locs == 0 then
+            local fname = e.file and e.file:match("[^/\\]+$") or "?"
+            Text(RA.ctx, "  " .. fname)
+          else
+            for _, loc in ipairs(locs) do
+              local idx_str = (loc.track_idx == "M") and "Master"
+                or ("Track " .. tostring(loc.track_idx))
+              local tname = loc.track_name and loc.track_name ~= ""
+                              and (' "' .. loc.track_name .. '"') or ""
+              Text(RA.ctx, ("  %s%s   \xc2\xb7   FX %d"):format(
+                idx_str, tname, loc.fx_idx or 0))
+            end
+          end
+          PopStyleColor(RA.ctx)
+          PopFont(RA.ctx)
+
+          ImGui.ImGui_EndChild(RA.ctx)
+        end
+        ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+        PopStyleColor(RA.ctx, 2)
+      end
+      ImGui.ImGui_EndChild(RA.ctx)
+    end
+    PopStyleColor(RA.ctx, 5)            -- ChildBg + 4 Scrollbar*
+    ImGui.ImGui_PopStyleVar(RA.ctx, 1)  -- WindowPadding for the scroll child
+
+    -- Tight gap above the footer -- the dynamic list_h above already
+    -- consumed the slack, so this is just the visual breathing room
+    -- between the bottom card and the Dismiss row.
+    Dummy(RA.ctx, 1, RA.SC(6))
+
+    -- ===== Footer: checkbox left, Dismiss button right =====
+    do
+      local footer_avail = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+      local b_w = RA.SC(110)
+      local cb_x = GetCursorPosX(RA.ctx)
+      local cb_y = ImGui.ImGui_GetCursorPosY(RA.ctx)
+
+      -- Checkbox -- frame palette tuned to the modal surface.
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBg(),        TK.card_hover)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgHovered(),
+        UI.lerp_u32(TK.card_hover, TK.accent_ui, 0.35))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgActive(),
+        UI.lerp_u32(TK.card_hover, TK.accent_ui, 0.55))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_CheckMark(),      TK.accent)
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
+      local cur = S._ceiling_alert_dismissed and true or false
+      local changed, val = ImGui.ImGui_Checkbox(RA.ctx,
+        "Don't show again this session", cur)
+      PopFont(RA.ctx)
+      PopStyleColor(RA.ctx, 4)
+      if changed then S._ceiling_alert_dismissed = val end
+
+      -- Dismiss button on the same row, right-aligned.
+      SameLine(RA.ctx)
+      SetCursorPosX(RA.ctx, cb_x + footer_avail - b_w)
+      ImGui.ImGui_SetCursorPosY(RA.ctx, cb_y)
+      UI.push_modal_primary_btn()
+      local dismiss = ImGui.ImGui_Button(RA.ctx,
+        "Dismiss##ceiling_alert", b_w, 0)
+      UI.pop_modal_primary_btn()
+
+      if dismiss
+         or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
+        S._ceiling_alert_open = false
+        S._ceiling_muted_fx   = {}
+        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+      end
+    end
+
+    ImGui.ImGui_EndPopup(RA.ctx)
+  else
+    -- Popup closed externally (X button, click outside, etc.).
+    -- Treat the same as Dismiss -- clear so a new trip can re-open.
+    S._ceiling_alert_open = false
+    S._ceiling_muted_fx   = {}
   end
   UI.pop_modal_style()
 end
@@ -12280,12 +12576,17 @@ function Render.main_window()
               field_map["API Calls"] = tostring(msg.api_calls)
             end
 
-            -- Per-field value colour overrides. Est. Cost uses a darkened
-            -- accent -- the "receipt total" line visually weighted against
-            -- the rest of the muted metadata.
+            -- Per-field value colour overrides. Est. Cost and Est. Total
+            -- use a darkened accent -- the "receipt" lines visually weighted
+            -- against the rest of the muted metadata. Est. Total's color is
+            -- cached unconditionally because the row's value is computed
+            -- per-frame outside the field_map cache (so the cumulative stays
+            -- accurate if a prior turn's cost ever changes), but the colour
+            -- itself is constant per palette.
             local accent_dk = UI.lerp_u32(TK.accent, 0x000000FF, 0.18)
             local color_map = {}
             if field_map["Est. Cost"] then color_map["Est. Cost"] = accent_dk end
+            color_map["Est. Total"] = accent_dk
 
             msg._details_field_map    = field_map
             msg._details_color_map    = color_map
@@ -12312,10 +12613,71 @@ function Render.main_window()
           -- _DETAILS_FIELD_TOOLTIPS for the hover help.
           local group_of = _DETAILS_GROUP_OF
           local row_order = _DETAILS_ROW_ORDER
+          -- Hide the Time and Est. Cost rows while this turn is still in
+          -- flight. Both are set from per-call usage (msg.response_time,
+          -- msg.cost) which gets overwritten on every API call within
+          -- the turn. On a multi-call turn (docs-gate retry, intra-turn
+          -- context_needed fetch), the cached values reflect the LAST
+          -- completed call, not the in-flight one -- so Time freezes at
+          -- e.g. "18.2s" while live "Thinking" climbs to "0:49", and
+          -- Est. Cost shows a partial number that ticks up later. The
+          -- final response_time (computed from time_precise() -
+          -- S.request_start_time, with request_start_time preserved
+          -- across intra-turn retries) and final cost already reflect
+          -- the full turn, so when the rows reappear they match.
+          local hide_inflight = (S.status == "waiting"
+                                 and S.pending_display_idx == i
+                                 and S.request_start_time)
+
+          -- Running total cost across every turn up to and including this
+          -- one. Computed per-frame (instead of folded into the cached
+          -- field_map) so that if a prior turn's cost is ever rebuilt --
+          -- e.g. via the Retry button -- this row reflects the new sum
+          -- without needing to invalidate every downstream message's
+          -- cache. Cheap: O(i) additions, ~once per visible bubble per
+          -- frame. Hidden on turn 1 (count == 1) since it would just
+          -- duplicate Est. Cost and clutter the card.
+          local total_cost_value = nil
+          if msg.tok_in and msg.cost then
+            local total, count = 0, 0
+            for j = 1, i do
+              local pm = S.display_messages[j]
+              if pm and pm.cost then
+                total = total + pm.cost
+                count = count + 1
+              end
+            end
+            if count > 1 then
+              total_cost_value = "~" .. MODELS.format_cost(total)
+            end
+          end
+
+          -- Each row is { label, value, suffix? }. The optional suffix is
+          -- a faint-colour qualifier rendered after the value (e.g. the
+          -- receipt rows tag "(this turn)" / "(this chat)" so users can
+          -- tell the per-message Est. Cost from the running Est. Total at
+          -- a glance without reading the tooltip). Free Tier wording
+          -- already explains itself, so we skip the suffix in that case.
           local rows = {}
           for _, name in ipairs(row_order) do
-            if field_map[name] then
-              rows[#rows+1] = { name, field_map[name] }
+            local hide = hide_inflight
+              and (name == "Time" or name == "Est. Cost" or name == "Est. Total")
+            if not hide then
+              local value, suffix
+              if name == "Est. Total" then
+                value  = total_cost_value
+                suffix = value and "(this chat)" or nil
+              elseif name == "Est. Cost" then
+                value = field_map[name]
+                if value and not msg.free_tier then
+                  suffix = "(this turn)"
+                end
+              else
+                value = field_map[name]
+              end
+              if value then
+                rows[#rows+1] = { name, value, suffix }
+              end
             end
           end
 
@@ -12339,9 +12701,17 @@ function Render.main_window()
           -- the USER_MAX_W cap when a row (e.g. Context with many buckets)
           -- is naturally longer than that max -- in which case it wraps
           -- inside. Short-content cards hug tightly.
+          -- Suffix gap: tight space between the value and the faint-colour
+          -- qualifier so they read as one phrase ("~$0.10 (this turn)")
+          -- rather than separate columns. Matches the ItemSpacing.x used
+          -- elsewhere in the card via SameLine below.
+          local SUFFIX_GAP = RA.SC(4)
           local max_row_natural_w = 0
           for _, r in ipairs(rows) do
             local vw = CalcTextSize(RA.ctx, r[2])
+            if r[3] then
+              vw = vw + SUFFIX_GAP + CalcTextSize(RA.ctx, r[3])
+            end
             local rw = label_px + vw
             if rw > max_row_natural_w then max_row_natural_w = rw end
           end
@@ -12358,7 +12728,12 @@ function Render.main_window()
               if prev_group and g ~= prev_group then
                 content_h = content_h + DIVIDER_SPACE
               end
-              content_h = content_h + wrap_h(r[2], value_w)
+              -- Measure value + suffix as one combined string so a row
+              -- whose tail wraps still gets the right height. In practice
+              -- the cost rows fit on one line, but Context-style long
+              -- values would otherwise undercount.
+              local meas = r[3] and (r[2] .. " " .. r[3]) or r[2]
+              content_h = content_h + wrap_h(meas, value_w)
               prev_group = g
             end
           end
@@ -12400,7 +12775,11 @@ function Render.main_window()
           -- rect is the "last item" that IsItemHovered checks against.
           -- `value_color` overrides the default TK.text_muted for the value
           -- -- used for Complexity's tier colour and Est. Cost's accent.
-          local function draw_field(x, y, label, value, label_px, wrap_w, row_h, value_color)
+          -- `suffix` (optional) is a faint-colour qualifier appended after
+          -- the value (e.g. "(this turn)" / "(this chat)" on the cost rows)
+          -- so the parenthetical reads as a hint rather than competing
+          -- with the dollar amount.
+          local function draw_field(x, y, label, value, label_px, wrap_w, row_h, value_color, suffix)
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
             ImGui.ImGui_SetCursorPos(RA.ctx, x, y)
             Text(RA.ctx, label)
@@ -12411,6 +12790,12 @@ function Render.main_window()
             Text(RA.ctx, value)
             ImGui.ImGui_PopTextWrapPos(RA.ctx)
             PopStyleColor(RA.ctx)
+            if suffix then
+              SameLine(RA.ctx, 0, SUFFIX_GAP)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
+              Text(RA.ctx, suffix)
+              PopStyleColor(RA.ctx)
+            end
             local tip = field_tooltips[label]
             if tip then
               ImGui.ImGui_SetCursorPos(RA.ctx, x, y)
@@ -12438,9 +12823,10 @@ function Render.main_window()
                 div_sx1, div_screen_y, div_sx2, div_screen_y, TK.border, 1)
               cursor_y = cursor_y + DIVIDER_SPACE
             end
-            local rh = wrap_h(r[2], value_w)
+            local meas = r[3] and (r[2] .. " " .. r[3]) or r[2]
+            local rh = wrap_h(meas, value_w)
             draw_field(row_x, cursor_y, r[1], r[2], label_px, value_w, rh,
-              color_map[r[1]])
+              color_map[r[1]], r[3])
             cursor_y = cursor_y + rh
             prev_group = g
           end
@@ -13375,6 +13761,10 @@ function Render.main_window()
           local poll_timeout = (pa.is_custom
             and ((tonumber(pa.request_timeout) or 600) + 15))
             or (prefs.cloud_request_timeout or CFG.CLOUD_TIMEOUT_DEFAULT)
+          -- Reflect "Extend by Ns" clicks in the displayed Timeout. The watchdog
+          -- already honors them by pushing S.send_time forward; this just keeps
+          -- the on-screen number in sync so the user sees the deadline move.
+          poll_timeout = poll_timeout + (S.timeout_extensions or 0) * CFG.EXTEND_BY_SECS
 
           PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ItemSpacing(), 8, RA.SC(2))
 
@@ -13494,6 +13884,7 @@ function Render.main_window()
             local ext_label = "Extend by " .. CFG.EXTEND_BY_SECS .. "s"
             if ImGui.ImGui_Button(RA.ctx, ext_label) then
               S.send_time = S.send_time + CFG.EXTEND_BY_SECS
+              S.timeout_extensions = (S.timeout_extensions or 0) + 1
             end
             PopFont(RA.ctx)
             PopStyleColor(RA.ctx, 5)
@@ -15423,6 +15814,11 @@ function Render.main_window()
     PopFont(RA.ctx)
     UI.pop_modal_style()
   end
+
+  -- Safety output ceiling alert. Triggered by Loop.handle_ceiling_poll
+  -- when a JSFX trips its mute latch. Renders independently of which
+  -- screen is currently active.
+  Render._ceiling_alert_popup()
 
   return open
 end

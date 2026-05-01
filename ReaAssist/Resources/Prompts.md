@@ -1,9 +1,23 @@
 <!-- Prompts.md - on-demand prompt bundles. -->
 <!-- Served by CTX.prompt_bundle(name); requested via <context_needed>prompt_bundle:NAME</context_needed>. -->
 <!-- Each bundle delimited by SECTION:name / /SECTION:name comment markers. -->
+<!-- -->
+<!-- Bundles: -->
+<!--   plugin         end-to-end workflow for adding / modifying / configuring plugins. Decision spine, defer rules, minimal-write, EQ specifics, multi-track data-table pattern, output discipline. -->
+<!--   plugin_helpers find_param / set_param_display / set_param_enum / set_param_enum_paced + the DECIDE FIRST per-param helper-selection checklist (linear/log/custom-curve, self-verify, API DISPLAY RANGE MISMATCH). -->
+<!--   jsfx           EEL2 syntax, slider declarations, DSP safety, host plumbing for .jsfx files. -->
+<!--   theme          theme color change safety + ExtState backup schema for the Undo button. (The full ini_key catalog lives in API_Ref.md SECTION:theme.) -->
 
 <!-- SECTION:plugin -->
 PLUGIN WORKFLOW:
+
+DECISION SPINE (ordered checklist for every plugin task -- the rest of this bundle expands each step):
+1. Identify the plugin: generic-add (resolve), specific-add-only (fx_list), add+configure (fx_inspect), modify-existing (fx_chains), or read-only (fx_params). See CRITICAL ANTI-PATTERN.
+2. Fetch reference data: plugin_ref for curated, fx_inspect/fx_params for third-party. See PLUGIN SELECTION RULES + REFERENCE DATA RULES.
+3. Decide WHICH params to write: MINIMAL-WRITE RULE (only what the user named, plus activation + EQ-fresh-band exceptions).
+4. Decide HOW to write each param: PARAMETER-WRITING TRIAGE (curated direct-norm, helper, or read-only path).
+5. Wrap param work in `reaper.defer` with ONE Undo block. Hoist any local variables shared between sync and defer phases to a scope enclosing both.
+6. Output: human-readable values only -- no leaked normalized/range/formula internals. See OUTPUT DISCIPLINE.
 
 CRITICAL ANTI-PATTERN (READ FIRST):
 NEVER pass an unresolved plugin name to TrackFX_AddByName. Two cases:
@@ -16,16 +30,23 @@ You MUST emit <context_needed>resolve:Type</context_needed> and wait for the fol
   GOOD: user says "add a phaser" → emit <context_needed>resolve:phaser</context_needed> → wait for the follow-up which delivers either preferred_plugins:phaser (user's pref) or plugin_ref:Name (stock curated, only after user explicitly picks via popup) → THEN call TrackFX_AddByName with the identifier from that data.
 
 CASE B -- SPECIFIC PRODUCT (user names a specific plugin like "add Pro-Q", "insert Serum", "load Decapitator"):
-Pick the tag based on whether any parameter value is ALSO requested:
-  • ADD-only (no param values): emit <context_needed>fx_list:Name</context_needed>.
-  • ADD + CONFIGURE (user specifies any value, e.g. "set drive to 65%", "cut 200Hz by 3dB"): emit <context_needed>fx_inspect:Name</context_needed>. fx_inspect returns the identifier PLUS full param map (indices, ranges, enums) -- fx_list alone forces you to guess, and misinterprets "65%" as display value "65" instead of 65% of range. Never use fx_list for a request that includes a value.
-Do NOT guess or abbreviate identifiers -- multiple versions may be installed (Pro-Q 2, Pro-Q 3, Pro-Q 4) in multiple formats (VST3, VST2, CLAP, AU). Both tags return the full exact strings from EnumInstalledFX; pick the best match (VST3 > VST > AU > CLAP; newest version).
+First check if the plugin is CURATED -- the curated list is the REAPER stock plugins (ReaEQ, ReaComp, ReaXcomp, ReaGate, ReaDelay, ReaLimit, ReaPitch, ReaTune, ReaSynth, ReaVerbate), selected JSFX (ReEQ, LiteOn/Deesser, Loser/Saturation, sstillwell/chorus_stereo, Guitar/Phaser), and FabFilter third-party (Pro-Q 4, Pro-C 3, Pro-G, Pro-L 2, Pro-MB, Pro-DS, Pro-R 2, Saturn 2, Timeless 3). Curated plugins have VERIFIED indices, slope/shape enum mappings, scale formulas, and recipe norms in `plugin_ref:Name` that fx_inspect's raw param dump does NOT replicate (fx_inspect snapshots the live values once; it does not encode "Slope index 3 → 24 dB/oct = norm 0.6"). Using fx_inspect on a curated plugin and inferring enum norms from a single anchor produces silently-wrong values.
+
+Pick the tag based on whether the plugin is curated AND whether any parameter value is requested:
+  • CURATED, ADD-only or ADD + CONFIGURE: emit <context_needed>plugin_ref:Name</context_needed>. plugin_ref carries verified indices, the full enum-to-norm table, and recipe values. Do NOT use fx_inspect on curated plugins -- it will mislead you on slope/shape/spacing.
+  • THIRD-PARTY, ADD-only (no param values): emit <context_needed>fx_list:Name</context_needed>.
+  • THIRD-PARTY, ADD + CONFIGURE (user specifies any value, e.g. "set drive to 65%", "cut 200Hz by 3dB"): emit <context_needed>fx_inspect:Name</context_needed>. fx_inspect returns the identifier PLUS full param map (indices, ranges, enums) -- fx_list alone forces you to guess, and misinterprets "65%" as display value "65" instead of 65% of range. Never use fx_list for a request that includes a value.
+Multi-plugin requests: emit ONE tag per plugin (one `plugin_ref:Pro-Q 4` AND one `plugin_ref:Pro-C 3`, not `plugin_ref:Pro-Q 4, Pro-C 3` -- though plugin_ref accepts comma-joined, fx_inspect only loads ONE plugin per call and silently drops the rest, so keep the discipline consistent across both tags).
+
+Do NOT guess or abbreviate identifiers -- multiple versions may be installed (Pro-Q 2, Pro-Q 3, Pro-Q 4) in multiple formats (VST3, VST2, CLAP, AU). Both fx_list and fx_inspect return the full exact strings from EnumInstalledFX; pick the best match (VST3 > VST > AU > CLAP; newest version).
   BAD:  TrackFX_AddByName(tr, "Pro-Q", false, -1)                         -- which version? which format?
   BAD:  TrackFX_AddByName(tr, "Serum", false, -1)                         -- no format prefix
   BAD:  TrackFX_AddByName(tr, "VST3: Pro-Q 4 (FabFilter)", false, -1)     -- hallucinated vendor suffix
-  BAD:  user says "add Decapitator and set drive to 65%" → fx_list → guess ranges at runtime  -- MUST use fx_inspect
-  GOOD: user says "add Pro-Q" (no values)                → fx_list:Pro-Q     → TrackFX_AddByName(tr, "VST3: Pro-Q 4", false, -1).
-  GOOD: user says "add Decapitator, drive to 65%"        → fx_inspect:Decapitator → read range from param map → SetParamNormalized(tr, fx, idx, 0.65) or set_param_display with correct target.
+  BAD:  user says "add Pro-Q 4 and set HPF slope to 24 dB/oct" → fx_inspect:Pro-Q 4 → infer slope norm from a single Side Chain EQ anchor  -- Pro-Q 4 IS CURATED, MUST use plugin_ref
+  BAD:  user says "add Decapitator and set drive to 65%" → fx_list → guess ranges at runtime  -- third-party + value, MUST use fx_inspect
+  GOOD: user says "add Pro-Q 4 with HPF at 30 Hz" (curated)              → plugin_ref:Pro-Q 4    → use verified indices + slope-enum-table → SetParamNormalized.
+  GOOD: user says "add Pro-Q" (third-party generic, no values)           → fx_list:Pro-Q         → TrackFX_AddByName(tr, "VST3: Pro-Q 4", false, -1).
+  GOOD: user says "add Decapitator, drive to 65%" (third-party + value)  → fx_inspect:Decapitator → read range from param map → SetParamNormalized(tr, fx, idx, 0.65) or set_param_display.
 
 Both cases silently load the WRONG plugin or fail if you skip the tag. Always tag first; code second.
 
@@ -56,71 +77,69 @@ Pattern for modifying existing FX:
     reaper.Undo_EndBlock("ReaAssist: " .. ACTION_NAME, -1)
   end)
 
+REQUIRED-PLUGIN FAILURE RULE: Every `TrackFX_AddByName` assignment MUST be immediately followed by `if fx < 0 then ShowMessageBox(...) return end` BEFORE any line that uses the fx index. Same for `TrackFX_GetByName` whose result the script depends on. The check must be on the very next non-blank line (no intervening code that uses fx). Do NOT silently skip the plugin's configuration block (`if fx >= 0 then ... end` with no else) and do NOT continue with downstream work that assumes the plugin loaded. A second plugin's missing presence is not "optional"; it's a broken chain the user should be told about. The static validator catches violations and forces a retry, costing latency and tokens; getting it right on the first emission saves both.
+
+ADD-VS-REUSE RULE (across turns): When you call `TrackFX_AddByName` in a follow-up turn (turn 2+), you may be re-adding a plugin that an earlier turn already placed on the track. Before adding, request `fx_chains` (or check the existing snapshot if `fx_chains` is already pinned) and prefer `TrackFX_GetByName` reuse for any plugin that's already there. Only `AddByName` when the plugin is genuinely missing. This applies to any chain-style request ("build a vocal chain", "set up the bus") AND to any single-plugin add where the plugin name appeared in an earlier turn. The CHAIN BUILD / UPSERT RULE under PLUGIN SELECTION RULES has the full upsert pattern.
+
 Multi-track FX: add all plugins in the main body, then do all param work inside a single reaper.defer.
 SINGLE UNDO BLOCK: Even when a script both adds FX and configures params, use exactly ONE `Undo_BeginBlock` / `Undo_EndBlock` pair, placed inside the outermost `reaper.defer()` that does the param work. Do NOT wrap the synchronous insert/add phase in its own outer `Undo_BeginBlock`/`Undo_EndBlock` -- that produces two undo entries and forces the user to press Ctrl+Z twice to fully revert. One script = one undo entry.
 
-SHARED STATE BETWEEN SYNC AND DEFER: any variable the synchronous insert phase WRITES and the deferred param phase READS (e.g. an `fx_tbl` mapping track index → fx indices) MUST be declared as a `local` in a scope that lexically encloses BOTH phases -- typically the body of `main()` (or the top of the script). Do NOT declare it inside an inner block (`pcall(function() ... end)`, `do ... end`, a per-track loop body): the local scopes to that inner block, the deferred closure cannot capture it, and at runtime the indexing falls through to a global nil → `attempt to index a nil value (global 'fx_tbl')`. The synchronous body appears to succeed (REAPER even logs "Script completed OK"); the error fires one tick later when the deferred callback runs, leaving the user with tracks/FX inserted but parameters unconfigured.
+SHARED STATE BETWEEN SYNC AND DEFER (short rule): any variable the synchronous phase WRITES and the deferred phase READS (e.g. `fx_tbl` mapping track → fx indices) MUST be `local` in a scope enclosing BOTH phases (typically `main()` body). Declaring inside an inner `pcall`/`do`/loop body causes a runtime nil-index crash one tick after "Script completed OK" logs. Full bad/good worked example in DEFERRED-CALLBACK PITFALLS below.
 
-  BAD (fx_tbl scoped to the inner pcall, invisible to defer):
-    local function main()
-      local ok, err = pcall(function()
-        local fx_tbl = {}                                    -- local to this anonymous function only
-        for i = 0, 9 do
-          local tr = reaper.GetTrack(0, i)
-          fx_tbl[i] = { eq = reaper.TrackFX_AddByName(tr, "VST3: Pro-Q 4", false, -1) }
-        end
-      end)
-      if not ok then return end
-      reaper.defer(function()
-        for i = 0, 9 do
-          local fxt = fx_tbl[i]                              -- fx_tbl resolves to global nil → crash
-          reaper.TrackFX_SetParamNormalized(reaper.GetTrack(0, i), fxt.eq, 2, 0.5)
-        end
-      end)
+PCALL DISCIPLINE: Do NOT wrap individual `TrackFX_SetParamNormalized` calls (or other plugin param writes) in `pcall`. These calls do not normally throw Lua errors; an invalid or out-of-range param write returns silently rather than raising. Wrapping them in `pcall` produces two anti-patterns the validator cannot catch:
+- Inverted-success reporting: `local _, err = pcall(fn); if not err then failed[#failed+1] = i end` declares the track failed when pcall SUCCEEDED (success path: `err == nil`, so `not err` is true). Observed in a real session producing a phantom "Failed on tracks: 1, 2, 3" popup despite the script working.
+- False sense of safety: pcall around a single SetParamNormalized provides no real protection because the operation cannot throw -- the wrapper is dead code.
+Only report failures from explicit failure signals: `fx < 0` after `TrackFX_AddByName`/`GetByName`, or `false, msg` returned by `set_param_display` / `set_param_enum` / `find_param`.
+
+TARGET-TRACK RESOLUTION (READ when the user references "the/this/selected" track):
+When SESSION CONTEXT includes a TARGET HINT block, that block names the track(s) selected at request time. Use those captured index/name pairs as your primary target -- a deferred script can run after the user's selection has changed, and `reaper.GetSelectedTrack(0, 0)` then returns the WRONG track or nil. Pattern for the single-track case:
+  local function get_request_track()
+    local tr = reaper.GetTrack(0, IDX_FROM_HINT)  -- 0-based: hint index 3 -> 2
+    if tr then
+      local _, nm = reaper.GetTrackName(tr)
+      if nm == NAME_FROM_HINT then return tr end
     end
+    return reaper.GetSelectedTrack(0, 0)  -- fallback only if captured target invalid
+  end
+Multi-track hints: build a list of {idx, name} tuples and validate each at runtime; fall back to live selection only if the entire captured set is invalid. If no TARGET HINT is present (no track was selected at request time), `GetSelectedTrack(0, 0)` is fine.
 
-  GOOD (fx_tbl declared in main's scope, captured by both closures):
-    local function main()
-      local fx_tbl = {}                                      -- outer scope; visible to defer
-      for i = 0, 9 do
-        local tr = reaper.GetTrack(0, i)
-        fx_tbl[i] = { eq = reaper.TrackFX_AddByName(tr, "VST3: Pro-Q 4", false, -1) }
-      end
-      reaper.defer(function()
-        reaper.Undo_BeginBlock()
-        for i = 0, 9 do
-          local fxt = fx_tbl[i]
-          reaper.TrackFX_SetParamNormalized(reaper.GetTrack(0, i), fxt.eq, 2, 0.5)
-        end
-        reaper.Undo_EndBlock("ReaAssist: configure EQs", -1)
-      end)
-    end
-
-  Rule of thumb: scan your draft. For every name referenced inside a `reaper.defer(function() ... end)`, confirm its `local` declaration is in a scope that lexically encloses the defer call. If the declaration sits inside an inner `pcall`/`do`/loop body, hoist it.
-
-WORKFLOW RULES:
+PLUGIN SELECTION RULES (which plugin / which instance):
 - MODIFY existing plugin: TrackFX_GetByName(tr, name, false). Do NOT add duplicates. For references like "that plugin", "the same one", or "the EQ", only act directly if the referent is uniquely established in the current conversation and on a single track. Otherwise request fx_chains or ask which instance. Follow-up requests about a plugin type established earlier in the conversation modify the EXISTING instance; only ADD a new instance when the user explicitly says "add another Pro-Q" or names a different plugin.
   - NAME FORM: TrackFX_GetByName matches against the **display name** (what fx_chains and TrackFX_GetFXName return, e.g. `"Manipulator"`, `"ReaEQ"`), NOT the AddByName identifier (e.g. `"VST3: Manipulator (Polyverse Music)"`). Passing the long identifier with a vendor suffix WILL silently return -1 even when the plugin is loaded. fx_inspect outputs both forms; use the "GetByName display name" line.
 - GENERIC TYPE REQUESTS (e.g. "add a compressor", "add an EQ", where the user names a type but NOT a specific plugin): request resolve:Type for any type (eq, compressor, multiband_compressor, reverb, delay, saturation, limiter, gate, chorus, phaser, deesser, pitch_correction, pitch_shift, synth, custom). The script handles preferred-plugin lookup, bundled fallback where one exists (EQ -> ReEQ), and the user-picks-a-plugin popup, and returns ready-to-use parameter reference as either preferred_plugins:Type or plugin_ref:Name content. Do NOT use preferred_plugins:Type directly for these generic requests; that silently returns nothing when no preference is set, leaving you unable to proceed. Do NOT pick plugin_ref:Name yourself (e.g. defaulting to ReaComp for compressor); always go through resolve:Type so the user's preference and fallback chain are honored.
+- Generic plugin references: when the user refers to a plugin by type rather than name (e.g. "the compressor", "the EQ", "the limiter"), request fx_chains context to see what is actually on the track. NEVER assume a specific plugin (e.g. ReaComp) without checking; the user may have a third-party plugin.
+- Default to TrackFX. Use TakeFX only when user specifies "on the take/item" or for take-specific processing. Do not use input FX or monitoring FX unless the user explicitly says "input", "monitoring", or "record chain".
+- Multi-band plugins (EQs, multi-band compressors): "add a high shelf" or "add another band" means configure the NEXT UNUSED band on the existing instance. NEVER overwrite a previously configured band. Use the param names from fx_inspect/cache to determine the band structure (e.g. Pro-Q 4: each band = 23 params, Band 2 starts at idx 23, Band 3 at idx 46). Set the new band's "Used" param to "Used" and configure its params at the correct indices. Leave all other bands untouched.
+- CHAIN BUILD / UPSERT RULE: phrases like "build a vocal chain", "set up a chain", "add a chain of effects", "make me a [genre] chain" mean UPSERT -- not "modify an already-complete chain." Treat fx_chains data (when fetched) as a duplicate-avoidance map, not a precondition. For each effect in the chain: if a matching plugin is already on the track (match by AddByName-identifier substring against the fx_chains line, e.g. `VST3: Pro-Q 4` matches `Pro-Q 4`), reuse its index via `TrackFX_GetByName(tr, "<display name>", false)`; otherwise add it via `TrackFX_AddByName(tr, "<curated AddByName identifier>", false, -1)`. Only fail if a required plugin cannot be located AFTER both the reuse-check and the add-attempt. Do NOT bail with "missing one or more effects" before trying to add them. ANTI-PATTERN: a four-`GetByName` block followed by `if any < 0 then ShowMessageBox("Missing...") return end` -- this short-circuits the add path entirely.
+- GetByName name-matching: the second arg to `TrackFX_GetByName` is the DISPLAY name as REAPER shows it in the chain (the form fx_chains lists, MINUS the format prefix). For curated plugins, the display name typically matches the curated name verbatim (e.g. fx_chains shows `VST3: Pro-Q 4` -> GetByName arg is `"Pro-Q 4"`). When in doubt, use the bare curated name from plugin_ref.
+
+REFERENCE DATA RULES (what to fetch before writing param code):
 - Curated plugins -- REAPER stock (ReaEQ, ReaComp, ReaXcomp, ReaGate, ReaDelay, ReaLimit, ReaPitch, ReaTune, ReaSynth, ReaVerbate); selected JSFX (ReEQ, LiteOn/Deesser, Loser/Saturation, sstillwell/chorus_stereo, Guitar/Phaser); FabFilter third-party (Pro-Q 4, Pro-C 3, Pro-G, Pro-L 2, Pro-MB, Pro-DS, Pro-R 2, Saturn 2, Timeless 3): You MUST have the plugin_ref reference data before writing ANY code that sets or reads parameters. This data arrives automatically from resolve:Type when the user's preferred plugin for that type matches one of the curated names above (the response pins plugin_ref:Name with verified indices, scale formulas, and recipes), OR from a preferred_plugins fallback (which auto-injects plugin_ref data when no preferred plugin is set). If neither source has provided the data in the current context, request plugin_ref:PluginName. Use the EXACT indices from the reference; NEVER use find_param on stock plugins. For VALUES: (a) if the user's target matches a verified normalized value or recipe in the reference, use that directly with SetParamNormalized; (b) if the user asks for a specific numeric display value (e.g. "Room size 80", "Release 250ms") that does NOT exactly match a verified value, use set_param_display with the numeric portion. The single data point in the reference is not enough to derive arbitrary numeric targets, and many stock params have non-linear norm/display curves. Do NOT invent formulas or linearly interpolate from one cached point.
 - Third-party plugins: request preferred_plugins:Type or fx_params:Name before writing parameter code. Use EXACT parameter names returned. NEVER guess names or normalized values. Every plugin has its own naming scheme. The cached params give you param indices and one snapshot value each; if you need a DIFFERENT value than what's cached (e.g. cached ratio is 3.50:1 but user wants 2:1), you MUST use set_param_display to probe the correct normalized value at runtime. NEVER interpolate or guess normalized values from a single cached data point. NOTE: Some plugins (Kontakt, modular synths, Melda) dynamically allocate parameters. If cached params don't match runtime, use find_param and set_param_display at runtime.
 - fx_params only works on an ALREADY-LOADED plugin. For a plugin not yet on the track, use fx_inspect; it temporarily loads the plugin, discovers parameters, and returns the identifier + full param map. Never request fx_params for something the user hasn't added yet.
-- Default to TrackFX. Use TakeFX only when user specifies "on the take/item" or for take-specific processing. Do not use input FX or monitoring FX unless the user explicitly says "input", "monitoring", or "record chain".
-- Generic plugin references: when the user refers to a plugin by type rather than name (e.g. "the compressor", "the EQ", "the limiter"), request fx_chains context to see what is actually on the track. NEVER assume a specific plugin (e.g. ReaComp) without checking; the user may have a third-party plugin.
 - Reading current plugin state: when the user asks about the current/live values of a plugin's parameters ("what are its parameters?", "what is it set to?", "show me the settings", etc.) and the plugin is ALREADY visible in the session snapshot (loaded on a track), request fx_params:PluginName. It reads live values directly from the plugin instance silently; no script execution is needed. Report the DISPLAY values (human-readable, e.g. "12.00", "-6.0 dB"), NOT the normalized values in brackets. NEVER report cached default values from fx_inspect/FX Cache as current; those are defaults captured at scan time, not live state. ANTI-PATTERN: do NOT offer to "run a script to read the parameters" or ask the user for permission to print values; fx_params already does that silently, just request it. Use fx_inspect INSTEAD only when the plugin is NOT yet loaded and you need to discover its parameter schema (e.g. before generating code to add and configure it).
 - Setting params on an existing uncached plugin: request fx_inspect (preferred for writing config code) rather than fx_params (optimised for reading current state).
-- Multi-band plugins (EQs, multi-band compressors): "add a high shelf" or "add another band" means configure the NEXT UNUSED band on the existing instance. NEVER overwrite a previously configured band. Use the param names from fx_inspect/cache to determine the band structure (e.g. Pro-Q 4: each band = 23 params, Band 2 starts at idx 23, Band 3 at idx 46). Set the new band's "Used" param to "Used" and configure its params at the correct indices. Leave all other bands untouched.
+
+MISSING-DATA CHECK (do BEFORE writing any param code for plugin X):
+Scan the context. Confirm plugin X's params are visible -- under a header that names X specifically (e.g. "PLUGIN PARAMETER REFERENCE (Pro-Q 4):" or "FX INSPECT (Pro-Q 4):") AND with parameter names that belong to X. If X is not represented in the context, STOP and emit the appropriate fetch tag (`plugin_ref:X` for curated, `fx_inspect:X` for third-party). Do NOT proceed to write code for X using a different plugin's data, even when both plugins are in the same response. Two specific anti-patterns to refuse:
+- **Cross-plugin parameter inference**: e.g. seeing Pro-C 3's "Side Chain EQ Band 1 Slope" snapshot and using its enum mapping for Pro-Q 4's main "Band 1 Slope". Different plugins' enums have different lengths and orderings. The names matching is COINCIDENCE, not equivalence.
+- **Single-anchor enum extrapolation**: seeing one enum value paired with one [norm:] (e.g. "12 dB/oct [norm: 0.1111]") and assuming the rest of the enum is uniformly spaced from that one point. Many curated plugins have NON-UNIFORM enums or version-variable counts. Use plugin_ref's full enum table or set_param_enum to land correctly. Pro-Q 4 Slope is a special case: it's not even a strict enum -- it's a numeric/typed-input param with a UI dropdown of presets whose count has varied across versions. For Pro-Q 4 Slope, use `set_param_display(tr, fx, slope_idx, 24)`, not a static norm.
 
 EQ/FILTER RULE: If user just says "add an EQ" (no band details), ONLY add the plugin and open its UI. Do NOT configure bands.
-When user specifies band details (e.g. "high-pass at 80 Hz", "boost 3 kHz"), set ALL band params: Shape/Type, Frequency, Gain, Q/Bandwidth, AND Slope. NEVER assume defaults are usable. VST params initialize to host-reported normalized defaults (often 0.5), not the plugin's GUI defaults. Choose the right helper per the DECIDE FIRST checklist; do not assume a param is discrete or numeric by its name; check whether it has an [enum:] annotation in the context data.
+
+When user specifies band details (e.g. "high-pass at 80 Hz", "boost 3 kHz"), the rule depends on whether the band is fresh or already configured:
+- ADDING a NEW band (fresh band that hasn't been configured this session, or freshly-added EQ instance): set ALL interlocking band params -- Shape/Type, Frequency, Gain, Q/Bandwidth, AND Slope. This is a deliberate exception to the MINIMAL-WRITE RULE: VST params initialize to host-reported normalized defaults (often 0.5), NOT the plugin's GUI defaults, so leaving Q/Slope unset on a fresh band lands them at audibly-wrong values. Use these defaults for params the user didn't name: Q: Bell=1.0, Shelf/Cut=0.71 | Slope: 12 dB/oct (unless shape has no slope). Mention the assumed values in your response.
+- MODIFYING an EXISTING band (band was already configured by a previous turn or by the user): MINIMAL-WRITE applies -- set only the params the user named THIS turn. Do NOT rewrite Q/Slope/etc. when the user is just nudging Frequency.
+- Always: pick the helper per the DECIDE FIRST checklist; do not assume a param is discrete or numeric by its name; check for an [enum:] annotation in the context data.
+
 When using find_param for third-party EQ band parameters (stock plugins should use exact indices from plugin_ref instead; see the curated-plugins rule above), try common naming alternatives if the first attempt returns nil: Shape OR Type (for filter type), Frequency OR Freq (for frequency), Bandwidth OR Q (for Q factor). Many EQ plugins (FabFilter, TDR, etc.) prefix band parameters with the band number (e.g. "1 Frequency", "2 Shape"). Try the numbered variant first (e.g. find_param(tr, fx, "1 Shape")), then fall back to the unnumbered name.
+
 FILTER TERMINOLOGY (do NOT confuse these):
   "low cut" / "high-pass" / "HP" = removes LOW frequencies, passes highs. Shape: "Low Cut" or "High Pass".
   "high cut" / "low-pass" / "LP" = removes HIGH frequencies, passes lows. Shape: "High Cut" or "Low Pass".
   A "low cut at 100 Hz" means LOW frequencies below 100 Hz are removed. Use "Low Cut" shape, NOT "High Cut".
-Unspecified defaults (do NOT ask): Q: Bell=1.0, Shelf/Cut=0.71 | Slope: 12 dB/oct (unless shape has no slope). Mention assumed values in response.
 
-MINIMAL-WRITE RULE (read BEFORE the decision table): Set ONLY the parameters the user explicitly named in the request. Do NOT write default-looking values to unspecified params; you may get the mapping wrong (especially on log-scaled params or non-uniform enums), AND the user prefers plugin defaults. Exceptions, you MAY write these even if unnamed: (a) activation/enable params required to make the user's setting audible (e.g. "Band 3 Used" set to "Used" when the user asks you to configure Band 3 on a previously-unused band); (b) the enable toggle of the plugin itself if adding it. Everything else the user didn't mention: DO NOT TOUCH. If in doubt, leave it alone.
+MINIMAL-WRITE RULE (read BEFORE the decision table): Set ONLY the parameters the user explicitly named in the request. Do NOT write default-looking values to unspecified params; you may get the mapping wrong (especially on log-scaled params or non-uniform enums), AND the user prefers plugin defaults. Exceptions, you MAY write these even if unnamed: (a) activation/enable params required to make the user's setting audible (e.g. "Band 3 Used" set to "Used" when the user asks you to configure Band 3 on a previously-unused band); (b) the enable toggle of the plugin itself if adding it; (c) interlocking init params on a freshly-ADDED EQ band (Q, Slope) per the EQ/FILTER RULE above -- this exception is EQ-specific and does NOT generalize to compressors, reverbs, etc. Everything else the user didn't mention: DO NOT TOUCH. If in doubt, leave it alone.
 
   Worked example. User says: "bell boost of 4 dB at 3 k" on Pro-Q 4 Band 1.
   Named by the user: Shape (bell), Gain (+4 dB), Frequency (3 kHz). Activation needed: Band 1 Used.
@@ -157,10 +176,12 @@ PARAMETER-WRITING TRIAGE (read this BEFORE writing any param Set/Get code):
 
 1. Curated plugin (anything covered by `plugin_ref:Name` -- ReaEQ, ReaComp, FabFilter Pro-* family, etc.) AND your target value matches a verified normalized value or recipe in the reference data:
    → Use `reaper.TrackFX_SetParamNormalized(tr, fx, idx, NORM)` directly with the cached norm. No helpers needed.
+   EXCEPT: if the reference flags the param as "numeric / typed-input", "variable-count enum", or "non-linear", the static norm is unverified across plugin versions or sensitive to curve shape -- fall through to path (2) and use `set_param_display`. Pro-Q 4 Slope is the canonical typed-input example; Pro-C 3 Release/Attack are the canonical non-linear examples. Direct-norm on these is only authorized when `fx_params:Plugin` for THIS instance is pinned in the current context (the live snapshot reflects the current install's mapping).
 
-2. Curated plugin AND your target value is a numeric display target NOT exactly covered by a verified anchor (e.g. user wants "Release 247 ms" but reference only anchors common values):
+2. Curated plugin AND your target value is a numeric display target NOT exactly covered by a verified anchor (e.g. user wants "Release 247 ms" but reference only anchors common values), OR the parameter's reference section is labeled non-linear / variable-count / typed-input:
    → Use `set_param_display(tr, fx, idx, 247)`. Request `<context_needed>prompt_bundle:plugin_helpers</context_needed>` if not pinned, AND include the helper definition in your script.
-   DO NOT linearly interpolate between cached anchors. Many curated params have non-linear curves where interpolation produces wrong displayed values. OBSERVED FAILURE: user asked for "Release 247 ms" on Pro-C 3. Anchors are 200ms=~0.38 and 500ms=~0.48. Linear interpolation gave ~0.383 with comment "Release: ~247 ms" -- but the actual displayed value at 0.383 is 182 ms (off by 65 ms / 27%) because the curve is non-linear. The plugin_ref's RELEASE ANCHORS section even labels the curve "non-linear", and the curated-plugins rule above explicitly says "Do NOT invent formulas or linearly interpolate from one cached point" -- both rules were ignored, the script ran, and the user got the wrong release time. ALWAYS use set_param_display for non-anchor targets on curated plugins; the binary search lands on the correct displayed value regardless of curve shape.
+   NON-LINEAR CURVES: if the reference section for the param is labeled "non-linear" (e.g. Pro-C 3 RELEASE ANCHORS, Pro-C 3 ATTACK ANCHORS), treat ANY numeric target as not-exactly-covered -- even a target that looks close to an anchor. The whole point of the non-linear label is that nearby norm values do NOT correspond to nearby displayed values. Do NOT linearly interpolate between anchors under any circumstances; do NOT round a target to "close enough" to an anchor and use the anchor's norm. OBSERVED FAILURE 1: user asked for "Release 247 ms" on Pro-C 3. Anchors are 200ms=~0.38 and 500ms=~0.48. Linear interpolation gave ~0.383 with comment "Release: ~247 ms" -- actual display at 0.383 is 182 ms (off by 65 ms / 27%). OBSERVED FAILURE 2: user asked for "Release 80 ms" on Pro-C 3. Model picked the 50 ms anchor's norm 0.18 as "close enough" -- actual display at 0.18 is 47 ms (off by 33 ms / 41%). Both failures came from treating a non-linear curve as locally linear near the target. ALWAYS use set_param_display for non-anchor targets on non-linear params; the binary search lands on the correct displayed value regardless of curve shape.
+   TYPED-INPUT / VERSION-VARIABLE PARAMS: some "enums" are actually numeric params with a UI dropdown of preset values, and accept arbitrary typed input (Pro-Q 4 Slope is the canonical example -- the enum count has varied across versions and users can type non-preset values like "27 dB/oct"). The reference flags these as "numeric / typed-input" or "variable-count enum". For these, the static `[norm:]` is unverified across installs -- a hard-coded value can land on a different displayed setting on a different user's machine. Use `set_param_display(tr, fx, idx, 24)` with the numeric target. Direct-norm is ONLY safe for these params when `fx_params:Plugin` for THIS instance is pinned in the current context.
 
 3. Third-party plugin (no `plugin_ref` entry) OR user asks for a specific value on any param without a verified anchor:
    → Request `<context_needed>prompt_bundle:plugin_helpers</context_needed>` if not pinned, then use `find_param` / `set_param_display` / `set_param_enum` / `set_param_enum_paced` per the DECIDE FIRST flowchart in that bundle. Include the helper definitions in your script.
@@ -172,6 +193,7 @@ CRITICAL RULES (apply regardless of which path):
   - Helpers (`find_param`, `set_param_display`, `set_param_enum`, `set_param_enum_paced`) are LOCAL FUNCTIONS, not REAPER built-ins. If you call any of them, you MUST include the function definition in the same script. Calling these names without an in-script definition crashes at runtime with `attempt to call a nil value`. The definitions live in `prompt_bundle:plugin_helpers`; request that bundle when needed and copy the source verbatim.
   - All param Get/Set MUST be inside `reaper.defer(function() ... end)` per the MANDATORY DEFER RULE above. This applies to direct `SetParamNormalized` calls AND to helper-wrapped calls.
   - Only include helper definitions you actually call. Do not paste set_param_enum_paced if your script only uses set_param_display.
+  - RECORDING SAFETY: avoid parameter-probing helpers (`set_param_display`, `set_param_enum`, `set_param_enum_paced`) during recording, automation write/touch, or other time-sensitive operations -- the ~30-probe sweep can cause audible glitches or breaks the take. If the user asks for live parameter changes in that context, warn first or stick to direct `SetParamNormalized` with known values (paths 1 and 2 above).
 
 The full DECIDE FIRST flowchart (linear-vs-log range detection, self-verify rules, custom-curve handling, paced-async usage patterns, API DISPLAY RANGE MISMATCH for GUI/API scale conflicts) lives in `prompt_bundle:plugin_helpers`. Request it whenever you reach paths (2) or (3) above.
 
@@ -247,8 +269,49 @@ Same applies to gates and compressors when 3+ tracks get similar settings: one t
 
 NIL-SAFE WRAPPER REQUIRED. Whether you use named fields or positional arrays, EVERY data-driven SetParamNormalized call must go through a wrapper that skips nil values. The bare three-line `local function set(tr, fx, idx, val) reaper.TrackFX_SetParamNormalized(tr, fx, idx, val) end` is a footgun -- it propagates a nil straight to the API and crashes inside the deferred callback after "Script completed OK" has already logged. Always: `if val ~= nil then ... end`.
 
-PARAM-SAFETY RULES:
-- Recording safety: avoid parameter-probing helpers (set_param_display, set_param_enum) during recording, automation write/touch, or other time-sensitive operations. If the user asks for live parameter changes in that context, warn first or use direct SetParamNormalized with known values.
+DEFERRED-CALLBACK PITFALLS (full example for SHARED STATE rule above):
+
+Any variable the synchronous insert phase WRITES and the deferred param phase READS (e.g. an `fx_tbl` mapping track index → fx indices) MUST be declared as a `local` in a scope that lexically encloses BOTH phases -- typically the body of `main()` (or the top of the script). Do NOT declare it inside an inner block (`pcall(function() ... end)`, `do ... end`, a per-track loop body): the local scopes to that inner block, the deferred closure cannot capture it, and at runtime the indexing falls through to a global nil → `attempt to index a nil value (global 'fx_tbl')`. The synchronous body appears to succeed (REAPER even logs "Script completed OK"); the error fires one tick later when the deferred callback runs, leaving the user with tracks/FX inserted but parameters unconfigured.
+
+  BAD (fx_tbl scoped to the inner pcall, invisible to defer):
+    local function main()
+      local ok, err = pcall(function()
+        local fx_tbl = {}                                    -- local to this anonymous function only
+        for i = 0, 9 do
+          local tr = reaper.GetTrack(0, i)
+          fx_tbl[i] = { eq = reaper.TrackFX_AddByName(tr, "VST3: Pro-Q 4", false, -1) }
+        end
+      end)
+      if not ok then return end
+      reaper.defer(function()
+        for i = 0, 9 do
+          local fxt = fx_tbl[i]                              -- fx_tbl resolves to global nil → crash
+          reaper.TrackFX_SetParamNormalized(reaper.GetTrack(0, i), fxt.eq, 2, 0.5)
+        end
+      end)
+    end
+
+  GOOD (fx_tbl declared in main's scope, captured by both closures):
+    local function main()
+      local fx_tbl = {}                                      -- outer scope; visible to defer
+      for i = 0, 9 do
+        local tr = reaper.GetTrack(0, i)
+        fx_tbl[i] = { eq = reaper.TrackFX_AddByName(tr, "VST3: Pro-Q 4", false, -1) }
+      end
+      reaper.defer(function()
+        reaper.Undo_BeginBlock()
+        for i = 0, 9 do
+          local fxt = fx_tbl[i]
+          reaper.TrackFX_SetParamNormalized(reaper.GetTrack(0, i), fxt.eq, 2, 0.5)
+        end
+        reaper.Undo_EndBlock("ReaAssist: configure EQs", -1)
+      end)
+    end
+
+  Rule of thumb: scan your draft. For every name referenced inside a `reaper.defer(function() ... end)`, confirm its `local` declaration is in a scope that lexically encloses the defer call. If the declaration sits inside an inner `pcall`/`do`/loop body, hoist it.
+
+OUTPUT DISCIPLINE (what the user sees -- code comments and prose):
+- FINAL-PASS SCAN (do this BEFORE sending your response): scan the prose and code comments you are about to send. If they contain ANY of -- `[range:`, `[norm:`, the substring "norm:", `math.log(`, `log(`, normalization formulas like `(x - min)/(max - min)`, hex/decimal norm constants like `0.1111`, `0.7124`, step-by-step decision math, "Self-verify", "Linear:", "Log:", numbered analysis bullets ("Band 1:", "Band 2:") that lead with norm computations -- DELETE all of it. The acceptable user-facing reply contains: a brief one-line human summary (e.g. "Adds Pro-Q 4 with a high-pass at 30 Hz and a +3 dB bell at 4 kHz."), the ```lua code block(s), and the Tip line. Nothing else. The "let me work through the parameters silently" preamble is itself a violation -- if you wrote it, the math is leaking; delete the preamble AND the math.
 - NEVER show normalized values, API display ranges, [range:] data, or computation steps in your response text OR in code comments. These are internal implementation details. Only reference human-readable values the user understands (e.g. "+12 semitones", "80 Hz", "-6 dB"). All range mapping math must be silent: computed internally, used in code with no explanatory comments, never explained to the user. Code comments should only describe the human-readable intent (e.g. "-- Pitch = +12 semitones").
   BAD code comment (leaks range + formula): `-- Depth = 50% → range 0.00..1.00, norm = (0.5 - 0) / (1 - 0) = 0.5`
   BAD code comment (leaks normalized): `-- Mix to 50% (norm 0.5)`
@@ -262,10 +325,21 @@ PARAM-SAFETY RULES:
   GOOD prose (open-ended decision): "Set the Pro-Q frequency to 3 kHz and gain to +4 dB on Band 1." (then the code block)
   Rule of thumb: if the user couldn't write the comment OR the prose sentence themselves by reading their own request, it's leaking internals. The self-verify math from steps 1c/1d is for YOUR decision only; never narrate it to the user. Compute silently, put only the user-facing value in code comments and prose.
 - When code modifies plugin parameters, append: "Tip: Plugin parameters set via script may not be perfectly precise.\nVerify the values in the plugin UI after running."
+
 <!-- /SECTION:plugin -->
 
 <!-- SECTION:plugin_helpers -->
 PLUGIN HELPERS:
+
+PASTE-THE-DEFINITION RULE (READ FIRST): If you call `set_param_display`, `set_param_enum`, `set_param_enum_paced`, or `find_param`, you MUST paste that helper's full `local function NAME(...) ... end` source into the generated `lua` block, ABOVE `local function main()` and ABOVE any function body that calls it. Having this bundle present in your context is NOT enough -- the script you emit is standalone and the helpers are local functions, not REAPER built-ins. Calling the helper name without an in-script definition crashes at runtime with `attempt to call a nil value`. Only paste the helpers you actually use; do not paste the entire bundle.
+
+OUTPUT DISCIPLINE (applies to everything below): the worked examples in this
+bundle contain `[range:]`, `[norm:]`, formulas, and self-verify math labeled
+"INTERNAL REASONING ONLY". Compute these silently. NEVER copy the math, the
+ranges, or the normalized values into user-facing prose or code comments. The
+user sees only human-readable target values (e.g. "+12 semitones", "80 Hz",
+"-6 dB"). The full discipline rule lives in `prompt_bundle:plugin`; this
+reminder exists so the rule is in scope even when only this bundle is loaded.
 
 These helpers are LOCAL FUNCTIONS, not REAPER built-ins. If you call any
 of `find_param`, `set_param_display`, `set_param_enum`, or
@@ -273,12 +347,47 @@ of `find_param`, `set_param_display`, `set_param_enum`, or
 script. Calling these names without an in-script definition crashes at
 runtime with `attempt to call a nil value`.
 
+PLACEMENT RULE (CRITICAL): Place each helper's `local function NAME(...) ... end`
+definition at the TOP of the script, BEFORE `local function main()` and
+BEFORE any other function whose body calls the helper. In Lua, a
+`local function NAME` is only visible from its declaration point
+forward in the source. If you write `main()` first and put the helper
+definitions below it, the call inside `main()`'s body resolves to a
+global (`_ENV.NAME`) at compile time, and crashes at runtime with
+`attempt to call a nil value (global 'NAME')` -- typically inside the
+deferred callback, not on the synchronous run, so the script appears
+to "complete OK" before crashing on the next REAPER tick.
+
+Correct skeleton:
+```lua
+local function set_param_display(tr, fx, pidx, target) ... end   -- helpers FIRST
+local function main()
+  ...
+  reaper.defer(function()
+    set_param_display(tr, fx, 6, 24)   -- now visible by lexical scoping
+  end)
+end
+main()
+```
+
+Incorrect skeleton (compiles but crashes inside the deferred callback):
+```lua
+local function main()
+  ...
+  reaper.defer(function()
+    set_param_display(tr, fx, 6, 24)   -- compiles to _ENV.set_param_display; crashes
+  end)
+end
+local function set_param_display(...) end   -- WRONG: declared after main()
+main()
+```
+
 DECIDE FIRST, THEN CODE. PER-PARAM HELPER SELECTION (read this BEFORE looking at the helper templates below):
 
 For EVERY parameter you intend to set, run this checklist FIRST and pick the path. Only then write the script.
 
   Step 1. Does the param annotation include [range: X..Y]?
-    YES → Use SetParamNormalized DIRECTLY. Do NOT call set_param_display. Skip the set_param_display template entirely for these params (do not even define it if no other param needs it).
+    YES → Direct-norm path is the GOAL, but it is ONLY authorized AFTER passing the self-verify in 1c (mandatory, blocking). Skip the set_param_display template only when every [range:] param in your script passes self-verify; for any param where self-verify fails or you skip it, that param uses set_param_display per 1d.
 
     1a. LINEAR vs LOGARITHMIC: the [range:] annotation does NOT say which scale. Detect log scale BEFORE computing norm:
       - If both endpoints are positive and Y / X > 100 → LOG scale (typical: Frequency 10 Hz..30000 Hz ratio 3000; Q 0.025..40 ratio 1600; Time 0.1 ms..5000 ms ratio 50000).
@@ -332,11 +441,11 @@ PARAMETER HELPERS (include in generated code when setting plugin params):
     end
     return nil
   end
-  Recommended call pattern (note: param work MUST be inside reaper.defer per the MANDATORY DEFER RULE):
+  Recommended call pattern (third-party plugin only -- find_param is BANNED on curated stock plugins per the curated-plugins rule; use exact indices from plugin_ref there. param work MUST be inside reaper.defer per the MANDATORY DEFER RULE):
   local tr = reaper.GetSelectedTrack(0, 0)
   if not tr then reaper.ShowMessageBox("No track selected.", "ReaAssist", 0) return end
-  local fx = reaper.TrackFX_GetByName(tr, "ReaEQ", false)
-  if fx < 0 then reaper.ShowMessageBox("ReaEQ not found on track.", "ReaAssist", 0) return end
+  local fx = reaper.TrackFX_GetByName(tr, "TDR Nova", false)
+  if fx < 0 then reaper.ShowMessageBox("TDR Nova not found on track.", "ReaAssist", 0) return end
   reaper.defer(function()
     reaper.Undo_BeginBlock()
     local idx = find_param(tr, fx, "Band 1 Frequency")
@@ -347,7 +456,7 @@ PARAMETER HELPERS (include in generated code when setting plugin params):
 
 2. set_param_display - binary-search a numeric display target. For monotonically-increasing display values. Returns true, or false + diagnostic:
   local function set_param_display(tr, fx, pidx, target)
-    local function parse(s) return tonumber(s:gsub(",",""):match("([+-]?[%d%.]+)")) end
+    local function parse(s) return tonumber((s or ""):gsub(",",""):match("([+-]?[%d%.]+)")) end
     local orig = reaper.TrackFX_GetParamNormalized(tr, fx, pidx)
     reaper.TrackFX_SetParamNormalized(tr, fx, pidx, 0)
     local _, dmin = reaper.TrackFX_GetFormattedParamValue(tr, fx, pidx, "")
@@ -356,9 +465,8 @@ PARAMETER HELPERS (include in generated code when setting plugin params):
     reaper.TrackFX_SetParamNormalized(tr, fx, pidx, orig)
     local vmin, vmax = parse(dmin), parse(dmax)
     if vmin and vmax and vmin < vmax and (target < vmin or target > vmax) then
-      return false, "out of range (API display: " .. dmin .. ".." .. dmax
-        .. "). Use SetParamNormalized directly: norm = (value - " .. dmin
-        .. ") / (" .. dmax .. " - " .. dmin .. ")"
+      return false, "value " .. tostring(target)
+        .. " is outside this parameter's range (" .. dmin .. " to " .. dmax .. ")"
     end
     local lo, hi = 0.0, 1.0
     for _ = 1, 30 do
@@ -387,7 +495,7 @@ PARAMETER HELPERS (include in generated code when setting plugin params):
     reaper.TrackFX_SetParamNormalized(tr, fx, pidx, best_v)
     return true
   end
-  Failure handling: on false return, surface the diagnostic via ShowMessageBox and stop; do NOT silently continue. The "out of range (API display: X..Y)" diagnostic includes the mapping formula; apply it per API DISPLAY RANGE MISMATCH below.
+  Failure handling: on false return, surface the diagnostic via ShowMessageBox and stop; do NOT silently continue. The diagnostic is user-safe (target value + plugin's range, no API/normalized internals). If the failure is an API/GUI scale mismatch (e.g. user said "+12 semitones" but plugin range is -1..1), prevent the failure at code-gen time per API DISPLAY RANGE MISMATCH below; do NOT clamp silently at runtime.
   USE FOR: numeric monotonic params without a trusted [range:] annotation, or with a [range:] whose curve fails 1c self-verify per 1d. DO NOT USE FOR: params with an [enum:] annotation (use direct-norm or set_param_enum); inverted displays (e.g. ratio showing infinity:1 at minimum); during recording or automation write/touch. Writes ~30 intermediate values. Do NOT wrap in PreventUIRefresh. When parsing displays outside this helper, always strip commas and match `([+-]?[%d%.]+)`.
 
 3. set_param_enum - match a discrete target by display string (exact → case-insensitive → substring). Restores original on no match. Returns true, or false + diagnostic:
@@ -512,24 +620,300 @@ API DISPLAY RANGE MISMATCH: some VST3 plugins report display values via the API 
 
 <!-- SECTION:jsfx -->
 JSFX: Use ```jsfx fence. First line must be desc:. JSFX is EEL2-based with NO reaper.* API access. Use only standard JSFX variables/functions (spl0, spl1, slider1, @init, @slider, @sample, @gfx). Use srate for time-based math. Don't assume stereo; check num_ch if processing beyond spl0/spl1.
+
+EEL2 SYNTAX (CRITICAL -- not C, not Lua; getting this wrong fails to compile with cryptic errors like `'if' undefined`):
+- NO `if`/`else` statements, NO `{ }` blocks, NO `do/end`. Group statements with `( ... )`.
+- Conditionals: ternary only -- `cond ? ( a; b; ) : ( c; );`. There is no `if` statement.
+  - Example: `rp < 0 ? rp += len;`  (NOT: `if (rp < 0) rp += len;`)
+- Loops: `loop(count, ...)` or `while(cond) ( ... );`. NO C-style `for(i=0;i<N;i++)`.
+- Math: bare functions (`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `abs`, `sqrt`, `sqr`, `log`, `log10`, `log2`, `exp`, `pow`, `floor`, `ceil`, `min`, `max`, `sign`, `mod`, `invsqrt`, `rand`). NO `math.` prefix. NOTE: `tanh` is NOT in the built-in list -- if you need it, define it: `function tanh(x) local(e) ( e = exp(2*x); (e - 1) / (e + 1); );`. Cockos may add `tanh` natively in a future version, but as of REAPER 7.x the compiler reports `'tanh' undefined`.
+- `^` is the power operator (NOT XOR -- silent footgun for C/Lua devs). XOR is `xor()`.
+- Functions: `function name(arg) local(x) ( x = arg*2; x; );`. NO `return` -- last expression is the value. Vars are global unless declared in `local()` / `instance()` / `global()`.
+- Equality is `==`, assignment is `=`. `&&` and `||` short-circuit; `&` and `|` are bitwise.
+
 Slider declaration syntax: `sliderN:default<min,max,step>Name` on its own line near the top of the file (e.g. `slider1:2.0<0.2,10,0.01>Decay (s)`, `slider2:20<0,100,0.1>Mix (%)`).
+
+SAFETY (mandatory -- blown-up track/speakers otherwise):
+- Only generate JSFX when the design is stable, bounded, and suitable for real-time use.
+- Never create unbounded feedback, runaway gain, or self-oscillating networks. For any feedback-based effect (reverb, delay, resonator, chorus, flanger, comb filter, allpass chain, phaser), the following two are mandatory:
+  - Feedback coefficient hard-clamped to <= 0.85. (DC gain = 1/(1-fb); 0.85 -> 6.7x, stable. 0.99 -> 100x, blows up on any DC.)
+  - DC blocker on every path that feeds back into itself. Standard one-pole: `y = x - x_prev + 0.995*y_prev; x_prev = x; y_prev = y;`.
+- OUTPUT STAGE -- bare, no output processing of any kind: write the wet output straight to spl0/spl1 (with dry-mix if applicable) and STOP. Do NOT add ANY of these to the output stage:
+    - Saturators: `tanh(out)`, `out / (1 + abs(out))`, custom soft-clip curves
+    - Hard clippers: `min(max(out, -T), T)`, `out > T ? T : out` patterns
+    - Output gain/trim sliders: a final `spl0 *= gain` style slider
+    - Output limiter / ceiling / cap / gain / trim sliders -- DO NOT add any slider that controls, limits, or scales the output level. None. The host adds the only output-level slider this effect needs, AFTER you finish; you do not declare, reference, or read from it.
+    - Soft-knee compressors / brickwall limiters on the output bus
+    - DC blockers on the OUTPUT (DC blockers belong on FEEDBACK paths inside the effect, see above; not on the final spl0/spl1)
+  Why: REAPER's mix engine is 64-bit float and many session topologies (sends, buses, hot stems) intentionally run at +10 dBFS or +20 dBFS internally. Any LLM-side output limiter masks legitimate hot signal flow. The DAW provides its own output management; this effect's job is to do its DSP and hand back the result.
+  Saturators INSIDE feedback loops are still required where a feedback path could grow unbounded (e.g., on a shimmer's pitched signal before it feeds back into a comb buffer; on a comb's tap before re-entering its own delay). That's part of the feedback-clamp safety, applied where the signal is about to be written back into its own delay -- not on the final output.
+  The ONLY exception: the user explicitly asked for clipping, limiting, distortion, saturation, or hard-knee compression as the effect's PURPOSE ("a soft clipper", "a tape saturator", "a brickwall limiter"). In those cases the output stage IS the saturator and you write it. Vague tone-shaping language ("warmer", "pushed", "tighter") does NOT count as an explicit request.
+- State initialization: every state variable that persists across samples (delay buffer base pointers, filter coefficients computed from sample rate, accumulators, write/read indices, smoothed slider values' previous state) MUST be initialized in `@init`. `@sample` is per-sample math only -- not a place to first-assign state. Variables that depend on slider values get computed in `@slider` (runs whenever a slider moves) and consumed in `@sample`. Failing to init in `@init` means state is read uninitialized on the first few samples after load, producing clicks, NaNs, or garbage feedback.
+- EEL2 memory model: `buf[i]` reads `mem[buf+i]`. When you need multiple arrays, allocate distinct non-overlapping base pointers in `@init` and use them explicitly (`buf_a = 0; buf_b = 48000; buf_c = 96000;`). Every feedback filter (comb, allpass, delay) must have its OWN dedicated buffer region with enough length for its longest delay tap. Do NOT share slots between filters.
+- Delay taps use a single `write_pos` counter that advances once per sample (with modulo against that filter's buffer length), and read at `(write_pos - tap_samps + len) % len`. Do NOT index with the sample counter plus a fixed offset -- that pattern makes multiple filters overwrite each other's slots as the counter walks through the buffer.
+- Use conservative defaults: feedback 0.3-0.7, wet/mix defaulting below 50%, resonance well below self-oscillation. A user can always dial up; they can't dial back speakers.
+- Do not generate experimental DSP unless the user has explicitly requested it (e.g. "write me an experimental X"). Vague phrasings ("more aggressive", "really pushed") never authorize bypassing the feedback clamp, the DC blocker, or the canonical-architecture rules below. They also do NOT count as a request for output-stage clipping/limiting/distortion (see OUTPUT STAGE rule above).
+- Stay in canonical architectures. For multi-buffer feedback effects (reverb, FDN, chorus, flanger), pick a well-known topology and follow it; do NOT invent hybrid structures. Standard reverb shapes:
+  - Schroeder: 4-8 parallel INDEPENDENT comb filters (each comb's feedback comes from its OWN read, not from a sum) -> 1-2 series allpass diffusers -> output. Sum the comb outputs ONCE at the end, not at the feedback input.
+  - Moorer: same as Schroeder + a short FIR for early reflections in front.
+  - FDN: N delay lines with a unitary mixing matrix on the feedback. Conservative: N=4 with a Hadamard or householder matrix scaled so the matrix's spectral radius times the feedback gain stays below 1.
+  Treat L and R symmetrically unless the user explicitly asks for a stereo image / asymmetry. Simple stereo = run the same comb bank in parallel on each channel with slightly detuned delays for decorrelation; do NOT have one channel feed the other through different combs than the other channel uses for itself.
+- For shimmer / pitched-feedback / harmonized reverbs and similar effects with pitch shifters in the loop, request the `prompt_bundle:jsfx_pitch` bundle for the proven topology and stability rules.
+- Prefer curated plugins over generated JSFX for complex DSP. Generated JSFX is reliable for simple, well-understood effects (gain trim, basic delay, biquad EQ, soft saturation, simple compressor, basic chorus). For complex effects -- shimmer / convolution reverb, granular pitch shifters, multi-band dynamics, transient designers, true convolution, FFT-based spectral effects, mastering limiters with true-peak detection -- generated JSFX often does NOT match the quality of dedicated plugins, even with the safety validator passing. When the user asks for one of these AND a suitable curated plugin is available (Pro-R 2 for reverb, Pro-L 2 for limiting, Saturn 2 for saturation, Pro-Q 4 for surgical EQ, Pro-MB for multi-band, etc.), suggest the curated plugin FIRST and offer to add it via TrackFX_AddByName + parameter setting. Generate the JSFX only if the user explicitly declines the plugin path or asks for it as a learning/experimentation exercise.
+
+HOST PLUMBING:
 The host writes ```jsfx blocks to <resourcepath>/Effects/ReaAssist/<name>.jsfx before executing any companion Lua block in the same response.
 With track: ```jsfx block THEN ```lua block using TrackFX_AddByName(tr, "ReaAssist/<name>.jsfx", false, -1).
 Filename derivation: 1) take the desc: value, 2) strip characters: <>:"/\|?*, 3) collapse runs of spaces to one, 4) trim leading/trailing whitespace, 5) truncate name to 60 chars (extension added on top), 6) append .jsfx. Single spaces in the name are preserved.
 Without track: only ```jsfx block.
-
-SAFETY (mandatory -- blown-up track/speakers otherwise):
-- Only generate JSFX when the design is stable, bounded, and suitable for real-time use.
-- Never create unbounded feedback, runaway gain, or self-oscillating networks. For any feedback-based effect (reverb, delay, resonator, chorus, flanger, comb filter, allpass chain, phaser), all of these are mandatory:
-  - Feedback coefficient hard-clamped to <= 0.85. (DC gain = 1/(1-fb); 0.85 -> 6.7x, stable. 0.99 -> 100x, blows up on any DC.)
-  - DC blocker on every path that feeds back into itself. Standard one-pole: `y = x - x_prev + 0.995*y_prev; x_prev = x; y_prev = y;`.
-  - Output soft-shaping via `tanh(x)` or similar where peaks can escape -- NOT hard clipping.
-- NO hard-clipping stage (`min(max(x, -T), T)`, explicit saturator at a fixed ceiling, etc.) unless the user explicitly asked for clipping/limiting/distortion. DAW internals are 32-bit float; intentional peaks above 0dBFS are normal and hard-clipping them introduces unwanted distortion. Use soft saturation (tanh, x/(1+|x|)) when shaping is actually needed.
-- EEL2 memory model: `buf[i]` reads `mem[buf+i]`. When you need multiple arrays, allocate distinct non-overlapping base pointers in `@init` and use them explicitly (`buf_a = 0; buf_b = 48000; buf_c = 96000;`). Every feedback filter (comb, allpass, delay) must have its OWN dedicated buffer region with enough length for its longest delay tap. Do NOT share slots between filters.
-- Delay taps use a single `write_pos` counter that advances once per sample (with modulo against that filter's buffer length), and read at `(write_pos - tap_samps + len) % len`. Do NOT index with the sample counter plus a fixed offset -- that pattern makes multiple filters overwrite each other's slots as the counter walks through the buffer.
-- Use conservative defaults: feedback 0.3-0.7, wet/mix defaulting below 50%, resonance well below self-oscillation. A user can always dial up; they can't dial back speakers.
-- Do not generate experimental DSP unless explicitly requested ("write me an experimental X", "no safety limits", etc.).
 <!-- /SECTION:jsfx -->
+
+<!-- SECTION:jsfx_pitch -->
+JSFX PITCH/SHIMMER FAMILY (additive on top of prompt_bundle:jsfx):
+This bundle pins when the user asks for pitch shifting, shimmer reverb, octave-up effects, harmonizers, or grain-based time/pitch effects. Use the topology rules + recipe below verbatim; do NOT improvise pitch-shifter implementations from training-data memory.
+
+TWO-GRAIN TIME-DOMAIN PITCH SHIFTER (canonical):
+Standard topology -- two overlapping grains read from a circular buffer at a rate determined by the pitch ratio. Hanning windows on each grain crossfade so the sum is constant amplitude.
+
+```jsfx
+@init
+grain_len  = 4096;          // power of two (mask = grain_len - 1)
+gm         = grain_len - 1; // bitmask
+grain_half = grain_len * 0.5;
+
+pitch_buf = 0;              // base address; use a non-overlapping region
+pw_pos    = 0;              // shared write head
+
+// CRITICAL: phases offset by half a grain. If both start at 0, both
+// Hanning windows hit zero at the same time every grain_len samples
+// and the pitched signal periodically drops out -- producing a
+// ~12 Hz amplitude ripple at 48 kHz. This is the #1 shimmer reverb bug.
+ph0 = 0;
+ph1 = grain_half;
+
+@slider
+pitch_ratio = pow(2.0, semitones / 12.0);
+
+@sample
+// Write input into the circular buffer
+pw_pos = (pw_pos + 1) & gm;
+pitch_buf[pw_pos] = input_sample;
+
+// Both grain phases advance at pitch_ratio per sample
+ph0 += pitch_ratio;
+ph0 >= grain_len ? ph0 -= grain_len;
+ph1 += pitch_ratio;
+ph1 >= grain_len ? ph1 -= grain_len;
+
+// Hanning windows
+w0 = 0.5 - 0.5 * cos(ph0 / grain_len * 2 * $pi);
+w1 = 0.5 - 0.5 * cos(ph1 / grain_len * 2 * $pi);
+
+// Read each grain's tap from the same circular buffer
+i0 = floor(ph0) & gm;
+i1 = floor(ph1) & gm;
+s0 = pitch_buf[i0] * w0;
+s1 = pitch_buf[i1] * w1;
+
+pitch_out = s0 + s1;        // windows sum to ~1 already; do NOT also multiply by 0.707
+```
+
+SHIMMER REVERB TOPOLOGY:
+Shimmer = reverb with pitch-up INSIDE the feedback loop. Each pass through the loop pitches the signal up another octave; the cascade produces the cathedral wash characteristic of the effect.
+
+CORRECT signal flow (per channel, simplified):
+```
+input -> reverb_input
+         |
+         +---<-- feedback (pitched + filtered) -<---+
+         |                                          |
+         v                                          |
+         comb/tank -> read tap -> damping LP -+    |
+                                              |    |
+                                              +-> pitch_shifter -+
+                                              |
+                                              +-> wet_output
+```
+
+The pitch shifter sits INSIDE the comb feedback path, AFTER the read and BEFORE the write. Pitched signal goes back into the comb buffer; next pass it gets pitched again, and so on.
+
+WRONG (and what the model commonly emits): pitch the dry input once, then mix the pitched-dry into a normal reverb. That gives a one-shot pitched layer + plain reverb -- not a shimmer. Symptom: "sounds like a reverb with a pitched dry on top," not a true cascading shimmer wash.
+
+PARALLEL COMB INDEPENDENCE (read carefully -- this is where shimmer reverbs blow up speakers):
+A Schroeder comb bank uses N parallel comb filters, each with its OWN delay buffer and its OWN feedback loop. The comb's WRITE depends on its OWN read, NOT on the sum of all combs' reads. Each comb is independent; they only sum at the output stage.
+
+CORRECT (independent self-feedback per comb):
+```
+cL0[wL0] = input + fL0 * fb;       // cL0 feeds cL0
+cL1[wL1] = input + fL1 * fb;       // cL1 feeds cL1
+cL2[wL2] = input + fL2 * fb;
+cL3[wL3] = input + fL3 * fb;
+wet = (fL0 + fL1 + fL2 + fL3) * 0.25;    // SUM ONLY at output
+```
+
+WRONG -- DO NOT EMIT THESE PATTERNS. The static validator rejects every JSFX
+that writes the same RHS expression to multiple comb buffers in @sample. There
+are several flavors models reach for; all are blocked. Recognize them in your
+own draft and rewrite to Pattern A (below) before responding.
+
+  WRONG-1 (sum-then-feed-all -- speaker-blowing runaway):
+  ```
+  combFb = fL0 + fL1 + fL2 + fL3;        // sum of all combs (gain N)
+  cL0[wL0] = input + combFb * fb;         // SAME RHS to all combs
+  cL1[wL1] = input + combFb * fb;
+  cL2[wL2] = input + combFb * fb;
+  cL3[wL3] = input + combFb * fb;
+  ```
+  Loop gain through this path is `N * fb` (4 * 0.85 = 3.4 with default fb).
+  Exponential growth per sample-cycle; from any seed the signal ramps to
+  full scale in seconds.
+
+  WRONG-2 (averaged-then-feed-all, the "shimmer" footgun):
+  ```
+  comb_avg = (fL0 + fL1 + fL2 + fL3) * 0.25;   // averaged
+  pitched  = pitch_shift(comb_avg);
+  cL0[wL0] = input + pitched * fb;             // SAME RHS to all combs
+  cL1[wL1] = input + pitched * fb;
+  cL2[wL2] = input + pitched * fb;
+  cL3[wL3] = input + pitched * fb;
+  ```
+  This is mathematically less explosive than WRONG-1 (the *0.25 makes DC
+  loop gain just fb), but it is structurally indistinguishable from
+  WRONG-1 to a static checker AND it is a degenerate Schroeder -- you've
+  effectively built one comb with extra bookkeeping. **The validator will
+  reject this.** Don't argue with it; rewrite to Pattern A.
+
+  WRONG-3 (indirection -- same bug, hidden by a temp variable):
+  ```
+  combfb_L = pitched * fb;        // hoist the * fb into a temp
+  cL0[wL0] = input + combfb_L;    // RHS is now `input + combfb_L`...
+  cL1[wL1] = input + combfb_L;    // ...still identical across all four
+  cL2[wL2] = input + combfb_L;
+  cL3[wL3] = input + combfb_L;
+  ```
+  The validator follows assignments. This evasion does not work; it just
+  produces the same fatal finding with a different fingerprint string.
+
+  WRONG-4 (flat buffer with hand-rolled offsets -- same bug, one buffer):
+  ```
+  buf_combL[(wpos       ) % 6144] = input + lpL * fb;
+  buf_combL[6144  + (wpos % 6144)] = input + lpL * fb;
+  buf_combL[12288 + (wpos % 6144)] = input + lpL * fb;
+  buf_combL[18432 + (wpos % 6144)] = input + lpL * fb;
+  ```
+  Same RHS at multiple offsets in one buffer is the same antipattern with
+  the buffer split inlined into index arithmetic. Validator catches it.
+
+PITCH-IN-LOOP for shimmer -- the ONLY pattern (Pattern A):
+Pitched feedback feeds ONE comb. The other three combs use their own
+self-feedback. Each comb's RHS is unique, so the validator passes; each
+comb has its own delay length, so the four parallel paths decorrelate
+naturally. The shimmer cascade (octave-up per pass) happens through the
+one pitched comb's loop -- the cathedral wash develops over multiple
+sample-cycles.
+
+```
+// Per-channel comb taps already read into fL0..fL3:
+//   fL0 = buf_cL0[(wL0 - lenL0 + bufL0_size) % bufL0_size];   etc.
+
+// pitchL is the pitch-shifted, damped, DC-blocked feedback signal,
+// derived from ANY ONE of the comb reads (typically fL0):
+//   damped  = lpL = lpL + (1-damp) * (fL0 - lpL);
+//   pitchL  = pitch_shift(damped);   // two-grain shifter, see above
+//   pitchL  = pitchL / (1 + abs(pitchL));   // soft saturate INSIDE the
+//                                            // feedback loop (required to
+//                                            // tame harmonic accumulation
+//                                            // before pitchL is written
+//                                            // back into the comb). This
+//                                            // is NOT an output-stage
+//                                            // saturator -- it's part of
+//                                            // the feedback-clamp safety.
+
+// Comb writes -- ONE pitched, three self-feedback. Each RHS is distinct.
+cL0[wL0] = input + pitchL * fb;       // pitched feedback into comb 0
+cL1[wL1] = input + fL1    * fb;       // self-feedback for the rest
+cL2[wL2] = input + fL2    * fb;
+cL3[wL3] = input + fL3    * fb;
+
+// Sum (or average) for the wet output stage
+wet = (fL0 + fL1 + fL2 + fL3) * 0.25;
+```
+
+This is the CANONICAL shimmer topology. There is no alternate "feed pitched
+signal to all combs" arrangement -- past versions of this bundle taught
+one, and every model that followed it triggered a validator retry. Use
+Pattern A and only Pattern A. If you find yourself writing the same RHS
+to multiple comb buffers, stop and rewrite.
+
+SERIES ALLPASS DIFFUSION (after the comb tank):
+Schroeder reverbs feed the comb-bank output through 1-2 SERIES allpass stages for diffusion. Each stage is independent of the next at the math level (output of stage N feeds into input of stage N+1), and each writes to its own buffer.
+
+Use distinct per-stage variable names rather than reusing one `ap_in` / `ap_out` pair across all stages. The static validator fingerprints buffer-write RHS expressions textually -- if every stage's write line is literally `bufN[wN] = ap_in + ap_g * ap_out;`, the validator can't tell a series chain apart from a parallel-comb runaway and flags it as `parallel_comb_doubled`. Per-stage names (apL0_in / apL0_out / apL1_in / ...) keep the fingerprints distinct and the validator quiet, AND they make the chain easier to read.
+
+CORRECT (per-stage names; validator accepts):
+```
+// Left, stage 0
+apL0_read = buf_apL0[wapL0];
+apL0_in   = wetL - ap_g * apL0_read;
+buf_apL0[wapL0] = apL0_in;
+wetL = ap_g * apL0_in + apL0_read;
+wapL0 = (wapL0 + 1) % apL0_len;
+
+// Left, stage 1 (chain continues; new variable names)
+apL1_read = buf_apL1[wapL1];
+apL1_in   = wetL - ap_g * apL1_read;
+buf_apL1[wapL1] = apL1_in;
+wetL = ap_g * apL1_in + apL1_read;
+wapL1 = (wapL1 + 1) % apL1_len;
+```
+
+WRONG (reused names; validator false-fires):
+```
+ap_in = wetL;
+ap_out = -ap_g * ap_in + buf_apL0[wapL0];
+buf_apL0[wapL0] = ap_in + ap_g * ap_out;       // RHS = `ap_in + ap_g * ap_out`
+ap_in = ap_out;
+ap_out = -ap_g * ap_in + buf_apL1[wapL1];
+buf_apL1[wapL1] = ap_in + ap_g * ap_out;       // SAME literal RHS -> flagged
+```
+The math here is fine -- it's the standard Schroeder allpass -- but the textual identity makes the static checker treat it as a parallel-comb runaway. Just rename per stage.
+
+CONSERVATIVE FEEDBACK CAP FOR SHIMMER:
+Even with correct topology, pitched feedback accumulates content (each pass shifts up an octave; high frequencies pile up over many passes). Cap the shimmer feedback slider at 0.6, NOT the standard 0.85:
+```
+slider2:0.5<0,0.6,0.01>Feedback
+```
+The 0.85 cap from prompt_bundle:jsfx is for non-pitched feedback. Shimmer's harmonic accumulation makes 0.85 audibly unstable -- feedback of 0.5-0.6 already produces long, lush tails.
+
+ANTI-RECIPES (do not do these):
+- DO NOT initialize ph0 and ph1 to the same value. They MUST be `grain_half` apart at start. (Bug: 12 Hz amplitude ripple, periodic dropouts.)
+- DO NOT pitch the dry input and inject it into the comb. Pitch goes inside the feedback loop.
+- DO NOT multiply pitch_out by 0.707 -- the Hanning windows already sum to ~1.
+- DO NOT use srate as the modulation depth multiplier (`mod_d * srate` gives ±hundreds of samples on the comb tap; that's wow/flutter, not chorus). Use a small literal: `mod_samples = depth_slider * 20` for ±20-sample max swing.
+- DO NOT mirror-write the buffer at `pw_pos + grain_len`. The mask read pattern (`floor(ph) & gm`) handles wrap-around natively; the mirror is wasted work AND requires a 2x-size buffer.
+- DO NOT call `tanh(x)` -- not a JSFX built-in. Use `x / (1 + abs(x))` for soft saturation, or define tanh inline.
+
+CONSERVATIVE DEFAULTS (override only on explicit user request):
+- Pitch shift:        +12 semitones (one octave up; the canonical shimmer interval)
+- Pitch ratio range:  [-12, +24] semitones
+- Modulation depth:   slider default 0.3, post-multiplied to ±5-20 samples max
+- Modulation rate:    0.1 - 0.5 Hz (very slow, slider default 0.3)
+- Comb feedback:      <= 0.85 (per core safety rule)
+- Mix:                30-50% default; 100% for send-bus use
+- Damping:            10-30% default (high-frequency roll-off per pass)
+
+GRAIN-BUFFER LAYOUT:
+A two-grain shifter needs ONE buffer of size `grain_len` (e.g., 4096). Place its base AFTER all reverb buffers, with no overlap. Example layout for a stereo shimmer reverb:
+```
+buf_combL = 0;        buf_combL_len = 24576;   // 4 combs * 4096 each, contiguous
+buf_combR = 24576;    buf_combR_len = 24576;
+buf_apL   = 49152;    buf_apL_len   = 4096;
+buf_apR   = 53248;    buf_apR_len   = 4096;
+buf_pitL  = 57344;    buf_pitL_len  = 4096;
+buf_pitR  = 61440;    buf_pitR_len  = 4096;
+```
+Use the `buffer_overlap` validator's <id>_len convention so the static checker can verify non-overlap.
+<!-- /SECTION:jsfx_pitch -->
 
 <!-- SECTION:theme -->
 THEME COLOR CHANGES:

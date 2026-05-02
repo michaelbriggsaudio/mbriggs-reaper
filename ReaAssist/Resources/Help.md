@@ -2,13 +2,64 @@
 
 ## Overview
 
-ReaAssist is a technical and workflow assistant for REAPER. Type requests in plain English and get responses with explanations or executable Lua code that runs directly inside your session. ReaAssist can read your project state (tracks, FX chains, tempo, items, selections) to give context-aware advice and write accurate scripts.
+ReaAssist is a technical and workflow assistant for REAPER. Type requests in plain English and get explanations or executable Lua code that runs inside your session.
+
+When enabled, ReaAssist can read project state such as tracks, FX chains, tempo, items, and selections so it can give context-aware answers and write more accurate scripts.
 
 ReaAssist does not generate, process, or alter your audio files. It is strictly a scripting and workflow tool. You maintain full creative control over your sound.
 
 ## Privacy & Data
 
-Your audio files are never uploaded or sent anywhere. ReaAssist only sends text to the provider you choose: your typed messages, optional project metadata (track names, FX lists, tempo, etc.), and any files you explicitly attach (images, PDFs). No data is collected by ReaAssist itself. All communication goes directly between your machine and your chosen provider's API. For full data privacy, custom local LLMs (LM Studio, Ollama, etc.) are supported for completely offline use with no data leaving your machine.
+Your audio files are never uploaded or sent anywhere. ReaAssist sends text to the provider you choose: your typed messages, optional project metadata (track names, FX lists, tempo, etc.), and any files you explicitly attach (images, PDFs). All chat communication goes directly between your machine and your chosen provider's API. For fully offline use, custom local LLMs (LM Studio, Ollama, etc.) are supported and keep all chat data on your machine.
+
+ReaAssist itself does not send anything automatically. The only path through which data leaves your machine to the ReaAssist project is the manual feedback flow described in the next section, and only after you open the dialog, review a preview of the exact bytes, and explicitly press Send.
+
+## Sending Feedback
+
+Below every assistant reply, ReaAssist shows small thumbs-up and thumbs-down feedback buttons. Clicking either button opens a preview-and-send dialog with that choice preselected. The buttons themselves send nothing; they only open the dialog.
+
+Inside the dialog you can:
+
+- Pick or change a thumbs-up or thumbs-down rating for the assistant's reply
+- If thumbs-down, optionally tag what went wrong: wrong result, wrong plugin, didn't follow request, or too slow
+- Add a free-text comment (optional)
+- Expand **Preview feedback** to inspect the exact JSON bytes that would be sent
+- Expand **Details & privacy** for the full disclosure of what's included, redacted, and excluded
+- Press **Send** to upload, or **Cancel** to discard
+
+**What is sent (only when you press Send):**
+
+- The current chat session (all turns visible in the chat)
+- Your typed comment and any tags you ticked
+- Basic context: app version, REAPER version, OS, provider, model
+- A **Diagnostic Report** with app/REAPER/OS/ImGui versions, installed extensions, preferences, plugin cache status, recent errors, and recent token/cache/cost metrics
+
+**Automatically redacted before sending:**
+
+- API keys
+- `Authorization:` headers and `Bearer` tokens
+- Home-directory paths (e.g. `C:\Users\<user>`), including log-file paths in the Diagnostic Report
+
+**What may still appear in the chat content** (always review the preview before clicking Send):
+
+- Project, track, plugin, or other names you typed or that the assistant mentioned
+- Any other text you pasted into the chat
+
+**What is never sent:**
+
+- Audio files
+- REAPER project files (`.RPP`)
+- Your API keys
+
+**On send:**
+
+- **Successful sends:** the dialog confirms with a brief message and closes.
+- **Failed sends:** the dialog stays open with the error and a **Try Again** button. ReaAssist does not queue, retry, or save any feedback file in the background. If you cancel after a failure, the data is discarded.
+
+**Where it goes:**
+
+- Sent to the ReaAssist project maintainer via `https://d.reaassist.app`.
+- A random installation ID is generated **only on your first successful send** so duplicate reports from the same install can be deduplicated. This ID is not linked to your identity.
 
 ## What It Can Do
 
@@ -40,61 +91,13 @@ Your audio files are never uploaded or sent anywhere. ReaAssist only sends text 
 
 ## Providers & Models
 
-ReaAssist supports three cloud providers plus custom/local LLMs:
+ReaAssist supports Claude, ChatGPT, Gemini, and custom OpenAI-compatible endpoints, including local servers such as LM Studio, Ollama, llama.cpp, and vLLM.
 
-- **Claude** (Anthropic)
-- **ChatGPT** (OpenAI)
-- **Gemini** (Google)
-- **Custom LLM**: connect local servers (LM Studio, Ollama, llama.cpp, vLLM) or cloud services (OpenRouter) via OpenAI-compatible endpoints. Configure from the Settings page.
+Each provider has fast, balanced, and smart model tiers. Start with a balanced model for normal work, use a smart/full model for complex scripts or multi-plugin tasks, and use fast/mini models for quick questions or simple edits.
 
-Each provider offers fast, balanced, and smart model tiers. Use fast for quick questions, smart for complex multi-step tasks.
+For providers with configurable thinking, more is not always better. ReaAssist gives the model a structured recipe; strong models usually follow it best at low or minimal thinking. If a complex task fails, raise the model tier before raising the thinking level.
 
-## Choosing a Model
-
-ReaAssist works with all three providers (and custom LLMs), but **not all models follow the script's plugin-configuration rules equally well**. The assistant gets a structured prompt with multi-step decision rules for picking the right parameter-setting strategy; larger models follow these reliably, while smaller "mini" / "flash" / "nano" variants sometimes shortcut them on complex multi-plugin requests.
-
-Pick a model from the dropdown next to each provider chip. Your choice is remembered per-provider. As a rule of thumb: start with the provider's **balanced mid-tier** model for most work, step up to the smart tier for complex multi-plugin configuration, and use the fast tier only for quick chat or simple single-action prompts.
-
-### Reliability tiers (from direct testing)
-
-Tested on complex multi-plugin rock-vocal stress prompts and on simpler requests.
-
-- **S-tier (handles anything)**: Claude Sonnet 4.6, Claude Opus 4.7, GPT-5.4 full, Gemini Pro 3.1, Gemini Flash 3.
-  - **Sonnet 4.6**: most thoroughly tested. Consistent rule-following across single-track edits, multi-plugin chains, MIDI / theme work, and complex third-party plugins.
-  - **GPT-5.4 full**: comparable. Slightly more likely to shortcut a nuanced rule on edge cases but code works.
-  - **Gemini Pro 3.1**: comparable. Occasionally picks a suboptimal parameter-setting strategy but code works.
-  - **Gemini Flash 3** (!): punches well above its "Flash" name. Matched Pro 3.1 on the same stress test and was **~12× cheaper**. Best price-per-success in the whole table.
-- **C-tier (simple chat only)**: Claude Haiku 4.5, GPT-5.4 mini, Gemini Flash Lite 3.1, GPT-5.4 nano. Fine for chat, explanations, and simple "add track" / "set tempo" requests. They struggle on multi-plugin configuration, re-request already-provided data, or skip decision rules. Don't use them for "recommended settings" prompts.
-- **Custom / local LLMs**: highly variable. Larger instruct-tuned models (Llama 70B+, Qwen 32B+, Mistral Large) generally work; smaller ones often produce malformed code.
-
-### Thinking level: less is usually more
-
-For providers with configurable thinking (ChatGPT, Gemini), the intuition that "more thinking = better results" is usually wrong here. ReaAssist's prompt is a structured recipe with explicit rules; strong models follow it best at Low or None. Higher thinking gives the model room to second-guess the rules and talk itself into edge cases.
-
-Direct test data on a complex multi-plugin rock-vocal request:
-
-| Model | Thinking | Outcome | API response | Cost |
-|---|---|---|---|---|
-| GPT-5.4 mini | Medium | Failed (wrong strategy) | n/a | $0.0949 |
-| GPT-5.4 full | Medium | **Timed out** (>180s) | n/a | n/a |
-| GPT-5.4 full | Low | Worked | 53.9s | $0.0580 |
-| GPT-5.4 full | **None** | Worked | 16.4s | $0.0541 |
-| Gemini Flash 3 | Medium | Worked | 20.2s | **$0.0126** |
-| Gemini Pro 3.1 | Low | Worked | 27.3s | $0.0604 |
-
-**Practical takeaway**: start with Thinking: Low on top-tier models (None on GPT-5 full). When a complex request fails, **bump the model tier before bumping thinking**: switch from "mini at Medium" to "full at Low" rather than "mini at High".
-
-### Cost considerations
-
-- **Anthropic** (Claude): pay-as-you-go, cheapest cards-only setup. $5 starter credit for new accounts.
-- **OpenAI** (ChatGPT): pay-as-you-go from cent one. No free tier for the API.
-- **Google** (Gemini): generous free tier with daily quotas. Easiest free signup. Pro 3.1 requires a paid key; Flash Lite + Flash 3 work on free.
-
-**Gemini Flash 3** is the single strongest cost-vs-capability choice (empirically S-tier, cheap enough to be C-tier priced), and works on the free tier.
-
-### Switching providers
-
-You can connect more than one provider simultaneously and switch between them per-request via the provider picker above the chat input. Add or remove keys at any time from Settings > API Keys. Each provider has its own remembered model pick.
+You can connect more than one provider and switch per request from the provider picker above the chat input. Add or remove keys from **Settings > API Keys**. Model choices are remembered per provider.
 
 ## Code Execution
 
@@ -167,7 +170,7 @@ These checkboxes are available on the main screen:
 Additional options are available on the **Settings** page:
 
 - **Send session snapshot**: attach a live project snapshot with every message (tracks, FX, tempo, markers, selections, cursor position).
-- **Always include REAPER API reference**: pin the REAPER Lua API reference to every request. Off by default; the assistant fetches docs on-demand when it needs them, which saves ~10K tokens per turn on non-code questions. Turn on if you do mostly code-generation work and want zero docs-fetch round trips.
+- **Always include REAPER API reference**: pin the REAPER Lua API reference to every request. Off by default; the assistant fetches docs on-demand when it needs them, which saves about 10K tokens per turn on non-code questions. Turn on if you do mostly code-generation work and want no docs-fetch round trips.
 - **Check for updates**: automatically check for new versions on startup.
 - **Preferred Plugins**: set default plugins for each generic type, e.g. "EQ" → your favorite EQ plugin (see below).
 - **FX Param Cache**: view and manage cached plugin parameter data (see below).
@@ -231,17 +234,9 @@ All fallback plugins ship with a stock REAPER install. The JSFX entries use the 
 
 ## On-Demand Context
 
-The assistant can request project data mid-conversation when needed, even with Send snapshot off. You don't need to do anything; this happens automatically. Available data:
+The assistant can request extra context mid-conversation when needed, even if **Send session snapshot** is off. This happens automatically.
 
-- **Session**: tracks, selections, cursor, items, tempo, markers, regions
-- **Docs**: REAPER Lua API function signatures
-- **Curated plugin data**: verified parameter recipes for REAPER stock (ReaEQ, ReaComp, ReaXcomp, ReaGate, ReaDelay, ReaLimit, ReaPitch, ReaTune, ReaVerbate, ReaSynth), bundled / stock JSFX fallbacks (ReEQ, De-esser, Saturation, Chorus, Phaser), and selected third-party (FabFilter Pro-Q 4, Pro-C 3, Pro-L 2, Pro-MB, Pro-R 2, Pro-DS, Pro-G; Saturn 2; Timeless 3). Anything not in this list is handled by live parameter scanning instead
-- **FX parameters**: live parameter values for any plugin on a track
-- **FX search**: search your installed plugins by name
-- **FX chains**: full FX chain listing for all tracks
-- **Track flags**: mute, solo, and record-arm state for all tracks
-- **MIDI reference**: note/CC helpers, PPQ, and MIDI workflow patterns
-- **Preferred plugins**: your configured plugin choices and cached parameters
+Available context includes project snapshots, REAPER API docs, MIDI reference notes, curated plugin guidance, preferred-plugin settings, FX search results, FX chain listings, and live parameter scans for installed plugins.
 
 ## Prompt Caching & Cost
 
@@ -255,36 +250,13 @@ All three providers cache repeated prompt content between turns, which can cut p
 - **Ctrl+C**: copy selected text from chat
 - **Right-click** on chat text: copy selection, copy all, or copy table
 
-## Buttons
+## Button Reference
 
-Main screen:
-
-- **Send**: send your message (or press Enter).
 - **+**: attach files, screenshots, or clipboard images.
-- **Settings**: manage API keys, preferred plugins, and other options.
-- **Help**: open this help page.
-- **Clear Chat**: reset the conversation (with confirmation).
-- **Copy Chat**: copy the entire conversation to clipboard.
-- **Credits**: view credits and acknowledgments.
-- **Donate**: support further development.
-
-Code block buttons (appear under generated code):
-
-- **Run Code**: execute the code in REAPER.
-- **Undo**: revert the last executed action.
-- **Backup**: save a project backup.
-- **Copy**: copy the code to clipboard.
-- **Save**: save as a standalone .lua script.
-- **Edit**: edit the code before running.
-
-Settings page:
-
-- **UI Scale**: choose an interface zoom level (75% to 200%).
-- **Theme**: choose Auto, Dark, or Light appearance.
-- **Preferred Plugins**: configure default plugins by type (with Save, Rescan All, Clear All, and per-row Rescan).
-- **FX Param Cache**: view and manage cached plugin parameter data (Rescan, Deep rescan, Remove, Clear All).
-- **Reset Window Size**: restore default window dimensions and clear saved position.
-- **Factory Reset**: clear all data and return to the first-run setup.
+- **Settings**: manage API keys, models, preferred plugins, cache, theme, and scale.
+- **Clear Chat**: reset the current conversation.
+- **Copy Chat**: copy the full chat to clipboard.
+- **Run Code / Undo / Backup / Copy / Save / Edit**: actions shown below generated code.
 
 ## Troubleshooting
 
@@ -304,4 +276,4 @@ Settings page:
 
 ## Disclaimer and Terms of Use
 
-ReaAssist for REAPER is provided as-is, with no warranty of any kind. Running any code generated by this tool is entirely at your own risk. The script author is not liable for any direct, indirect, incidental, or consequential damages, including data loss or project corruption. Always review generated code before running it and back up your project file first. Use of this tool requires an API key from at least one supported provider and is subject to each provider's Terms of Service. Cost estimates are approximations only.
+ReaAssist is provided as-is. Review generated code before running it, keep project backups, and follow your provider's terms and pricing. Cost estimates are approximations only.

@@ -275,7 +275,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.0.6", -- public release version
+  VERSION           = "1.0.7", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -739,12 +739,12 @@ api_keys = {
   key_error_url        = nil,     -- console URL for the provider (clickable link)
   key_error_url_label  = nil,     -- display text for the URL
   -- TOS persistence.
-  tos_version    = "2",
+  tos_version    = "5",
   -- Disclaimer text shown on the first-run TOS screen. When this text
   -- changes substantively, bump tos_version above to force re-acceptance.
   tos_text = string.format([[
 YOUR PRIVACY
-API keys are encoded and stored locally on your machine. They are never sent to the author. Data is sent only to your chosen provider to fulfill your request. To provide relevant help, ReaAssist may send session data included in your prompt, such as track names, routing, and project settings. ReaAssist does not access, transmit, or create audio files. You may use a local LLM to keep all data offline and on your machine.
+API keys are encoded and stored locally on your machine. They are never sent to the author. Chat data is sent only to your chosen provider to fulfill your request. To provide relevant help, ReaAssist may send session data included in your prompt, such as track names, routing, and project settings. ReaAssist does not access, transmit, or create audio files. You may use a local LLM to keep all data offline and on your machine. You may optionally share feedback about a chat by opening the feedback dialog and pressing Send after reviewing the preview. The dialog previews what will be sent before anything is uploaded.
 
 SECURITY & SAFEGUARDS
 ReaAssist scans generated code for potentially high-risk operations, such as file system changes or shell commands, and requires your confirmation before flagged code can run. Project backups can be created before execution, and REAPER Undo history is preserved. No project changes are made without your approval.
@@ -752,7 +752,7 @@ ReaAssist scans generated code for potentially high-risk operations, such as fil
 TERMS & LIABILITY
 ReaAssist is provided "as is," without warranties of any kind, express or implied, including merchantability or fitness for a particular purpose. Generated code may contain errors or unintended results. You are responsible for reviewing code before execution. You are also responsible for your provider's terms, privacy practices, availability, and API charges. Displayed cost estimates are approximate only.
 
-Copyright %s Michael Briggs. All rights reserved. ReaAssist is proprietary software; local personal modification is permitted, but redistribution, resale, repackaging, and presenting this software as your own (modified or unmodified) are prohibited without prior written permission.
+Copyright %s Michael Briggs. All rights reserved. ReaAssist is proprietary software; redistribution, resale, repackaging, and presenting this software as your own (modified or unmodified) are prohibited without prior written permission.
 
 By clicking "I Agree," you confirm that you have read and agree to these Terms of Use.]], os.date("%Y")),
 }
@@ -2673,6 +2673,8 @@ ICON = {
   PHONE            = _utf8(0xE133),
   SAVE             = _utf8(0xE14D),  -- floppy-disk glyph, for Save buttons
   REDO_2           = _utf8(0xE2A0),  -- Lucide redo-2 glyph; used as Rescan affordance
+  THUMBS_UP        = _utf8(0xE18A),  -- Helpful sentiment in feedback modal
+  THUMBS_DOWN      = _utf8(0xE189),  -- Not-helpful sentiment in feedback modal
 }
 
 -- Load chat_font_idx (default 2 = Medium/14px).
@@ -10560,6 +10562,14 @@ do
   end
 end
 
+-- Expose JSON to dofile'd sidecar modules (Resources/Diag.lua, future
+-- v1.1 diagnostics modules). Required because JSON is `local` to this file
+-- (forward-declared at line ~1138, populated above). Sidecar modules loaded
+-- via dofile cannot see lexical locals from the parent file; they use RA.JSON
+-- instead. Must come AFTER the do/end block above so RA.JSON points to the
+-- fully populated table.
+RA.JSON = JSON
+
 -- =============================================================================
 -- Auto-update module
 -- =============================================================================
@@ -10717,6 +10727,14 @@ do
     return _SHA.finalize(s)
   end
 end
+
+-- Expose sha256_hash to dofile'd sidecar modules. Resources/Diag.lua
+-- prefers RA.sha256_hex over its own pure-Lua fallback (this implementation
+-- is the same algorithm but the existing instance is already loaded and
+-- well-tested by the updater pipeline). Optional dependency; Diag.lua
+-- checks for the function before using and falls back to its own SHA-256
+-- if absent.
+RA.sha256_hex = sha256_hash
 
 -- Cross-chunk namespace. The UI file's Update-Available and File-
 -- Integrity dialogs call Updater.download_start / Updater.force_reinstall,
@@ -14581,6 +14599,12 @@ function Net.handle_key_test(raw)
     S.display_messages = {}
     S.history          = {}
     S.scroll_to_bottom = true
+    -- Settings provider-switch implicitly starts a new chat. Rotate chat_id
+    -- to match what Net.clear_conversation does at the canonical "+ New Chat"
+    -- entry point.
+    if Diag.uploader_enabled then
+      Diag.rotate_chat_id()
+    end
   end
 
   -- Clear the response file so the next Net.send_to_api call doesn't pick up
@@ -15790,6 +15814,13 @@ function Net.clear_conversation()
   S.scroll_to_bottom     = true
   S.wrap_cache           = {}  -- invalidate per-bubble text-wrap cache
   Code.safe_write(tmp.out, "")
+  -- Diag uploader: rotate chat_id so subsequent feedback events from this
+  -- new conversation group correctly. Guarded by the same uploader_enabled
+  -- gate the main-loop Diag.tick() call uses (module may be disabled / not
+  -- loaded if RA.JSON wasn't available at dofile time).
+  if Diag.uploader_enabled then
+    Diag.rotate_chat_id()
+  end
 end
 
 -- =============================================================================
@@ -22389,6 +22420,31 @@ do
 end
 
 -- =============================================================================
+-- Diag module dofile (uploader pathway: manual feedback now, auto-tier in v1.1)
+-- =============================================================================
+-- Loaded AFTER Temp-Probe.lua (so RA.JSON and RA.sha256_hex exports above are
+-- visible) and BEFORE UI.lua (so the in-chat link guard `Diag.uploader_enabled`
+-- has a real value when UI renders). Diag (the namespace) is already populated
+-- with .errors / .add_error / .build_report from earlier in this file; this
+-- dofile extends it with the network-uploader surface.
+--
+-- The fallback catches both a hard load failure and a module that loaded but
+-- disabled itself (e.g. internal RA.JSON guard tripped). In that case we
+-- install no-op stubs for tick / rotate_chat_id so UI guards and main-loop
+-- call sites never see missing functions.
+do
+  local ok, err = pcall(dofile, RA.RESOURCES_DIR .. "Diag.lua")
+  if not ok or Diag.uploader_enabled ~= true then
+    Diag.uploader_enabled = false
+    Diag.tick             = Diag.tick             or function() end
+    Diag.rotate_chat_id   = Diag.rotate_chat_id   or function() end
+    if not ok then
+      Log.line("DIAG", "Diag.lua load failed: " .. tostring(err))
+    end
+  end
+end
+
+-- =============================================================================
 -- Critical-files check + Render screen dofile
 -- =============================================================================
 -- Verify every critical file (UI chunk + every font the atlas expects) is
@@ -22516,16 +22572,6 @@ function Loop.handle_dev_signal()
     -- early-release default the user actually has in memory.
     prefs.debug_logging =
       reaper.GetExtState(CFG.EXT_NS, "debug_logging") ~= "0"
-  elseif dev_sig == "dump_manifest" then
-    -- Dev helper asked for the current PINNED REFERENCES line. Grab the
-    -- first line of growing_text (sticky_parts always puts the manifest
-    -- there first) and stash it on ExtState for the helper to read back.
-    local _, growing = Net.sticky_parts()
-    local manifest = "(no pinned references)"
-    if growing then
-      manifest = growing:match("^([^\n]+)") or manifest
-    end
-    reaper.SetExtState(CFG.EXT_NS, "dev_manifest_dump", manifest, false)
   elseif dev_sig == "refresh_fx_filter" then
     -- Dev helper toggled the FabFilter-hide flag. Invalidate the cached
     -- installed-FX lists so populate_installed_fx re-walks REAPER with
@@ -22542,6 +22588,19 @@ function Loop.handle_dev_signal()
     CTX._installed_fx_list         = nil
     CTX._installed_fx_list_deduped = nil
     pref_plugins.initialized = false
+  elseif dev_sig == "refresh_theme" then
+    -- Dev helper flipped the saved theme pref. Re-read ExtState and
+    -- re-apply the palette live, mirroring what the in-app Settings
+    -- footer toggle does (see UI.lua "##fr_theme" handler). apply_palette
+    -- swaps COL/TK and invalidates UI palette caches, so the change shows
+    -- up on the next render without a restart. Match the boot-time
+    -- normalization at the prefs load site so an unrecognized value falls
+    -- back to "auto" instead of NULL-ing the palette.
+    local v = reaper.GetExtState(CFG.EXT_NS, "theme")
+    prefs.theme = (v == "dark" or v == "light") and v or "auto"
+    apply_palette(PALETTES[resolve_theme(prefs.theme)])
+    Log.line("DEV_THEME", "refresh_theme fired; pref=" .. prefs.theme
+      .. " resolved=" .. resolve_theme(prefs.theme))
   end
 end
 
@@ -22965,6 +23024,12 @@ local function loop()
   if S.kill_pending then
     Net.try_finish_kill_pending()
   end
+
+  -- Drive the manual feedback uploader: polls in-flight POST exit/status
+  -- files and fires the on_done callback when complete. Grouped here with
+  -- the other network pollers above. Cheap when no send is in flight
+  -- (early-returns on `not in_flight`).
+  if Diag.uploader_enabled then Diag.tick() end
 
   -- Piggyback the once-per-session update check on the first chat-SEND in
   -- this session (transition idle -> waiting), not on the first chat

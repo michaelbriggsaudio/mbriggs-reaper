@@ -3823,16 +3823,16 @@ function Render.tos_screen()
   local sb_w     = ImGui.ImGui_GetStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ScrollbarSize())
   local stable_w = win_w - pad_x * 2 - sb_w
 
-  -- Target visible margin of 40 px on each side (measured from the window
+  -- Target visible margin of 30 px on each side (measured from the window
   -- edge). pad_x covers part of it; indent makes up the rest so the
-  -- cursor lands at 40px from the window left. inner_w is the resulting
+  -- cursor lands at 30 px from the window left. inner_w is the resulting
   -- content column width between the two margins.
-  local SIDE_MARGIN = RA.SC(40)
+  local SIDE_MARGIN = RA.SC(30)
   local indent   = math_max(SIDE_MARGIN - pad_x, 0)
   local inner_w  = math_max(stable_w - 2 * indent, RA.SC(200))
   ImGui.ImGui_Indent(RA.ctx, indent)
 
-  Dummy(RA.ctx, 1, RA.SC(20))
+  Dummy(RA.ctx, 1, RA.SC(10))
 
   -- Wordmark + "Terms of Use" title with accent underline. Kept as the
   -- centered-logo approach rather than the hero band used on the settings
@@ -3840,9 +3840,9 @@ function Render.tos_screen()
   -- better with a formal document-style header. Logo rendered at 2x the
   -- default size so it anchors this splash-like screen.
   UI.logo(inner_w, RA.SC(44))
-  Dummy(RA.ctx, 1, RA.SC(6))
+  Dummy(RA.ctx, 1, RA.SC(4))
   UI.page_title("Terms of Use", inner_w)
-  Dummy(RA.ctx, 1, RA.SC(14))
+  Dummy(RA.ctx, 1, RA.SC(16))
 
   -- Parse TOS text into structured blocks on first render. Cached on
   -- api_keys so subsequent renders skip the split.
@@ -3850,24 +3850,16 @@ function Render.tos_screen()
     api_keys._tos_blocks = parse_tos_blocks(api_keys.tos_text)
   end
 
-  -- Right-click anywhere on the TOS window -> Copy full TOS text to
-  -- clipboard. Useful for users who want to archive the terms locally.
-  -- BeginPopupContextWindow fires on right-click of any empty space in
-  -- the current window, which during TOS rendering means the whole
-  -- page. Placement of this call doesn't affect WHERE the popup opens.
-  if ImGui.ImGui_BeginPopupContextWindow(RA.ctx, "##tos_copy_ctx") then
-    if ImGui.ImGui_MenuItem(RA.ctx, "Copy") then
-      ImGui.ImGui_SetClipboardText(RA.ctx,
-        UI.strip_markdown(api_keys.tos_text))
-    end
-    ImGui.ImGui_EndPopup(RA.ctx)
-  end
-
-  -- All body text uses an explicit wrap-X at cursor_x + inner_w so the
-  -- right margin lands exactly SIDE_MARGIN from the window edge. Helper
-  -- wrapper to keep call sites tidy.
+  -- Wrap-X helper: returns the X coordinate at which TextWrapPos should
+  -- wrap. Subtracts `indent` so the right margin matches the left
+  -- (SIDE_MARGIN), instead of stopping at the global WindowPadding edge.
+  -- The default ImGui content-region right edge sits at pad_x from the
+  -- window edge; we want it at SIDE_MARGIN, which means rolling back by
+  -- (SIDE_MARGIN - pad_x) = indent.
   local function _wrap_x()
-    return GetCursorPosX(RA.ctx) + inner_w
+    return GetCursorPosX(RA.ctx)
+      + ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+      - indent
   end
 
   -- Shared accept-flow: fired by the I Agree button and by the Enter-key
@@ -3884,21 +3876,17 @@ function Render.tos_screen()
     end
   end
 
-  -- Lead paragraph: short description of what ReaAssist is, rendered
-  -- above the first section. Bold (inter_semi) to mark it as the page's
-  -- introduction, matching the V5 value-prop headline pattern used on
-  -- Custom LLM and Preferred Plugins.
-  PushFont(RA.ctx, FONT.inter_semi, RA.SC(12))
-  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
-  ImGui.ImGui_PushTextWrapPos(RA.ctx, _wrap_x())
-  Text(RA.ctx,
-    "ReaAssist is a REAPER assistant powered by Claude, ChatGPT, "
-    .. "Gemini, or a local model. Ask in plain English to adjust plugins, "
-    .. "write quick scripts, or speed up mixing and mastering work.")
-  ImGui.ImGui_PopTextWrapPos(RA.ctx)
-  PopStyleColor(RA.ctx)
-  PopFont(RA.ctx)
-  Dummy(RA.ctx, 1, RA.SC(10))
+  -- Flat layout: render the TOS sections directly on the page (no inner
+  -- scrollable child). The TOS is short and won't grow -- v1.1's auto-
+  -- diagnostics opt-in lives in its own dedicated dialog, not here -- so
+  -- the previous container-with-scrollbar machinery was overkill. The
+  -- main window's own scrollbar handles overflow on small screens.
+  --
+  -- Right-click -> Copy TOS was scoped to the inner child and dropped
+  -- with the flatten. Users wanting a copy of the terms can read the
+  -- source (Resources/UI.lua references the canonical text in
+  -- api_keys.tos_text in ReaAssist.lua); a Copy button can be added back
+  -- here later if a real user asks for it.
 
   -- Render each block. Sections get a v5_section_label + wrapped body
   -- paragraph. Copyright is a quiet muted footnote at the end.
@@ -3907,7 +3895,7 @@ function Render.tos_screen()
   -- mono to match the rest of the V5 section-label sites.
   for bi, blk in ipairs(api_keys._tos_blocks) do
     if blk.type == "section" then
-      if bi > 1 then Dummy(RA.ctx, 1, RA.SC(8)) end
+      if bi > 1 then Dummy(RA.ctx, 1, RA.SC(10)) end
       UI.v5_section_label(blk.heading)
       PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
@@ -3917,7 +3905,7 @@ function Render.tos_screen()
       PopStyleColor(RA.ctx)
       PopFont(RA.ctx)
     elseif blk.type == "copyright" then
-      Dummy(RA.ctx, 1, RA.SC(14))
+      Dummy(RA.ctx, 1, RA.SC(20))
       PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
       ImGui.ImGui_PushTextWrapPos(RA.ctx, _wrap_x())
@@ -3928,7 +3916,7 @@ function Render.tos_screen()
     end
   end
 
-  Dummy(RA.ctx, 1, RA.SC(20))
+  Dummy(RA.ctx, 1, RA.SC(28))
 
   -- Confirmation line: the authored "By clicking..." paragraph rendered
   -- as a muted caption right above the I Agree button. Acts as the final
@@ -3939,7 +3927,7 @@ function Render.tos_screen()
   -- would require manual line-by-line layout for marginal gain).
   for _, blk in ipairs(api_keys._tos_blocks) do
     if blk.type == "confirm" then
-      PushFont(RA.ctx, FONT.inter_reg, RA.SC(10))
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
       local tw = CalcTextSize(RA.ctx, blk.text)
       if tw <= inner_w then
@@ -5638,6 +5626,695 @@ function Render._key_test_results_popup()
     ImGui.ImGui_EndPopup(RA.ctx)
   end
   UI.pop_modal_style()
+end
+
+-- =============================================================================
+-- Render.feedback_modal
+-- =============================================================================
+-- Manual feedback dialog. Opened by clicking "What went right, what went
+-- wrong?" below an assistant message. The link itself sends nothing; this
+-- modal is the consent moment. The preview is ALWAYS visible (not behind
+-- a collapsing header) and is the EXACT bytes that Send would post --
+-- preview_payload_text and send_draft both render the same draft + comment
+-- + flags through Diag.assemble_payload.
+local function _close_feedback_modal()
+  S.feedback_modal_open       = false
+  S._feedback_modal_opened    = false
+  S.feedback_modal_draft      = nil
+  S.feedback_modal_target_idx = nil
+  S.feedback_modal_comment    = nil
+  S.feedback_modal_flags      = nil
+  S.feedback_modal_state      = nil
+  S.feedback_modal_error      = nil
+  -- Reset the collapsible-section open state so each modal open starts
+  -- with both Preview feedback and the privacy panel closed (treat the
+  -- modal as a one-shot consent dialog rather than a persistent
+  -- workspace).
+  S.feedback_modal_preview_open = nil
+  S.feedback_modal_privacy_open = nil
+end
+
+-- Compatibility helpers: ImGui_BeginDisabled was added in a later ReaImGui
+-- and isn't used elsewhere in this file. If absent, the visual disabled
+-- state is skipped -- the manual `if not (sending or success) then` guards
+-- below prevent state mutation regardless of the visual.
+local _fb_has_disabled = type(ImGui.ImGui_BeginDisabled) == "function"
+local function _fb_begin_disabled(b)
+  if _fb_has_disabled then ImGui.ImGui_BeginDisabled(RA.ctx, b) end
+end
+local function _fb_end_disabled()
+  if _fb_has_disabled then ImGui.ImGui_EndDisabled(RA.ctx) end
+end
+
+function Render.feedback_modal()
+  if not S.feedback_modal_open then
+    S._feedback_modal_opened = false
+    return
+  end
+
+  local draft = S.feedback_modal_draft
+  if not draft then
+    _close_feedback_modal()
+    return
+  end
+
+  if not S._feedback_modal_opened then
+    S._feedback_modal_opened = true
+    ImGui.ImGui_OpenPopup(RA.ctx, "Send Feedback##fb_modal")
+  end
+
+  -- Clamp height to fit inside main window with a margin. Width and
+  -- height both tightened post-redesign: the modal is mostly thumbs +
+  -- comment + collapsibles and reads cleaner at this size.
+  local mw     = RA.SC(490)
+  local main_h = update._main_h or RA.SC(760)
+  local mh     = math.min(RA.SC(620), math.max(RA.SC(320), main_h - RA.SC(140)))
+
+  if update._main_w then
+    ImGui.ImGui_SetNextWindowPos(RA.ctx,
+      update._main_x + (update._main_w - mw) * 0.5,
+      update._main_y + (main_h - mh) * 0.5,
+      ImGui.ImGui_Cond_Appearing())
+  end
+  ImGui.ImGui_SetNextWindowSize(RA.ctx, mw, mh, ImGui.ImGui_Cond_Appearing())
+
+  UI.push_modal_style()
+  -- Scrollbar palette pushed BEFORE BeginPopupModal so the popup window's
+  -- own scrollbar (visible when content overflows mh) inherits the
+  -- TK.border_str palette too. Pushing inside the popup body only affects
+  -- nested BeginChild scrollbars, not the popup's own. Popped after
+  -- pop_modal_style on both branches.
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarBg(),          0x00000000)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrab(),        TK.border_str)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabHovered(),
+    UI.lerp_u32(TK.border_str, TK.text, 0.30))
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
+    UI.lerp_u32(TK.border_str, TK.text, 0.55))
+  if ImGui.ImGui_BeginPopupModal(RA.ctx, "Send Feedback##fb_modal", true,
+      ImGui.ImGui_WindowFlags_NoResize()) then
+
+    -- Very faint vertical gradient over the modal body. The home / Settings
+    -- hero uses TK.accent_soft -> TK.bg full-strength; for the modal we
+    -- want a barely-perceptible tint, so the top color is lerped 80%
+    -- toward TK.bg before the gradient draws. Drawn onto the window draw
+    -- list FIRST so subsequent ImGui content renders on top of it.
+    do
+      local _dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+      local _wx, _wy = ImGui.ImGui_GetWindowPos(RA.ctx)
+      local _ww, _wh = ImGui.ImGui_GetWindowSize(RA.ctx)
+      local _top = UI.lerp_u32(TK.accent_soft, TK.bg, 0.80)
+      ImGui.ImGui_DrawList_AddRectFilledMultiColor(_dl,
+        _wx, _wy, _wx + _ww, _wy + _wh,
+        _top, _top, TK.bg, TK.bg)
+    end
+
+    -- Push input frame colors so the comment box and (when expanded) the
+    -- preview read as recessed text wells against the modal_bg, instead of
+    -- the global theme FrameBg which clashes (washed-out blue on the light
+    -- theme). TK.input_bg is the canonical "field" tone used by the
+    -- Settings API-key input cards.
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBg(),        TK.input_bg)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgHovered(), TK.input_bg)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgActive(),  TK.input_bg)
+
+    local cw      = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+    local sending = S.feedback_modal_state == "sending"
+    local success = S.feedback_modal_state == "success"
+    local locked  = sending or success
+    local f       = S.feedback_modal_flags
+
+    -- In-body title heading. The popup title-bar text is small and easy
+    -- to miss; an explicit heading anchors the top of the modal. Sized a
+    -- step below the bug-report hero (SC(22) wordmark + SC(16) subtitle)
+    -- so the modal feels like a focused surface rather than a peer page.
+    PushFont(RA.ctx, FONT.inter_semi, RA.SC(17))
+    Text(RA.ctx, "Send Feedback")
+    PopFont(RA.ctx)
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+    Text(RA.ctx, "Help improve ReaAssist")
+    PopStyleColor(RA.ctx)
+    PopFont(RA.ctx)
+    Dummy(RA.ctx, 1, RA.SC(10))
+
+    -- Intro
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+    UI.text_multiline(
+      "Sends the current chat session plus your tags and comment below "
+      .. "to help improve ReaAssist. API keys, bearer tokens, and home "
+      .. "paths are automatically redacted before sending. Project, "
+      .. "track, or plugin names you typed may still appear in the chat "
+      .. "content; review the preview to verify. Audio is never sent."
+    )
+    PopStyleColor(RA.ctx)
+    PopFont(RA.ctx)
+    Dummy(RA.ctx, 1, RA.SC(8))
+
+    -- ──── TAGS section (Option A: thumbs sentiment + conditional chips).
+    --
+    -- Layout:
+    --   thumbs-up / thumbs-down sentiment buttons (mutually exclusive)
+    --   when thumbs_down: "What went wrong?" + multi-select chip row
+    --
+    -- Why this shape: matches the dominant pattern in other AI assistants
+    -- (ChatGPT, Claude.ai, Gemini), reduces vertical clutter for the
+    -- common 👍 case (one-click), and surfaces the secondary "what went
+    -- wrong" tags only when they're relevant -- exactly the analysis
+    -- signal we care about.
+    UI.v5_section_label("HOW DID IT GO?")
+    Dummy(RA.ctx, 1, RA.SC(6))
+
+    -- Local helpers (modal-private; not promoted to UI.* since they're
+    -- one-off styling for this dialog).
+    --
+    -- Hover affordance: ImGui_Button only colours the background on
+    -- hover, not the border or text. To get a "subtle accent on hover"
+    -- like the rest of the V5 surface (where icons + borders shift
+    -- toward TK.accent), we render the button with a low-alpha
+    -- accent-tinted hover bg AND overlay an accent rect-stroke after
+    -- the button when hovered. Selected state stays full accent fill,
+    -- so the overlay is a no-op there.
+    local function _fb_overlay_hover_border(rounding)
+      local x1, y1 = ImGui.ImGui_GetItemRectMin(RA.ctx)
+      local x2, y2 = ImGui.ImGui_GetItemRectMax(RA.ctx)
+      local dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+      ImGui.ImGui_DrawList_AddRect(dl, x1, y1, x2, y2,
+        TK.accent, rounding, 0, 1)
+    end
+
+    local function _fb_thumb_btn(id, icon, selected, btn_w, btn_h, tooltip)
+      local fill_col = selected and TK.accent or 0x00000000
+      local bord_col = selected and TK.accent or TK.border
+      local text_col = selected and TK.accent_text or TK.text_muted
+      -- Unselected hover: accent at ~20% alpha tints the bg toward
+      -- accent without overpowering. Selected hover stays full accent.
+      local hov_col  = selected and TK.accent or
+                       ((TK.accent & 0xFFFFFF00) | 0x33)
+      local act_col  = selected and TK.accent or
+                       ((TK.accent & 0xFFFFFF00) | 0x55)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        fill_col)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), hov_col)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  act_col)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),        bord_col)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          text_col)
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 1)
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(),   RA.SC(6))
+      PushFont(RA.ctx, FONT.lucide, RA.SC(18))
+      local clicked = ImGui.ImGui_Button(RA.ctx, icon .. "##" .. id,
+        btn_w, btn_h)
+      PopFont(RA.ctx)
+      ImGui.ImGui_PopStyleVar(RA.ctx, 2)
+      PopStyleColor(RA.ctx, 5)
+      local hovered = ImGui.ImGui_IsItemHovered(RA.ctx)
+      if hovered then
+        if not selected then _fb_overlay_hover_border(RA.SC(6)) end
+        if tooltip then UI.tooltip(tooltip) end
+      end
+      return clicked
+    end
+
+    local function _fb_chip(id, label, selected)
+      local fill_col = selected and TK.accent or 0x00000000
+      local bord_col = selected and TK.accent or TK.border
+      local text_col = selected and TK.accent_text or TK.text_muted
+      local hov_col  = selected and TK.accent or
+                       ((TK.accent & 0xFFFFFF00) | 0x33)
+      local act_col  = selected and TK.accent or
+                       ((TK.accent & 0xFFFFFF00) | 0x55)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        fill_col)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), hov_col)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  act_col)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),        bord_col)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          text_col)
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 1)
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(),   RA.SC(12))
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),
+        RA.SC(12), RA.SC(5))
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+      local clicked = ImGui.ImGui_Button(RA.ctx, label .. "##" .. id)
+      PopFont(RA.ctx)
+      ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+      PopStyleColor(RA.ctx, 5)
+      if not selected and ImGui.ImGui_IsItemHovered(RA.ctx) then
+        _fb_overlay_hover_border(RA.SC(12))
+      end
+      return clicked
+    end
+
+    -- Thumbs sentiment row: two equal-width buttons side by side.
+    _fb_begin_disabled(locked)
+    local THUMB_W = math.floor((cw - RA.SC(8)) * 0.5)
+    local THUMB_H = RA.SC(40)
+    if _fb_thumb_btn("fb_thumb_up", ICON.THUMBS_UP, f.thumbs_up,
+        THUMB_W, THUMB_H, "Helpful") and not locked then
+      if f.thumbs_up then
+        f.thumbs_up = false
+      else
+        f.thumbs_up   = true
+        f.thumbs_down = false
+        -- Clear any previously-set secondary tags so they don't ride
+        -- along on a sentiment that no longer applies.
+        f.wrong_result, f.too_slow, f.wrong_plugin, f.didnt_follow_request
+          = false, false, false, false
+      end
+    end
+    SameLine(RA.ctx, 0, RA.SC(8))
+    if _fb_thumb_btn("fb_thumb_down", ICON.THUMBS_DOWN, f.thumbs_down,
+        THUMB_W, THUMB_H, "Not helpful") and not locked then
+      if f.thumbs_down then
+        f.thumbs_down = false
+        -- Collapse the follow-up chip row by clearing its selections too,
+        -- so re-opening 👎 starts on a clean slate (and the payload
+        -- doesn't keep stale flags from a previous 👎/un-👎 cycle).
+        f.wrong_result, f.too_slow, f.wrong_plugin, f.didnt_follow_request
+          = false, false, false, false
+      else
+        f.thumbs_down = true
+        f.thumbs_up   = false
+      end
+    end
+    _fb_end_disabled()
+
+    -- Conditional follow-up: revealed only when thumbs_down. The chips
+    -- wrap to a second row when needed via SameLine + width-aware breaks
+    -- (ImGui doesn't auto-wrap buttons, so we measure each label and
+    -- start a new line when the cumulative width would overflow cw).
+    if f.thumbs_down then
+      Dummy(RA.ctx, 1, RA.SC(10))
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+      Text(RA.ctx, "What went wrong?")
+      PopStyleColor(RA.ctx)
+      PopFont(RA.ctx)
+      Dummy(RA.ctx, 1, RA.SC(6))
+
+      _fb_begin_disabled(locked)
+      local chips = {
+        { "fb_tag_wrong",   "Wrong result",            "wrong_result" },
+        { "fb_tag_plugin",  "Wrong plugin",            "wrong_plugin" },
+        { "fb_tag_didnt",   "Didn't follow request",   "didnt_follow_request" },
+        { "fb_tag_slow",    "Too slow",                "too_slow" },
+      }
+      -- Track horizontal cursor to break to next row before overflow.
+      -- ImGui_Button width auto-fits content + FramePadding; CalcTextSize
+      -- gives us the inner text width, so the rendered button width is
+      -- text_w + 2 * padding_x (12px each side) + FrameBorderSize (~1).
+      local CHIP_PAD_X = RA.SC(12)
+      local CHIP_GAP   = RA.SC(6)
+      local row_w = 0
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+      for i, c in ipairs(chips) do
+        local id, label, key = c[1], c[2], c[3]
+        local tw = CalcTextSize(RA.ctx, label)
+        local btn_w = tw + CHIP_PAD_X * 2 + 2
+        local need_w = (i == 1) and btn_w or (CHIP_GAP + btn_w)
+        if i > 1 and (row_w + need_w) > cw then
+          -- Wrap: start a fresh row.
+          row_w = 0
+        elseif i > 1 then
+          SameLine(RA.ctx, 0, CHIP_GAP)
+        end
+        PopFont(RA.ctx)   -- chip pushes its own font; restore measurement font afterward
+        if _fb_chip(id, label, f[key]) and not locked then
+          f[key] = not f[key]
+        end
+        PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+        row_w = row_w + need_w
+      end
+      PopFont(RA.ctx)
+      _fb_end_disabled()
+    end
+
+    -- ──── COMMENTS section (free-text). Below the sentiment row so the
+    -- quick-classify path is on top and the comment box is the optional
+    -- elaboration step.
+    Dummy(RA.ctx, 1, RA.SC(12))
+    UI.v5_section_label("COMMENTS")
+    Dummy(RA.ctx, 1, RA.SC(4))
+    -- Capture screen pos BEFORE the input so we can overlay a placeholder
+    -- text when the field is empty. ImGui's InputTextWithHint helper is
+    -- single-line only; for multi-line we draw the hint manually onto the
+    -- window draw list at the input's top-left + the InputText frame
+    -- padding.
+    local _fb_comment_x, _fb_comment_y = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
+    _fb_begin_disabled(locked)
+    -- Push input font + explicit text colors. The caret in particular
+    -- needs Col_InputTextCursor (a separate ImGui slot) -- pushing only
+    -- Col_Text leaves the caret using the global default which renders
+    -- white on the light theme's pale input_bg. Same fix used by the
+    -- chat selection InputTextMultiline at line ~3528.
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(14))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),            TK.text)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_InputTextCursor(), TK.text)
+    -- Snapshot the buffer BEFORE InputTextMultiline so the Enter-to-Send
+    -- handler can restore it (stripped of trailing \n) when Enter fires
+    -- from inside the comment box. Without this restore, the \n that
+    -- ImGui already inserted on the same frame would leak into
+    -- user_comment. Mirrors the chat prompt pattern at line ~14875.
+    local _fb_prev_comment = S.feedback_modal_comment or ""
+    local _rv, new_comment = ImGui.ImGui_InputTextMultiline(RA.ctx,
+      "##fb_comment", S.feedback_modal_comment or "",
+      cw, RA.SC(78), 0, nil)
+    -- Capture focus state so the Enter-to-Send handler below can
+    -- distinguish "Enter pressed while typing" (need to strip the \n
+    -- ImGui just inserted) from "Enter pressed elsewhere in the modal"
+    -- (no buffer mutation needed).
+    local _fb_comment_active = ImGui.ImGui_IsItemActive(RA.ctx)
+    PopStyleColor(RA.ctx, 2)
+    PopFont(RA.ctx)
+    if not locked then S.feedback_modal_comment = new_comment end
+    _fb_end_disabled()
+    if (S.feedback_modal_comment or "") == "" then
+      -- Placeholder adapts to the current sentiment: a generic prompt
+      -- when neither thumb is selected, then a tailored question after
+      -- the user picks a thumb. Switching back to neutral (deselecting)
+      -- restores the generic prompt.
+      local _fb_placeholder
+      if f.thumbs_up then
+        _fb_placeholder = "What went right? How did this help you?"
+      elseif f.thumbs_down then
+        _fb_placeholder = "What went wrong? How could this chat have gone better?"
+      else
+        _fb_placeholder = "What went right, what went wrong?"
+      end
+      local dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+      ImGui.ImGui_DrawList_AddTextEx(dl, FONT.inter_reg, RA.SC(13),
+        _fb_comment_x + RA.SC(12), _fb_comment_y + RA.SC(10),
+        TK.text_faint, _fb_placeholder)
+    end
+
+    -- ──── Preview Report -- collapsible sub-section. Modeled on the
+    -- Help > Report a Bug page's "Preview Report" expander (same
+    -- v5_section_label + bordered child + mono font pattern). Closed by
+    -- default. When expanded, shows the EXACT JSON bytes that Send would
+    -- post (preview_payload_text and send_draft both render the same
+    -- draft + comment + flags through Diag.assemble_payload). Walked
+    -- line-by-line with TextWrapped so the box shape and styling match
+    -- the bug-report preview rather than ImGui's default text-input look.
+    Dummy(RA.ctx, 1, RA.SC(14))
+    S.feedback_modal_preview_open = S.feedback_modal_preview_open or false
+    S.feedback_modal_preview_open = UI.v5_section_label(
+      "Preview feedback",
+      S.feedback_modal_preview_open, nil, 1.0, TK.text_muted)
+    if S.feedback_modal_preview_open then
+      local preview = Diag.preview_payload_text(draft,
+        S.feedback_modal_comment or "", f)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), TK.code_bg)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),  TK.border)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),    TK.text)
+      -- Scrollbar palette pushed locally too (belt + suspenders alongside
+      -- the modal-level push) so the preview child's own scrollbar reads
+      -- light in light mode regardless of how scope inheritance shakes
+      -- out across nested popup -> child -> child windows.
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarBg(),          0x00000000)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrab(),        TK.border_str)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabHovered(),
+        UI.lerp_u32(TK.border_str, TK.text, 0.30))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
+        UI.lerp_u32(TK.border_str, TK.text, 0.55))
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildBorderSize(), 1)
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildRounding(),   RA.SC(5))
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(),   RA.SC(10), RA.SC(8))
+      if ImGui.ImGui_BeginChild(RA.ctx, "##fb_preview_child",
+          cw, RA.SC(220), ImGui.ImGui_ChildFlags_Borders()) then
+        -- Right-click anywhere in the preview body -> Copy full payload
+        -- text to clipboard. Lets users grab the exact JSON they're
+        -- about to send for offline inspection without having to
+        -- triple-click + select-all + Ctrl-C through a non-selectable
+        -- TextWrapped widget.
+        if ImGui.ImGui_BeginPopupContextWindow(RA.ctx, "##fb_preview_ctx") then
+          if ImGui.ImGui_MenuItem(RA.ctx, "Copy") then
+            ImGui.ImGui_SetClipboardText(RA.ctx, preview)
+          end
+          ImGui.ImGui_EndPopup(RA.ctx)
+        end
+        PushFont(RA.ctx, FONT.mono_reg, RA.SC(10))
+        local rp = 1
+        while rp <= #preview do
+          local nl = str_find(preview, "\n", rp, true)
+          local line = nl and str_sub(preview, rp, nl - 1) or str_sub(preview, rp)
+          if line == "" then
+            Dummy(RA.ctx, 1, 4)
+          else
+            ImGui.ImGui_TextWrapped(RA.ctx, line)
+          end
+          if not nl then break end
+          rp = nl + 1
+        end
+        PopFont(RA.ctx)
+        ImGui.ImGui_EndChild(RA.ctx)
+      end
+      ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+      PopStyleColor(RA.ctx, 7)   -- ChildBg, Border, Text + Scrollbar x4
+      Dummy(RA.ctx, 1, RA.SC(6))
+    end
+
+    -- ──── What's in the Report (privacy) -- collapsible sub-section.
+    -- Modeled on the bug-report page's privacy expander but adapted to
+    -- the feedback flow (which sends chat content + comment + tags +
+    -- diag report, redacted before send). Closed by default.
+    S.feedback_modal_privacy_open = S.feedback_modal_privacy_open or false
+    S.feedback_modal_privacy_open = UI.v5_section_label(
+      "Details & privacy",
+      S.feedback_modal_privacy_open, nil, 1.0, TK.text_muted)
+    if S.feedback_modal_privacy_open then
+      -- 2x2 grid of compact bordered mini-panels. Each panel has a bold
+      -- short header (1-2 words) + 2-4 bullets. Heights are normalised
+      -- per row -- both panels in a row render at max(content_a, content_b)
+      -- so the grid reads as uniform tiles instead of ragged auto-sized
+      -- cards.
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ItemSpacing(),
+        RA.SC(10), RA.SC(2))
+
+      local _avail_w  = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+      local _grid_gap = RA.SC(8)
+      local _panel_w  = math.floor((_avail_w - _grid_gap) / 2)
+
+      -- Approximate the rendered height of one panel's content. Uses the
+      -- exact fonts the renderer uses + the same wrap width so the
+      -- result tracks reality. Includes WindowPadding (top + bottom) +
+      -- the SC(4) Dummy between header and items + ItemSpacing.y between
+      -- bullets, then trims one trailing ItemSpacing since the last
+      -- bullet doesn't add a gap below.
+      local _item_wrap = _panel_w - RA.SC(20)
+      local _pad_y    = RA.SC(8)
+      local _spacing_y = RA.SC(2)
+      local function _panel_h(header, items)
+        PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
+        local _, hh = ImGui.ImGui_CalcTextSize(RA.ctx, header)
+        PopFont(RA.ctx)
+        PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+        local items_h = 0
+        for _, item in ipairs(items) do
+          -- ReaImGui CalcTextSize signature: (ctx, text, off_x?, off_y?,
+          -- hide_text_after_double_hash, wrap_width). Positions 3-4 are
+          -- nil so the call measures from the text origin, not an offset.
+          local _, ih = ImGui.ImGui_CalcTextSize(RA.ctx,
+            "\xe2\x80\xa2 " .. item, nil, nil, false, _item_wrap)
+          items_h = items_h + ih + _spacing_y
+        end
+        PopFont(RA.ctx)
+        if #items > 0 then items_h = items_h - _spacing_y end
+        -- Header line + Dummy(SC(4)) + items + WindowPadding top + bot.
+        -- + SC(8) safety margin: CalcTextSize's wrapped height tends to
+        -- run ~1-2 px shy of the actual rendered height per wrapped line
+        -- (ItemSpacing.y on the underlying TextWrapped is not perfectly
+        -- captured), so without a buffer the child can overflow by a
+        -- pixel or two and trigger ImGui's auto-scrollbar.
+        return hh + RA.SC(4) + items_h + _pad_y * 2 + RA.SC(8)
+      end
+
+      local function _fb_priv_panel(id, header, items, h)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(),
+          UI.lerp_u32(TK.card, TK.bg, 0.35))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(), TK.border)
+        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildBorderSize(), 1)
+        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildRounding(),   RA.SC(5))
+        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(),
+          RA.SC(10), _pad_y)
+        if ImGui.ImGui_BeginChild(RA.ctx, id, _panel_w, h,
+            ImGui.ImGui_ChildFlags_Borders(),
+            ImGui.ImGui_WindowFlags_NoScrollbar()) then
+          PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
+          Text(RA.ctx, header)
+          PopStyleColor(RA.ctx)
+          PopFont(RA.ctx)
+          Dummy(RA.ctx, 1, RA.SC(4))
+          PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+          ImGui.ImGui_PushTextWrapPos(RA.ctx,
+            GetCursorPosX(RA.ctx) + _item_wrap)
+          for _, item in ipairs(items) do
+            Text(RA.ctx, "\xe2\x80\xa2 " .. item)   -- "• " (UTF-8 bullet)
+          end
+          ImGui.ImGui_PopTextWrapPos(RA.ctx)
+          PopStyleColor(RA.ctx)
+          PopFont(RA.ctx)
+          ImGui.ImGui_EndChild(RA.ctx)
+        end
+        ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+        PopStyleColor(RA.ctx, 2)
+      end
+
+      -- Row 1: What's included | Privacy
+      local _r1_a_header, _r1_a_items = "What's included", {
+        "Chat shown above",
+        "Your comment and tags",
+        "App, REAPER, OS, provider/model",
+        "Diagnostic summary",
+      }
+      local _r1_b_header, _r1_b_items = "Privacy", {
+        "API keys and bearer tokens redacted",
+        "Home/install paths redacted",
+        "Audio files and .RPP projects not sent",
+        "No account/contact info",
+      }
+      local _r1_h = math.max(
+        _panel_h(_r1_a_header, _r1_a_items),
+        _panel_h(_r1_b_header, _r1_b_items))
+      _fb_priv_panel("##fb_priv_included", _r1_a_header, _r1_a_items, _r1_h)
+      ImGui.ImGui_SameLine(RA.ctx, 0, _grid_gap)
+      _fb_priv_panel("##fb_priv_privacy",  _r1_b_header, _r1_b_items, _r1_h)
+
+      -- Row 2: Where it goes | Note
+      local _r2_a_header, _r2_a_items = "Where it goes", {
+        "Sent to ReaAssist maintainer",
+        "Used only to improve ReaAssist",
+        "No third parties",
+      }
+      local _r2_b_header, _r2_b_items = "Note", {
+        "Chat may include project, track, plugin, or names you typed.",
+      }
+      local _r2_h = math.max(
+        _panel_h(_r2_a_header, _r2_a_items),
+        _panel_h(_r2_b_header, _r2_b_items))
+      _fb_priv_panel("##fb_priv_where", _r2_a_header, _r2_a_items, _r2_h)
+      ImGui.ImGui_SameLine(RA.ctx, 0, _grid_gap)
+      _fb_priv_panel("##fb_priv_note",  _r2_b_header, _r2_b_items, _r2_h)
+
+      ImGui.ImGui_PopStyleVar(RA.ctx)   -- ItemSpacing
+    end
+
+    -- Status / error line (no success branch -- on ok the modal closes
+    -- immediately and a toast fires on the main screen instead).
+    if sending then
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+      Text(RA.ctx, "Sending...")
+      PopStyleColor(RA.ctx)
+    elseif S.feedback_modal_state == "error" then
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.red)
+      UI.text_multiline("Send failed: " ..
+        (S.feedback_modal_error or "unknown error"))
+      PopStyleColor(RA.ctx)
+    end
+
+    -- Buttons (centered horizontally within the modal content width).
+    -- 20 px margin above so the row clearly separates from the privacy
+    -- section (or the status line) above it.
+    Dummy(RA.ctx, 1, RA.SC(20))
+    local btn_w   = RA.SC(100)
+    local btn_gap = RA.SC(8)
+    local btns_total_w = btn_w * 2 + btn_gap
+    local _btn_cur_x = ImGui.ImGui_GetCursorPosX(RA.ctx)
+    ImGui.ImGui_SetCursorPosX(RA.ctx,
+      _btn_cur_x + math_max(0, math_floor((cw - btns_total_w) * 0.5)))
+
+    -- Cancel: disabled while sending. The POST cannot be cancelled, so
+    -- allowing Cancel mid-flight would just orphan the in-flight callback
+    -- (which would later mutate cleared state). Same applies to Escape.
+    _fb_begin_disabled(sending)
+    local cancel_clicked = ImGui.ImGui_Button(RA.ctx, "Cancel", btn_w, 0)
+    _fb_end_disabled()
+
+    ImGui.ImGui_SameLine(RA.ctx, 0, btn_gap)
+
+    UI.push_modal_primary_btn()
+    _fb_begin_disabled(locked)
+    local primary_label = (S.feedback_modal_state == "error") and "Try Again" or "Send"
+    local send_clicked = ImGui.ImGui_Button(RA.ctx, primary_label, btn_w, 0)
+    _fb_end_disabled()
+    UI.pop_modal_primary_btn()
+
+    -- Cancel + Escape (only when not sending)
+    if not sending and (cancel_clicked or
+       ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape())) then
+      ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+      _close_feedback_modal()
+    end
+
+    -- Enter-to-submit: fires from anywhere in the modal as long as Shift
+    -- is not held. Shift+Enter inside the comment box still inserts a
+    -- newline (standard chat-app convention; matches the main chat
+    -- prompt's Enter handling at line ~14875). When Enter fires from
+    -- inside the comment box, we restore the pre-edit buffer (stripped
+    -- of any trailing \n) so the newline ImGui already inserted on this
+    -- frame doesn't leak into user_comment. Both Enter and Keypad-Enter
+    -- count.
+    local _fb_shift_held = (ImGui.ImGui_GetKeyMods(RA.ctx)
+      & ImGui.ImGui_Mod_Shift()) == ImGui.ImGui_Mod_Shift()
+    local _fb_enter_pressed =
+      ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Enter())
+      or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_KeypadEnter())
+    local _fb_enter_to_send = _fb_enter_pressed and not _fb_shift_held
+    if _fb_enter_to_send and _fb_comment_active and not locked then
+      S.feedback_modal_comment = _fb_prev_comment:gsub("\n$", "")
+    end
+
+    -- Send / Try Again. Capture event_id BEFORE send_draft so the callback
+    -- can verify the same draft is still active (defends against the
+    -- title-bar X close mid-send race).
+    if (send_clicked or _fb_enter_to_send) and not locked then
+      S.feedback_modal_state = "sending"
+      S.feedback_modal_error = nil
+      local send_event_id = draft.event_id
+      Diag.send_draft(draft,
+        S.feedback_modal_comment or "",
+        S.feedback_modal_flags,
+        function(ok, status, err)
+          -- Guard: only mutate UI state if the same draft is still active.
+          -- Prevents orphan callbacks (after title-bar X close, or after
+          -- the user opened a fresh modal for a different message) from
+          -- writing into cleared or re-initialised modal state.
+          if not S.feedback_modal_draft
+             or S.feedback_modal_draft.event_id ~= send_event_id then
+            return
+          end
+          if ok then
+            S.feedback_modal_state = "success"
+          else
+            S.feedback_modal_state = "error"
+            S.feedback_modal_error = err or
+              ("status " .. tostring(status))
+          end
+        end)
+    end
+
+    -- Close-on-success: drop the modal as soon as the callback flips
+    -- state to "success" and surface a brief toast on the main window
+    -- instead. No inline success banner, no 1.5 s linger.
+    if success then
+      ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+      if UI.show_float_toast then
+        UI.show_float_toast("Feedback sent. Thanks!", "ok")
+      end
+      _close_feedback_modal()
+    end
+
+    -- Pop the 3 FrameBg colors pushed at the top of this branch.
+    PopStyleColor(RA.ctx, 3)
+
+    ImGui.ImGui_EndPopup(RA.ctx)
+  else
+    -- BeginPopupModal returned false. If we already opened the popup once,
+    -- the user closed it via the title-bar X. Tear down state.
+    if S._feedback_modal_opened then
+      _close_feedback_modal()
+    end
+  end
+  UI.pop_modal_style()
+  PopStyleColor(RA.ctx, 4)   -- outer scrollbar palette
 end
 
 -- Render._key_validation_error_popup
@@ -11692,9 +12369,13 @@ function Render.main_window()
       -- Escape on the main chat screen: defer popup open to next frame so
       -- the Escape key is released before the popup renders (otherwise the
       -- popup's own Escape handler immediately closes it).
+      -- UI._popup_was_open guard so an Escape pressed inside an open popup
+      -- (feedback modal, key-test results, etc.) closes that popup without
+      -- ALSO triggering the quit confirm here.
       if S._open_quit_confirm == "ready" then
         S._open_quit_confirm = "fire"
       elseif not S._quit_popup_open
+        and not UI._popup_was_open
         and ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
         S._open_quit_confirm = "ready"
       end
@@ -13650,6 +14331,84 @@ function Render.main_window()
           PopStyleColor(RA.ctx)
         end
 
+        -- Two thumbs icon buttons (Helpful / Not helpful), shown below
+        -- every assistant message when the Diag uploader is enabled.
+        -- Click opens the feedback modal with that sentiment pre-selected.
+        -- Click does NOT send; preview + Send still required.
+        --
+        -- Skipped while a response is still streaming. Includes code-only
+        -- assistant messages (no prose, just generated code) since those
+        -- are exactly the kind users may want to report on.
+        --
+        -- Styled as compact icon-only V5 secondary buttons (transparent
+        -- fill, 1px muted border) with subtle accent-tinted hover.
+        local _fb_has_text = msg.content and msg.content ~= ""
+        local _fb_has_code = msg.code_block and msg.code_block ~= ""
+        if Diag.uploader_enabled
+           and S.status ~= "waiting"
+           and (_fb_has_text or _fb_has_code) then
+          Dummy(RA.ctx, 1, RA.SC(20))   -- 20px margin above
+
+          -- Local helper: opens the modal for this assistant message,
+          -- pre-selecting `with_thumb` ("up" / "down" / nil).
+          local function _open_fb(with_thumb)
+            S.feedback_modal_open       = true
+            S.feedback_modal_target_idx = i
+            S.feedback_modal_draft      = Diag.begin_draft(i)
+            S.feedback_modal_comment    = ""
+            S.feedback_modal_flags      = {
+              thumbs_up            = (with_thumb == "up"),
+              thumbs_down          = (with_thumb == "down"),
+              wrong_result         = false,
+              wrong_plugin         = false,
+              didnt_follow_request = false,
+              too_slow             = false,
+            }
+            S.feedback_modal_state      = "idle"
+            S.feedback_modal_error      = nil
+            S._feedback_modal_opened    = false
+          end
+
+          -- Local helper: renders a single thumb icon button. Returns
+          -- true if clicked. Hover overlay matches the modal's chips:
+          -- subtle accent-tinted bg + accent border drawn after the
+          -- button when hovered.
+          local function _fb_thumb_chat_btn(id, icon, tooltip)
+            PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 1)
+            PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(),   RA.SC(4))
+            PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),    RA.SC(8), RA.SC(4))
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),        TK.border)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        0x00000000)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(),
+              (TK.accent & 0xFFFFFF00) | 0x33)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),
+              (TK.accent & 0xFFFFFF00) | 0x55)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.text_muted)
+            PushFont(RA.ctx, FONT.lucide, RA.SC(12))
+            local clicked = ImGui.ImGui_Button(RA.ctx, icon .. "##" .. id)
+            PopFont(RA.ctx)
+            PopStyleColor(RA.ctx, 5)
+            ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+            if ImGui.ImGui_IsItemHovered(RA.ctx) then
+              local x1, y1 = ImGui.ImGui_GetItemRectMin(RA.ctx)
+              local x2, y2 = ImGui.ImGui_GetItemRectMax(RA.ctx)
+              local dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+              ImGui.ImGui_DrawList_AddRect(dl, x1, y1, x2, y2,
+                TK.accent, RA.SC(4), 0, 1)
+              if tooltip then UI.tooltip(tooltip) end
+            end
+            return clicked
+          end
+
+          if _fb_thumb_chat_btn("fbup_" .. i, ICON.THUMBS_UP, "Helpful") then
+            _open_fb("up")
+          end
+          ImGui.ImGui_SameLine(RA.ctx, 0, RA.SC(6))
+          if _fb_thumb_chat_btn("fbdown_" .. i, ICON.THUMBS_DOWN, "Not helpful") then
+            _open_fb("down")
+          end
+        end
+
         ImGui.ImGui_Unindent(RA.ctx, BUBBLE_IND)
         ImGui.ImGui_Spacing(RA.ctx)
         ImGui.ImGui_Unindent(RA.ctx, BUBBLE_IND)
@@ -15499,6 +16258,19 @@ function Render.main_window()
       UI.render_float_toast(_tx, _ty, _tw, _th)
     end
 
+    -- Manual feedback dialog + safety output ceiling alert. Both
+    -- rendered HERE (inside the main window's Begin/End) rather than
+    -- after End so the popup-modals stay glued to the main script
+    -- window for ReaImGui's OS-level window management. Opened from
+    -- outside this scope, the popup z-orders behind the main window
+    -- when REAPER focus shifts to it, leaving the dim overlay painted
+    -- on the main window's surface with no visible popup to interact
+    -- with -- the user has to hit Esc to recover. Same call-site
+    -- pattern as the Settings page's per-row "Details" popup, which
+    -- lives inside its render scope and doesn't have this z-order bug.
+    Render.feedback_modal()
+    Render._ceiling_alert_popup()
+
     -- Landing point for the first-frame boot guard at the top of this
     -- block. When content is skipped on frame 1, the goto above jumps
     -- here so End still runs on the visible-but-skipped path. Kept as
@@ -15814,11 +16586,6 @@ function Render.main_window()
     PopFont(RA.ctx)
     UI.pop_modal_style()
   end
-
-  -- Safety output ceiling alert. Triggered by Loop.handle_ceiling_poll
-  -- when a JSFX trips its mute latch. Renders independently of which
-  -- screen is currently active.
-  Render._ceiling_alert_popup()
 
   return open
 end

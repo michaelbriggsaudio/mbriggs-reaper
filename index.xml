@@ -56,6 +56,36 @@ After installing, run the action "Script: ReaAssist.lua" from REAPER's Action Li
         <link rel="website" href="https://github.com/michaelbriggsaudio/mbriggs-reaper">GitHub Repository</link>
         <link rel="website" href="https://reaassist.app">ReaAssist Website</link>
       </metadata>
+      <version name="1.0.7" author="Michael Briggs" time="2026-05-02T13:40:04Z">
+        <changelog><![CDATA[
+- New "Send Feedback" flow: thumbs-up / thumbs-down icon buttons appear under each assistant message; click opens a single-screen modal with an optional comment box and, on thumbs-down, a row of secondary tags (Wrong result, Wrong plugin, Didn't follow request, Too slow). Submission goes to ReaAssist's feedback endpoint and surfaces a "Feedback sent" toast.
+        ]]></changelog>
+        <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.0.7</source>
+        <source file="manifest.json">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/manifest.json?v=1.0.7</source>
+        <source file="CHANGELOG.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/CHANGELOG.md?v=1.0.7</source>
+        <source file="LICENSE.txt">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/LICENSE.txt?v=1.0.4</source>
+        <source file="README.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/README.md?v=1.0.3</source>
+        <source file="Resources/UI.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/UI.lua?v=1.0.7</source>
+        <source file="Resources/Relaunch.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Relaunch.lua?v=1.0.4</source>
+        <source file="Resources/Diag.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Diag.lua?v=1.0.7</source>
+        <source file="Resources/System_Prompt.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/System_Prompt.md?v=1.0.6</source>
+        <source file="Resources/Prompts.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Prompts.md?v=1.0.6</source>
+        <source file="Resources/API_Ref.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/API_Ref.md?v=1.0.6</source>
+        <source file="Resources/Plugin_Ref.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Plugin_Ref.md?v=1.0.6</source>
+        <source file="Resources/Help.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Help.md?v=1.0.7</source>
+        <source file="Resources/ReEQ/ReEQ.jsfx">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/ReEQ/ReEQ.jsfx?v=1.0.3</source>
+        <source file="Resources/ReEQ/LICENSE.txt">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/ReEQ/LICENSE.txt?v=1.0.3</source>
+        <source file="Resources/ReEQ/Dependencies/firhalfband.jsfx-inc">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/ReEQ/Dependencies/firhalfband.jsfx-inc?v=1.0.3</source>
+        <source file="Resources/ReEQ/Dependencies/spectrum.jsfx-inc">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/ReEQ/Dependencies/spectrum.jsfx-inc?v=1.0.3</source>
+        <source file="Resources/ReEQ/Dependencies/svf_filter.jsfx-inc">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/ReEQ/Dependencies/svf_filter.jsfx-inc?v=1.0.3</source>
+        <source file="Resources/fonts/Inter_18pt-Regular.ttf">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/fonts/Inter_18pt-Regular.ttf?v=1.0.3</source>
+        <source file="Resources/fonts/Inter_18pt-Light.ttf">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/fonts/Inter_18pt-Light.ttf?v=1.0.3</source>
+        <source file="Resources/fonts/Inter_18pt-SemiBold.ttf">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/fonts/Inter_18pt-SemiBold.ttf?v=1.0.3</source>
+        <source file="Resources/fonts/Inter_18pt-Bold.ttf">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/fonts/Inter_18pt-Bold.ttf?v=1.0.3</source>
+        <source file="Resources/fonts/JetBrainsMono-Regular.ttf">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/fonts/JetBrainsMono-Regular.ttf?v=1.0.3</source>
+        <source file="Resources/fonts/JetBrainsMono-Medium.ttf">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/fonts/JetBrainsMono-Medium.ttf?v=1.0.3</source>
+        <source file="Resources/fonts/lucide.ttf">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/fonts/lucide.ttf?v=1.0.7</source>
+      </version>
       <version name="1.0.6" author="Michael Briggs" time="2026-05-01T01:00:00Z">
         <changelog><![CDATA[
 - Static validator stack expanded with five new checks running before auto-run: arity check for fixed-arity reaper.* calls (catches missing paramidx), unchecked TrackFX_AddByName results, chain-build upsert pairing (every plugin needs both GetByName and AddByName), helper-body integrity (catches subtly rewritten set_param_display bodies), and a Lua-syntax preflight on lua blocks. Each fires a hidden retry on hit; the visible response is the corrected one.

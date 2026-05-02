@@ -1,5 +1,9 @@
 # ReaAssist - Changelog
 
+## v1.0.7 - 2026-05-02
+
+- New "Send Feedback" flow: thumbs-up / thumbs-down icon buttons appear under each assistant message; click opens a single-screen modal with an optional comment box and, on thumbs-down, a row of secondary tags (Wrong result, Wrong plugin, Didn't follow request, Too slow). Submission goes to ReaAssist's feedback endpoint and surfaces a "Feedback sent" toast.
+
 ## v1.0.6 - 2026-05-01
 
 ### Reliability

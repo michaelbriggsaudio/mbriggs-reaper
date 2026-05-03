@@ -1,5 +1,21 @@
 # ReaAssist - Changelog
 
+## v1.0.8 - 2026-05-03
+
+### Install & onboarding
+
+- ReaImGui (the required UI dependency) now installs itself on first launch instead of pointing users at the ReaPack docs. A small dark-themed installer downloads the right binary for your platform, SHA-256 verifies it, and atomically installs it -- no manual ReaPack step needed. macOS quarantine attribute is stripped automatically. Same path applies if ReaImGui is older than the pinned minimum (v0.10.0.5).
+- Bootstrap UI distinguishes first-launch (minimal popup with per-file progress cells) from existing-install repair (styled dialog with file list and Repair/Quit buttons). Install errors that previously stalled on a blank popup now route to the styled error view.
+- Cross-platform install hardening: Linux ARM detection (was falling through to x64 on aarch64), PowerShell rollback when the move-into-place step fails, progress-cell off-by-one, ASCII bullet in the repair list (Mac/Linux Proggy fallback), and `sha256sum` tried before `shasum` for broader Linux compatibility.
+
+### UI
+
+- Custom-provider model rows: notes are now a second inline column instead of buried in the Details popup, so a duplicated row can be retagged in place. The wide "Details" pill and bare "x" are replaced with three ghost icon buttons (settings / duplicate / delete). Active model gets the same checkmark as built-in providers.
+
+### Prompt
+
+- Generic chain prompts ("rock vocal chain", "add a compressor") now correctly trigger pref discovery on non-thinking models. Previously these would skip resolution entirely on lighter models and emit code against stock plugins instead of your preferred FX.
+
 ## v1.0.7 - 2026-05-02
 
 - New "Send Feedback" flow: thumbs-up / thumbs-down icon buttons appear under each assistant message; click opens a single-screen modal with an optional comment box and, on thumbs-down, a row of secondary tags (Wrong result, Wrong plugin, Didn't follow request, Too slow). Submission goes to ReaAssist's feedback endpoint and surfaces a "Feedback sent" toast.

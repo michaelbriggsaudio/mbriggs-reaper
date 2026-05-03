@@ -260,7 +260,7 @@ All three providers cache repeated prompt content between turns, which can cut p
 
 ## Troubleshooting
 
-- **Code doesn't run or buttons don't appear**: make sure ReaImGui is installed and up to date via ReaPack (Extensions > ReaPack > Browse Packages).
+- **Code doesn't run or buttons don't appear**: make sure ReaImGui is installed and up to date. ReaAssist auto-installs ReaImGui on first launch when missing; if you uninstalled it manually, relaunch ReaAssist and accept the install prompt, or update via ReaPack (Extensions > ReaPack > Browse Packages).
 - **API errors or "invalid key"**: double-check your key on the Settings page. Verify your billing status with your provider.
 - **Gemini free tier limits**: the free tier has lower rate limits and may reject large requests. Enable billing on your Google Cloud account for full access.
 - **Screenshots not working**: install js_ReaScriptAPI via ReaPack for accurate window capture.
@@ -269,7 +269,7 @@ All three providers cache repeated prompt content between turns, which can cut p
 
 ## Requirements
 
-- **ReaImGui** (install via ReaPack) - required
+- **ReaImGui** - required (auto-installed by ReaAssist on first launch; can also be installed via ReaPack)
 - **API key** for at least one provider - required
 - **curl** (built into Windows 10+, macOS, and Linux) - required
 - **js_ReaScriptAPI** (optional) - enables native file dialogs and accurate window screenshots

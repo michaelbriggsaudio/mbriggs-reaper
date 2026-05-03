@@ -1918,15 +1918,13 @@ function UI.mode_model_row_v5()
           if m.id == raw_m.id then usable_idx = j; break end
         end
       end
-      -- Checkmark: the selected-state indicator next to each item. Skip
-      -- entirely for custom providers (pass nil) -- without a filter tier
-      -- or price ranking the checkmark is the only signal, and the chip
-      -- up top already shows which row is active. Hiding it also declutters
-      -- lists where multiple rows share a model id.
-      local sel
-      if not is_custom then
-        sel = usable_idx ~= nil and (prefs.model_idx == usable_idx)
-      end
+      -- Checkmark: the selected-state indicator next to the active row.
+      -- Position-based comparison works for both branches -- built-in:
+      -- usable_idx is the filtered MODELS index and prefs.model_idx tracks
+      -- the same; custom: usable_idx = i and the saved model_idx is the
+      -- raw row position too. Two custom rows that share an id but differ
+      -- in notes get checkmarked independently because the index disambiguates.
+      local sel = usable_idx ~= nil and (prefs.model_idx == usable_idx)
 
       local descr_col = row_descr[i] .. string.rep(" ", max_descr - #row_descr[i])
       local right_col = string.rep(" ", max_right - #row_right[i]) .. row_right[i]
@@ -9301,33 +9299,86 @@ function Render.custom_llm_screen()
   _push_cllm_card()
   if ImGui.ImGui_BeginChild(RA.ctx, "##cllm_models_card", inner_w, 0,
       ImGui.ImGui_ChildFlags_AutoResizeY() | ImGui.ImGui_ChildFlags_Borders()) then
-    -- Column metrics: model identifier takes the row; Details and trash are
-    -- fixed-width pills on the right. card_w is the inner width exposed by
-    -- the card's content region, so the row fills regardless of padding.
+    -- Column metrics: identifier and notes split the input zone; the three
+    -- trailing icon buttons (gear/duplicate/remove) are equal-width squares.
+    -- card_w is the inner width exposed by the card's content region, so
+    -- the row fills regardless of padding.
     local RM_W      = RA.SC(22)
-    local DETAILS_W = RA.SC(64)
+    local DET_W     = RA.SC(22)   -- gear icon (per-row Details popup)
+    local DUP_W     = RA.SC(22)   -- duplicate icon (clones this row)
+    local ICON_SZ   = RA.SC(15)   -- glyph size inside the 22-px icon buttons
     local row_gap   = RA.SC(4)
     local card_w    = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
-    local id_w      = card_w - DETAILS_W - RM_W - row_gap * 2
+    -- 4 gaps between 5 widgets: [id][notes][dup][det][rm].
+    local fixed_w   = DUP_W + DET_W + RM_W + row_gap * 4
+    local inputs_w  = card_w - fixed_w
+    local id_w      = math_floor(inputs_w * 0.62)
+    local notes_w   = inputs_w - id_w
 
-    -- Single mono small-caps column header.
+    -- Two-column mono small-caps column header. NOTES sits over the second
+    -- input by absolute cursor X so it stays aligned regardless of the
+    -- "MODEL IDENTIFIER" label width.
     PushFont(RA.ctx, FONT.mono_reg, RA.SC(9))
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
+    local hdr_x0 = ImGui.ImGui_GetCursorPosX(RA.ctx)
     Text(RA.ctx, "MODEL IDENTIFIER")
     UI.tooltip("The model name as your server expects it (e.g. llama3.1:8b, "
       .. "kimi-k2.6, claude-opus-4-7). Open Details to set prices, context, "
-      .. "a short notes tag shown in the dropdown, and extra JSON body fields.")
+      .. "the same notes tag shown next to it, and extra JSON body fields.")
+    SameLine(RA.ctx, 0, 0)
+    ImGui.ImGui_SetCursorPosX(RA.ctx, hdr_x0 + id_w + row_gap)
+    Text(RA.ctx, "NOTES")
+    UI.tooltip("Optional short tag appended to the model id in the main-screen "
+      .. "model dropdown, so rows that share an id but differ in tuning "
+      .. "(thinking on/off, temperature, etc.) are distinguishable at a glance.")
     PopStyleColor(RA.ctx)
     PopFont(RA.ctx)
     Dummy(RA.ctx, 1, RA.SC(2))
 
     _push_input_style()
 
-    local row_to_remove = nil
-    local open_details_ri = nil  -- Deferred OpenPopup: ImGui requires the call
-                                 -- to sit OUTSIDE the input-style push/pop
-                                 -- pair to avoid style leakage into the popup.
+    -- Row buttons share the input frame height so the gear / duplicate /
+    -- trash glyphs sit on the same baseline as the inputs. Captured AFTER
+    -- _push_input_style so it reflects the same FramePadding the inputs use,
+    -- and BEFORE pushing FONT.lucide (which would otherwise change the
+    -- line-height term in GetFrameHeight).
+    local btn_h = ImGui.ImGui_GetFrameHeight(RA.ctx)
+
+    -- Renders one of the three trailing icon buttons (gear/duplicate/trash)
+    -- as a "ghost" affordance: transparent at rest, quiet card_hover tint on
+    -- hover, slightly stronger on press, no border. The icon glyph alone is
+    -- the visible UI when idle; the hover state confirms it's clickable.
+    --
+    -- FramePadding override (SC(2) x SC(2)) keeps the SC(15) lucide glyph
+    -- inside the content rect so ButtonTextAlign(0.5, 0.5) centers it
+    -- symmetrically; the inherited input style's SC(8) x SC(5) padding would
+    -- otherwise shrink the content rect below the glyph width and trip
+    -- ImGui's clamp-to-content-min path. btn_h stays equal to the input
+    -- frame height so the click target still aligns with the input baseline.
+    local function _icon_btn(label, w)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        0x00000000)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), TK.card_hover)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),
+        UI.lerp_u32(TK.card_hover, TK.text, 0.15))
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 0)
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),
+        RA.SC(2), RA.SC(2))
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ButtonTextAlign(), 0.5, 0.5)
+      PushFont(RA.ctx, FONT.lucide, ICON_SZ)
+      local clicked = ImGui.ImGui_Button(RA.ctx, label, w, btn_h)
+      PopFont(RA.ctx)
+      ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+      PopStyleColor(RA.ctx, 3)
+      return clicked
+    end
+
+    local row_to_remove    = nil
+    local row_to_duplicate = nil
+    local open_details_ri  = nil  -- Deferred OpenPopup: ImGui requires the call
+                                  -- to sit OUTSIDE the input-style push/pop
+                                  -- pair to avoid style leakage into the popup.
     for ri, row in ipairs(edit.models) do
+      -- Column 1: model identifier.
       ImGui.ImGui_SetNextItemWidth(RA.ctx, id_w)
       local _, new_id = ImGui.ImGui_InputTextWithHint(RA.ctx, "##cus_mid_" .. ri,
         "llama3.1:8b", row.id)
@@ -9337,35 +9388,49 @@ function Render.custom_llm_screen()
 
       SameLine(RA.ctx, 0, row_gap)
 
-      -- Details button: tints accent when either optional field (cache-hit
-      -- price or extra_body) is populated, so the user can see at a glance
-      -- which rows have "non-default" configuration without opening each
-      -- popup. A populated indicator on required fields (price_in, price_out,
-      -- context) would fire for every row, so it's meaningless there.
-      local cache_n    = tonumber(row.price_cache_r or "0") or 0
-      local has_extras = (row.extra_body or "") ~= ""
-                      or (row.notes      or "") ~= ""
-                      or cache_n > 0
-      if has_extras then
-        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        TK.accent_ui)
-        PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(),
-          UI.lerp_u32(TK.accent_ui, TK.text, 0.20))
-        PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),
-          UI.lerp_u32(TK.accent_ui, TK.text, 0.35))
-        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.bg)
-      end
-      if ImGui.ImGui_Button(RA.ctx, "Details##cus_det_" .. ri, DETAILS_W, 0) then
+      -- Column 2: dropdown-notes tag (lives on the row so a duplicated
+      -- template can be retagged in one keystroke). The 20-char cap and
+      -- format rules are enforced by Custom.validate_notes on Save.
+      ImGui.ImGui_SetNextItemWidth(RA.ctx, notes_w)
+      local _, new_notes = ImGui.ImGui_InputTextWithHint(RA.ctx,
+        "##cus_dnotes_" .. ri, "thinking, fast...", row.notes or "")
+      UI.focus_ring()
+      _, new_notes = UI.input_with_menu(RA.ctx, false, new_notes)
+      row.notes = new_notes
+      UI.tooltip(
+        "Short free-text label appended to the model id in the main-screen "
+        .. "model dropdown so rows that share a model id but differ in "
+        .. "tuning are distinguishable at a glance.\n\n"
+        .. "Examples: thinking, fast, creative, deterministic, long-ctx.\n\n"
+        .. str_format("Max %d characters. No pipes (|), tabs, or newlines.",
+          Custom.MAX_NOTES_LEN))
+
+      SameLine(RA.ctx, 0, row_gap)
+
+      -- Details (gear), Duplicate, and Trash share the same chrome: a square
+      -- icon button matching the input frame height. Text alignment is the
+      -- ImGui default (0.5, 0.5) for these buttons and the lucide font is
+      -- pushed only around each button so the surrounding input-style font
+      -- stays in scope for the inputs.
+      local cache_n = tonumber(row.price_cache_r or "0") or 0
+
+      if _icon_btn(ICON.SETTINGS .. "##cus_det_" .. ri, DET_W) then
         open_details_ri = ri
       end
       -- Tooltip summarizes what's in the popup right now. Kept short so the
       -- tooltip doesn't scroll; truncates extra_body beyond ~120 chars.
       local tip_lines = {
+        "Details - prices, context, notes, extra body JSON",
         str_format("$%s in / $%s cached / $%s out per 1M tokens",
           row.price_in or "0", row.price_cache_r or "0", row.price_out or "0"),
         str_format("Context: %s tokens", row.context_window or "?"),
       }
       if (row.notes or "") ~= "" then
         tip_lines[#tip_lines+1] = "Dropdown notes: " .. row.notes
+      end
+      if cache_n > 0 then
+        tip_lines[#tip_lines+1] = str_format("Cache-hit price: $%s",
+          row.price_cache_r or "0")
       end
       if (row.extra_body or "") ~= "" then
         local eb = row.extra_body
@@ -9375,16 +9440,31 @@ function Render.custom_llm_screen()
         tip_lines[#tip_lines+1] = "Extra body: (none)"
       end
       UI.tooltip(tbl_concat(tip_lines, "\n"))
-      if has_extras then PopStyleColor(RA.ctx, 4) end
+
+      SameLine(RA.ctx, 0, row_gap)
+
+      -- Duplicate: clones this row directly below as a template, so the user
+      -- can tweak one field (e.g. flip a thinking flag in extra_body) without
+      -- retyping the rest. Disabled during an active connection test for
+      -- the same reason as the remove button.
+      do
+        local test_active = api_keys.custom_conn_test and api_keys.custom_conn_test.active
+        ImGui.ImGui_BeginDisabled(RA.ctx, test_active)
+        if _icon_btn(ICON.COPY_PLUS .. "##cus_mdup_" .. ri, DUP_W) then
+          row_to_duplicate = ri
+        end
+        UI.tooltip("Duplicate this model row")
+        ImGui.ImGui_EndDisabled(RA.ctx)
+      end
 
       SameLine(RA.ctx, 0, row_gap)
 
       if #edit.models > 1 then
-        -- Row-remove X: disabled during an active connection test so
-        -- the in-flight request's target model can't vanish mid-call.
+        -- Row-remove (trash icon): disabled during an active connection test
+        -- so the in-flight request's target model can't vanish mid-call.
         local test_active = api_keys.custom_conn_test and api_keys.custom_conn_test.active
         ImGui.ImGui_BeginDisabled(RA.ctx, test_active)
-        if ImGui.ImGui_Button(RA.ctx, "x##cus_mrm_" .. ri, RM_W, 0) then
+        if _icon_btn(ICON.TRASH .. "##cus_mrm_" .. ri, RM_W) then
           row_to_remove = ri
         end
         UI.tooltip("Remove this model row")
@@ -9393,10 +9473,23 @@ function Render.custom_llm_screen()
         Dummy(RA.ctx, RM_W, 1)
       end
 
-      _inline_msg(edit.errors["model_" .. ri], TK.red)
+      _inline_msg(edit.errors["model_notes_" .. ri], TK.red)
+      _inline_msg(edit.errors["model_" .. ri],       TK.red)
     end
     if row_to_remove then
       tbl_remove(edit.models, row_to_remove)
+    end
+    if row_to_duplicate then
+      local src = edit.models[row_to_duplicate]
+      table.insert(edit.models, row_to_duplicate + 1, {
+        id             = src.id,
+        price_in       = src.price_in,
+        price_cache_r  = src.price_cache_r,
+        price_out      = src.price_out,
+        context_window = src.context_window,
+        notes          = src.notes,
+        extra_body     = src.extra_body,
+      })
     end
 
     _pop_input_style()
@@ -9439,7 +9532,10 @@ function Render.custom_llm_screen()
 
         local fw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
 
-        -- Dropdown Notes (short free-text tag)
+        -- Dropdown Notes: same field as the inline row input -- both bind to
+        -- row.notes, so an edit here surfaces in the row immediately and
+        -- vice versa. The row carries the inline validator error, so the
+        -- popup omits the redundant error display.
         PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
         Text(RA.ctx, "Dropdown Notes")
         PopFont(RA.ctx)
@@ -9450,20 +9546,23 @@ function Render.custom_llm_screen()
         PopFont(RA.ctx)
         _push_input_style()
         ImGui.ImGui_SetNextItemWidth(RA.ctx, fw)
-        local _, new_notes = ImGui.ImGui_InputTextWithHint(RA.ctx,
-          "##cus_dnotes_" .. ri, "thinking, fast, creative...", row.notes or "")
+        local _, popup_notes = ImGui.ImGui_InputTextWithHint(RA.ctx,
+          "##cus_dnotes_pop_" .. ri, "thinking, fast, creative...",
+          row.notes or "")
         UI.focus_ring()
-        _, new_notes = UI.input_with_menu(RA.ctx, false, new_notes)
+        _, popup_notes = UI.input_with_menu(RA.ctx, false, popup_notes)
         _pop_input_style()
-        row.notes = new_notes
+        row.notes = popup_notes
         UI.tooltip(
           "Short free-text label appended to the model id in the main-screen "
           .. "model dropdown so rows that share a model id but differ in "
           .. "tuning are distinguishable at a glance.\n\n"
           .. "Examples: thinking, fast, creative, deterministic, long-ctx.\n\n"
           .. str_format("Max %d characters. No pipes (|), tabs, or newlines.",
-            Custom.MAX_NOTES_LEN))
-        _inline_msg(edit.errors["model_notes_" .. ri], TK.red)
+            Custom.MAX_NOTES_LEN)
+          .. "\n\n"
+          .. "Mirrors the Notes input on the row -- editing either updates the "
+          .. "other.")
 
         Dummy(RA.ctx, 1, RA.SC(10))
 
@@ -10028,10 +10127,9 @@ function Render.custom_llm_screen()
             "Context window must be a number >= %d.", CUSTOM_MIN_CTX)
           has_format_error = true
         elseif notes_err then
-          -- Popup-field errors also flag a row-level hint so the user sees
-          -- something in the main list even if the Details popup is closed.
+          -- Notes lives on the row, so a single inline error is enough; no
+          -- "reopen Details" hint required.
           edit.errors["model_notes_" .. ri] = notes_err
-          edit.errors["model_" .. ri] = "Details has errors - reopen to fix."
           has_format_error = true
         elseif body_err then
           edit.errors["model_body_" .. ri] = body_err

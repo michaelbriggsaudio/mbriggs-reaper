@@ -54,23 +54,778 @@
 --     has no ASCII alternative for that record-class reference syntax.
 
 -- =============================================================================
--- ReaImGui availability check
+-- ReaImGui dependency check + auto-installer
 -- =============================================================================
-if not reaper.ImGui_CreateContext then
-  reaper.ShowMessageBox([[
-ReaAssist requires the ReaImGui extension.
+-- ReaAssist requires the ReaImGui REAPER extension. If it is missing or
+-- older than the pinned minimum, we run a self-contained gfx-based
+-- installer that downloads + SHA-256 verifies + atomically installs the
+-- pinned release directly from cfillion's GitHub release. This replaces
+-- the older "go install ReaPack and use it to get ReaImGui" message.
+--
+-- Hard constraint: this entire block runs BEFORE ImGui is available
+-- (we are checking for it). It cannot use ImGui calls, RA.* state, or
+-- any later ReaAssist code. Allowed: native reaper.MB / reaper.ExecProcess
+-- / reaper.GetOS / reaper.GetAppVersion / reaper.GetResourcePath /
+-- reaper.RecursiveCreateDirectory / standard Lua I/O / REAPER's gfx.*
+-- immediate-mode graphics library.
+--
+-- The whole block is wrapped in a `do ... end` scope so its many locals
+-- (Deps, InstallerGfx, helpers) do not count against the main chunk's
+-- 200-local Lua limit.
 
-To install it:
-1. Open REAPER's Extensions menu and click ReaPack > Browse Packages
-2. Search for "ReaImGui"
-3. Right-click the result and select Install
-4. Click Apply in the lower-right corner
-5. Restart REAPER, then re-run this script
+do
 
-If you do not see a ReaPack menu entry, install ReaPack first from:
-https://reapack.com]], "ReaAssist - Missing Dependency", 0)
+local Deps = {}
+
+Deps.PINNED_VERSION   = "v0.10.0.5"
+Deps.MIN_VERSION_NUM  = {0, 10, 0, 5}  -- numeric components for comparison
+Deps.RELEASE_URL_BASE = "https://github.com/cfillion/reaimgui/releases/download/" .. Deps.PINNED_VERSION
+
+-- Per-platform asset filename + SHA-256. Verified against v0.10.0.5 on
+-- 2026-05-02 (sha256sum of each downloaded asset). When bumping
+-- PINNED_VERSION, recompute these values and update in the same edit.
+Deps.ASSETS = {
+  ["win-x64"]    = {"reaper_imgui-x64.dll",      "800b216e0937bf5bb6b08ba2767b7b974a746b3fc3b54943b4d3011da0a68f2a"},
+  ["win-x86"]    = {"reaper_imgui-x86.dll",      "6840f7c76673018d9a42590f70c4c06ce8074b7c0f126c8deb6440a24c483082"},
+  ["mac-arm64"]  = {"reaper_imgui-arm64.dylib",  "1f90cf004c0bbada45358609c943f601b2cb0e625ecf7739ae5df8708ab705ae"},
+  ["mac-x64"]    = {"reaper_imgui-x86_64.dylib", "2209fec3eae03f22fe94b9d2681b04e21f41c7d4587cb0d69e4eb72e39a64e65"},
+  ["mac-x86"]    = {"reaper_imgui-i386.dylib",   "dd2dcb747cbe18e390d85417905977a8a24c311bd6c4d18e03e39cb3e6f4be54"},
+  ["linux-x64"]  = {"reaper_imgui-x86_64.so",    "b967a30b356f1c689ab457f2ce393b936267e4287939ece616e10d74399e2997"},
+  ["linux-arm64"]= {"reaper_imgui-aarch64.so",   "9b72753132a2ce96ae0405effaf9a8d8eeab9ab6d0f8c41ca7f62064333cdfc7"},
+  ["linux-arm32"]= {"reaper_imgui-armv7l.so",    "da2177ebd88f8e306e84002f045080c60beb521d43395b7ef36377ff6c35d315"},
+  ["linux-x86"]  = {"reaper_imgui-i686.so",      "4dadc055a1b8698e0d9fbf8ce3b63c39c9b5d30b0abc5734f14235d8545011d2"},
+}
+
+function Deps.detect_platform()
+  local os_str  = reaper.GetOS() or ""
+  local app_ver = reaper.GetAppVersion() or ""
+  -- Capture EVERYTHING after the last slash, hyphens included. REAPER's
+  -- Linux build labels arch as e.g. "7.20/linux-aarch64", and the
+  -- previous /([%w_]+)$ pattern (no hyphens in class) failed to match
+  -- the prefixed form -- silently falling through to linux-x64 on ARM.
+  local arch = app_ver:match("/([^/]+)$") or ""
+  if os_str == "Win64" then
+    return arch:find("x86", 1, true) and not arch:find("x86_64", 1, true)
+           and "win-x86" or "win-x64"
+  elseif os_str == "Win32" then
+    return "win-x86"
+  elseif os_str == "OSX64" then
+    return "mac-x64"
+  elseif os_str == "OSX32" then
+    return "mac-x86"
+  elseif os_str == "macOS-arm64" then
+    return "mac-arm64"
+  elseif os_str == "Other" then
+    -- Substring checks rather than equality so "linux-aarch64",
+    -- "aarch64", "linux-armv7l", "armv7l" etc. all map cleanly.
+    if     arch:find("aarch64", 1, true) then return "linux-arm64"
+    elseif arch:find("armv7",   1, true) then return "linux-arm32"
+    elseif arch:find("i686",    1, true) or arch:find("i386", 1, true) then
+      return "linux-x86"
+    else return "linux-x64"  -- best guess for x86_64 / x64 / unspecified
+    end
+  end
+  return nil
+end
+
+function Deps.parse_version(s)
+  -- Accepts "v0.10.0.5", "0.10.0.5", "0.10". Returns numeric component table.
+  local t = {}
+  for n in tostring(s or ""):gsub("^v", ""):gmatch("(%d+)") do
+    t[#t + 1] = tonumber(n)
+  end
+  return t
+end
+
+function Deps.cmp_version(a, b)
+  -- -1 if a < b, 0 if equal, 1 if a > b. Pads missing components with 0.
+  local n = math.max(#a, #b)
+  for i = 1, n do
+    local ai, bi = a[i] or 0, b[i] or 0
+    if ai < bi then return -1 end
+    if ai > bi then return  1 end
+  end
+  return 0
+end
+
+function Deps.check_status()
+  -- Returns "ok" | "missing" | "too_old" [, installed_version_string]
+  if not reaper.ImGui_CreateContext then return "missing" end
+  if not reaper.ImGui_GetVersion    then return "ok" end  -- pre-version-API; assume OK
+  local ok, _, _, reaimgui_ver = pcall(reaper.ImGui_GetVersion)
+  if not ok or not reaimgui_ver then return "ok" end
+  local installed = Deps.parse_version(reaimgui_ver)
+  if Deps.cmp_version(installed, Deps.MIN_VERSION_NUM) < 0 then
+    return "too_old", reaimgui_ver
+  end
+  return "ok"
+end
+
+-- =============================================================================
+-- gfx-based ReaImGui installer UI
+-- =============================================================================
+-- Polished dark-themed installer that auto-runs (no confirmation prompt).
+-- The user already opted in by launching ReaAssist; the UI's job is to
+-- show what is happening and surface failures.
+
+local InstallerGfx = {
+  W = 560, H = 320,
+  -- Theme colors lifted from PALETTE_DARK (kept in sync by hand; this
+  -- block runs before COL is built so we can't reference it directly).
+  C_BG_TOP    = 0x0B0B0BFF,
+  C_BG_BOT    = 0x2A2A2AFF,
+  C_TEXT      = 0xFFFFFFFF,
+  C_TEXT_DIM  = 0xB0BEC5FF,
+  C_TEXT_VDIM = 0x78909CFF,
+  C_ACCENT    = 0x83BCEBFF,  -- ice blue (ASSIST)
+  C_ACCENT_DK = 0x4A7DA8FF,
+  C_SUCCESS   = 0x66CC66FF,
+  C_ERROR     = 0xFF6060FF,
+  C_BORDER    = 0x37474FFF,
+  C_BAR_BG    = 0x363636FF,
+  C_BTN_BG    = 0x37474FFF,
+  C_BTN_HOV   = 0x455A64FF,
+  C_BTN_PRI   = 0x5D809CFF,
+  C_BTN_PRIH  = 0x7A9BB2FF,
+  -- State
+  state             = "init",   -- init | downloading | verifying | installing | done | error
+  status            = "",
+  error_msg         = nil,
+  error_step        = nil,
+  platform          = nil,
+  asset             = nil,
+  expected_sha      = nil,
+  dest_path         = nil,
+  imgui_status      = nil,      -- "missing" or "too_old"
+  installed_ver     = nil,
+  _last_mouse_cap   = 0,
+  _frame_count      = 0,
+}
+
+function InstallerGfx.color(rgba)
+  local r = math.floor(rgba / 0x1000000) % 256 / 255
+  local g = math.floor(rgba / 0x10000)   % 256 / 255
+  local b = math.floor(rgba / 0x100)     % 256 / 255
+  local a =          (rgba % 256)        / 255
+  gfx.set(r, g, b, a)
+end
+
+function InstallerGfx.set_font(idx, sz, bold)
+  -- Use cross-platform sans-serif. REAPER substitutes if exact face missing.
+  -- "Arial" is universally present (or has a near-identical substitute) on
+  -- Windows, macOS, and most Linux distros.
+  local flags = bold and string.byte("b") or 0
+  gfx.setfont(idx, "Arial", sz, flags)
+end
+
+function InstallerGfx.draw_gradient_bg()
+  local r1 = math.floor(InstallerGfx.C_BG_TOP / 0x1000000) % 256
+  local g1 = math.floor(InstallerGfx.C_BG_TOP / 0x10000)   % 256
+  local b1 = math.floor(InstallerGfx.C_BG_TOP / 0x100)     % 256
+  local r2 = math.floor(InstallerGfx.C_BG_BOT / 0x1000000) % 256
+  local g2 = math.floor(InstallerGfx.C_BG_BOT / 0x10000)   % 256
+  local b2 = math.floor(InstallerGfx.C_BG_BOT / 0x100)     % 256
+  for y = 0, gfx.h - 1 do
+    local t = y / (gfx.h - 1)
+    gfx.set((r1 + (r2-r1)*t)/255, (g1 + (g2-g1)*t)/255, (b1 + (b2-b1)*t)/255, 1.0)
+    gfx.line(0, y, gfx.w, y)
+  end
+end
+
+function InstallerGfx.draw_text_center(text, y, color, font_idx)
+  InstallerGfx.color(color)
+  gfx.setfont(font_idx)
+  local tw = gfx.measurestr(text)
+  gfx.x = math.floor((gfx.w - tw) / 2)
+  gfx.y = y
+  gfx.drawstr(text)
+end
+
+function InstallerGfx.draw_progress_bar(x, y, w, h, progress)
+  -- Track
+  InstallerGfx.color(InstallerGfx.C_BAR_BG)
+  gfx.rect(x, y, w, h, 1)
+  -- Fill (ice blue)
+  if progress > 0 then
+    InstallerGfx.color(InstallerGfx.C_ACCENT)
+    gfx.rect(x, y, math.floor(w * math.min(1, progress)), h, 1)
+  end
+  -- Border
+  InstallerGfx.color(InstallerGfx.C_BORDER)
+  gfx.rect(x, y, w, h, 0)
+end
+
+-- Indeterminate progress bar: a sliding ice-blue band that moves
+-- left-to-right and bounces back. Used while curl is downloading and we
+-- can't safely poll the partial file size (NTFS share-mode contention).
+-- All inputs are time-derived; no file system access.
+function InstallerGfx.draw_indeterminate_bar(x, y, w, h)
+  -- Track
+  InstallerGfx.color(InstallerGfx.C_BAR_BG)
+  gfx.rect(x, y, w, h, 1)
+  -- Sliding band: 30% of the bar's width, period ~1.6s round trip.
+  local band_w = math.floor(w * 0.30)
+  local t = (reaper.time_precise() % 1.6) / 1.6   -- 0..1
+  -- Bounce: 0->1->0
+  local pos_t = (t < 0.5) and (t * 2) or ((1.0 - t) * 2)
+  local band_x = x + math.floor((w - band_w) * pos_t)
+  InstallerGfx.color(InstallerGfx.C_ACCENT)
+  gfx.rect(band_x, y, band_w, h, 1)
+  -- Border
+  InstallerGfx.color(InstallerGfx.C_BORDER)
+  gfx.rect(x, y, w, h, 0)
+end
+
+function InstallerGfx.button(x, y, w, h, label, is_primary)
+  local mx, my = gfx.mouse_x, gfx.mouse_y
+  local hovered = mx >= x and mx < x + w and my >= y and my < y + h
+  local now_down = (gfx.mouse_cap & 1) == 1
+  local was_down = (InstallerGfx._last_mouse_cap & 1) == 1
+  local clicked = hovered and was_down and not now_down
+  -- Background
+  if is_primary then
+    InstallerGfx.color(hovered and InstallerGfx.C_BTN_PRIH or InstallerGfx.C_BTN_PRI)
+  else
+    InstallerGfx.color(hovered and InstallerGfx.C_BTN_HOV or InstallerGfx.C_BTN_BG)
+  end
+  gfx.rect(x, y, w, h, 1)
+  -- Border
+  InstallerGfx.color(InstallerGfx.C_BORDER)
+  gfx.rect(x, y, w, h, 0)
+  -- Label
+  InstallerGfx.color(InstallerGfx.C_TEXT)
+  gfx.setfont(2)
+  local tw, th = gfx.measurestr(label)
+  gfx.x = x + math.floor((w - tw) / 2)
+  gfx.y = y + math.floor((h - th) / 2)
+  gfx.drawstr(label)
+  return clicked
+end
+
+function InstallerGfx.start(opts)
+  InstallerGfx.platform = Deps.detect_platform()
+  if not InstallerGfx.platform or not Deps.ASSETS[InstallerGfx.platform] then
+    -- Unsupported platform: fall back to native message + manual install link.
+    reaper.ShowMessageBox(
+      "ReaAssist could not auto-install ReaImGui on this platform.\n\n" ..
+      "Detected: " .. tostring(reaper.GetOS()) .. " / " .. tostring(reaper.GetAppVersion()) .. "\n\n" ..
+      "Please install ReaImGui manually from:\n" ..
+      "https://github.com/cfillion/reaimgui/releases\n\n" ..
+      "Place the appropriate binary in:\n" ..
+      reaper.GetResourcePath() .. "/UserPlugins/",
+      "ReaAssist - Manual Install Required", 0)
+    return
+  end
+  local asset, sha = table.unpack(Deps.ASSETS[InstallerGfx.platform])
+  InstallerGfx.asset         = asset
+  InstallerGfx.expected_sha  = sha
+  InstallerGfx.dest_path     = reaper.GetResourcePath() .. "/UserPlugins/" .. asset
+  InstallerGfx.imgui_status  = opts.kind
+  InstallerGfx.installed_ver = opts.installed_ver
+  -- Start on the disclosure screen so the user can read what's about to
+  -- be installed (third-party binary, source, license, destination)
+  -- before we touch UserPlugins/. Click Install to proceed.
+  InstallerGfx.state         = "disclose"
+  -- Center on whichever monitor the user's mouse is on. The trick to
+  -- get the active monitor's work-area bounds via reaper.my_getViewport
+  -- is to pass a deliberately huge target rect (-10000..10000) along
+  -- with a 1-pixel source rect at the mouse position; the returned rect
+  -- is the bounds of the work area on that monitor (taskbar excluded).
+  -- We then center our window within those bounds.
+  local mx, my = reaper.GetMousePosition()
+  -- my_getViewport returns 4 values: x1, y1, x2, y2 (the input rect
+  -- clamped to the work area of the screen containing the source rect).
+  local sx1, sy1, sx2, sy2 = reaper.my_getViewport(
+    -10000, -10000, 10000, 10000,
+    mx, my, mx + 1, my + 1, true)
+  local x = sx1 + math.floor((sx2 - sx1 - InstallerGfx.W) / 2)
+  local y = sy1 + math.floor((sy2 - sy1 - InstallerGfx.H) / 2)
+  -- Pre-init font slots (some REAPER builds need these registered before
+  -- the first measurestr call to return correct widths).
+  gfx.init("Install ReaImGui", InstallerGfx.W, InstallerGfx.H, 0,
+           math.max(0, x), math.max(0, y))
+  InstallerGfx.set_font(1, 28, true)   -- title
+  InstallerGfx.set_font(2, 14)         -- body / button labels
+  InstallerGfx.set_font(3, 12)         -- small / detail
+  InstallerGfx.set_font(4, 11)         -- footer
+  InstallerGfx.set_font(5, 16, true)   -- subtitle emphasis
+  InstallerGfx.set_font(6, 16)         -- instructions body (2pt up from 14)
+  InstallerGfx.set_font(7, 20, true)   -- "ReaAssist is not running yet" emphasis
+  reaper.defer(InstallerGfx.tick)
+end
+
+function InstallerGfx.tick()
+  -- Window closed by user (Esc / X button) -> abort
+  local char = gfx.getchar()
+  if char < 0 then return end
+
+  InstallerGfx._frame_count = InstallerGfx._frame_count + 1
+
+  -- Render current state
+  InstallerGfx.draw_gradient_bg()
+  if     InstallerGfx.state == "disclose" then
+    InstallerGfx.render_disclose()
+  elseif InstallerGfx.state == "done"     then
+    InstallerGfx.render_done()
+  elseif InstallerGfx.state == "error"    then
+    InstallerGfx.render_error()
+  else
+    InstallerGfx.render_running()
+  end
+  gfx.update()
+
+  -- Advance state machine. Download + SHA verify + atomic install all run
+  -- inside ONE async background script (PowerShell on Windows, sh on
+  -- macOS/Linux). The main thread only polls a single result marker each
+  -- tick. Synchronous certutil / shasum / os.rename calls would otherwise
+  -- block REAPER's main thread for several seconds because Windows
+  -- Defender holds the freshly-written DLL open while it scans.
+  if     InstallerGfx.state == "disclose"    then
+    -- No auto-advance; render_disclose handles its own button input.
+  elseif InstallerGfx.state == "init"        then
+    InstallerGfx.status = "Preparing..."
+    if InstallerGfx._frame_count >= 2 then
+      InstallerGfx.state = "starting"
+      InstallerGfx.status = "Starting installer..."
+    end
+  elseif InstallerGfx.state == "starting"    then
+    if InstallerGfx._frame_count >= 4 then InstallerGfx.spawn_pipeline() end
+  elseif InstallerGfx.state == "running"     then
+    InstallerGfx.poll_pipeline()  -- non-blocking marker check
+  end
+
+  InstallerGfx._last_mouse_cap = gfx.mouse_cap
+  reaper.defer(InstallerGfx.tick)
+end
+
+function InstallerGfx.render_running()
+  -- Title
+  InstallerGfx.draw_text_center("Installing ReaImGui", 38, InstallerGfx.C_TEXT, 1)
+  -- Subtitle: missing vs upgrading
+  local subtitle = (InstallerGfx.imgui_status == "too_old")
+    and ("Updating from " .. tostring(InstallerGfx.installed_ver) .. " to " .. Deps.PINNED_VERSION)
+    or  ("Required dependency \xE2\x80\xA2 " .. Deps.PINNED_VERSION)
+  InstallerGfx.draw_text_center(subtitle, 80, InstallerGfx.C_TEXT_DIM, 3)
+  -- Asset file name
+  InstallerGfx.draw_text_center(InstallerGfx.asset, 102, InstallerGfx.C_TEXT_VDIM, 4)
+  -- Progress bar. During "downloading" we can't safely poll the .tmp file
+  -- (curl holds it open with NTFS share-mode that makes io.open / seek
+  -- slow enough to starve the main thread); instead show an animated
+  -- indeterminate band that visibly moves left-to-right. The other
+  -- states have known durations / discrete steps so a fractional fill
+  -- works fine for them.
+  local bar_w = gfx.w - 120
+  if InstallerGfx.state == "downloading" then
+    InstallerGfx.draw_indeterminate_bar(60, 145, bar_w, 14)
+  else
+    local progress = 0.05
+    if     InstallerGfx.state == "starting"    then progress = 0.20
+    elseif InstallerGfx.state == "verifying"   then progress = 0.85
+    elseif InstallerGfx.state == "installing"  then progress = 0.95
+    end
+    InstallerGfx.draw_progress_bar(60, 145, bar_w, 14, progress)
+  end
+  -- Live status text
+  InstallerGfx.draw_text_center(InstallerGfx.status or "...", 178, InstallerGfx.C_TEXT, 2)
+  -- Attribution footer
+  InstallerGfx.draw_text_center("ReaImGui by Christian Fillion \xE2\x80\xA2 LGPL-3.0-or-later",
+                                 gfx.h - 38, InstallerGfx.C_TEXT_VDIM, 4)
+  InstallerGfx.draw_text_center("github.com/cfillion/reaimgui",
+                                 gfx.h - 22, InstallerGfx.C_TEXT_VDIM, 4)
+end
+
+function InstallerGfx.render_disclose()
+  local is_update = (InstallerGfx.imgui_status == "too_old")
+  local title = is_update and "Update ReaImGui?" or "Install ReaImGui?"
+  local subtitle = is_update
+    and ("Your installed ReaImGui (" .. tostring(InstallerGfx.installed_ver)
+         .. ") is older than ReaAssist requires.")
+    or  "ReaAssist requires the ReaImGui extension to run."
+  InstallerGfx.draw_text_center(title,    38, InstallerGfx.C_ACCENT, 1)
+  InstallerGfx.draw_text_center(subtitle, 80, InstallerGfx.C_TEXT, 5)
+
+  -- Disclosure block: name / author / license / source / destination.
+  -- Labels left-justified within the block, values left-justified after
+  -- a fixed gap from the widest label. The whole block is then centered
+  -- horizontally in the window by measuring its total width once.
+  local rows = {
+    {"Dependency:", "ReaImGui " .. Deps.PINNED_VERSION},
+    {"By:",         "Christian Fillion"},
+    {"License:",    "LGPL-3.0-or-later"},
+    {"Source:",     "github.com/cfillion/reaimgui"},
+    {"Install to:", "UserPlugins/" .. InstallerGfx.asset},
+  }
+  gfx.setfont(3)
+  local label_w_max, value_w_max = 0, 0
+  for _, r in ipairs(rows) do
+    local lw = gfx.measurestr(r[1]); if lw > label_w_max then label_w_max = lw end
+    local vw = gfx.measurestr(r[2]); if vw > value_w_max then value_w_max = vw end
+  end
+  local gap = 20
+  local block_w = label_w_max + gap + value_w_max
+  local label_x = math.floor((gfx.w - block_w) / 2)
+  local value_x = label_x + label_w_max + gap
+  local y = 118
+  for _, r in ipairs(rows) do
+    InstallerGfx.color(InstallerGfx.C_TEXT_VDIM)
+    gfx.x = label_x; gfx.y = y; gfx.drawstr(r[1])
+    InstallerGfx.color(InstallerGfx.C_TEXT)
+    gfx.x = value_x; gfx.y = y; gfx.drawstr(r[2])
+    y = y + 20
+  end
+
+  -- Buttons
+  local btn_w, btn_h = 130, 36
+  local gap = 14
+  local btn_y = gfx.h - 60
+  local total_w = btn_w * 2 + gap
+  local btn_x = math.floor((gfx.w - total_w) / 2)
+  if InstallerGfx.button(btn_x, btn_y, btn_w, btn_h, "Install", true) then
+    InstallerGfx.state        = "init"
+    InstallerGfx._frame_count = 0
+  end
+  if InstallerGfx.button(btn_x + btn_w + gap, btn_y, btn_w, btn_h, "Quit", false) then
+    gfx.quit()
+  end
+end
+
+function InstallerGfx.render_done()
+  local is_update = (InstallerGfx.imgui_status == "too_old")
+  local title = is_update and "Dependency Update Complete" or "Dependency Install Complete"
+  local body  = is_update
+    and ("ReaImGui was updated to " .. Deps.PINNED_VERSION .. ".")
+    or  ("ReaImGui " .. Deps.PINNED_VERSION .. " was installed.")
+  InstallerGfx.draw_text_center(title, 36, InstallerGfx.C_SUCCESS, 1)
+  InstallerGfx.draw_text_center(body,  78, InstallerGfx.C_TEXT, 2)
+
+  -- Make absolutely clear ReaAssist itself is NOT yet running. Bigger,
+  -- emphasized "next steps" block so a user who closes the window
+  -- without reading still has the text linger long enough to register.
+  InstallerGfx.draw_text_center("ReaAssist is not running yet.", 116,
+                                 InstallerGfx.C_ACCENT, 7)
+
+  -- Instruction list. Centered as a block: measure the widest line,
+  -- center the block's left edge, then draw lines left-justified within.
+  local steps = {
+    "1.  Close and reopen REAPER (so the new extension loads).",
+    "2.  Open the Action list (Actions menu, or shortcut '?').",
+    "3.  Search for 'ReaAssist' and run it.",
+  }
+  gfx.setfont(6)
+  local max_w = 0
+  for _, line in ipairs(steps) do
+    local w = gfx.measurestr(line)
+    if w > max_w then max_w = w end
+  end
+  local step_x = math.floor((gfx.w - max_w) / 2)
+  local step_y = 162
+  InstallerGfx.color(InstallerGfx.C_TEXT_DIM)
+  for _, line in ipairs(steps) do
+    gfx.x = step_x; gfx.y = step_y; gfx.drawstr(line)
+    step_y = step_y + 24
+  end
+
+  -- Two buttons: Close Window (just closes the gfx UI), Close REAPER
+  -- (one-click way to do step 1). REAPER prompts for unsaved work
+  -- before quitting via 40004, so this is safe.
+  local btn_w, btn_h = 150, 36
+  local gap = 14
+  local btn_y = gfx.h - 70
+  local total_w = btn_w * 2 + gap
+  local btn_x = math.floor((gfx.w - total_w) / 2)
+  if InstallerGfx.button(btn_x, btn_y, btn_w, btn_h, "Close Window", false) then
+    gfx.quit()
+  end
+  if InstallerGfx.button(btn_x + btn_w + gap, btn_y, btn_w, btn_h, "Close REAPER", true) then
+    reaper.Main_OnCommand(40004, 0)  -- File: Quit REAPER
+    gfx.quit()
+  end
+end
+
+function InstallerGfx.render_error()
+  InstallerGfx.draw_text_center("Installation Failed", 50, InstallerGfx.C_ERROR, 1)
+  InstallerGfx.draw_text_center("Step: " .. (InstallerGfx.error_step or "unknown"),
+                                 95, InstallerGfx.C_TEXT_DIM, 3)
+  -- Wrap and draw error message lines
+  local y = 125
+  for line in (InstallerGfx.error_msg or ""):gmatch("([^\n]*)\n?") do
+    if line ~= "" then
+      InstallerGfx.draw_text_center(line, y, InstallerGfx.C_TEXT, 3)
+      y = y + 18
+    end
+    if y > gfx.h - 90 then break end
+  end
+  -- Retry + Close
+  local btn_w, btn_h = 110, 36
+  local gap = 14
+  local btn_y = gfx.h - 60
+  local total_w = btn_w * 2 + gap
+  local btn_x = math.floor((gfx.w - total_w) / 2)
+  if InstallerGfx.button(btn_x, btn_y, btn_w, btn_h, "Retry", true) then
+    InstallerGfx.state         = "init"
+    InstallerGfx._frame_count  = 0
+    InstallerGfx.error_msg     = nil
+    InstallerGfx.error_step    = nil
+  end
+  if InstallerGfx.button(btn_x + btn_w + gap, btn_y, btn_w, btn_h, "Close", false) then
+    gfx.quit()
+  end
+end
+
+function InstallerGfx.fail(step, msg)
+  InstallerGfx.state      = "error"
+  InstallerGfx.error_step = step
+  InstallerGfx.error_msg  = msg
+  -- Best-effort tmp cleanup
+  if InstallerGfx.dest_path then
+    os.remove(InstallerGfx.dest_path .. ".tmp")
+  end
+end
+
+-- All-in-one async install pipeline. Writes a self-contained PowerShell
+-- (Windows) or sh (macOS/Linux) script to a temp file that downloads,
+-- SHA-256 verifies, atomically installs, and on macOS strips the Gate-
+-- keeper quarantine xattr -- then writes a single result marker to
+-- signal completion. The main thread only polls that one marker file.
+--
+-- Why bundled into one script: doing these steps as separate Lua-side
+-- ExecProcess calls blocks the REAPER main thread for several seconds
+-- per call, because Windows Defender holds the freshly-written DLL open
+-- while it scans, and certutil/os.rename then wait for share-mode
+-- access. Bundling moves that contention entirely off the main thread.
+function InstallerGfx.spawn_pipeline()
+  local tmp         = InstallerGfx.dest_path .. ".tmp"
+  local marker      = InstallerGfx.dest_path .. ".marker"
+  local script_base = InstallerGfx.dest_path .. ".install_script"
+  local url         = Deps.RELEASE_URL_BASE .. "/" .. InstallerGfx.asset
+  local expected    = InstallerGfx.expected_sha:lower()
+
+  -- Clear any previous run's leftovers (.ps1 / .sh suffix variants both)
+  os.remove(tmp); os.remove(marker); os.remove(InstallerGfx.dest_path .. ".bak")
+  os.remove(script_base); os.remove(script_base .. ".ps1"); os.remove(script_base .. ".sh")
+
+  local script_path
+  local os_str = reaper.GetOS() or ""
+  if os_str:match("^Win") then
+    script_path = script_base .. ".ps1"
+    local function psq(s) return "'" .. tostring(s):gsub("'", "''") .. "'" end
+    -- Per-phase status markers let the Lua side render an accurate
+    -- status string AND prove the script actually started (vs. silently
+    -- failing to launch). The "ok" / "*_failed" / "error:" markers are
+    -- final and trigger state transition; intermediate phase markers
+    -- just update the UI.
+    local script = table.concat({
+      "$ErrorActionPreference = 'Stop'",
+      "$marker = "   .. psq(marker),
+      -- WriteAllText is atomic at the OS level (one CreateFile + WriteFile
+      -- pair); Out-File opens the file truncating then writes, leaving a
+      -- brief window where a concurrent reader sees the file as empty.
+      -- Our 250ms poll easily hits that window during rapid phase
+      -- transitions (e.g. installing -> ok), causing a false "unknown
+      -- error" report even though the install succeeded.
+      "function Mark($s) {",
+      "  [System.IO.File]::WriteAllText($marker, $s + \"`r`n\", [System.Text.Encoding]::ASCII)",
+      "}",
+      "Mark 'started'",
+      "try {",
+      "  $tmp = "      .. psq(tmp),
+      "  $dest = "     .. psq(InstallerGfx.dest_path),
+      "  $url = "      .. psq(url),
+      "  $expected = " .. psq(expected),
+      "  Mark 'downloading'",
+      "  & curl.exe -fsSL --max-time 60 -o $tmp $url",
+      "  if ($LASTEXITCODE -ne 0) { Mark \"download_failed:$LASTEXITCODE\"; return }",
+      "  Mark 'verifying'",
+      "  $actual = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()",
+      "  if ($actual -ne $expected) {",
+      "    Mark \"verify_failed:$actual\"",
+      "    Remove-Item $tmp -Force -ErrorAction SilentlyContinue",
+      "    return",
+      "  }",
+      "  Mark 'installing'",
+      "  if (Test-Path $dest) {",
+      "    $backup = \"$dest.bak\"",
+      "    if (Test-Path $backup) { Remove-Item $backup -Force }",
+      "    Move-Item $dest $backup",
+      -- Inner try/catch: if moving tmp into place fails, restore the
+      -- backup so the user keeps their previous (working) DLL rather
+      -- than being left with a stranded .bak and no DLL at all.
+      "    try {",
+      "      Move-Item $tmp $dest",
+      "    } catch {",
+      "      Move-Item $backup $dest -Force -ErrorAction SilentlyContinue",
+      "      throw",
+      "    }",
+      "    Remove-Item $backup -Force -ErrorAction SilentlyContinue",
+      "  } else {",
+      "    Move-Item $tmp $dest",
+      "  }",
+      "  Mark 'ok'",
+      "} catch {",
+      "  Mark ('error:' + $_.ToString())",
+      "}",
+    }, "\n")
+    local sf = io.open(script_path, "w")
+    if not sf then InstallerGfx.fail("setup", "Could not write install script."); return end
+    sf:write(script); sf:close()
+    -- Spawn the script async. Mirrors the proven Net.fire_curl pattern:
+    -- outer powershell launches `cmd /c <command>` via Start-Process
+    -- with -WindowStyle Hidden so there's no flash AND the outer call
+    -- only blocks until Start-Process returns (~1-2s). The inner cmd
+    -- invokes powershell -File against the script with triple-quoted
+    -- path so spaces survive the powershell -> cmd -> powershell layers.
+    local function ps_escape(s) return s:gsub("'", "''") end
+    local inner_cmd = string.format(
+      'powershell -NoProfile -ExecutionPolicy Bypass -File """%s"""',
+      script_path)
+    local launch = string.format(
+      'powershell -NoProfile -WindowStyle Hidden -Command ' ..
+      '"Start-Process cmd -ArgumentList \'/c %s\' -WindowStyle Hidden"',
+      ps_escape(inner_cmd))
+    reaper.ExecProcess(launch, 5000)
+  else
+    script_path = script_base .. ".sh"
+    local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+    local script = table.concat({
+      "#!/bin/sh",
+      "TMP=" .. sq(tmp),
+      "DEST=" .. sq(InstallerGfx.dest_path),
+      "URL=" .. sq(url),
+      "EXPECTED=" .. sq(expected),
+      "MARKER=" .. sq(marker),
+      "mark() { echo \"$1\" > \"$MARKER\"; }",
+      "mark started",
+      "mark downloading",
+      "if ! curl -fsSL --max-time 60 -o \"$TMP\" \"$URL\"; then",
+      "  mark \"download_failed:$?\"; exit 0",
+      "fi",
+      "mark verifying",
+      -- Try GNU sha256sum first (default on most Linux distros) then
+      -- fall back to BSD shasum -a 256 (default on macOS). Either tool
+      -- prints "<hex>  filename" on its first line.
+      "if command -v sha256sum >/dev/null 2>&1; then",
+      "  ACTUAL=$(sha256sum \"$TMP\" 2>/dev/null | awk '{print $1}')",
+      "else",
+      "  ACTUAL=$(shasum -a 256 \"$TMP\" 2>/dev/null | awk '{print $1}')",
+      "fi",
+      "if [ \"$ACTUAL\" != \"$EXPECTED\" ]; then",
+      "  mark \"verify_failed:$ACTUAL\"; rm -f \"$TMP\"; exit 0",
+      "fi",
+      "mark installing",
+      -- Install with explicit failure detection. Without these checks, a
+      -- failed mv (disk full, permissions) would silently fall through to
+      -- "mark ok" since && chains don't propagate failure to the script's
+      -- exit status. Mirror the PowerShell script's try/catch behaviour.
+      "do_install() {",
+      "  if [ -f \"$DEST\" ]; then",
+      "    rm -f \"$DEST.bak\"",
+      "    mv \"$DEST\" \"$DEST.bak\" || return 1",
+      "    mv \"$TMP\" \"$DEST\" || { mv \"$DEST.bak\" \"$DEST\"; return 1; }",
+      "    rm -f \"$DEST.bak\"",
+      "  else",
+      "    mv \"$TMP\" \"$DEST\" || return 1",
+      "  fi",
+      "}",
+      "if ! do_install; then",
+      "  mark \"error:could not move binary into UserPlugins\"",
+      "  rm -f \"$TMP\" 2>/dev/null",
+      "  exit 0",
+      "fi",
+      "case \"$(uname)\" in Darwin) xattr -d com.apple.quarantine \"$DEST\" 2>/dev/null || true ;; esac",
+      "mark ok",
+    }, "\n")
+    local sf = io.open(script_path, "w")
+    if not sf then InstallerGfx.fail("setup", "Could not write install script."); return end
+    sf:write(script); sf:close()
+    os.execute("chmod +x " .. sq(script_path))
+    os.execute(string.format("(sh %s) &", sq(script_path)))
+  end
+
+  InstallerGfx.pipeline_started_at = reaper.time_precise()
+  InstallerGfx.marker_path         = marker
+  InstallerGfx.script_path         = script_path
+  InstallerGfx.tmp_path            = tmp
+  InstallerGfx.state               = "running"
+  InstallerGfx.status              = "Downloading & installing ReaImGui..."
+end
+
+-- Non-blocking poll for the result marker. Throttled to ~4 Hz so we are
+-- not hammering the file system while the background script does its work.
+function InstallerGfx.poll_pipeline()
+  local now = reaper.time_precise()
+  if (InstallerGfx._last_marker_poll or 0) > 0
+     and (now - InstallerGfx._last_marker_poll) < 0.25 then
+    return
+  end
+  InstallerGfx._last_marker_poll = now
+
+  -- Hard timeout safety
+  if now - (InstallerGfx.pipeline_started_at or 0) > 120 then
+    InstallerGfx.fail("timeout",
+      "Install timed out after 2 minutes. Check your network connection and try again.")
+    return
+  end
+
+  local mf = io.open(InstallerGfx.marker_path, "r")
+  if not mf then return end  -- script hasn't written its first marker yet
+  local content = (mf:read("*a") or ""):gsub("[\r\n%s]+$", "")
+  mf:close()
+
+  -- Empty content = we caught the file mid-overwrite during a phase
+  -- transition. Treat as "still running" and re-poll next tick.
+  if content == "" then return end
+
+  -- Intermediate phase markers: update UI status, don't transition or
+  -- delete the marker; the script will overwrite it on the next phase.
+  local PHASE_LABELS = {
+    started     = "Starting installer...",
+    downloading = "Downloading from GitHub...",
+    verifying   = "Verifying checksum...",
+    installing  = "Installing to UserPlugins...",
+  }
+  if PHASE_LABELS[content] then
+    InstallerGfx.status = PHASE_LABELS[content]
+    return
+  end
+
+  -- Final markers (ok / *_failed / error): cleanup + state transition.
+  os.remove(InstallerGfx.script_path)
+  os.remove(InstallerGfx.marker_path)
+
+  if content == "ok" then
+    InstallerGfx.state  = "done"
+    InstallerGfx.status = "Done."
+    return
+  end
+
+  local kind, detail = content:match("^([^:]+):(.*)$")
+  kind   = kind   or content
+  detail = detail or ""
+  if kind == "download_failed" then
+    InstallerGfx.fail("download", string.format(
+      "Could not download from GitHub (curl exit code %s).\nCheck your network connection and try again.",
+      detail))
+  elseif kind == "verify_failed" then
+    InstallerGfx.fail("verify", string.format(
+      "SHA-256 checksum mismatch for %s.\nExpected: %s...\nGot:      %s...",
+      InstallerGfx.asset,
+      InstallerGfx.expected_sha:sub(1, 16),
+      (detail or ""):sub(1, 16)))
+  else
+    InstallerGfx.fail("install",
+      "Install failed: " .. (content ~= "" and content or "unknown error"))
+  end
+end
+
+-- Main dispatch
+local _imgui_status, _installed_ver = Deps.check_status()
+if _imgui_status == "missing" or _imgui_status == "too_old" then
+  InstallerGfx.start({kind = _imgui_status, installed_ver = _installed_ver})
   return
 end
+
+end -- do (closes the dependency-installer scope)
+
 local ImGui = reaper  -- secondary alias used for ImGui calls (reads as ImGui.ImGui_*)
 
 -- =============================================================================
@@ -275,7 +1030,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.0.7", -- public release version
+  VERSION           = "1.0.8", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -2656,6 +3411,8 @@ ICON = {
   X                = _utf8(0xE1B2),
   PLUS             = _utf8(0xE13D),
   COPY             = _utf8(0xE09E),
+  COPY_PLUS        = _utf8(0xE3FD),  -- Lucide copy-plus glyph; reads as "duplicate this row"
+  TRASH            = _utf8(0xE18E),  -- Lucide trash-2 glyph; row-delete affordance
   INFO             = _utf8(0xE0F9),
   CHECK            = _utf8(0xE06C),
   PLAY             = _utf8(0xE13C),
@@ -22507,10 +23264,19 @@ end
 
 if #S.bootstrap_missing > 0 then
   S.bootstrap_active = true
+  -- Distinguish "fresh install (stub installer just dropped ReaAssist.lua,
+  -- supporting files not yet fetched)" from "existing install with corrupt
+  -- or missing files." The former auto-installs without a Repair button;
+  -- the latter shows the existing repair prompt. Signal: ExtState
+  -- `first_launch_complete` is set once UI has loaded successfully at
+  -- least once on this REAPER profile. Empty -> install mode.
+  S.bootstrap_install_mode =
+    (reaper.GetExtState(CFG.EXT_NS, "first_launch_complete") ~= "1")
   Log.line("BOOTSTRAP", string.format(
-    "%d critical file%s missing; entering recovery mode on this launch.",
+    "%d critical file%s missing; entering %s mode on this launch.",
     #S.bootstrap_missing,
-    #S.bootstrap_missing == 1 and "" or "s"))
+    #S.bootstrap_missing == 1 and "" or "s",
+    S.bootstrap_install_mode and "first-install" or "recovery"))
   for _, rel in ipairs(S.bootstrap_missing) do
     Log.line("BOOTSTRAP", "  missing: " .. rel)
   end
@@ -22523,11 +23289,18 @@ else
   local ok_ui, err_ui = pcall(dofile, RA.RESOURCES_DIR .. "UI.lua")
   if not ok_ui then
     S.bootstrap_active = true
+    S.bootstrap_install_mode =
+      (reaper.GetExtState(CFG.EXT_NS, "first_launch_complete") ~= "1")
     S.bootstrap_missing[#S.bootstrap_missing + 1] =
       "Resources/UI.lua (load error)"
     Updater._set_failure("ui_load", tostring(err_ui))
     Log.line("BOOTSTRAP", string.format(
       "UI.lua failed to load: %s", tostring(err_ui)))
+  else
+    -- UI loaded cleanly. Mark first launch as complete so any future
+    -- bootstrap fires routes through the recovery (repair) UI instead
+    -- of the first-install UI.
+    reaper.SetExtState(CFG.EXT_NS, "first_launch_complete", "1", true)
   end
 end
 
@@ -23195,8 +23968,8 @@ end
 Bootstrap = {}
 
 -- Self-contained newline-aware TextWrapped used by Bootstrap.* render
--- functions. Bootstrap may run with Resources/UI.lua missing
--- or unloadable, in which case UI.text_multiline does not exist; this
+-- functions. Bootstrap may run with Resources/UI.lua missing or
+-- unloadable, in which case UI.text_multiline does not exist; this
 -- helper mirrors the no-newline rule (ImGui_TextWrapped corrupts window
 -- state when fed a literal \n) without depending on the UI namespace.
 local function bootstrap_text_multiline(text)
@@ -23216,168 +23989,404 @@ local function bootstrap_text_multiline(text)
   end
 end
 
+-- Theme colors lifted from PALETTE_DARK. Bootstrap may run before COL
+-- is built, so we duplicate the values rather than reference COL.
+local BS_C = {
+  WIN_BG     = 0x1A1A1AFF,
+  ACCENT     = 0x83BCEBFF,  -- ASSIST ice-blue ("Assist" half of logo)
+  ACCENT_DK  = 0x4A7DA8FF,  -- ASSIST_DK darker ice-blue ("Rea" half of logo)
+  TEXT       = 0xFFFFFFFF,
+  TEXT_DIM   = 0xB0BEC5FF,  -- CARD_HEAD
+  TEXT_VDIM  = 0x78909CFF,  -- CARD_DESC
+  ERROR      = 0xFF6060FF,
+  SUCCESS    = 0x66CC66FF,
+  BTN_BG     = 0x37474FFF,
+  BTN_HOV    = 0x455A64FF,
+  BTN_ACT    = 0x263238FF,
+  PRIMARY    = 0x5D809CFF,
+  PRIMARY_H  = 0x7A9BB2FF,
+  PRIMARY_A  = 0x4A6A80FF,
+  FRAME_BG   = 0x363636FF,
+  PROG_FILL  = 0x83BCEBFF,
+  BORDER     = 0x37474FFF,
+}
+
+-- Push the bootstrap window's chrome styles. Returns counts so the
+-- matching pop call can balance the stack exactly.
+local function bs_push_styles()
+  ImGui.ImGui_PushStyleColor(RA.ctx, ImGui.ImGui_Col_WindowBg(),       BS_C.WIN_BG)
+  ImGui.ImGui_PushStyleColor(RA.ctx, ImGui.ImGui_Col_TitleBg(),        BS_C.WIN_BG)
+  ImGui.ImGui_PushStyleColor(RA.ctx, ImGui.ImGui_Col_TitleBgActive(),  BS_C.WIN_BG)
+  ImGui.ImGui_PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBg(),        BS_C.FRAME_BG)
+  ImGui.ImGui_PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),         BS_C.BTN_BG)
+  ImGui.ImGui_PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(),  BS_C.BTN_HOV)
+  ImGui.ImGui_PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),   BS_C.BTN_ACT)
+  ImGui.ImGui_PushStyleColor(RA.ctx, ImGui.ImGui_Col_PlotHistogram(),  BS_C.PROG_FILL)
+  ImGui.ImGui_PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),         BS_C.BORDER)
+  ImGui.ImGui_PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(), 22, 22)
+  ImGui.ImGui_PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ItemSpacing(),    0, 10)
+  ImGui.ImGui_PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(),  4)
+  ImGui.ImGui_PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),  12, 6)
+  return 9, 4  -- color count, var count
+end
+
+local function bs_pop_styles(n_color, n_var)
+  ImGui.ImGui_PopStyleVar(RA.ctx, n_var)
+  ImGui.ImGui_PopStyleColor(RA.ctx, n_color)
+end
+
+-- Render the ReaAssist wordmark, centered. Approximates the gradient
+-- two-tone wordmark used on the TOS screen (UI.logo) but works inside
+-- Bootstrap where UI.lua / RA.bold_font may not be loaded -- "Rea" in
+-- the darker blue, "Assist" in the brighter ice-blue, both at the
+-- default font at a larger size via PushFont(nil, size).
+local function bs_logo()
+  ImGui.ImGui_PushFont(RA.ctx, nil, 28)
+  local rea_w = ImGui.ImGui_CalcTextSize(RA.ctx, "Rea")
+  local ass_w = ImGui.ImGui_CalcTextSize(RA.ctx, "Assist")
+  local total_w = rea_w + ass_w
+  local win_w = ImGui.ImGui_GetWindowWidth(RA.ctx)
+  ImGui.ImGui_SetCursorPosX(RA.ctx,
+    math.max(0, math.floor((win_w - total_w) / 2)))
+  ImGui.ImGui_TextColored(RA.ctx, BS_C.ACCENT_DK, "Rea")
+  ImGui.ImGui_SameLine(RA.ctx, 0, 0)
+  ImGui.ImGui_TextColored(RA.ctx, BS_C.ACCENT,    "Assist")
+  ImGui.ImGui_PopFont(RA.ctx)
+  ImGui.ImGui_Spacing(RA.ctx)
+end
+
+-- Centered text helper -- measures the string at the (optionally scaled)
+-- font, then positions the cursor so the text is horizontally centered
+-- in the window before drawing it. `size` is in pixels; nil means use
+-- the current font unchanged.
+local function bs_text_center(s, color, size)
+  if size then ImGui.ImGui_PushFont(RA.ctx, nil, size) end
+  local tw = ImGui.ImGui_CalcTextSize(RA.ctx, s)
+  local win_w = ImGui.ImGui_GetWindowWidth(RA.ctx)
+  ImGui.ImGui_SetCursorPosX(RA.ctx,
+    math.max(0, math.floor((win_w - tw) / 2)))
+  if color then
+    ImGui.ImGui_TextColored(RA.ctx, color, s)
+  else
+    ImGui.ImGui_Text(RA.ctx, s)
+  end
+  if size then ImGui.ImGui_PopFont(RA.ctx) end
+end
+
+-- Render a title line with bigger font + accent color (left-aligned).
+-- Kept for backward compatibility; new code prefers bs_text_center.
+local function bs_title_text(s, color)
+  ImGui.ImGui_PushFont(RA.ctx, nil, 20)
+  ImGui.ImGui_TextColored(RA.ctx, color or BS_C.ACCENT, s)
+  ImGui.ImGui_PopFont(RA.ctx)
+end
+
+-- Render the primary action button with accent colors.
+local function bs_primary_button(label, w, h)
+  ImGui.ImGui_PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),         BS_C.PRIMARY)
+  ImGui.ImGui_PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(),  BS_C.PRIMARY_H)
+  ImGui.ImGui_PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),   BS_C.PRIMARY_A)
+  local clicked = ImGui.ImGui_Button(RA.ctx, label, w, h)
+  ImGui.ImGui_PopStyleColor(RA.ctx, 3)
+  return clicked
+end
+
+-- Position the cursor for a centered group of buttons. Use total
+-- combined width and call this before placing the first button.
+local function bs_center_buttons(total_w)
+  local win_w = ImGui.ImGui_GetWindowWidth(RA.ctx)
+  ImGui.ImGui_SetCursorPosX(RA.ctx,
+    math.max(0, math.floor((win_w - total_w) / 2)))
+end
+
+-- Discrete-progress cell row used by both the install minimal popup and
+-- the styled repair view. One cell per file, fills ice-blue as each
+-- file completes. Caller passes total and done counts; if total is 0
+-- the row reserves vertical space but draws nothing (so layout above
+-- stays anchored across phase changes).
+local function bs_progress_cells(total, done)
+  local cell_h  = 10
+  local gap     = 3
+  local cx, cy  = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
+  local avail_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+  if total > 0 then
+    local cell_w  = math.max(4,
+      math.floor((avail_w - (total - 1) * gap) / total))
+    local total_w = total * cell_w + (total - 1) * gap
+    local start_x = cx + math.floor((avail_w - total_w) / 2)
+    local dl      = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+    for i = 1, total do
+      local x = start_x + (i - 1) * (cell_w + gap)
+      local color = (i <= done) and BS_C.ACCENT or BS_C.FRAME_BG
+      ImGui.ImGui_DrawList_AddRectFilled(dl, x, cy,
+                                         x + cell_w, cy + cell_h,
+                                         color, 2)
+    end
+  end
+  ImGui.ImGui_Dummy(RA.ctx, avail_w, cell_h)
+end
+
+-- Minimal popup for install-mode success path. The auto-restart in
+-- Bootstrap.loop will relaunch ReaAssist a moment after state="done",
+-- at which point the real app window opens and this popup vanishes.
+-- Small ReaAssist wordmark + "Installing..." status + animated band.
+function Bootstrap.render_minimal()
+  -- Small wordmark for color / polish. Same two-tone treatment as the
+  -- styled installer's bigger version, just smaller.
+  ImGui.ImGui_PushFont(RA.ctx, nil, 22)
+  local rea_w = ImGui.ImGui_CalcTextSize(RA.ctx, "Rea")
+  local ass_w = ImGui.ImGui_CalcTextSize(RA.ctx, "Assist")
+  local total_w = rea_w + ass_w
+  local win_w = ImGui.ImGui_GetWindowWidth(RA.ctx)
+  ImGui.ImGui_SetCursorPosX(RA.ctx,
+    math.max(0, math.floor((win_w - total_w) / 2)))
+  ImGui.ImGui_TextColored(RA.ctx, BS_C.ACCENT_DK, "Rea")
+  ImGui.ImGui_SameLine(RA.ctx, 0, 0)
+  ImGui.ImGui_TextColored(RA.ctx, BS_C.ACCENT,    "Assist")
+  ImGui.ImGui_PopFont(RA.ctx)
+  ImGui.ImGui_Spacing(RA.ctx)
+
+  -- Discrete progress: one cell per file in the download queue. Each
+  -- cell turns from dim track-color to ice-blue accent as that file
+  -- completes. Updates are pure discrete events tied to real install
+  -- progress (not animation), so frame-rate stutter is invisible -- a
+  -- skipped repaint just means the next cell-fill happens one frame
+  -- later, not jumpily. During pre-download phases (checking /
+  -- verifying) the queue isn't built yet; show status text only.
+  local status_text  = "Installing..."
+  local cells_total  = 0
+  local cells_done   = 0
+
+  if update.state == "checking" then
+    status_text = "Checking for updates..."
+  elseif update.state == "verifying" then
+    status_text = "Verifying files..."
+  elseif update.state == "downloading" or update.state == "rename_retry" then
+    cells_total = #(update.download_queue or {})
+    -- download_idx points at the file currently being fetched (1-indexed),
+    -- not the count of completed files. Subtract one so the in-flight
+    -- file's cell stays empty until it actually lands.
+    cells_done  = math.max(0, math.min((update.download_idx or 0) - 1, cells_total))
+    status_text = "Downloading..."
+  elseif update.state == "done" then
+    cells_total = #(update.download_queue or {})
+    cells_done  = cells_total
+    status_text = "Almost done..."
+  end
+
+  bs_text_center(status_text, BS_C.TEXT, 17)
+  ImGui.ImGui_Spacing(RA.ctx)
+  bs_progress_cells(cells_total, cells_done)
+end
+
 function Bootstrap.render_prompt()
-  ImGui.ImGui_Text(RA.ctx, "ReaAssist is missing critical files.")
+  -- The install-mode auto-fire moved to Bootstrap.loop so it triggers
+  -- regardless of which view (minimal or styled) is being rendered.
+  -- This function only handles the repair-mode prompt now; install mode
+  -- shouldn't ever reach here in normal flow (it routes to render_minimal
+  -- for success path, render_failed for errors).
+  if S.bootstrap_install_mode then
+    -- Defensive fallback if dispatch routing changes -- show the
+    -- minimal view rather than nothing.
+    return Bootstrap.render_minimal()
+  end
+
+  -- Repair mode: surface the affected-file list + Repair / Quit buttons.
+  -- "Some files need repair" covers all detected issues: missing on disk,
+  -- present-but-unreadable (font load errors), and SHA mismatches that
+  -- the regular update flow routes here as repair_available.
+  bs_text_center("Some Files Need Repair", BS_C.ACCENT, 20)
   ImGui.ImGui_Spacing(RA.ctx)
-  -- List up to 6 missing files; if more, summarize the rest. This keeps the
-  -- window a predictable size on fresh-install cases where many files are
-  -- absent.
+  bs_text_center(string.format(
+    "ReaAssist found %d critical file%s missing, modified, or unreadable.",
+    #S.bootstrap_missing,
+    #S.bootstrap_missing == 1 and "" or "s"),
+    BS_C.TEXT_VDIM)
+  ImGui.ImGui_Spacing(RA.ctx)
+
+  -- File list. Two-column bulleted layout to halve vertical space.
+  -- Drop the "Resources/" prefix (header context already implies it).
+  -- Bullet char is U+2022 (UTF-8: E2 80 A2); falls back gracefully if
+  -- the default ImGui font lacks the glyph.
   local n = #S.bootstrap_missing
-  local show_n = math.min(n, 6)
+  local show_n = math.min(n, 10)
+  local items = {}
   for i = 1, show_n do
-    ImGui.ImGui_Text(RA.ctx, "  - " .. S.bootstrap_missing[i])
+    local p = S.bootstrap_missing[i]:gsub("^Resources/", "")
+    -- ASCII bullet (rather than U+2022) so it renders cleanly even on
+    -- Mac/Linux where ImGui's default Proggy font is ASCII-only and
+    -- would otherwise show a missing-glyph box.
+    items[#items + 1] = "*  " .. p
   end
-  if n > show_n then
-    ImGui.ImGui_Text(RA.ctx,
-      string.format("  ... and %d more", n - show_n))
+  local more_line = (n > show_n) and string.format("+ %d more", n - show_n) or nil
+
+  ImGui.ImGui_PushFont(RA.ctx, nil, 12)
+  ImGui.ImGui_PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ItemSpacing(), 0, 3)
+
+  local rows = math.ceil(#items / 2)
+  -- Measure widest entry in each column independently for clean alignment.
+  local col_l_w, col_r_w = 0, 0
+  for i = 1, rows do
+    local w = ImGui.ImGui_CalcTextSize(RA.ctx, items[i])
+    if w > col_l_w then col_l_w = w end
   end
-  ImGui.ImGui_Spacing(RA.ctx)
-  ImGui.ImGui_Spacing(RA.ctx)
+  for i = rows + 1, #items do
+    local w = ImGui.ImGui_CalcTextSize(RA.ctx, items[i])
+    if w > col_r_w then col_r_w = w end
+  end
+  local col_gap = 30
+  local block_w = col_l_w + (col_r_w > 0 and (col_gap + col_r_w) or 0)
+  local win_w   = ImGui.ImGui_GetWindowWidth(RA.ctx)
+  local block_x = math.max(0, math.floor((win_w - block_w) / 2))
+  local right_x = block_x + col_l_w + col_gap
+
+  for r = 1, rows do
+    ImGui.ImGui_SetCursorPosX(RA.ctx, block_x)
+    ImGui.ImGui_TextColored(RA.ctx, BS_C.TEXT_DIM, items[r])
+    local right = items[rows + r]
+    if right then
+      ImGui.ImGui_SameLine(RA.ctx, right_x, 0)
+      ImGui.ImGui_TextColored(RA.ctx, BS_C.TEXT_DIM, right)
+    end
+  end
+  if more_line then
+    -- Centered "+ N more" on its own line, in the dimmer color.
+    local mw = ImGui.ImGui_CalcTextSize(RA.ctx, more_line)
+    ImGui.ImGui_SetCursorPosX(RA.ctx,
+      math.max(0, math.floor((win_w - mw) / 2)))
+    ImGui.ImGui_TextColored(RA.ctx, BS_C.TEXT_VDIM, more_line)
+  end
+
+  ImGui.ImGui_PopStyleVar(RA.ctx, 1)
+  ImGui.ImGui_PopFont(RA.ctx)
+  -- Extra 15px breathing room between the file list and the action prompt.
+  ImGui.ImGui_Dummy(RA.ctx, 0, 15)
+
   if CFG.UPDATE_BASE_URL == "" then
-    -- Auto-repair is not available yet (release URL not wired in). Tell the
-    -- user they must reinstall manually and exit.
-    ImGui.ImGui_Text(RA.ctx,
-      "Automatic recovery is not available (update URL not configured).")
-    ImGui.ImGui_Text(RA.ctx,
-      "Please reinstall ReaAssist manually from the release.")
+    bs_text_center("Automatic recovery is not available (update URL not configured).",
+                   BS_C.ERROR)
+    bs_text_center("Please reinstall ReaAssist manually.", BS_C.TEXT)
     ImGui.ImGui_Spacing(RA.ctx)
-    if ImGui.ImGui_Button(RA.ctx, "Close", 100, 0) then
-      S.script_open = false
-    end
-  else
-    -- If a previous attempt failed (user is back on this prompt after a
-    -- rejected check_poll or a rename/SHA failure), surface the reason
-    -- so they know whether to retry, exit, or check their network --
-    -- otherwise the same button click just silently fails again.
-    if update.last_error then
-      ImGui.ImGui_Spacing(RA.ctx)
-      ImGui.ImGui_TextColored(RA.ctx, 0xFF8080FF,
-        string.format("Previous attempt failed (%s):",
-                      tostring(update.last_step or "unknown")))
-      -- Use the self-contained bootstrap helper instead of UI.text_multiline:
-      -- if Resources/UI.lua is missing/corrupt the UI namespace
-      -- is empty, and TextWrapped corrupts window state when fed a literal \n.
-      bootstrap_text_multiline(update.last_error)
-      ImGui.ImGui_Spacing(RA.ctx)
-    end
-    ImGui.ImGui_Text(RA.ctx,
-      "Download the missing files from the current ReaAssist release?")
-    ImGui.ImGui_Spacing(RA.ctx)
-    if ImGui.ImGui_Button(RA.ctx, "Repair", 100, 0) then
-      -- Clear any stale failure so the prompt does not keep showing it
-      -- while the new attempt is in flight. A fresh failure will re-set
-      -- these via Updater._set_failure.
-      update.last_error = nil
-      update.last_step  = nil
-      Updater.force_reinstall()
-    end
-    ImGui.ImGui_SameLine(RA.ctx, 0, 16)
-    if ImGui.ImGui_Button(RA.ctx, "Exit", 80, 0) then
-      S.script_open = false
-    end
+    bs_center_buttons(100)
+    if ImGui.ImGui_Button(RA.ctx, "Close", 100, 30) then S.script_open = false end
+    return
   end
-end
 
-function Bootstrap.render_progress()
-  ImGui.ImGui_Text(RA.ctx, string.format(
-    "Restoring files (%d/%d)...",
-    update.download_idx or 0, #(update.download_queue or {})))
-  ImGui.ImGui_Spacing(RA.ctx)
-  local entry = update.download_queue
-                  and update.download_queue[update.download_idx]
-  if entry and entry.filename then
-    ImGui.ImGui_Text(RA.ctx, entry.filename)
-  end
-end
-
--- Bootstrap-mode "checking..." / "verifying..." view. Without this branch
--- the dispatcher falls through to render_prompt, which still shows a
--- clickable Repair button while a check is mid-flight. The force_reinstall
--- busy guard makes a duplicate click harmless, but the visual is wrong:
--- nothing tells the user their first click is being processed. Render a
--- minimal "Checking..." line that mirrors the in-app footer feedback.
-function Bootstrap.render_checking()
-  if update.state == "verifying" then
-    local s = update._sha_diff
-    -- Per-file progress is only meaningful in pure-Lua mode; the native
-    -- subprocess hashes everything in one shot and there is no
-    -- intermediate count to surface. Show a generic "Verifying files..."
-    -- in native and lua_fallback modes (the latter resets lua_idx to 1
-    -- and re-walks, so a count would step backwards relative to native's
-    -- elapsed wall-clock).
-    if s and (s.mode == "lua") and s.to_hash then
-      local total = #s.to_hash
-      local idx   = s.lua_idx or 0
-      if total > 0 then
-        ImGui.ImGui_Text(RA.ctx, string.format(
-          "Verifying files (%d/%d)...",
-          math.min(idx, total), total))
-      else
-        ImGui.ImGui_Text(RA.ctx, "Verifying files...")
-      end
-    else
-      ImGui.ImGui_Text(RA.ctx, "Verifying files...")
-    end
-  else
-    ImGui.ImGui_Text(RA.ctx, "Checking for updates...")
-  end
-  ImGui.ImGui_Spacing(RA.ctx)
-  ImGui.ImGui_TextDisabled(RA.ctx,
-    "This usually takes a few seconds.")
-end
-
-function Bootstrap.render_done()
-  local n = #(update.applied_files or {})
-  ImGui.ImGui_Text(RA.ctx, string.format(
-    "Restored %d file%s successfully.", n, n == 1 and "" or "s"))
-  ImGui.ImGui_Spacing(RA.ctx)
-  -- Mirror the normal-popup done view: say "Restarting..." when
-  -- auto-restart is pending; otherwise tell the user to close and reopen.
-  -- OK button always present so the user can close manually at any point.
-  local auto_restart_pending = update.restart_after
-                                 and not update.restart_fired
-  if auto_restart_pending then
-    ImGui.ImGui_Text(RA.ctx,
-      "Restarting to load the restored files...")
-  else
-    ImGui.ImGui_Text(RA.ctx,
-      "Close and reopen ReaAssist to finish the repair.")
-  end
-  ImGui.ImGui_Spacing(RA.ctx)
-  if ImGui.ImGui_Button(RA.ctx, "OK", 80, 0) then
-    S.script_open = false
-  end
-end
-
-function Bootstrap.render_failed()
-  ImGui.ImGui_Text(RA.ctx, "Repair failed.")
   if update.last_error then
-    ImGui.ImGui_Spacing(RA.ctx)
-    ImGui.ImGui_TextColored(RA.ctx, 0xFF8080FF,
-      string.format("Reason (%s):",
-                    tostring(update.last_step or "unknown")))
-    -- Self-contained helper: UI.text_multiline lives in UI.lua,
-    -- which may not be loaded in bootstrap mode.
+    bs_text_center(string.format("Previous attempt failed (%s):",
+                                 tostring(update.last_step or "unknown")),
+                   BS_C.ERROR)
     bootstrap_text_multiline(update.last_error)
+    ImGui.ImGui_Spacing(RA.ctx)
   end
+
+  bs_text_center("Repair these and any other modified files from the current release?",
+                 BS_C.TEXT)
   ImGui.ImGui_Spacing(RA.ctx)
-  ImGui.ImGui_Text(RA.ctx,
-    "If the problem persists, reinstall ReaAssist manually.")
-  ImGui.ImGui_Spacing(RA.ctx)
-  -- Retry path. Most bootstrap failures here are transient (CDN propagation,
-  -- AV scanner lock, network blip). force_reinstall clears the failure
-  -- metadata and re-fetches the manifest, identical to the Retry button on
-  -- the normal Update Failed dialog. Close still ends the session if the
-  -- user prefers to bail manually.
-  if ImGui.ImGui_Button(RA.ctx, "Retry Repair", 120, 0) then
+
+  bs_center_buttons(110 + 12 + 80)
+  if bs_primary_button("Repair", 110, 32) then
     update.last_error = nil
     update.last_step  = nil
     Updater.force_reinstall()
   end
-  ImGui.ImGui_SameLine(RA.ctx, 0, 16)
-  if ImGui.ImGui_Button(RA.ctx, "Close", 80, 0) then
-    S.script_open = false
+  ImGui.ImGui_SameLine(RA.ctx, 0, 12)
+  if ImGui.ImGui_Button(RA.ctx, "Quit", 80, 32) then S.script_open = false end
+end
+
+function Bootstrap.render_progress()
+  local title = S.bootstrap_install_mode and "Setting up ReaAssist" or "Repairing Files"
+  bs_text_center(title, BS_C.ACCENT, 20)
+  ImGui.ImGui_Spacing(RA.ctx)
+
+  bs_text_center("Downloading...", BS_C.TEXT, 17)
+  ImGui.ImGui_Spacing(RA.ctx)
+
+  local idx   = update.download_idx or 0
+  local total = #(update.download_queue or {})
+  -- idx is the in-flight file's index (1-based); subtract one so the
+  -- current file's cell only fills once it actually lands on disk.
+  bs_progress_cells(total, math.max(0, math.min(idx - 1, total)))
+end
+
+function Bootstrap.render_checking()
+  local title = S.bootstrap_install_mode and "Setting up ReaAssist" or "Repairing Files"
+  bs_text_center(title, BS_C.ACCENT, 20)
+  ImGui.ImGui_Spacing(RA.ctx)
+
+  local status_text = "Checking for updates..."
+  if update.state == "verifying" then
+    status_text = "Verifying files..."
   end
+  bs_text_center(status_text, BS_C.TEXT, 17)
+  ImGui.ImGui_Spacing(RA.ctx)
+
+  -- Reserve cell-row space even though we don't have a queue yet, so
+  -- the status text above stays anchored when the dispatcher transitions
+  -- from "checking" -> "downloading" and the cells become populated.
+  bs_progress_cells(0, 0)
+end
+
+function Bootstrap.render_done()
+  local title = S.bootstrap_install_mode and "Setup Complete" or "Repair Complete"
+  bs_text_center(title, BS_C.SUCCESS, 20)
+  ImGui.ImGui_Spacing(RA.ctx)
+
+  local n = #(update.applied_files or {})
+  local verb = S.bootstrap_install_mode and "Installed" or "Restored"
+  bs_text_center(string.format("%s %d file%s successfully.",
+                               verb, n, n == 1 and "" or "s"),
+                 BS_C.TEXT_DIM)
+
+  local auto_restart_pending = update.restart_after and not update.restart_fired
+  if auto_restart_pending then
+    bs_text_center("Restarting ReaAssist...", BS_C.TEXT_VDIM)
+  else
+    bs_text_center(
+      S.bootstrap_install_mode
+        and "Close and reopen ReaAssist to finish setup."
+        or  "Close and reopen ReaAssist to finish the repair.",
+      BS_C.TEXT_VDIM)
+  end
+  ImGui.ImGui_Spacing(RA.ctx)
+
+  bs_center_buttons(100)
+  if bs_primary_button("OK", 100, 32) then S.script_open = false end
+end
+
+function Bootstrap.render_failed()
+  local title = S.bootstrap_install_mode and "Setup Failed" or "Repair Failed"
+  bs_text_center(title, BS_C.ERROR, 20)
+  ImGui.ImGui_Spacing(RA.ctx)
+
+  if update.last_error then
+    bs_text_center(string.format("Step: %s",
+                                 tostring(update.last_step or "unknown")),
+                   BS_C.TEXT_DIM)
+    ImGui.ImGui_Spacing(RA.ctx)
+    -- Centered, compact multi-line: skip empty lines (which would
+    -- otherwise add Spacing and waste vertical room) and center each
+    -- non-empty line individually instead of using TextWrapped's
+    -- left-aligned default.
+    for line in tostring(update.last_error):gmatch("[^\n]+") do
+      bs_text_center(line, BS_C.TEXT)
+    end
+  end
+  ImGui.ImGui_Spacing(RA.ctx)
+  bs_text_center("If the problem persists, reinstall ReaAssist manually.",
+                 BS_C.TEXT_VDIM)
+  ImGui.ImGui_Spacing(RA.ctx)
+
+  bs_center_buttons(100 + 12 + 80)
+  if bs_primary_button("Retry", 100, 32) then
+    update.last_error = nil
+    update.last_step  = nil
+    -- Allow install-mode auto-trigger to re-fire on the next prompt pass.
+    S.bootstrap_install_fired = false
+    Updater.force_reinstall()
+  end
+  ImGui.ImGui_SameLine(RA.ctx, 0, 12)
+  if ImGui.ImGui_Button(RA.ctx, "Close", 80, 32) then S.script_open = false end
 end
 
 function Bootstrap.loop()
@@ -23395,50 +24404,98 @@ function Bootstrap.loop()
   if update.state == "downloading"   then Updater.download_poll()    end
   if update.state == "rename_retry"  then Updater.rename_retry_poll() end
   -- Auto-accept: in recovery we do not show an "Update Now" confirm step.
-  -- Any transition into the "available" or "repair_available" prompt
-  -- immediately fires the download. Single call is enough -- download_start
-  -- transitions the state out of those values on the same frame.
-  if update.state == "available"
-      or update.state == "repair_available" then
+  if update.state == "available" or update.state == "repair_available" then
     Updater.download_start()
   end
-  -- Stage 3.4 auto-restart: once the apply finishes and the 1.5s grace
-  -- window elapses, relaunch the script so the newly-downloaded files
-  -- take effect without the user having to close/reopen manually.
   Updater.try_auto_restart()
 
-  -- Minimal ImGui window, default font, default theme. Size is chosen
-  -- generously so long file-path lines fit without wrapping.
-  ImGui.ImGui_SetNextWindowSize(RA.ctx, 540, 300,
-    ImGui.ImGui_Cond_Appearing())
+  -- Install-mode auto-fire: kick off Updater.force_reinstall on the
+  -- first tick when the state machine hasn't started yet. Lives here
+  -- (rather than inside a render function) so it triggers whether we
+  -- end up rendering the minimal popup OR the full styled view on a
+  -- subsequent failure.
+  if S.bootstrap_install_mode and not S.bootstrap_install_fired
+     and (not update.state or update.state == "idle") then
+    S.bootstrap_install_fired = true
+    update.last_error = nil
+    update.last_step  = nil
+    Updater.force_reinstall()
+  end
+
+  -- View selection:
+  --   * install-mode + non-failed state + no error -> minimal popup
+  --   * install-mode + failed/error                -> full styled view
+  --   * repair-mode (any state)                    -> full styled view
+  -- Note we also check update.last_error: check_poll's "could not reach
+  -- update server" branch sets last_error and reverts state to "idle"
+  -- (rather than "failed") -- without checking last_error here, a network
+  -- failure would silently leave the minimal popup stuck on "Installing...".
+  local use_minimal = S.bootstrap_install_mode
+                      and update.state ~= "failed"
+                      and not update.last_error
+
+  -- Center on the active monitor, but cache the screen bounds on the
+  -- FIRST frame only so the popup doesn't follow the mouse around if
+  -- the user moves it to another monitor mid-install. We re-center
+  -- within the cached screen each frame (so a minimal -> styled view
+  -- size change still recenters), but we never re-read mouse position.
+  if not S.bootstrap_screen_bounds then
+    local mx, my = reaper.GetMousePosition()
+    local x1, y1, x2, y2 = reaper.my_getViewport(
+      -10000, -10000, 10000, 10000, mx, my, mx + 1, my + 1, true)
+    S.bootstrap_screen_bounds = {x1, y1, x2, y2}
+  end
+  local sx1, sy1, sx2, sy2 = table.unpack(S.bootstrap_screen_bounds)
+  local W = use_minimal and 380 or 580
+  local H = use_minimal and 175 or 410
+  local px = sx1 + math.floor((sx2 - sx1 - W) / 2)
+  local py = sy1 + math.floor((sy2 - sy1 - H) / 2)
+  -- Cond_Always so the size + position track view-mode changes (minimal
+  -- -> styled on failure). Position uses cached screen bounds so it
+  -- doesn't follow the mouse cursor across monitors.
+  ImGui.ImGui_SetNextWindowSize(RA.ctx, W, H, ImGui.ImGui_Cond_Always())
+  ImGui.ImGui_SetNextWindowPos(RA.ctx,
+    math.max(0, px), math.max(0, py), ImGui.ImGui_Cond_Always())
+  local n_color, n_var = bs_push_styles()
   local flags = ImGui.ImGui_WindowFlags_NoCollapse()
               + ImGui.ImGui_WindowFlags_NoDocking()
-  local visible, open = ImGui.ImGui_Begin(RA.ctx,
-    "ReaAssist Recovery", true, flags)
+              + ImGui.ImGui_WindowFlags_NoResize()
+  -- Minimal popup hides the title bar entirely (no title, no X) -- the
+  -- install runs autonomously in 5-15s, no user action expected. The
+  -- styled view keeps the title bar so the user can drag/close.
+  if use_minimal then
+    flags = flags + ImGui.ImGui_WindowFlags_NoTitleBar()
+                  + ImGui.ImGui_WindowFlags_NoMove()
+  end
+  local title = S.bootstrap_install_mode and "ReaAssist Installer" or "ReaAssist Recovery"
+  local visible, open = ImGui.ImGui_Begin(RA.ctx, title, true, flags)
   if visible then
-    if update.state == "downloading"
-        or update.state == "rename_retry" then
-      Bootstrap.render_progress()
-    elseif update.state == "checking"
-        or update.state == "verifying" then
-      Bootstrap.render_checking()
-    elseif update.state == "done" then
-      Bootstrap.render_done()
-    elseif update.state == "failed" then
-      Bootstrap.render_failed()
+    if use_minimal then
+      Bootstrap.render_minimal()
     else
-      Bootstrap.render_prompt()
+      bs_logo()  -- brand wordmark only on the styled view
+      -- Route to failed view when EITHER state=failed OR last_error is
+      -- set. The latter catches the "manifest_fetch could not reach
+      -- update server" case where check_poll sets last_error but
+      -- transitions state back to "idle" rather than "failed".
+      if update.state == "failed" or update.last_error then
+        Bootstrap.render_failed()
+      elseif update.state == "downloading" or update.state == "rename_retry" then
+        Bootstrap.render_progress()
+      elseif update.state == "checking" or update.state == "verifying" then
+        Bootstrap.render_checking()
+      elseif update.state == "done" then
+        Bootstrap.render_done()
+      else
+        Bootstrap.render_prompt()
+      end
     end
   end
-  -- ImGui_End is called outside the visible block per the Dear ImGui
-  -- contract: Begin returns false when the window is collapsed or fully
-  -- clipped, but End must still be called either way.
   ImGui.ImGui_End(RA.ctx)
-  if not open then S.script_open = false end
+  bs_pop_styles(n_color, n_var)
 
-  if S.script_open then
-    reaper.defer(Bootstrap.loop)
-  end
+  if not open then S.script_open = false end
+  if S.script_open then reaper.defer(Bootstrap.loop) end
 end
 
 -- =============================================================================

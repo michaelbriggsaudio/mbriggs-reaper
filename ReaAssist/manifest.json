@@ -1,5 +1,5 @@
 {
-  "version": "1.1.0",
+  "version": "1.1.1",
   "removed_files": [
     "Resources/MIDI_Ref.md",
     "Resources/Theme_Ref.md",
@@ -8,7 +8,7 @@
   "files": [
     {
       "name": "CHANGELOG.md",
-      "sha256": "ccee2e8699f5fe3e1cfec7800325d139e45ebf5998aa6a301e459c3ce767feb2"
+      "sha256": "78eeec80a7894e50851579aa3d9c2f5a0dcb9632797a2fda10098c3edd09ba55"
     },
     {
       "name": "LICENSE.txt",
@@ -20,7 +20,7 @@
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "ea0161c28c21cefeb79278a9e0a2c16ceeb8659a7d77388f6dbaae797dc62aa9"
+      "sha256": "e0ce7352bffa93e60c95012d2b1ec86d97b0e07cee622ffd319e87efc7d53865"
     },
     {
       "name": "Resources/API_Ref.md",
@@ -28,11 +28,11 @@
     },
     {
       "name": "Resources/Diag.lua",
-      "sha256": "287eeb719af5732da2892726d34a428e85b27ed161ea8a5e247aaef5dfe55058"
+      "sha256": "8260b6dc8f7f92a21ceb571eef868cfa33b6e864f9619f8d34bfe40e2290afbe"
     },
     {
       "name": "Resources/Help.md",
-      "sha256": "7bddeb29a8eefe2ac614072c86150be1a9b56c9bfceab56749a27696a3482023"
+      "sha256": "4f0c635aed4d331e3beb0eec0fd6fb8edfcc3f0a40cdb55d8a22af9c0dfb1f70"
     },
     {
       "name": "Resources/Plugin_Ref.md",
@@ -40,7 +40,7 @@
     },
     {
       "name": "Resources/Prompts.md",
-      "sha256": "1a859804e4a2dd36d925a7e6401e43146f1ad445478187e5e3d382ebd35ddd49"
+      "sha256": "9190686e1cdd113cce54e772fe6a4c8c419079a76a59e5d252d927292f64396c"
     },
     {
       "name": "Resources/ReEQ/Dependencies/firhalfband.jsfx-inc",
@@ -68,11 +68,11 @@
     },
     {
       "name": "Resources/System_Prompt.md",
-      "sha256": "a2be3f040b013ac81728efe164392cffbe6038db592ee774104fe7f3fbe4ef70"
+      "sha256": "7291b3a538283310d43b335ee1b8b35e5b6c1f7237df0f9b27f42836d15902b7"
     },
     {
       "name": "Resources/UI.lua",
-      "sha256": "17c340f4b3f0ca0e67f8b5c63b9be56b8cd91feb50aac8910cbb28cf90321df9"
+      "sha256": "9b523f7e7ddbc4b33e6f56bd46b6ed8025264ed4b181ed84b5e74e2f37232c29"
     },
     {
       "name": "Resources/fonts/Inter_18pt-Bold.ttf",

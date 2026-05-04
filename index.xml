@@ -56,25 +56,29 @@ After installing, run the action "Script: ReaAssist.lua" from REAPER's Action Li
         <link rel="website" href="https://github.com/michaelbriggsaudio/mbriggs-reaper">GitHub Repository</link>
         <link rel="website" href="https://reaassist.app">ReaAssist Website</link>
       </metadata>
-      <version name="1.1.0" author="Michael Briggs" time="2026-05-04T07:42:56Z">
+      <version name="1.1.1" author="Michael Briggs" time="2026-05-04T22:42:26Z">
         <changelog><![CDATA[
-- First public release announcement.
-- Dependency auto-install: ReaAssist now installs its required dependencies (ReaImGui, js_ReaScriptAPI) on first launch instead of pointing you at ReaPack docs.
-- Various bug fixes and polish.
+- New Report an Issue form on the Help page for bugs that need more than a thumbs reaction. Captures a description, optional contact info for replies, and ReaAssist attaches the redacted Advanced Log (or current chat as a fallback). Custom-provider endpoint URLs (LAN IPs and self-hosted hostnames) are scrubbed before send.
+- Custom LLMs: new "Test with a real chat/completions request" option above Test Connection. Catches misconfigurations the models-list probe misses (auth scope mismatch, configured id is not a chat model). Off by default to avoid surprise inference charges on reasoning models.
+- Custom LLMs: Test Connection no longer silently rewrites unrelated endpoint paths to /v1/models, so testing against servers with non-OpenAI chat paths works correctly.
+- Custom LLMs: multi-line endpoint values now round-trip correctly through REAPER's INI ExtState; configured providers no longer silently lose lines after a REAPER restart.
+- Custom LLMs: model rows with a typed override but no id are blocked at save time; stale model-index values are clamped when the active row is deleted underneath them.
+- FX-parameter calls scope per-track and dedupe identical-state writes, reducing redundant calls when chaining FX state across tracks.
+- Manual and Help: documented the new Report an Issue form and clarified that js_ReaScriptAPI is auto-installed alongside ReaImGui.
         ]]></changelog>
-        <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.1.0</source>
-        <source file="manifest.json">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/manifest.json?v=1.1.0</source>
-        <source file="CHANGELOG.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/CHANGELOG.md?v=1.1.0</source>
+        <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.1.1</source>
+        <source file="manifest.json">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/manifest.json?v=1.1.1</source>
+        <source file="CHANGELOG.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/CHANGELOG.md?v=1.1.1</source>
         <source file="LICENSE.txt">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/LICENSE.txt?v=1.0.4</source>
         <source file="README.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/README.md?v=1.0.3</source>
-        <source file="Resources/UI.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/UI.lua?v=1.1.0</source>
+        <source file="Resources/UI.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/UI.lua?v=1.1.1</source>
         <source file="Resources/Relaunch.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Relaunch.lua?v=1.1.0</source>
-        <source file="Resources/Diag.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Diag.lua?v=1.1.0</source>
-        <source file="Resources/System_Prompt.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/System_Prompt.md?v=1.0.8</source>
-        <source file="Resources/Prompts.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Prompts.md?v=1.0.6</source>
+        <source file="Resources/Diag.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Diag.lua?v=1.1.1</source>
+        <source file="Resources/System_Prompt.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/System_Prompt.md?v=1.1.1</source>
+        <source file="Resources/Prompts.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Prompts.md?v=1.1.1</source>
         <source file="Resources/API_Ref.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/API_Ref.md?v=1.0.6</source>
         <source file="Resources/Plugin_Ref.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Plugin_Ref.md?v=1.0.6</source>
-        <source file="Resources/Help.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Help.md?v=1.0.8</source>
+        <source file="Resources/Help.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Help.md?v=1.1.1</source>
         <source file="Resources/ReEQ/ReEQ.jsfx">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/ReEQ/ReEQ.jsfx?v=1.0.3</source>
         <source file="Resources/ReEQ/LICENSE.txt">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/ReEQ/LICENSE.txt?v=1.0.3</source>
         <source file="Resources/ReEQ/Dependencies/firhalfband.jsfx-inc">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/ReEQ/Dependencies/firhalfband.jsfx-inc?v=1.0.3</source>

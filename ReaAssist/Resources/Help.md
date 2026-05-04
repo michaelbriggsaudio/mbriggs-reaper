@@ -12,7 +12,7 @@ ReaAssist does not generate, process, or alter your audio files. It is strictly 
 
 Your audio files are never uploaded or sent anywhere. ReaAssist sends text to the provider you choose: your typed messages, optional project metadata (track names, FX lists, tempo, etc.), and any files you explicitly attach (images, PDFs). All chat communication goes directly between your machine and your chosen provider's API. For fully offline use, custom local LLMs (LM Studio, Ollama, etc.) are supported and keep all chat data on your machine.
 
-ReaAssist itself does not send anything automatically. The only path through which data leaves your machine to the ReaAssist project is the manual feedback flow described in the next section, and only after you open the dialog, review a preview of the exact bytes, and explicitly press Send.
+ReaAssist itself does not send anything automatically. The only paths through which data leaves your machine to the ReaAssist project are the in-chat feedback dialog and the Report an Issue form on the Help page, and only after you open them, review a preview of the exact bytes, and explicitly press Send.
 
 ## Sending Feedback
 
@@ -60,6 +60,52 @@ Inside the dialog you can:
 
 - Sent to the ReaAssist project maintainer via `https://d.reaassist.app`.
 - A random installation ID is generated **only on your first successful send** so duplicate reports from the same install can be deduplicated. This ID is not linked to your identity.
+
+## Reporting a Bug
+
+For issues that need more than a thumbs-down (something crashed, the wrong code ran, a feature isn't working as expected), open **Feedback / Report an Issue** from the Help page. The page hosts a form that collects everything the maintainer needs to investigate in one place.
+
+Inside the form you can:
+
+- Describe what happened, what you expected, and what actually happened (required)
+- Add an optional **Name** and **Email** if you'd like a reply (otherwise leave blank)
+- Expand **Preview report** to inspect the exact JSON bytes that would be sent (right-click the preview to copy)
+- Expand **Details & privacy** for the full disclosure of what's included, redacted, and excluded
+- Press **Send** to upload
+
+**What is sent (only when you press Send):**
+
+- Your description and any contact info you provided
+- The same Diagnostic Report as the in-chat dialog (app/REAPER/OS, installed extensions, recent errors, metrics)
+- One of the following, depending on the **Enable Advanced Log** toggle below the form:
+  - **If the log is enabled** (the default): the entire Advanced Log file, redacted before sending. The log captures full API request/response traffic, FX scan events, and exchange summaries — the most useful evidence for debugging.
+  - **If the log is disabled or empty:** the current chat session as a fallback, so reports are still useful when the log isn't available.
+
+**Automatically redacted before sending:**
+
+- API keys (yours and any pasted into chat)
+- `Authorization:` headers and `Bearer` tokens
+- Home-directory paths
+- `?key=` / `?token=` style URL query secrets
+- Custom-provider endpoint URLs (so LAN IPs and self-hosted hostnames stay private)
+
+**What is *not* redacted** (so the maintainer can read the report and reply):
+
+- Your **Name** and **Email**, if you typed them — sent as-is
+- Project, track, plugin, or file names that appear in the chat or the log
+- Anything else you pasted into the chat
+
+**What is never sent:**
+
+- Audio files
+- REAPER project files (`.RPP`)
+- Your API keys
+
+The **Preview report** expander shows the exact redacted bytes that will be POSTed. Always skim it before sending if you're worried about anything sensitive in your chat or log.
+
+**Contact info is remembered.** If you fill in Name and Email, they're saved locally so the next visit pre-fills them. They're never sent unless you press Send. Clear them by emptying the fields and sending another report (or by Factory Reset).
+
+**Where it goes:** same as in-chat feedback — the ReaAssist project maintainer via `https://d.reaassist.app`. Failed sends keep the form filled with a **Try Again** button; nothing is queued in the background.
 
 ## What It Can Do
 
@@ -263,7 +309,7 @@ All three providers cache repeated prompt content between turns, which can cut p
 - **Code doesn't run or buttons don't appear**: make sure ReaImGui is installed and up to date. ReaAssist auto-installs ReaImGui on first launch when missing; if you uninstalled it manually, relaunch ReaAssist and accept the install prompt, or update via ReaPack (Extensions > ReaPack > Browse Packages).
 - **API errors or "invalid key"**: double-check your key on the Settings page. Verify your billing status with your provider.
 - **Gemini free tier limits**: the free tier has lower rate limits and may reject large requests. Enable billing on your Google Cloud account for full access.
-- **Screenshots not working**: install js_ReaScriptAPI via ReaPack for accurate window capture.
+- **Screenshots not working**: accurate window capture requires js_ReaScriptAPI. ReaAssist auto-installs it on first launch on Windows, macOS, and Linux x86_64; if it was skipped or you uninstalled it, install via ReaPack (Extensions > ReaPack > Browse Packages). Platforms without an upstream binary fall back to non-native capture.
 - **JSFX not showing in FX Browser**: REAPER needs to rescan. Go to Options > Preferences > Plug-ins > VST and click Re-scan, or restart REAPER.
 - **UI is too large or off-screen**: hold Shift while launching ReaAssist to reset the scale to 100%, theme to Auto, and clear saved window position.
 
@@ -272,7 +318,7 @@ All three providers cache repeated prompt content between turns, which can cut p
 - **ReaImGui** - required (auto-installed by ReaAssist on first launch; can also be installed via ReaPack)
 - **API key** for at least one provider - required
 - **curl** (built into Windows 10+, macOS, and Linux) - required
-- **js_ReaScriptAPI** (optional) - enables native file dialogs and accurate window screenshots
+- **js_ReaScriptAPI** - auto-installed by ReaAssist on first launch on Windows, macOS, and Linux x86_64; enables native file dialogs and accurate window screenshots. ReaAssist runs without it on platforms with no upstream binary, using non-native fallbacks.
 
 ## Disclaimer and Terms of Use
 

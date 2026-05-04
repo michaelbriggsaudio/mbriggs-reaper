@@ -1,5 +1,21 @@
 # ReaAssist - Changelog
 
+## v1.1.1 - 2026-05-04
+
+- New Report an Issue form on the Help page for bugs that need more than a thumbs reaction. Captures a description, optional contact info for replies, and ReaAssist attaches the redacted Advanced Log (or current chat as a fallback). Custom-provider endpoint URLs (LAN IPs and self-hosted hostnames) are scrubbed before send.
+
+- Custom LLMs: new "Test with a real chat/completions request" option above Test Connection. Catches misconfigurations the models-list probe misses (auth scope mismatch, configured id is not a chat model). Off by default to avoid surprise inference charges on reasoning models.
+
+- Custom LLMs: Test Connection no longer silently rewrites unrelated endpoint paths to /v1/models, so testing against servers with non-OpenAI chat paths works correctly.
+
+- Custom LLMs: multi-line endpoint values now round-trip correctly through REAPER's INI ExtState; configured providers no longer silently lose lines after a REAPER restart.
+
+- Custom LLMs: model rows with a typed override but no id are blocked at save time; stale model-index values are clamped when the active row is deleted underneath them.
+
+- FX-parameter calls scope per-track and dedupe identical-state writes, reducing redundant calls when chaining FX state across tracks.
+
+- Manual and Help: documented the new Report an Issue form and clarified that js_ReaScriptAPI is auto-installed alongside ReaImGui.
+
 ## v1.1.0 - 2026-05-04
 
 - First public release announcement.

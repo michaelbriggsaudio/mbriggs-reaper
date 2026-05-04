@@ -39,11 +39,25 @@ end
 -- Constants
 -- ============================================================================
 Diag.SCHEMA_VERSION    = 2
-Diag.PAYLOAD_CAP_BYTES = 1024 * 1024     -- 1 MB server-side cap
+Diag.PAYLOAD_CAP_BYTES = 1024 * 1024     -- 1 MB server-side cap (manual feedback)
+-- Bug-report tier carries the full Advanced Log inline as a JSON string.
+-- Logs are auto-pruned to MAX_LOG_TURNS (20) at write time, but each turn can
+-- still contain large prompts/responses, so the cap here is set generously.
+-- Server must accept up to this size for event_type = "bug_report".
+Diag.BUG_REPORT_CAP_BYTES = 20 * 1024 * 1024   -- 20 MB
 Diag.USER_COMMENT_CAP  = 100 * 1024      -- 100 KB cap on user_comment
+Diag.CONTACT_NAME_CAP  = 200             -- chars; UI also enforces
+Diag.CONTACT_EMAIL_CAP = 320             -- chars; RFC 5321 local+domain ceiling
 Diag.URL               = "https://d.reaassist.app/api/feedback/v1/submit"
 Diag.CONNECT_TIMEOUT_S = 10
 Diag.CURL_TIMEOUT_S    = 30
+-- Bug-report uploads can be 10s of MB; the manual feedback path is sub-MB
+-- and finishes quickly, so it gets the tighter timeout above. curl's --max-time
+-- covers connect + transfer; bump for bug reports so a slow uplink mid-send
+-- doesn't drop a 15 MB log on the floor. Tick still has its own 60 s wall-clock
+-- ceiling but it's bumped per-event-type below.
+Diag.BUG_REPORT_CURL_TIMEOUT_S = 180
+Diag.BUG_REPORT_TICK_TIMEOUT_S = 240
 
 local EXT_NS             = "reaassist"
 local EXT_KEY_INSTALL_ID = "feedback_install_id"
@@ -265,6 +279,58 @@ function Diag.redact(s)
   end
 
   return s
+end
+
+-- Bug-report-specific log redaction. Exact-match scrubs three variants of
+-- each currently-configured custom-provider endpoint before delegating to
+-- the standard Diag.redact pipeline, since arbitrary hostnames and LAN IPs
+-- in custom URLs can't be reliably scrubbed by pattern alone:
+--
+--   1. The full configured endpoint (e.g. http://192.168.1.50:1234/v1/chat/completions)
+--   2. The derived /v1/models URL used by the connection-test path
+--      (Net.custom_models_url(p.endpoint)). Without this scrub, a Test
+--      Connection failure would leak the LAN/host portion via the models
+--      URL embedded in the curl error message.
+--   3. The bare scheme+host prefix (e.g. http://192.168.1.50:1234). Catches
+--      any other code path that surfaces the URL without the path component
+--      -- "connection refused to <host>:<port>" in curl errors, etc.
+--
+-- Order matters: longest match first so the more-specific scrub consumes
+-- text before the bare-host scrub gets to it.
+function Diag.redact_log(content)
+  if type(content) ~= "string" or content == "" then return content or "" end
+  if type(PROVIDERS) == "table" then
+    local n = 0
+    -- Track scrubbed bare-host prefixes per scan so two providers sharing
+    -- a host don't get one each (the first wins; ambiguous attribution but
+    -- correct redaction).
+    local seen_host = {}
+    for _, p in ipairs(PROVIDERS) do
+      if p and p.is_custom and type(p.endpoint) == "string" and #p.endpoint > 0 then
+        n = n + 1
+        local placeholder = "<custom-endpoint-" .. n .. ">"
+        -- 1. Full configured endpoint.
+        content = content:gsub(_esc_pat(p.endpoint), placeholder)
+        -- 2. Derived /v1/models URL (only if Net is loaded -- it lives in
+        -- ReaAssist.lua and is initialized before any logging that could
+        -- need it, but pcall guards against any load-order surprise).
+        if type(Net) == "table" and type(Net.custom_models_url) == "function" then
+          local ok, models_url = pcall(Net.custom_models_url, p.endpoint)
+          if ok and type(models_url) == "string" and #models_url > 0
+             and models_url ~= p.endpoint then
+            content = content:gsub(_esc_pat(models_url), placeholder)
+          end
+        end
+        -- 3. Bare scheme+host prefix.
+        local host_prefix = p.endpoint:match("^(https?://[^/]+)")
+        if host_prefix and not seen_host[host_prefix] then
+          seen_host[host_prefix] = true
+          content = content:gsub(_esc_pat(host_prefix), placeholder)
+        end
+      end
+    end
+  end
+  return Diag.redact(content)
 end
 
 -- ============================================================================
@@ -595,6 +661,318 @@ function Diag.preview_payload_text(draft, comment, flags)
 end
 
 -- ============================================================================
+-- Bug-report draft API (uses event_type = "bug_report" partition).
+-- Snapshots the entire Advanced Log (already pruned to MAX_LOG_TURNS at write
+-- time) when debug_logging is on; falls back to capturing the full chat
+-- session when the log is unavailable. Optional contact_name / contact_email
+-- bypass redaction so the maintainer can reply.
+-- ============================================================================
+
+-- Loose email validity: catches typos without enforcing RFC 5321/5322. Empty
+-- string is valid (the field is optional).
+function Diag.is_valid_email(s)
+  if type(s) ~= "string" or s == "" then return true end
+  if s:find("%s") then return false end
+  local at = s:find("@", 1, true)
+  if not at or at == 1 or at == #s then return false end
+  return true
+end
+
+local function _trim_string(s, n)
+  if type(s) ~= "string" then return "" end
+  if #s <= n then return s end
+  return s:sub(1, n)
+end
+
+function Diag.begin_bug_report_draft()
+  -- Provider id (NOT the table) -- mirrors begin_draft.
+  local provider_id = "unknown"
+  if type(PROVIDERS) == "table" and type(PROVIDERS.active) == "function" then
+    local ok, p = pcall(PROVIDERS.active)
+    if ok then
+      if type(p) == "table" then
+        provider_id = p.id or p.label or "unknown"
+      elseif type(p) == "string" then
+        provider_id = p
+      end
+    end
+  end
+
+  local model_id = "unknown"
+  if type(MODELS) == "table" and type(MODELS.active_id) == "function" then
+    local ok, m = pcall(MODELS.active_id)
+    if ok and type(m) == "string" then model_id = m end
+  end
+  if model_id == "unknown" and type(S) == "table" and type(S.model) == "string" then
+    model_id = S.model
+  end
+
+  local thinking_level = (type(S) == "table") and S.thinking_level or nil
+
+  local reaper_version = "unknown"
+  if type(reaper) == "table" and type(reaper.GetAppVersion) == "function" then
+    local ok, v = pcall(reaper.GetAppVersion)
+    if ok and type(v) == "string" then reaper_version = v end
+  end
+
+  -- Diagnostic report (same string the manual flow uses, redacted).
+  local diagnostic_report
+  if type(Diag.build_report) == "function" then
+    local ok, rep = pcall(Diag.build_report, { skip_followup_note = true })
+    if ok and type(rep) == "string" then
+      diagnostic_report = Diag.redact(rep)
+    end
+  end
+
+  -- Attachment selection: log first (richer signal), chat session as fallback.
+  local attachment_kind        = "none"
+  local debug_log_redacted     = nil
+  local debug_log_raw_size     = 0
+  local debug_log_redacted_size = 0
+  local turns                  = nil
+  local turn_count_total       = 0
+
+  local prefs_t = (type(prefs) == "table") and prefs or {}
+  local log_path = (type(Log) == "table") and Log.path or nil
+
+  if prefs_t.debug_logging and type(log_path) == "string" and log_path ~= "" then
+    local f = io.open(log_path, "rb")
+    if f then
+      local content = f:read("*a") or ""
+      f:close()
+      debug_log_raw_size = #content
+      if #content > 0 then
+        local ok, redacted = pcall(Diag.redact_log, content)
+        if ok and type(redacted) == "string" then
+          debug_log_redacted     = redacted
+          debug_log_redacted_size = #redacted
+          attachment_kind         = "log"
+        end
+      end
+    end
+  end
+
+  if attachment_kind == "none" then
+    local msgs = (type(S) == "table" and type(S.display_messages) == "table")
+                 and S.display_messages or {}
+    if #msgs > 0 then
+      turns = {}
+      for i = 1, #msgs do turns[i] = _turn_to_table(msgs[i], true) end
+      turn_count_total = #msgs
+      attachment_kind  = "chat"
+    end
+  end
+
+  return {
+    event_id                 = uuidv4(),
+    drafted_at               = os.time(),
+    install_id               = Diag.install_id(),
+    launch_id                = launch_id_value,
+    launch_started_at        = launch_started_at,
+    app_version              = (type(CFG) == "table" and CFG.VERSION) or "unknown",
+    os                       = _detect_os(),
+    reaper_version           = reaper_version,
+    provider                 = provider_id,
+    model                    = model_id,
+    thinking_level           = thinking_level,
+    diagnostic_report        = diagnostic_report,
+    attachment_kind          = attachment_kind,
+    _debug_log               = debug_log_redacted,
+    _debug_log_raw_size      = debug_log_raw_size,
+    _debug_log_redacted_size = debug_log_redacted_size,
+    _turns                   = turns,
+    _turn_count_total        = turn_count_total,
+  }
+end
+
+function Diag.assemble_bug_report_payload(draft, comment, name, email)
+  comment = comment or ""
+  name    = name    or ""
+  email   = email   or ""
+
+  -- Cap user_comment with a visible truncation marker (matches the manual
+  -- feedback assemble_payload pattern). Server-side reviewer can tell the
+  -- difference between a verbose user and a hard-cut. Name/email get a
+  -- silent hard-cut since their caps are short and a marker on a contact
+  -- field reads as garbled to a maintainer trying to reply.
+  --
+  -- The marker overhead has to fit INSIDE USER_COMMENT_CAP so the final
+  -- field stays under the contract documented in BUG_REPORT_SERVER_SPEC.md
+  -- (and so the server can enforce a strict per-field cap without
+  -- rejecting locally-accepted reports). Reserve a fixed 50-byte budget
+  -- for the marker -- generous enough for any byte-count digit width
+  -- Lua can produce (16+ digits = ~42 chars).
+  if #comment > Diag.USER_COMMENT_CAP then
+    local MARKER_RESERVE = 50
+    local cut_at = Diag.USER_COMMENT_CAP - MARKER_RESERVE
+    if cut_at < 0 then cut_at = 0 end
+    local trunc_count = #comment - cut_at
+    comment = comment:sub(1, cut_at)
+      .. " [...truncated " .. trunc_count .. " bytes...]"
+  end
+  name    = _trim_string(name,    Diag.CONTACT_NAME_CAP)
+  email   = _trim_string(email,   Diag.CONTACT_EMAIL_CAP)
+
+  local payload = {
+    schema_version    = Diag.SCHEMA_VERSION,
+    event_type        = "bug_report",
+    event_id          = draft.event_id,
+    install_id        = draft.install_id,
+    launch_id         = draft.launch_id,
+    launch_started_at = draft.launch_started_at,
+    drafted_at        = draft.drafted_at,
+    app_version       = draft.app_version,
+    os                = draft.os,
+    reaper_version    = draft.reaper_version,
+    provider          = draft.provider,
+    model             = draft.model,
+    thinking_level    = draft.thinking_level,
+    user_comment      = Diag.redact(comment),
+    attachment_kind   = draft.attachment_kind,
+  }
+
+  -- Contact fields: deliberately preserved as the user typed them. Empty
+  -- means "no contact info provided". Field is omitted (not "") when empty
+  -- so the JSON stays clean.
+  if name  ~= "" then payload.contact_name  = name  end
+  if email ~= "" then payload.contact_email = email end
+
+  if draft.diagnostic_report then
+    payload.diagnostic_report = draft.diagnostic_report
+  end
+
+  if draft.attachment_kind == "log" and draft._debug_log then
+    payload.debug_log = draft._debug_log
+  elseif draft.attachment_kind == "chat" and draft._turns then
+    payload.session = {
+      turn_count_total = draft._turn_count_total,
+      turns            = draft._turns,
+    }
+  end
+
+  local serialized = _serialize(payload)
+  if #serialized <= Diag.BUG_REPORT_CAP_BYTES then
+    return payload, nil
+  end
+
+  -- Truncation cascade. Log tail-cap > chat shrink > drop diagnostic_report >
+  -- drop attachment > nuke to bare metadata. Comment / contact preserved as
+  -- long as possible (those are deliberate user input).
+  local truncation = {
+    applied                = true,
+    original_byte_estimate = #serialized,
+    final_byte_estimate    = 0,
+  }
+  payload.truncation_info = truncation
+
+  local function stabilize(s)
+    for _ = 1, 5 do
+      if truncation.final_byte_estimate == #s then break end
+      truncation.final_byte_estimate = #s
+      s = _serialize(payload)
+    end
+    return s
+  end
+
+  -- Phase 1a: tail-cap the log. Land the cut on a "REQUEST #" boundary if
+  -- one is within the first 8 KB so the trimmed log opens cleanly.
+  if draft.attachment_kind == "log" and payload.debug_log then
+    local log_str       = payload.debug_log
+    local log_orig_len  = #log_str
+    -- Available room = cap - (everything else's serialized size). Leave a
+    -- 256 KB safety margin for JSON-escape inflation jitter.
+    local non_log_bytes = truncation.original_byte_estimate - log_orig_len
+    local available     = Diag.BUG_REPORT_CAP_BYTES - 256 * 1024 - non_log_bytes
+    if available < 64 * 1024 then available = 64 * 1024 end
+    if log_orig_len > available then
+      local tail = log_str:sub(log_orig_len - available + 1)
+      local marker = tail:find("======= REQUEST #", 1, true)
+      if marker and marker > 1 and marker < 8192 then
+        tail = tail:sub(marker)
+      end
+      payload.debug_log = "[earlier "
+        .. (log_orig_len - #tail)
+        .. " bytes of log trimmed to fit -- showing latest "
+        .. #tail .. " bytes]\n\n" .. tail
+      truncation.debug_log_tail_capped     = true
+      truncation.debug_log_original_size   = log_orig_len
+      truncation.debug_log_final_size      = #payload.debug_log
+    end
+  end
+
+  -- Phase 1b: chat fallback - shrink largest turn iteratively.
+  if draft.attachment_kind == "chat" and payload.session then
+    local kept = payload.session.turns
+    local copied = {}
+    local function ensure_copy(i)
+      if kept[i] and not copied[i] then
+        kept[i] = _shallow_copy(kept[i]); copied[i] = true
+      end
+    end
+    local function shrinkable_largest(min_size)
+      local b_i, b_sz = nil, min_size or 200
+      for i, t in ipairs(kept) do
+        local clen = #(t.content or "")
+        if clen > b_sz then b_i, b_sz = i, clen end
+      end
+      return b_i, b_sz
+    end
+    local s = stabilize(_serialize(payload))
+    local guard = 0
+    while #s > Diag.BUG_REPORT_CAP_BYTES and guard < 24 do
+      guard = guard + 1
+      local i, sz = shrinkable_largest(200)
+      if not i then break end
+      ensure_copy(i)
+      local target = math.max(200, math.min(math.floor(sz / 2), 64 * 1024))
+      local orig = kept[i].content or ""
+      if #orig > target then
+        kept[i].content = orig:sub(1, target)
+          .. " [...truncated " .. (#orig - target) .. " bytes...]"
+      end
+      s = stabilize(_serialize(payload))
+    end
+  end
+
+  local s = stabilize(_serialize(payload))
+
+  -- Phase 2: drop diagnostic_report (it's reproducible from Diag.build_report).
+  if #s > Diag.BUG_REPORT_CAP_BYTES and payload.diagnostic_report then
+    payload.diagnostic_report = nil
+    truncation.diagnostic_report_dropped = true
+    s = stabilize(_serialize(payload))
+  end
+
+  -- Phase 3: drop the attachment entirely. Comment + contact + metadata stay.
+  if #s > Diag.BUG_REPORT_CAP_BYTES then
+    if payload.debug_log then
+      payload.debug_log = nil
+      truncation.debug_log_dropped = true
+    end
+    if payload.session then
+      payload.session = nil
+      truncation.session_dropped = true
+    end
+    s = stabilize(_serialize(payload))
+  end
+
+  -- Phase 4: shouldn't be reachable for any sane input but defends against
+  -- pathological comments etc.
+  if #s > Diag.BUG_REPORT_CAP_BYTES then
+    payload.user_comment = "[...overflow truncated...]"
+    truncation.fatal_overflow = true
+    s = stabilize(_serialize(payload))
+  end
+
+  return payload, truncation
+end
+
+function Diag.preview_bug_report_text(draft, comment, name, email)
+  local payload = Diag.assemble_bug_report_payload(draft, comment, name, email)
+  return _serialize(payload)
+end
+
+-- ============================================================================
 -- Send (async via curl) + tick
 -- Mirrors Net.fire_curl pattern (ReaAssist.lua:15144+).
 -- ============================================================================
@@ -625,7 +1003,7 @@ local function _path_safe(p) return type(p) == "string" and not p:find('"', 1, t
 local function _ps_escape(s) return s:gsub("'", "''") end
 local function _sq(p) return "'" .. p:gsub("'", "'\\''") .. "'" end
 
-local function _build_windows(body_path, resp_path, status_path, exit_path)
+local function _build_windows(body_path, resp_path, status_path, exit_path, max_time_s)
   for _, p in ipairs({ body_path, resp_path, status_path, exit_path, Diag.URL }) do
     if not _path_safe(p) then
       return nil, "path/URL contains literal quote: " .. tostring(p)
@@ -640,7 +1018,7 @@ local function _build_windows(body_path, resp_path, status_path, exit_path)
     .. ' """%s"""'
     .. ' > """%s"""'
     .. ' & echo %%errorlevel%% > """%s"""',
-    Diag.CONNECT_TIMEOUT_S, Diag.CURL_TIMEOUT_S,
+    Diag.CONNECT_TIMEOUT_S, max_time_s,
     body_path, resp_path, Diag.URL, status_path, exit_path
   )
 
@@ -652,7 +1030,7 @@ local function _build_windows(body_path, resp_path, status_path, exit_path)
   )
 end
 
-local function _build_posix(body_path, resp_path, status_path, exit_path)
+local function _build_posix(body_path, resp_path, status_path, exit_path, max_time_s)
   for _, p in ipairs({ body_path, resp_path, status_path, exit_path, Diag.URL }) do
     if not _path_safe(p) then
       return nil, "path/URL contains literal quote: " .. tostring(p)
@@ -664,7 +1042,7 @@ local function _build_posix(body_path, resp_path, status_path, exit_path)
     .. " -X POST -H 'Content-Type: application/json'"
     .. " --data-binary @%s -o %s -w '%%{http_code}'"
     .. " %s > %s ; echo $? > %s) &",
-    Diag.CONNECT_TIMEOUT_S, Diag.CURL_TIMEOUT_S,
+    Diag.CONNECT_TIMEOUT_S, max_time_s,
     _sq(body_path), _sq(resp_path),
     _sq(Diag.URL), _sq(status_path), _sq(exit_path)
   )
@@ -705,9 +1083,11 @@ function Diag.send_draft(draft, comment, flags, on_done)
   local is_win = _detect_os() == "win"
   local cmd, cerr
   if is_win then
-    cmd, cerr = _build_windows(body_path, resp_path, status_path, exit_path)
+    cmd, cerr = _build_windows(body_path, resp_path, status_path, exit_path,
+      Diag.CURL_TIMEOUT_S)
   else
-    cmd, cerr = _build_posix(body_path, resp_path, status_path, exit_path)
+    cmd, cerr = _build_posix(body_path, resp_path, status_path, exit_path,
+      Diag.CURL_TIMEOUT_S)
   end
   if not cmd then
     if on_done then on_done(false, nil, cerr) end
@@ -724,12 +1104,78 @@ function Diag.send_draft(draft, comment, flags, on_done)
   os.remove(resp_path); os.remove(status_path); os.remove(exit_path)
 
   in_flight = {
-    body_path   = body_path,
-    resp_path   = resp_path,
-    status_path = status_path,
-    exit_path   = exit_path,
-    started_at  = os.time(),
-    on_done     = on_done,
+    body_path      = body_path,
+    resp_path      = resp_path,
+    status_path    = status_path,
+    exit_path      = exit_path,
+    started_at     = os.time(),
+    on_done        = on_done,
+    -- 60 s is generous given the 30 s curl --max-time + manual feedback's
+    -- sub-MB body. Bug-report sends override this with a higher value to
+    -- cover multi-MB log uploads on slow uplinks.
+    tick_timeout_s = 60,
+  }
+
+  _launch_curl(cmd, is_win)
+end
+
+-- Bug-report sender. Same curl harness + single-flight gate as send_draft;
+-- differs only in payload assembly (assemble_bug_report_payload), pre-flight
+-- cap (BUG_REPORT_CAP_BYTES), and curl/tick timeouts (sized for multi-MB
+-- bodies). Manual feedback and bug reports share `in_flight`, so a
+-- mid-flight bug-report send blocks a manual-feedback Send and vice versa --
+-- both surface "send already in flight" to the caller.
+function Diag.send_bug_report(draft, comment, name, email, on_done)
+  if in_flight then
+    if on_done then on_done(false, nil, "send already in flight") end
+    return
+  end
+
+  local body = Diag.preview_bug_report_text(draft, comment, name, email)
+
+  if #body > Diag.BUG_REPORT_CAP_BYTES then
+    if on_done then
+      on_done(false, nil, "payload exceeds cap after truncation: " .. #body .. " bytes")
+    end
+    return
+  end
+
+  local body_path   = _tmp_path("body")
+  local resp_path   = _tmp_path("resp")
+  local status_path = _tmp_path("status")
+  local exit_path   = _tmp_path("exit")
+
+  local is_win = _detect_os() == "win"
+  local cmd, cerr
+  if is_win then
+    cmd, cerr = _build_windows(body_path, resp_path, status_path, exit_path,
+      Diag.BUG_REPORT_CURL_TIMEOUT_S)
+  else
+    cmd, cerr = _build_posix(body_path, resp_path, status_path, exit_path,
+      Diag.BUG_REPORT_CURL_TIMEOUT_S)
+  end
+  if not cmd then
+    if on_done then on_done(false, nil, cerr) end
+    return
+  end
+
+  local f, ferr = io.open(body_path, "wb")
+  if not f then
+    if on_done then on_done(false, nil, "cannot open body: " .. tostring(ferr)) end
+    return
+  end
+  f:write(body); f:close()
+
+  os.remove(resp_path); os.remove(status_path); os.remove(exit_path)
+
+  in_flight = {
+    body_path      = body_path,
+    resp_path      = resp_path,
+    status_path    = status_path,
+    exit_path      = exit_path,
+    started_at     = os.time(),
+    on_done        = on_done,
+    tick_timeout_s = Diag.BUG_REPORT_TICK_TIMEOUT_S,
   }
 
   _launch_curl(cmd, is_win)
@@ -755,7 +1201,7 @@ function Diag.tick()
 
   local exit_str = _read_file(in_flight.exit_path)
   if not exit_str then
-    if os.time() - in_flight.started_at > 60 then
+    if os.time() - in_flight.started_at > (in_flight.tick_timeout_s or 60) then
       local cb = in_flight.on_done
       _cleanup_inflight(); in_flight = nil
       if cb then cb(false, nil, "timeout waiting for curl") end

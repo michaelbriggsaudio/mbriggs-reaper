@@ -1336,7 +1336,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.1.0", -- public release version
+  VERSION           = "1.1.1", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -2520,6 +2520,62 @@ local function _elide_static_refs(s)
         .. s:sub(g_end)
     end
   end
+
+  -- Cross-request dedupe pass. SESSION CONTEXT, PINNED REFERENCES, and
+  -- INSTALLED FX MATCHING blocks get re-injected into every request body
+  -- but rarely change within a 20-turn window (track count, tempo, pin
+  -- list, FX list are usually stable). First occurrence is kept verbatim;
+  -- byte-identical re-occurrences in later requests collapse to a back-
+  -- reference placeholder. State lives in Log._seen_sections, keyed by
+  -- "<label>\0<body>", reset on session header / clear / prune so
+  -- references never point outside the current log window.
+  local _DEDUP_HEADERS = {
+    { hdr = "SESSION CONTEXT ",     label = "SESSION CONTEXT" },
+    { hdr = "PINNED REFERENCES ",   label = "PINNED REFERENCES" },
+    { hdr = "INSTALLED FX MATCHING ", label = "INSTALLED FX MATCHING" },
+  }
+  for _, ent in ipairs(_DEDUP_HEADERS) do
+    local hdr   = ent.hdr
+    local label = ent.label
+    local pos = 1
+    while true do
+      local hs = s:find(hdr, pos, true)
+      if not hs then break end
+      local he = s:find("\n", hs + #hdr, true) or (#s + 1)
+      local section_end = #s + 1
+      local scan = he
+      while true do
+        local blank = s:find("\n\n", scan, true)
+        if not blank then break end
+        local line_start = blank + 2
+        if _line_starts_new_section(s, line_start) then
+          section_end = blank
+          break
+        end
+        scan = blank + 2
+      end
+      -- Body = content after header line, before section terminator.
+      local body = s:sub(he + 1, section_end - 1)
+      if #body > 200 then
+        local turn_num = Log._current_turn_num or 1
+        local key = label .. "\0" .. body
+        local seen = Log._seen_sections[key]
+        if seen and seen ~= turn_num then
+          s = s:sub(1, he)
+            .. "  [" .. label .. " same as request #" .. seen
+            .. " -- " .. #body .. " chars omitted]"
+            .. s:sub(section_end)
+          pos = hs + #hdr
+        else
+          if not seen then Log._seen_sections[key] = turn_num end
+          pos = section_end
+        end
+      else
+        pos = he
+      end
+    end
+  end
+
   return s
 end
 
@@ -2800,6 +2856,18 @@ local _REQ_DELIM = "\n======= REQUEST #"
 -- repeat across script reloads.
 Log._turn_counter = nil
 
+-- Cross-request dedupe state for repeated almost-static section blocks
+-- (SESSION CONTEXT / PINNED REFERENCES / INSTALLED FX MATCHING). Maps
+-- "<label>\0<verbatim body>" -> first-seen turn number. Only used by
+-- _elide_static_refs's dedup pass; reset on session header / log clear /
+-- prune so back-references never point outside the current log window.
+Log._seen_sections = {}
+
+-- Last [CHAIN] tagged-line message seen in this session. Consecutive
+-- identical [CHAIN] events (which happen many times per session because
+-- the chain-types list is fixed) are collapsed to a short marker.
+Log._last_chain_msg = nil
+
 local function _init_turn_counter()
   if Log._turn_counter then return end
   Log._turn_counter = 0
@@ -2828,6 +2896,23 @@ local function _prune_log()
     pos = p + #_REQ_DELIM
   end
   if #positions < MAX_LOG_TURNS then return end
+  -- We're about to drop the oldest turns. Any back-references in the
+  -- kept turns to "[X same as request #N]" where N is in the dropped
+  -- range now point outside the file. Reset the dedupe state so the
+  -- next incoming request emits its sections verbatim again -- subsequent
+  -- requests then dedupe against that fresh baseline. The dangling
+  -- references in the already-written kept content are accepted as a
+  -- known limitation; the verbose-baseline-then-elide pattern resumes
+  -- cleanly from the next request forward.
+  --
+  -- Same logic for the [CHAIN] tag: if the verbatim baseline line was
+  -- in a dropped turn, the kept content is left with only "(chains
+  -- unchanged)" markers and no in-file reference for what they're
+  -- unchanged FROM. Clearing _last_chain_msg here forces the next
+  -- chain event to log the type list in full again, restoring a
+  -- visible baseline.
+  Log._seen_sections  = {}
+  Log._last_chain_msg = nil
   -- Preserve the prefix (session header / system info) above positions[1],
   -- then keep the newest (MAX_LOG_TURNS - 1) turns so the append makes MAX.
   local prefix_end = positions[1] - 1
@@ -2886,10 +2971,26 @@ Log.response = function(body, elapsed)
 end
 
 -- Short tagged line (used for scan events, cache hit/miss, etc.).
+-- [CHAIN] events fire many times per session with identical "loaded chains
+-- for types: ..." messages because the chain-types list is fixed. After
+-- the first occurrence in the current log window, byte-identical [CHAIN]
+-- messages collapse to "[CHAIN] (chains unchanged)" -- timestamps still
+-- log so the timeline is preserved, but we don't pay for the type list
+-- on every event. State (Log._last_chain_msg) lives until session_header
+-- / clear / prune resets it, at which point the next chain event re-emits
+-- the full type list as a fresh baseline. Other tags log normally.
 Log.line = function(tag, msg)
   if not prefs.debug_logging then return end
+  msg = tostring(msg)
   local ts = os.date("%H:%M:%S")
-  _log_write("[" .. ts .. "] [" .. tag .. "] " .. tostring(msg) .. "\n")
+  if tag == "CHAIN" then
+    if Log._last_chain_msg == msg then
+      _log_write("[" .. ts .. "] [CHAIN] (chains unchanged)\n")
+      return
+    end
+    Log._last_chain_msg = msg
+  end
+  _log_write("[" .. ts .. "] [" .. tag .. "] " .. msg .. "\n")
 end
 
 -- Exchange-summary block: mirrors the details bubble (Model, Context, Tokens,
@@ -2947,6 +3048,8 @@ Log.clear = function()
   Log._session_header_written = false
   Log._turn_counter = 0  -- reset numbering when log is cleared
   Log._current_turn_num = nil
+  Log._seen_sections = {}
+  Log._last_chain_msg = nil
   local f = io.open(Log.path, "w")
   if f then f:close() end
 end
@@ -3035,6 +3138,11 @@ end
 Log.session_header = function()
   if not prefs.debug_logging then return end
   Log._session_header_written = true
+  -- Fresh log file (or first write since module load) means no prior
+  -- requests for back-references to point at -- start the dedupe windows
+  -- empty so the next request's repeated sections are emitted in full.
+  Log._seen_sections = {}
+  Log._last_chain_msg = nil
   local ts = os.date("%Y-%m-%d %H:%M:%S")
   _log_write("\n================================================================\n"
     .. "ReaAssist debug log session start: " .. ts .. "\n"
@@ -3407,6 +3515,41 @@ function Custom.save_ids(ids)
     tbl_concat(ids or {}, ","), true)
 end
 
+-- REAPER's ExtState writer round-trips literal newlines fine *within* a
+-- session (SetExtState/GetExtState see the full multi-line string), but it
+-- truncates each value at the first newline when serializing to
+-- reaper-extstate.ini on shutdown. A user who saves a 4-row models blob
+-- (rows joined by "\n") sees the right thing in-session, then closes
+-- REAPER and on re-open finds only the first row survived.
+--
+-- Fix: percent-encode \n / \r before SetExtState, decode after GetExtState,
+-- for any field that legitimately holds multiple lines (custom-provider
+-- _models and _extra_headers right now). Encoding `%` first is what makes
+-- the round-trip lossless when user content already contains a literal `%`
+-- or `%25` sequence -- decode reverses the order to undo the guarding.
+--
+-- Backward compatibility: the decode is a no-op on legacy single-line
+-- content (no `%0A`/`%0D`/`%25` sequences appear in any pre-existing
+-- _models or _extra_headers value the encoder could have produced).
+--
+-- Hung off the Custom table rather than declared as `local function`s so
+-- the main chunk doesn't blow past Lua's 200-local-variable limit (hard
+-- parse error, not a style nit).
+function Custom._mline_encode(s)
+  if not s or s == "" then return s or "" end
+  s = s:gsub("%%", "%%25")
+  s = s:gsub("\n", "%%0A")
+  s = s:gsub("\r", "%%0D")
+  return s
+end
+function Custom._mline_decode(s)
+  if not s or s == "" then return s or "" end
+  s = s:gsub("%%0A", "\n")
+  s = s:gsub("%%0D", "\r")
+  s = s:gsub("%%25", "%%")
+  return s
+end
+
 -- Parse a per-record "models" ExtState blob. Pipe-delimited fields, one line
 -- per model. The extra_body field (optional JSON object) is appended after a
 -- tab separator to avoid pipe-in-JSON collisions; single-line JSON.encode
@@ -3476,7 +3619,10 @@ function Custom.load_record(id)
   local endpoint = reaper.GetExtState(CFG.EXT_NS, "custom_" .. id .. "_endpoint")
   if endpoint == "" then return nil end
   local label      = reaper.GetExtState(CFG.EXT_NS, "custom_" .. id .. "_label")
-  local models_raw = reaper.GetExtState(CFG.EXT_NS, "custom_" .. id .. "_models")
+  -- _models is multi-line content stored encoded; see Custom._mline_*
+  -- helpers above for why. Decode is a no-op on legacy single-line blobs.
+  local models_raw = Custom._mline_decode(
+    reaper.GetExtState(CFG.EXT_NS, "custom_" .. id .. "_models"))
   local timeout    = tonumber(
     reaper.GetExtState(CFG.EXT_NS, "custom_" .. id .. "_timeout_secs"))
     or CUSTOM_DEFAULT_TIMEOUT
@@ -3495,8 +3641,10 @@ function Custom.load_record(id)
   -- lines silently (they were either blanks the user left between edits or
   -- characters that slipped past UI validation -- better to drop than to
   -- try to render a command line with them).
-  local headers_raw =
-    reaper.GetExtState(CFG.EXT_NS, "custom_" .. id .. "_extra_headers")
+  -- _extra_headers is the other multi-line ExtState field; see encode/decode
+  -- comment above. Decode is a no-op on legacy / single-header blobs.
+  local headers_raw = Custom._mline_decode(
+    reaper.GetExtState(CFG.EXT_NS, "custom_" .. id .. "_extra_headers"))
   local extra_headers = {}
   if headers_raw and headers_raw ~= "" then
     for line in (headers_raw .. "\n"):gmatch("([^\n]*)\n") do
@@ -3578,15 +3726,21 @@ function Custom.save_record(record)
       safe_headers[#safe_headers+1] = h
     end
   end
+  -- Multi-line value: encode \n so REAPER's ExtState INI writer doesn't
+  -- truncate every header after the first one when saving to disk on
+  -- shutdown. See Custom._mline_encode for the round-trip rationale.
   reaper.SetExtState(CFG.EXT_NS, "custom_" .. id .. "_extra_headers",
-    tbl_concat(safe_headers, "\n"), true)
+    Custom._mline_encode(tbl_concat(safe_headers, "\n")), true)
   -- Provider-level extra_body: stored as-is. Save handlers are expected to
   -- have already canonicalized it via Custom.validate_extra_body before
   -- reaching here, so this write is a straight pass-through.
   reaper.SetExtState(CFG.EXT_NS, "custom_" .. id .. "_extra_body",
     record.extra_body or "", true)
+  -- Same multi-line encoding rationale as _extra_headers above: this blob
+  -- joins rows with "\n", which REAPER's INI writer would truncate at the
+  -- first newline on shutdown without the encode hop.
   reaper.SetExtState(CFG.EXT_NS, "custom_" .. id .. "_models",
-    encode_models_blob(record.models or {}), true)
+    Custom._mline_encode(encode_models_blob(record.models or {})), true)
 end
 
 -- Save + ensure the record's id appears in the ordered id list. If the id
@@ -7898,10 +8052,72 @@ function CTX.fx_name_matches(fx_full_name, search_terms)
   return false
 end
 
+-- CTX.fx_filter_parse(payload) -> { name, track }
+-- Parse a single fx_params payload like "Pro-Q 4" or "Pro-Q 4@2". The "@N"
+-- suffix is optional and scopes the lookup to a single 1-based track index
+-- (matching the human-facing "Track N" labels in fx_params output). Without
+-- "@N" the filter applies to every track. Whitespace around the @ and around
+-- the name is ignored; an unparsable "@..." (non-integer or zero) falls back
+-- to whole-string-as-name with no scope, so a literal "@" inside an exotic
+-- plugin name doesn't cause a silent miss.
+function CTX.fx_filter_parse(payload)
+  payload = payload or ""
+  local nm, tn = payload:match("^(.-)%s*@%s*(%d+)%s*$")
+  if nm and nm ~= "" then
+    local n = tonumber(tn)
+    if n and n >= 1 then
+      return { name = nm:match("^%s*(.-)%s*$"), track = n }
+    end
+  end
+  return { name = payload:match("^%s*(.-)%s*$"), track = nil }
+end
+
+-- CTX.fx_filter_key(filters) -> string
+-- Re-serialize a list of filter records back into "Pro-Q 4@2/Pro-C 3" form
+-- for use as a sticky_context key and ctx_label chip. Tolerates legacy
+-- string entries (no scope).
+function CTX.fx_filter_key(filters)
+  local parts = {}
+  for _, f in ipairs(filters or {}) do
+    local nm, tr
+    if type(f) == "string" then nm = f
+    else nm, tr = f.name, f.track end
+    if nm and nm ~= "" then
+      parts[#parts+1] = tr and (nm .. "@" .. tr) or nm
+    end
+  end
+  return tbl_concat(parts, "/")
+end
+
+-- CTX.fx_filter_names_only(filters) -> { string, ... }
+-- Names-only view, used by callers that need to fuzzy-match without caring
+-- about track scope (e.g. the auto-cache trigger in the bucket dispatcher,
+-- which inspects any matching plugin to populate the FX cache regardless of
+-- which track instance the model asked about).
+function CTX.fx_filter_names_only(filters)
+  local out = {}
+  for _, f in ipairs(filters or {}) do
+    local nm = (type(f) == "string") and f or f.name
+    if nm and nm ~= "" then out[#out+1] = nm end
+  end
+  return out
+end
+
 -- CTX.fx_params(proj, filter_names) -> string, matched_count
 -- On-demand bucket (NOT included in the default session snapshot).
 -- Returns current parameter values ONLY for FX whose names fuzzy-match at
--- least one entry in filter_names (see CTX.fx_name_matches above).
+-- least one entry in filter_names (see CTX.fx_name_matches above). filter_names
+-- entries may be strings ("Pro-Q 4") OR records ({name="Pro-Q 4", track=2})
+-- produced by CTX.fx_filter_parse. A record's track field, when present,
+-- restricts the match to that single 1-based track index -- so the model can
+-- request "fx_params:Pro-Q 4@2" to read only track 2's instance instead of
+-- triggering a 200K-token dump across every Pro-Q 4 in the project.
+--
+-- Identical-state dedup: when multiple matched FX produce byte-identical
+-- param bodies (typical for freshly-added EQ instances on N tracks: only the
+-- ones actually edited differ from the default), emit the body once and
+-- annotate the FX header with "(also identical on tracks 3-10)". Cuts the
+-- output for 10x default Pro-Q 4 from ~6000 lines to ~600.
 --
 -- A non-empty filter_names list is ALWAYS required. Full-session dumps are
 -- intentionally not supported: on large sessions they can exceed the model's
@@ -7917,129 +8133,219 @@ end
 -- (0 means no FX matched the filter, which the caller should surface as a
 -- friendly error rather than sending an empty block to the assistant).
 function CTX.fx_params(proj, filter_names)
-  -- Guard: filter_names must be a non-empty table. If the assistant somehow emits a
-  -- bare <context_needed>fx_params</context_needed> with no plugin name, the
+  -- Normalize the filter list: callers may pass strings (legacy) or records
+  -- (new). Records carry an optional `track` field that scopes the match to
+  -- a single 1-based track index. Inlined to avoid blowing past the 200
+  -- module-scope-local limit in this large file.
+  local filters = {}
+  for _, f in ipairs(filter_names or {}) do
+    if type(f) == "string" then
+      filters[#filters+1] = CTX.fx_filter_parse(f)
+    else
+      filters[#filters+1] = { name = f.name or "", track = f.track }
+    end
+  end
+  -- Guard: filters must be non-empty. If the assistant somehow emits a bare
+  -- <context_needed>fx_params</context_needed> with no plugin name, the
   -- parser catches it before calling this function, but defend here too.
-  if not filter_names or #filter_names == 0 then
+  if #filters == 0 then
     return "FX PARAMETER VALUES: (error: no plugin name specified -- "
       .. "use fx_params:PluginName to request specific plugins)", 0
   end
 
-  local track_count = R_CountTracks(proj)
-  local header = "FX PARAMETER VALUES (filtered: "
-    .. tbl_concat(filter_names, ", ") .. "):"
-  local lines = { header }
-  local matched_fx = 0  -- count of FX blocks actually written
+  -- Format the "(also identical on ...)" annotation. When every duplicate
+  -- shares the primary's FX index, collapse to "tracks 3-10" / "tracks 3, 5,
+  -- 7-9". When the FX index varies across dups (uncommon: same plugin at
+  -- different chain positions on different tracks), emit "Track N FX[I]"
+  -- verbatim so the model can disambiguate.
+  local function format_dup_list(dups, primary_fx_idx)
+    local same_fx = true
+    for _, d in ipairs(dups) do
+      if d.fx_idx ~= primary_fx_idx then same_fx = false; break end
+    end
+    if same_fx then
+      local nums = {}
+      for _, d in ipairs(dups) do nums[#nums+1] = d.track_idx end
+      table.sort(nums)
+      local out, i = {}, 1
+      while i <= #nums do
+        local j = i
+        while j < #nums and nums[j+1] == nums[j] + 1 do j = j + 1 end
+        if j > i then
+          out[#out+1] = nums[i] .. "-" .. nums[j]
+        else
+          out[#out+1] = tostring(nums[i])
+        end
+        i = j + 1
+      end
+      return "tracks " .. tbl_concat(out, ", ")
+    else
+      local out = {}
+      for _, d in ipairs(dups) do
+        out[#out+1] = "Track " .. d.track_idx .. " FX[" .. d.fx_idx .. "]"
+      end
+      return tbl_concat(out, ", ")
+    end
+  end
 
+  local track_count = R_CountTracks(proj)
+  -- Re-emit the filters in canonical "Name@Track" form for the header so the
+  -- model sees its own scope decisions echoed back (helps it learn the syntax
+  -- via positive reinforcement on subsequent turns).
+  local header_parts = {}
+  for _, f in ipairs(filters) do
+    header_parts[#header_parts+1] = f.track and (f.name .. "@" .. f.track) or f.name
+  end
+  local header = "FX PARAMETER VALUES (filtered: "
+    .. tbl_concat(header_parts, ", ") .. "):"
+  local lines = { header }
+
+  -- A filter matches a (track_idx_1based, fx_name) pair when the FX name
+  -- fuzzy-matches the filter's name AND the filter has either no track scope
+  -- or a track scope equal to this track.
+  local function matches_any(track_idx_1based, fx_nm)
+    for _, f in ipairs(filters) do
+      if (not f.track) or f.track == track_idx_1based then
+        if CTX.fx_name_matches(fx_nm, { f.name }) then return true end
+      end
+    end
+    return false
+  end
+
+  -- Walk all tracks/FX once, building a per-FX "entry" with the parameter
+  -- body buffered as a single string. We dedup by (fx_nm, body) below so
+  -- N identical instances of a freshly-added EQ collapse to one block.
+  local entries = {}
   for ti = 0, track_count - 1 do
     -- Nil-guard R_GetTrack against project-tab close races: track_count
     -- was sampled at the top of fx_params, but on long FX walks the user
     -- can swap or close the project tab mid-loop. R_GetTrackName(nil)
-    -- would crash; skipping the iteration is safe (we just emit fewer
-    -- track entries than the header announced).
+    -- would crash; skipping the iteration is safe.
     local tr = R_GetTrack(proj, ti)
     if tr then
       local _, nm    = R_GetTrackName(tr)
       local fx_count = R_TrackFX_GetCount(tr)
-      local track_lines = {}  -- buffered so we only emit the track header when
-                              -- at least one FX on this track matches the filter
-
       for fi = 0, fx_count - 1 do
         local _, fx_nm = R_TrackFX_GetFXName(tr, fi, "")
-
-        -- Skip this FX if the name does not match any filter term.
-        if not CTX.fx_name_matches(fx_nm, filter_names) then
-          goto continue_fx
-        end
-
-        matched_fx = matched_fx + 1
-
-        -- Emit the track header once on the first matching FX for this track.
-        if #track_lines == 0 then
-          track_lines[#track_lines+1] = str_format("Track %d %q:", ti + 1, nm)
-        end
-
-        track_lines[#track_lines+1] = str_format("  FX [%d] %s:", fi, fx_nm)
-        -- Look up cached enum data for this plugin (if available).
-        local cached_key, cached_plugin = FXCache.find_plugin(fx_nm)
-        local cached_enums = {}  -- idx -> enum list
-        local cached_ranges = {} -- idx -> {display_min, display_max}
-        if cached_plugin and cached_plugin.params then
-          if S._fx_cache_events then
-            local t = S._fx_cache_events
-            t.hit = t.hit or {}
-            t.hit[#t.hit+1] = cached_key or fx_nm
-          end
-          for _, cp in ipairs(cached_plugin.params) do
-            if cp.enum then cached_enums[cp.idx] = cp.enum end
-            if cp.display_min and cp.display_max then
-              cached_ranges[cp.idx] = { cp.display_min, cp.display_max }
+        if matches_any(ti + 1, fx_nm) then
+          -- Look up cached enum data for this plugin (if available).
+          local cached_key, cached_plugin = FXCache.find_plugin(fx_nm)
+          local cached_enums = {}  -- idx -> enum list
+          local cached_ranges = {} -- idx -> {display_min, display_max}
+          if cached_plugin and cached_plugin.params then
+            if S._fx_cache_events then
+              local t = S._fx_cache_events
+              t.hit = t.hit or {}
+              t.hit[#t.hit+1] = cached_key or fx_nm
+            end
+            for _, cp in ipairs(cached_plugin.params) do
+              if cp.enum then cached_enums[cp.idx] = cp.enum end
+              if cp.display_min and cp.display_max then
+                cached_ranges[cp.idx] = { cp.display_min, cp.display_max }
+              end
             end
           end
-        end
-        local param_count = R_TrackFX_GetNumParams(tr, fi)
-        local param_shown = 0
-        for pi = 0, param_count - 1 do
-          local _, param_nm = R_TrackFX_GetParamName(tr, fi, pi, "")
-          -- Filter MIDI CC automation parameters (VST3 plugins expose 2000+).
-          if param_nm:match("^CC %d") or param_nm:match("^MIDI CC") then
-            goto continue_param
-          end
-          -- Filter MIDI message params injected by the host.
-          if param_nm == "Channel Pressure" or param_nm == "Poly Pressure"
-             or param_nm == "Pitch Bend" or param_nm == "Program Change" then
-            goto continue_param
-          end
-          -- Filter generic unnamed params with no useful display value.
-          local _, disp = R_TrackFX_GetFormattedParamValue(tr, fi, pi, "")
-          disp = disp or ""  -- ReaImGui binding can return nil on unusual plugins
-          if (param_nm:match("^Param %d+$") or param_nm:match("^Parameter %d+$"))
-             and (disp == "" or disp:match("^[%d%.%%]*$")) then
-            goto continue_param
-          end
-          -- Filter VST3 host-appended params (Bypass/Wet/Delta/Internal at tail).
-          if _is_vst3_tail(param_nm, pi) then
-            if disp == "normal" or disp == "-" or disp:match("^%d+$") then
+          local body_lines = {}
+          local param_count = R_TrackFX_GetNumParams(tr, fi)
+          local param_shown = 0
+          for pi = 0, param_count - 1 do
+            local _, param_nm = R_TrackFX_GetParamName(tr, fi, pi, "")
+            -- Filter MIDI CC automation parameters (VST3 plugins expose 2000+).
+            if param_nm:match("^CC %d") or param_nm:match("^MIDI CC") then
               goto continue_param
             end
+            -- Filter MIDI message params injected by the host.
+            if param_nm == "Channel Pressure" or param_nm == "Poly Pressure"
+               or param_nm == "Pitch Bend" or param_nm == "Program Change" then
+              goto continue_param
+            end
+            -- Filter generic unnamed params with no useful display value.
+            local _, disp = R_TrackFX_GetFormattedParamValue(tr, fi, pi, "")
+            disp = disp or ""  -- ReaImGui binding can return nil on unusual plugins
+            if (param_nm:match("^Param %d+$") or param_nm:match("^Parameter %d+$"))
+               and (disp == "" or disp:match("^[%d%.%%]*$")) then
+              goto continue_param
+            end
+            -- Filter VST3 host-appended params (Bypass/Wet/Delta/Internal at tail).
+            if _is_vst3_tail(param_nm, pi) then
+              if disp == "normal" or disp == "-" or disp:match("^%d+$") then
+                goto continue_param
+              end
+            end
+            local val, mn, mx = R_TrackFX_GetParam(tr, fi, pi)
+            local norm = 0
+            if mx ~= mn then norm = (val - mn) / (mx - mn) end
+            -- Annotate with [enum:] or [range:] if we have cached data for this param.
+            local suffix = ""
+            if cached_enums[pi] then
+              suffix = "  [enum: " .. tbl_concat(cached_enums[pi], ", ") .. "]"
+            elseif cached_ranges[pi] then
+              suffix = "  [range: " .. cached_ranges[pi][1] .. ".." .. cached_ranges[pi][2] .. "]"
+            end
+            -- Display value first (human-readable), normalized in brackets.
+            body_lines[#body_lines+1] = str_format(
+              "    [%d] %s: %s  [norm: %.4f]%s",
+              pi, param_nm, disp, norm, suffix)
+            param_shown = param_shown + 1
+            ::continue_param::
           end
-          local val, mn, mx = R_TrackFX_GetParam(tr, fi, pi)
-          local norm = 0
-          if mx ~= mn then norm = (val - mn) / (mx - mn) end
-          -- Annotate with [enum:] or [range:] if we have cached data for this param.
-          local suffix = ""
-          if cached_enums[pi] then
-            suffix = "  [enum: " .. tbl_concat(cached_enums[pi], ", ") .. "]"
-          elseif cached_ranges[pi] then
-            suffix = "  [range: " .. cached_ranges[pi][1] .. ".." .. cached_ranges[pi][2] .. "]"
+          if param_shown < param_count then
+            body_lines[#body_lines+1] = str_format(
+              "    (%d host/uninformative params filtered)",
+              param_count - param_shown)
           end
-          -- Display value first (human-readable), normalized in brackets.
-          track_lines[#track_lines+1] = str_format(
-            "    [%d] %s: %s  [norm: %.4f]%s",
-            pi, param_nm, disp, norm, suffix)
-          param_shown = param_shown + 1
-          ::continue_param::
+          entries[#entries+1] = {
+            track_idx = ti + 1,
+            track_nm  = nm,
+            fx_idx    = fi,
+            fx_nm     = fx_nm,
+            body      = tbl_concat(body_lines, "\n"),
+          }
         end
-        if param_shown < param_count then
-          track_lines[#track_lines+1] = str_format(
-            "    (%d host/uninformative params filtered)", param_count - param_shown)
-        end
-
-        ::continue_fx::
       end
-
-      -- Append this track's lines to the master list if any FX matched.
-      for _, l in ipairs(track_lines) do lines[#lines+1] = l end
     end
   end
 
-  if matched_fx == 0 then
+  -- Group entries by (fx_nm, body). Order is preserved by the order entries
+  -- were inserted (track-major, FX-minor), so the "primary" of each group is
+  -- always the first occurrence of that body. Later occurrences become
+  -- "(also identical on tracks ...)" annotations on the primary's FX header.
+  local groups, group_idx = {}, {}
+  for _, e in ipairs(entries) do
+    local key = e.fx_nm .. "\0" .. e.body
+    local gi = group_idx[key]
+    if gi then
+      groups[gi].dups[#groups[gi].dups + 1] = e
+    else
+      groups[#groups+1] = { primary = e, dups = {} }
+      group_idx[key] = #groups
+    end
+  end
+
+  -- Emit. Track headers ride along the primary entries; non-primary entries
+  -- are folded into the dedup annotation so identical bodies aren't repeated.
+  local last_track_emitted = -1
+  for _, g in ipairs(groups) do
+    local p = g.primary
+    if last_track_emitted ~= p.track_idx then
+      last_track_emitted = p.track_idx
+      lines[#lines+1] = str_format("Track %d %q:", p.track_idx, p.track_nm)
+    end
+    local also = ""
+    if #g.dups > 0 then
+      also = "  (also identical on " .. format_dup_list(g.dups, p.fx_idx) .. ")"
+    end
+    lines[#lines+1] = str_format("  FX [%d] %s:%s", p.fx_idx, p.fx_nm, also)
+    if p.body ~= "" then lines[#lines+1] = p.body end
+  end
+
+  if #entries == 0 then
     lines[#lines+1] = "  (no matching FX found on any track -- the plugin is not loaded yet. "
       .. "If fx_list results are available above, use them to write code that adds the plugin and sets parameters "
       .. "using find_param and set_param_display at runtime. Do NOT request fx_list again -- proceed with the code.)"
   end
 
-  return tbl_concat(lines, "\n"), matched_fx
+  return tbl_concat(lines, "\n"), #entries
 end
 
 -- =============================================================================
@@ -13658,6 +13964,21 @@ CUSTOM_CONN_TEST_ID = "__cllm_conn_test__"
 -- fields (connect_timeout, allow_insecure, extra_headers, model_prefix) so
 -- the test exercises the same curl options the real request will use.
 local function custom_conn_test_register(cfg_base)
+  -- Default model id: a placeholder safe for the GET /v1/models path
+  -- (which doesn't reference it). When the caller opts into the real-
+  -- inference path, swap in the user's first model id from the form so
+  -- the chat/completions POST hits the right model -- the placeholder
+  -- would just earn an "unknown model" rejection from the server.
+  local model_id_for_test = "conn-test"
+  if cfg_base.use_inference_test and type(cfg_base.test_model_id) == "string"
+     and cfg_base.test_model_id ~= "" then
+    model_id_for_test = cfg_base.test_model_id
+  end
+  -- Provider-wide and per-model extra_body get plumbed through ONLY for
+  -- the inference test path (GET /v1/models doesn't send a body, so the
+  -- extras are irrelevant there). Net.merge_custom_extra_body reads
+  -- p.extra_body and p.models[1].extra_body to assemble the merged
+  -- vendor-toggle suffix that real chat would send.
   local record = {
     id                   = CUSTOM_CONN_TEST_ID,
     endpoint             = cfg_base.endpoint,
@@ -13667,17 +13988,28 @@ local function custom_conn_test_register(cfg_base)
     model_prefix         = cfg_base.model_prefix,
     extra_headers        = cfg_base.extra_headers,
     label                = cfg_base.label,
+    extra_body           = (cfg_base.use_inference_test
+                              and cfg_base.extra_body) or "",
     models               = { {
-      id             = "conn-test",  -- placeholder; not used by /v1/models
+      id             = model_id_for_test,
       price_in       = 0,
       price_out      = 0,
       context_window = CUSTOM_DEFAULT_CTX,
+      extra_body     = (cfg_base.use_inference_test
+                          and cfg_base.test_model_extra_body) or "",
     } },
   }
   -- Defensive: if a prior test left the sentinel registered, drop it first.
   Custom.unregister_id(CUSTOM_CONN_TEST_ID)
   local cust_idx = Custom.register_one(record)
   if cust_idx then
+    -- Stamp the runtime-only flag on the registered provider entry so
+    -- Net.fire_key_test / Net.handle_key_test can dispatch on it. Lives
+    -- on the throwaway PROVIDERS slot only -- gets dropped with the
+    -- sentinel in custom_conn_test_finish.
+    if cfg_base.use_inference_test then
+      PROVIDERS[cust_idx].use_inference_test = true
+    end
     prefs.provider_idx = cust_idx
     MODELS.refresh()
   end
@@ -13751,6 +14083,29 @@ function CTX.custom_llm_start_conn_test()
     end
   end
 
+  -- Opt-in real-inference test: only fires if the user ticked the
+  -- checkbox AND filled in at least one model id. Without a model id we
+  -- have nothing to send in the chat/completions body, so block the
+  -- attempt with a clear per-field error rather than firing a malformed
+  -- request and getting a confusing server-side error back.
+  local use_inference = edit.test_with_inference and true or false
+  local first_model_id = ""
+  if type(edit.models) == "table" and edit.models[1] then
+    first_model_id = (edit.models[1].id or ""):match("^%s*(.-)%s*$") or ""
+  end
+  if use_inference and first_model_id == "" then
+    -- Surface via the test-result panel since edit.errors.models has no
+    -- inline renderer. This puts the message right where the user is
+    -- looking after they click Test Connection.
+    if api_keys.custom_conn_test then
+      api_keys.custom_conn_test.result = {
+        ok    = false,
+        error = "Add at least one model id before running an inference test.",
+      }
+    end
+    return false
+  end
+
   if has_format_error then return false end
 
   local cfg_base = {
@@ -13761,6 +14116,16 @@ function CTX.custom_llm_start_conn_test()
     model_prefix         = prefix_t,
     extra_headers        = headers_arr,
     label                = label_t,
+    use_inference_test   = use_inference,
+    test_model_id        = first_model_id,
+    -- Provider-wide and per-model extra_body. Only consumed by the
+    -- inference test path; the GET /v1/models path sends no body so it
+    -- ignores them. Pass the form values raw -- merge_custom_extra_body
+    -- silently discards malformed JSON, so we don't need to re-run the
+    -- save-time canonicalizer here.
+    extra_body              = edit.extra_body or "",
+    test_model_extra_body   = (edit.models and edit.models[1]
+                                and edit.models[1].extra_body) or "",
   }
   CTX.custom_conn_test_start(cfg_base, key_t)
   return true
@@ -14585,6 +14950,51 @@ function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
 end
 
 -- =============================================================================
+-- Net.merge_custom_extra_body
+-- =============================================================================
+-- Merge provider-wide extra_body (p.extra_body) with per-model extra_body
+-- (active_m.extra_body) and return the result as a comma-prefixed JSON
+-- body suffix ("," + inner-JSON without surrounding braces) ready to splice
+-- into the outer chat/completions body. Returns "" when both are empty or
+-- decode fails -- callers can append it unconditionally.
+--
+-- Per-model keys win over provider-wide keys (in-order decode/merge/re-
+-- encode pass). Runs through JSON.decode / JSON.encode so we don't brace-
+-- splice raw user input.
+--
+-- Shared by Net.build_body_openai (real chat) and Net.fire_key_test's
+-- opt-in inference probe so the test exercises the same vendor-specific
+-- toggles as the real chat path. active_m may be nil; result is the same
+-- as if its extra_body were empty.
+function Net.merge_custom_extra_body(p, active_m)
+  if not p or not p.is_custom then return "" end
+  local prov_body  = p.extra_body or ""
+  local model_body = (active_m and active_m.extra_body) or ""
+  if prov_body == "" and model_body == "" then return "" end
+  local merged = {}
+  if prov_body ~= "" then
+    local pobj = JSON.decode(prov_body)
+    if type(pobj) == "table" then
+      for k, v in pairs(pobj) do merged[k] = v end
+    end
+  end
+  if model_body ~= "" then
+    local mobj = JSON.decode(model_body)
+    if type(mobj) == "table" then
+      for k, v in pairs(mobj) do merged[k] = v end
+    end
+  end
+  local encoded = JSON.encode(merged)
+  if not encoded or encoded == "{}"
+     or encoded:sub(1, 1) ~= "{" or encoded:sub(-1) ~= "}" then
+    return ""
+  end
+  local inner = encoded:sub(2, -2)
+  if inner == "" then return "" end
+  return "," .. inner
+end
+
+-- =============================================================================
 -- Net.build_body_openai
 -- =============================================================================
 -- OpenAI Chat Completions API format. System prompt as a "system" role message.
@@ -14688,38 +15098,14 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
     model_id = p.model_prefix .. model_id
   end
   -- Custom-provider extra_body: merge provider-wide + per-model JSON objects
-  -- into the outer request body. Per-model keys win over provider-wide keys
-  -- via an in-order decode/merge/re-encode pass. Used for vendor-specific
-  -- toggles that don't map to the OpenAI schema (Kimi thinking flag, Qwen
-  -- enable_thinking, OpenRouter reasoning object, etc.). Runs through
-  -- JSON.decode / JSON.encode so we don't brace-splice raw user input.
+  -- into the outer request body. Net.merge_custom_extra_body is the shared
+  -- helper -- used here for real chat AND from Net.fire_key_test's opt-in
+  -- inference test path so the test exercises the same vendor toggles
+  -- (Kimi thinking flag, Qwen enable_thinking, OpenRouter reasoning, etc.)
+  -- that real chat sends.
   local extra_suffix = ""
   if p.is_custom then
-    local prov_body  = p.extra_body or ""
-    local model_body = ""
-    local active_m = MODELS[prefs.model_idx]
-    if active_m and active_m.extra_body then model_body = active_m.extra_body end
-    if prov_body ~= "" or model_body ~= "" then
-      local merged = {}
-      if prov_body ~= "" then
-        local pobj = JSON.decode(prov_body)
-        if type(pobj) == "table" then
-          for k, v in pairs(pobj) do merged[k] = v end
-        end
-      end
-      if model_body ~= "" then
-        local mobj = JSON.decode(model_body)
-        if type(mobj) == "table" then
-          for k, v in pairs(mobj) do merged[k] = v end
-        end
-      end
-      local encoded = JSON.encode(merged)
-      if encoded and encoded ~= "{}" and encoded:sub(1, 1) == "{"
-         and encoded:sub(-1) == "}" then
-        local inner = encoded:sub(2, -2)
-        if inner ~= "" then extra_suffix = "," .. inner end
-      end
-    end
+    extra_suffix = Net.merge_custom_extra_body(p, MODELS[prefs.model_idx])
   end
   -- max_completion_tokens: optional on the OpenAI Chat Completions API. For
   -- cloud OpenAI, omit it entirely so the server applies its own per-model
@@ -15452,6 +15838,10 @@ end
 -- input URL is unrecognized.
 function Net.custom_models_url(endpoint)
   if type(endpoint) ~= "string" or endpoint == "" then return nil end
+  -- Require an http(s):// scheme. The form validator catches this at user-
+  -- input time, but defending here too means a saved-but-corrupt config
+  -- can't accidentally produce a curl-wrong URL.
+  if not endpoint:match("^https?://") then return nil end
   -- Strip trailing slash.
   local url = endpoint:gsub("/+$", "")
   -- Most common: ".../v1/chat/completions" -> ".../v1/models"
@@ -15461,9 +15851,16 @@ function Net.custom_models_url(endpoint)
   if url:match("/models$") then return url end
   -- URL ends at /v1 (no suffix): append /models.
   if url:match("/v1$") then return url .. "/models" end
-  -- Unknown shape: try to strip to scheme+host and append /v1/models.
-  local host = url:match("^(https?://[^/]+)")
-  if host then return host .. "/v1/models" end
+  -- Bare-host fallback: append /v1/models ONLY when the input has no path.
+  -- Strict anchor (^scheme://host$) so that a deliberately-typed-but-wrong
+  -- path like ".../v3fffs" is NOT silently rewritten to ".../v1/models" --
+  -- the test would otherwise report success against the canonical path
+  -- the user didn't ask for. The earlier permissive prefix match was too
+  -- eager. Returning nil here causes Net.fire_key_test to surface
+  -- "Could not derive a /v1/models URL from the endpoint." so the user
+  -- knows their endpoint shape isn't recognised.
+  local host_only = url:match("^(https?://[^/]+)$")
+  if host_only then return host_only .. "/v1/models" end
   return nil
 end
 
@@ -15486,21 +15883,53 @@ function Net.fire_key_test(provider_override)
   local body
   local curl_opts = nil
   if p.is_custom then
-    local url = Net.custom_models_url(p.endpoint)
-    if not url then
-      S.key_test_pending  = false
-      S.key_test_provider = nil
-      S.status            = "error"
-      if api_keys.custom_conn_test and api_keys.custom_conn_test.active
-         and api_keys.screen == "custom_llm" then
-        CTX.custom_conn_test_advance(false,
-          "Could not derive a /v1/models URL from the endpoint.")
+    if p.use_inference_test then
+      -- Opt-in real-inference test (Test Connection checkbox). Sends a
+      -- 1-token chat/completions POST against the user's first model id
+      -- (with model_prefix applied) -- exercises the same code path real
+      -- chat will, at the cost of one short inference call. Default-off
+      -- per the custom-LLM page UX since reasoning models would still
+      -- run a full thinking pass on max_completion_tokens=1.
+      --
+      -- Mirrors Net.build_body_openai's custom path on two load-bearing
+      -- points: (1) max_completion_tokens (the field newer OpenAI-
+      -- compatibles expect; max_tokens diverges and could fail on a
+      -- working provider); (2) the merged provider-wide + per-model
+      -- extra_body via Net.merge_custom_extra_body so vendor toggles
+      -- (Kimi thinking flag, Qwen enable_thinking, OpenRouter reasoning)
+      -- get tested too -- without it, a provider that requires a toggle
+      -- could pass the probe and fail under real chat. System prompt /
+      -- prompt_cache_key / reasoning_effort are deliberately NOT included
+      -- to keep the probe cheap (input-token cost stays minimal).
+      local model_id = (p.models and p.models[1] and p.models[1].id) or ""
+      if p.model_prefix and p.model_prefix ~= "" then
+        model_id = p.model_prefix .. model_id
+      end
+      local extra_suffix = Net.merge_custom_extra_body(p,
+        p.models and p.models[1] or nil)
+      body = str_format(
+        '{"model":"%s","max_completion_tokens":1,"messages":[{"role":"user","content":"hi"}]%s}',
+        model_id, extra_suffix)
+      -- curl_opts stays nil -> default POST to p.endpoint.
+    else
+      -- Default safe path: GET /v1/models. No inference, no cost,
+      -- instant response.
+      local url = Net.custom_models_url(p.endpoint)
+      if not url then
+        S.key_test_pending  = false
+        S.key_test_provider = nil
+        S.status            = "error"
+        if api_keys.custom_conn_test and api_keys.custom_conn_test.active
+           and api_keys.screen == "custom_llm" then
+          CTX.custom_conn_test_advance(false,
+            "Could not derive a /v1/models URL from the endpoint.")
+          return
+        end
         return
       end
-      return
+      body      = nil
+      curl_opts = { method = "GET", endpoint_override = url }
     end
-    body      = nil
-    curl_opts = { method = "GET", endpoint_override = url }
   elseif p.id == "anthropic" then
     body = str_format(
       '{"model":"%s","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}',
@@ -15691,17 +16120,23 @@ function Net.handle_key_test(raw)
 
   -- Parse the response using the JSON decoder.
   local resp = JSON.decode(raw)
-  -- Custom (local LLM) test uses a GET /v1/models call -- no inference is
-  -- invoked, so we only need to verify:
-  --   * the response parsed as JSON (endpoint is reachable and not a 404/HTML)
-  --   * it does not carry a top-level error envelope
-  --   * it has a `data` array (OpenAI-compatible models listing shape)
+  -- Custom (local LLM) test response check. Two shapes possible:
+  --   * Default GET /v1/models path -- expect a `data` array.
+  --   * Opt-in inference test (Test Connection checkbox) -- expect a
+  --     chat/completions response with a `choices` array.
+  -- Either way: must parse as JSON, must not carry a top-level error
+  -- envelope. p.use_inference_test is set on the throwaway provider
+  -- record by custom_conn_test_register when the user ticked the box.
   local custom_unreachable = false
   if p.is_custom then
     if type(resp) ~= "table" then
       custom_unreachable = true
     elseif type(resp.error) == "table" and resp.error ~= JSON.NULL then
       custom_unreachable = true
+    elseif p.use_inference_test then
+      if type(resp.choices) ~= "table" then
+        custom_unreachable = true
+      end
     elseif type(resp.data) ~= "table" then
       -- Server responded but the body isn't a /v1/models listing -> not
       -- OpenAI-compatible, or we hit the wrong route.
@@ -15717,7 +16152,10 @@ function Net.handle_key_test(raw)
       local emsg = (type(resp) == "table" and type(resp.error) == "table"
                     and resp.error ~= JSON.NULL and type(resp.error.message) == "string")
                    and resp.error.message or nil
-      err_msg = "Endpoint reachable but /v1/models returned an unexpected response."
+      local probe = p.use_inference_test and "/v1/chat/completions"
+                                          or "/v1/models"
+      err_msg = "Endpoint reachable but " .. probe
+        .. " returned an unexpected response."
         .. (emsg and (" Server said: " .. emsg) or "")
     elseif Net.is_auth_error(resp, p) then
       err_msg = "Authentication failed."
@@ -19876,7 +20314,7 @@ function Net.process_response_buckets(text)
       wants_fx_params = true
       last_scoped = "fx_params"
       if payload ~= "" then
-        fx_filter_names[#fx_filter_names+1] = payload
+        fx_filter_names[#fx_filter_names+1] = CTX.fx_filter_parse(payload)
       end
     elseif kw == "midi" and not S.midi_already_sent then
       wants_midi = true
@@ -20068,7 +20506,7 @@ function Net.process_response_buckets(text)
       -- e.g. "fx_list:Pro-Q, Valhalla" -> fx_list_search = {Pro-Q, Valhalla}
       local name = tok:match("^%s*(.-)%s*$")
       if last_scoped == "fx_params" then
-        fx_filter_names[#fx_filter_names+1] = name
+        fx_filter_names[#fx_filter_names+1] = CTX.fx_filter_parse(name)
       elseif last_scoped == "fx_list" then
         fx_list_search[#fx_list_search+1] = name
       elseif last_scoped == "preferred_plugins" then
@@ -20181,6 +20619,12 @@ function Net.process_response_buckets(text)
       if not wants_fx_inspect then
         local _proj = S.pending_project
         local _tc = R_CountTracks(_proj)
+        -- Auto-inspect ignores any per-filter @track scope: caching one
+        -- instance's params for a plugin populates the FX cache used by
+        -- every other instance, and inspecting the wrong instance is fine
+        -- here because we only use the result to backfill enum/range
+        -- annotations, not to answer the user's track-specific question.
+        local _names_only = CTX.fx_filter_names_only(fx_filter_names)
         local found_search = nil
         for _ti = 0, _tc - 1 do
           if found_search then break end
@@ -20189,13 +20633,13 @@ function Net.process_response_buckets(text)
             local _fc = R_TrackFX_GetCount(_tr)
             for _fi = 0, _fc - 1 do
               local _, _fxnm = R_TrackFX_GetFXName(_tr, _fi, "")
-              if CTX.fx_name_matches(_fxnm, fx_filter_names) then
+              if CTX.fx_name_matches(_fxnm, _names_only) then
                 local _ck, _cp = FXCache.find_plugin(_fxnm)
                 if not _cp then
                   -- Use the user's filter term that matched as the search
                   -- input for fx_inspect_load (cleaner than full bracketed
                   -- VST3 identifier).
-                  for _, fn in ipairs(fx_filter_names) do
+                  for _, fn in ipairs(_names_only) do
                     if _fxnm:lower():find(fn:lower(), 1, true) then
                       found_search = fn; break
                     end
@@ -20222,7 +20666,7 @@ function Net.process_response_buckets(text)
         proj   = S.pending_project,
         names  = fx_filter_names,
         fp_key = #fx_filter_names > 0
-          and ("fx:" .. tbl_concat(fx_filter_names, "/")) or "fx_params",
+          and ("fx:" .. CTX.fx_filter_key(fx_filter_names)) or "fx_params",
       }
     end
 
@@ -20855,7 +21299,7 @@ function Net.process_response_buckets(text)
         if wants_track_flags then parts[#parts+1] = "track_flags" end
         if wants_fx_params then
           parts[#parts+1] = #fx_filter_names > 0
-            and ("fx:" .. tbl_concat(fx_filter_names, "/")) or "fx_params"
+            and ("fx:" .. CTX.fx_filter_key(fx_filter_names)) or "fx_params"
         end
         if wants_midi  then parts[#parts+1] = "midi" end
         if wants_theme then parts[#parts+1] = "theme" end

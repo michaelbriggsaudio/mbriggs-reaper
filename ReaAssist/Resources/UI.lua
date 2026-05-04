@@ -4099,16 +4099,24 @@ function Render.help_screen()
   ImGui.ImGui_Indent(RA.ctx, indent)
   Dummy(RA.ctx, 1, RA.SC(14))
 
-  -- "Feedback & Report a Bug" nav row -- same card pill chrome as the
-  -- Settings Preferred Plugins button (UI.v5_nav_row), with the `>`
-  -- chevron that signals "drills into another screen." Centered on
-  -- its own row at SC(260) wide.
+  -- Top-of-page nav row pair: [Read Online Manual] [Feedback & Report a
+  -- Bug]. Same card pill chrome as the Settings Preferred Plugins button
+  -- (UI.v5_nav_row); both buttons are equal-width and centered as a
+  -- group. The manual button opens the online manual via UI.open_url;
+  -- the feedback button drills into the in-app bug report screen.
   do
-    local BUG_ROW_W = RA.SC(260)
+    local NAV_ROW_W = RA.SC(230)
+    local NAV_GAP   = RA.SC(8)
+    local TOTAL_W   = NAV_ROW_W * 2 + NAV_GAP
     SetCursorPosX(RA.ctx,
-      GetCursorPosX(RA.ctx) + math_max(math_floor((inner_w - BUG_ROW_W) * 0.5), 0))
+      GetCursorPosX(RA.ctx) + math_max(math_floor((inner_w - TOTAL_W) * 0.5), 0))
+    if UI.v5_nav_row("##help_manual_btn", "Read Online Manual",
+        "Open the online manual at reaassist.app/manual", NAV_ROW_W) then
+      UI.open_url("https://reaassist.app/manual")
+    end
+    SameLine(RA.ctx, 0, NAV_GAP)
     if UI.v5_nav_row("##help_bug_btn", "Feedback & Report a Bug",
-        "Open the feedback / bug report form", BUG_ROW_W) then
+        "Open the feedback / bug report form", NAV_ROW_W) then
       S.show_bug_report = true
       S.show_help = false
     end
@@ -4571,6 +4579,16 @@ end
 -- -----------------------------------------------------------------------------
 -- Render.bug_report_screen
 -- -----------------------------------------------------------------------------
+-- Top-level Feedback / Report an Issue page (linked from Help). Hosts a form
+-- that POSTs to https://d.reaassist.app via Diag.send_bug_report. Replaces the
+-- previous email-out-of-band flow (mailto / Gmail compose) -- the in-app form
+-- bundles the comment, optional contact name + email, the diagnostic report,
+-- and either the entire Advanced Log (when enabled) or the current chat
+-- session (fallback) into one redacted JSON payload.
+--
+-- Form state (S.bug_report_form_*) persists across page navigation within a
+-- session; name + email also persist across sessions via ExtState so the user
+-- types contact info once. Comment is cleared on successful send.
 function Render.bug_report_screen()
   local win_w  = ImGui.ImGui_GetWindowWidth(RA.ctx)
   local pad_x  = ImGui.ImGui_GetStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding())
@@ -4579,10 +4597,23 @@ function Render.bug_report_screen()
   local inner_w  = math_min(RA.SC(480), stable_w)
   local indent   = math_floor((stable_w - inner_w) * 0.5)
 
+  -- Lazy-load contact fields from ExtState once per session so the user only
+  -- types name + email once. nil sentinel ensures we hit ExtState on first
+  -- access but don't re-read on subsequent renders. Empty strings indicate
+  -- "loaded but user never set it"; further blank visits don't re-query.
+  if S.bug_report_form_name == nil then
+    S.bug_report_form_name =
+      reaper.GetExtState(CFG.EXT_NS, "bug_report_contact_name") or ""
+  end
+  if S.bug_report_form_email == nil then
+    S.bug_report_form_email =
+      reaper.GetExtState(CFG.EXT_NS, "bug_report_contact_email") or ""
+  end
+  S.bug_report_form_comment = S.bug_report_form_comment or ""
+  S.bug_report_send_state   = S.bug_report_send_state   or "idle"
+
   -- V5 hero band -- matches Settings. Branded "FEEDBACK" to line up
-  -- with the Help-page "Feedback & Report a Bug" entry row; the page
-  -- handles both feedback and bug reporting through the same flow
-  -- (diagnostic report + optional debug log).
+  -- with the Help-page "Feedback & Report a Bug" entry row.
   UI.hero_band_settings_v5(
     "Send feedback or report an issue.",
     "FEEDBACK \xc2\xb7 v" .. CFG.VERSION)
@@ -4636,305 +4667,379 @@ function Render.bug_report_screen()
     PopStyleColor(RA.ctx)
   end
 
-  -- Page-level privacy note. Scopes to BOTH the Diagnostic Report and
-  -- the Debug Log below since either file can carry chat content.
-  -- "Provider" rather than naming Claude/ChatGPT/etc since the active
-  -- provider varies per user.
-  _para("Both the report and the log can include your chat content, "
-     .. "including any personal information you shared with the "
-     .. "provider. Neither contains your API keys.")
-  Dummy(RA.ctx, 1, RA.SC(12))
+  -- Recessed-input chrome with a 1 px border so empty fields stand out from
+  -- the page background. TK.input_bg fill + TK.border outline + Inter SC(13).
+  -- Pair push/pop around any single-line ImGui_InputText or InputTextMultiline
+  -- call inside this form.
+  local function _push_input_style()
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBg(),         TK.input_bg)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgHovered(),  TK.input_bg)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgActive(),   TK.input_bg)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),            TK.text)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_InputTextCursor(), TK.text)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),          TK.border)
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(13))
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),    RA.SC(8), RA.SC(6))
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 1)
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(),   RA.SC(4))
+  end
+  local function _pop_input_style()
+    ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+    PopFont(RA.ctx)
+    PopStyleColor(RA.ctx, 6)
+  end
 
-  -- ---- DIAGNOSTIC REPORT --------------------------------------------
-  UI.v5_section_label("DIAGNOSTIC REPORT", nil, nil,
+  local sending = S.bug_report_send_state == "sending"
+  local locked  = sending  -- inputs frozen while a send is in flight
+
+  -- Compatibility shim for ImGui_BeginDisabled (added in later ReaImGui
+  -- versions). When unavailable we just skip the visual disable; the
+  -- `if not locked then` guards on the mutation paths below prevent
+  -- state changes regardless of the visual.
+  local _has_disabled = type(ImGui.ImGui_BeginDisabled) == "function"
+  local function _begin_dis(b) if _has_disabled then ImGui.ImGui_BeginDisabled(RA.ctx, b) end end
+  local function _end_dis()    if _has_disabled then ImGui.ImGui_EndDisabled(RA.ctx) end end
+
+  -- Decide what attachment will accompany the report. Same rule as
+  -- Diag.begin_bug_report_draft: log if available, else chat, else none.
+  -- Read on every render so the summary updates immediately when the user
+  -- toggles "Enable Advanced Log" below or sends a new chat message.
+  local _log_size, _log_present = nil, false
+  if prefs.debug_logging and Log and Log.path and Log.path ~= "" then
+    local f = io.open(Log.path, "rb")
+    if f then
+      local sz = f:seek("end") or 0
+      f:close()
+      if sz > 0 then _log_size, _log_present = sz, true end
+    end
+  end
+  local _chat_count = 0
+  if type(S.display_messages) == "table" then _chat_count = #S.display_messages end
+  local _attachment_kind
+  if _log_present then       _attachment_kind = "log"
+  elseif _chat_count > 0 then _attachment_kind = "chat"
+  else                        _attachment_kind = "none" end
+
+  -- Page-level intro. Calls out the privacy posture in one sentence so
+  -- users have context before filling out the form -- the deeper
+  -- "Details & privacy" expander below has the full disclosure.
+  _para("Sends your description plus the diagnostic report and either the "
+     .. "Advanced Log or the current chat session to the ReaAssist "
+     .. "maintainer. API keys, bearer tokens, and home paths are "
+     .. "automatically redacted before sending.")
+  Dummy(RA.ctx, 1, RA.SC(14))
+
+  -- ---- DESCRIBE THE ISSUE -------------------------------------------
+  UI.v5_section_label("DESCRIBE THE ISSUE", nil, nil,
     SEC_LBL_SCALE, SEC_LBL_COL)
-
-  _para("Copy or save a quick snapshot of your setup and include it "
-     .. "with your email describing what happened.")
-
-  Dummy(RA.ctx, 1, RA.SC(10))
-
-  -- Action buttons: 2x2 grid of v5_link_rows (inner_w = SC(480)):
-  --   [ Copy Diagnostic Report ]  [ Save to File... ]
-  --   [ Email to help@...      ]  [ Compose in Gmail ]
-  -- Each cell is SC(230) wide with an SC(8) gap, totalling SC(468).
-  -- All four use the same v5_link_row chrome with icons on the left
-  -- -- keeps the grid visually uniform (no mixed left/center
-  -- alignment between icon-bearing and text-only rows).
-  do
-    local ACT_W   = RA.SC(230)
-    local ACT_GAP = RA.SC(8)
-    local GRID_W  = ACT_W * 2 + ACT_GAP
-
-    local function _center_grid()
-      SetCursorPosX(RA.ctx,
-        GetCursorPosX(RA.ctx) + math_max(math_floor((inner_w - GRID_W) * 0.5), 0))
-    end
-
-    _center_grid()
-    if UI.v5_link_row("##bugrpt_copy", nil,
-        "Copy Diagnostic Report", nil, ICON.COPY,
-        "Copy the diagnostic report text to your clipboard",
-        ACT_W) then
-      local report = Diag.build_report()
-      ImGui.ImGui_SetClipboardText(RA.ctx, report)
-      S.bug_report_copied = true
-      S.bug_report_saved  = false
-      -- Clear any prior save-failure so the toast shows this success
-      -- instead of a stale amber "Save failed:" string. The toast block
-      -- below prefers bug_report_save_error over the success flags.
-      S.bug_report_save_error = nil
-      S.bug_report_copied_time = reaper.time_precise()
-    end
-
-    SameLine(RA.ctx, 0, ACT_GAP)
-    if UI.v5_link_row("##bugrpt_save", nil,
-        "Save to File...", nil, ICON.SAVE,
-        "Save the diagnostic report to a .txt file for email attachment",
-        ACT_W) then
-      local report = Diag.build_report()
-      local default_name = str_format("Diagnostic_%s.txt",
-        os.date("%Y-%m-%d_%H%M%S"))
-      local default_dir = reaper.GetResourcePath() or ""
-      local saved_path
-      if reaper.JS_Dialog_BrowseForSaveFile then
-        local ret, path = reaper.JS_Dialog_BrowseForSaveFile(
-          "Save ReaAssist Diagnostic Report",
-          default_dir, default_name,
-          "Text files (.txt)\0*.txt\0All files\0*.*\0")
-        if ret == 1 and path and path ~= "" then
-          if not path:match("%.txt$") and not path:match("%.log$") then
-            path = path .. ".txt"
-          end
-          saved_path = path
-        end
-      else
-        saved_path = default_dir .. RA.SEP .. default_name
-      end
-      if saved_path then
-        local f, ferr = io.open(saved_path, "w")
-        if f then
-          f:write(report)
-          f:close()
-          S.bug_report_saved_path = saved_path
-          S.bug_report_saved  = true
-          S.bug_report_copied = false
-          -- Clear any prior save-failure so this success isn't masked by
-          -- a stale amber "Save failed:" toast (toast block prefers
-          -- bug_report_save_error over the success flags).
-          S.bug_report_save_error = nil
-          S.bug_report_copied_time = reaper.time_precise()
-        else
-          S.bug_report_save_error = "Save failed: " .. tostring(ferr)
-          S.bug_report_copied_time = reaper.time_precise()
-        end
-      end
-    end
-  end
-
-  -- Toast under the CTA row (auto-fades after 6s).
-  if S.bug_report_copied or S.bug_report_saved or S.bug_report_save_error then
-    Dummy(RA.ctx, 1, RA.SC(6))
-    local elapsed = reaper.time_precise() - (S.bug_report_copied_time or 0)
-    if elapsed < 6 then
-      if S.bug_report_save_error then
-        _toast(S.bug_report_save_error, TK.amber)
-      elseif S.bug_report_saved then
-        _toast("Saved. Attach \"" .. tostring(S.bug_report_saved_path)
-          .. "\" to your email.", TK.green)
-      elseif S.bug_report_emailed then
-        _toast("Opened email. Describe the issue at the top, then send.",
-          TK.green)
-      elseif S.bug_report_copied then
-        _toast("Copied. Paste it into your email.", TK.green)
-      end
-    else
-      S.bug_report_copied     = false
-      S.bug_report_saved      = false
-      S.bug_report_save_error = nil
-      S.bug_report_emailed    = false
-    end
-  end
-
-  -- Email action rows. Two options stacked at SC(280) each:
-  --   1. Default mail client (mailto:) -- works for users with an
-  --      actual desktop mail client wired up (Apple Mail / Outlook /
-  --      Thunderbird / whoever's set as the OS's mailto handler).
-  --   2. Gmail compose URL -- covers the large subset of users who
-  --      live in Gmail inside a browser tab and haven't configured
-  --      their browser as a system mailto handler. mailto would
-  --      open a dead Mail.app / empty Outlook for them.
-  --
-  -- Both rows:
-  --   * Copy the full diagnostic report to the clipboard (backup
-  --     in case the client truncates the pre-filled body, and so a
-  --     re-send / forward is trivial).
-  --   * Build a body that includes the diagnostic inline, prefixed
-  --     by a "describe what happened" prompt for the user.
-  --   * If prefs.debug_logging is on and the log file has content,
-  --     reference the log path in the body so the user knows to
-  --     attach it manually. For mailto, we additionally pass a
-  --     non-standard &attach= param -- some clients (Apple Mail,
-  --     Thunderbird, older Outlook) auto-attach; others ignore it.
-  --     Gmail's compose URL doesn't support attachments at all, so
-  --     the body reference is the sole hint there.
   Dummy(RA.ctx, 1, RA.SC(6))
+
+  -- Capture screen pos BEFORE the input so we can overlay a placeholder
+  -- when the field is empty (same pattern as feedback_modal's comment box).
+  local _cmt_x, _cmt_y = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
+  _begin_dis(locked)
+  _push_input_style()
+  local _, new_comment = ImGui.ImGui_InputTextMultiline(RA.ctx,
+    "##bugrpt_comment", S.bug_report_form_comment,
+    inner_w, RA.SC(110), 0, nil)
+  _pop_input_style()
+  _end_dis()
+  if not locked then S.bug_report_form_comment = new_comment end
+  if (S.bug_report_form_comment or "") == "" then
+    local dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+    ImGui.ImGui_DrawList_AddTextEx(dl, FONT.inter_reg, RA.SC(13),
+      _cmt_x + RA.SC(10), _cmt_y + RA.SC(8), TK.text_faint,
+      "What happened? What did you expect? What actually happened?")
+  end
+  Dummy(RA.ctx, 1, RA.SC(14))
+
+  -- ---- OPTIONAL CONTACT ---------------------------------------------
+  UI.v5_section_label("OPTIONAL CONTACT", nil, nil,
+    SEC_LBL_SCALE, SEC_LBL_COL)
+  _para("Only if you'd like a reply. These fields are sent as-is and "
+     .. "are not redacted.")
+  Dummy(RA.ctx, 1, RA.SC(8))
+
+  -- Two-column row so Name + Email line up side-by-side at SC(480) inner_w
+  -- (~SC(228) per cell + SC(24) gap).
+  local FIELD_GAP = RA.SC(24)
+  local FIELD_W   = math_floor((inner_w - FIELD_GAP) / 2)
+
+  -- Name + Email labels side-by-side, each aligned to the start of its
+  -- corresponding input below. Anchored to the row's starting X so the
+  -- positioning is independent of label-text width.
+  local _label_row_x = ImGui.ImGui_GetCursorPosX(RA.ctx)
+  PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
+  Text(RA.ctx, "Name")
+  ImGui.ImGui_SameLine(RA.ctx)
+  ImGui.ImGui_SetCursorPosX(RA.ctx, _label_row_x + FIELD_W + FIELD_GAP)
+  Text(RA.ctx, "Email")
+  PopStyleColor(RA.ctx)
+  PopFont(RA.ctx)
+  Dummy(RA.ctx, 1, RA.SC(4))
+
+  _begin_dis(locked)
+  _push_input_style()
+  ImGui.ImGui_SetNextItemWidth(RA.ctx, FIELD_W)
+  local _, new_name = ImGui.ImGui_InputText(RA.ctx,
+    "##bugrpt_name", S.bug_report_form_name or "")
+  -- Persist on blur (IsItemDeactivatedAfterEdit fires the frame after the
+  -- field loses focus following an edit). Means tab-out / click-out saves
+  -- contact info even if the user doesn't end up pressing Send.
+  local _name_blurred = ImGui.ImGui_IsItemDeactivatedAfterEdit
+    and ImGui.ImGui_IsItemDeactivatedAfterEdit(RA.ctx) or false
+  ImGui.ImGui_SameLine(RA.ctx, 0, FIELD_GAP)
+  ImGui.ImGui_SetNextItemWidth(RA.ctx, FIELD_W)
+  local _, new_email = ImGui.ImGui_InputText(RA.ctx,
+    "##bugrpt_email", S.bug_report_form_email or "")
+  local _email_blurred = ImGui.ImGui_IsItemDeactivatedAfterEdit
+    and ImGui.ImGui_IsItemDeactivatedAfterEdit(RA.ctx) or false
+  _pop_input_style()
+  _end_dis()
+  if not locked then
+    -- Editing the email field dismisses any prior "bad email" error so the
+    -- user isn't yelled at while mid-keystroke. The error only re-fires when
+    -- they hit Send again.
+    if new_email ~= S.bug_report_form_email then
+      S.bug_report_email_show_error = false
+    end
+    S.bug_report_form_name  = new_name
+    S.bug_report_form_email = new_email
+    if _name_blurred then
+      reaper.SetExtState(CFG.EXT_NS, "bug_report_contact_name",
+        S.bug_report_form_name or "", true)
+    end
+    if _email_blurred then
+      reaper.SetExtState(CFG.EXT_NS, "bug_report_contact_email",
+        S.bug_report_form_email or "", true)
+    end
+  end
+
+  -- Inline email error: shown only when the user has actually clicked Send
+  -- with a malformed address (S.bug_report_email_show_error). Editing the
+  -- field clears the flag (above), so the message auto-dismisses as soon as
+  -- they start fixing it.
+  local _email_invalid = false
+  if S.bug_report_email_show_error and Diag and Diag.is_valid_email then
+    local em = S.bug_report_form_email or ""
+    _email_invalid = (em ~= "" and not Diag.is_valid_email(em))
+  end
+  if _email_invalid then
+    Dummy(RA.ctx, 1, RA.SC(4))
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(10))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.red)
+    SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx) + FIELD_W + FIELD_GAP)
+    Text(RA.ctx, "Doesn't look like an email address.")
+    PopStyleColor(RA.ctx)
+    PopFont(RA.ctx)
+  end
+  Dummy(RA.ctx, 1, RA.SC(14))
+
+  -- ---- WHAT WILL BE SENT --------------------------------------------
+  UI.v5_section_label("WHAT WILL BE SENT", nil, nil,
+    SEC_LBL_SCALE, SEC_LBL_COL)
+  Dummy(RA.ctx, 1, RA.SC(4))
+
   do
-    -- RFC 3986 URL encoder. Percent-escapes anything outside the
-    -- unreserved set; newlines emitted as CRLF so mail clients that
-    -- expect header-style line endings render breaks correctly.
-    local function _url_encode(s)
-      return (s
-        :gsub("\r\n", "\n")
-        :gsub("\n", "\r\n")
-        :gsub("([^%w%-%_%.%~])", function(c)
-          return string.format("%%%02X", string.byte(c))
-        end))
+    local function _bullet(text, col)
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), col or TK.text_muted)
+      ImGui.ImGui_PushTextWrapPos(RA.ctx, GetCursorPosX(RA.ctx) + inner_w)
+      Text(RA.ctx, "\xe2\x80\xa2  " .. text)
+      ImGui.ImGui_PopTextWrapPos(RA.ctx)
+      PopFont(RA.ctx)
+      PopStyleColor(RA.ctx)
     end
 
-    -- Build the shared body template. Same string goes into both the
-    -- mailto and the Gmail URL so the two paths stay identical apart
-    -- from the attachment-param handling in the mailto wrapper.
-    --
-    -- Log-attach reminder lives at the TOP of the body (not buried
-    -- after the diagnostic) so the user sees it immediately when
-    -- the email opens -- maximises the chance they attach the log
-    -- before typing their description + hitting send.
-    --
-    -- skip_followup_note = true strips the diagnostic's own trailing
-    -- "For detailed bugs..." paragraph so the top-of-body reminder
-    -- is the single, authoritative attach instruction.
-    local function _build_bug_email_body()
-      local lines = {}
-      if prefs.debug_logging then
-        lines[#lines+1] = "Please attach the debug log file to this email:"
-        lines[#lines+1] = Log.path
-        lines[#lines+1] = ""
-        lines[#lines+1] = "---"
-        lines[#lines+1] = ""
-      end
-      lines[#lines+1] = "Describe what happened:"
-      lines[#lines+1] = "(what you did, what you expected, what actually happened)"
-      lines[#lines+1] = ""
-      lines[#lines+1] = ""
-      lines[#lines+1] = ""
-      lines[#lines+1] = "--- DIAGNOSTIC REPORT ---"
-      lines[#lines+1] = Diag.build_report({ skip_followup_note = true })
-      return table.concat(lines, "\n")
-    end
-
-    -- Shared click handler: fills clipboard, builds URL, fires
-    -- toast. `via` = "mailto" or "gmail" for the right URL shape.
-    local function _fire_email(via)
-      -- Clipboard backup matches the body exactly so if the mailto URL
-      -- gets truncated by the client, re-paste recovers the full thing.
-      local report = Diag.build_report({ skip_followup_note = true })
-      ImGui.ImGui_SetClipboardText(RA.ctx, report)
-      local subject = "ReaAssist Bug Report - v" .. CFG.VERSION
-      local body    = _build_bug_email_body()
-      local url
-      if via == "gmail" then
-        url = "https://mail.google.com/mail/?view=cm&fs=1"
-          .. "&to="   .. _url_encode("help@reaassist.app")
-          .. "&su="   .. _url_encode(subject)
-          .. "&body=" .. _url_encode(body)
+    _bullet("Diagnostic report (app/REAPER/OS, recent errors, metrics)")
+    if _attachment_kind == "log" then
+      local size_str
+      if _log_size >= 1024 * 1024 then
+        size_str = string.format("%.1f MB", _log_size / (1024 * 1024))
       else
-        url = "mailto:help@reaassist.app"
-          .. "?subject=" .. _url_encode(subject)
-          .. "&body="    .. _url_encode(body)
-        -- Non-standard `&attach=` param: Apple Mail + Thunderbird
-        -- honour it; others ignore silently (and the user follows
-        -- the top-of-body reminder manually). Only added when the
-        -- log file is present on disk so clients that DO honour it
-        -- don't fail trying to attach a non-existent path.
-        if prefs.debug_logging then
-          local f = io.open(Log.path, "r")
-          if f then
-            f:close()
-            url = url .. "&attach=" .. _url_encode(Log.path)
-          else
-            -- Debug logging is enabled but the log file is gone (rotated,
-            -- permission-revoked, manually deleted). Surface a toast so
-            -- the user knows the email going out won't have the log they
-            -- expect -- previously this degraded silently.
-            UI.show_float_toast(
-              "Debug log file missing; email won't include it.", "err")
-          end
-        end
+        size_str = string.format("%.0f KB", math.max(1, _log_size / 1024))
       end
-      UI.open_url(url)
-      S.bug_report_copied      = true
-      S.bug_report_saved       = false
-      S.bug_report_save_error  = nil
-      S.bug_report_copied_time = reaper.time_precise()
-      S.bug_report_emailed     = true
+      _bullet("Advanced Log enabled \xe2\x80\x94 your complete log ("
+        .. size_str .. ") will be attached")
+    elseif _attachment_kind == "chat" then
+      _bullet("Advanced Log not enabled \xe2\x80\x94 the current chat ("
+        .. _chat_count .. " message" .. (_chat_count == 1 and "" or "s")
+        .. ") will be attached instead")
+      _bullet("For richer reports, enable the Advanced Log below, "
+        .. "reproduce the issue, and try again.", TK.text_faint)
+    else
+      _bullet("No log or chat available \xe2\x80\x94 only the diagnostic "
+        .. "report will be sent. Enable the Advanced Log below or start "
+        .. "a chat to reproduce the issue first.", TK.text_faint)
     end
-
-    -- Email row: two pills side-by-side matching the Copy/Save row
-    -- above (SC(230) cells, SC(8) gap, SC(468) total grid width).
-    local EMAIL_CELL_W = RA.SC(230)
-    local EMAIL_GAP    = RA.SC(8)
-    local EMAIL_GRID_W = EMAIL_CELL_W * 2 + EMAIL_GAP
-    SetCursorPosX(RA.ctx,
-      GetCursorPosX(RA.ctx) + math_max(math_floor((inner_w - EMAIL_GRID_W) * 0.5), 0))
-
-    -- Left cell: default mail client.
-    if UI.v5_link_row("##bugrpt_email_mail", nil,
-        "Email to help@reaassist.app",
-        nil, ICON.MAIL,
-        "Opens a pre-filled email in your default mail client "
-          .. "(Mail, Outlook, Thunderbird, etc.) with the diagnostic "
-          .. "report already in the body.",
-        EMAIL_CELL_W) then
-      _fire_email("mailto")
-    end
-
-    SameLine(RA.ctx, 0, EMAIL_GAP)
-
-    -- Right cell: Gmail compose URL (covers browser-Gmail users whose
-    -- OS mailto handler points somewhere they don't read).
-    if UI.v5_link_row("##bugrpt_email_gmail", nil,
-        "Compose in Gmail",
-        nil, ICON.MAIL,
-        "Opens a pre-filled compose window in Gmail (in your default "
-          .. "browser) with the diagnostic report already in the body. "
-          .. "Use this if your system mailto handler isn't wired up "
-          .. "to Gmail.",
-        EMAIL_CELL_W) then
-      _fire_email("gmail")
+    if (S.bug_report_form_name or "") ~= ""
+       or (S.bug_report_form_email or "") ~= "" then
+      _bullet("Your name / email (sent as-is, not redacted)")
     end
   end
 
   Dummy(RA.ctx, 1, RA.SC(14))
 
-  -- Collapsible sub-section: Preview Report. Uses v5_section_label's
-  -- collapsible mode (the bar doubles as a +/- glyph), kept at the
-  -- default scale so sub-sections read as nested under DIAGNOSTIC
-  -- REPORT above. Defaults CLOSED now that the email button auto-
-  -- fills the diagnostic inline -- the preview is a verification
-  -- aid, not a primary touchpoint.
+  -- ---- STATUS / SEND ROW --------------------------------------------
+  if sending then
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+    Text(RA.ctx, "Sending\xe2\x80\xa6")
+    PopFont(RA.ctx)
+    PopStyleColor(RA.ctx)
+    if S.bug_report_send_truncation_note then
+      _para("Note: " .. S.bug_report_send_truncation_note)
+    end
+    Dummy(RA.ctx, 1, RA.SC(4))
+  elseif S.bug_report_send_state == "error" then
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.red)
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+    UI.text_multiline("Send failed: " ..
+      (S.bug_report_send_error or "unknown error"))
+    PopFont(RA.ctx)
+    PopStyleColor(RA.ctx)
+    Dummy(RA.ctx, 1, RA.SC(4))
+  end
+
+  -- Send button (centered, primary modal style). Disabled when comment is
+  -- empty, when email is invalid, or while a send is in flight. Label flips
+  -- to "Try Again" when the previous attempt failed (matches the feedback
+  -- modal's retry pattern).
+  do
+    local btn_w   = RA.SC(140)
+    local btn_off = math_max(math_floor((inner_w - btn_w) * 0.5), 0)
+    SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx) + btn_off)
+
+    local comment_empty = (S.bug_report_form_comment or ""):find("%S") == nil
+    -- can_send only blocks on the structural prerequisites (not in flight,
+    -- comment present). Email validity is checked at click time so the user
+    -- gets a clear error rather than a silently-disabled button.
+    local can_send = (not locked) and (not comment_empty)
+    local label = (S.bug_report_send_state == "error") and "Try Again" or "Send"
+
+    UI.push_modal_primary_btn()
+    _begin_dis(not can_send)
+    local clicked = ImGui.ImGui_Button(RA.ctx, label .. "##bugrpt_send",
+      btn_w, RA.SC(28))
+    _end_dis()
+    UI.pop_modal_primary_btn()
+
+    if clicked and can_send then
+      -- Validate email at submit time. If it's filled in but malformed,
+      -- surface the inline error and skip the actual send -- the user can
+      -- fix it and click Send again.
+      local em = S.bug_report_form_email or ""
+      if em ~= "" and Diag and Diag.is_valid_email
+         and not Diag.is_valid_email(em) then
+        S.bug_report_email_show_error = true
+      else
+      S.bug_report_email_show_error = false
+      -- Persist contact info to ExtState so the next visit pre-fills.
+      reaper.SetExtState(CFG.EXT_NS, "bug_report_contact_name",
+        S.bug_report_form_name or "", true)
+      reaper.SetExtState(CFG.EXT_NS, "bug_report_contact_email",
+        S.bug_report_form_email or "", true)
+
+      -- Privacy contract: if the user has the Preview Report expander
+      -- open, send EXACTLY the bytes they're looking at. Reusing the
+      -- cached preview draft byte-for-byte (event_id and drafted_at
+      -- included -- they were stamped when the preview draft was built)
+      -- means the redacted log snapshot the user reviewed is the
+      -- redacted log snapshot they upload, not a fresh re-read at click
+      -- time which could have grown new events or shifted redaction
+      -- since they OK'd it. If the preview is closed (cached draft is
+      -- nil), the user hasn't reviewed anything yet, so we build a
+      -- fresh snapshot for the send -- event_id and drafted_at in that
+      -- branch reflect the click moment.
+      local draft = S.bug_report_preview_draft or Diag.begin_bug_report_draft()
+      S.bug_report_draft_inflight = draft
+      S.bug_report_send_state     = "sending"
+      S.bug_report_send_error     = nil
+      S.bug_report_send_truncation_note = nil
+      local send_event_id = draft.event_id
+      Diag.send_bug_report(draft,
+        S.bug_report_form_comment or "",
+        S.bug_report_form_name    or "",
+        S.bug_report_form_email   or "",
+        function(ok, status, err)
+          -- Guard: only mutate state if the in-flight draft is still ours
+          -- (defends against the user navigating away mid-send and the
+          -- screen state being torn down or replaced).
+          if not S.bug_report_draft_inflight
+             or S.bug_report_draft_inflight.event_id ~= send_event_id then
+            return
+          end
+          if ok then
+            S.bug_report_send_state    = "idle"
+            S.bug_report_form_comment  = ""
+            S.bug_report_draft_inflight = nil
+            S.bug_report_send_truncation_note = nil
+            S.bug_report_preview_open  = false
+            if UI.show_float_toast then
+              UI.show_float_toast("Bug report sent. Thanks!", "ok")
+            end
+          else
+            S.bug_report_send_state = "error"
+            S.bug_report_send_error = err or
+              ("status " .. tostring(status))
+            S.bug_report_draft_inflight = nil
+          end
+        end)
+      end  -- else (email valid, proceed with send)
+    end
+  end
+
+  Dummy(RA.ctx, 1, RA.SC(16))
+
+  -- ---- COLLAPSIBLES: Preview report + Details & privacy --------------
+  -- Preview shows the EXACT redacted JSON bytes that will be POSTed.
+  -- We rebuild the draft on each open of the expander (not every frame)
+  -- so log-file IO stays bounded. Right-clicking the preview body copies
+  -- the full payload to the clipboard for offline inspection.
   S.bug_report_preview_open = S.bug_report_preview_open or false
+  local _was_preview_open = S.bug_report_preview_open
   S.bug_report_preview_open = UI.v5_section_label(
-    "Preview Report",
+    "Preview report",
     S.bug_report_preview_open, nil, 1.0, TK.text_muted)
   if S.bug_report_preview_open then
-    local report = Diag.build_report()
+    -- Refresh the cached draft on every transition closed -> open so the
+    -- preview reflects current log state, but reuse the snapshot while the
+    -- expander stays open (avoids re-reading multi-MB logs each frame).
+    if not _was_preview_open or not S.bug_report_preview_draft then
+      S.bug_report_preview_draft = Diag.begin_bug_report_draft()
+    end
+    local draft = S.bug_report_preview_draft
+    local preview = Diag.preview_bug_report_text(draft,
+      S.bug_report_form_comment or "",
+      S.bug_report_form_name    or "",
+      S.bug_report_form_email   or "")
+
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), TK.code_bg)
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),  TK.border)
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),    TK.text)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarBg(),          0x00000000)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrab(),        TK.border_str)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabHovered(),
+      UI.lerp_u32(TK.border_str, TK.text, 0.30))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
+      UI.lerp_u32(TK.border_str, TK.text, 0.55))
     PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildBorderSize(), 1)
     PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildRounding(),   RA.SC(5))
     PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(),   RA.SC(10), RA.SC(8))
-    -- SC(172) ~ two mono-SC(10) lines shorter than the previous SC(200)
-    -- height. Report fits comfortably; the taller box was wasting air
-    -- at the bottom.
     if ImGui.ImGui_BeginChild(RA.ctx, "##bugrpt_preview_child",
-        inner_w, RA.SC(172), ImGui.ImGui_ChildFlags_Borders()) then
+        inner_w, RA.SC(220), ImGui.ImGui_ChildFlags_Borders()) then
+      if ImGui.ImGui_BeginPopupContextWindow(RA.ctx, "##bugrpt_preview_ctx") then
+        if ImGui.ImGui_MenuItem(RA.ctx, "Copy") then
+          ImGui.ImGui_SetClipboardText(RA.ctx, preview)
+        end
+        ImGui.ImGui_EndPopup(RA.ctx)
+      end
       PushFont(RA.ctx, FONT.mono_reg, RA.SC(10))
       local rp = 1
-      while rp <= #report do
-        local nl = str_find(report, "\n", rp, true)
-        local line = nl and str_sub(report, rp, nl - 1) or str_sub(report, rp)
+      while rp <= #preview do
+        local nl = str_find(preview, "\n", rp, true)
+        local line = nl and str_sub(preview, rp, nl - 1) or str_sub(preview, rp)
         if line == "" then
           Dummy(RA.ctx, 1, 4)
         else
@@ -4947,52 +5052,130 @@ function Render.bug_report_screen()
       ImGui.ImGui_EndChild(RA.ctx)
     end
     ImGui.ImGui_PopStyleVar(RA.ctx, 3)
-    PopStyleColor(RA.ctx, 3)
+    PopStyleColor(RA.ctx, 7)
     Dummy(RA.ctx, 1, RA.SC(6))
+  else
+    -- Drop the cached draft once the preview collapses so the next open
+    -- triggers a fresh log read (and so we don't pin a multi-MB string in
+    -- S indefinitely).
+    S.bug_report_preview_draft = nil
   end
 
-  -- Collapsible sub-section: privacy disclosure.
+  -- Details & privacy. Mirrors the feedback_modal's privacy panel layout
+  -- (2x2 mini-cards) but adapted to the bug-report context: the chat card
+  -- is replaced with one describing the log, and a fourth panel calls out
+  -- the contact-fields exception.
   S.bug_report_privacy_open = S.bug_report_privacy_open or false
   S.bug_report_privacy_open = UI.v5_section_label(
-    "What's in the Report (privacy)",
+    "Details & privacy",
     S.bug_report_privacy_open, nil, 1.0, TK.text_muted)
   if S.bug_report_privacy_open then
-    PushFont(RA.ctx, nil, RA.SC(12))
-    ImGui.ImGui_Indent(RA.ctx, RA.SC(12))
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ItemSpacing(),
+      RA.SC(10), RA.SC(2))
 
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
-    Text(RA.ctx, "Included:")
-    PopStyleColor(RA.ctx)
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-    Text(RA.ctx, "  ReaAssist version, REAPER version, OS")
-    Text(RA.ctx, "  Active provider and model")
-    Text(RA.ctx, "  Recent error messages and tracebacks")
-    Text(RA.ctx, "  Last few chat exchanges (truncated)")
-    PopStyleColor(RA.ctx)
+    local _avail_w  = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+    local _grid_gap = RA.SC(8)
+    local _panel_w  = math_floor((_avail_w - _grid_gap) / 2)
+    local _item_wrap = _panel_w - RA.SC(20)
+    local _pad_y    = RA.SC(8)
+    local _spacing_y = RA.SC(2)
 
-    Dummy(RA.ctx, 1, RA.SC(6))
+    local function _panel_h(header, items)
+      PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
+      local _, hh = ImGui.ImGui_CalcTextSize(RA.ctx, header)
+      PopFont(RA.ctx)
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+      local items_h = 0
+      for _, item in ipairs(items) do
+        local _, ih = ImGui.ImGui_CalcTextSize(RA.ctx,
+          "\xe2\x80\xa2 " .. item, nil, nil, false, _item_wrap)
+        items_h = items_h + ih + _spacing_y
+      end
+      PopFont(RA.ctx)
+      if #items > 0 then items_h = items_h - _spacing_y end
+      return hh + RA.SC(4) + items_h + _pad_y * 2 + RA.SC(8)
+    end
 
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
-    Text(RA.ctx, "NOT included:")
-    PopStyleColor(RA.ctx)
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-    Text(RA.ctx, "  Your API keys")
-    Text(RA.ctx, "  Your project files or audio")
-    Text(RA.ctx, "  Track names, file paths, or project content")
-    PopStyleColor(RA.ctx)
+    local function _panel(id, header, items, h)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(),
+        UI.lerp_u32(TK.card, TK.bg, 0.35))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(), TK.border)
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildBorderSize(), 1)
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildRounding(),   RA.SC(5))
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(),
+        RA.SC(10), _pad_y)
+      if ImGui.ImGui_BeginChild(RA.ctx, id, _panel_w, h,
+          ImGui.ImGui_ChildFlags_Borders(),
+          ImGui.ImGui_WindowFlags_NoScrollbar()) then
+        PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
+        Text(RA.ctx, header)
+        PopStyleColor(RA.ctx)
+        PopFont(RA.ctx)
+        Dummy(RA.ctx, 1, RA.SC(4))
+        PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+        ImGui.ImGui_PushTextWrapPos(RA.ctx,
+          GetCursorPosX(RA.ctx) + _item_wrap)
+        for _, item in ipairs(items) do
+          Text(RA.ctx, "\xe2\x80\xa2 " .. item)
+        end
+        ImGui.ImGui_PopTextWrapPos(RA.ctx)
+        PopStyleColor(RA.ctx)
+        PopFont(RA.ctx)
+        ImGui.ImGui_EndChild(RA.ctx)
+      end
+      ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+      PopStyleColor(RA.ctx, 2)
+    end
 
-    ImGui.ImGui_Unindent(RA.ctx, RA.SC(12))
-    PopFont(RA.ctx)
+    -- Row 1: Included | Redacted
+    local r1a_h, r1a_i = "What's included", {
+      "Diagnostic report (app/REAPER/OS, errors, metrics)",
+      "Advanced Log or current chat (whichever is available)",
+      "Comment, name, and email you typed (if provided)",
+      "Active provider and model id",
+    }
+    local r1b_h, r1b_i = "Auto-redacted", {
+      "API keys (yours, and any pasted into chat)",
+      "Authorization headers and Bearer tokens",
+      "Home-directory paths",
+      "?key= / ?token= URL params",
+      "Custom-provider endpoint URLs",
+    }
+    local r1_h = math_max(_panel_h(r1a_h, r1a_i), _panel_h(r1b_h, r1b_i))
+    _panel("##bugrpt_priv_inc", r1a_h, r1a_i, r1_h)
+    ImGui.ImGui_SameLine(RA.ctx, 0, _grid_gap)
+    _panel("##bugrpt_priv_red", r1b_h, r1b_i, r1_h)
+
+    -- Row 2: Where it goes | Note
+    local r2a_h, r2a_i = "Where it goes", {
+      "Sent to the ReaAssist maintainer",
+      "Used only to debug ReaAssist issues",
+      "No third parties",
+    }
+    local r2b_h, r2b_i = "Not redacted", {
+      "Project, track, plugin, or file names you typed",
+      "Anything else you pasted into the chat",
+      "Your contact name and email (so a reply works)",
+    }
+    local r2_h = math_max(_panel_h(r2a_h, r2a_i), _panel_h(r2b_h, r2b_i))
+    _panel("##bugrpt_priv_where", r2a_h, r2a_i, r2_h)
+    ImGui.ImGui_SameLine(RA.ctx, 0, _grid_gap)
+    _panel("##bugrpt_priv_note",  r2b_h, r2b_i, r2_h)
+
+    ImGui.ImGui_PopStyleVar(RA.ctx)
     Dummy(RA.ctx, 1, RA.SC(6))
   end
 
-  Dummy(RA.ctx, 1, RA.SC(18))
+  Dummy(RA.ctx, 1, RA.SC(20))
 
   -- ---- DEBUG LOG ----------------------------------------------------
   UI.v5_section_label("DEBUG LOG", nil, nil, SEC_LBL_SCALE, SEC_LBL_COL)
 
-  _para("Captures full API traffic and FX scan events. Enable it, "
-     .. "reproduce the issue, then attach the log file to your email.")
+  _para("Captures full API traffic and FX scan events. When enabled, the "
+     .. "complete log is attached to your bug report automatically. "
+     .. "Reproduce the issue first, then send the form above.")
 
   Dummy(RA.ctx, 1, RA.SC(10))
 
@@ -5093,7 +5276,7 @@ function Render.bug_report_screen()
         end
       end
     end
-    UI.tooltip("Save the log to a location of your choice (for email attachment)")
+    UI.tooltip("Save a copy of the log to a location of your choice")
 
     SameLine(RA.ctx, 0, LOG_GAP)
     if ImGui.ImGui_Button(RA.ctx, "Clear##bugrpt_dbg_clear", LOG_W, 0) then
@@ -5767,6 +5950,41 @@ function Render.feedback_modal()
     )
     PopStyleColor(RA.ctx)
     PopFont(RA.ctx)
+    Dummy(RA.ctx, 1, RA.SC(4))
+
+    -- Cross-link to the full bug-report flow. Three Text calls chained via
+    -- SameLine(0, 0) so the "Bug Reports" segment is the only clickable
+    -- region (accent color + hand cursor on hover). Clicking closes the
+    -- modal and pops the user onto the Bug Report page, which has space
+    -- for an Advanced Log attachment plus name/email contact fields. Sized
+    -- at SC(11) Inter Regular so the line reads as a peer of the intro
+    -- paragraph above.
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+    Text(RA.ctx, "See the ")
+    PopStyleColor(RA.ctx)
+    SameLine(RA.ctx, 0, 0)
+
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.accent)
+    Text(RA.ctx, "Bug Reports")
+    local _br_link_clicked = ImGui.ImGui_IsItemClicked(RA.ctx)
+    if ImGui.ImGui_IsItemHovered(RA.ctx) then
+      ImGui.ImGui_SetMouseCursor(RA.ctx, ImGui.ImGui_MouseCursor_Hand())
+    end
+    PopStyleColor(RA.ctx)
+    SameLine(RA.ctx, 0, 0)
+
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+    Text(RA.ctx, " screen to send an advanced report with the full log.")
+    PopStyleColor(RA.ctx)
+    PopFont(RA.ctx)
+
+    if _br_link_clicked and not locked then
+      ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+      _close_feedback_modal()
+      S.show_bug_report = true
+    end
+
     Dummy(RA.ctx, 1, RA.SC(8))
 
     -- ──── TAGS section (Option A: thumbs sentiment + conditional chips).
@@ -6209,9 +6427,9 @@ function Render.feedback_modal()
     end
 
     -- Buttons (centered horizontally within the modal content width).
-    -- 20 px margin above so the row clearly separates from the privacy
-    -- section (or the status line) above it.
-    Dummy(RA.ctx, 1, RA.SC(20))
+    -- 5 px margin above (was 20 px) -- tightened so the button row stays
+    -- inside the modal viewport without a scrollbar at default height.
+    Dummy(RA.ctx, 1, RA.SC(5))
     local btn_w   = RA.SC(100)
     local btn_gap = RA.SC(8)
     local btns_total_w = btn_w * 2 + btn_gap
@@ -9969,6 +10187,43 @@ function Render.custom_llm_screen()
     end
   end
 
+  -- "Test with real chat/completions" checkbox. Default off so the safe
+  -- GET /v1/models probe stays the one-click default. Ticking it routes
+  -- Test Connection through a real chat/completions POST with max_tokens=1
+  -- and "hi" -- exercises the same path real chat will, but on reasoning
+  -- models like DeepSeek-R1 / o1 the thinking phase still runs (the cap
+  -- only limits OUTPUT tokens), so the user pays for that one inference
+  -- call. Transient: the checkbox state lives only in api_keys.custom_edit
+  -- and is reset whenever the user enters/leaves the edit screen. Centered
+  -- to align with the action row below.
+  do
+    local edit = api_keys.custom_edit
+    if edit then
+      local cb_label = "Test with a real chat/completions request"
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+      local cb_w = CalcTextSize(RA.ctx, cb_label) + RA.SC(28)  -- text + checkbox + gap
+      PopFont(RA.ctx)
+      SetCursorPosX(RA.ctx,
+        GetCursorPosX(RA.ctx) + math_max(math_floor((inner_w - cb_w) * 0.5), 0))
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+      local _changed, _new = ImGui.ImGui_Checkbox(RA.ctx,
+        cb_label .. "##cllm_test_inference",
+        edit.test_with_inference and true or false)
+      if _changed then edit.test_with_inference = _new end
+      PopStyleColor(RA.ctx)
+      PopFont(RA.ctx)
+      UI.tooltip(
+        "Off (default): GET /v1/models -- safe, free, instant. Verifies "
+        .. "server reachable and auth header works.\n\n"
+        .. "On: POST /v1/chat/completions with max_tokens=1 and 'hi' against "
+        .. "your first model. Exercises the same path real chat uses, but "
+        .. "reasoning models (DeepSeek-R1, o1, etc.) still run the full "
+        .. "thinking phase -- you'll pay for one short inference call.")
+      Dummy(RA.ctx, 1, RA.SC(8))
+    end
+  end
+
   -- ============================================================
   -- Action row: [Cancel]  [Test Connection]  [Save]
   -- Save is the primary (accent) call-to-action; Cancel + Test are
@@ -10014,7 +10269,7 @@ function Render.custom_llm_screen()
   UI.pressable()
   UI.tooltip(test_active
     and "Cancel the in-flight connection test"
-    or  "Fire a quick GET /v1/models against the endpoint to verify the server is reachable (no save required)")
+    or  "Test the endpoint and key against the current form values (no save required). Default: GET /v1/models. With the checkbox above ticked: real chat/completions POST.")
 
   PopStyleColor(RA.ctx, 5)
   ImGui.ImGui_PopStyleVar(RA.ctx, 3)
@@ -10099,10 +10354,20 @@ function Render.custom_llm_screen()
       local ctx_t2   = (row.context_window or ""):match("^%s*(.-)%s*$") or ""
       local notes_raw = row.notes or ""
       local body_raw  = row.extra_body or ""
-      if id_t ~= "" or (pin_t ~= "" and pin_t ~= "0")
-                    or (pout_t ~= "" and pout_t ~= "0")
-                    or (pcache_t ~= "" and pcache_t ~= "0")
-                    or (notes_raw ~= "") or (body_raw ~= "") then
+      -- Has the user typed anything meaningful on this row besides the id?
+      -- Used for two things: feeding any_row_input (form-is-being-filled-out
+      -- gate), and surfacing an explicit "Model Identifier required" error
+      -- when this is true but id_t == "" -- otherwise the row would silently
+      -- vanish from persistence. The default-row shape (all "0" / default
+      -- ctx / blank notes / blank body) is treated as "no input" so a fresh
+      -- "+ Add Model" row still drops silently when left untouched.
+      local row_typed = (pin_t    ~= "" and pin_t    ~= "0")
+                        or (pout_t   ~= "" and pout_t   ~= "0")
+                        or (pcache_t ~= "" and pcache_t ~= "0")
+                        or (ctx_t2   ~= "" and ctx_t2   ~= tostring(CUSTOM_DEFAULT_CTX))
+                        or (notes_raw ~= "")
+                        or (body_raw  ~= "")
+      if id_t ~= "" or row_typed then
         any_row_input = true
       end
       if id_t ~= "" then
@@ -10146,6 +10411,16 @@ function Render.custom_llm_screen()
             extra_body     = body_clean  or "",
           }
         end
+      elseif row_typed then
+        -- User typed prices / context / notes / extra body on this row but
+        -- left the Model Identifier blank. Refuse the save instead of
+        -- silently dropping the row from persistence -- otherwise the user
+        -- looks at the saved provider later and finds the row gone with no
+        -- warning. (Fresh "+ Add Model" rows are still dropped silently
+        -- because row_typed stays false on a default-shape row.)
+        edit.errors["model_" .. ri] =
+          "Model Identifier is required for this row. Add an id, or click the trash icon to remove the row."
+        has_format_error = true
       end
     end
 
@@ -10228,6 +10503,22 @@ function Render.custom_llm_screen()
           label                = label_t,  -- validated non-empty above
         }
         Custom.upsert_record(record)
+        -- Clamp the persisted model_idx for this provider so it can never
+        -- point past the (possibly-shrunk) models list. The runtime loader
+        -- (_prefs_load_idx) already clamps at read time, so this is purely
+        -- a hygiene write: it keeps reaper-extstate.ini honest about the
+        -- last-selected slot. Without it, a stale "model_idx_<id>=N" sits
+        -- around forever on disk pointing past the end of the list, which
+        -- makes the file useless as evidence when triaging "where did my
+        -- models go?" reports.
+        do
+          local idx_key = "model_idx_" .. edit.id
+          local cur = tonumber(reaper.GetExtState(CFG.EXT_NS, idx_key))
+          if cur and #parsed_models > 0 and cur > #parsed_models then
+            reaper.SetExtState(CFG.EXT_NS, idx_key,
+              tostring(#parsed_models), true)
+          end
+        end
         if key_t ~= "" then
           Key.save(key_t, "api_key_" .. edit.id)
           S.api_key_map[edit.id] = key_t

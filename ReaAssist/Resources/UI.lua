@@ -5448,7 +5448,7 @@ function Render._factory_reset_execute()
   -- switch, debug-logging toggle, etc.) would re-persist its OLD
   -- in-memory value into the just-cleared .ini, leaving the user with
   -- a non-default config that "factory reset" was supposed to wipe.
-  -- Schema mirror of the prefs table at ReaAssist.lua:1014-1045.
+  -- Schema mirror of the prefs table at ReaAssist.lua:~2331.
   prefs.auto_run              = false
   prefs.auto_backup           = true
   prefs.show_details          = false
@@ -7876,7 +7876,7 @@ function Render._shared_key_screen_impl()
       end
       -- Esc inside this popup mimics the Back button -- close the popup
       -- and stay on Settings. The outer Settings-cancel handler
-      -- (around line ~6911) is gated on `UI.back_pressed()`, which
+      -- (around line ~7975) is gated on `UI.back_pressed()`, which
       -- returns false whenever any popup was open at frame start, so
       -- the same Esc press never bubbles into a Settings-wide Cancel
       -- (which would re-open this popup) -- no per-frame "consumed"
@@ -10895,7 +10895,7 @@ function Render.preferred_plugins_screen()
       end
       -- ImGui_End paired with Begin only on the visible path; ReaImGui
       -- auto-pops the window when Begin returns false. Same contract as
-      -- the resolve popup at line ~13983 and the main window's End.
+      -- the resolve popup at line ~15432 and the main window's End at ~16387.
       ImGui.ImGui_End(RA.ctx)
     end
   end
@@ -15570,7 +15570,7 @@ function Render.main_window()
       -- field-active-only check would miss the commit for an arrow-selected
       -- dropdown row.
       -- Renamed from `enter_pressed` to disambiguate against the chat
-      -- prompt's enter_pressed (line ~13528): different scopes, but
+      -- prompt's enter_pressed (line ~14995): different scopes, but
       -- both checked during a debug session creates avoidable
       -- confusion.
       local popup_enter_pressed = ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Enter())
@@ -15687,7 +15687,7 @@ function Render.main_window()
           -- auto-pops the window when Begin returns false (collapsed or
           -- fully clipped), so calling End on that path underflows the
           -- stack and trips "Calling End() too many times!". Matches the
-          -- main-window pattern at line ~14637 below.
+          -- main-window pattern at line ~16387 below.
           ImGui.ImGui_End(RA.ctx)
         end
       end
@@ -16509,8 +16509,11 @@ function Render.main_window()
         -- Failure view. Branches by failure step so the user gets a
         -- message that matches the actual cause rather than a single
         -- generic line:
-        --   sha_verify -> CDN propagation lag, retry after a wait
-        --   anything else -> generic copy with ReaPack fallback hint
+        --   sha_verify     -> CDN propagation lag, retry after a wait
+        --   content_verify -> downloaded file is not ReaAssist content
+        --                     (proxy interception or wrong server),
+        --                     no point hammering Retry without diagnosis
+        --   anything else  -> generic copy with ReaPack fallback hint
         --
         -- The sha_verify branch is the common case immediately after a
         -- new release: GitHub's raw CDN serves stale bytes from edge
@@ -16527,6 +16530,11 @@ function Render.main_window()
           fail_text = noun .. " files temporarily out of sync. "
                    .. "GitHub's CDN may still be propagating a new "
                    .. "release. Wait a minute or two, then click Retry."
+        elseif update.last_step == "content_verify" then
+          fail_text = noun .. " aborted: a downloaded file did not "
+                   .. "look like ReaAssist content. This usually means "
+                   .. "a captive portal, proxy, or VPN is intercepting "
+                   .. "the download. Check your network, then Retry."
         else
           fail_text = noun .. " failed. Click Retry, or "
                    .. (update.action_was_repair and "reinstall"
@@ -16662,8 +16670,12 @@ function Render.main_window()
         if ImGui.ImGui_Button(RA.ctx, "Later", btn2_w, 0) then
           update.show_dialog = false
           -- Persist a 7-day snooze so the daily auto-check does not
-          -- re-nag; check_start() reads this key and skips the fetch
-          -- while it is still in the future.
+          -- re-nag; check_poll() reads this key and (for piggyback
+          -- checks only -- forced/manual paths bypass the snooze)
+          -- pre-flips popup_opened so the auto-show guard treats the
+          -- "available" state as already-shown. The fetch itself is
+          -- not gated; we always need a fresh manifest to compute the
+          -- local-vs-remote SHA diff.
           local snooze_until = os.time() + 7 * 24 * 3600
           reaper.SetExtState(CFG.EXT_NS, "update_snooze",
             tostring(snooze_until), true)

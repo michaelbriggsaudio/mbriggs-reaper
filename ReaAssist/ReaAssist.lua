@@ -73,27 +73,85 @@
 -- (Deps, InstallerGfx, helpers) do not count against the main chunk's
 -- 200-local Lua limit.
 
+-- Shared shell-quoting helpers used by every code path that builds a
+-- shell command line: the ReaImGui auto-installer (InstallerGfx) and
+-- the Updater module's curl + native-SHA launchers. Lives on a global
+-- namespace (rather than file-scope locals) because the main chunk's
+-- 200-local Lua limit is already tight; globals don't count against it.
+--   Shell.ps_escape(s) -- doubles single quotes for embedding in a
+--                         PowerShell '...' string. No outer quotes added.
+--   Shell.ps_quote(s)  -- ps_escape + surrounding single quotes; produces
+--                         a complete PowerShell single-quoted literal.
+--   Shell.sh_quote(s)  -- POSIX shell single-quote-and-escape. Wraps the
+--                         value in '...' and escapes embedded single
+--                         quotes via the standard '\'' close-reopen pattern.
+Shell = {}
+function Shell.ps_escape(s) return tostring(s):gsub("'", "''") end
+function Shell.ps_quote(s)  return "'" .. Shell.ps_escape(s) .. "'" end
+function Shell.sh_quote(s)
+  return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
+
 do
 
 local Deps = {}
 
-Deps.PINNED_VERSION   = "v0.10.0.5"
-Deps.MIN_VERSION_NUM  = {0, 10, 0, 5}  -- numeric components for comparison
-Deps.RELEASE_URL_BASE = "https://github.com/cfillion/reaimgui/releases/download/" .. Deps.PINNED_VERSION
+-- Per-dependency descriptor. Each describes one REAPER extension that
+-- ReaAssist auto-installs via the gfx-based installer. Both deps land
+-- in REAPER's UserPlugins/ folder and require a REAPER restart to load.
+-- The release-checklist's "pinned-asset preflight" step re-verifies the
+-- per-platform SHAs against the live upstream when bumping pinned_version
+-- (recompute via curl + sha256sum on each platform asset).
 
--- Per-platform asset filename + SHA-256. Verified against v0.10.0.5 on
--- 2026-05-02 (sha256sum of each downloaded asset). When bumping
--- PINNED_VERSION, recompute these values and update in the same edit.
-Deps.ASSETS = {
-  ["win-x64"]    = {"reaper_imgui-x64.dll",      "800b216e0937bf5bb6b08ba2767b7b974a746b3fc3b54943b4d3011da0a68f2a"},
-  ["win-x86"]    = {"reaper_imgui-x86.dll",      "6840f7c76673018d9a42590f70c4c06ce8074b7c0f126c8deb6440a24c483082"},
-  ["mac-arm64"]  = {"reaper_imgui-arm64.dylib",  "1f90cf004c0bbada45358609c943f601b2cb0e625ecf7739ae5df8708ab705ae"},
-  ["mac-x64"]    = {"reaper_imgui-x86_64.dylib", "2209fec3eae03f22fe94b9d2681b04e21f41c7d4587cb0d69e4eb72e39a64e65"},
-  ["mac-x86"]    = {"reaper_imgui-i386.dylib",   "dd2dcb747cbe18e390d85417905977a8a24c311bd6c4d18e03e39cb3e6f4be54"},
-  ["linux-x64"]  = {"reaper_imgui-x86_64.so",    "b967a30b356f1c689ab457f2ce393b936267e4287939ece616e10d74399e2997"},
-  ["linux-arm64"]= {"reaper_imgui-aarch64.so",   "9b72753132a2ce96ae0405effaf9a8d8eeab9ab6d0f8c41ca7f62064333cdfc7"},
-  ["linux-arm32"]= {"reaper_imgui-armv7l.so",    "da2177ebd88f8e306e84002f045080c60beb521d43395b7ef36377ff6c35d315"},
-  ["linux-x86"]  = {"reaper_imgui-i686.so",      "4dadc055a1b8698e0d9fbf8ce3b63c39c9b5d30b0abc5734f14235d8545011d2"},
+Deps.REAIMGUI = {
+  key             = "imgui",
+  name            = "ReaImGui",
+  pinned_version  = "v0.10.0.5",
+  min_version_num = {0, 10, 0, 5},
+  url_base        = "https://github.com/cfillion/reaimgui/releases/download/v0.10.0.5",
+  author          = "Christian Fillion",
+  license         = "LGPL-3.0-or-later",
+  source_url      = "github.com/cfillion/reaimgui",
+  -- assets[platform] = {filename, sha256}
+  assets = {
+    ["win-x64"]    = {"reaper_imgui-x64.dll",      "800b216e0937bf5bb6b08ba2767b7b974a746b3fc3b54943b4d3011da0a68f2a"},
+    ["win-x86"]    = {"reaper_imgui-x86.dll",      "6840f7c76673018d9a42590f70c4c06ce8074b7c0f126c8deb6440a24c483082"},
+    ["mac-arm64"]  = {"reaper_imgui-arm64.dylib",  "1f90cf004c0bbada45358609c943f601b2cb0e625ecf7739ae5df8708ab705ae"},
+    ["mac-x64"]    = {"reaper_imgui-x86_64.dylib", "2209fec3eae03f22fe94b9d2681b04e21f41c7d4587cb0d69e4eb72e39a64e65"},
+    ["mac-x86"]    = {"reaper_imgui-i386.dylib",   "dd2dcb747cbe18e390d85417905977a8a24c311bd6c4d18e03e39cb3e6f4be54"},
+    ["linux-x64"]  = {"reaper_imgui-x86_64.so",    "b967a30b356f1c689ab457f2ce393b936267e4287939ece616e10d74399e2997"},
+    ["linux-arm64"]= {"reaper_imgui-aarch64.so",   "9b72753132a2ce96ae0405effaf9a8d8eeab9ab6d0f8c41ca7f62064333cdfc7"},
+    ["linux-arm32"]= {"reaper_imgui-armv7l.so",    "da2177ebd88f8e306e84002f045080c60beb521d43395b7ef36377ff6c35d315"},
+    ["linux-x86"]  = {"reaper_imgui-i686.so",      "4dadc055a1b8698e0d9fbf8ce3b63c39c9b5d30b0abc5734f14235d8545011d2"},
+  },
+}
+
+-- js_ReaScriptAPI: enables native file dialogs (save Lua/JSFX, attach
+-- file to prompt), window-rect probing, mouse modifier detection. The
+-- script degrades gracefully where it's missing (GetUserInputs save,
+-- no-op attach), so on platforms with no upstream binary we simply
+-- skip it and let those code paths run their fallback. Last upstream
+-- release was v1.310 (~2021); the binaries are committed to the
+-- ReaExtensions repo rather than published as GitHub releases, so the
+-- url_base references a specific version directory under master.
+Deps.JSAPI = {
+  key             = "js",
+  name            = "js_ReaScriptAPI",
+  pinned_version  = "v1.310",
+  -- No min_version_num: presence-only check (reaper.JS_ReaScriptAPI_Version).
+  url_base        = "https://raw.githubusercontent.com/juliansader/ReaExtensions/master/js_ReaScriptAPI/v1.310",
+  author          = "Julian Sader",
+  license         = "MIT",
+  source_url      = "github.com/juliansader/ReaExtensions",
+  -- mac-x86, linux-arm64, linux-arm32, linux-x86 intentionally absent:
+  -- no upstream binary exists for those platforms.
+  assets = {
+    ["win-x64"]    = {"reaper_js_ReaScriptAPI64.dll",      "7231862247efcd935f14a648364f7808631cb99b0fd55eb5ed6af1fbf7405072"},
+    ["win-x86"]    = {"reaper_js_ReaScriptAPI32.dll",      "80390a815c76504f3cb0defdfe2be1a6265bf16c29b15201685b5b287668a13b"},
+    ["mac-x64"]    = {"reaper_js_ReaScriptAPI64.dylib",    "645da47e8c766bc49e249467dc70c143cb618583aa0f408dfc42f5274049383e"},
+    ["mac-arm64"]  = {"reaper_js_ReaScriptAPI64ARM.dylib", "484765a944ee7fe39b71db1a16b3ec8e6311c1d8f93d141720942762b4679d70"},
+    ["linux-x64"]  = {"reaper_js_ReaScriptAPI64.so",       "5b06fd605ebcfed82cea39dabec180fa9905edc58a0d08c629d0672eba5f49ae"},
+  },
 }
 
 function Deps.detect_platform()
@@ -148,17 +206,70 @@ function Deps.cmp_version(a, b)
   return 0
 end
 
-function Deps.check_status()
+function Deps.check_imgui_status()
   -- Returns "ok" | "missing" | "too_old" [, installed_version_string]
   if not reaper.ImGui_CreateContext then return "missing" end
   if not reaper.ImGui_GetVersion    then return "ok" end  -- pre-version-API; assume OK
   local ok, _, _, reaimgui_ver = pcall(reaper.ImGui_GetVersion)
   if not ok or not reaimgui_ver then return "ok" end
   local installed = Deps.parse_version(reaimgui_ver)
-  if Deps.cmp_version(installed, Deps.MIN_VERSION_NUM) < 0 then
+  if Deps.cmp_version(installed, Deps.REAIMGUI.min_version_num) < 0 then
     return "too_old", reaimgui_ver
   end
   return "ok"
+end
+
+function Deps.check_jsapi_status()
+  -- Presence-only check (upstream is frozen at v1.310 since 2021).
+  return reaper.JS_ReaScriptAPI_Version and "ok" or "missing"
+end
+
+-- Build the install queue for the current platform. Order: ReaImGui
+-- first (UI dependency, blocks anything from rendering), JS_API second
+-- (file dialogs, only blocks save/attach UX). Each queue item carries
+-- everything the install pipeline needs: dep table, asset filename,
+-- expected SHA, full destination path under UserPlugins/, and the
+-- "kind" of install (missing vs. too_old) for messaging.
+--
+-- Skips deps whose platform has no upstream binary (e.g. js_ReaScriptAPI
+-- on linux-arm64): the script still works on those platforms via the
+-- existing fallback paths (GetUserInputs save, no-op attach), so we
+-- silently drop the unsupported dep rather than block the install flow.
+function Deps.build_queue(platform)
+  local queue = {}
+  local user_plugins = reaper.GetResourcePath() .. "/UserPlugins/"
+
+  local imgui_status, imgui_ver = Deps.check_imgui_status()
+  if imgui_status ~= "ok" then
+    local entry = Deps.REAIMGUI.assets[platform]
+    if entry then
+      queue[#queue + 1] = {
+        dep           = Deps.REAIMGUI,
+        kind          = imgui_status,             -- "missing" or "too_old"
+        installed_ver = imgui_ver,
+        asset         = entry[1],
+        expected_sha  = entry[2],
+        dest_path     = user_plugins .. entry[1],
+      }
+    end
+  end
+
+  local jsapi_status = Deps.check_jsapi_status()
+  if jsapi_status ~= "ok" then
+    local entry = Deps.JSAPI.assets[platform]
+    if entry then
+      queue[#queue + 1] = {
+        dep           = Deps.JSAPI,
+        kind          = jsapi_status,             -- always "missing"
+        installed_ver = nil,
+        asset         = entry[1],
+        expected_sha  = entry[2],
+        dest_path     = user_plugins .. entry[1],
+      }
+    end
+  end
+
+  return queue
 end
 
 -- =============================================================================
@@ -169,7 +280,7 @@ end
 -- show what is happening and surface failures.
 
 local InstallerGfx = {
-  W = 560, H = 320,
+  W = 560, H = 340,
   -- Theme colors lifted from PALETTE_DARK (kept in sync by hand; this
   -- block runs before COL is built so we can't reference it directly).
   C_BG_TOP    = 0x0B0B0BFF,
@@ -188,19 +299,40 @@ local InstallerGfx = {
   C_BTN_PRI   = 0x5D809CFF,
   C_BTN_PRIH  = 0x7A9BB2FF,
   -- State
-  state             = "init",   -- init | downloading | verifying | installing | done | error
+  -- State machine progression (per queue item):
+  --   init -> starting (pre-spawn) -> running (script alive, pre-download)
+  --     -> downloading -> verifying -> installing -> ok
+  --   on ok: if more items in queue, restart at "init" for next item;
+  --          on last item, transition to "done"
+  --   any phase + failure -> error
+  --   user opt-in screen: disclose (initial state set by .start when the
+  --     installer is invoked because at least one dep needs install).
+  -- The downloading/verifying/installing phase names are also written by
+  -- the background pipeline script as marker file content; poll_pipeline
+  -- promotes those phase names to InstallerGfx.state so render_running
+  -- can drive the progress bar from the live phase.
+  state             = "init",   -- see comment above for the full set
+  -- Live human-readable status text; mirrors the marker phase from
+  -- poll_pipeline (e.g. "Downloading from GitHub..."). Drawn under the
+  -- progress bar in render_running.
   status            = "",
   error_msg         = nil,
   error_step        = nil,
   platform          = nil,
-  asset             = nil,
-  expected_sha      = nil,
-  dest_path         = nil,
-  imgui_status      = nil,      -- "missing" or "too_old"
-  installed_ver     = nil,
+  -- Install queue: ordered list of items to install. Each item is the
+  -- table built by Deps.build_queue (dep / kind / installed_ver / asset
+  -- / expected_sha / dest_path). The pipeline runs once per item.
+  queue             = nil,
+  queue_idx         = 0,        -- 1-based index of current item
   _last_mouse_cap   = 0,
   _frame_count      = 0,
 }
+
+-- Helper: current queue item (the one being installed right now).
+function InstallerGfx.current()
+  if not InstallerGfx.queue then return nil end
+  return InstallerGfx.queue[InstallerGfx.queue_idx]
+end
 
 function InstallerGfx.color(rgba)
   local r = math.floor(rgba / 0x1000000) % 256 / 255
@@ -302,30 +434,40 @@ function InstallerGfx.button(x, y, w, h, label, is_primary)
   return clicked
 end
 
-function InstallerGfx.start(opts)
-  InstallerGfx.platform = Deps.detect_platform()
-  if not InstallerGfx.platform or not Deps.ASSETS[InstallerGfx.platform] then
-    -- Unsupported platform: fall back to native message + manual install link.
+-- Choose the gfx window title based on the queue's contents. Single-dep
+-- queues name the dep directly; mixed queues use the generic phrase.
+local function _installer_window_title(queue)
+  if not queue or #queue == 0 then return "Install Dependencies" end
+  if #queue == 1 then
+    local item = queue[1]
+    return ((item.kind == "too_old") and "Update " or "Install ") .. item.dep.name
+  end
+  return "Install Dependencies"
+end
+
+function InstallerGfx.start(queue)
+  InstallerGfx.platform  = Deps.detect_platform()
+  -- Defensive: build_queue would have filtered empty queues out before
+  -- calling .start, so #queue is at least 1 here. The platform check
+  -- could still come back nil on a totally unrecognized OS string.
+  if not InstallerGfx.platform or not queue or #queue == 0 then
     reaper.ShowMessageBox(
-      "ReaAssist could not auto-install ReaImGui on this platform.\n\n" ..
+      "ReaAssist could not auto-install its dependencies on this platform.\n\n" ..
       "Detected: " .. tostring(reaper.GetOS()) .. " / " .. tostring(reaper.GetAppVersion()) .. "\n\n" ..
-      "Please install ReaImGui manually from:\n" ..
-      "https://github.com/cfillion/reaimgui/releases\n\n" ..
-      "Place the appropriate binary in:\n" ..
+      "Please install manually:\n" ..
+      "  ReaImGui:        https://github.com/cfillion/reaimgui/releases\n" ..
+      "  js_ReaScriptAPI: https://github.com/juliansader/ReaExtensions\n\n" ..
+      "Place the appropriate binaries in:\n" ..
       reaper.GetResourcePath() .. "/UserPlugins/",
       "ReaAssist - Manual Install Required", 0)
     return
   end
-  local asset, sha = table.unpack(Deps.ASSETS[InstallerGfx.platform])
-  InstallerGfx.asset         = asset
-  InstallerGfx.expected_sha  = sha
-  InstallerGfx.dest_path     = reaper.GetResourcePath() .. "/UserPlugins/" .. asset
-  InstallerGfx.imgui_status  = opts.kind
-  InstallerGfx.installed_ver = opts.installed_ver
+  InstallerGfx.queue     = queue
+  InstallerGfx.queue_idx = 1
   -- Start on the disclosure screen so the user can read what's about to
-  -- be installed (third-party binary, source, license, destination)
+  -- be installed (third-party binaries, sources, licenses, destinations)
   -- before we touch UserPlugins/. Click Install to proceed.
-  InstallerGfx.state         = "disclose"
+  InstallerGfx.state     = "disclose"
   -- Center on whichever monitor the user's mouse is on. The trick to
   -- get the active monitor's work-area bounds via reaper.my_getViewport
   -- is to pass a deliberately huge target rect (-10000..10000) along
@@ -342,11 +484,11 @@ function InstallerGfx.start(opts)
   local y = sy1 + math.floor((sy2 - sy1 - InstallerGfx.H) / 2)
   -- Pre-init font slots (some REAPER builds need these registered before
   -- the first measurestr call to return correct widths).
-  gfx.init("Install ReaImGui", InstallerGfx.W, InstallerGfx.H, 0,
+  gfx.init(_installer_window_title(queue), InstallerGfx.W, InstallerGfx.H, 0,
            math.max(0, x), math.max(0, y))
   InstallerGfx.set_font(1, 28, true)   -- title
-  InstallerGfx.set_font(2, 14)         -- body / button labels
-  InstallerGfx.set_font(3, 12)         -- small / detail
+  InstallerGfx.set_font(2, 16)         -- body / button labels (16pt for legibility)
+  InstallerGfx.set_font(3, 13)         -- small / detail (1pt up from 12 for legibility)
   InstallerGfx.set_font(4, 11)         -- footer
   InstallerGfx.set_font(5, 16, true)   -- subtitle emphasis
   InstallerGfx.set_font(6, 16)         -- instructions body (2pt up from 14)
@@ -390,8 +532,16 @@ function InstallerGfx.tick()
     end
   elseif InstallerGfx.state == "starting"    then
     if InstallerGfx._frame_count >= 4 then InstallerGfx.spawn_pipeline() end
-  elseif InstallerGfx.state == "running"     then
-    InstallerGfx.poll_pipeline()  -- non-blocking marker check
+  elseif InstallerGfx.state == "running"
+      or InstallerGfx.state == "downloading"
+      or InstallerGfx.state == "verifying"
+      or InstallerGfx.state == "installing" then
+    -- Pipeline is alive (state was either set to "running" by spawn_pipeline
+    -- or promoted to a phase name by an earlier poll_pipeline tick). Keep
+    -- polling the marker each frame; poll_pipeline updates state as the
+    -- background script advances through phases and transitions to "done"
+    -- or "error" when the final marker arrives.
+    InstallerGfx.poll_pipeline()
   end
 
   InstallerGfx._last_mouse_cap = gfx.mouse_cap
@@ -399,15 +549,23 @@ function InstallerGfx.tick()
 end
 
 function InstallerGfx.render_running()
-  -- Title
-  InstallerGfx.draw_text_center("Installing ReaImGui", 38, InstallerGfx.C_TEXT, 1)
+  local item = InstallerGfx.current()
+  local n    = #InstallerGfx.queue
+  -- Title: "Installing ReaImGui" / "Updating ReaImGui" / "(2 of 2) Installing
+  -- js_ReaScriptAPI" depending on queue size and item kind.
+  local prefix = (n > 1)
+    and string.format("(%d of %d) ", InstallerGfx.queue_idx, n)
+    or  ""
+  local verb  = (item.kind == "too_old") and "Updating " or "Installing "
+  InstallerGfx.draw_text_center(prefix .. verb .. item.dep.name, 38,
+                                 InstallerGfx.C_TEXT, 1)
   -- Subtitle: missing vs upgrading
-  local subtitle = (InstallerGfx.imgui_status == "too_old")
-    and ("Updating from " .. tostring(InstallerGfx.installed_ver) .. " to " .. Deps.PINNED_VERSION)
-    or  ("Required dependency \xE2\x80\xA2 " .. Deps.PINNED_VERSION)
+  local subtitle = (item.kind == "too_old")
+    and ("from " .. tostring(item.installed_ver) .. " to " .. item.dep.pinned_version)
+    or  (item.dep.name .. " " .. item.dep.pinned_version)
   InstallerGfx.draw_text_center(subtitle, 80, InstallerGfx.C_TEXT_DIM, 3)
   -- Asset file name
-  InstallerGfx.draw_text_center(InstallerGfx.asset, 102, InstallerGfx.C_TEXT_VDIM, 4)
+  InstallerGfx.draw_text_center(item.asset, 102, InstallerGfx.C_TEXT_VDIM, 4)
   -- Progress bar. During "downloading" we can't safely poll the .tmp file
   -- (curl holds it open with NTFS share-mode that makes io.open / seek
   -- slow enough to starve the main thread); instead show an animated
@@ -427,54 +585,23 @@ function InstallerGfx.render_running()
   end
   -- Live status text
   InstallerGfx.draw_text_center(InstallerGfx.status or "...", 178, InstallerGfx.C_TEXT, 2)
-  -- Attribution footer
-  InstallerGfx.draw_text_center("ReaImGui by Christian Fillion \xE2\x80\xA2 LGPL-3.0-or-later",
-                                 gfx.h - 38, InstallerGfx.C_TEXT_VDIM, 4)
-  InstallerGfx.draw_text_center("github.com/cfillion/reaimgui",
+  -- Attribution footer (per current item)
+  InstallerGfx.draw_text_center(
+    item.dep.name .. " by " .. item.dep.author .. " \xE2\x80\xA2 " .. item.dep.license,
+    gfx.h - 38, InstallerGfx.C_TEXT_VDIM, 4)
+  InstallerGfx.draw_text_center(item.dep.source_url,
                                  gfx.h - 22, InstallerGfx.C_TEXT_VDIM, 4)
 end
 
 function InstallerGfx.render_disclose()
-  local is_update = (InstallerGfx.imgui_status == "too_old")
-  local title = is_update and "Update ReaImGui?" or "Install ReaImGui?"
-  local subtitle = is_update
-    and ("Your installed ReaImGui (" .. tostring(InstallerGfx.installed_ver)
-         .. ") is older than ReaAssist requires.")
-    or  "ReaAssist requires the ReaImGui extension to run."
-  InstallerGfx.draw_text_center(title,    38, InstallerGfx.C_ACCENT, 1)
-  InstallerGfx.draw_text_center(subtitle, 80, InstallerGfx.C_TEXT, 5)
-
-  -- Disclosure block: name / author / license / source / destination.
-  -- Labels left-justified within the block, values left-justified after
-  -- a fixed gap from the widest label. The whole block is then centered
-  -- horizontally in the window by measuring its total width once.
-  local rows = {
-    {"Dependency:", "ReaImGui " .. Deps.PINNED_VERSION},
-    {"By:",         "Christian Fillion"},
-    {"License:",    "LGPL-3.0-or-later"},
-    {"Source:",     "github.com/cfillion/reaimgui"},
-    {"Install to:", "UserPlugins/" .. InstallerGfx.asset},
-  }
-  gfx.setfont(3)
-  local label_w_max, value_w_max = 0, 0
-  for _, r in ipairs(rows) do
-    local lw = gfx.measurestr(r[1]); if lw > label_w_max then label_w_max = lw end
-    local vw = gfx.measurestr(r[2]); if vw > value_w_max then value_w_max = vw end
-  end
-  local gap = 20
-  local block_w = label_w_max + gap + value_w_max
-  local label_x = math.floor((gfx.w - block_w) / 2)
-  local value_x = label_x + label_w_max + gap
-  local y = 118
-  for _, r in ipairs(rows) do
-    InstallerGfx.color(InstallerGfx.C_TEXT_VDIM)
-    gfx.x = label_x; gfx.y = y; gfx.drawstr(r[1])
-    InstallerGfx.color(InstallerGfx.C_TEXT)
-    gfx.x = value_x; gfx.y = y; gfx.drawstr(r[2])
-    y = y + 20
+  local queue = InstallerGfx.queue
+  if #queue == 1 then
+    InstallerGfx._render_disclose_single(queue[1])
+  else
+    InstallerGfx._render_disclose_multi(queue)
   end
 
-  -- Buttons
+  -- Buttons (shared layout for both single and multi).
   local btn_w, btn_h = 130, 36
   local gap = 14
   local btn_y = gfx.h - 60
@@ -489,14 +616,119 @@ function InstallerGfx.render_disclose()
   end
 end
 
+-- Single-dep disclose view: labeled rows (Dependency: / By: / License:
+-- / Source: / Install to:) with the dep name in the title. This is the
+-- pre-bundling polish layout; restored for single-dep queues so it
+-- doesn't read as plural when only one extension is needed.
+function InstallerGfx._render_disclose_single(item)
+  local is_update = (item.kind == "too_old")
+  local title = is_update
+    and ("Update " .. item.dep.name .. "?")
+    or  ("Install " .. item.dep.name .. "?")
+  local subtitle = is_update
+    and ("Your installed " .. item.dep.name .. " ("
+         .. tostring(item.installed_ver) .. ") is older than "
+         .. "ReaAssist requires.")
+    or  ("ReaAssist requires the " .. item.dep.name .. " extension to run.")
+  InstallerGfx.draw_text_center(title,    38, InstallerGfx.C_ACCENT, 1)
+  InstallerGfx.draw_text_center(subtitle, 80, InstallerGfx.C_TEXT, 5)
+
+  -- Disclosure block: name / author / license / source / destination.
+  -- Labels left-justified within the block, values left-justified after
+  -- a fixed gap from the widest label. The whole block is then centered
+  -- horizontally in the window by measuring its total width once.
+  local rows = {
+    {"Dependency:", item.dep.name .. " " .. item.dep.pinned_version},
+    {"By:",         item.dep.author},
+    {"License:",    item.dep.license},
+    {"Source:",     item.dep.source_url},
+    {"Install to:", "UserPlugins/" .. item.asset},
+  }
+  gfx.setfont(3)
+  local label_w_max, value_w_max = 0, 0
+  for _, r in ipairs(rows) do
+    local lw = gfx.measurestr(r[1]); if lw > label_w_max then label_w_max = lw end
+    local vw = gfx.measurestr(r[2]); if vw > value_w_max then value_w_max = vw end
+  end
+  local row_gap = 20
+  local block_w = label_w_max + row_gap + value_w_max
+  local label_x = math.floor((gfx.w - block_w) / 2)
+  local value_x = label_x + label_w_max + row_gap
+  local y = 118
+  for _, r in ipairs(rows) do
+    InstallerGfx.color(InstallerGfx.C_TEXT_VDIM)
+    gfx.x = label_x; gfx.y = y; gfx.drawstr(r[1])
+    InstallerGfx.color(InstallerGfx.C_TEXT)
+    gfx.x = value_x; gfx.y = y; gfx.drawstr(r[2])
+    y = y + 22
+  end
+end
+
+-- Multi-dep disclose view: each queue item gets two centered lines
+-- (name + version, then author / license / source on one dim line)
+-- with a shared "Will install to: REAPER UserPlugins/" footer.
+function InstallerGfx._render_disclose_multi(queue)
+  local any_install = false
+  for _, item in ipairs(queue) do
+    if item.kind ~= "too_old" then any_install = true; break end
+  end
+  -- Mixed queues default to "Install Dependencies?". An all-update
+  -- multi-dep queue is vanishingly rare in practice but still correct.
+  local title = any_install and "Install Dependencies?"
+                            or  "Update Dependencies?"
+  InstallerGfx.draw_text_center(title, 38, InstallerGfx.C_ACCENT, 1)
+  InstallerGfx.draw_text_center(
+    "ReaAssist needs the following extensions:",
+    80, InstallerGfx.C_TEXT, 5)
+
+  local y = 118
+  for _, item in ipairs(queue) do
+    local line1 = item.dep.name .. " " .. item.dep.pinned_version
+    if item.kind == "too_old" then
+      line1 = line1 .. "  (was " .. tostring(item.installed_ver) .. ")"
+    end
+    InstallerGfx.draw_text_center(line1, y, InstallerGfx.C_TEXT, 5)
+    y = y + 22
+    local line2 = "by " .. item.dep.author .. " \xE2\x80\xA2 "
+               .. item.dep.license .. " \xE2\x80\xA2 "
+               .. item.dep.source_url
+    InstallerGfx.draw_text_center(line2, y, InstallerGfx.C_TEXT_DIM, 3)
+    y = y + 30
+  end
+
+  InstallerGfx.draw_text_center(
+    "Will install to: REAPER UserPlugins/", y + 4,
+    InstallerGfx.C_TEXT_VDIM, 3)
+end
+
 function InstallerGfx.render_done()
-  local is_update = (InstallerGfx.imgui_status == "too_old")
-  local title = is_update and "Dependency Update Complete" or "Dependency Install Complete"
-  local body  = is_update
-    and ("ReaImGui was updated to " .. Deps.PINNED_VERSION .. ".")
-    or  ("ReaImGui " .. Deps.PINNED_VERSION .. " was installed.")
+  local queue = InstallerGfx.queue
+  local n     = #queue
+
+  -- Title: pluralize and pick verb based on whether any items were
+  -- updates rather than fresh installs.
+  local any_update = false
+  for _, item in ipairs(queue) do
+    if item.kind == "too_old" then any_update = true; break end
+  end
+  local noun = (n > 1) and "Dependencies" or "Dependency"
+  local verb = any_update and "Updated" or "Installed"
+  local title = noun .. " " .. verb
   InstallerGfx.draw_text_center(title, 36, InstallerGfx.C_SUCCESS, 1)
-  InstallerGfx.draw_text_center(body,  78, InstallerGfx.C_TEXT, 2)
+
+  -- Body: list what was installed/updated. "ReaImGui v0.10.0.5 and
+  -- js_ReaScriptAPI v1.310 were installed." for two items; the single
+  -- item form drops the "and".
+  local names = {}
+  for _, item in ipairs(queue) do
+    names[#names + 1] = item.dep.name .. " " .. item.dep.pinned_version
+  end
+  local list  = (#names == 2) and (names[1] .. " and " .. names[2])
+             or  table.concat(names, ", ")
+  local was_were = (n > 1) and "were" or "was"
+  local body = list .. " " .. was_were .. " "
+            .. (any_update and "installed/updated." or "installed.")
+  InstallerGfx.draw_text_center(body, 78, InstallerGfx.C_TEXT, 2)
 
   -- Make absolutely clear ReaAssist itself is NOT yet running. Bigger,
   -- emphasized "next steps" block so a user who closes the window
@@ -506,8 +738,9 @@ function InstallerGfx.render_done()
 
   -- Instruction list. Centered as a block: measure the widest line,
   -- center the block's left edge, then draw lines left-justified within.
+  local extn_word = (n > 1) and "extensions" or "extension"
   local steps = {
-    "1.  Close and reopen REAPER (so the new extension loads).",
+    "1.  Close and reopen REAPER (so the new " .. extn_word .. " loads).",
     "2.  Open the Action list (Actions menu, or shortcut '?').",
     "3.  Search for 'ReaAssist' and run it.",
   }
@@ -525,27 +758,32 @@ function InstallerGfx.render_done()
     step_y = step_y + 24
   end
 
-  -- Two buttons: Close Window (just closes the gfx UI), Close REAPER
-  -- (one-click way to do step 1). REAPER prompts for unsaved work
-  -- before quitting via 40004, so this is safe.
+  -- Single Close button: closes the installer window only. The user
+  -- quits REAPER themselves via the OS chrome (red button on macOS,
+  -- X on Windows / Linux) per step 1 above. An earlier version had a
+  -- "Close REAPER" convenience button that fired Main_OnCommand(40004)
+  -- to quit REAPER in one click; on macOS Tahoe that path raced the
+  -- gfx teardown and left REAPER's extension state half-finalized,
+  -- which then surfaced on the next launch as a ReaImGui context
+  -- that ImGui_CreateContext returned but failed in-frame validation.
+  -- Native Cocoa termination (red button / Cmd+Q) does not have this
+  -- problem because it sequences the shutdown through AppKit.
   local btn_w, btn_h = 150, 36
-  local gap = 14
+  local btn_x = math.floor((gfx.w - btn_w) / 2)
   local btn_y = gfx.h - 70
-  local total_w = btn_w * 2 + gap
-  local btn_x = math.floor((gfx.w - total_w) / 2)
-  if InstallerGfx.button(btn_x, btn_y, btn_w, btn_h, "Close Window", false) then
-    gfx.quit()
-  end
-  if InstallerGfx.button(btn_x + btn_w + gap, btn_y, btn_w, btn_h, "Close REAPER", true) then
-    reaper.Main_OnCommand(40004, 0)  -- File: Quit REAPER
+  if InstallerGfx.button(btn_x, btn_y, btn_w, btn_h, "Close", true) then
     gfx.quit()
   end
 end
 
 function InstallerGfx.render_error()
+  local item = InstallerGfx.current()
+  local dep_name = item and item.dep.name or "dependency"
   InstallerGfx.draw_text_center("Installation Failed", 50, InstallerGfx.C_ERROR, 1)
-  InstallerGfx.draw_text_center("Step: " .. (InstallerGfx.error_step or "unknown"),
-                                 95, InstallerGfx.C_TEXT_DIM, 3)
+  InstallerGfx.draw_text_center(
+    "Failed installing " .. dep_name
+      .. " (" .. (InstallerGfx.error_step or "unknown") .. ")",
+    95, InstallerGfx.C_TEXT_DIM, 3)
   -- Wrap and draw error message lines
   local y = 125
   for line in (InstallerGfx.error_msg or ""):gmatch("([^\n]*)\n?") do
@@ -576,10 +814,14 @@ function InstallerGfx.fail(step, msg)
   InstallerGfx.state      = "error"
   InstallerGfx.error_step = step
   InstallerGfx.error_msg  = msg
-  -- Best-effort tmp cleanup
-  if InstallerGfx.dest_path then
-    os.remove(InstallerGfx.dest_path .. ".tmp")
-  end
+  -- Best-effort cleanup of any pipeline files this run produced. Each
+  -- field is only set after spawn_pipeline got far enough to create
+  -- the file; absent paths just no-op via os.remove. Uses the run-
+  -- tokenized paths captured by spawn_pipeline (the legacy ".tmp"
+  -- suffix is no longer accurate after the per-run-token change).
+  if InstallerGfx.tmp_path    then os.remove(InstallerGfx.tmp_path)    end
+  if InstallerGfx.marker_path then os.remove(InstallerGfx.marker_path) end
+  if InstallerGfx.script_path then os.remove(InstallerGfx.script_path) end
 end
 
 -- All-in-one async install pipeline. Writes a self-contained PowerShell
@@ -594,29 +836,63 @@ end
 -- while it scans, and certutil/os.rename then wait for share-mode
 -- access. Bundling moves that contention entirely off the main thread.
 function InstallerGfx.spawn_pipeline()
-  local tmp         = InstallerGfx.dest_path .. ".tmp"
-  local marker      = InstallerGfx.dest_path .. ".marker"
-  local script_base = InstallerGfx.dest_path .. ".install_script"
-  local url         = Deps.RELEASE_URL_BASE .. "/" .. InstallerGfx.asset
-  local expected    = InstallerGfx.expected_sha:lower()
+  local item = InstallerGfx.current()
+  if not item then
+    InstallerGfx.fail("setup", "Install queue was empty; nothing to do.")
+    return
+  end
+  -- Per-run token in tmp / marker / script paths so a cancelled-then-
+  -- rerun cycle cannot have the OLD background script's marker write
+  -- race with this run's poll. os.time() resolution is 1s; pair with a
+  -- microsecond fraction of time_precise() so two spawns in the same
+  -- second still get distinct tokens.
+  local run_token = string.format("%d_%06d",
+    os.time(),
+    math.floor((reaper.time_precise() % 1) * 1000000))
+  local tmp         = item.dest_path .. ".tmp."           .. run_token
+  local marker      = item.dest_path .. ".marker."        .. run_token
+  local script_base = item.dest_path .. ".install_script." .. run_token
+  local url         = item.dep.url_base .. "/" .. item.asset
+  local expected    = item.expected_sha:lower()
 
-  -- Clear any previous run's leftovers (.ps1 / .sh suffix variants both)
-  os.remove(tmp); os.remove(marker); os.remove(InstallerGfx.dest_path .. ".bak")
-  os.remove(script_base); os.remove(script_base .. ".ps1"); os.remove(script_base .. ".sh")
+  -- Best-effort cleanup of any stale .bak from a prior failed run. The
+  -- per-run-token .tmp / .marker / .script paths above can't collide
+  -- with prior runs by construction, so they don't need pre-removal.
+  os.remove(item.dest_path .. ".bak")
 
   local script_path
   local os_str = reaper.GetOS() or ""
   if os_str:match("^Win") then
+    -- Defensive guard limited to characters that BOTH have cmd meaning
+    -- AND cannot legitimately appear in a Windows file/directory name
+    -- (Windows reserves " < > | * ? for filenames, of which the first
+    -- four are also cmd metacharacters). Other cmd-significant chars
+    -- like & ^ ( ) % ARE valid in Windows paths -- "Program Files (x86)",
+    -- user dirs like "R&D", etc. -- and are protected by the triple-
+    -- quoted argument passing through PowerShell -> cmd -> powershell,
+    -- so we must NOT reject them or valid installs would fail to launch.
+    for _, c in ipairs({'"', '<', '>', '|'}) do
+      if item.dest_path:find(c, 1, true)
+          or marker:find(c, 1, true)
+          or tmp:find(c, 1, true) then
+        InstallerGfx.fail("setup", string.format(
+          "Install path contains a character ('%s') unsafe for the "
+          .. "Windows command line. Please install %s manually.",
+          c, item.dep.name))
+        return
+      end
+    end
     script_path = script_base .. ".ps1"
-    local function psq(s) return "'" .. tostring(s):gsub("'", "''") .. "'" end
     -- Per-phase status markers let the Lua side render an accurate
     -- status string AND prove the script actually started (vs. silently
     -- failing to launch). The "ok" / "*_failed" / "error:" markers are
     -- final and trigger state transition; intermediate phase markers
-    -- just update the UI.
+    -- (running / downloading / verifying / installing) update both the
+    -- on-screen status text AND InstallerGfx.state, which drives the
+    -- progress bar fill in render_running.
     local script = table.concat({
       "$ErrorActionPreference = 'Stop'",
-      "$marker = "   .. psq(marker),
+      "$marker = "   .. Shell.ps_quote(marker),
       -- WriteAllText is atomic at the OS level (one CreateFile + WriteFile
       -- pair); Out-File opens the file truncating then writes, leaving a
       -- brief window where a concurrent reader sees the file as empty.
@@ -626,12 +902,12 @@ function InstallerGfx.spawn_pipeline()
       "function Mark($s) {",
       "  [System.IO.File]::WriteAllText($marker, $s + \"`r`n\", [System.Text.Encoding]::ASCII)",
       "}",
-      "Mark 'started'",
+      "Mark 'running'",
       "try {",
-      "  $tmp = "      .. psq(tmp),
-      "  $dest = "     .. psq(InstallerGfx.dest_path),
-      "  $url = "      .. psq(url),
-      "  $expected = " .. psq(expected),
+      "  $tmp = "      .. Shell.ps_quote(tmp),
+      "  $dest = "     .. Shell.ps_quote(item.dest_path),
+      "  $url = "      .. Shell.ps_quote(url),
+      "  $expected = " .. Shell.ps_quote(expected),
       "  Mark 'downloading'",
       "  & curl.exe -fsSL --max-time 60 -o $tmp $url",
       "  if ($LASTEXITCODE -ne 0) { Mark \"download_failed:$LASTEXITCODE\"; return }",
@@ -674,27 +950,25 @@ function InstallerGfx.spawn_pipeline()
     -- only blocks until Start-Process returns (~1-2s). The inner cmd
     -- invokes powershell -File against the script with triple-quoted
     -- path so spaces survive the powershell -> cmd -> powershell layers.
-    local function ps_escape(s) return s:gsub("'", "''") end
     local inner_cmd = string.format(
       'powershell -NoProfile -ExecutionPolicy Bypass -File """%s"""',
       script_path)
     local launch = string.format(
       'powershell -NoProfile -WindowStyle Hidden -Command ' ..
       '"Start-Process cmd -ArgumentList \'/c %s\' -WindowStyle Hidden"',
-      ps_escape(inner_cmd))
+      Shell.ps_escape(inner_cmd))
     reaper.ExecProcess(launch, 5000)
   else
     script_path = script_base .. ".sh"
-    local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
     local script = table.concat({
       "#!/bin/sh",
-      "TMP=" .. sq(tmp),
-      "DEST=" .. sq(InstallerGfx.dest_path),
-      "URL=" .. sq(url),
-      "EXPECTED=" .. sq(expected),
-      "MARKER=" .. sq(marker),
-      "mark() { echo \"$1\" > \"$MARKER\"; }",
-      "mark started",
+      "TMP=" .. Shell.sh_quote(tmp),
+      "DEST=" .. Shell.sh_quote(item.dest_path),
+      "URL=" .. Shell.sh_quote(url),
+      "EXPECTED=" .. Shell.sh_quote(expected),
+      "MARKER=" .. Shell.sh_quote(marker),
+      "mark() { printf '%s' \"$1\" > \"$MARKER\"; }",
+      "mark running",
       "mark downloading",
       "if ! curl -fsSL --max-time 60 -o \"$TMP\" \"$URL\"; then",
       "  mark \"download_failed:$?\"; exit 0",
@@ -737,16 +1011,20 @@ function InstallerGfx.spawn_pipeline()
     local sf = io.open(script_path, "w")
     if not sf then InstallerGfx.fail("setup", "Could not write install script."); return end
     sf:write(script); sf:close()
-    os.execute("chmod +x " .. sq(script_path))
-    os.execute(string.format("(sh %s) &", sq(script_path)))
+    os.execute("chmod +x " .. Shell.sh_quote(script_path))
+    os.execute(string.format("(sh %s) &", Shell.sh_quote(script_path)))
   end
 
   InstallerGfx.pipeline_started_at = reaper.time_precise()
   InstallerGfx.marker_path         = marker
   InstallerGfx.script_path         = script_path
   InstallerGfx.tmp_path            = tmp
+  -- Initial post-spawn state. The background script overwrites the
+  -- marker file with phase names ("running", "downloading", ...) which
+  -- poll_pipeline promotes to InstallerGfx.state for progress-bar
+  -- rendering. Until the first marker lands we sit in "running".
   InstallerGfx.state               = "running"
-  InstallerGfx.status              = "Downloading & installing ReaImGui..."
+  InstallerGfx.status              = "Downloading & installing " .. item.dep.name .. "..."
 end
 
 -- Non-blocking poll for the result marker. Throttled to ~4 Hz so we are
@@ -775,15 +1053,18 @@ function InstallerGfx.poll_pipeline()
   -- transition. Treat as "still running" and re-poll next tick.
   if content == "" then return end
 
-  -- Intermediate phase markers: update UI status, don't transition or
-  -- delete the marker; the script will overwrite it on the next phase.
+  -- Intermediate phase markers: promote to InstallerGfx.state (drives
+  -- the progress-bar fill in render_running) and update the on-screen
+  -- status text. Don't transition out of the running pipeline or delete
+  -- the marker -- the script overwrites it on the next phase.
   local PHASE_LABELS = {
-    started     = "Starting installer...",
+    running     = "Starting installer...",
     downloading = "Downloading from GitHub...",
     verifying   = "Verifying checksum...",
     installing  = "Installing to UserPlugins...",
   }
   if PHASE_LABELS[content] then
+    InstallerGfx.state  = content
     InstallerGfx.status = PHASE_LABELS[content]
     return
   end
@@ -793,23 +1074,35 @@ function InstallerGfx.poll_pipeline()
   os.remove(InstallerGfx.marker_path)
 
   if content == "ok" then
-    InstallerGfx.state  = "done"
-    InstallerGfx.status = "Done."
+    -- Current queue item finished. If there are more items, advance and
+    -- restart the pipeline state machine for the next item; otherwise
+    -- transition to the unified "done" view.
+    if InstallerGfx.queue_idx < #InstallerGfx.queue then
+      InstallerGfx.queue_idx         = InstallerGfx.queue_idx + 1
+      InstallerGfx.state             = "init"
+      InstallerGfx._frame_count      = 0
+      InstallerGfx._last_marker_poll = 0
+      InstallerGfx.status            = "Preparing next dependency..."
+    else
+      InstallerGfx.state  = "done"
+      InstallerGfx.status = "Done."
+    end
     return
   end
 
+  local item = InstallerGfx.current()
   local kind, detail = content:match("^([^:]+):(.*)$")
   kind   = kind   or content
   detail = detail or ""
   if kind == "download_failed" then
     InstallerGfx.fail("download", string.format(
-      "Could not download from GitHub (curl exit code %s).\nCheck your network connection and try again.",
-      detail))
+      "Could not download %s from GitHub (curl exit code %s).\nCheck your network connection and try again.",
+      (item and item.dep.name) or "dependency", detail))
   elseif kind == "verify_failed" then
     InstallerGfx.fail("verify", string.format(
       "SHA-256 checksum mismatch for %s.\nExpected: %s...\nGot:      %s...",
-      InstallerGfx.asset,
-      InstallerGfx.expected_sha:sub(1, 16),
+      (item and item.asset) or "asset",
+      ((item and item.expected_sha) or ""):sub(1, 16),
       (detail or ""):sub(1, 16)))
   else
     InstallerGfx.fail("install",
@@ -817,10 +1110,23 @@ function InstallerGfx.poll_pipeline()
   end
 end
 
--- Main dispatch
-local _imgui_status, _installed_ver = Deps.check_status()
-if _imgui_status == "missing" or _imgui_status == "too_old" then
-  InstallerGfx.start({kind = _imgui_status, installed_ver = _installed_ver})
+-- Main dispatch. Build a queue of dependencies that need install for the
+-- current platform; if any need install, run the gfx installer and stop
+-- script execution here. The script will resume normal startup after the
+-- user restarts REAPER with the new extension(s) loaded.
+local _platform = Deps.detect_platform()
+local _queue    = _platform and Deps.build_queue(_platform) or {}
+if #_queue > 0 then
+  InstallerGfx.start(_queue)
+  return
+end
+-- Fallback: unrecognized platform but at least one dep check failed.
+-- Shouldn't normally hit this path (build_queue returns {} for missing
+-- assets, not an empty platform), but guard the case where GetOS is
+-- something neither Win/OSX/macOS-arm64/Other.
+if not _platform
+   and (Deps.check_imgui_status() ~= "ok" or Deps.check_jsapi_status() ~= "ok") then
+  InstallerGfx.start({})  -- triggers the unsupported-platform message
   return
 end
 
@@ -1030,7 +1336,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.0.8", -- public release version
+  VERSION           = "1.1.0", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -1664,6 +1970,9 @@ update = {
                              -- must delete dest (not try to restore a nonexistent .bak)
   send_time       = nil,     -- time_precise() when the current curl was launched
   applied         = false,   -- true once files have been written to disk
+  show_dialog     = false,   -- drives the Update Available / Files Need Repair popup in UI.lua;
+                             -- flipped true when the popup auto-show guard fires, false when
+                             -- the user dismisses (Later, OK) or starts a new fetch (Retry)
   popup_opened    = false,   -- true once the "Update Available" popup has been shown
   force           = false,   -- true to bypass version comparison (integrity reinstall)
   rename_failures = 0,       -- consecutive os.rename failures for AV-locked retry (initial fail = 1; each defer retry increments; gives up at 15)
@@ -1685,6 +1994,76 @@ update = {
 -- ImGui context, fonts, and atexit cleanup
 -- =============================================================================
 RA.ctx = ImGui.ImGui_CreateContext(CFG._PRODUCT .. " v" .. CFG.VERSION)
+
+-- Freshly-installed-ReaImGui preflight. After the gfx installer drops a
+-- new ReaImGui dylib into UserPlugins, REAPER occasionally hands us a
+-- context whose runtime metatable does not pass ImGui's per-call
+-- validation -- ImGui_CreateContext succeeds (returns a non-nil
+-- pointer), but the first context-taking call inside the bootstrap
+-- render fails with "expected a valid ImGui_Context*, got 0x...". One
+-- extra full REAPER restart loads the extension correctly. Observed on
+-- macOS Tahoe immediately after first install. Detect it here -- before
+-- ImGui_Attach and the main loop -- so the user sees a friendly
+-- "please restart REAPER" dialog instead of a raw Lua error from deep
+-- inside the bootstrap render.
+do
+  local ok, err = pcall(ImGui.ImGui_SetNextWindowSize, RA.ctx, 0, 0,
+                        ImGui.ImGui_Cond_Always())
+  if not ok and tostring(err):match("[Ee]xpected.*ImGui_Context") then
+    reaper.MB(
+      "ReaImGui was just installed but is not yet fully loaded.\n\n" ..
+      "Please quit REAPER and reopen it, then run ReaAssist again.\n\n" ..
+      "If this dialog appears a second time, quit and reopen REAPER " ..
+      "once more -- macOS sometimes loads new extensions over two " ..
+      "restarts.",
+      "ReaAssist", 0)
+    return
+  end
+end
+
+-- In-frame variant of the ReaImGui context preflight above. The init-
+-- time check runs OUTSIDE any defer/render frame; on macOS Tahoe,
+-- ReaImGui's strict per-call context validation appears to fire only
+-- INSIDE an active frame, so a freshly-installed dylib can pass the
+-- init-time check yet still fail validation on the first in-frame
+-- ImGui call (observed: SetNextWindowSize at the top of Bootstrap.loop).
+-- The two main-loop bodies (Bootstrap.loop and the post-bootstrap main
+-- loop) call this once on their first tick, before any other ImGui
+-- call, so the user sees the same friendly "please restart REAPER"
+-- dialog the init-time preflight uses instead of a raw Lua error.
+--
+-- Implementation: ImGui_ValidatePtr is a pure boolean check against
+-- ReaImGui's pointer registry -- it does NOT raise the Lua error or
+-- post to REAPER's "ReaScript error" popup. An earlier version probed
+-- with pcall(ImGui_PushStyleVar): the pcall caught the Lua error fine
+-- and the friendly dialog fired, but ReaImGui's C side ALSO posted
+-- the raw "expected a valid ImGui_Context*" message to REAPER's
+-- script error dialog before raising the Lua error, so the user got
+-- both popups. ValidatePtr avoids that path entirely.
+--
+-- Returns true if the context is usable, false (after showing the
+-- friendly dialog) if not.
+--
+-- Hung off RA (cross-file shared table) rather than declared as a
+-- main-chunk local: the main file is at Lua 5.4's 200-local cap.
+function RA.imgui_in_frame_context_ok()
+  -- ValidatePtr was added in ReaImGui 0.3; if the running ReaImGui
+  -- predates it (extremely unlikely on a fresh install, since the
+  -- bootstrap ships current ReaImGui), assume the context is usable
+  -- and let the original error path fire if it isn't.
+  if not reaper.ImGui_ValidatePtr then return true end
+  if reaper.ImGui_ValidatePtr(RA.ctx, "ImGui_Context*") then
+    return true
+  end
+  reaper.MB(
+    "ReaImGui was just installed but is not yet fully loaded.\n\n" ..
+    "Please quit REAPER and reopen it, then run ReaAssist again.\n\n" ..
+    "If this dialog appears a second time, quit and reopen REAPER " ..
+    "once more -- macOS sometimes loads new extensions over two " ..
+    "restarts.",
+    "ReaAssist", 0)
+  return false
+end
 
 -- EEL callback for InputTextMultiline: tracks selection start/end each
 -- frame. Lives on RA so UI.selectable_text (in the UI chunk) can reach
@@ -1786,6 +2165,88 @@ os.remove(tmp.update_sha_ps)
 os.remove(tmp.screenshot)
 os.remove(tmp.clipboard)
 
+-- Stranded-CMD_ID sweep: the per-CMD_ID removes above only catch files
+-- whose suffix matches THIS instance's command id. During the first-install
+-- bootstrap -> auto-update -> relauncher restart cycle, the initial install
+-- can leave behind temp files keyed to a CMD_ID that subsequent normal
+-- launches never see again (most visibly the SHA-verify trio
+-- reaassist_shain_/_shaout_/_shaexit_<id>.txt that users notice in
+-- /Library/Application Support/REAPER on macOS). Sweep the resource path
+-- for any reaassist_* leftovers regardless of suffix. Safe because the
+-- single-instance handshake guarantees no other live ReaAssist owns
+-- these files; safe even if a sibling install exists in another path
+-- because both share one resource directory and only one can run at a
+-- time. Pattern is anchored to known temp extensions so we never touch
+-- user-authored files that happen to start with "reaassist_".
+do
+  local sweep_dir = reaper.GetResourcePath()
+  -- Collect first, remove second: EnumerateFiles is index-based, so
+  -- os.remove mid-iteration would shift later entries down by one and
+  -- we would skip every other match.
+  local victims = {}
+  local idx     = 0
+  while true do
+    local fn = reaper.EnumerateFiles(sweep_dir, idx)
+    if not fn then break end
+    if fn:match("^reaassist_.+%.txt$")
+        or fn:match("^reaassist_.+%.json$")
+        or fn:match("^reaassist_.+%.ps1$")
+        or fn:match("^reaassist_.+%.png$") then
+      victims[#victims + 1] = fn
+    end
+    idx = idx + 1
+  end
+  for _, fn in ipairs(victims) do
+    os.remove(sweep_dir .. RA.SEP .. fn)
+  end
+end
+
+-- Stranded .bak sweep: the auto-update's atomic per-file swap renames
+-- each existing dest -> dest.bak before moving the new file in, then
+-- removes the .bak in a post-batch cleanup pass at the bottom of
+-- download_poll. When ReaAssist.lua itself is one of the updated
+-- files, the script auto-restarts shortly after the swap; if the
+-- restart races the cleanup pass for ReaAssist.lua's .bak, the .bak
+-- gets stranded in the install dir and sits there forever (cosmetic
+-- clutter, not a functional bug -- the script reads ReaAssist.lua
+-- and ignores .bak). Sweep here at startup.
+--
+-- Guards:
+--   1. Only delete a .bak when its un-suffixed counterpart exists in
+--      the same dir, so we never touch a user-saved hand-rolled .bak
+--      that lives here without a matching live file.
+--   2. Skip .bak files whose stem is in BAK_SWEEP_EXEMPT below: user
+--      overrides (System_Prompt_Custom.md is documented; some users
+--      keep a hand-saved .bak beside it before edits) and runtime-
+--      managed state (FX_Cache.json, Debug.log -- users sometimes
+--      back these up before clearing). These are NEVER files the
+--      updater backs up, so any .bak beside them is user-authored.
+do
+  local exempt = {
+    ["System_Prompt_Custom.md"] = true,
+    ["FX_Cache.json"]           = true,
+    ["Debug.log"]               = true,
+  }
+  local sweep_dirs = { RA.script_path, RA.RESOURCES_DIR }
+  for _, dir in ipairs(sweep_dirs) do
+    local victims = {}
+    local idx     = 0
+    while true do
+      local fn = reaper.EnumerateFiles(dir, idx)
+      if not fn then break end
+      local stem = fn:match("^(.+)%.bak$")
+      if stem and not exempt[stem]
+          and reaper.file_exists(dir .. stem) then
+        victims[#victims + 1] = fn
+      end
+      idx = idx + 1
+    end
+    for _, fn in ipairs(victims) do
+      os.remove(dir .. fn)
+    end
+  end
+end
+
 reaper.atexit(function()
   set_toolbar(false)
   -- Only clear the "running" lock if it still belongs to this instance.
@@ -1851,6 +2312,13 @@ reaper.atexit(function()
   os.remove(tmp.pid)
   os.remove(tmp.update_out)
   os.remove(tmp.update_exit)
+  -- Native SHA verify temp files; symmetric with the startup wipe so
+  -- the .ps1 in particular (which embeds tmp paths) doesn't linger
+  -- on disk after a graceful close.
+  os.remove(tmp.update_sha_in)
+  os.remove(tmp.update_sha_out)
+  os.remove(tmp.update_sha_exit)
+  os.remove(tmp.update_sha_ps)
   os.remove(tmp.screenshot)
   os.remove(tmp.clipboard)
 end)
@@ -2771,7 +3239,7 @@ function PROVIDERS.active()   return PROVIDERS[prefs.provider_idx] end
 -- existing lookup that goes through PROVIDERS.get(id) / PROVIDERS._by_id[id]
 -- continues to work. Flat per-record keys (rather than a single JSON blob)
 -- let this module run at script load without waiting on the JSON codec,
--- which is defined 8k lines later.
+-- which is populated ~3.8k lines later (line ~7093).
 Custom = {}
 
 CUSTOM_DEFAULT_CTX          = 65536  -- per-model fallback if everything is missing
@@ -2852,7 +3320,7 @@ end
 -- cleanly; the re-encoded canonical form is what gets stored. Called from the
 -- UI save handlers for both the provider-level field and the per-model popup.
 --
--- Runs after JSON.decode is defined (line ~11369), so all call sites (Save
+-- Runs after JSON.decode is defined (line ~11711), so all call sites (Save
 -- button in the custom_llm edit screen) reach it lazily at click time.
 function Custom.validate_extra_body(text)
   if not text then return "", nil end
@@ -4542,16 +5010,40 @@ local function capture_screenshot()
 
   elseif RA.IS_MACOS then
     -- screencapture -x: silent (no shutter sound). Captures all screens.
+    -- Absolute path because REAPER's os.execute / ExecProcess on some
+    -- macOS configs (notably Tahoe) doesn't reliably resolve PATH-based
+    -- binaries; mirrors the /usr/bin/curl pattern in the installer.
     local sq_path = "'" .. png_path:gsub("'", "'\\''") .. "'"
-    os.execute("screencapture -x " .. sq_path)
-    local f = io.open(png_path, "rb")
-    if f then
-      local size = f:seek("end")
-      f:close()
-      if size and size > 0 then return png_path end
+    local ok, _, code = os.execute("/usr/sbin/screencapture -x " .. sq_path)
+    if ok then
+      local f = io.open(png_path, "rb")
+      if f then
+        local size = f:seek("end")
+        f:close()
+        if size and size > 0 then return png_path end
+      end
     end
     os.remove(png_path)
-    return nil, "Screenshot capture failed."
+    -- Surface the actionable cause via a modal popup. Since macOS 10.15,
+    -- screencapture from a child process is denied when the parent app
+    -- (REAPER) lacks Screen Recording permission -- with no Lua-level
+    -- error, the file just never appears or comes back empty. The
+    -- transient inline error in the attachment row is too short to fit
+    -- the recovery steps, so use reaper.MB to deliver them.
+    reaper.MB(
+      "Screenshot capture failed (exit " .. tostring(code or "?") .. ").\n\n"
+      .. "On macOS this usually means REAPER does not have Screen Recording "
+      .. "permission. To grant it:\n\n"
+      .. "1. Open System Settings > Privacy & Security > Screen Recording.\n"
+      .. "2. Enable REAPER in the list.\n"
+      .. "3. Quit and reopen REAPER (macOS requires this before the new "
+      .. "permission takes effect).\n"
+      .. "4. Try the screenshot attachment again.\n\n"
+      .. "On macOS Sequoia / Tahoe you may also see a one-time \"bypass "
+      .. "the system private window picker\" prompt the first time the "
+      .. "capture runs -- click Allow.",
+      "ReaAssist", 0)
+    return nil, "Screenshot capture failed (see popup for details)."
   end
 
   return nil, "Screenshot capture is not supported on Linux."
@@ -4833,8 +5325,17 @@ local function load_system_prompt()
     S.bootstrap_active = true
     S.bootstrap_missing[#S.bootstrap_missing + 1] =
       "Resources/System_Prompt.md"
-    Updater._set_failure("system_prompt_load",
-      "System prompt file is missing.")
+    -- Log only; do NOT call Updater._set_failure here. _set_failure
+    -- populates update.last_error, which Bootstrap.loop's view selector
+    -- reads as "the last repair attempt failed" and routes straight to
+    -- render_failed -- skipping the normal recovery prompt that lets
+    -- the user click Repair. This is a load-time detection of a
+    -- recoverable file (downloading it again will fix it), not a
+    -- failed repair, so we leave last_error alone and let the
+    -- bootstrap_active + bootstrap_missing entries drive render_prompt.
+    Log.line("BOOTSTRAP",
+      "system_prompt_load: System_Prompt.md missing; "
+      .. "routing to recovery prompt.")
     return false
   end
   local raw = f:read("*a"); f:close()
@@ -4866,9 +5367,13 @@ local function load_system_prompt()
         S.bootstrap_active = true
         S.bootstrap_missing[#S.bootstrap_missing + 1] =
           "Resources/System_Prompt.md (corrupt)"
-        Updater._set_failure("system_prompt_load",
-          "System prompt file is corrupted (missing anchor: "
-          .. anchor .. ").")
+        -- Log only; see the parallel comment on the missing-file branch
+        -- above for why we do NOT call Updater._set_failure here. The
+        -- specific anchor is preserved in the debug log for triage.
+        Log.line("BOOTSTRAP", string.format(
+          "system_prompt_load: System_Prompt.md corrupt "
+          .. "(missing anchor %q); routing to recovery prompt.",
+          anchor))
         return false
       end
     end
@@ -8631,14 +9136,12 @@ function CTX.scan_fx_params(tr, fx_idx)
     local val, mn, mx = R_TrackFX_GetParam(tr, fx_idx, pi)
     local norm = 0
     if mx ~= mn then norm = (val - mn) / (mx - mn) end
-    -- Detect enum params: probe 21 evenly-spaced values. If 2-20 distinct
-    -- display strings, record as enum. Also capture display at norm 0/1
-    -- for continuous params so the model knows the API display range.
-    -- Probe 21 evenly-spaced normalised values to detect enum params and
-    -- capture display@0 / display@1 for continuous params. The earlier
-    -- early-return at "if needs_deep_scan then return ..." above guarantees
-    -- needs_deep_scan is false at this point in the loop, so no `if not
-    -- needs_deep_scan` wrapper is needed here.
+    -- Probe 21 evenly-spaced normalised values: 2-20 distinct display
+    -- strings -> record as enum; otherwise capture display@0 / display@1
+    -- so the model knows the API display range. The earlier early-return
+    -- at "if needs_deep_scan then return ..." above guarantees
+    -- needs_deep_scan is false here, so no `if not needs_deep_scan`
+    -- wrapper is needed.
     local enum_list = nil
     local disp_at_min, disp_at_max = nil, nil
     local probe_seen, probe_order = {}, {}
@@ -10585,7 +11088,7 @@ function CTX.preempt_buckets_for_prompt(user_text)
   -- type-keyword match (e.g. "reverb" in "create a JSFX shimmer reverb")
   -- triggers all four pins on a Pro-R 2 user; the model never reads any of
   -- them while writing EEL2, and the docs co-pin alone is ~19K input
-  -- tokens of waste. The docs-gate at Code.process_response_content is
+  -- tokens of waste. The docs-gate inside Net.try_finish_curl is
   -- still the safety net if the model does emit a Lua companion that
   -- needs reaper.* signatures.
   if jsfx_intent then
@@ -11321,7 +11824,7 @@ end
 
 -- Expose JSON to dofile'd sidecar modules (Resources/Diag.lua, future
 -- v1.1 diagnostics modules). Required because JSON is `local` to this file
--- (forward-declared at line ~1138, populated above). Sidecar modules loaded
+-- (forward-declared at line ~2366, populated above). Sidecar modules loaded
 -- via dofile cannot see lexical locals from the parent file; they use RA.JSON
 -- instead. Must come AFTER the do/end block above so RA.JSON points to the
 -- fully populated table.
@@ -11574,20 +12077,25 @@ function Updater.fire_get(url, out_path, exit_path)
                   .. string.format("%03d", ms)
   local timeout = CFG.UPDATE_CURL_TIMEOUT
   if RA.IS_WINDOWS then
-    -- Defensive: a literal " in url / out_path / exit_path would
-    -- terminate the inner cmd shell's quoted arguments early and
-    -- break PowerShell's outer -Command parse. Today's URL contains
-    -- only digits in its query string and the temp paths come from
-    -- RA.script_path, but reject defensively rather than silently
-    -- launching a malformed command.
-    if url:find('"', 1, true)
-        or out_path:find('"', 1, true)
-        or exit_path:find('"', 1, true) then
-      Log.line("UPDATE",
-        "fire_get: refusing to launch with literal '\"' in URL or path")
-      return false
+    -- Defensive guard limited to characters that cannot legitimately
+    -- appear in a valid Windows path OR a valid URL: " < > | are all
+    -- reserved by Windows filenames and are also invalid in URLs (or,
+    -- for ", a quote-terminator that would break the inner cmd arg
+    -- parse). Other cmd-significant chars (& ^ ( ) %) ARE valid in
+    -- Windows paths ("Program Files (x86)", user dirs like "R&D")
+    -- and in URL query strings; the triple-quoted argument passing
+    -- protects them, so we must NOT reject them or update / repair
+    -- would silently fail for users on those paths.
+    for _, c in ipairs({'"', '<', '>', '|'}) do
+      if url:find(c, 1, true)
+          or out_path:find(c, 1, true)
+          or exit_path:find(c, 1, true) then
+        Log.line("UPDATE", string.format(
+          "fire_get: refusing to launch with cmd-unsafe character '%s' "
+          .. "in URL or path", c))
+        return false
+      end
     end
-    local function ps_escape(p) return p:gsub("'", "''") end
     local cmd_line = str_format(
       'curl -s --connect-timeout 10 --max-time %d'
       .. ' "%s" -o """%s"""'
@@ -11597,10 +12105,9 @@ function Updater.fire_get(url, out_path, exit_path)
       'powershell -NoProfile -WindowStyle Hidden'
       .. ' -Command "Start-Process cmd -ArgumentList \'/c %s\''
       .. ' -WindowStyle Hidden"',
-      ps_escape(cmd_line))
+      Shell.ps_escape(cmd_line))
     reaper.ExecProcess(ps_cmd, 5000)
   else
-    local function sq(p) return "'" .. p:gsub("'", "'\\''") .. "'" end
     -- Single-quote the URL on POSIX shells. Double quotes still allow
     -- $(...) and `...` command substitution, so a malicious or malformed
     -- manifest filename baked into the URL could execute. is_safe_filename
@@ -11609,7 +12116,8 @@ function Updater.fire_get(url, out_path, exit_path)
     local cmd = str_format(
       '(curl -s --connect-timeout 10 --max-time %d'
       .. ' %s -o %s ; echo $? > %s) &',
-      timeout, sq(url), sq(out_path), sq(exit_path))
+      timeout, Shell.sh_quote(url), Shell.sh_quote(out_path),
+      Shell.sh_quote(exit_path))
     os.execute(cmd)
   end
   -- NOTE: Neither ExecProcess nor os.execute reliably indicate launch failure,
@@ -11626,8 +12134,10 @@ function Updater.poll()
   if (time_precise() - update.send_time) > (CFG.UPDATE_CURL_TIMEOUT + 10) then
     return "error"
   end
-  local ok_ef, ef = pcall(io.open, tmp.update_exit, "r")
-  if not ok_ef or not ef then return "waiting" end
+  -- io.open returns nil + err on failure; never throws. Direct call
+  -- keeps the control flow flat.
+  local ef = io.open(tmp.update_exit, "r")
+  if not ef then return "waiting" end
   local exit_str = ef:read("*a"); ef:close()
   local exit_code = tonumber(exit_str:match("(%d+)"))
   if not exit_code then return "waiting" end
@@ -11637,8 +12147,8 @@ end
 
 -- Read and parse the response file. Returns parsed table or nil.
 function Updater.read_response()
-  local ok_f, f = pcall(io.open, tmp.update_out, "r")
-  if not ok_f or not f then return nil end
+  local f = io.open(tmp.update_out, "r")
+  if not f then return nil end
   local raw = f:read("*a"); f:close()
   if not raw or #raw < 2 then return nil end
   local data, err = JSON.decode(raw)
@@ -11910,19 +12420,24 @@ function Updater.fire_native_sha(to_hash)
   pf:close()
 
   if RA.IS_WINDOWS then
-    -- Defensive: literal " in any tmp path would break the inner cmd's
-    -- triple-quoted argument parse and the outer PS Start-Process arg
-    -- list. The tmp paths come from RA.script_path so should be safe,
-    -- but reject defensively rather than launching a malformed command.
-    if tmp.update_sha_in:find('"', 1, true)
-        or tmp.update_sha_out:find('"', 1, true)
-        or tmp.update_sha_exit:find('"', 1, true)
-        or tmp.update_sha_ps:find('"', 1, true) then
-      Log.line("UPDATE",
-        "fire_native_sha: refusing to launch with literal '\"' in tmp paths")
-      return false
+    -- Defensive guard limited to characters that cannot legitimately
+    -- appear in a valid Windows path: " < > | are all reserved by
+    -- Windows filenames. Other cmd-significant chars (& ^ ( ) %) ARE
+    -- valid in Windows paths ("Program Files (x86)", "R&D", etc.) and
+    -- the triple-quoted argument passing protects them; rejecting
+    -- them would silently break update / repair for valid users. See
+    -- fire_get for the same guard on the manifest-fetch path.
+    for _, c in ipairs({'"', '<', '>', '|'}) do
+      if tmp.update_sha_in:find(c, 1, true)
+          or tmp.update_sha_out:find(c, 1, true)
+          or tmp.update_sha_exit:find(c, 1, true)
+          or tmp.update_sha_ps:find(c, 1, true) then
+        Log.line("UPDATE", string.format(
+          "fire_native_sha: refusing to launch with cmd-unsafe "
+          .. "character '%s' in tmp paths", c))
+        return false
+      end
     end
-    local function ps_escape(p) return p:gsub("'", "''") end
 
     -- The PS script: read paths, hash each via Get-FileHash, write
     -- "<hex>\t<input path>" to the output file. Per-file try/catch so a
@@ -11951,7 +12466,7 @@ try {
   exit 1
 }
 ]],
-      ps_escape(tmp.update_sha_in), ps_escape(tmp.update_sha_out))
+      Shell.ps_escape(tmp.update_sha_in), Shell.ps_escape(tmp.update_sha_out))
 
     -- Write the .ps1 with a UTF-8 BOM so PowerShell 5 reads it as UTF-8
     -- unambiguously (PS5 default file encoding is the system codepage;
@@ -11982,23 +12497,22 @@ try {
       'powershell -NoProfile -WindowStyle Hidden'
       .. ' -Command "Start-Process cmd -ArgumentList \'/c %s\''
       .. ' -WindowStyle Hidden"',
-      ps_escape(cmd_line))
+      Shell.ps_escape(cmd_line))
     reaper.ExecProcess(ps_cmd, 5000)
   else
     -- POSIX: prefer sha256sum (GNU; standard on Linux), fall back to
     -- shasum -a 256 (Perl; standard on macOS). exit 127 if neither is
     -- installed -- tick_native_sha falls back to pure-Lua. tr '\n' '\0'
     -- piped to xargs -0 so paths with spaces survive the shell split.
-    local function sq(p) return "'" .. p:gsub("'", "'\\''") .. "'" end
     local cmd = string.format(
       "(if command -v sha256sum >/dev/null 2>&1; then "
       .. "tr '\\n' '\\0' < %s | xargs -0 sha256sum > %s; rc=$?; "
       .. "elif command -v shasum >/dev/null 2>&1; then "
       .. "tr '\\n' '\\0' < %s | xargs -0 shasum -a 256 > %s; rc=$?; "
       .. "else rc=127; fi; echo $rc > %s) &",
-      sq(tmp.update_sha_in), sq(tmp.update_sha_out),
-      sq(tmp.update_sha_in), sq(tmp.update_sha_out),
-      sq(tmp.update_sha_exit))
+      Shell.sh_quote(tmp.update_sha_in), Shell.sh_quote(tmp.update_sha_out),
+      Shell.sh_quote(tmp.update_sha_in), Shell.sh_quote(tmp.update_sha_out),
+      Shell.sh_quote(tmp.update_sha_exit))
     os.execute(cmd)
   end
 
@@ -12034,8 +12548,8 @@ function Updater.tick_native_sha()
   -- powershell returns). The race window where it exists but isn't
   -- fully written is small; tonumber(nil) -> nil makes us wait one more
   -- frame on partial reads.
-  local ok_ef, ef = pcall(io.open, tmp.update_sha_exit, "r")
-  if not ok_ef or not ef then return end
+  local ef = io.open(tmp.update_sha_exit, "r")
+  if not ef then return end
   local exit_str = ef:read("*a"); ef:close()
   local exit_code = tonumber(exit_str:match("(%d+)"))
   if not exit_code then return end
@@ -12382,13 +12896,41 @@ function Updater.check_poll()
   elseif not remote_older then
     -- Versions match. But the local install may still have missing or
     -- corrupted files (user deleted something, disk error, partial copy).
-    -- Run the per-file SHA diff to find them, deferred across frames so
-    -- REAPER stays responsive. Synchronous diff would freeze the UI for
-    -- ~100-500 ms hashing ~5-6 MB of fonts and large .lua files (more
-    -- with AV scanning). See Updater.start_sha_diff / tick_sha_diff for
-    -- the incremental machine; main loop pumps it via the "verifying"
-    -- state branch, identical control-flow shape to "checking".
-    Updater.start_sha_diff(manifest, manual, forced)
+    -- Normally we run the per-file SHA diff to find them, deferred across
+    -- frames so REAPER stays responsive (synchronous diff would freeze
+    -- the UI for ~100-500 ms hashing ~5-6 MB of fonts and large .lua
+    -- files). See Updater.start_sha_diff / tick_sha_diff for the
+    -- incremental machine.
+    --
+    -- Bootstrap fast-path: when this check fired from the Bootstrap
+    -- repair button (`update._bootstrap_repair == true`), we already
+    -- know which files are missing/broken from the critical-files probe
+    -- at startup -- skip the SHA verify entirely and route directly to
+    -- repair_available with the known list. The trade-off: SHA-level
+    -- corruption in non-critical files won't be caught by THIS repair,
+    -- but the next non-bootstrap launch's normal SHA verify will.
+    if update._bootstrap_repair then
+      update._bootstrap_repair = nil
+      update.manifest          = manifest
+      update.remote_version    = manifest.version
+      -- S.bootstrap_missing entries can carry a " (load error)" suffix
+      -- (added by the font-load probe) that is presentation-only and
+      -- not part of the manifest filename; strip before queueing.
+      local missing = {}
+      for _, name in ipairs(S.bootstrap_missing or {}) do
+        local clean = name:gsub("%s*%(load error%)$", "")
+        missing[#missing + 1] = clean
+      end
+      update.repair_missing    = missing
+      update.repair_mismatched = {}
+      update.state             = "repair_available"
+      Log.line("UPDATE", string.format(
+        "check_poll: bootstrap fast-path armed; queueing %d known-broken "
+        .. "file(s) without SHA verify.", #missing))
+      if manual then S.float_toast = nil end
+    else
+      Updater.start_sha_diff(manifest, manual, forced)
+    end
   elseif forced then
     -- Remote manifest is older than installed AND user explicitly asked to
     -- reinstall. Repairing against an older manifest would effectively
@@ -12757,12 +13299,20 @@ function Updater.download_poll()
       return
     end
   end
-  -- Secondary sanity check: the main Lua file must contain our version marker.
+  -- Secondary sanity check: every shipped .lua file contains a
+  -- CFG.VERSION literal (the marker comment in Resources/Relaunch.lua
+  -- and Resources/Diag.lua is required for exactly this reason). A
+  -- download that passes SHA but doesn't contain the marker has either
+  -- been intercepted (proxy injecting an HTML error page) or is some
+  -- other file entirely. Distinct step name from sha_verify so the
+  -- Update-Failed dialog can show a content-specific message instead
+  -- of the CDN-propagation copy that fits sha_verify cases.
   if entry.filename:match("%.lua$") then
     if not content:find("CFG.VERSION", 1, true) then
-      Updater._set_failure("sha_verify", string.format(
+      Updater._set_failure("content_verify", string.format(
         "Downloaded %s is missing the CFG.VERSION marker "
-        .. "(rejected as likely-corrupt).", fname))
+        .. "(rejected as likely-corrupt or non-ReaAssist content).",
+        fname))
       Updater.rollback()
       update.state = "failed"
       return
@@ -13528,7 +14078,7 @@ end
 -- work. Without this, the chain-phrase / resolve preempts pre-pin a rich
 -- plugin context (plugin_ref + pref + bundle) but NO docs -- the model then
 -- bypasses the API-REF-REQUIREMENT rule, writes reaper.* code anyway, and
--- the docs-gate at Code.process_response_content silently force-fetches +
+-- the docs-gate inside Net.try_finish_curl silently force-fetches +
 -- retries. Net: 2 round-trips instead of 1, +30K cache_write on the retry,
 -- and the user-visible cost/time display only shows the FIRST request,
 -- understating the true cost. Co-pinning docs alongside the plugin context
@@ -16386,9 +16936,9 @@ function Net.send_to_api(user_text)
     S.input_buf = user_text
     if msg_attachments then S.attachments = msg_attachments end
     -- Clear the pending_* / event-tracking state populated earlier in this
-    -- function (lines 12181-12210) so a context-needed handler firing later
+    -- function (lines ~16555-16585) so a context-needed handler firing later
     -- doesn't pick up stale snapshot/project/prompt from a turn that never
-    -- actually sent. The _already_sent resets at 12158-12176 are
+    -- actually sent. The _already_sent resets at ~16549-16580 are
     -- intentionally left applied; the next attempt should re-run those
     -- buckets fresh.
     S.pending_orig_prompt  = nil
@@ -22059,7 +22609,7 @@ function Net.try_finish_curl()
           .. "deliver the correct code with a normal brief description.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
         -- Pop bad assistant + user turn (mirrors docs-gate scrub at line
-        -- 15183). Without this, the retry body carries the broken code as
+        -- ~22492). Without this, the retry body carries the broken code as
         -- a prior assistant turn, which both poisons prefix caching and
         -- contradicts the "respond as if this is your first reply" nudge.
         if #S.history > 0 and S.history[#S.history].role == "assistant" then
@@ -23110,7 +23660,7 @@ function Net.try_finish_curl()
   S.pending_display_idx = nil
   -- Final clear: this is the only spot in process_response that nils
   -- request_start_time. Earlier cleanup paths (empty-text error, normal
-  -- cleanup at ~15636) deliberately leave it set so the docs-gate auto-
+  -- cleanup at ~22087) deliberately leave it set so the docs-gate auto-
   -- retry can keep the in-flight "Thinking..." timer ticking across the
   -- silent retry curl. Once we reach here the turn is fully complete and
   -- the next send_to_api will overwrite anyway.
@@ -23293,9 +23843,14 @@ else
       (reaper.GetExtState(CFG.EXT_NS, "first_launch_complete") ~= "1")
     S.bootstrap_missing[#S.bootstrap_missing + 1] =
       "Resources/UI.lua (load error)"
-    Updater._set_failure("ui_load", tostring(err_ui))
+    -- Log only; do NOT call Updater._set_failure here. Same reason as
+    -- the load_system_prompt branches above: this is a load-time
+    -- detection of a recoverable file, not a failed repair, and
+    -- pre-populating last_error would skip the recovery prompt and
+    -- route straight to render_failed.
     Log.line("BOOTSTRAP", string.format(
-      "UI.lua failed to load: %s", tostring(err_ui)))
+      "ui_load: UI.lua failed to dofile (%s); routing to recovery prompt.",
+      tostring(err_ui)))
   else
     -- UI loaded cleanly. Mark first launch as complete so any future
     -- bootstrap fires routes through the recovery (repair) UI instead
@@ -23699,6 +24254,18 @@ end
 
 local function loop()
   if CFG._PRODUCT:lower() ~= CFG.EXT_NS then return end
+
+  -- In-frame ReaImGui context check, one-shot. Mirror of the guard at
+  -- the top of Bootstrap.loop -- defense in depth for the case where a
+  -- freshly-installed ReaImGui dylib lets the script skip bootstrap
+  -- entirely (resources already on disk) and lands directly here.
+  if not S.imgui_in_frame_validated then
+    if not RA.imgui_in_frame_context_ok() then
+      S.script_open = false
+      return
+    end
+    S.imgui_in_frame_validated = true
+  end
 
   Loop.handle_close_signal()
   Loop.handle_dev_signal()
@@ -24205,9 +24772,10 @@ function Bootstrap.render_prompt()
   ImGui.ImGui_Spacing(RA.ctx)
 
   -- File list. Two-column bulleted layout to halve vertical space.
-  -- Drop the "Resources/" prefix (header context already implies it).
-  -- Bullet char is U+2022 (UTF-8: E2 80 A2); falls back gracefully if
-  -- the default ImGui font lacks the glyph.
+  -- Drop the "Resources/" prefix on Resources/ entries (header context
+  -- already implies it); other entries (e.g. ReaAssist.lua, README.md)
+  -- render unchanged. Bullet char is ASCII; see comment by the items[]
+  -- construction below for why.
   local n = #S.bootstrap_missing
   local show_n = math.min(n, 10)
   local items = {}
@@ -24288,6 +24856,15 @@ function Bootstrap.render_prompt()
   if bs_primary_button("Repair", 110, 32) then
     update.last_error = nil
     update.last_step  = nil
+    -- Bootstrap fast-path: we already have S.bootstrap_missing from the
+    -- critical-files check at startup, so check_poll can skip the full
+    -- per-file SHA verify (which re-hashes ~5-7s of fonts and Lua
+    -- files for nothing -- those files are confirmed missing/broken
+    -- already). Only set in repair mode; install mode needs the full
+    -- diff because S.bootstrap_missing only covers critical files.
+    if not S.bootstrap_install_mode then
+      update._bootstrap_repair = true
+    end
     Updater.force_reinstall()
   end
   ImGui.ImGui_SameLine(RA.ctx, 0, 12)
@@ -24383,6 +24960,13 @@ function Bootstrap.render_failed()
     update.last_step  = nil
     -- Allow install-mode auto-trigger to re-fire on the next prompt pass.
     S.bootstrap_install_fired = false
+    -- Repair-mode Retry takes the same fast-path as the Repair button
+    -- above (skip the full SHA verify; we already know the broken file
+    -- list). Install mode keeps the full diff because S.bootstrap_missing
+    -- only covers critical files.
+    if not S.bootstrap_install_mode then
+      update._bootstrap_repair = true
+    end
     Updater.force_reinstall()
   end
   ImGui.ImGui_SameLine(RA.ctx, 0, 12)
@@ -24390,6 +24974,19 @@ function Bootstrap.render_failed()
 end
 
 function Bootstrap.loop()
+  -- In-frame ReaImGui context check, one-shot. The init-time preflight
+  -- can pass on macOS Tahoe even when the freshly-installed dylib isn't
+  -- fully loaded; the failure surfaces on the first in-frame ImGui call
+  -- below (SetNextWindowSize). Catching it here lets the user see the
+  -- friendly "please restart REAPER" dialog instead of a raw Lua error.
+  if not S.imgui_in_frame_validated then
+    if not RA.imgui_in_frame_context_ok() then
+      S.script_open = false
+      return
+    end
+    S.imgui_in_frame_validated = true
+  end
+
   -- Pump the Update state machine so check_poll / download_poll / retry
   -- all advance during bootstrap recovery. The normal main loop does this
   -- in its dev-signal handler; we do it inline here because the normal

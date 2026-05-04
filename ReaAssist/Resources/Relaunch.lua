@@ -24,8 +24,8 @@
 --   2. This helper polls the "running" ExtState in a defer loop until
 --      the old ReaAssist's cleanup path (or atexit) clears it.
 --   3. A small 0.25s grace window lets REAPER finish tearing down the
---      old action's state -- matches the successful pattern used by
---      Dev/ReaAssist_Debug_Helper.lua's Restart Plugin button.
+--      old action's state. Empirically chosen and validated against
+--      our internal restart tooling.
 --   4. The helper re-registers ReaAssist (idempotent if already known,
 --      returns the same cmd_id) and fires Main_OnCommand on it from
 --      this separate script context. REAPER reads that as a fresh

@@ -1,5 +1,11 @@
 # ReaAssist - Changelog
 
+## v1.1.0 - 2026-05-04
+
+- First public release announcement.
+- Dependency auto-install: ReaAssist now installs its required dependencies (ReaImGui, js_ReaScriptAPI) on first launch instead of pointing you at ReaPack docs.
+- Various bug fixes and polish.
+
 ## v1.0.8 - 2026-05-03
 
 ### Install & onboarding

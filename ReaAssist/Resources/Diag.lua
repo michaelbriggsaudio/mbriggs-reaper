@@ -596,7 +596,7 @@ end
 
 -- ============================================================================
 -- Send (async via curl) + tick
--- Mirrors Net.fire_curl pattern (ReaAssist.lua:13931+).
+-- Mirrors Net.fire_curl pattern (ReaAssist.lua:15144+).
 -- ============================================================================
 local function _instance_id()
   if type(S) == "table" and type(S.INSTANCE_ID) == "string" and S.INSTANCE_ID ~= "" then

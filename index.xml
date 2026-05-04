@@ -56,27 +56,20 @@ After installing, run the action "Script: ReaAssist.lua" from REAPER's Action Li
         <link rel="website" href="https://github.com/michaelbriggsaudio/mbriggs-reaper">GitHub Repository</link>
         <link rel="website" href="https://reaassist.app">ReaAssist Website</link>
       </metadata>
-      <version name="1.0.8" author="Michael Briggs" time="2026-05-03T15:26:05Z">
+      <version name="1.1.0" author="Michael Briggs" time="2026-05-04T07:42:56Z">
         <changelog><![CDATA[
-Install & onboarding:
-- ReaImGui (the required UI dependency) now installs itself on first launch instead of pointing users at the ReaPack docs. A small dark-themed installer downloads the right binary for your platform, SHA-256 verifies it, and atomically installs it -- no manual ReaPack step needed. macOS quarantine attribute is stripped automatically. Same path applies if ReaImGui is older than the pinned minimum (v0.10.0.5).
-- Bootstrap UI distinguishes first-launch (minimal popup with per-file progress cells) from existing-install repair (styled dialog with file list and Repair/Quit buttons). Install errors that previously stalled on a blank popup now route to the styled error view.
-- Cross-platform install hardening: Linux ARM detection (was falling through to x64 on aarch64), PowerShell rollback when the move-into-place step fails, progress-cell off-by-one, ASCII bullet in the repair list (Mac/Linux Proggy fallback), and sha256sum tried before shasum for broader Linux compatibility.
-
-UI:
-- Custom-provider model rows: notes are now a second inline column instead of buried in the Details popup, so a duplicated row can be retagged in place. The wide "Details" pill and bare "x" are replaced with three ghost icon buttons (settings / duplicate / delete). Active model gets the same checkmark as built-in providers.
-
-Prompt:
-- Generic chain prompts ("rock vocal chain", "add a compressor") now correctly trigger pref discovery on non-thinking models. Previously these would skip resolution entirely on lighter models and emit code against stock plugins instead of your preferred FX.
+- First public release announcement.
+- Dependency auto-install: ReaAssist now installs its required dependencies (ReaImGui, js_ReaScriptAPI) on first launch instead of pointing you at ReaPack docs.
+- Various bug fixes and polish.
         ]]></changelog>
-        <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.0.8</source>
-        <source file="manifest.json">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/manifest.json?v=1.0.8</source>
-        <source file="CHANGELOG.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/CHANGELOG.md?v=1.0.8</source>
+        <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.1.0</source>
+        <source file="manifest.json">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/manifest.json?v=1.1.0</source>
+        <source file="CHANGELOG.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/CHANGELOG.md?v=1.1.0</source>
         <source file="LICENSE.txt">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/LICENSE.txt?v=1.0.4</source>
         <source file="README.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/README.md?v=1.0.3</source>
-        <source file="Resources/UI.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/UI.lua?v=1.0.8</source>
-        <source file="Resources/Relaunch.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Relaunch.lua?v=1.0.4</source>
-        <source file="Resources/Diag.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Diag.lua?v=1.0.7</source>
+        <source file="Resources/UI.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/UI.lua?v=1.1.0</source>
+        <source file="Resources/Relaunch.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Relaunch.lua?v=1.1.0</source>
+        <source file="Resources/Diag.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Diag.lua?v=1.1.0</source>
         <source file="Resources/System_Prompt.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/System_Prompt.md?v=1.0.8</source>
         <source file="Resources/Prompts.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Prompts.md?v=1.0.6</source>
         <source file="Resources/API_Ref.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/API_Ref.md?v=1.0.6</source>

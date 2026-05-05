@@ -56,24 +56,25 @@ After installing, run the action "Script: ReaAssist.lua" from REAPER's Action Li
         <link rel="website" href="https://github.com/michaelbriggsaudio/mbriggs-reaper">GitHub Repository</link>
         <link rel="website" href="https://reaassist.app">ReaAssist Website</link>
       </metadata>
-      <version name="1.1.1" author="Michael Briggs" time="2026-05-04T22:42:26Z">
+      <version name="1.1.2" author="Michael Briggs" time="2026-05-05T09:08:56Z">
         <changelog><![CDATA[
-- New Report an Issue form on the Help page for bugs that need more than a thumbs reaction. Captures a description, optional contact info for replies, and ReaAssist attaches the redacted Advanced Log (or current chat as a fallback). Custom-provider endpoint URLs (LAN IPs and self-hosted hostnames) are scrubbed before send.
-- Custom LLMs: new "Test with a real chat/completions request" option above Test Connection. Catches misconfigurations the models-list probe misses (auth scope mismatch, configured id is not a chat model). Off by default to avoid surprise inference charges on reasoning models.
-- Custom LLMs: Test Connection no longer silently rewrites unrelated endpoint paths to /v1/models, so testing against servers with non-OpenAI chat paths works correctly.
-- Custom LLMs: multi-line endpoint values now round-trip correctly through REAPER's INI ExtState; configured providers no longer silently lose lines after a REAPER restart.
-- Custom LLMs: model rows with a typed override but no id are blocked at save time; stale model-index values are clamped when the active row is deleted underneath them.
-- FX-parameter calls scope per-track and dedupe identical-state writes, reducing redundant calls when chaining FX state across tracks.
-- Manual and Help: documented the new Report an Issue form and clarified that js_ReaScriptAPI is auto-installed alongside ReaImGui.
+- Per-model thinking levels. Each model now remembers its own thinking-effort pick instead of one shared setting per provider. Switching Sonnet -> Haiku -> Opus and back keeps each model's level independent. Models can also carry a default (Haiku 4.5 starts at Low; GPT-5.4 nano/mini start at Low; Gemini Flash Lite at Minimal, Flash at Low, Pro at Medium; everything else None).
+  - One-time reset on upgrade: v1.1.2 wipes any existing thinking-level pick once on first launch so everyone lands on the new defaults. Re-pick from the chip dropdown if you preferred a different level -- your choice is then remembered per-model from then on.
+- Anthropic extended thinking. Claude models can now run with thinking enabled (off by default). Opus 4.7 uses the new adaptive shape; Sonnet 4.6 / Haiku 4.5 use the manual budget shape. If a thinking turn burns its visible-output budget on reasoning, the existing length-retry path automatically falls back to thinking off.
+- Per-model context windows in preflight. The local token gate now respects each model's actual context window (Sonnet 4.6 / Opus 4.7 = 1M, GPT-5.4 nano/mini = 400K, GPT-5.4 full = 1.05M, Gemini 3.x = 1.05M) instead of treating everything as 200K. Long-context requests that previously got rejected before reaching the wire now go through.
+- Backup-warn popup hardened. "Save Project" path now bails (and surfaces a Log error) if the safety backup itself fails, instead of silently running the generated code without a backup. New "Disable Auto-Backup" button on the same popup for users who want to opt out.
+- Details card: "Est. Cost" / "Est. Total" rows hide when the active model has no prices entered (e.g. local llama.cpp, custom OpenAI-compatible endpoints), so you don't see "~$0.000000". Free-tier Gemini still shows the "would have been ~$X" framing.
+- Chip dropdowns: Provider / Model / Thinking popups open with a labelled header so it's clear what each chip selects.
+- API Keys cards: dropped the bold weight on provider names and the redundant "API Key" suffix from card titles.
         ]]></changelog>
-        <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.1.1</source>
-        <source file="manifest.json">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/manifest.json?v=1.1.1</source>
-        <source file="CHANGELOG.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/CHANGELOG.md?v=1.1.1</source>
+        <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.1.2</source>
+        <source file="manifest.json">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/manifest.json?v=1.1.2</source>
+        <source file="CHANGELOG.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/CHANGELOG.md?v=1.1.2</source>
         <source file="LICENSE.txt">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/LICENSE.txt?v=1.0.4</source>
         <source file="README.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/README.md?v=1.0.3</source>
-        <source file="Resources/UI.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/UI.lua?v=1.1.1</source>
+        <source file="Resources/UI.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/UI.lua?v=1.1.2</source>
         <source file="Resources/Relaunch.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Relaunch.lua?v=1.1.0</source>
-        <source file="Resources/Diag.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Diag.lua?v=1.1.1</source>
+        <source file="Resources/Diag.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Diag.lua?v=1.1.2</source>
         <source file="Resources/System_Prompt.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/System_Prompt.md?v=1.1.1</source>
         <source file="Resources/Prompts.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Prompts.md?v=1.1.1</source>
         <source file="Resources/API_Ref.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/API_Ref.md?v=1.0.6</source>

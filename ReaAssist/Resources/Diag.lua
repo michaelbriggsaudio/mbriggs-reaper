@@ -41,7 +41,7 @@ end
 Diag.SCHEMA_VERSION    = 2
 Diag.PAYLOAD_CAP_BYTES = 1024 * 1024     -- 1 MB server-side cap (manual feedback)
 -- Bug-report tier carries the full Advanced Log inline as a JSON string.
--- Logs are auto-pruned to MAX_LOG_TURNS (20) at write time, but each turn can
+-- Logs are auto-pruned to MAX_LOG_TURNS (40) at write time, but each turn can
 -- still contain large prompts/responses, so the cap here is set generously.
 -- Server must accept up to this size for event_type = "bug_report".
 Diag.BUG_REPORT_CAP_BYTES = 20 * 1024 * 1024   -- 20 MB

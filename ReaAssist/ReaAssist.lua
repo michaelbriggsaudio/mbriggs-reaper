@@ -1336,7 +1336,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.1.1", -- public release version
+  VERSION           = "1.1.2", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -2847,7 +2847,7 @@ end
 -- up with a multi-MB file. Runs at the top of Log.request so the cap
 -- holds after the new turn is appended. Session header + system info
 -- above the first kept REQUEST delimiter are preserved.
-local MAX_LOG_TURNS = 20
+local MAX_LOG_TURNS = 40
 local _REQ_DELIM = "\n======= REQUEST #"
 
 -- Monotonic turn counter, shared by REQUEST / RESPONSE pairs so it's obvious
@@ -3171,6 +3171,10 @@ end
 -- has_caching: true enables prompt-cache token display/accounting.
 -- cache_write applies to Claude only; OpenAI's caching is free to write and
 -- Gemini charges a separate per-hour storage fee which is not modeled here.
+-- hidden:      true marks an experimental built-in that is invisible in every
+--              UI surface (chip dropdown, Settings cards, Test API Keys, etc.)
+--              until an ExtState unlock at startup clears the flag. The slot
+--              still occupies its index so PROVIDERS.get(id) keeps working.
 PROVIDERS = {
   {
     id            = "anthropic",
@@ -3192,21 +3196,72 @@ PROVIDERS = {
     billing_url   = "https://console.anthropic.com/settings/billing",
     billing_label = "console.anthropic.com/settings/billing",
     default_model_idx = 2,
-    thinking_levels = nil,  -- Claude: no configurable thinking
-    -- price_cache_w reflects the 1-hour cache write rate (2x input). All cache
-    -- breakpoints in build_body_anthropic use ttl="1h" via the
-    -- extended-cache-ttl-2025-04-11 beta header. (5-min writes would be 1.25x.)
+    -- Anthropic thinking levels carry BOTH a budget_tokens (for the
+    -- legacy manual-thinking shape, {"thinking":{"type":"enabled",
+    -- "budget_tokens":N}}) AND an effort string (for the adaptive shape,
+    -- {"thinking":{"type":"adaptive"},"output_config":{"effort":"..."}}).
+    -- Which shape lands on the wire is decided per-MODEL via
+    -- thinking_style on the model entry, because Anthropic split the
+    -- thinking API across the 4.x lineup:
+    --   * Haiku 4.5 (and other "Claude 4" models without adaptive
+    --     support): manual budget_tokens only.
+    --   * Sonnet 4.6: both work; adaptive + effort is recommended,
+    --     manual is deprecated.
+    --   * Opus 4.7: adaptive + effort REQUIRED. Sending the manual
+    --     shape returns a 400.
+    -- "None" is the no-emit sentinel: the request goes out with no
+    -- `thinking` field. Anthropic's Messages API treats extended thinking
+    -- as opt-in across the entire Claude lineup -- omitting the field
+    -- means the model runs without reasoning blocks, regardless of model.
+    -- (Mythos Preview is the lone documented exception that auto-enables
+    -- adaptive when no thinking config is sent; we don't ship it.)
+    -- Default idx is None to match pre-existing ReaAssist behavior. The
+    -- budget_tokens stay under each model's max_output and under ~21K so
+    -- non-streaming Net.fire_curl is legal.
+    thinking_levels = {
+      { label = "None",   value = "none"   },
+      { label = "Low",    value = "low",    budget_tokens = 2048,  effort = "low"    },
+      { label = "Medium", value = "medium", budget_tokens = 8192,  effort = "medium" },
+      { label = "High",   value = "high",   budget_tokens = 16384, effort = "high"   },
+    },
+    default_thinking_idx = 1,  -- None (matches pre-thinking-support behavior)
+    -- price_cache_w reflects the 5-minute cache write rate (1.25x input).
+    -- build_body_anthropic emits ttl="5m" on every breakpoint (see the
+    -- "Plan A" comment block in that function for why the 1h escalation
+    -- was dropped). 1h writes would be 2x but we never use them.
     -- max_output: per-model output-token ceiling (Anthropic Messages API
     -- enforces server-side; we send this as max_tokens). Sourced from
     -- Anthropic's published model docs as of April 2026. Update when
     -- ceilings change.
+    -- context_window: per-model context size used by the preflight token
+    -- gate. Haiku 4.5 stays at the 200K default (no field); Sonnet 4.6
+    -- and Opus 4.7 advertise 1M-token windows.
+    -- thinking_style: which wire-format shape this model accepts.
+    --   "claude_manual"   = {"thinking":{"type":"enabled","budget_tokens":N}}
+    --   "claude_adaptive" = {"thinking":{"type":"adaptive"},
+    --                        "output_config":{"effort":"<level>"}}
+    -- Haiku 4.5 only accepts manual; Opus 4.7 only accepts adaptive
+    -- (manual returns 400); Sonnet 4.6 accepts both, adaptive preferred.
+    --
+    -- default_thinking_idx (per-model override): Haiku is meaningfully
+    -- weaker than Sonnet/Opus on multi-step REAPER scripting, so it
+    -- defaults to Low (2, 2K budget_tokens) instead of the provider's
+    -- None (1) -- enough reasoning lift to stabilize the small model on
+    -- typical scripting prompts without burning a thinking budget on
+    -- every turn. Sonnet and Opus inherit the provider default of None,
+    -- which means no thinking field on the wire and therefore no
+    -- extended thinking -- the API treats thinking as opt-in. Users who
+    -- want Sonnet/Opus to think can pick a level from the chip;
+    -- Anthropic's docs recommend Medium for Sonnet 4.6 and xHigh for
+    -- Opus 4.7 (xHigh isn't in our 4-level dropdown today, so High is
+    -- the strongest available there).
     models = {
       { label = "Haiku 4.5",  chip_label = "HAIKU",  id = "claude-haiku-4-5",
-        price_in = 1.00,  price_out = 5.00,  price_cache_r = 0.10, price_cache_w = 2.00,  max_output = 64000  },
+        price_in = 1.00,  price_out = 5.00,  price_cache_r = 0.10, price_cache_w = 1.25, max_output = 64000,  thinking_style = "claude_manual",   default_thinking_idx = 2 },
       { label = "Sonnet 4.6", chip_label = "SONNET", id = "claude-sonnet-4-6",
-        price_in = 3.00,  price_out = 15.00, price_cache_r = 0.30, price_cache_w = 6.00,  max_output = 64000  },
+        price_in = 3.00,  price_out = 15.00, price_cache_r = 0.30, price_cache_w = 3.75, max_output = 64000,  context_window = 1000000, thinking_style = "claude_adaptive" },
       { label = "Opus 4.7",   chip_label = "OPUS",   id = "claude-opus-4-7",
-        price_in = 5.00,  price_out = 25.00, price_cache_r = 0.50, price_cache_w = 10.00, max_output = 128000 },
+        price_in = 5.00,  price_out = 25.00, price_cache_r = 0.50, price_cache_w = 6.25, max_output = 128000, context_window = 1000000, thinking_style = "claude_adaptive" },
     },
   },
   {
@@ -3233,19 +3288,31 @@ PROVIDERS = {
       { label = "Medium", value = "medium" },
       { label = "High",   value = "high"   },
     },
-    default_thinking_idx = 3,  -- Medium
+    default_thinking_idx = 1,  -- None (full GPT-5.4 inherits this)
     -- max_output: per-model output-token ceiling. OpenAI accepts but does
     -- not require max_tokens / max_completion_tokens; we omit it from the
     -- request so the server applies its own default (= the ceiling). The
     -- value here is used for the preflight context-budget reserve only.
     -- All current GPT-5.x models share the same 128K ceiling.
+    -- context_window: per-model context size used by the preflight token
+    -- gate. Per OpenAI's GPT-5.4 docs, nano and mini accept 400K input
+    -- tokens; the full GPT-5.4 accepts 1,050,000.
+    -- Surcharge tier on GPT-5.4 full: prompts above 272K input tokens are
+    -- billed at 2x input and 1.5x output for the request. The cost
+    -- display below uses the lower-tier rate; large-prompt costs will
+    -- read low until calc_cost grows tier metadata + a token-count
+    -- branch. Same approximation pattern as Gemini Pro >200K below.
+    -- default_thinking_idx (per-model override): nano and mini both
+    -- benefit from a small reasoning lift on typical prompts (Low / 2),
+    -- while the full GPT-5.4 is capable enough at None (1) that the
+    -- provider default applies.
     models = {
       { label = "GPT-5.4 nano", chip_label = "NANO", id = "gpt-5.4-nano",
-        price_in = 0.20,  price_out = 1.25,  price_cache_r = 0.02,  max_output = 128000 },
+        price_in = 0.20,  price_out = 1.25,  price_cache_r = 0.02,  max_output = 128000, context_window = 400000,  default_thinking_idx = 2 },
       { label = "GPT-5.4 mini", chip_label = "MINI", id = "gpt-5.4-mini",
-        price_in = 0.75,  price_out = 4.50,  price_cache_r = 0.075, max_output = 128000 },
+        price_in = 0.75,  price_out = 4.50,  price_cache_r = 0.075, max_output = 128000, context_window = 400000,  default_thinking_idx = 2 },
       { label = "GPT-5.4",      chip_label = "FULL", id = "gpt-5.4",
-        price_in = 2.50,  price_out = 15.00, price_cache_r = 0.25,  max_output = 128000 },
+        price_in = 2.50,  price_out = 15.00, price_cache_r = 0.25,  max_output = 128000, context_window = 1050000 },
     },
   },
   {
@@ -3270,7 +3337,7 @@ PROVIDERS = {
       { label = "Medium",  value = "MEDIUM"  },
       { label = "High",    value = "HIGH"    },
     },
-    default_thinking_idx = 3,  -- Medium
+    default_thinking_idx = 3,  -- Medium (provider-wide fallback only)
     -- price_cache_r is the text/image/video rate at the lower (<=200K for Pro)
     -- prompt-size tier. Audio cache reads are ~2x and >200K Pro requests are
     -- billed at 2x; the script has no per-request tier tracking so the
@@ -3279,14 +3346,85 @@ PROVIDERS = {
     -- not require maxOutputTokens; we omit it from the request so the
     -- server applies its own default. Used here for the preflight reserve
     -- only. All current Gemini 3.x models share the same 65,536 ceiling.
+    -- context_window: per-model context size used by the preflight token
+    -- gate. All current Gemini 3.x models advertise the same 1,048,576-
+    -- token input window.
+    -- default_thinking_idx (per-model override): tested values per
+    -- ChatGPT-led benchmarking. Flash Lite goes to Minimal (1, flash_only)
+    -- since its dropdown does include the Minimal entry; Flash 3 to Low
+    -- (2); Pro 3.1 inherits the provider Medium default. Pro is "Medium
+    -- if exposed, but not recommended" -- the long-context surcharge tier
+    -- + the cost of every Pro turn make it the wrong daily-driver pick.
     models = {
       { label = "Flash Lite 3.1", chip_label = "FLASH LITE", id = "gemini-3.1-flash-lite-preview",
-        price_in = 0.25,  price_out = 1.50, price_cache_r = 0.025, is_flash = true,    max_output = 65536 },
+        price_in = 0.25,  price_out = 1.50, price_cache_r = 0.025, is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 1 },
       { label = "Flash 3",        chip_label = "FLASH",      id = "gemini-3-flash-preview",
-        price_in = 0.50,  price_out = 3.00, price_cache_r = 0.05,  is_flash = true,    max_output = 65536 },
+        price_in = 0.50,  price_out = 3.00, price_cache_r = 0.05,  is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 2 },
       { label = "Pro 3.1",        chip_label = "PRO",        id = "gemini-3.1-pro-preview",
-        price_in = 2.00,  price_out = 12.00, price_cache_r = 0.20, paid_only = true,   max_output = 65536 },
+        price_in = 2.00,  price_out = 12.00, price_cache_r = 0.20, paid_only = true,   max_output = 65536, context_window = 1048576 },
     },
+  },
+  {
+    -- DeepSeek V4 (experimental, hidden until unlocked via ExtState
+    -- "experimental_deepseek" == "1"; see the unlock block after
+    -- Custom.register_all). OpenAI-compatible chat-completions wire format
+    -- so build_body_openai handles it; thinking is per-request via
+    -- extra_body.thinking.type ("disabled" / "enabled") instead of OpenAI's
+    -- top-level reasoning_effort -- see the deepseek_extra_body branch in
+    -- Net.build_body_openai. Caching is automatic on the prefix (no
+    -- cache_control headers); usage.prompt_cache_hit_tokens reports hits in
+    -- place of OpenAI's prompt_tokens_details.cached_tokens (see the
+    -- response parser branch in Net.try_finish_curl).
+    id            = "deepseek",
+    label         = "DeepSeek",
+    endpoint      = "https://api.deepseek.com/v1/chat/completions",
+    auth_style    = "header",
+    auth_header   = "Authorization",
+    auth_prefix   = "Bearer ",
+    extra_headers = {},
+    -- DeepSeek keys begin with "sk-" (same family as OpenAI). The exclude
+    -- list rules out the two known siblings so a misfiled paste lands on
+    -- the right card. Pasting an OpenAI sk- key here will pass format
+    -- validation but fail at the API; that's a 401 the user can act on.
+    key_prefix    = "sk-",
+    key_exclude   = "sk-ant-",
+    key_min_len   = 30,
+    key_extstate  = "api_key_deepseek",
+    has_caching   = true,
+    console_url   = "https://platform.deepseek.com/api_keys",
+    console_label = "platform.deepseek.com/api_keys",
+    billing_url   = "https://platform.deepseek.com/usage",
+    billing_label = "platform.deepseek.com/usage",
+    default_model_idx = 1,  -- Flash: cheapest serious option in the lineup
+    -- DeepSeek thinking is binary, not an effort scale: extra_body.thinking
+    -- carries either "disabled" or "enabled". Net.build_body_openai branches
+    -- on thinking_style to emit the extra_body shape instead of the top-
+    -- level reasoning_effort field used by OpenAI proper.
+    thinking_style = "deepseek_extra_body",
+    -- The chip dropdown has no field label, so naked "Enabled"/"Disabled"
+    -- reads as ambiguous in isolation. The wire-format `value` strings stay
+    -- as DeepSeek requires ("disabled"/"enabled"); the user-facing labels
+    -- name what is being toggled.
+    thinking_levels = {
+      { label = "Non-Thinking", value = "disabled" },
+      { label = "Thinking",     value = "enabled"  },
+    },
+    default_thinking_idx = 1,  -- Non-Thinking (Thinking is opt-in via the chip)
+    -- Pricing: post-discount steady-state numbers from
+    -- api-docs.deepseek.com/quick_start/pricing as of 2026-05-04. The
+    -- promotional 75% V4-Pro discount expires 2026-05-31; using the
+    -- non-promo prices here so the $ column does not lie after that date.
+    -- max_output: both models cap at 384K per the same page.
+    -- context_window: both V4 models advertise a 1M-token window. The
+    -- preflight token gate needs this to be larger than max_output;
+    -- otherwise the budget calc (limit - reserve) goes negative.
+    models = {
+      { label = "V4 Flash", chip_label = "FLASH", id = "deepseek-v4-flash",
+        price_in = 0.14, price_out = 0.28, price_cache_r = 0.0028, max_output = 384000, context_window = 1000000 },
+      { label = "V4 Pro",   chip_label = "PRO",   id = "deepseek-v4-pro",
+        price_in = 1.74, price_out = 3.48, price_cache_r = 0.0145, max_output = 384000, context_window = 1000000 },
+    },
+    hidden = true,
   },
 }
 
@@ -3295,6 +3433,46 @@ PROVIDERS._by_id = {}
 for i, p in ipairs(PROVIDERS) do PROVIDERS._by_id[p.id] = i end
 function PROVIDERS.get(id)    return PROVIDERS[PROVIDERS._by_id[id] or 0] end
 function PROVIDERS.active()   return PROVIDERS[prefs.provider_idx] end
+
+-- Per-model thinking_idx persistence. Stored as
+-- "thinking_idx_<provider_id>_<model_id>". An earlier rev of this helper
+-- read the legacy "thinking_idx_<provider_id>" key as a fallback to soften
+-- the upgrade, but that bled a single per-provider setting onto every
+-- model in the provider (e.g. picking High on Sonnet then restarting made
+-- Haiku and Opus also load High as their default until the user touched
+-- each one). Cleaner: per-model keys only, with the cascade falling
+-- through model.default_thinking_idx -> provider.default_thinking_idx ->
+-- 1. Legacy keys still in ExtState are inert orphans; the save helper
+-- writes only the per-model slot. Used by MODELS.refresh, the chip
+-- dropdown's provider-switch and model-switch handlers, and the thinking-
+-- pick handler.
+function PROVIDERS.load_thinking_idx(p, m)
+  if not p or not p.thinking_levels then return 0 end
+  local saved
+  if m and m.id then
+    saved = tonumber(reaper.GetExtState(
+      CFG.EXT_NS, "thinking_idx_" .. p.id .. "_" .. m.id))
+  end
+  local tdefault = (m and m.default_thinking_idx)
+                    or p.default_thinking_idx or 1
+  local idx = saved or tdefault
+  if idx < 1 or idx > #p.thinking_levels then idx = tdefault end
+  return idx
+end
+
+function PROVIDERS.save_thinking_idx(p, m, idx)
+  if not p or not p.thinking_levels then return end
+  if m and m.id then
+    reaper.SetExtState(
+      CFG.EXT_NS, "thinking_idx_" .. p.id .. "_" .. m.id,
+      tostring(idx), true)
+  else
+    -- Custom providers mid-edit can briefly land here with no usable
+    -- model id; fall back to the legacy slot so the value still persists.
+    reaper.SetExtState(
+      CFG.EXT_NS, "thinking_idx_" .. p.id, tostring(idx), true)
+  end
+end
 
 -- =============================================================================
 -- Custom LLM / custom-endpoint provider support
@@ -3922,6 +4100,67 @@ end
 -- below sees every custom entry as a valid index.
 Custom.register_all()
 
+-- One-time thinking-level reset, sentinel-gated to fire exactly once per
+-- install on first launch of any release that contains this block. Wipes
+-- every saved thinking_idx -- both the legacy per-provider key
+-- ("thinking_idx_<provider>") and the new per-model keys
+-- ("thinking_idx_<provider>_<model>") -- so everyone lands on the
+-- freshly-tuned defaults instead of carrying forward a level that was
+-- set under different rules. Without this, users who had picked, say,
+-- High on GPT-5.4 in 1.1.1 would silently keep High on every GPT-5.4
+-- model after upgrade because the legacy key bleeds across models.
+--
+-- Defaults users land on after the reset:
+--   Claude:   Haiku=Medium (per-model override), Sonnet/Opus=None
+--   ChatGPT:  Medium (provider default)
+--   Gemini:   Medium (provider default)
+--   DeepSeek: Thinking (provider default)
+--
+-- Subsequent user picks via the chip dropdown persist normally. The
+-- sentinel lives in the user's ExtState, so this block needs to remain
+-- in future releases too -- a user who skips from 1.1.1 straight to a
+-- later release should still get the reset on their first launch of
+-- that release. Once the sentinel is "1" the block is a single
+-- GetExtState no-op, so the cost of keeping it is negligible. A future
+-- release that needs another reset should add a new block with a fresh
+-- sentinel name (thinking_idx_reset_v2, etc.) rather than editing
+-- this one.
+do
+  if reaper.GetExtState(CFG.EXT_NS, "thinking_idx_reset_v1") ~= "1" then
+    for _, p in ipairs(PROVIDERS) do
+      reaper.DeleteExtState(CFG.EXT_NS, "thinking_idx_" .. p.id, true)
+      if p.models then
+        for _, m in ipairs(p.models) do
+          if m.id then
+            reaper.DeleteExtState(
+              CFG.EXT_NS, "thinking_idx_" .. p.id .. "_" .. m.id, true)
+          end
+        end
+      end
+    end
+    reaper.SetExtState(CFG.EXT_NS, "thinking_idx_reset_v1", "1", true)
+  end
+end
+
+-- Experimental built-in unlock. PROVIDERS may carry `hidden = true` on a
+-- built-in entry to gate it behind an ExtState flag while the integration
+-- is still being shaken out. Setting the flag to "1" clears the field on
+-- every matching entry, making it indistinguishable from a regular built-in
+-- for the rest of the script (chip dropdown, Settings cards, Test API Keys,
+-- request build/response parse, etc.). Flipping the flag back to anything
+-- else re-hides on the next script load -- the snap-back below pulls
+-- prefs.provider_idx off any provider that ends up hidden so the home
+-- screen does not boot into a blank chip.
+do
+  local function _unlock_if(extstate_key, provider_id)
+    if reaper.GetExtState(CFG.EXT_NS, extstate_key) == "1" then
+      local p = PROVIDERS.get(provider_id)
+      if p then p.hidden = nil end
+    end
+  end
+  _unlock_if("experimental_deepseek", "deepseek")
+end
+
 -- =============================================================================
 -- Provider + Model selector
 -- =============================================================================
@@ -3948,6 +4187,20 @@ local function _prefs_load_idx(key, default, list)
 end
 
 prefs.provider_idx = _prefs_load_idx("provider_idx", 1, PROVIDERS)
+
+-- Hidden-provider snap-back. If the persisted provider_idx points at a
+-- built-in that is currently hidden (the unlock flag was on previously,
+-- the user picked it, and the flag is now off), every UI surface filters
+-- it out -- the home chip would render blank and the model picker would
+-- be empty. Snap to the canonical default (1 = Claude) and persist so
+-- the next launch does not re-snap. Custom providers cannot carry the
+-- hidden field, so the check is harmless when the active slot is custom.
+if PROVIDERS[prefs.provider_idx]
+   and PROVIDERS[prefs.provider_idx].hidden then
+  prefs.provider_idx = 1
+  reaper.SetExtState(CFG.EXT_NS, "provider_idx",
+    tostring(prefs.provider_idx), true)
+end
 
 -- Load cloud_request_timeout (default CFG.CLOUD_TIMEOUT_DEFAULT = 180s). Clamp
 -- to [CLOUD_TIMEOUT_MIN, CLOUD_TIMEOUT_MAX] so a corrupt ExtState value can't
@@ -4102,16 +4355,14 @@ function MODELS.refresh()
     default_idx = p.default_model_idx or #src
   end
   prefs.model_idx = _prefs_load_idx(key, default_idx, src)
-  -- Load per-provider thinking_idx (0 = not supported).
+  -- Load per-(provider,model) thinking_idx via the shared helper so all
+  -- the cascade rules (per-model -> model default -> provider default
+  -- -> 1) live in one place.
   if p.thinking_levels then
-    local tkey = "thinking_idx_" .. p.id
-    local tdefault = p.default_thinking_idx or 1
-    prefs.thinking_idx = tonumber(reaper.GetExtState(CFG.EXT_NS, tkey)) or tdefault
-    if prefs.thinking_idx < 1 or prefs.thinking_idx > #p.thinking_levels then
-      prefs.thinking_idx = tdefault
-    end
+    local active_m = MODELS[prefs.model_idx] or MODELS[1]
+    prefs.thinking_idx = PROVIDERS.load_thinking_idx(p, active_m)
   else
-    prefs.thinking_idx = 0
+    prefs.thinking_idx = 0  -- 0 = provider does not expose thinking
   end
 end
 
@@ -4181,13 +4432,29 @@ end
 MODELS.refresh()
 
 -- Determine the initial first-run screen. Order: TOS first, then API key, then main UI.
--- Show the first-run API key screen only if NO provider has a key set.
-if not api_keys.tos_is_accepted() then
-  api_keys.screen = "tos"
-elseif not next(S.api_key_map) then
-  api_keys.screen = "first_run"
-else
-  api_keys.screen = nil
+-- Show the first-run API key screen only if NO usable VISIBLE provider exists:
+-- a built-in with a saved key (that isn't hidden) OR a registered custom
+-- provider. A hidden provider's key in api_key_map (e.g. an experimental
+-- DeepSeek key persisted from a prior unlocked session) does NOT count --
+-- otherwise a tester who flips off the unlock would skip first-run and land
+-- on the main UI with no usable provider chip.
+--
+-- The visibility scan lives inside a do-block so its locals don't count
+-- against the main chunk's 200-local limit (already very near the cap).
+do
+  local has_usable = false
+  for _, p in ipairs(PROVIDERS) do
+    if p.is_custom or (not p.hidden and S.api_key_map[p.id]) then
+      has_usable = true; break
+    end
+  end
+  if not api_keys.tos_is_accepted() then
+    api_keys.screen = "tos"
+  elseif not has_usable then
+    api_keys.screen = "first_run"
+  else
+    api_keys.screen = nil
+  end
 end
 
 -- =============================================================================
@@ -14690,9 +14957,12 @@ function Net.build_body(msgs, snapshot, msg_attachments)
   local result
   if p.id == "anthropic" then
     result = Net.build_body_anthropic(msgs, snapshot, msg_attachments)
-  elseif p.id == "openai" or p.is_custom then
+  elseif p.id == "openai" or p.id == "deepseek" or p.is_custom then
     -- Custom providers always speak the OpenAI Chat Completions schema (the
     -- de-facto standard for OSS servers like Ollama, LM Studio, vLLM).
+    -- DeepSeek shares this branch -- it is OpenAI-compatible at the wire
+    -- level, with thinking expressed via extra_body (see the
+    -- deepseek_extra_body branch in build_body_openai itself).
     result = Net.build_body_openai(msgs, snapshot, msg_attachments)
   elseif p.id == "google" then
     result = Net.build_body_google(msgs, snapshot, msg_attachments)
@@ -14944,9 +15214,43 @@ function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
   -- max_output (older entries; defensive, all current entries have it).
   local active_m = MODELS[prefs.model_idx] or MODELS[1]
   local max_out  = (active_m and active_m.max_output) or 64000
+
+  -- Extended thinking. Anthropic's API treats `thinking` as opt-in for
+  -- every Claude model: when the field is absent, the model runs in
+  -- non-thinking mode regardless of which 4.x variant is active. The
+  -- "None" dropdown entry maps to that no-emit case. When a non-None
+  -- level is picked, the wire shape depends on the active model's
+  -- thinking_style: Haiku 4.5 takes manual budget_tokens; Opus 4.7
+  -- requires adaptive + an effort knob (manual returns 400); Sonnet 4.6
+  -- accepts either, adaptive preferred. S.thinking_override_idx (when
+  -- set) wins over prefs.thinking_idx so the length-retry path can force
+  -- "None" for one round-trip.
+  local p_active = PROVIDERS.active()
+  local effective_thinking_idx = S.thinking_override_idx or prefs.thinking_idx
+  local thinking_field = ""
+  if effective_thinking_idx and effective_thinking_idx > 0
+     and p_active.thinking_levels then
+    local tl = p_active.thinking_levels[effective_thinking_idx]
+    local style = active_m and active_m.thinking_style
+    if tl and tl.value ~= "none" then
+      if style == "claude_adaptive" and tl.effort then
+        thinking_field = str_format(
+          ',"thinking":{"type":"adaptive"},"output_config":{"effort":"%s"}',
+          tl.effort)
+      elseif tl.budget_tokens then
+        -- claude_manual (Haiku 4.5) -- and a defensive fallback if a
+        -- model entry omits thinking_style entirely.
+        thinking_field = str_format(
+          ',"thinking":{"type":"enabled","budget_tokens":%d}',
+          tl.budget_tokens)
+      end
+    end
+  end
+
   return str_format(
-    '{"model":"%s","max_tokens":%d,"system":%s,"messages":[%s]}',
-    MODELS.active_id(), max_out, system_json, tbl_concat(msg_parts, ","))
+    '{"model":"%s","max_tokens":%d%s,"system":%s,"messages":[%s]}',
+    MODELS.active_id(), max_out, thinking_field, system_json,
+    tbl_concat(msg_parts, ","))
 end
 
 -- =============================================================================
@@ -15040,12 +15344,25 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
           blocks[#blocks+1] = str_format('{"type":"text","text":"%s"}',
             JSON.escape(snapshot))
         end
+        local _is_deepseek = (PROVIDERS.active().id == "deepseek")
         if msg_attachments then
           for _, att in ipairs(msg_attachments) do
             if att.kind == "image" then
-              blocks[#blocks+1] = str_format(
-                '{"type":"image_url","image_url":{"url":"data:%s;base64,%s"}}',
-                att.media_type, att.b64)
+              if _is_deepseek then
+                -- DeepSeek's Chat Completion API is text-only (their own
+                -- Anthropic-compat table marks image content unsupported),
+                -- so an image_url block would 400 the request. Surface
+                -- the attachment by name as a text note so the model can
+                -- acknowledge it and the user understands why it isn't
+                -- visually inspected -- mirrors the PDF handling below.
+                blocks[#blocks+1] = str_format(
+                  '{"type":"text","text":"[Attached image: %s] (DeepSeek does not support image input; this attachment was not sent.)"}',
+                  JSON.escape(att.name))
+              else
+                blocks[#blocks+1] = str_format(
+                  '{"type":"image_url","image_url":{"url":"data:%s;base64,%s"}}',
+                  att.media_type, att.b64)
+              end
             elseif att.kind == "text" then
               blocks[#blocks+1] = str_format(
                 '{"type":"text","text":"[Attached file: %s]\\n%s"}',
@@ -15076,14 +15393,31 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
   -- S.thinking_override_idx (when set) wins over prefs.thinking_idx -- the
   -- length auto-retry path uses this to force "none" for one round-trip
   -- when reasoning consumed the entire output budget on the first attempt.
+  --
+  -- DeepSeek (thinking_style == "deepseek_extra_body") expresses thinking
+  -- via a top-level "thinking" object with type="disabled"|"enabled" instead
+  -- of OpenAI's reasoning_effort scale. The "extra_body" name in DeepSeek's
+  -- own docs is an OpenAI-SDK pass-through convention; on the wire the
+  -- field sits at the top level next to where reasoning_effort would go.
+  -- The field is MANDATORY for every DeepSeek request: omitting it falls
+  -- through to DeepSeek's server-side default (currently enabled) which
+  -- would silently ignore both the user's Non-Thinking selection and the
+  -- length-retry fallback. Always emit an explicit "enabled"/"disabled";
+  -- if the resolved idx is somehow out-of-range or carries an unexpected
+  -- value, default to "disabled" (safer -- no surprise reasoning cost).
   local effective_thinking_idx = S.thinking_override_idx or prefs.thinking_idx
   local reasoning = ""
-  if effective_thinking_idx > 0 then
-    if p.thinking_levels and p.thinking_levels[effective_thinking_idx] then
-      local val = p.thinking_levels[effective_thinking_idx].value
-      if val and val ~= "none" then
-        reasoning = str_format(',"reasoning_effort":"%s"', val)
-      end
+  if p.thinking_style == "deepseek_extra_body" then
+    local tl = p.thinking_levels and p.thinking_levels[effective_thinking_idx]
+    local val = (tl and tl.value) or "disabled"
+    if val ~= "enabled" and val ~= "disabled" then val = "disabled" end
+    reasoning = str_format(',"thinking":{"type":"%s"}', val)
+  elseif effective_thinking_idx > 0
+     and p.thinking_levels
+     and p.thinking_levels[effective_thinking_idx] then
+    local val = p.thinking_levels[effective_thinking_idx].value
+    if val and val ~= "none" then
+      reasoning = str_format(',"reasoning_effort":"%s"', val)
     end
   end
   -- prompt_cache_key: stable per script-session identifier. OpenAI's automatic
@@ -15127,6 +15461,15 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
     local custom_cap = math_min(16384, math_floor(ctx_window * 0.1))
     if custom_cap < 256 then custom_cap = 256 end
     max_tokens_field = str_format(',"max_completion_tokens":%d', custom_cap)
+  end
+  -- DeepSeek: skip prompt_cache_key (OpenAI-only routing hint; DeepSeek caches
+  -- automatically on prefix and ignores the field, but emitting it makes the
+  -- request log misleading) and skip max_completion_tokens (handled like
+  -- cloud OpenAI -- let the server apply its own per-model ceiling).
+  if p.id == "deepseek" then
+    return str_format(
+      '{"model":"%s","messages":[%s]%s%s}',
+      model_id, tbl_concat(msg_parts, ","), reasoning, extra_suffix)
   end
   return str_format(
     '{"model":"%s"%s,"prompt_cache_key":"%s","messages":[%s]%s%s}',
@@ -15938,6 +16281,15 @@ function Net.fire_key_test(provider_override)
     body = str_format(
       '{"model":"%s","max_completion_tokens":1,"messages":[{"role":"user","content":"hi"}]}',
       p.models[1].id)
+  elseif p.id == "deepseek" then
+    -- DeepSeek speaks the OpenAI Chat Completions wire format but uses
+    -- the older `max_tokens` cap field; their reference does not document
+    -- `max_completion_tokens`, and an unknown-field cap is silently
+    -- ignored (so the probe burns ~100+ output tokens of real generation
+    -- on every key test instead of stopping at 1).
+    body = str_format(
+      '{"model":"%s","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}',
+      p.models[1].id)
   elseif p.id == "google" then
     body = '{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"maxOutputTokens":1}}'
   end
@@ -16028,8 +16380,9 @@ function Net.is_auth_error(resp, prov)
     return resp.type == "error"
       and type(resp.error) == "table" and resp.error ~= JSON.NULL
       and resp.error.type == "authentication_error"
-  elseif prov.id == "openai" or prov.is_custom then
+  elseif prov.id == "openai" or prov.id == "deepseek" or prov.is_custom then
     -- Custom OpenAI-compatible servers usually pass errors through unchanged.
+    -- DeepSeek follows the same envelope conventions.
     return type(resp.error) == "table" and resp.error ~= JSON.NULL
       and (resp.error.code == "invalid_api_key"
         or resp.error.type == "invalid_request_error"
@@ -17269,20 +17622,22 @@ function Net.send_to_api(user_text)
   -- positives are acceptable -- better to warn than waste API time. For
   -- attachments, add their estimated token counts directly.
   --
-  -- Cloud providers (Anthropic, OpenAI, Google) all expose at least 200K
-  -- context on the models we ship, so a flat 200K ceiling is fine for them.
-  -- Custom providers (LM Studio, Ollama, vLLM, OpenRouter, etc.) use the
-  -- per-MODEL context_window value the user entered on the API Keys page,
-  -- because their actual server-side limit is whatever they loaded the model
-  -- with -- and exceeding it on a local llama.cpp server either truncates the
-  -- prompt or starts evicting tokens from the front of the cache. Each row
-  -- on the custom provider can have a different value, so we read it off the
-  -- currently selected model entry rather than off the provider.
+  -- Per-model context_window on the active model wins. Built-in providers
+  -- now carry context_window on each model entry where it differs from the
+  -- 200K default (Sonnet/Opus 1M, GPT-5.4 nano/mini 400K, GPT-5.4 1.05M,
+  -- Gemini 3.x 1,048,576, DeepSeek V4 Flash/Pro 1M); a provider-level
+  -- field is honored as a fallback if a model row omits it. Custom
+  -- providers always carry context_window per-model (set by the user on
+  -- the API Keys page from each loaded model's actual server-side limit;
+  -- exceeding it on a local llama.cpp server either truncates the prompt
+  -- or starts evicting tokens from the front of the cache). Final fallback
+  -- is 200K, the floor every cloud provider we ship still honors. A model
+  -- without context_window AND a provider with no fallback (e.g. Claude
+  -- Haiku 4.5) lands on the 200K default.
   local active_provider     = PROVIDERS.active()
   local active_model        = MODELS[prefs.model_idx] or MODELS[1]
-  local MODEL_CONTEXT_LIMIT = (active_provider.is_custom
-                               and active_model
-                               and tonumber(active_model.context_window))
+  local MODEL_CONTEXT_LIMIT = (active_model and tonumber(active_model.context_window))
+                              or tonumber(active_provider.context_window)
                               or 200000
   local CHARS_PER_TOKEN     = 4       -- ~4 for prose, ~3 for code, ~5 for JSON keys; 4 is a safe middle
   -- Phase 1 instrumentation: preempt phase ends here. body_build is
@@ -22133,10 +22488,10 @@ function Net.try_finish_curl()
     raw_tok_in      = base + tok_in_create + tok_in_read
     raw_tok_out     = tonumber(usage.output_tokens) or 0
 
-  elseif p.id == "openai" or p.is_custom then
+  elseif p.id == "openai" or p.id == "deepseek" or p.is_custom then
     -- OpenAI error envelope: {"error":{"type":"...","message":"...","code":"..."}}
     -- Custom OpenAI-compatible endpoints (Ollama, LM Studio, vLLM, OpenRouter,
-    -- etc.) follow the same wire format, so they share this branch.
+    -- etc.) and DeepSeek follow the same wire format, so they share this branch.
     if type(resp.error) == "table" and resp.error ~= JSON.NULL then
       local code = resp.error.code or resp.error.type or ""
       local is_auth = (code == "invalid_api_key")
@@ -22176,12 +22531,21 @@ function Net.try_finish_curl()
     -- and prompt_tokens_details.cached_tokens is the portion served from the
     -- automatic prefix cache (billed at 10% of regular input). OpenAI's caching
     -- has no separate cache-write fee, so tok_in_create stays 0.
+    --
+    -- DeepSeek reports cache hits at the top level of usage as
+    -- prompt_cache_hit_tokens / prompt_cache_miss_tokens (not nested under
+    -- prompt_tokens_details). Caching is automatic on prefix and there is no
+    -- separate cache-write fee, so tok_in_create also stays 0.
     local usage   = type(resp.usage) == "table" and resp.usage or {}
     raw_tok_in    = tonumber(usage.prompt_tokens)     or 0
     raw_tok_out   = tonumber(usage.completion_tokens) or 0
-    local details = type(usage.prompt_tokens_details) == "table"
-                    and usage.prompt_tokens_details or {}
-    tok_in_read   = tonumber(details.cached_tokens) or 0
+    if p.id == "deepseek" then
+      tok_in_read = tonumber(usage.prompt_cache_hit_tokens) or 0
+    else
+      local details = type(usage.prompt_tokens_details) == "table"
+                      and usage.prompt_tokens_details or {}
+      tok_in_read   = tonumber(details.cached_tokens) or 0
+    end
     tok_in_create = 0
     -- Reasoning-token count for the length-cap error path. Lets the user see
     -- exactly how much of the cap went to internal reasoning vs visible output.
@@ -22354,13 +22718,40 @@ function Net.try_finish_curl()
     -- Skipped when the active provider doesn't expose thinking levels
     -- (Anthropic today): nothing to retry-with-different-thinking.
     local _retry_prov = PROVIDERS.active()
+    -- "Thinking off" is provider-specific. For OpenAI/Gemini, override_idx=0
+    -- omits the reasoning_effort field which is effectively off. For
+    -- DeepSeek, omitting the "thinking" field falls through to its
+    -- server-side default (enabled), so a 0 override would NOT actually
+    -- disable reasoning -- it would re-fire with thinking still on and
+    -- usually fail the length cap again. Find the "off" entry by value
+    -- ("none" for OpenAI, "disabled" for DeepSeek) and use its idx;
+    -- providers without an explicit off entry (Gemini's Minimal/Low/Med/
+    -- High) fall back to 0 = omit, matching the existing behavior.
+    local _retry_off_idx = 0
+    if _retry_prov.thinking_levels then
+      for _i, _tl in ipairs(_retry_prov.thinking_levels) do
+        if _tl.value == "none" or _tl.value == "disabled" then
+          _retry_off_idx = _i; break
+        end
+      end
+    end
+    -- Don't fire the retry if we are already at the provider's off entry
+    -- (the prior request already had thinking off and still hit the cap;
+    -- another retry with the same setting won't change anything).
+    local _cur_idx = S.thinking_override_idx or prefs.thinking_idx
+    local _cur_tl  = _retry_prov.thinking_levels
+                     and _retry_prov.thinking_levels[_cur_idx]
+    local _cur_is_off = _cur_tl
+                        and (_cur_tl.value == "none"
+                             or _cur_tl.value == "disabled")
     if empty_reason == "length"
        and not S.length_retry_used
        and _retry_prov.thinking_levels
-       and (S.thinking_override_idx or prefs.thinking_idx) > 0 then
+       and not _cur_is_off
+       and _cur_idx > 0 then
       S.length_retry_used     = true
       Probe.add_validator_retry(S.probe_turn, "length")
-      S.thinking_override_idx = 0  -- "none"
+      S.thinking_override_idx = _retry_off_idx  -- provider-aware "off"
       local detail = ""
       if reasoning_only_tokens and reasoning_only_tokens > 0 then
         detail = " (" .. reasoning_only_tokens
@@ -24058,6 +24449,15 @@ function Net.try_finish_curl()
     code_block = code,
     code_type  = code_type,
     provider_id     = PROVIDERS.active().id,
+    -- model_id captured alongside provider_id so per-message recovery
+    -- actions (Lower Thinking on a length-cap reply, etc.) can write
+    -- their changes against the model that actually produced this
+    -- response, not against whatever model the user happens to be on
+    -- when they click the recovery button.
+    model_id        = (function()
+      local _m = MODELS[prefs.model_idx] or MODELS[1]
+      return _m and _m.id or nil
+    end)(),
     model_label     = PROVIDERS.active().label .. " " .. (function()
       -- Same fallback as the user-bubble model_label build: a brief
       -- post-provider-switch race or a 0-model custom provider would

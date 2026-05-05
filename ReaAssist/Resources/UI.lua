@@ -1667,9 +1667,13 @@ function UI.mode_model_row_v5()
   end
 
   -- ---- Provider chip ------------------------------------------------------
+  -- Hidden built-ins (experimental, gated by an ExtState unlock at startup;
+  -- see the unlock block after Custom.register_all in ReaAssist.lua) keep
+  -- their slot in PROVIDERS for id-based lookup but stay out of every UI
+  -- surface, including this dropdown.
   local prov_filtered = {}
   for i, p in ipairs(PROVIDERS) do
-    if p.is_custom or S.api_key_map[p.id] then
+    if not p.hidden and (p.is_custom or S.api_key_map[p.id]) then
       -- Label Gemini as "Gemini (Free)" in the dropdown when the free-tier
       -- detector has confirmed the key is on the free plan. The chip uses a
       -- separate suffix (same condition, capitalized to match UPPER casing).
@@ -1753,15 +1757,24 @@ function UI.mode_model_row_v5()
   ImGui.ImGui_SetNextWindowPos(RA.ctx, prov_cx1, y2 + RA.SC(2))
   UI.push_card_popup_style()
   if ImGui.ImGui_BeginPopup(RA.ctx, "##mm_prov_popup") then
+    -- Muted header label so the dropdown reads "this is the Provider menu"
+    -- at a glance. TextDisabled inherits Col_TextDisabled = TK.text_muted
+    -- from the global style push at line 575, so it tracks the active
+    -- theme without an extra Push/Pop pair here.
+    ImGui.ImGui_TextDisabled(RA.ctx, "Provider:")
+    ImGui.ImGui_Separator(RA.ctx)
     for _, fp in ipairs(prov_filtered) do
       if ImGui.ImGui_MenuItem(RA.ctx, fp.label, nil, fp.idx == prefs.provider_idx)
          and fp.idx ~= prefs.provider_idx then
         local old_p = PROVIDERS.active()
         reaper.SetExtState(CFG.EXT_NS, "model_idx_" .. old_p.id,
           tostring(prefs.model_idx), true)
+        -- Save thinking_idx under the OLD (provider, model) pair so the
+        -- per-model state survives the switch. The helper writes the
+        -- new "thinking_idx_<provider>_<model>" slot.
         if old_p.thinking_levels and prefs.thinking_idx > 0 then
-          reaper.SetExtState(CFG.EXT_NS, "thinking_idx_" .. old_p.id,
-            tostring(prefs.thinking_idx), true)
+          local old_m = MODELS[prefs.model_idx] or MODELS[1]
+          PROVIDERS.save_thinking_idx(old_p, old_m, prefs.thinking_idx)
         end
         if old_p.id == "google" then Net.gemini_cache_invalidate() end
         prefs.provider_idx = fp.idx
@@ -1833,6 +1846,9 @@ function UI.mode_model_row_v5()
     return "balanced"
   end
   if ImGui.ImGui_BeginPopup(RA.ctx, "##mm_mdl_popup") then
+    -- Header label, matching the Provider / Thinking dropdowns.
+    ImGui.ImGui_TextDisabled(RA.ctx, "Model:")
+    ImGui.ImGui_Separator(RA.ctx)
     -- Iterate the provider's FULL model list (raw, unfiltered) -- we want
     -- paid-only models to appear disabled rather than hidden, so free-tier
     -- users learn they exist. MODELS (the filtered list) is still used to
@@ -1947,9 +1963,27 @@ function UI.mode_model_row_v5()
       if m_clicked and usable_idx then
         local was_selected = sel      -- capture before mutating prefs.model_idx
         local switched_to_lowest = (i == 1) and not was_selected
+        -- Save current thinking_idx under the OLD model so per-model
+        -- state survives the switch (e.g. Sonnet=Medium, Haiku=Low,
+        -- Opus=None all preserved independently). Capture old_m BEFORE
+        -- mutating prefs.model_idx; otherwise we'd save under the new
+        -- model's id and lose the old model's setting.
+        local old_m = MODELS[prefs.model_idx] or MODELS[1]
+        if p_active.thinking_levels and prefs.thinking_idx > 0 then
+          PROVIDERS.save_thinking_idx(p_active, old_m, prefs.thinking_idx)
+        end
         prefs.model_idx = usable_idx
         reaper.SetExtState(CFG.EXT_NS, "model_idx_" .. prov_id,
           tostring(prefs.model_idx), true)
+        -- Load thinking_idx for the NEW model. Helper cascades through
+        -- per-model key -> model default -> provider default -> 1, so
+        -- first switches to a model with a model-level default (e.g.
+        -- Haiku 4.5 = Medium) auto-apply that default while explicit
+        -- prior choices on that model still win.
+        if p_active.thinking_levels then
+          local new_m = MODELS[prefs.model_idx] or MODELS[1]
+          prefs.thinking_idx = PROVIDERS.load_thinking_idx(p_active, new_m)
+        end
         if prov_id == "google" then Net.gemini_cache_invalidate() end
         S.api_ref_message = nil
         for _, att in ipairs(S.attachments) do
@@ -1985,11 +2019,16 @@ function UI.mode_model_row_v5()
     ImGui.ImGui_SetNextWindowPos(RA.ctx, tl_cx1, y2 + RA.SC(2))
     UI.push_card_popup_style()
     if ImGui.ImGui_BeginPopup(RA.ctx, "##mm_tl_popup") then
+      -- Header label, matching the Provider / Model dropdowns.
+      ImGui.ImGui_TextDisabled(RA.ctx, "Thinking:")
+      ImGui.ImGui_Separator(RA.ctx)
       for _, v in ipairs(vis) do
         if ImGui.ImGui_MenuItem(RA.ctx, v.label, nil, v.idx == prefs.thinking_idx) then
           prefs.thinking_idx = v.idx
-          reaper.SetExtState(CFG.EXT_NS, "thinking_idx_" .. p_active.id,
-            tostring(prefs.thinking_idx), true)
+          -- Save under the per-model slot via the helper. Falls back to
+          -- the legacy per-provider key only when no model id is available.
+          local active_m = MODELS[prefs.model_idx] or MODELS[1]
+          PROVIDERS.save_thinking_idx(p_active, active_m, prefs.thinking_idx)
         end
       end
       ImGui.ImGui_EndPopup(RA.ctx)
@@ -2394,10 +2433,15 @@ function UI.footer_rail_v5()
     ImGui.ImGui_EndDisabled(RA.ctx)
     -- Accent tint when no key is configured for any provider (draws eye).
     -- Suppressed while the user is already on an api_keys flow screen --
-    -- they don't need the nudge when the keys UI is on-screen.
+    -- they don't need the nudge when the keys UI is on-screen. Hidden
+    -- experimental providers do not count: they cannot be configured from
+    -- the visible Settings UI, so a stranded key on one of them must not
+    -- suppress the accent for users who have no other key set.
     local keys_set = 0
     for _, pk in ipairs(PROVIDERS) do
-      if pk.is_custom or S.api_key_map[pk.id] then keys_set = keys_set + 1 end
+      if not pk.hidden and (pk.is_custom or S.api_key_map[pk.id]) then
+        keys_set = keys_set + 1
+      end
     end
     local col
     if keys_set == 0 and not api_keys.screen then
@@ -5769,7 +5813,7 @@ function Render._key_test_results_popup()
       Text(RA.ctx, "Test Results:")
       ImGui.ImGui_Spacing(RA.ctx)
       for _, pk in ipairs(PROVIDERS) do
-        local r = api_keys.test_results[pk.id]
+        local r = (not pk.hidden) and api_keys.test_results[pk.id] or nil
         if r then
           if r.ok then
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.green)
@@ -6994,13 +7038,14 @@ function Render._shared_key_screen_impl()
   -- re-initialises without those sites needing to know about the change.
   local needs_init = false
   for i, prov in ipairs(PROVIDERS) do
-    if not prov.is_custom and api_keys.key_bufs[i] == nil then
+    if not prov.is_custom and not prov.hidden
+       and api_keys.key_bufs[i] == nil then
       needs_init = true; break
     end
   end
   if needs_init then
     for i, prov in ipairs(PROVIDERS) do
-      if not prov.is_custom then
+      if not prov.is_custom and not prov.hidden then
         api_keys.key_bufs[i]   = api_keys.key_bufs[i]   or ""
         api_keys.key_errors[i] = api_keys.key_errors[i] or nil
       end
@@ -7154,8 +7199,10 @@ function Render._shared_key_screen_impl()
     -- Custom providers are managed on the dedicated "Local & Custom
     -- Providers" page (entered via the nav row further down). Skip them
     -- here to avoid rendering the cloud-provider single-input layout
-    -- against a row that has its own multi-row schema.
-    if not prov.is_custom then
+    -- against a row that has its own multi-row schema. Hidden experimental
+    -- providers (gated by an ExtState unlock at startup) are also skipped:
+    -- they are not surfaced anywhere in the UI until unlocked.
+    if not prov.is_custom and not prov.hidden then
       if any_card_drawn then
         Dummy(RA.ctx, 1, RA.SC(5))
       end
@@ -7216,11 +7263,15 @@ function Render._shared_key_screen_impl()
         SameLine(RA.ctx, 0, RA.SC(6))
       end
 
-      -- Provider label (left side of the row). V5: Inter SemiBold SC(12),
-      -- TK.text, so the name reads as a card title and anchors the row.
-      PushFont(RA.ctx, FONT.inter_semi, RA.SC(12))
+      -- Provider label (left side of the row). V5: Inter Regular SC(12),
+      -- TK.text. Just the bare provider name; the section header above
+      -- the cards ("API KEYS"), the green dot, the CONNECTED pill, the
+      -- masked "Current: sk-..." preview, and the per-card tooltip
+      -- already carry the "this is an API key" context, so the title
+      -- doesn't need the extra weight that the section header carries.
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
-      Text(RA.ctx, prov.label .. " API Key")
+      Text(RA.ctx, prov.label)
       PopStyleColor(RA.ctx)
       PopFont(RA.ctx)
 
@@ -7459,7 +7510,8 @@ function Render._shared_key_screen_impl()
           if shift_down then
             for j = i - 1, 1, -1 do
               local pj = PROVIDERS[j]
-              if pj and not pj.is_custom and not S.api_key_map[pj.id] then
+              if pj and not pj.is_custom and not pj.hidden
+                 and not S.api_key_map[pj.id] then
                 target = j
                 break
               end
@@ -7467,7 +7519,8 @@ function Render._shared_key_screen_impl()
           else
             for j = i + 1, #PROVIDERS do
               local pj = PROVIDERS[j]
-              if pj and not pj.is_custom and not S.api_key_map[pj.id] then
+              if pj and not pj.is_custom and not pj.hidden
+                 and not S.api_key_map[pj.id] then
                 target = j
                 break
               end
@@ -7556,12 +7609,15 @@ function Render._shared_key_screen_impl()
     -- Test API Keys: verifies all stored keys sequentially, then shows the
     -- results popup. Enabled if any provider has either a stored key OR a
     -- non-empty buffered (just-pasted, not yet saved) key. Disabled only
-    -- while a test is already running.
+    -- while a test is already running. Hidden providers cannot reach this
+    -- UI to enter a key, so they are excluded from the trigger condition.
     local has_keys = false
     for i, pk in ipairs(PROVIDERS) do
-      if S.api_key_map[pk.id] then has_keys = true; break end
-      local buf = not pk.is_custom and api_keys.key_bufs[i]
-      if buf and buf:match("%S") then has_keys = true; break end
+      if not pk.hidden then
+        if S.api_key_map[pk.id] then has_keys = true; break end
+        local buf = not pk.is_custom and api_keys.key_bufs[i]
+        if buf and buf:match("%S") then has_keys = true; break end
+      end
     end
     ImGui.ImGui_BeginDisabled(RA.ctx, not has_keys or api_keys.key_validating)
     if ImGui.ImGui_Button(RA.ctx, test_label .. "##key_recheck") then
@@ -7572,7 +7628,7 @@ function Render._shared_key_screen_impl()
       -- buffered key that fails format validation records an inline error
       -- and is NOT promoted.
       for i, prov in ipairs(PROVIDERS) do
-        if not prov.is_custom then
+        if not prov.is_custom and not prov.hidden then
           local buf = (api_keys.key_bufs[i] or ""):match("^%s*(.-)%s*$") or ""
           if buf ~= "" then
             local valid, reason = Key.validate_format(buf, prov)
@@ -7595,7 +7651,7 @@ function Render._shared_key_screen_impl()
       -- matters more than queue brevity. The order also matches what
       -- the user usually configures first (cloud keys -> custom).
       for i, pk in ipairs(PROVIDERS) do
-        if not pk.is_custom and S.api_key_map[pk.id] then
+        if not pk.is_custom and not pk.hidden and S.api_key_map[pk.id] then
           api_keys.test_queue[#api_keys.test_queue + 1] = { idx = i, prov = pk }
         end
       end
@@ -8108,19 +8164,26 @@ function Render._shared_key_screen_impl()
   end
 
   -- Check if at least one cloud key field has new content. Custom LLM config
-  -- is managed on its own page, so it does not participate here.
+  -- is managed on its own page, so it does not participate here. Hidden
+  -- providers do not render an input on this page, so their key_bufs slot
+  -- (if it ever got populated) cannot represent a real edit.
   local any_new_input = false
   for i, prov in ipairs(PROVIDERS) do
-    if not prov.is_custom and api_keys.key_bufs[i] and api_keys.key_bufs[i]:match("%S") then
+    if not prov.is_custom and not prov.hidden
+       and api_keys.key_bufs[i] and api_keys.key_bufs[i]:match("%S") then
       any_new_input = true; break
     end
   end
 
   -- For first-run: need at least one new key. For re-entry: allow save with
-  -- no new input (user may have only removed keys), or with new input.
+  -- no new input (user may have only removed keys), or with new input. A
+  -- key on a hidden provider does not count -- the user cannot reach it
+  -- from this UI, and it would suppress the "enter a key" gate.
   local has_any_key = false
   for _, pk in ipairs(PROVIDERS) do
-    if S.api_key_map[pk.id] or pk.is_custom then has_any_key = true; break end
+    if pk.is_custom or (not pk.hidden and S.api_key_map[pk.id]) then
+      has_any_key = true; break
+    end
   end
   -- Dirty signals across every staged setting on this screen. Each one
   -- compares prefs.* to api_keys.saved_* (the value at screen open) so
@@ -8465,7 +8528,7 @@ function Render._shared_key_screen_impl()
     local has_format_error = false
     for i, prov in ipairs(PROVIDERS) do
       api_keys.key_errors[i] = nil
-      if not prov.is_custom then
+      if not prov.is_custom and not prov.hidden then
         local trimmed = (api_keys.key_bufs[i] or ""):match("^%s*(.-)%s*$") or ""
         if trimmed ~= "" then
           local valid, reason = Key.validate_format(trimmed, prov)
@@ -8515,7 +8578,7 @@ function Render._shared_key_screen_impl()
           local act = PROVIDERS.active()
           if act and not act.is_custom and not S.api_key_map[act.id] then
             for i, p in ipairs(PROVIDERS) do
-              if p.is_custom or S.api_key_map[p.id] then
+              if not p.hidden and (p.is_custom or S.api_key_map[p.id]) then
                 prefs.provider_idx = i
                 reaper.SetExtState(CFG.EXT_NS, "provider_idx",
                   tostring(prefs.provider_idx), true)
@@ -9151,6 +9214,32 @@ function Render.custom_llm_screen()
     .. "gateway (OpenRouter, Groq, DeepSeek, Together AI, Mistral, etc.).")
   PopStyleColor(RA.ctx)
   Dummy(RA.ctx, 1, RA.SC(4))
+  -- Domain-specific size advisory: ReaAssist's worst failure mode with
+  -- small local models is plausible-looking code that runs cleanly,
+  -- passes the API validator, and silently does nothing. Users won't
+  -- predict that from "Experimental feature" alone, so this block calls
+  -- it out explicitly with a size-floor recommendation. Bold lead +
+  -- regular body matches the privacy/technical-description pattern above.
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
+  PushFont(RA.ctx, FONT.inter_semi, RA.SC(12))
+  Text(RA.ctx, "Heads up: local model size matters for ReaAssist.")
+  PopFont(RA.ctx)
+  Dummy(RA.ctx, 1, RA.SC(2))
+  Text(RA.ctx,
+    "REAPER's ReaScript and JSFX APIs are a niche surface poorly "
+    .. "represented in any model's pretraining. Small models (7-8B) "
+    .. "will connect and produce code that looks right, but most "
+    .. "replies will use fabricated function names or wrap real names "
+    .. "around no-op logic. The API validator can't always catch this.")
+  Dummy(RA.ctx, 1, RA.SC(4))
+  Text(RA.ctx,
+    "For usable results, use a code-specialized model with at least "
+    .. "~14B parameters (e.g. Qwen 2.5 Coder 14B at ~12 GB VRAM); 32B "
+    .. "coders on 24 GB VRAM work substantially better. Below 14B, "
+    .. "treat the connection as \"wired up correctly\" rather than "
+    .. "\"ready to use.\"")
+  PopStyleColor(RA.ctx)
+  Dummy(RA.ctx, 1, RA.SC(4))
   -- Muted-amber advisory: 50/50 blend of TK.amber and TK.text_muted so
   -- the line reads as cautionary but not alarming. Kept to one line so
   -- it doesn't dominate the header block.
@@ -9540,7 +9629,7 @@ function Render.custom_llm_screen()
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
     local hdr_x0 = ImGui.ImGui_GetCursorPosX(RA.ctx)
     Text(RA.ctx, "MODEL IDENTIFIER")
-    UI.tooltip("The model name as your server expects it (e.g. llama3.1:8b, "
+    UI.tooltip("The model name as your server expects it (e.g. qwen2.5-coder-14b, "
       .. "kimi-k2.6, claude-opus-4-7). Open Details to set prices, context, "
       .. "the same notes tag shown next to it, and extra JSON body fields.")
     SameLine(RA.ctx, 0, 0)
@@ -9590,6 +9679,34 @@ function Render.custom_llm_screen()
       return clicked
     end
 
+    -- Parse a parameter-count B-number out of a free-form model identifier.
+    -- Returns the number (e.g. 7, 14, 32, 235) or nil if no plausible
+    -- "<n>B" token is found. Used to surface the inline size advisory under
+    -- the model row when the user types something like "qwen2.5-coder:7b" or
+    -- a GGUF filename that includes the param count, so we can warn that
+    -- ~7B is below the practical floor for ReaAssist's REAPER tasks.
+    --
+    -- Trailing-boundary check (next char must NOT be alphanumeric) avoids
+    -- false positives on tokens like "7bee" or "7b1234" (a hash); leading
+    -- side is naturally bounded by the digit class. Names without a B-token
+    -- (gpt-4o, claude-sonnet-4-6, deepseek-v3, "model") return nil and the
+    -- prose advisory above remains the safety net.
+    local function _detect_param_b(s)
+      if not s or s == "" then return nil end
+      s = s:lower()
+      local pos = 1
+      while pos <= #s do
+        local b_start, b_end, num = s:find("(%d+%.?%d*)b", pos)
+        if not b_start then return nil end
+        local next_ch = s:sub(b_end + 1, b_end + 1)
+        if next_ch == "" or not next_ch:match("[%w]") then
+          return tonumber(num)
+        end
+        pos = b_end + 1
+      end
+      return nil
+    end
+
     local row_to_remove    = nil
     local row_to_duplicate = nil
     local open_details_ri  = nil  -- Deferred OpenPopup: ImGui requires the call
@@ -9599,7 +9716,7 @@ function Render.custom_llm_screen()
       -- Column 1: model identifier.
       ImGui.ImGui_SetNextItemWidth(RA.ctx, id_w)
       local _, new_id = ImGui.ImGui_InputTextWithHint(RA.ctx, "##cus_mid_" .. ri,
-        "llama3.1:8b", row.id)
+        "qwen2.5-coder-14b", row.id)
       UI.focus_ring()
       _, new_id = UI.input_with_menu(RA.ctx, false, new_id)
       row.id = new_id
@@ -9693,6 +9810,19 @@ function Render.custom_llm_screen()
 
       _inline_msg(edit.errors["model_notes_" .. ri], TK.red)
       _inline_msg(edit.errors["model_" .. ri],       TK.red)
+      -- Soft size advisory: parses a B-number from row.id and flags anything
+      -- under ~14B as likely too small. Muted-amber color (matching the
+      -- Experimental advisory at the top of the page) so it reads as a
+      -- caution, not a hard error. Names without a parseable size produce
+      -- nothing -- the page-level prose advisory still covers those.
+      do
+        local b = _detect_param_b(row.id)
+        if b and b < 14 then
+          _inline_msg(str_format(
+            "~%gB detected - usually too small for reliable REAPER output.", b),
+            UI.lerp_u32(TK.amber, TK.text_muted, 0.5))
+        end
+      end
     end
     if row_to_remove then
       tbl_remove(edit.models, row_to_remove)
@@ -10206,12 +10336,18 @@ function Render.custom_llm_screen()
       SetCursorPosX(RA.ctx,
         GetCursorPosX(RA.ctx) + math_max(math_floor((inner_w - cb_w) * 0.5), 0))
       PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
-      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.text_muted)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBg(),       TK.card_hover)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgHovered(),
+        UI.lerp_u32(TK.card_hover, TK.accent_ui, 0.35))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgActive(),
+        UI.lerp_u32(TK.card_hover, TK.accent_ui, 0.55))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_CheckMark(),     TK.accent)
       local _changed, _new = ImGui.ImGui_Checkbox(RA.ctx,
         cb_label .. "##cllm_test_inference",
         edit.test_with_inference and true or false)
       if _changed then edit.test_with_inference = _new end
-      PopStyleColor(RA.ctx)
+      PopStyleColor(RA.ctx, 5)
       PopFont(RA.ctx)
       UI.tooltip(
         "Off (default): GET /v1/models -- safe, free, instant. Verifies "
@@ -10546,8 +10682,8 @@ function Render.custom_llm_screen()
         -- newly-added custom record is unreachable.
         do
           local stranded = PROVIDERS[prefs.provider_idx]
-          if stranded and not stranded.is_custom
-             and not S.api_key_map[stranded.id]
+          if stranded and (stranded.hidden
+             or (not stranded.is_custom and not S.api_key_map[stranded.id]))
              and PROVIDERS._by_id[edit.id] then
             prefs.provider_idx = PROVIDERS._by_id[edit.id]
             reaper.SetExtState(CFG.EXT_NS, "provider_idx",
@@ -13598,14 +13734,18 @@ function Render.main_window()
               end
               field_map["Model"] = msg._model_display
             end
-            if msg.tok_in and msg.cost then
+            if msg.tok_in and msg.cost and (msg.cost > 0 or msg.free_tier) then
               -- "~" prefix marks the value as approximate (matches the "Est."
               -- in the label -- belt-and-suspenders so scanning either side
               -- makes the estimation clear). Free-tier Gemini exchanges cost
               -- the user $0 on the actual API bill, but the token math still
               -- produces a number; frame it as "would have been" so the user
               -- sees the break they're getting without being confused into
-              -- thinking they're being charged.
+              -- thinking they're being charged. A flat-zero cost with no
+              -- free-tier flag means the active model has no per-token
+              -- prices entered (local llama.cpp, custom OpenAI-compatible
+              -- endpoint with empty price fields, etc.); the row would just
+              -- read "~$0.000000" so we drop it entirely.
               if msg.free_tier then
                 field_map["Est. Cost"] = "Free Tier (would have been ~"
                   .. MODELS.format_cost(msg.cost) .. ")"
@@ -13717,7 +13857,11 @@ function Render.main_window()
                 count = count + 1
               end
             end
-            if count > 1 then
+            -- Suppress Est. Total when the running sum is 0 -- e.g. every
+            -- turn so far ran on a local/custom model with no per-token
+            -- prices entered, so a "this chat: $0.000000" line would just
+            -- mirror the (already hidden) Est. Cost rows.
+            if count > 1 and total > 0 then
               total_cost_value = "~" .. MODELS.format_cost(total)
             end
           end
@@ -14000,12 +14144,24 @@ function Render.main_window()
           -- applies its own default). For empty-output-from-thinking failures
           -- the only meaningful client-side recovery is Lower Thinking.
           local rec_prov = msg.provider_id and PROVIDERS.get(msg.provider_id) or PROVIDERS.active()
-          local tkey, cur_idx
+          -- Resolve which model this message was produced by so the
+          -- recovery action targets the right per-(provider, model)
+          -- thinking slot, even if the user has switched models since.
+          -- Falls back to the currently-active model when the message
+          -- predates the model_id stamp or its model has since been
+          -- removed (e.g. custom-provider entry deleted).
+          local rec_model
+          if rec_prov and msg.model_id and rec_prov.models then
+            for _, m in ipairs(rec_prov.models) do
+              if m.id == msg.model_id then rec_model = m; break end
+            end
+          end
+          if not rec_model then
+            rec_model = MODELS[prefs.model_idx] or MODELS[1]
+          end
+          local cur_idx
           if rec_prov and rec_prov.thinking_levels then
-            tkey = "thinking_idx_" .. rec_prov.id
-            cur_idx = tonumber(reaper.GetExtState(CFG.EXT_NS, tkey))
-              or (rec_prov == PROVIDERS.active() and prefs.thinking_idx)
-              or (rec_prov.default_thinking_idx or 1)
+            cur_idx = PROVIDERS.load_thinking_idx(rec_prov, rec_model)
           end
           local can_lower = cur_idx and cur_idx > 1
           -- Retry hides until the user has applied a fix (msg.recovery_used is
@@ -14066,8 +14222,17 @@ function Render.main_window()
               _push_sec()
               if ImGui.ImGui_Button(RA.ctx, "Lower Thinking to " .. (lower.label or "?") .. "##rec_think_" .. i, 0, 0) then
                 local new_idx = cur_idx - 1
-                reaper.SetExtState(CFG.EXT_NS, tkey, tostring(new_idx), true)
-                if rec_prov == PROVIDERS.active() then
+                -- Save under the (provider, model) that produced the
+                -- failed response so the lowered level applies to that
+                -- model on its next turn, not to whichever model the
+                -- user is currently looking at. Update prefs.thinking_idx
+                -- in memory only when the recovery target IS the
+                -- currently-active (provider, model) -- otherwise the
+                -- user has already moved on and we shouldn't change
+                -- their visible chip.
+                PROVIDERS.save_thinking_idx(rec_prov, rec_model, new_idx)
+                local active_m = MODELS[prefs.model_idx] or MODELS[1]
+                if rec_prov == PROVIDERS.active() and rec_model == active_m then
                   prefs.thinking_idx = new_idx
                 end
                 msg.recovery_used = true
@@ -15655,7 +15820,7 @@ function Render.main_window()
       S.open_backup_warn = false
     end
     -- Explicitly center the popup over the main window.
-    local popup_w, popup_h = RA.SC(420), RA.SC(160)
+    local popup_w, popup_h = RA.SC(480), RA.SC(165)
     local win_x, win_y = ImGui.ImGui_GetWindowPos(RA.ctx)
     local win_w, win_h = ImGui.ImGui_GetWindowSize(RA.ctx)
     ImGui.ImGui_SetNextWindowPos(RA.ctx,
@@ -15665,20 +15830,46 @@ function Render.main_window()
     ImGui.ImGui_SetNextWindowSize(RA.ctx, popup_w, popup_h, ImGui.ImGui_Cond_Appearing())
     UI.push_modal_style()
     if ImGui.ImGui_BeginPopupModal(RA.ctx, "Project Not Saved##popup", true, ImGui.ImGui_WindowFlags_NoResize()) then
+      local bw_cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+      ImGui.ImGui_Spacing(RA.ctx)
       ImGui.ImGui_TextWrapped(RA.ctx,
-        "Your project has not been saved yet. "
-        .. "Backups require a saved project file.\n\n"
-        .. "Continue running code without a backup?")
+        "You have auto-backup turned on and your project is not saved.")
+      ImGui.ImGui_Spacing(RA.ctx)
       ImGui.ImGui_Spacing(RA.ctx)
 
-      local do_continue = false
-      -- "Run without a backup" is the risky path -- danger palette so
-      -- the user reads "this is the lose-work choice," not a safe primary.
+      local do_continue     = false
+      local do_save_project = false
+      local do_disable      = false
+      -- Row 1: Continue (danger -- skips backup this run) | Save Project (primary).
+      -- Both rows centered using GetContentRegionAvail math, matching the
+      -- pattern used by Confirm Clear / Quit / Risky-Run popups.
+      local btn_h     = 0
+      local r1_a, r1_b, r1_gap = RA.SC(96), RA.SC(112), RA.SC(16)
+      local r1_row    = r1_a + r1_gap + r1_b
+      SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx) + math_floor((bw_cw - r1_row) * 0.5))
       UI.push_modal_danger_btn()
-      if ImGui.ImGui_Button(RA.ctx, "Continue", RA.SC(88), 0) then do_continue = true end
+      if ImGui.ImGui_Button(RA.ctx, "Continue", r1_a, btn_h) then do_continue = true end
       UI.pop_modal_danger_btn()
-      SameLine(RA.ctx, 0, RA.SC(10))
-      if ImGui.ImGui_Button(RA.ctx, "Cancel", RA.SC(72), 0) then
+      SameLine(RA.ctx, 0, r1_gap)
+      UI.push_modal_primary_btn()
+      if ImGui.ImGui_Button(RA.ctx, "Save Project", r1_b, btn_h) then
+        do_save_project = true
+      end
+      UI.pop_modal_primary_btn()
+      ImGui.ImGui_Spacing(RA.ctx)
+
+      -- Row 2: Disable Auto-Backup | Cancel.
+      -- For users who keep hitting this on unsaved scratch projects: one-click
+      -- opt-out. Persists the pref change AND runs the deferred code, so the
+      -- popup stops appearing and the action they kicked off still happens.
+      local r2_a, r2_b, r2_gap = RA.SC(160), RA.SC(96), RA.SC(16)
+      local r2_row = r2_a + r2_gap + r2_b
+      SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx) + math_floor((bw_cw - r2_row) * 0.5))
+      if ImGui.ImGui_Button(RA.ctx, "Disable Auto-Backup", r2_a, btn_h) then
+        do_disable = true
+      end
+      SameLine(RA.ctx, 0, r2_gap)
+      if ImGui.ImGui_Button(RA.ctx, "Cancel", r2_b, btn_h) then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
         S.backup_warn_code = nil
         S.backup_warn_jsfx = nil
@@ -15692,7 +15883,48 @@ function Render.main_window()
         S.backup_warn_idx  = nil
         S.refocus_prompt   = true
       end
-      if do_continue and S.backup_warn_code then
+      if do_disable then
+        prefs.auto_backup = false
+        reaper.SetExtState(CFG.EXT_NS, "auto_backup", "0", true)
+      end
+      -- Save Project: trigger native "File: Save project" (40026). If the
+      -- project has never been saved, REAPER puts up the native Save-As
+      -- dialog and Main_OnCommand blocks until the user picks a path or
+      -- cancels. After it returns, re-check EnumProjects: if a path is
+      -- now set, the save succeeded and we can do the backup + run. If
+      -- the user cancelled the native dialog, leave our popup open so
+      -- they can pick a different option.
+      local saved_now = false
+      if do_save_project then
+        reaper.Main_OnCommand(40026, 0)
+        local _, after_path = reaper.EnumProjects(-1)
+        if after_path and after_path ~= "" then
+          -- Now that the project has a path, do the safety backup the
+          -- popup originally blocked on. Treat a real backup failure
+          -- (write_error / read_error) as a hard stop here: the user
+          -- explicitly chose Save Project specifically to get the
+          -- backup, and silently running the generated code without
+          -- one would defeat the popup's whole purpose. "unchanged"
+          -- can't happen on the first backup of a freshly-saved
+          -- project, but accept it defensively as success.
+          local bok, berr = Code.safety_backup()
+          if bok or berr == "unchanged" then
+            saved_now = true
+          else
+            ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+            S.backup_warn_code = nil
+            S.backup_warn_jsfx = nil
+            S.backup_warn_idx  = nil
+            S.refocus_prompt   = true
+            Log.add_error("Project saved, but the safety backup failed ("
+              .. tostring(berr) .. "). The generated code was NOT run. "
+              .. "Resolve the disk/permission issue and try again, or "
+              .. "click Run manually if you want to proceed without a "
+              .. "backup.")
+          end
+        end
+      end
+      if (do_continue or do_disable or saved_now) and S.backup_warn_code then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
         -- If there's a JSFX to save alongside the Lua companion, save it first.
         if S.backup_warn_jsfx then

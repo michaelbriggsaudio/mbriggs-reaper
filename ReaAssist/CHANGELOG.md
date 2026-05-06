@@ -1,5 +1,19 @@
 # ReaAssist - Changelog
 
+## v1.1.4 - 2026-05-06
+
+- **New model picker UX.** Each provider's recommended model and recommended thinking level now show a "*" badge in the chip dropdowns. A brief explainer line ("Best for | Cost | Speed | Note") appears below the chips when you change the selection and fades after 10 seconds. Hovering any row in the thinking dropdown previews that combo's explainer before you click.
+  - One-time reset on upgrade: v1.1.4 wipes any existing model + thinking-level picks once on first launch so everyone lands on the new bench-driven defaults. Re-pick from the chip dropdowns if you preferred a different combo.
+
+- **New default model + thinking picks** for built-in providers, based on bench testing of multi-step REAPER scripting tasks:
+  - Anthropic: Sonnet 4.6 (no thinking) remains the recommended Claude default; Haiku 4.5 default thinking moves Low to High (the only Haiku combo that handles complex routing reliably).
+  - OpenAI: full GPT-5.4 (no thinking) replaces mini as the recommended OpenAI default; nano default thinking moves Low to None.
+  - Gemini: Flash Lite default thinking moves Minimal to Low; Flash 3 default thinking moves Low to Minimal (fastest combo in the lineup).
+
+- **Help page Quick model guide** added under Providers & Models with the recommended pick per provider. Help page renderer now handles markdown tables and `###` sub-headings, so the existing Stock Fallbacks table and the new Quick model guide render properly instead of as raw markdown.
+
+- **ReaComp Threshold** conversion clarified in the plugin reference (`value = 10^(dB / 20)` formula + worked examples), reducing the rate at which lighter models pick the default normalized value when asked for a specific dB target.
+
 ## v1.1.3 - 2026-05-05
 
 - **Per-turn API call cap.** A 15-call ceiling per turn stops a stuck model from silently racking up cost on retry loops, and nudges toward a higher-tier model where one applies.

@@ -1610,7 +1610,13 @@ function UI.mode_model_row_v5()
   local req_live = (S.status == "waiting")
 
   local cursor_x = sx + PAD_X
-  local y1, y2 = sy, sy + ROW_H
+  -- Lift the chip row 7px above its layout slot. The Dummy at the bottom
+  -- of this function still reserves ROW_H of vertical space, so downstream
+  -- elements (combo-hint line, footer rail) keep their normal layout
+  -- positions; only the chip row + Ask/AutoRun pill + inline toggles
+  -- visually rise into the slot above.
+  local CHIP_ROW_LIFT = RA.SC(5)
+  local y1, y2 = sy - CHIP_ROW_LIFT, sy - CHIP_ROW_LIFT + ROW_H
 
   PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
   local _, th = CalcTextSize(RA.ctx, "M")
@@ -1906,8 +1912,23 @@ function UI.mode_model_row_v5()
         shortcut = row_descr[i]    -- no right column; plain descriptor
       end
 
+      -- Asterisk badge marks the provider's recommended model (per
+      -- p_active.default_model_idx). Non-recommended rows get a 2-space
+      -- prefix so model names line up vertically against "* ". The
+      -- right-side checkmark (sel) still indicates the user's current
+      -- selection -- the two cues read independently, so a
+      -- recommended-and-selected row appears as "* Sonnet 4.6 CHK".
+      -- Asterisk (vs. a Unicode star glyph) keeps us inside the basic
+      -- Latin range that the menu font's glyph map actually loads.
+      -- Custom providers carry a default_model_idx (typically 1) for
+      -- bootstrap, but their model lists are user-defined so generic
+      -- "recommended" guidance can't be reliable -- nil out rec_idx
+      -- on custom providers so no row gets the badge, matching the
+      -- same convention UI.COMBO_HINTS uses to skip custom providers.
+      local rec_idx   = (not is_custom) and p_active.default_model_idx or nil
+      local label_pfx = (i == rec_idx) and "* " or "  "
       ImGui.ImGui_BeginDisabled(RA.ctx, locked)
-      local m_clicked = ImGui.ImGui_MenuItem(RA.ctx, raw_m.label, shortcut, sel)
+      local m_clicked = ImGui.ImGui_MenuItem(RA.ctx, label_pfx .. raw_m.label, shortcut, sel)
       ImGui.ImGui_EndDisabled(RA.ctx)
       if locked then
         UI.tooltip_v5("Requires Google's paid API tier. Upgrade at aistudio.google.com/apikey.")
@@ -1968,14 +1989,32 @@ function UI.mode_model_row_v5()
       -- Header label, matching the Provider / Model dropdowns.
       ImGui.ImGui_TextDisabled(RA.ctx, "Thinking:")
       ImGui.ImGui_Separator(RA.ctx)
+      -- Same asterisk convention as the model dropdown: marks the
+      -- recommended thinking level for the active model. Cascade is the
+      -- same one PROVIDERS.load_thinking_idx uses for first-touch
+      -- defaults -- model.default_thinking_idx -> provider.
+      -- default_thinking_idx -> nil. Nil means no badge (custom
+      -- providers that haven't configured a default).
+      local rec_t_idx = (active_model and active_model.default_thinking_idx)
+                         or p_active.default_thinking_idx
       for _, v in ipairs(vis) do
-        if ImGui.ImGui_MenuItem(RA.ctx, v.label, nil, v.idx == prefs.thinking_idx) then
+        local t_pfx = (v.idx == rec_t_idx) and "* " or "  "
+        if ImGui.ImGui_MenuItem(RA.ctx, t_pfx .. v.label, nil, v.idx == prefs.thinking_idx) then
           prefs.thinking_idx = v.idx
           -- Save under the per-model slot via the helper. Falls back to
           -- the legacy per-provider key only when no model id is available.
           local active_m = MODELS[prefs.model_idx] or MODELS[1]
           PROVIDERS.save_thinking_idx(p_active, active_m, prefs.thinking_idx)
         end
+        -- Hover tooltip: show the (provider, model, this-thinking) explainer
+        -- line so the user can preview each row's tradeoff before clicking.
+        -- Same lookup the muted line below the chip row uses; here it
+        -- previews each option, while the muted line summarizes the
+        -- current pick. Custom providers without COMBO_HINTS entries
+        -- return nil and skip the tooltip.
+        local tl_obj = p_active.thinking_levels[v.idx]
+        local hint   = UI.combo_hint(p_active, active_model, tl_obj)
+        if hint then UI.tooltip_v5(hint) end
       end
       ImGui.ImGui_EndPopup(RA.ctx)
     end
@@ -2105,37 +2144,67 @@ function UI.mode_model_row_v5()
   ImGui.ImGui_Dummy(RA.ctx, 1, ROW_H)
 
   -- Combo hint below the chip row: a single muted line describing the
-  -- current (provider, model, thinking) pick -- e.g. "Haiku + High maxes
-  -- Haiku's budget. Sonnet is usually a stronger pick at this depth." or
-  -- "Sonnet + Medium: Anthropic's recommended depth..." Lookup table lives
-  -- in UI.COMBO_HINTS. Custom providers and uncovered combos return nil and
-  -- the line just doesn't render. Rendered in the whitespace between the
-  -- chip row and the footer rail, left-aligned with the page content edge
-  -- (sx + PAD_X -- same origin the CLAUDE chip uses), nudged up 1px. Same
-  -- font + muted color the prior tier-warning toast used; no fade since the
-  -- line is keyed off the active selection rather than a transient event.
-  --
-  -- TEMP DISABLED while new thinking-level benchmarking is under way -- the
-  -- explainer copy in Dev/Model_Info.md is still our source of truth, but
-  -- shouldn't be shown to users until the recommended depths are settled.
-  -- Re-enable by flipping the `if false` guard below to `if true`. The data
-  -- table (UI.COMBO_HINTS), helper (UI.combo_hint), and the Debug Helper's
-  -- "Reset Thinking Levels" button stay live so the test session can flip
-  -- this back on without touching anything else.
-  if false then
+  -- current (provider, model, thinking) pick in the format
+  -- "Best for | Cost | Speed | Note" -- e.g.
+  -- "Simple and complex | Mid-cost | Very fast | Recommended OpenAI default"
+  -- or "Avoid long prompts | Higher cost | Very slow (hits timeouts) |
+  -- Use None or Opus None". Lookup table lives in UI.COMBO_HINTS (source
+  -- of truth: Dev/Model_Info.md). Custom providers and uncovered combos
+  -- return nil and the line just doesn't render. Rendered in the
+  -- whitespace between the chip row and the footer rail, left-aligned
+  -- with the page content edge (sx + PAD_X -- same origin the CLAUDE chip
+  -- uses), nudged up 1px. Same font + muted color the prior tier-warning
+  -- toast used; no fade since the line is keyed off the active selection
+  -- rather than a transient event.
+  do
     local active_m  = MODELS[prefs.model_idx] or MODELS[1]
     local active_tl = p_active.thinking_levels
                       and p_active.thinking_levels[prefs.thinking_idx]
                       or nil
     local hint = UI.combo_hint(p_active, active_m, active_tl)
     if hint then
-      PushFont(RA.ctx, nil, RA.SC(11))
-      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-      local _, cy = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
-      ImGui.ImGui_SetCursorScreenPos(RA.ctx, sx + PAD_X, cy - RA.SC(2))
-      Text(RA.ctx, hint)
-      PopStyleColor(RA.ctx)
-      PopFont(RA.ctx)
+      -- Selection-change-triggered fade: hold for HOLD_S then fade over
+      -- FADE_S. The signature (provider|model|thinking) is rebuilt every
+      -- frame; whenever it changes, the visibility deadline pushes
+      -- forward so the user gets a fresh read after each pick. Window
+      -- close/reopen resets S.combo_hint_sig (S.* lives in script state)
+      -- so a freshly-opened ReaAssist also flashes the line on first
+      -- render.
+      local HOLD_S = 10.0
+      local FADE_S = 0.5
+      local sig = (p_active and p_active.id or "") .. "|"
+                .. (active_m and active_m.id or "") .. "|"
+                .. (active_tl and active_tl.value or "")
+      if sig ~= S.combo_hint_sig then
+        -- First render after script launch: S.combo_hint_sig is nil. Just
+        -- prime the signature so the line stays hidden on launch -- only
+        -- a real user pick (provider/model/thinking change) should make
+        -- it appear and fade.
+        if S.combo_hint_sig ~= nil then
+          S.combo_hint_until = time_precise() + HOLD_S + FADE_S
+        end
+        S.combo_hint_sig = sig
+      end
+      local now   = time_precise()
+      local end_t = S.combo_hint_until or 0
+      local alpha = 1.0
+      if now >= end_t then
+        alpha = 0
+      elseif now > end_t - FADE_S then
+        alpha = (end_t - now) / FADE_S
+      end
+      if alpha > 0 then
+        local base   = TK.text_muted
+        local fade_c = (base & 0xFFFFFF00)
+                       | math_floor((base & 0xFF) * alpha + 0.5)
+        PushFont(RA.ctx, nil, RA.SC(10))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), fade_c)
+        local _, cy = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
+        ImGui.ImGui_SetCursorScreenPos(RA.ctx, sx + PAD_X + RA.SC(2), cy - RA.SC(3))
+        Text(RA.ctx, hint)
+        PopStyleColor(RA.ctx)
+        PopFont(RA.ctx)
+      end
     end
   end
 
@@ -4400,10 +4469,114 @@ function Render.help_screen()
     end
 
     local body_wrap_x_off = inner_w
-    for _, raw in ipairs(sec.lines) do
+    -- Index-based walk (vs. ipairs) so the table branch can advance
+    -- across multiple consumed rows in one step. Adds ### sub-heading
+    -- and pipe-table support that the chat renderer (UI.selectable_text)
+    -- already had; without these, "### Foo" rendered as literal raw
+    -- text and "| col | col |" rows showed as pipe-separated lines.
+    local idx = 1
+    while idx <= #sec.lines do
+      local raw  = sec.lines[idx]
       local line = raw:gsub("^%s+", ""):gsub("%s+$", "")
       if line == "" then
         Dummy(RA.ctx, 1, 4)
+        idx = idx + 1
+      elseif line:match("^|") then
+        -- Markdown table: gather contiguous |...| rows starting here,
+        -- then render via ImGui_BeginTable. Same column-fitting logic
+        -- the chat renderer's table branch uses (search "Render table
+        -- segment" in this file). No per-table right-click "Copy"
+        -- menu -- the section-level "Copy" via BeginPopupContextItem
+        -- on the outer group already covers it.
+        local rows, next_idx = parse_md_table(sec.lines, idx)
+        if #rows > 0 then
+          local num_cols = 0
+          for _, cells in ipairs(rows) do
+            if #cells > num_cols then num_cols = #cells end
+          end
+          if num_cols > 0 then
+            local tbl_id    = "##help_tbl_" .. si .. "_" .. idx
+            local tbl_flags = ImGui.ImGui_TableFlags_SizingFixedFit()
+                            | ImGui.ImGui_TableFlags_BordersInnerV()
+                            | ImGui.ImGui_TableFlags_PadOuterX()
+            PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_CellPadding(), 5, 2)
+            local col_px = {}
+            for c = 1, num_cols do col_px[c] = 0 end
+            for _, cells in ipairs(rows) do
+              for c = 1, num_cols do
+                local w = CalcTextSize(RA.ctx, cells[c] or "")
+                if w > col_px[c] then col_px[c] = w end
+              end
+            end
+            local pad_total = num_cols * 12
+            local budget    = body_wrap_x_off - pad_total
+            local total_w   = 0
+            for c = 1, num_cols do total_w = total_w + col_px[c] end
+            if total_w > budget and budget > 0 then
+              local fair = budget / num_cols
+              local locked, unlocked_w = 0, 0
+              local is_locked = {}
+              for c = 1, num_cols do
+                if col_px[c] <= fair then
+                  is_locked[c] = true
+                  locked = locked + col_px[c]
+                else
+                  unlocked_w = unlocked_w + col_px[c]
+                end
+              end
+              local remain = budget - locked
+              for c = 1, num_cols do
+                if not is_locked[c] then
+                  if unlocked_w > 0 then
+                    col_px[c] = math_max(40, math_floor(remain * col_px[c] / unlocked_w))
+                  else
+                    col_px[c] = math_max(40, math_floor(remain / num_cols))
+                  end
+                end
+              end
+            end
+            if ImGui.ImGui_BeginTable(RA.ctx, tbl_id, num_cols, tbl_flags, body_wrap_x_off) then
+              for c = 1, num_cols do
+                ImGui.ImGui_TableSetupColumn(RA.ctx, "##c" .. c,
+                  ImGui.ImGui_TableColumnFlags_WidthFixed(), col_px[c])
+              end
+              local start_row = 1
+              if #rows > 1 then
+                ImGui.ImGui_TableNextRow(RA.ctx)
+                for c = 1, num_cols do
+                  ImGui.ImGui_TableSetColumnIndex(RA.ctx, c - 1)
+                  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+                  ImGui.ImGui_TextWrapped(RA.ctx, rows[1][c] or "")
+                  PopStyleColor(RA.ctx)
+                end
+                start_row = 2
+              end
+              for r = start_row, #rows do
+                ImGui.ImGui_TableNextRow(RA.ctx)
+                for c = 1, num_cols do
+                  ImGui.ImGui_TableSetColumnIndex(RA.ctx, c - 1)
+                  ImGui.ImGui_TextWrapped(RA.ctx, rows[r][c] or "")
+                end
+              end
+              ImGui.ImGui_EndTable(RA.ctx)
+            end
+            ImGui.ImGui_PopStyleVar(RA.ctx)
+            Dummy(RA.ctx, 1, 4)
+          end
+        end
+        idx = next_idx
+      elseif line:match("^### ") then
+        -- H3 sub-heading: bold at body size + 2 SC pixels, with a
+        -- small pre/post spacer. ## H2 sections still cap at the
+        -- orange section label via UI.v5_section_label above; ###
+        -- gives a lighter visual divider inside a section.
+        local htext = line:sub(5):gsub("^%s+", "")
+        Dummy(RA.ctx, 1, 4)
+        PushFont(RA.ctx, RA.bold_font, _help_body_sz + RA.SC(2))
+        Text(RA.ctx, htext)
+        PopFont(RA.ctx)
+        Dummy(RA.ctx, 1, 2)
+        idx = idx + 1
       elseif line:sub(1, 2) == "- " then
         local content = line:sub(3)
         -- Bullet dot, muted. Pulled back from TK.accent to TK.text_muted
@@ -4442,6 +4615,7 @@ function Render.help_screen()
         end
         ImGui.ImGui_Unindent(RA.ctx, indent_px)
         Dummy(RA.ctx, 1, 2)
+        idx = idx + 1
       else
         if qlower_body then
           draw_hl_wrapped(line, body_wrap_x_off)
@@ -4450,6 +4624,7 @@ function Render.help_screen()
           Text(RA.ctx, line)
           ImGui.ImGui_PopTextWrapPos(RA.ctx)
         end
+        idx = idx + 1
       end
     end
     PopStyleColor(RA.ctx)

@@ -143,6 +143,16 @@ Each provider has fast, balanced, and smart model tiers. Start with a balanced m
 
 For providers with configurable thinking, more is not always better. ReaAssist gives the model a structured recipe; strong models usually follow it best at low or minimal thinking. If a complex task fails, raise the model tier before raising the thinking level.
 
+### Quick model guide
+
+| Provider | Recommended pick | Best for |
+|---|---|---|
+| Anthropic (Claude) | Sonnet 4.6, no thinking | All-around safe default. Pick Opus 4.7 (no thinking) for highest quality at higher cost. |
+| OpenAI (ChatGPT) | GPT-5.4, no thinking | Fastest reliable combo |
+| Google (Gemini) | Flash 3, Minimal thinking | Cheapest fast option |
+
+The model and thinking dropdowns mark each provider's recommended row with a `*` on the left. Hover any row to see what that combination is best for; the same explainer briefly appears as a muted line below the chips after you change the selection.
+
 You can connect more than one provider and switch per request from the provider picker above the chat input. Add or remove keys from **Settings > API Keys**. Model choices are remembered per provider.
 
 ## Code Execution

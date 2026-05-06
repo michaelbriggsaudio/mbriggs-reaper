@@ -1336,7 +1336,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.1.3", -- public release version
+  VERSION           = "1.1.4", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -3246,21 +3246,19 @@ PROVIDERS = {
     -- Haiku 4.5 only accepts manual; Opus 4.7 only accepts adaptive
     -- (manual returns 400); Sonnet 4.6 accepts both, adaptive preferred.
     --
-    -- default_thinking_idx (per-model override): Haiku is meaningfully
-    -- weaker than Sonnet/Opus on multi-step REAPER scripting, so it
-    -- defaults to Low (2, 2K budget_tokens) instead of the provider's
-    -- None (1) -- enough reasoning lift to stabilize the small model on
-    -- typical scripting prompts without burning a thinking budget on
-    -- every turn. Sonnet and Opus inherit the provider default of None,
-    -- which means no thinking field on the wire and therefore no
-    -- extended thinking -- the API treats thinking as opt-in. Users who
-    -- want Sonnet/Opus to think can pick a level from the chip;
-    -- Anthropic's docs recommend Medium for Sonnet 4.6 and xHigh for
-    -- Opus 4.7 (xHigh isn't in our 4-level dropdown today, so High is
-    -- the strongest available there).
+    -- default_thinking_idx (per-model override): Haiku at None/Low
+    -- struggles on multi-step REAPER scripting and Medium needs a
+    -- retry on complex prompts, so Haiku defaults to High (4, 16K
+    -- budget) -- the only Haiku combo that handles complex routing/
+    -- FX work reliably at moderate latency. Sonnet and Opus inherit
+    -- the provider default of None: no thinking field on the wire,
+    -- no extended thinking, lowest latency, and on this workflow no
+    -- measured quality gain from raising thinking. Users can still
+    -- pick a higher level via the chip if a particular prompt needs
+    -- it.
     models = {
       { label = "Haiku 4.5",  chip_label = "HAIKU",  id = "claude-haiku-4-5",
-        price_in = 1.00,  price_out = 5.00,  price_cache_r = 0.10, price_cache_w = 1.25, max_output = 64000,  thinking_style = "claude_manual",   default_thinking_idx = 2 },
+        price_in = 1.00,  price_out = 5.00,  price_cache_r = 0.10, price_cache_w = 1.25, max_output = 64000,  thinking_style = "claude_manual",   default_thinking_idx = 4 },
       { label = "Sonnet 4.6", chip_label = "SONNET", id = "claude-sonnet-4-6",
         price_in = 3.00,  price_out = 15.00, price_cache_r = 0.30, price_cache_w = 3.75, max_output = 64000,  context_window = 1000000, thinking_style = "claude_adaptive" },
       { label = "Opus 4.7",   chip_label = "OPUS",   id = "claude-opus-4-7",
@@ -3284,7 +3282,7 @@ PROVIDERS = {
     console_label = "platform.openai.com/api-keys",
     billing_url   = "https://platform.openai.com/settings/organization/billing",
     billing_label = "platform.openai.com/settings/organization/billing",
-    default_model_idx = 2,
+    default_model_idx = 3,  -- Full GPT-5.4 -- the recommended OpenAI default
     thinking_levels = {
       { label = "None",   value = "none"   },
       { label = "Low",    value = "low"    },
@@ -3305,13 +3303,18 @@ PROVIDERS = {
     -- display below uses the lower-tier rate; large-prompt costs will
     -- read low until calc_cost grows tier metadata + a token-count
     -- branch. Same approximation pattern as Gemini Pro >200K below.
-    -- default_thinking_idx (per-model override): nano and mini both
-    -- benefit from a small reasoning lift on typical prompts (Low / 2),
-    -- while the full GPT-5.4 is capable enough at None (1) that the
+    -- default_thinking_idx (per-model override): nano defaults to
+    -- None (1) -- nano's identity is "fastest cheapest OpenAI", and
+    -- reasoning lifts at Low/Medium add latency without solving
+    -- nano's actual failure mode (multi-step DAW edits). The
+    -- per-combo explainer redirects complex work to full GPT-5.4
+    -- None instead of trying to rescue nano with more thinking. Mini
+    -- stays at Low (2) since None has been unreliable on routing/FX
+    -- tasks, and full GPT-5.4 is capable enough at None (1) that the
     -- provider default applies.
     models = {
       { label = "GPT-5.4 nano", chip_label = "NANO", id = "gpt-5.4-nano",
-        price_in = 0.20,  price_out = 1.25,  price_cache_r = 0.02,  max_output = 128000, context_window = 400000,  default_thinking_idx = 2 },
+        price_in = 0.20,  price_out = 1.25,  price_cache_r = 0.02,  max_output = 128000, context_window = 400000,  default_thinking_idx = 1 },
       { label = "GPT-5.4 mini", chip_label = "MINI", id = "gpt-5.4-mini",
         price_in = 0.75,  price_out = 4.50,  price_cache_r = 0.075, max_output = 128000, context_window = 400000,  default_thinking_idx = 2 },
       { label = "GPT-5.4",      chip_label = "FULL", id = "gpt-5.4",
@@ -3352,17 +3355,20 @@ PROVIDERS = {
     -- context_window: per-model context size used by the preflight token
     -- gate. All current Gemini 3.x models advertise the same 1,048,576-
     -- token input window.
-    -- default_thinking_idx (per-model override): tested values per
-    -- ChatGPT-led benchmarking. Flash Lite goes to Minimal (1, flash_only)
-    -- since its dropdown does include the Minimal entry; Flash 3 to Low
-    -- (2); Pro 3.1 inherits the provider Medium default. Pro is "Medium
-    -- if exposed, but not recommended" -- the long-context surcharge tier
-    -- + the cost of every Pro turn make it the wrong daily-driver pick.
+    -- default_thinking_idx (per-model override): Flash Lite defaults
+    -- to Low (2) -- Flash Lite at Minimal misses on complex routing
+    -- while Low handles both simple and complex reliably. Flash 3
+    -- defaults to Minimal (1) -- it is the fastest combo in the
+    -- lineup and passes cleanly at Minimal, so paying for thinking
+    -- is a poor trade. Pro 3.1 inherits the provider Medium default.
+    -- Pro is "Medium if exposed, but not recommended" -- the long-
+    -- context surcharge tier + the cost of every Pro turn make it
+    -- the wrong daily-driver pick.
     models = {
       { label = "Flash Lite 3.1", chip_label = "FLASH LITE", id = "gemini-3.1-flash-lite-preview",
-        price_in = 0.25,  price_out = 1.50, price_cache_r = 0.025, is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 1 },
+        price_in = 0.25,  price_out = 1.50, price_cache_r = 0.025, is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 2 },
       { label = "Flash 3",        chip_label = "FLASH",      id = "gemini-3-flash-preview",
-        price_in = 0.50,  price_out = 3.00, price_cache_r = 0.05,  is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 2 },
+        price_in = 0.50,  price_out = 3.00, price_cache_r = 0.05,  is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 1 },
       { label = "Pro 3.1",        chip_label = "PRO",        id = "gemini-3.1-pro-preview",
         price_in = 2.00,  price_out = 12.00, price_cache_r = 0.20, paid_only = true,   max_output = 65536, context_window = 1048576 },
     },
@@ -4142,6 +4148,47 @@ do
       end
     end
     reaper.SetExtState(CFG.EXT_NS, "thinking_idx_reset_v1", "1", true)
+  end
+end
+
+-- Second one-time reset (v1.1.4), gated by a fresh sentinel. Wipes both
+-- saved model_idx_<provider> (per-provider model picks) AND the
+-- thinking_idx_<provider>_<model> per-model thinking picks so users
+-- land on the new bench-driven defaults shipped this release:
+--   anthropic.default_model_idx unchanged (Sonnet still recommended);
+--   claude-haiku-4-5 default thinking: Low -> High;
+--   openai.default_model_idx: mini (2) -> full GPT-5.4 (3);
+--   gpt-5.4-nano default thinking: Low -> None;
+--   gemini-3.1-flash-lite-preview default thinking: Minimal -> Low;
+--   gemini-3-flash-preview default thinking: Low -> Minimal.
+-- Without this, users who'd already picked a model/thinking combo
+-- before v1.1.4 would silently keep it and never see the new
+-- recommendations -- the "*" badge would still mark the recommended
+-- row, but the user's saved selection would still load on launch.
+--
+-- Same sentinel pattern as v1 above: fires exactly once per install
+-- on first launch of any release containing this block, then becomes
+-- a single GetExtState no-op forever. Future resets add a fresh
+-- sentinel name (model_picker_reset_v3, etc.) rather than editing
+-- this one. The legacy thinking_idx_<provider> + the per-model keys
+-- get wiped again here too -- harmless if v1 already cleared them,
+-- and it covers users who installed fresh post-v1 (so v1's reset
+-- ran on empty state) and then accumulated picks before v1.1.4.
+do
+  if reaper.GetExtState(CFG.EXT_NS, "model_picker_reset_v2") ~= "1" then
+    for _, p in ipairs(PROVIDERS) do
+      reaper.DeleteExtState(CFG.EXT_NS, "model_idx_" .. p.id, true)
+      reaper.DeleteExtState(CFG.EXT_NS, "thinking_idx_" .. p.id, true)
+      if p.models then
+        for _, m in ipairs(p.models) do
+          if m.id then
+            reaper.DeleteExtState(
+              CFG.EXT_NS, "thinking_idx_" .. p.id .. "_" .. m.id, true)
+          end
+        end
+      end
+    end
+    reaper.SetExtState(CFG.EXT_NS, "model_picker_reset_v2", "1", true)
   end
 end
 
@@ -4935,18 +4982,26 @@ end
 UI = {}
 
 -- Per-model hover descriptions shown in the V5 model dropdown. Keyed by model
--- id (not label) so renaming a label doesn't silently desync the text. Kept
--- to one short sentence so the tooltip reads at a glance.
+-- id (not label) so renaming a label doesn't silently desync the text.
+-- Source of truth for the strings: Dev/Model_Info.md ("Model dropdown
+-- tooltips" section). Format is uniform across all rows:
+--   "[Identity]. Use [Level] thinking. [Note]."
+-- Identity is one phrase (cheapest / cheap / recommended default / premium);
+-- the level names the recommended thinking pick (DeepSeek's "Non-Thinking"
+-- already includes the word "thinking" so the suffix is dropped); the note
+-- redirects weak combos or calls out a quality property of strong ones.
 UI.MODEL_TIPS = {
-  ["claude-haiku-4-5"]               = "Fastest + cheapest Claude. Best for quick questions, simple edits, and short scripts.",
-  ["claude-sonnet-4-6"]              = "Balanced Claude default. Best for most coding, debugging, and session-analysis tasks.",
-  ["claude-opus-4-7"]                = "Smartest Claude. Best for complex architecture, tricky bugs, and nuanced audio advice.",
-  ["gpt-5.4-nano"]                   = "Fastest + cheapest GPT. Best for simple lookups and short replies.",
-  ["gpt-5.4-mini"]                   = "Balanced GPT default. Solid reasoning at moderate cost.",
-  ["gpt-5.4"]                        = "Flagship GPT. Best for deep reasoning, tough debugging, and nuanced prompts.",
-  ["gemini-3.1-flash-lite-preview"]  = "Fastest + cheapest Gemini. Best for simple chat and high-volume tasks.",
-  ["gemini-3-flash-preview"]         = "Balanced Gemini. Strong quality/speed tradeoff for everyday use.",
-  ["gemini-3.1-pro-preview"]         = "Smartest Gemini. Best for complex reasoning and long-context work (paid tier).",
+  ["claude-haiku-4-5"]               = "Cheapest Claude. Use High thinking. Sonnet None is faster for complex work.",
+  ["claude-sonnet-4-6"]              = "Recommended Claude default. Use None thinking. Higher levels add latency without quality gain.",
+  ["claude-opus-4-7"]                = "Premium Claude. Use None thinking. Higher levels add cost without quality gain.",
+  ["gpt-5.4-nano"]                   = "Cheapest GPT. Use None thinking. Simple tasks only -- pick full GPT-5.4 for complex.",
+  ["gpt-5.4-mini"]                   = "Cheap GPT. Use Low thinking. Simple tasks only -- pick full GPT-5.4 for complex.",
+  ["gpt-5.4"]                        = "Recommended OpenAI default. Use None thinking. Reliable on simple and complex tasks.",
+  ["gemini-3.1-flash-lite-preview"]  = "Cheapest Gemini. Use Low thinking. Pro 3.1 Medium is better for complex prompts.",
+  ["gemini-3-flash-preview"]         = "Cheap Gemini. Use Minimal thinking. Fastest combo in the lineup.",
+  ["gemini-3.1-pro-preview"]         = "Premium Gemini. Use Medium thinking. Slower and pricier than Flash.",
+  ["deepseek-v4-flash"]              = "Cheapest combo in the lineup. Use Non-Thinking. Strong cheap pick.",
+  ["deepseek-v4-pro"]                = "Higher-cost DeepSeek. Use Non-Thinking. Flash is usually the better pick.",
 }
 
 -- Per-(provider, model, thinking) explainer line. Rendered as a static muted
@@ -4964,71 +5019,71 @@ UI.MODEL_TIPS = {
 UI.COMBO_HINTS = {
   anthropic = {
     ["claude-haiku-4-5"] = {
-      none   = "Haiku without thinking is the fastest, cheapest Claude. Best for short questions and basic edits.",
-      low    = "Haiku 4.5's recommended default. Light reasoning lift for typical scripting prompts.",
-      medium = "Haiku + Medium adds reasoning, but Haiku may still struggle on complex multi-step tasks.",
-      high   = "Haiku + High maxes Haiku's budget. Sonnet is usually a stronger pick at this depth.",
+      none   = "Simple tasks | Mid-cost | Very fast | Use Sonnet for complex",
+      low    = "Simple tasks only | Mid-cost | Very fast | Use Sonnet for complex",
+      medium = "Simple and complex | Mid-cost | Slow with retries | Use Sonnet for complex",
+      high   = "Recommended Level | Simple tasks; complex with caveats | Mid-cost | Moderate speed | Use Sonnet for complex",
     },
     ["claude-sonnet-4-6"] = {
-      none   = "Sonnet without thinking. Strong default for most tasks; pick Medium for trickier debugging.",
-      low    = "Sonnet + Low: small reasoning lift over None at modest extra cost.",
-      medium = "Sonnet + Medium: Anthropic's recommended depth for everyday Sonnet 4.6 use.",
-      high   = "Sonnet + High: deepest Sonnet reasoning. Slower replies and more output tokens per turn.",
+      none   = "Recommended Level | Simple and complex | Higher cost | Fast",
+      low    = "Simple and complex | Higher cost | Slow | Marginal lift over None -- use None",
+      medium = "Simple and complex | Higher cost | Very slow | Use only if None struggles",
+      high   = "Avoid long prompts | Higher cost | Very slow (hits timeouts) | Use None or Opus None",
     },
     ["claude-opus-4-7"] = {
-      none   = "Opus without thinking works, but Anthropic recommends pairing Opus with thinking.",
-      low    = "Opus + Low underuses Opus. Medium or High is the recommended sweet spot.",
-      medium = "Opus + Medium: solid balance of depth and speed for hard reasoning tasks.",
-      high   = "Opus + High: deepest, slowest, most expensive. Best for hard architectural problems.",
+      none   = "Recommended Level | Simple and complex (top quality) | Most expensive | Very fast",
+      low    = "Simple and complex | Most expensive | Very fast | No gain over None -- use None",
+      medium = "Simple and complex | Most expensive | Very fast | No gain over None -- use None",
+      high   = "Simple and complex | Most expensive | Very fast | Deepest reasoning but no gain -- use None",
     },
   },
   openai = {
     ["gpt-5.4-nano"] = {
-      none   = "Nano without thinking is fastest and cheapest. Best for short lookups and quick replies.",
-      low    = "Nano's recommended default. Small reasoning lift for simple prompts.",
-      medium = "Nano + Medium: extra reasoning, but nano may not have headroom for complex tasks.",
-      high   = "Nano + High maxes nano's budget. Mini or full GPT-5.4 will likely do better here.",
+      none   = "Recommended Level | Simple tasks only | Cheap | Very fast | Use full GPT-5.4 None for complex edits",
+      low    = "Simple tasks only | Cheap | Very fast | None is faster -- pick None (default)",
+      medium = "Simple and some complex | Cheap | Moderate speed | Use full GPT-5.4 None for complex edits",
+      high   = "Simple and some complex | Cheap | Slow | Use full GPT-5.4 None for complex edits",
     },
     ["gpt-5.4-mini"] = {
-      none   = "Mini without thinking is snappy and capable for most prompts.",
-      low    = "Mini's recommended default. Balanced quality at moderate cost.",
-      medium = "Mini + Medium: extra reasoning depth. Slower replies but stronger results.",
-      high   = "Mini + High: deepest mini reasoning. Consider full GPT-5.4 for difficult problems.",
+      none   = "Simple tasks only | Cheap | Very fast | Use full GPT-5.4 None for complex edits",
+      low    = "Recommended Level | Simple tasks only | Cheap | Very fast | Use full GPT-5.4 None for complex edits",
+      medium = "Simple and complex | Mid-cost | Moderate speed | Limited evidence; full GPT-5.4 None is faster",
+      high   = "Simple and complex | Mid-cost | Moderate speed | Mini's strongest combo, but full GPT-5.4 None is faster and cleaner",
     },
     ["gpt-5.4"] = {
-      none   = "Full GPT-5.4 without thinking. Strong default for coding and debugging.",
-      low    = "Full GPT-5.4 + Low: small reasoning lift over None.",
-      medium = "Full GPT-5.4 + Medium: balanced default depth for tough prompts.",
-      high   = "Full GPT-5.4 + High: deepest reasoning. Slow and pricey, but best for hard problems.",
+      none   = "Recommended Level | Simple and complex | Mid-cost | Very fast",
+      low    = "Simple and complex | Mid-cost | Moderate speed | Marginal lift over None -- use None",
+      medium = "Simple and complex | Higher cost | Very slow | Use only if None struggles",
+      high   = "Simple and complex | Higher cost | Very slow | No quality gain over None -- use None",
     },
   },
   google = {
     ["gemini-3.1-flash-lite-preview"] = {
-      MINIMAL = "Flash Lite + Minimal: cheapest Gemini combo. Best for simple chat and high-volume work.",
-      LOW     = "Flash Lite + Low: light reasoning. Reliable for everyday simple prompts.",
-      MEDIUM  = "Flash Lite + Medium: extra reasoning, but Flash Lite may struggle on complex tasks.",
-      HIGH    = "Flash Lite + High maxes Flash Lite's budget. Flash 3 or Pro is usually better here.",
+      MINIMAL = "Simple tasks only | Cheap | Fast | Low is more reliable on complex routing",
+      LOW     = "Recommended Level | Simple and complex | Cheap | Fast",
+      MEDIUM  = "Simple and complex | Cheap | Slow | Pro 3.1 usually better at this depth",
+      HIGH    = "Avoid complex prompts | Cheap | Very slow | Runtime-error risk; pick Flash Lite Low or Pro 3.1 Medium",
     },
     ["gemini-3-flash-preview"] = {
-      MINIMAL = "Flash 3 + Minimal: fast and cheap, with extra capability over Flash Lite.",
-      LOW     = "Flash 3 + Low: Flash 3's recommended default. Strong quality/speed tradeoff.",
-      MEDIUM  = "Flash 3 + Medium: deeper reasoning at moderate cost.",
-      HIGH    = "Flash 3 + High: deep reasoning, slower replies. Pro 3.1 may fit complex prompts better.",
+      MINIMAL = "Recommended Level | Simple and complex | Cheap | Very fast (fastest in lineup)",
+      LOW     = "Simple and complex | Cheap | Fast | Adds reasoning over Minimal at modest extra cost",
+      MEDIUM  = "Simple and complex | Cheap | Moderate speed | Solid for tougher prompts",
+      HIGH    = "Simple and complex | Cheap | Moderate speed | Pro 3.1 may fit complex prompts better",
     },
     ["gemini-3.1-pro-preview"] = {
-      LOW     = "Pro 3.1 + Low: capable but underuses Pro. Medium is Gemini's provider default.",
-      MEDIUM  = "Pro 3.1 + Medium: balanced default depth.",
-      HIGH    = "Pro 3.1 + High: deepest Gemini reasoning. Slowest and most expensive.",
+      LOW     = "Simple and complex | Mid-cost | Moderate speed | Underuses Pro -- Medium is provider default",
+      MEDIUM  = "Recommended Level | Simple and complex (best Gemini quality) | Mid-cost | Moderate speed",
+      HIGH    = "Simple and complex | Mid-cost | Moderate speed | Marginal lift over Medium",
     },
   },
   deepseek = {
     ["deepseek-v4-flash"] = {
-      disabled = "V4 Flash, no thinking: cheapest serious option in the lineup.",
-      enabled  = "V4 Flash + Thinking: stronger reasoning at modest extra cost and latency.",
+      disabled = "Recommended Level | Simple and complex | Cheapest in lineup | Very fast | Strong cheap pick",
+      enabled  = "Simple and complex | Cheap | Slow | Reasoning lift rarely worth the latency",
     },
     ["deepseek-v4-pro"] = {
-      disabled = "V4 Pro, no thinking: capable default at higher cost than Flash.",
-      enabled  = "V4 Pro + Thinking: deepest DeepSeek reasoning. Slower and more expensive.",
+      disabled = "Recommended Level | Simple and complex | Mid-cost | Slow | Slower and pricier than Flash without measured gain -- use Flash",
+      enabled  = "Avoid for normal use | Mid-cost | Very slow (often times out) | Pick V4 Flash Non-Thinking",
     },
   },
 }
@@ -20596,7 +20651,10 @@ function Net.process_response_buckets(text)
   -- uniformly. Without this, only the first tag was processed and the rest
   -- vanished silently, leaving the model stuck waiting for context.
   local merged = {}
-  for cap in scrubbed:gmatch("<context_needed>%s*(.-)%s*</context_needed>") do
+  -- Tolerate stray whitespace inside the tag delimiters (e.g. "< context_needed>"):
+  -- some quantized models tokenize "<context_needed>" as separate pieces and
+  -- decode with a space, which would otherwise fall through as visible chat.
+  for cap in scrubbed:gmatch("<%s*context_needed%s*>%s*(.-)%s*<%s*/%s*context_needed%s*>") do
     if cap ~= "" then merged[#merged+1] = cap end
   end
   local bucket_str = (#merged > 0) and tbl_concat(merged, ", ") or nil
@@ -20614,7 +20672,7 @@ function Net.process_response_buckets(text)
   -- pinned data). Threshold: 40 non-whitespace characters of non-tag,
   -- non-code content -- short tags like "Fetching..." don't need the hint.
   do
-    local non_tag = scrubbed:gsub("<context_needed>.-</context_needed>", "")
+    local non_tag = scrubbed:gsub("<%s*context_needed%s*>.-<%s*/%s*context_needed%s*>", "")
     local non_ws_count = 0
     for _ in non_tag:gmatch("%S") do
       non_ws_count = non_ws_count + 1
@@ -23132,7 +23190,7 @@ function Net.try_finish_curl()
   -- substantive prose. The tag is then noise in the visible reply -- pull it
   -- out (and any trailing whitespace it leaves behind) so the user sees the
   -- prose cleanly.
-  text = text:gsub("<context_needed>.-</context_needed>%s*", "")
+  text = text:gsub("<%s*context_needed%s*>.-<%s*/%s*context_needed%s*>%s*", "")
   text = text:match("^%s*(.-)%s*$") or ""
 
   -- Normal final response: update token counters, build display entry, extract code.
@@ -23574,7 +23632,7 @@ function Net.try_finish_curl()
       :match("^%s*(.-)%s*$")
   end
   explanation = explanation
-    :gsub("<context_needed>.-</context_needed>%s*", "")
+    :gsub("<%s*context_needed%s*>.-<%s*/%s*context_needed%s*>%s*", "")
     :gsub("\n\n\n+", "\n\n")
     :match("^%s*(.-)%s*$")
 

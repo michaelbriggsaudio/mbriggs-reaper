@@ -1336,7 +1336,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.1.2", -- public release version
+  VERSION           = "1.1.3", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -1361,6 +1361,13 @@ CFG = {
   POLL_THROTTLE     = 0.1,       -- min interval between poll-loop file checks
   MAX_RETRIES       = 3,         -- max auto-retries on transient 529 failures
   RETRY_DELAY_BASE  = 2,         -- base seconds for exponential backoff
+  MAX_CALLS_PER_TURN = 15,       -- hard cap on POSTs in a single user turn
+                                 -- (initial send + every silent context fetch
+                                 -- and validator retry combined). Trips before
+                                 -- a stuck small/local model can rack up real
+                                 -- cost. Per-vector caps still apply; this is
+                                 -- the aggregate backstop. Per-provider tuning
+                                 -- is intentionally not exposed in v1.
   -- Auto-update / repair / bootstrap URL. Points at the raw GitHub base
   -- for the release tag or test branch. Current setting is the `test`
   -- branch for pre-release smoke testing; switch to a pinned tag like
@@ -1543,13 +1550,6 @@ S = {
   gemini_tier_pending = false, -- true while tier test is in flight
   show_gemini_free_warn = false, -- triggers free-tier warning popup next frame
   open_no_tracks_warn   = false, -- triggers no-tracks-selected popup next frame
-  -- Transient toast below the chip row. { text, expires_at } or nil.
-  -- Set via UI.show_toast(); auto-clears when time_precise() passes expires_at.
-  toast                 = nil,
-  -- One-shot guard: fires the lowest-tier hint toast once per script session
-  -- when the main UI first renders on a provider's fast model. Mid-session
-  -- switch-to-lowest fires the toast independently of this flag.
-  lowtier_toast_shown_session = false,
   -- Context follow-up state
   pending_orig_prompt    = nil,    -- bare user text, saved for follow-up resend
   pending_snapshot       = nil,    -- snapshot from original send
@@ -1578,6 +1578,9 @@ S = {
   helper_int_validator_retries = 0,-- per-turn counter -- model rewrote a bundled helper body (e.g. dropped parens on the range-guard) (max 1 retry)
   defer_validator_retries  = 0,    -- per-turn counter -- model emitted plugin param calls outside reaper.defer (max 1 retry)
   helper_validator_retries = 0,    -- per-turn counter -- model called helper functions without including their definitions (max 1 retry)
+  void_return_validator_retries = 0,-- per-turn counter -- model assigned a void reaper.* call result (max 1 retry)
+  bare_lua_retry_used      = false,-- per-turn flag -- valid-looking Lua arrived without a ```lua fence; one hidden re-fence retry
+  unclosed_fence_retry_used = false,-- per-turn flag -- Lua fence was opened but not closed; one hidden re-fence retry
   parse_retry_used         = false,-- per-turn flag -- extracted ```lua block failed Lua syntax check; one hidden retry with the parser error
   jsfx_validator_retries   = 0,    -- per-turn counter -- generated JSFX failed Code.validate_jsfx (max 1 retry)
   length_retry_used        = false,-- per-turn flag -- empty-text-from-length retry already fired with thinking forced off
@@ -4946,29 +4949,108 @@ UI.MODEL_TIPS = {
   ["gemini-3.1-pro-preview"]         = "Smartest Gemini. Best for complex reasoning and long-context work (paid tier).",
 }
 
--- Transient below-chip toast. Caller passes plain text; the chip-row renderer
--- draws it in the whitespace above the footer, left-aligned with the model
--- chip. Animation: 200ms fade-in, 5s hold, 800ms fade-out (6s total). Click
--- on the text dismisses immediately.
-function UI.show_toast(text)
-  local now = reaper.time_precise()
-  local FADE_IN, HOLD, FADE_OUT = 0.2, 5.0, 0.8
-  S.toast = {
-    text            = text,
-    start_at        = now,
-    fade_in_end_at  = now + FADE_IN,
-    hold_end_at     = now + FADE_IN + HOLD,
-    fade_out_end_at = now + FADE_IN + HOLD + FADE_OUT,
-    fade_in_s       = FADE_IN,
-    fade_out_s      = FADE_OUT,
-  }
+-- Per-(provider, model, thinking) explainer line. Rendered as a static muted
+-- line below the chip row (see UI.chip_row_v5's footer), updating as the user
+-- changes selection. Replaces the older "lowest-tier" transient toast: every
+-- combo carries its own line so users can see at a glance whether the current
+-- pick is a balanced default, a capability-limited choice that may struggle
+-- on hard tasks, or a slow/expensive top-tier setting.
+--
+-- Keyed [provider_id][model_id][thinking.value]. Thinking values come from
+-- the PROVIDERS schema verbatim: lowercase for Anthropic / OpenAI / DeepSeek
+-- (none/low/medium/high, disabled/enabled), uppercase for Google
+-- (MINIMAL/LOW/MEDIUM/HIGH). Custom providers and any uncovered combo fall
+-- through to nil and the line just doesn't render that frame.
+UI.COMBO_HINTS = {
+  anthropic = {
+    ["claude-haiku-4-5"] = {
+      none   = "Haiku without thinking is the fastest, cheapest Claude. Best for short questions and basic edits.",
+      low    = "Haiku 4.5's recommended default. Light reasoning lift for typical scripting prompts.",
+      medium = "Haiku + Medium adds reasoning, but Haiku may still struggle on complex multi-step tasks.",
+      high   = "Haiku + High maxes Haiku's budget. Sonnet is usually a stronger pick at this depth.",
+    },
+    ["claude-sonnet-4-6"] = {
+      none   = "Sonnet without thinking. Strong default for most tasks; pick Medium for trickier debugging.",
+      low    = "Sonnet + Low: small reasoning lift over None at modest extra cost.",
+      medium = "Sonnet + Medium: Anthropic's recommended depth for everyday Sonnet 4.6 use.",
+      high   = "Sonnet + High: deepest Sonnet reasoning. Slower replies and more output tokens per turn.",
+    },
+    ["claude-opus-4-7"] = {
+      none   = "Opus without thinking works, but Anthropic recommends pairing Opus with thinking.",
+      low    = "Opus + Low underuses Opus. Medium or High is the recommended sweet spot.",
+      medium = "Opus + Medium: solid balance of depth and speed for hard reasoning tasks.",
+      high   = "Opus + High: deepest, slowest, most expensive. Best for hard architectural problems.",
+    },
+  },
+  openai = {
+    ["gpt-5.4-nano"] = {
+      none   = "Nano without thinking is fastest and cheapest. Best for short lookups and quick replies.",
+      low    = "Nano's recommended default. Small reasoning lift for simple prompts.",
+      medium = "Nano + Medium: extra reasoning, but nano may not have headroom for complex tasks.",
+      high   = "Nano + High maxes nano's budget. Mini or full GPT-5.4 will likely do better here.",
+    },
+    ["gpt-5.4-mini"] = {
+      none   = "Mini without thinking is snappy and capable for most prompts.",
+      low    = "Mini's recommended default. Balanced quality at moderate cost.",
+      medium = "Mini + Medium: extra reasoning depth. Slower replies but stronger results.",
+      high   = "Mini + High: deepest mini reasoning. Consider full GPT-5.4 for difficult problems.",
+    },
+    ["gpt-5.4"] = {
+      none   = "Full GPT-5.4 without thinking. Strong default for coding and debugging.",
+      low    = "Full GPT-5.4 + Low: small reasoning lift over None.",
+      medium = "Full GPT-5.4 + Medium: balanced default depth for tough prompts.",
+      high   = "Full GPT-5.4 + High: deepest reasoning. Slow and pricey, but best for hard problems.",
+    },
+  },
+  google = {
+    ["gemini-3.1-flash-lite-preview"] = {
+      MINIMAL = "Flash Lite + Minimal: cheapest Gemini combo. Best for simple chat and high-volume work.",
+      LOW     = "Flash Lite + Low: light reasoning. Reliable for everyday simple prompts.",
+      MEDIUM  = "Flash Lite + Medium: extra reasoning, but Flash Lite may struggle on complex tasks.",
+      HIGH    = "Flash Lite + High maxes Flash Lite's budget. Flash 3 or Pro is usually better here.",
+    },
+    ["gemini-3-flash-preview"] = {
+      MINIMAL = "Flash 3 + Minimal: fast and cheap, with extra capability over Flash Lite.",
+      LOW     = "Flash 3 + Low: Flash 3's recommended default. Strong quality/speed tradeoff.",
+      MEDIUM  = "Flash 3 + Medium: deeper reasoning at moderate cost.",
+      HIGH    = "Flash 3 + High: deep reasoning, slower replies. Pro 3.1 may fit complex prompts better.",
+    },
+    ["gemini-3.1-pro-preview"] = {
+      LOW     = "Pro 3.1 + Low: capable but underuses Pro. Medium is Gemini's provider default.",
+      MEDIUM  = "Pro 3.1 + Medium: balanced default depth.",
+      HIGH    = "Pro 3.1 + High: deepest Gemini reasoning. Slowest and most expensive.",
+    },
+  },
+  deepseek = {
+    ["deepseek-v4-flash"] = {
+      disabled = "V4 Flash, no thinking: cheapest serious option in the lineup.",
+      enabled  = "V4 Flash + Thinking: stronger reasoning at modest extra cost and latency.",
+    },
+    ["deepseek-v4-pro"] = {
+      disabled = "V4 Pro, no thinking: capable default at higher cost than Flash.",
+      enabled  = "V4 Pro + Thinking: deepest DeepSeek reasoning. Slower and more expensive.",
+    },
+  },
+}
+
+-- Look up the explainer line for the current (provider, model, thinking) pick.
+-- Returns the string from UI.COMBO_HINTS or nil if any layer is absent (custom
+-- provider, missing thinking_level, uncovered combo). Callers render nothing
+-- when nil.
+function UI.combo_hint(provider, model, thinking_level)
+  if not (provider and model) then return nil end
+  if provider.is_custom then return nil end
+  local p_tbl = UI.COMBO_HINTS[provider.id];  if not p_tbl then return nil end
+  local m_tbl = p_tbl[model.id];              if not m_tbl then return nil end
+  local key = thinking_level and thinking_level.value
+  if not key then return nil end
+  return m_tbl[key]
 end
 
 -- Floating toast: a top-level rounded bubble near the bottom-center of the
--- ReaAssist window. Unlike UI.show_toast (which prints text in a fixed spot
--- in the chat chrome), this draws its OWN window on top of whatever's below,
--- so it's visible regardless of scroll position or which settings page is
--- current. Animation: 180ms fade-in, 1.6s hold, 500ms fade-out (2.3s total).
+-- ReaAssist window. Draws its OWN window on top of whatever's below, so it's
+-- visible regardless of scroll position or which settings page is current.
+-- Animation: 180ms fade-in, 1.6s hold, 500ms fade-out (2.3s total).
 -- Sticky=true skips the hold/fade-out and keeps the toast visible until the
 -- caller replaces it (by firing another show_float_toast) or clears it
 -- (S.float_toast = nil). Used by the Settings "Check for Updates" button
@@ -14647,8 +14729,10 @@ end
 -- in ctx_label / fetched_to_sticky logs.
 function Net.copin_plugin_bundle(out_list)
   local pb_key = "prompt_bundle:plugin"
-  if S.sticky_context[pb_key] then return end
-  if S.prompt_bundle_sent and S.prompt_bundle_sent["plugin"] then return end
+  if S.sticky_context[pb_key] then
+    if S.prompt_bundle_sent then S.prompt_bundle_sent["plugin"] = true end
+    return
+  end
   local pb_content, _ = CTX.prompt_bundle("plugin")
   if not pb_content then return end
   Net.sticky_set(pb_key, pb_content)
@@ -14672,8 +14756,10 @@ end
 --     path; the helper-definition validator is the safety net at gen time).
 function Net.copin_plugin_helpers(out_list, source)
   local ph_key = "prompt_bundle:plugin_helpers"
-  if S.sticky_context[ph_key] then return end
-  if S.prompt_bundle_sent and S.prompt_bundle_sent["plugin_helpers"] then return end
+  if S.sticky_context[ph_key] then
+    if S.prompt_bundle_sent then S.prompt_bundle_sent["plugin_helpers"] = true end
+    return
+  end
   local ph_content, _ = CTX.prompt_bundle("plugin_helpers")
   if not ph_content then return end
   -- source defaults to "copin" inside Net.sticky_set. Pass "preempt"
@@ -14696,8 +14782,10 @@ end
 function Net.copin_jsfx_family(family, out_list)
   if not family or family == "" then return end
   local pb_key = "prompt_bundle:" .. family
-  if S.sticky_context[pb_key] then return end
-  if S.prompt_bundle_sent and S.prompt_bundle_sent[family] then return end
+  if S.sticky_context[pb_key] then
+    if S.prompt_bundle_sent then S.prompt_bundle_sent[family] = true end
+    return
+  end
   local pb_content, _ = CTX.prompt_bundle(family)
   if not pb_content then return end
   Net.sticky_set(pb_key, pb_content)
@@ -15868,6 +15956,57 @@ end
 -- Both are used by the custom-LLM connection test, which hits GET /v1/models
 -- so no inference runs on the server. When method=="GET" we skip the body
 -- write, the content-type header, and the -d flag; nil/POST behaves as before.
+-- Restore the trailing user-history entry from S.pending_orig_prompt,
+-- shedding any sticky-bucket / internal-retry-note content that was baked
+-- in mid-turn. Mirrors the success-path cleanup in Net.process_response;
+-- centralised so the per-turn-call-cap abort path can reuse the same
+-- semantics without leaving an internal note as the user's last turn.
+function Net._restore_pending_user_history()
+  if S.pending_orig_prompt
+     and #S.history > 0
+     and S.history[#S.history].role == "user" then
+    S.history[#S.history].content = "USER REQUEST:\n" .. S.pending_orig_prompt
+  end
+end
+
+-- Tier-aware copy for the per-turn-call-cap abort. Small / local models
+-- loop the most, so the message nudges users toward the next tier up;
+-- flagship models on the cap usually mean a genuinely confused turn,
+-- so the suggestion is to start fresh and report it if it repeats.
+function Net._call_cap_message()
+  local p   = PROVIDERS.active() or {}
+  local m   = MODELS[prefs.model_idx] or MODELS[1] or {}
+  local mid = (m.id or m.name or ""):lower()
+  local pid = p.id or ""
+  -- Match a marker only at a word boundary so substrings inside larger
+  -- names don't trigger -- e.g. "gemini-3.1-pro-preview" must NOT hit
+  -- "mini", and "anthropic-flash-prototype" must hit "flash" cleanly.
+  -- %f[%a] = position where prev char is non-letter and next is letter
+  -- (start of a word); %f[%A] is the inverse (end of a word).
+  local function tag(kw)
+    return mid:find("%f[%a]" .. kw .. "%f[%A]") ~= nil
+  end
+  local hint
+  if pid == "anthropic" and tag("haiku") then
+    hint = "Try Sonnet 4.6 or Opus 4.7 for this request."
+  elseif pid == "google" and (tag("flash") or tag("nano")) then
+    hint = "Try Gemini 3.1 Pro for this request."
+  elseif pid == "openai" and tag("mini") then
+    hint = "Try a non-mini OpenAI model for this request."
+  elseif p.is_custom
+      or tag("haiku") or tag("flash") or tag("mini")
+      or tag("nano")  or tag("gemma") or tag("llama")
+      or tag("phi") then
+    hint = "This often happens with smaller or local models -- try a "
+        .. "higher-tier model."
+  else
+    hint = "Unusual on a flagship model. Try starting a new chat or "
+        .. "rephrasing. If it repeats, please use Help -> Report an Issue."
+  end
+  return ("Stopped after %d API calls in one turn to avoid runaway cost. %s")
+         :format(CFG.MAX_CALLS_PER_TURN, hint)
+end
+
 function Net.fire_curl(body, opts)
   -- TCP/TLS handshake timeout (seconds). Default 10 for cloud providers;
   -- per-record override for customs set below.
@@ -15881,6 +16020,38 @@ function Net.fire_curl(body, opts)
   local method   = (opts and opts.method) or "POST"
   local is_get   = (method == "GET")
 
+  -- A "turn POST" is a POST tied to the user's currently-pending display
+  -- message: the initial send and every silent retry / context fetch /
+  -- beta-fallback that fires before the turn settles. NOT a turn POST:
+  -- GETs (auth probes, /v1/models scans), and the Settings-page POSTs
+  -- from Net.fire_key_test / Net.fire_gemini_tier_test, which don't have
+  -- a pending display message attached. The per-turn cap and per-message
+  -- counter both gate on this same predicate so they stay in sync.
+  local is_turn_post = not is_get
+                       and S.pending_orig_prompt ~= nil
+                       and S.pending_display_idx
+                       and S.display_messages[S.pending_display_idx] ~= nil
+
+  -- Per-turn call cap. Catches runaway loops (small / local model
+  -- thrashing on context_needed or validator retries) before they rack
+  -- up real cost. Aborts the turn cleanly: logs ONE user-visible error,
+  -- restores the user's history entry from any internal retry note,
+  -- ends the Probe turn, and returns a distinct reason so the 13 retry
+  -- call sites can suppress their generic "did not go through" message.
+  if is_turn_post
+     and (S.api_calls_this_turn or 0) >= CFG.MAX_CALLS_PER_TURN then
+    Log.add_error(Net._call_cap_message())
+    Net._restore_pending_user_history()
+    S.status               = "idle"
+    S.pending_display_idx  = nil
+    S.pending_orig_prompt  = nil
+    S.request_start_time   = nil
+    S.retry_scheduled      = false
+    S.retry_saved_body     = nil
+    if S.probe_turn then Probe.end_turn(S.probe_turn, "call_cap") end
+    return false, "call_cap_exceeded"
+  end
+
   -- Per-message API-call counter. Incremented for every POST that's tied
   -- to the user's pending display message: the initial send AND any
   -- silent retries (docs-gate auto-fetch, beta-header fallback, cache-
@@ -15891,10 +16062,13 @@ function Net.fire_curl(body, opts)
   -- numbers are missing one or more earlier round-trips. GET is a probe
   -- (auth check, /v1/models scan) and never a user-message API call, so
   -- it stays out of the count.
-  if not is_get and S.pending_display_idx
-     and S.display_messages[S.pending_display_idx] then
+  if is_turn_post then
     local dmsg = S.display_messages[S.pending_display_idx]
     dmsg.api_calls = (dmsg.api_calls or 0) + 1
+    S.api_calls_this_turn = (S.api_calls_this_turn or 0) + 1
+    if S.probe_turn then
+      S.probe_turn.posts_fired = (S.probe_turn.posts_fired or 0) + 1
+    end
   end
 
   if not is_get then
@@ -17352,10 +17526,15 @@ function Net.send_to_api(user_text)
   S.helper_int_validator_retries = 0
   S.defer_validator_retries = 0
   S.helper_validator_retries = 0
+  S.void_return_validator_retries = 0
+  S.void_return_retry_used = false
+  S.bare_lua_retry_used = false
+  S.unclosed_fence_retry_used = false
   S.parse_retry_used       = false
   S.jsfx_validator_retries = 0
   S.length_retry_used      = false
   S.empty_retry_used       = false
+  S.api_calls_this_turn    = 0   -- aggregate cap counter (see CFG.MAX_CALLS_PER_TURN)
   S.thinking_override_idx  = nil
   S._context_reuse_hint    = nil
   S._mixed_output_hint     = nil
@@ -17864,10 +18043,15 @@ function Net.clear_conversation()
   S.helper_int_validator_retries = 0
   S.defer_validator_retries    = 0
   S.helper_validator_retries   = 0
+  S.void_return_validator_retries = 0
+  S.void_return_retry_used     = false
+  S.bare_lua_retry_used        = false
+  S.unclosed_fence_retry_used  = false
   S.parse_retry_used           = false
   S.jsfx_validator_retries     = 0
   S.length_retry_used          = false
   S.empty_retry_used           = false
+  S.api_calls_this_turn        = 0
   S.thinking_override_idx      = nil
   S._context_reuse_hint        = nil
   S._mixed_output_hint         = nil
@@ -20558,8 +20742,8 @@ function Net.process_response_buckets(text)
         return S.theme_ref_message ~= nil or S.theme_already_sent
       elseif kw == "prompt_bundle" and payload ~= "" then
         local pkey = payload:lower()
-        return (S.prompt_bundle_sent and S.prompt_bundle_sent[pkey] == true)
-          or (S.sticky_context and S.sticky_context["prompt_bundle:" .. pkey] ~= nil)
+        return S.sticky_context
+          and S.sticky_context["prompt_bundle:" .. pkey] ~= nil
       elseif kw == "plugin_ref" and payload ~= "" then
         return (S.plugin_ref_sent and S.plugin_ref_sent[payload] == true)
           or (S.sticky_context and S.sticky_context["plugin_ref:" .. payload] ~= nil)
@@ -20692,22 +20876,23 @@ function Net.process_response_buckets(text)
     elseif kw == "prompt_bundle" then
       last_scoped = "prompt_bundle"
       if payload ~= "" then
-        if not S.prompt_bundle_sent[payload:lower()] then
+        local pb_name = payload:lower()
+        local pb_key = "prompt_bundle:" .. pb_name
+        if not (S.sticky_context and S.sticky_context[pb_key]) then
           wants_prompt_bundle = true
-          prompt_bundle_names[#prompt_bundle_names+1] = payload:lower()
+          prompt_bundle_names[#prompt_bundle_names+1] = pb_name
         else
           -- Already pinned (typically via JSFX-family co-pin: when
           -- prompt_bundle:jsfx_pitch was pre-pinned alongside jsfx_pitch,
-          -- the base bundle and the family bundle are both in
-          -- prompt_bundle_sent already). Without this branch the request
+          -- the base bundle and the family bundle are both in sticky_context).
+          -- Without this branch the request
           -- silently drops -- fine for the dedupe but the model is still
           -- waiting for permission to write code, so the turn stalls. Fire
           -- a follow-up with the reuse hint so the model proceeds without
           -- a second round-trip.
           wants_preempt_hint     = true
           S._context_reuse_hint  = S._context_reuse_hint or {}
-          S._context_reuse_hint[#S._context_reuse_hint+1] =
-            "prompt_bundle:" .. payload:lower()
+          S._context_reuse_hint[#S._context_reuse_hint+1] = pb_key
         end
       end
     elseif kw == "resolve" then
@@ -21708,7 +21893,9 @@ function Net.process_response_buckets(text)
       end
       S.status = "waiting"
       Code.safe_write(tmp.out, "")
-      if not Net.fire_curl(Net.build_body(Net.trimmed_history(), S.pending_snapshot, S.pending_attachments)) then
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
         Log.add_error("Tried to load additional project info but the "
           .. "follow-up request didn't go through. Please try again.")
       end
@@ -22798,8 +22985,9 @@ function Net.try_finish_curl()
       S.status = "waiting"
       S.request_start_time = nil
       Code.safe_write(tmp.out, "")
-      if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments)) then
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
         Log.add_error("Auto-retry after empty length-capped reply did not "
           .. "go through. Please resend the last message.")
       end
@@ -22878,8 +23066,9 @@ function Net.try_finish_curl()
         S.status = "waiting"
         S.request_start_time = nil
         Code.safe_write(tmp.out, "")
-        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
-            S.pending_snapshot, S.pending_attachments)) then
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
           Log.add_error("Auto-retry after empty response did not go "
             .. "through. Please resend the last message.")
         end
@@ -23100,6 +23289,181 @@ function Net.try_finish_curl()
   end
   local lua_code = #lua_parts > 0 and tbl_concat(lua_parts, "\n\n") or nil
 
+  -- Recover once when a model returns apparent Lua but omits or breaks the
+  -- ```lua fence. Never execute unfenced text directly: bare-Lua recovery is
+  -- gated by a sandboxed syntax check, then the model must re-emit the same
+  -- script through the normal fenced extraction path.
+  if not lua_code and not jsfx_code and not S.pending_jsfx_intent then
+    local function retry_lua_fence_retry(kind, previous_lua, ctx_label,
+                                         log_tag, log_message, user_note,
+                                         fail_message)
+      if #S.history > 0 and S.history[#S.history].role == "assistant" then
+        S.history[#S.history] = nil
+      end
+      if #S.history > 0 and S.history[#S.history].role == "user" then
+        S.history[#S.history] = nil
+      end
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: "
+        .. user_note
+        .. " Re-send the EXACT SAME script inside ONE complete "
+        .. "```lua ... ``` block. Do NOT change logic, names, positions, "
+        .. "plugins, parameters, values, or comments. Do NOT emit "
+        .. "<context_needed> -- all reference data is already pinned. "
+        .. "Respond as if this is your FIRST reply -- do NOT apologize, "
+        .. "do NOT mention a retry.)\n\nPrevious " .. kind
+        .. " Lua:\n```text\n"
+        .. previous_lua
+        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      S.history[#S.history+1] = { role = "user", content = history_content }
+      Probe.add_validator_retry(S.probe_turn, "parse")
+      Log.line(log_tag, log_message)
+      if S.pending_display_idx
+         and S.display_messages[S.pending_display_idx] then
+        local dmsg = S.display_messages[S.pending_display_idx]
+        local existing = dmsg.ctx_label or ""
+        if not existing:find(ctx_label, 1, true) then
+          dmsg.ctx_label = existing ~= ""
+            and (existing .. " + " .. ctx_label) or ctx_label
+        end
+      end
+      if prefs.include_snapshot then
+        S.pending_project  = _resolve_pending_project()
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+      end
+      S.status = "waiting"
+      S.request_start_time = nil
+      Code.safe_write(tmp.out, "")
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
+        Log.add_error(fail_message)
+      end
+      S.scroll_to_bottom = true
+      return true
+    end
+
+    local fence_retry_used = S.bare_lua_retry_used
+      or S.unclosed_fence_retry_used
+    local unclosed_lua = text:match("```lua%s*\n(.+)$")
+      or text:match("```reascript%s*\n(.+)$")
+    if unclosed_lua and not fence_retry_used then
+      S.unclosed_fence_retry_used = true
+      if retry_lua_fence_retry("incomplete fenced", unclosed_lua,
+          "unclosed_fence_retry", "UNCLOSED-FENCE-RETRY",
+          "lua fence was opened but not closed; asking model to resend exactly",
+          "Your previous reply opened a Lua code fence but did not close it, "
+            .. "so ReaAssist could not safely extract the script.",
+          "Auto-retry after unclosed Lua fence did not go through. "
+            .. "Please resend the last message.") then
+        return
+      end
+    end
+
+    local bare_lua = text:match("^%s*(.-)%s*$")
+    local looks_like_lua = bare_lua ~= ""
+      and bare_lua:find("reaper%.")
+      and (bare_lua:find("reaper%.Undo_")
+        or bare_lua:find("reaper%.AddProjectMarker")
+        or bare_lua:find("reaper%.InsertTrackAtIndex")
+        or bare_lua:find("local%s+function")
+        or bare_lua:find("function%s+main"))
+    if looks_like_lua and not fence_retry_used then
+      local _chunk = load(bare_lua, "bare_lua_preflight", "t", {})
+      if _chunk then
+        S.bare_lua_retry_used = true
+        if retry_lua_fence_retry("unfenced", bare_lua,
+            "bare_lua_retry", "BARE-LUA-RETRY",
+            "valid-looking bare Lua without fence; asking model to wrap exactly",
+            "Your previous reply appears to be valid Lua, but it was not "
+              .. "inside a ```lua code fence, so ReaAssist cannot safely "
+              .. "extract or run it.",
+            "Auto-retry after unfenced Lua response did not go through. "
+              .. "Please resend the last message.") then
+          return
+        end
+      end
+    end
+  end
+
+  -- High-confidence void-return API assignment validator. Some REAPER API
+  -- calls mutate project state but do not return the object just created; if a
+  -- model assigns that nil return and then uses it as a track/item handle, the
+  -- script can silently do nothing. Retry once with the documented pattern.
+  if lua_code and not S.void_return_retry_used then
+    local stripped = lua_code
+      :gsub("%-%-%[%[.-%]%]", "")
+      :gsub("%-%-[^\n]*", "")
+    local void_funcs = {
+      InsertTrackAtIndex = "InsertTrackAtIndex returns no track. Call it as a statement, then call reaper.GetTrack(0, index).",
+    }
+    local bad_name, bad_note
+    for name, note in pairs(void_funcs) do
+      local call_pat = "reaper%." .. name .. "%s*%("
+      local assign_target = "[%a_][%w_%.%[%]%\"']*"
+      local local_assign = "local%s+" .. assign_target .. "%s*=%s*" .. call_pat
+      local plain_assign = "[\n;]%s*" .. assign_target .. "%s*=%s*" .. call_pat
+      if stripped:find(local_assign) or stripped:find(plain_assign) then
+        bad_name, bad_note = name, note
+        break
+      end
+    end
+    if bad_name then
+      S.void_return_retry_used = true
+      S.void_return_validator_retries =
+        (S.void_return_validator_retries or 0) + 1
+      Probe.add_validator_retry(S.probe_turn, "api")
+      Log.line("VOID-RETURN-RETRY",
+        "void-return API assignment to reaper." .. bad_name
+        .. "; retrying with hint")
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous "
+        .. "reply assigned the return value of reaper." .. bad_name .. "(), "
+        .. "but that function does not return the object you need. "
+        .. bad_note .. " Preserve the user's requested tracks, names, "
+        .. "plugins, parameter values, MIDI notes, markers, routing, and "
+        .. "ordering. Only fix the void-return API usage unless another "
+        .. "change is required to make the script valid. Respond as if "
+        .. "this is your FIRST reply -- do NOT apologize, do NOT mention "
+        .. "a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+        .. lua_code
+        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      if #S.history > 0 and S.history[#S.history].role == "assistant" then
+        S.history[#S.history] = nil
+      end
+      if #S.history > 0 and S.history[#S.history].role == "user" then
+        S.history[#S.history] = nil
+      end
+      S.history[#S.history+1] = { role = "user", content = history_content }
+      if S.pending_display_idx
+         and S.display_messages[S.pending_display_idx] then
+        local dmsg = S.display_messages[S.pending_display_idx]
+        local existing = dmsg.ctx_label or ""
+        if not existing:find("void_return_retry", 1, true) then
+          dmsg.ctx_label = existing ~= ""
+            and (existing .. " + void_return_retry") or "void_return_retry"
+        end
+      end
+      if prefs.include_snapshot then
+        S.pending_project  = _resolve_pending_project()
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+      end
+      S.status = "waiting"
+      S.request_start_time = nil
+      Code.safe_write(tmp.out, "")
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
+        Log.add_error("Auto-retry after void-return API assignment did not go "
+          .. "through. Please resend the last message.")
+      end
+      S.scroll_to_bottom = true
+      return
+    end
+  end
+
   -- Preflight: does the extracted lua_code actually parse as Lua?
   -- Empty-env load() does a pure syntax check (the env is only touched
   -- at execution time, not during compilation). If it fails, the fence
@@ -23168,8 +23532,9 @@ function Net.try_finish_curl()
         S.status = "waiting"
         S.request_start_time = nil
         Code.safe_write(tmp.out, "")
-        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
-            S.pending_snapshot, S.pending_attachments)) then
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
           Log.add_error("Auto-retry after Lua parse error did not go "
             .. "through. Please resend the last message.")
         end
@@ -23357,8 +23722,9 @@ function Net.try_finish_curl()
       end
       S.status = "waiting"
       Code.safe_write(tmp.out, "")
-      if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments)) then
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
         Log.add_error("Auto-retry with API reference did not go through. "
           .. "Please resend the last message.")
       end
@@ -23475,8 +23841,9 @@ function Net.try_finish_curl()
         end
         S.status = "waiting"
         Code.safe_write(tmp.out, "")
-        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
-            S.pending_snapshot, S.pending_attachments)) then
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
           Log.add_error("Auto-retry for invalid reaper.* calls did not "
             .. "go through. Please resend the last message.")
         end
@@ -23566,8 +23933,9 @@ function Net.try_finish_curl()
         end
         S.status = "waiting"
         Code.safe_write(tmp.out, "")
-        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
-            S.pending_snapshot, S.pending_attachments)) then
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
           Log.add_error("Auto-retry for reaper.* arity mismatch did not "
             .. "go through. Please resend the last message.")
         end
@@ -23680,8 +24048,9 @@ function Net.try_finish_curl()
         end
         S.status = "waiting"
         Code.safe_write(tmp.out, "")
-        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
-            S.pending_snapshot, S.pending_attachments)) then
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
           Log.add_error("Auto-retry for unchecked AddByName result did "
             .. "not go through. Please resend the last message.")
         end
@@ -23797,8 +24166,9 @@ function Net.try_finish_curl()
         end
         S.status = "waiting"
         Code.safe_write(tmp.out, "")
-        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
-            S.pending_snapshot, S.pending_attachments)) then
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
           Log.add_error("Auto-retry for chain-upsert violation did not "
             .. "go through. Please resend the last message.")
         end
@@ -23884,8 +24254,9 @@ function Net.try_finish_curl()
         end
         S.status = "waiting"
         Code.safe_write(tmp.out, "")
-        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
-            S.pending_snapshot, S.pending_attachments)) then
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
           Log.add_error("Auto-retry for missing reaper.defer wrap did not "
             .. "go through. Please resend the last message.")
         end
@@ -23988,8 +24359,9 @@ function Net.try_finish_curl()
         end
         S.status = "waiting"
         Code.safe_write(tmp.out, "")
-        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
-            S.pending_snapshot, S.pending_attachments)) then
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
           Log.add_error("Auto-retry for missing helper definitions did not "
             .. "go through. Please resend the last message.")
         end
@@ -24088,8 +24460,9 @@ function Net.try_finish_curl()
         end
         S.status = "waiting"
         Code.safe_write(tmp.out, "")
-        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
-            S.pending_snapshot, S.pending_attachments)) then
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
           Log.add_error("Auto-retry for corrupted helper body did not go "
             .. "through. Please resend the last message.")
         end
@@ -24246,8 +24619,9 @@ function Net.try_finish_curl()
         end
         S.status = "waiting"
         Code.safe_write(tmp.out, "")
-        if not Net.fire_curl(Net.build_body(Net.trimmed_history(),
-            S.pending_snapshot, S.pending_attachments)) then
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
           Log.add_error("Auto-retry for invalid JSFX did not go through. "
             .. "Please resend the last message.")
         end
@@ -25078,8 +25452,18 @@ function Loop.pump_curl_or_retry()
     if now >= S.retry_fire_time then
       S.retry_scheduled = false
       Code.safe_write(tmp.out, "")
-      if S.retry_saved_body and Net.fire_curl(S.retry_saved_body) then
-        S.status = "waiting"
+      if S.retry_saved_body then
+        local ok, reason = Net.fire_curl(S.retry_saved_body)
+        if ok then
+          S.status = "waiting"
+        else
+          if reason ~= "call_cap_exceeded" then
+            Log.add_error(
+              "The servers are still busy and the automatic retry didn't "
+              .. "go through. Please try again in a moment.")
+          end
+          S.retry_count = 0
+        end
       else
         Log.add_error(
           "The servers are still busy and the automatic retry didn't "

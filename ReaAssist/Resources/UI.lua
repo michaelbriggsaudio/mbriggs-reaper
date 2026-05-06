@@ -1686,51 +1686,6 @@ function UI.mode_model_row_v5()
   end
   local p_active = PROVIDERS.active()
 
-  -- Build the tier-hint message for the active provider. Used by both the
-  -- launch-time check below and the switch-to-lowest-tier handler in the
-  -- model picker. Returns nil if the provider has no models. Skips the
-  -- "Use X for most tasks." sentence when there's no distinct mid-tier
-  -- model to recommend.
-  local function _tier_hint_msg()
-    local function _title(m)
-      if m.chip_label then
-        -- chip_label values in the PROVIDERS schema are uppercase
-        -- ("HAIKU", "SONNET", "FLASH LITE", ...), so the first-letter
-        -- :upper() is a no-op -- only :lower() on the tail is needed
-        -- to produce title case.
-        return (m.chip_label:gsub("(%w)(%w*)", function(f, r)
-          return f .. r:lower()
-        end))
-      end
-      return m.label or "this model"
-    end
-    local fast = p_active.models[1]
-    if not fast then return nil end
-    local msg = _title(fast) .. " is only for simple questions and basic requests."
-    local mid_idx = p_active.default_model_idx or 2
-    if mid_idx == 1 then mid_idx = 2 end
-    local mid = p_active.models[mid_idx]
-    if mid and mid ~= fast then
-      msg = msg .. " Use " .. _title(mid) .. " for most tasks."
-    end
-    return msg
-  end
-
-  -- Launch-time tier hint: first time the chip row renders in a session, if
-  -- the current model is the provider's lowest-tier entry and the provider
-  -- isn't custom, fire the same toast a fresh switch-to-lowest fires. The
-  -- session flag keeps redraws within one session from re-firing; a fresh
-  -- script reload starts a new session and the hint appears again.
-  if not S.lowtier_toast_shown_session
-      and not p_active.is_custom
-      and p_active.models[1]
-      and MODELS[prefs.model_idx]
-      and MODELS[prefs.model_idx].id == p_active.models[1].id then
-    local msg = _tier_hint_msg()
-    if msg then UI.show_toast(msg) end
-    S.lowtier_toast_shown_session = true
-  end
-
   -- Hard cap on the mono text rendered inside each chip. The row holds
   -- provider + model + thinking chips plus the Ask/Auto-Run pill and the
   -- "backup / details" text; letting a user-typed label grow unbounded
@@ -1961,8 +1916,6 @@ function UI.mode_model_row_v5()
         if tip then UI.tooltip_v5(tip) end
       end
       if m_clicked and usable_idx then
-        local was_selected = sel      -- capture before mutating prefs.model_idx
-        local switched_to_lowest = (i == 1) and not was_selected
         -- Save current thinking_idx under the OLD model so per-model
         -- state survives the switch (e.g. Sonnet=Medium, Haiku=Low,
         -- Opus=None all preserved independently). Capture old_m BEFORE
@@ -1988,13 +1941,6 @@ function UI.mode_model_row_v5()
         S.api_ref_message = nil
         for _, att in ipairs(S.attachments) do
           att.cost = att.tokens * raw_m.price_in / 1000000
-        end
-        -- Skip the tier-hint toast for custom / local providers: their model
-        -- lists are user-defined, so "lowest tier" doesn't reliably map to
-        -- "only for simple questions" the way it does for Claude/GPT/Gemini.
-        if switched_to_lowest and not p_active.is_custom then
-          local msg = _tier_hint_msg()
-          if msg then UI.show_toast(msg) end
         end
       end
     end
@@ -2158,37 +2104,36 @@ function UI.mode_model_row_v5()
   ImGui.ImGui_SetCursorScreenPos(RA.ctx, sx, sy)
   ImGui.ImGui_Dummy(RA.ctx, 1, ROW_H)
 
-  -- Toast below the chip row: transient hint (e.g. the lowest-tier warning
-  -- when a user switches to the fast model). Rendered in the whitespace
-  -- between the chip row and the footer rail, left-aligned with the page
-  -- content edge (sx + PAD_X -- same origin the CLAUDE chip uses), nudged
-  -- up 1px. Click to dismiss; otherwise runs a 200ms fade-in / 5s hold /
-  -- 800ms fade-out cycle keyed on reaper.time_precise(). Alpha modulates
-  -- TK.text_muted (0xRRGGBBAA).
-  if S.toast then
-    local t = reaper.time_precise()
-    if t >= S.toast.fade_out_end_at then
-      S.toast = nil
-    else
-      local alpha
-      if t < S.toast.fade_in_end_at then
-        alpha = (t - S.toast.start_at) / S.toast.fade_in_s
-      elseif t < S.toast.hold_end_at then
-        alpha = 1.0
-      else
-        alpha = 1 - (t - S.toast.hold_end_at) / S.toast.fade_out_s
-      end
-      if alpha < 0 then alpha = 0 elseif alpha > 1 then alpha = 1 end
-      local base = TK.text_muted
-      local a_byte = math_floor((base & 0xFF) * alpha + 0.5)
-      local col    = (base & 0xFFFFFF00) | a_byte
-
+  -- Combo hint below the chip row: a single muted line describing the
+  -- current (provider, model, thinking) pick -- e.g. "Haiku + High maxes
+  -- Haiku's budget. Sonnet is usually a stronger pick at this depth." or
+  -- "Sonnet + Medium: Anthropic's recommended depth..." Lookup table lives
+  -- in UI.COMBO_HINTS. Custom providers and uncovered combos return nil and
+  -- the line just doesn't render. Rendered in the whitespace between the
+  -- chip row and the footer rail, left-aligned with the page content edge
+  -- (sx + PAD_X -- same origin the CLAUDE chip uses), nudged up 1px. Same
+  -- font + muted color the prior tier-warning toast used; no fade since the
+  -- line is keyed off the active selection rather than a transient event.
+  --
+  -- TEMP DISABLED while new thinking-level benchmarking is under way -- the
+  -- explainer copy in Dev/Model_Info.md is still our source of truth, but
+  -- shouldn't be shown to users until the recommended depths are settled.
+  -- Re-enable by flipping the `if false` guard below to `if true`. The data
+  -- table (UI.COMBO_HINTS), helper (UI.combo_hint), and the Debug Helper's
+  -- "Reset Thinking Levels" button stay live so the test session can flip
+  -- this back on without touching anything else.
+  if false then
+    local active_m  = MODELS[prefs.model_idx] or MODELS[1]
+    local active_tl = p_active.thinking_levels
+                      and p_active.thinking_levels[prefs.thinking_idx]
+                      or nil
+    local hint = UI.combo_hint(p_active, active_m, active_tl)
+    if hint then
       PushFont(RA.ctx, nil, RA.SC(11))
-      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), col)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
       local _, cy = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
       ImGui.ImGui_SetCursorScreenPos(RA.ctx, sx + PAD_X, cy - RA.SC(2))
-      Text(RA.ctx, S.toast.text)
-      if ImGui.ImGui_IsItemClicked(RA.ctx) then S.toast = nil end
+      Text(RA.ctx, hint)
       PopStyleColor(RA.ctx)
       PopFont(RA.ctx)
     end

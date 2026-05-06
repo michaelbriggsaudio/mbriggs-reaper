@@ -1,5 +1,13 @@
 # ReaAssist - Changelog
 
+## v1.1.3 - 2026-05-05
+
+- **Per-turn API call cap.** A 15-call ceiling per turn stops a stuck model from silently racking up cost on retry loops, and nudges toward a higher-tier model where one applies.
+
+- **More auto-recovery from broken replies.** One-shot hidden retries for unfenced Lua, unclosed ```lua fences, and `local x = reaper.InsertTrackAtIndex(...)` (the function returns nothing) -- all previously dropped silently or produced no-op scripts.
+
+- **ReaScript reference fixes** to reduce wrong-output on lighter models: ReaComp Threshold direct values, immediate `TrackFX_AddByName` error checks, `D_PAN` is direct (-1..1) not percent, and `TrackFX_SetParam`/`GetParam` arg order.
+
 ## v1.1.2 - 2026-05-05
 
 - Per-model thinking levels. Each model now remembers its own thinking-effort pick instead of one shared setting per provider. Switching Sonnet -> Haiku -> Opus and back keeps each model's level independent. Models can also carry a default (Haiku 4.5 starts at Low; GPT-5.4 nano/mini start at Low; Gemini Flash Lite at Minimal, Flash at Low, Pro at Medium; everything else None).

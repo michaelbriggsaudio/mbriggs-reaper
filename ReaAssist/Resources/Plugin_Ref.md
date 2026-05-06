@@ -338,6 +338,18 @@ Param 0 (Threshold) is linear amplitude, range 0..2. Use TrackFX_SetParam (not n
   0.063 = -24 dBFS
 ```
 
+Most user prompts name Threshold in dB. Param 0 uses direct linear amplitude,
+not normalized position. Match the requested dB target to the direct value
+below. Do NOT use 0.5 for -18 dB; 0.5 displays about -6 dB.
+
+Common direct SetParam requests:
+
+```lua
+  reaper.TrackFX_SetParam(tr, fx, 0, 0.125)  -- "set Threshold to -18 dB"
+  reaper.TrackFX_SetParam(tr, fx, 0, 0.25)   -- "set Threshold to -12 dB"
+  reaper.TrackFX_SetParam(tr, fx, 0, 0.5)    -- "set Threshold to -6 dB"
+```
+
 ### RATIO SCALE
 
 Param 1 (Ratio) normalized 0..1. Use TrackFX_SetParamNormalized.

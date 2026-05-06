@@ -42,6 +42,9 @@ VOLUME (D_VOL is LINEAR AMPLITUDE, not dB and not slider position):
   a deeply negative dB value (~ -150 to -1000). The same caveat applies
   to D_VOL on items, takes, and sends; envelope volumes have their own
   scaling -- see the envelopes bucket.
+- D_PAN is direct position, not percent: -1.0 = full left, 0.0 = center,
+  1.0 = full right. Convert percent requests by dividing by 100 and applying
+  direction: 25% left = -0.25, 50% right = 0.50.
 
 COLORS:
 - I_CUSTOMCOLOR and track/item colors require ColorToNative(r,g,b)|0x1000000.
@@ -299,14 +302,47 @@ ADDBYNAME vs GETBYNAME (read first -- the most common FX-script bug):
   fully initialized in the same execution frame, and GetNumParams returns nil.
 - Function name is `GetNumParams`, NOT `GetParamCount` (common hallucination).
 
+Check the returned index immediately, before any `reaper.defer` block. A
+success-direction-only guard like `if fx >= 0 then ... end` with no else is
+the silent-skip anti-pattern: when the FX fails to load the script reports
+"OK" while the user sees a missing or broken effect chain.
+
 ```lua
   local fx = reaper.TrackFX_AddByName(tr, "ReaEQ", false, -1)
+  if fx < 0 then
+    reaper.ShowMessageBox("Failed to add ReaEQ.", "ReaAssist", 0)
+    return
+  end
+
   reaper.defer(function()
-    if fx < 0 then return end
     local n = reaper.TrackFX_GetNumParams(tr, fx)
     -- set params here
   end)
 ```
+
+For chains, check every plugin before the deferred parameter edits:
+
+```lua
+  local eq = reaper.TrackFX_AddByName(tr, "VST: ReaEQ (Cockos)", false, -1)
+  if eq < 0 then
+    reaper.ShowMessageBox("Failed to add ReaEQ.", "ReaAssist", 0)
+    return
+  end
+
+  local comp = reaper.TrackFX_AddByName(tr, "VST: ReaComp (Cockos)", false, -1)
+  if comp < 0 then
+    reaper.ShowMessageBox("Failed to add ReaComp.", "ReaAssist", 0)
+    return
+  end
+
+  reaper.defer(function()
+    -- parameter work on eq and comp here
+  end)
+```
+
+TrackFX_SetParam, SetParamNormalized, GetParam, GetParamName, and other
+TrackFX_* parameter and read calls take `(track, fx_index, ...)`. The FX
+index returned by TrackFX_AddByName is arg 2, not arg 1.
 
 `integer reaper.TrackFX_GetCount(MediaTrack track)`
   Count FX on a track.

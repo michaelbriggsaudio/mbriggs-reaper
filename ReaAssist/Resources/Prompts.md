@@ -328,7 +328,7 @@ OUTPUT DISCIPLINE (what the user sees -- code comments and prose):
   GOOD prose: "Sets the Cenozoix ratio to 3:1." (then the code block)
   GOOD prose (open-ended decision): "Set the Pro-Q frequency to 3 kHz and gain to +4 dB on Band 1." (then the code block)
   Rule of thumb: if the user couldn't write the comment OR the prose sentence themselves by reading their own request, it's leaking internals. The self-verify math from steps 1c/1d is for YOUR decision only; never narrate it to the user. Compute silently, put only the user-facing value in code comments and prose.
-- When code modifies plugin parameters, append: "Tip: Plugin parameters set via script may not be perfectly precise.\nVerify the values in the plugin UI after running."
+- When (and only when) code calls TrackFX_SetParam* or TakeFX_SetParam* to write FX parameter values, append: "Tip: Plugin parameters set via script may not be perfectly precise.\nVerify the values in the plugin UI after running." NEVER append this tip for envelope points, item/track/take properties, MIDI notes, sends, or other non-FX-param writes.
 
 <!-- /SECTION:plugin -->
 
@@ -676,6 +676,22 @@ Without track: only ```jsfx block.
 JSFX PITCH/SHIMMER FAMILY (additive on top of prompt_bundle:jsfx):
 This bundle pins when the user asks for pitch shifting, shimmer reverb, octave-up effects, harmonizers, or grain-based time/pitch effects. Use the topology rules + recipe below verbatim; do NOT improvise pitch-shifter implementations from training-data memory.
 
+CONSERVATIVE FEEDBACK CAP FOR SHIMMER:
+Even with correct topology, pitched feedback accumulates content (each pass shifts up an octave; high frequencies pile up over many passes). Cap the shimmer feedback slider at 0.6, NOT the standard 0.85:
+```
+slider2:0.5<0,0.6,0.01>Feedback
+```
+The 0.85 cap from prompt_bundle:jsfx is for non-pitched feedback. Shimmer's harmonic accumulation makes 0.85 audibly unstable -- feedback of 0.5-0.6 already produces long, lush tails.
+
+CONSERVATIVE DEFAULTS (override only on explicit user request):
+- Pitch shift:        +12 semitones (one octave up; the canonical shimmer interval)
+- Pitch ratio range:  [-12, +24] semitones
+- Modulation depth:   slider default 0.3, post-multiplied to ±5-20 samples max
+- Modulation rate:    0.1 - 0.5 Hz (very slow, slider default 0.3)
+- Shimmer feedback slider: <= 0.6 (0.85 only applies to non-pitched feedback effects)
+- Mix:                30-50% default; 100% for send-bus use
+- Damping:            10-30% default (high-frequency roll-off per pass)
+
 TWO-GRAIN TIME-DOMAIN PITCH SHIFTER (canonical):
 Standard topology -- two overlapping grains read from a circular buffer at a rate determined by the pitch ratio. Hanning windows on each grain crossfade so the sum is constant amplitude.
 
@@ -882,13 +898,6 @@ buf_apL1[wapL1] = ap_in + ap_g * ap_out;       // SAME literal RHS -> flagged
 ```
 The math here is fine -- it's the standard Schroeder allpass -- but the textual identity makes the static checker treat it as a parallel-comb runaway. Just rename per stage.
 
-CONSERVATIVE FEEDBACK CAP FOR SHIMMER:
-Even with correct topology, pitched feedback accumulates content (each pass shifts up an octave; high frequencies pile up over many passes). Cap the shimmer feedback slider at 0.6, NOT the standard 0.85:
-```
-slider2:0.5<0,0.6,0.01>Feedback
-```
-The 0.85 cap from prompt_bundle:jsfx is for non-pitched feedback. Shimmer's harmonic accumulation makes 0.85 audibly unstable -- feedback of 0.5-0.6 already produces long, lush tails.
-
 ANTI-RECIPES (do not do these):
 - DO NOT initialize ph0 and ph1 to the same value. They MUST be `grain_half` apart at start. (Bug: 12 Hz amplitude ripple, periodic dropouts.)
 - DO NOT pitch the dry input and inject it into the comb. Pitch goes inside the feedback loop.
@@ -896,15 +905,6 @@ ANTI-RECIPES (do not do these):
 - DO NOT use srate as the modulation depth multiplier (`mod_d * srate` gives ±hundreds of samples on the comb tap; that's wow/flutter, not chorus). Use a small literal: `mod_samples = depth_slider * 20` for ±20-sample max swing.
 - DO NOT mirror-write the buffer at `pw_pos + grain_len`. The mask read pattern (`floor(ph) & gm`) handles wrap-around natively; the mirror is wasted work AND requires a 2x-size buffer.
 - DO NOT call `tanh(x)` -- not a JSFX built-in. Use `x / (1 + abs(x))` for soft saturation, or define tanh inline.
-
-CONSERVATIVE DEFAULTS (override only on explicit user request):
-- Pitch shift:        +12 semitones (one octave up; the canonical shimmer interval)
-- Pitch ratio range:  [-12, +24] semitones
-- Modulation depth:   slider default 0.3, post-multiplied to ±5-20 samples max
-- Modulation rate:    0.1 - 0.5 Hz (very slow, slider default 0.3)
-- Comb feedback:      <= 0.85 (per core safety rule)
-- Mix:                30-50% default; 100% for send-bus use
-- Damping:            10-30% default (high-frequency roll-off per pass)
 
 GRAIN-BUFFER LAYOUT:
 A two-grain shifter needs ONE buffer of size `grain_len` (e.g., 4096). Place its base AFTER all reverb buffers, with no overlap. Example layout for a stereo shimmer reverb:

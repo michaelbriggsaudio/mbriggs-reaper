@@ -1,5 +1,5 @@
-<!-- API_Ref.md - REAPER Lua API + workflow reference, parsed into 9 buckets at runtime. -->
-<!-- core: pinned by default (when "Always include REAPER API reference" is on; otherwise on-demand via the docs bucket). extended: docs_extended. items/envelopes/take_fx/routing/tempo: docs:NAME. -->
+<!-- API_Ref.md - REAPER Lua API + workflow reference, parsed into 10 buckets at runtime. -->
+<!-- core: pinned by default (when "Always include REAPER API reference" is on; otherwise on-demand via the docs bucket). extended: docs_extended. items/envelopes/take_fx/routing/tempo/sws: docs:NAME. -->
 <!-- midi: midi bucket (auto-injected on midi prompts). theme: theme bucket (on-demand). -->
 <!-- Each bucket delimited by SECTION:name / /SECTION:name comment markers. -->
 
@@ -18,6 +18,7 @@ surface lives in on-demand sections requested via `<context_needed>docs:NAME</co
   docs:routing    -- sends, receives, sidechain routing, hardware outputs, channel bit-packing, MIDI channel routing
   docs:envelopes  -- envelopes, automation, automation points, automation modes, envelope scaling, volume/pan envelopes
   docs:tempo      -- tempo, BPM, time signature, time map, beats, quarter notes (QN), measures, bar positions
+  docs:sws        -- SWS Extension APIs (only when SWS is required or calls are guarded): clipboard, mouse context, GUID helpers, loudness, notes, FX-chain windows
 Plus `docs_extended` for media sources, project metadata, file/system, ext
 state, colors, UI & display, named-action calls (Main_OnCommand), misc
 utilities. MIDI workflow (notes, CCs, PPQ, MIDI editor) lives in the `midi`
@@ -1241,6 +1242,288 @@ local pos = reaper.TimeMap2_beatsToTime(0, 0, 4)  -- beat 0, measure 4 = bar 5
 reaper.SetEditCurPos(pos, true, false)
 ```
 <!-- /SECTION:tempo -->
+
+<!-- SECTION:sws -->
+# SWS Extension ReaScript Reference
+
+Source floor: SWS v2.14.0.6 `ReaScript.cpp` API definitions.
+All names below are extension APIs called as `reaper.FunctionName(...)`.
+
+IMPORTANT:
+- Use SWS only when the system prompt says SWS is available/required, or when
+  you first guard the call with `type(reaper.FunctionName) == "function"`.
+- If SWS is optional in the current build, native REAPER APIs remain preferred
+  whenever they solve the task directly.
+- Do not invent SWS calls. Verify names here or in the live `reaper.*` table.
+- Deprecated SWS wrappers are marked; prefer the native replacement when noted.
+
+## VERSION / PRESENCE
+
+`string reaper.CF_GetSWSVersion(optional string versionOut)`
+  Return the loaded SWS version string. In Lua bindings, host code may call
+  either `reaper.CF_GetSWSVersion()` or `reaper.CF_GetSWSVersion("")`; the
+  empty-string fallback covers bindings that expose output buffers that way.
+
+```lua
+local has_sws = type(reaper.CF_GetSWSVersion) == "function"
+local sws_version = nil
+if has_sws then
+  local ok, version = pcall(reaper.CF_GetSWSVersion)
+  if not ok or not version or version == "" then
+    ok, version = pcall(reaper.CF_GetSWSVersion, "")
+  end
+  sws_version = ok and version or nil
+end
+```
+
+## CLIPBOARD / SHELL
+
+`reaper.CF_SetClipboard(string text)`
+  Write text to the system clipboard.
+
+`string reaper.CF_GetClipboard(optional string textOutNeedBig)`
+  Read text from the system clipboard. Prefer this over deprecated
+  `CF_GetClipboardBig`.
+
+`boolean reaper.CF_ShellExecute(string fileOrUrl)`
+  Open a file, folder, or URL in the default OS application.
+
+`boolean reaper.CF_LocateInExplorer(string file)`
+  Reveal/select a file in Explorer/Finder/file manager.
+
+```lua
+if type(reaper.CF_SetClipboard) == "function" then
+  reaper.CF_SetClipboard("Copied from REAPER")
+end
+```
+
+## GUID HELPERS
+
+`MediaItem reaper.BR_GetMediaItemByGUID(ReaProject proj, string guidWithBraces)`
+  Resolve a media item by GUID string. GUID must include `{}` braces.
+
+`string reaper.BR_GetMediaItemGUID(MediaItem item)`
+  Return a media item GUID string.
+
+`string reaper.BR_GetMediaItemTakeGUID(MediaItem_Take take)`
+  Return a take GUID string.
+
+`MediaItem_Take reaper.SNM_GetMediaItemTakeByGUID(ReaProject proj, string guidWithBraces)`
+  Resolve a take by GUID string.
+
+`MediaTrack reaper.BR_GetMediaTrackByGUID(ReaProject proj, string guidWithBraces)`
+  Resolve a track by GUID string. For getting a track GUID, prefer native
+  `GetSetMediaTrackInfo_String(track, "GUID", "", false)`; SWS
+  `BR_GetMediaTrackGUID` is deprecated.
+
+```lua
+local item = reaper.GetSelectedMediaItem(0, 0)
+if item and type(reaper.BR_GetMediaItemGUID) == "function" then
+  local guid = reaper.BR_GetMediaItemGUID(item)
+  local same_item = reaper.BR_GetMediaItemByGUID(0, guid)
+end
+```
+
+## MOUSE CURSOR CONTEXT
+
+Call `BR_GetMouseCursorContext` first; the follow-up getters return objects
+captured by that last context probe.
+
+`string window, string segment, string details reaper.BR_GetMouseCursorContext()`
+  Capture what is under the mouse cursor.
+
+`MediaTrack reaper.BR_GetMouseCursorContext_Track()`
+  Return captured track.
+
+`MediaItem reaper.BR_GetMouseCursorContext_Item()`
+  Return captured item.
+
+`MediaItem_Take reaper.BR_GetMouseCursorContext_Take()`
+  Return captured take.
+
+`number reaper.BR_GetMouseCursorContext_Position()`
+  Return captured project time position.
+
+`TrackEnvelope envelope, boolean takeEnvelope reaper.BR_GetMouseCursorContext_Envelope()`
+  Return captured envelope and whether it belongs to a take.
+
+`TrackEnvelope envelope, boolean takeEnvelope, integer autoItemIdx, integer pointIdx reaper.BR_GetMouseCursorContext_EnvelopeEx()`
+  Return captured envelope plus automation-item/point indices when present.
+
+`MIDIEditor editor, boolean inlineEditor, integer noteRow, integer ccLane, integer ccLaneVal, integer ccLaneId reaper.BR_GetMouseCursorContext_MIDI()`
+  Return captured MIDI editor/lane context.
+
+`integer reaper.BR_GetMouseCursorContext_StretchMarker()`
+  Return captured stretch-marker index, or -1 when none.
+
+```lua
+if type(reaper.BR_GetMouseCursorContext) == "function" then
+  local window, segment, details = reaper.BR_GetMouseCursorContext()
+  local item = reaper.BR_GetMouseCursorContext_Item()
+  local pos = reaper.BR_GetMouseCursorContext_Position()
+end
+```
+
+## ENVELOPE OBJECT HELPERS
+
+These allocate a SWS `BR_Envelope*` wrapper around a native TrackEnvelope.
+Always free it. Pass `commit=true` to write changes back.
+
+`BR_Envelope reaper.BR_EnvAlloc(TrackEnvelope envelope, boolean takeEnvelopesUseProjectTime)`
+  Allocate a wrapper. For take envelopes, pass true when positions should use
+  project time instead of take-relative time.
+
+`boolean reaper.BR_EnvFree(BR_Envelope env, boolean commit)`
+  Free wrapper and optionally commit changes.
+
+`integer reaper.BR_EnvCountPoints(BR_Envelope env)`
+  Count envelope points.
+
+`boolean retval, number position, number value, integer shape, boolean selected, number bezier reaper.BR_EnvGetPoint(BR_Envelope env, integer id)`
+  Read point by 0-based id.
+
+`boolean reaper.BR_EnvSetPoint(BR_Envelope env, integer id, number position, number value, integer shape, boolean selected, number bezier)`
+  Set existing point, or pass id=-1 to insert. Call `BR_EnvSortPoints` if you
+  need sorted points before freeing.
+
+`reaper.BR_EnvSortPoints(BR_Envelope env)`
+  Sort points after edits.
+
+`number reaper.BR_EnvValueAtPos(BR_Envelope env, number position)`
+  Evaluate envelope value at time.
+
+`boolean active, boolean visible, boolean armed, boolean inLane, integer laneHeight, integer defaultShape, number minValue, number maxValue, number centerValue, integer type, boolean faderScaling, integer automationItemsOptions reaper.BR_EnvGetProperties(BR_Envelope env)`
+  Read envelope properties. Envelope type: 0 volume, 1 volume pre-FX, 2 pan,
+  3 pan pre-FX, 4 width, 5 width pre-FX, 6 mute, 7 pitch, 8 playrate,
+  9 tempo map, 10 parameter.
+
+```lua
+local env = reaper.GetSelectedEnvelope(0)
+if env and type(reaper.BR_EnvAlloc) == "function" then
+  local br_env = reaper.BR_EnvAlloc(env, false)
+  local count = reaper.BR_EnvCountPoints(br_env)
+  for i = 0, count - 1 do
+    local ok, pos, val, shape, selected, bezier = reaper.BR_EnvGetPoint(br_env, i)
+    if ok then reaper.BR_EnvSetPoint(br_env, i, pos, val, shape, selected, bezier) end
+  end
+  reaper.BR_EnvFree(br_env, true)
+end
+```
+
+## LOUDNESS / PEAK / RMS
+
+`number reaper.NF_GetMediaItemMaxPeak(MediaItem item)`
+  Greatest max peak in dBFS for active channels of the active audio take.
+  Returns -150.0 for MIDI/empty items.
+
+`number maxPeak, number maxPeakPos reaper.NF_GetMediaItemMaxPeakAndMaxPeakPos(MediaItem item)`
+  Same plus peak position relative to item start.
+
+`boolean reaper.NF_AnalyzeMediaItemPeakAndRMS(MediaItem item, number windowSize, reaper.array peaks, reaper.array peakPositions, reaper.array rms, reaper.array rmsPositions)`
+  Combined peak/RMS analysis using `reaper.array` outputs.
+
+`boolean retval, number lufsIntegrated reaper.NF_AnalyzeTakeLoudness_IntegratedOnly(MediaItem_Take take)`
+  Faster integrated LUFS only.
+
+`boolean retval, number lufsIntegrated, number range, number truePeak, number truePeakPos, number shortTermMax, number momentaryMax reaper.NF_AnalyzeTakeLoudness(MediaItem_Take take, boolean analyzeTruePeak)`
+  Full loudness analysis. True peak is slower.
+
+`boolean retval, number lufsIntegrated, number range, number truePeak, number truePeakPos, number shortTermMax, number momentaryMax, number shortTermMaxPos, number momentaryMaxPos reaper.NF_AnalyzeTakeLoudness2(MediaItem_Take take, boolean analyzeTruePeak)`
+  Full loudness analysis plus short-term/momentary positions.
+
+## SWS NOTES / MARKER SUBTITLES
+
+`string reaper.NF_GetSWSTrackNotes(MediaTrack track)`
+  Read SWS track notes.
+
+`reaper.NF_SetSWSTrackNotes(MediaTrack track, string notes)`
+  Write SWS track notes.
+
+`string reaper.NF_GetSWSMarkerRegionSub(integer markerRegionIdx)`
+  Read SWS/S&M marker or region subtitle. `markerRegionIdx` is the zero-based
+  marker/region list index you pass as the first argument to
+  `EnumProjectMarkers`, not the displayed marker/region number and not the
+  value returned by `AddProjectMarker`.
+
+`boolean reaper.NF_SetSWSMarkerRegionSub(string subtitle, integer markerRegionIdx)`
+  Write SWS/S&M marker or region subtitle.
+
+`reaper.NF_UpdateSWSMarkerRegionSubWindow()`
+  Redraw the SWS Notes window after subtitle edits.
+
+## FX-CHAIN WINDOW HELPERS
+
+These operate on FX-chain windows/selection, not plugin DSP state. They are
+useful for selecting focused FX and inspecting selected FX in open chains.
+
+`FxChain reaper.CF_GetTrackFXChain(MediaTrack track)`
+  Return a handle to the track FX-chain window.
+
+`FxChain reaper.CF_GetTrackFXChainEx(ReaProject proj, MediaTrack track, boolean wantInputChain)`
+  Return track FX-chain window; set wantInputChain for input/monitoring FX.
+
+`FxChain reaper.CF_GetTakeFXChain(MediaItem_Take take)`
+  Return take FX-chain window handle.
+
+`FxChain reaper.CF_GetFocusedFXChain()`
+  Return currently focused FX-chain window.
+
+`integer reaper.CF_EnumSelectedFX(FxChain chain, integer index)`
+  Enumerate selected FX. Start index at -1; returns -1 when done.
+
+`boolean reaper.CF_SelectTrackFX(MediaTrack track, integer fxIndex)`
+  Select/activate track FX by index.
+
+`boolean reaper.CF_SelectTakeFX(MediaItem_Take take, integer fxIndex)`
+  Select/activate take FX by index.
+
+## FNG MIDI HELPERS
+
+FNG exposes a separate MIDI wrapper type. Prefer native MIDI_* APIs for common
+MIDI edits; use FNG only when its wrapper model is specifically needed.
+
+`RprMidiTake reaper.FNG_AllocMidiTake(MediaItem_Take take)`
+  Allocate wrapper for an in-project MIDI take.
+
+`reaper.FNG_FreeMidiTake(RprMidiTake midiTake)`
+  Commit wrapper changes back to the MIDI take and free allocated memory.
+
+`integer reaper.FNG_CountMidiNotes(RprMidiTake midiTake)`
+  Count notes.
+
+`RprMidiNote reaper.FNG_GetMidiNote(RprMidiTake midiTake, integer index)`
+  Get wrapper note by index.
+
+`integer reaper.FNG_GetMidiNoteIntProperty(RprMidiNote note, string property)`
+  Read `CHANNEL`, `LENGTH`, `MUTED`, `PITCH`, `POSITION`, `SELECTED`, or
+  `VELOCITY`. `POSITION` and `LENGTH` are PPQ ticks. `CHANNEL` uses MIDI
+  channel numbers 1-16, not REAPER native 0-15 channel indexes.
+
+`reaper.FNG_SetMidiNoteIntProperty(RprMidiNote note, string property, integer value)`
+  Set integer note property.
+
+`RprMidiNote reaper.FNG_AddMidiNote(RprMidiTake midiTake)`
+  Add a note wrapper.
+
+## ACTION INTROSPECTION
+
+`integer reaper.CF_EnumerateActions(integer section, integer index, string nameOut)`
+  Deprecated; prefer native `kbd_enumerateActions` where available. Common
+  section IDs: Main=0, Main alt recording=100, MIDI Editor=32060, MIDI Event
+  List=32061, MIDI Inline=32062, Media Explorer=32063.
+
+`string reaper.CF_GetCommandText(integer section, integer command)`
+  Deprecated; prefer native `kbd_getTextFromCmd` where available.
+
+For named SWS actions, resolve first:
+
+```lua
+local cmd = reaper.NamedCommandLookup("_SWS_ABOUT")
+if cmd and cmd ~= 0 then
+  reaper.Main_OnCommand(cmd, 0)
+end
+```
+<!-- /SECTION:sws -->
 
 <!-- SECTION:midi -->
 # REAPER MIDI Workflow Reference

@@ -1,5 +1,19 @@
 # ReaAssist - Changelog
 
+## v1.1.5 - 2026-05-08
+
+- **SWS Extension is now installed and managed by ReaAssist.** Fresh installs and outdated installs can automatically download, verify, and install SWS alongside ReaImGui and js_ReaScriptAPI, with the same restart-after-install flow.
+
+- **New SWS-aware scripting support.** The bundled API reference now includes common SWS functions for clipboard, mouse context, GUID helpers, loudness/peak/RMS analysis, SWS notes, FX-chain windows, FNG MIDI helpers, and action introspection.
+
+- **Dependency installer polish.** The install and success windows are wider on macOS/Linux, SWS install/update paths clean up stale backups after a successful launch, and the PowerShell hash fallback works in stripped-down REAPER-launched environments.
+
+- **Safer generated routing and plugin scripts.** ReaAssist now catches more bad Lua before auto-run, including ignored `CreateTrackSend` return values and cases where a model substitutes third-party EQ/compressor plugins after the user explicitly asked for stock ReaEQ/ReaComp.
+
+- **Prompt and JSFX guidance fixes.** The JSFX pitch bundle and target-continuity rules were tightened so models get clearer instructions on pitch/shimmer limits, plugin-tip scope, and follow-up target handling.
+
+- **Chat UI polish.** Auto-run code blocks now show a calmer status treatment and avoid presenting the manual Run button as the primary next action after code already ran.
+
 ## v1.1.4 - 2026-05-06
 
 - **New model picker UX.** Each provider's recommended model and recommended thinking level now show a "*" badge in the chip dropdowns. A brief explainer line ("Best for | Cost | Speed | Note") appears below the chips when you change the selection and fades after 10 seconds. Hovering any row in the thinking dropdown previews that combo's explainer before you click.

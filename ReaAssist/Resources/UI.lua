@@ -14575,10 +14575,16 @@ function Render.main_window()
 
           -- Lua-only buttons: Run Code, Undo, Backup.
           if is_lua then
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        V5_RUN_BG)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), V5_RUN_HOV)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  V5_RUN_ACT)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          V5_RUN_TXT)
+            -- Demote Run to the secondary palette when Auto-Run already
+            -- executed this block. The AUTO-RAN pill below the action row
+            -- communicates success; an accent-filled Run on top of that
+            -- reads like a pending primary action when it isn't. Click
+            -- behavior is unchanged so the user can still re-run on demand.
+            local run_already = msg.auto_ran and true or false
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        run_already and V5_SEC_BG  or V5_RUN_BG)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), run_already and V5_SEC_HOV or V5_RUN_HOV)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  run_already and V5_SEC_ACT or V5_RUN_ACT)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          run_already and V5_SEC_TXT or V5_RUN_TXT)
             if ImGui.ImGui_Button(RA.ctx, "\xe2\x96\xb6 Run##run_" .. i, 70, 0) then
               if risk_warning then
                 -- Risky code: require explicit user confirmation before executing.
@@ -14953,24 +14959,26 @@ function Render.main_window()
             local ar_h = AR_FONT + AR_PAD_Y * 2
             local ar_sx, ar_sy = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
             local ar_dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
-            -- Subtle green bg: green with ~19% alpha so the chat surface
-            -- tints through. Keeps the pill quiet but clearly "success".
-            local ar_bg = (TK.green & 0xFFFFFF00) | 0x30
+            -- Match the AUTO-RUN segment in the bottom toolbar: solid
+            -- TK.autorun_fill background with white (TK.accent_text) icon
+            -- + label. Reusing the same tokens keeps the "auto-run voice"
+            -- consistent across the toggle and the after-the-fact pill.
             ImGui.ImGui_DrawList_AddRectFilled(ar_dl,
               ar_sx, ar_sy, ar_sx + ar_w, ar_sy + ar_h,
-              ar_bg, AR_ROUND)
+              TK.autorun_fill, AR_ROUND)
+            local ar_fg = TK.accent_text
             -- Lucide check glyph (mono font has no U+2713, so we use the icon font).
             -- Icon sits 2px lower than text for optical alignment (lucide's
             -- check glyph is high in its em-box vs. the mono baseline).
             ImGui.ImGui_DrawList_AddTextEx(ar_dl, FONT.lucide, AR_ICON,
               ar_sx + AR_PAD_X,
               ar_sy + AR_PAD_Y,
-              TK.green, ICON.CHECK)
+              ar_fg, ICON.CHECK)
             -- "AUTO-RAN" text.
             ImGui.ImGui_DrawList_AddTextEx(ar_dl, FONT.mono_med, AR_FONT,
               ar_sx + AR_PAD_X + AR_ICON + AR_GAP,
               ar_sy + AR_PAD_Y - AR_LIFT,
-              TK.green, ar_text)
+              ar_fg, ar_text)
             Dummy(RA.ctx, ar_w, ar_h)
           end
         end

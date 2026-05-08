@@ -92,12 +92,25 @@ function Shell.sh_quote(s)
   return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
 end
 
+-- Release/support toggle for the SWS dependency requirement. Leave enabled for
+-- normal builds; support can bypass it per-user with the hidden optoutsws
+-- ExtState flag if an extension install needs to be isolated. This lives on the
+-- global chunk namespace because ReaAssist.lua is already close to Lua's
+-- 200-local limit; do not convert it to a file-scope local.
+REQUIRE_SWS_EXTENSION = true
+
+SUPPORT_EXT_NS = "reaassist"
+function SupportExtFlag(key)
+  return reaper.GetExtState
+     and reaper.GetExtState(SUPPORT_EXT_NS, key) == "1"
+end
+
 do
 
 local Deps = {}
 
 -- Per-dependency descriptor. Each describes one REAPER extension that
--- ReaAssist auto-installs via the gfx-based installer. Both deps land
+-- ReaAssist auto-installs via the gfx-based installer. These deps land
 -- in REAPER's UserPlugins/ folder and require a REAPER restart to load.
 -- The release-checklist's "pinned-asset preflight" step re-verifies the
 -- per-platform SHAs against the live upstream when bumping pinned_version
@@ -151,6 +164,34 @@ Deps.JSAPI = {
     ["mac-x64"]    = {"reaper_js_ReaScriptAPI64.dylib",    "645da47e8c766bc49e249467dc70c143cb618583aa0f408dfc42f5274049383e"},
     ["mac-arm64"]  = {"reaper_js_ReaScriptAPI64ARM.dylib", "484765a944ee7fe39b71db1a16b3ec8e6311c1d8f93d141720942762b4679d70"},
     ["linux-x64"]  = {"reaper_js_ReaScriptAPI64.so",       "5b06fd605ebcfed82cea39dabec180fa9905edc58a0d08c629d0672eba5f49ae"},
+  },
+}
+
+-- SWS Extension: broadens the generated-script API surface with clipboard,
+-- mouse-context, GUID, loudness, notes, and named-command helpers. The
+-- descriptor is present now, but the hard-requirement branch is gated by
+-- REQUIRE_SWS_EXTENSION above until loaded-binary replacement is verified
+-- on Windows/macOS/Linux.
+Deps.SWS = {
+  key             = "sws",
+  name            = "SWS Extension",
+  pinned_version  = "v2.14.0.7",
+  min_version_num = {2, 14, 0, 6},
+  url_base        = "https://github.com/reaper-oss/sws/releases/download/v2.14.0.7",
+  author          = "Tim Payne et al. (SWS contributors)",
+  license         = "MIT",
+  source_url      = "github.com/reaper-oss/sws",
+  -- assets[platform] = {filename, sha256}
+  assets = {
+    ["win-x64"]    = {"reaper_sws-x64.dll",      "b52156735b21e523a755535b1e6f19887c8701cbe8fa96fbf90b6e7b4749d5f8"},
+    ["win-x86"]    = {"reaper_sws-x86.dll",      "ae71783407b9b9d34bd032be4b28ba759ac60f9bac26868f62ee5467faa1c291"},
+    ["mac-arm64"]  = {"reaper_sws-arm64.dylib",  "8e6ba86f4aac958871884d9285f4f063844900a04b25251bf95044334b103dba"},
+    ["mac-x64"]    = {"reaper_sws-x86_64.dylib", "7347a74485c537e74c0ddc53437845bf46a599317475fad21c82cd8a0269d89b"},
+    ["mac-x86"]    = {"reaper_sws-i386.dylib",   "a6f8e7821e05b05e41ff1a8d544c80dcfe99379e0cb1c842d7dac8cf40adb20f"},
+    ["linux-x64"]  = {"reaper_sws-x86_64.so",    "4cf0629aeeff346c1ed9a355ce826febfacf9775bd6f49f09b1b4f9f053b8644"},
+    ["linux-arm64"]= {"reaper_sws-aarch64.so",   "615b66ae9e38e01aabb2e5e2a21fb0ffe3c1bab9587c1a2620f62c6e80e9a409"},
+    ["linux-arm32"]= {"reaper_sws-armv7l.so",    "c7476b0aaba07079e0a48b5041a34f1d154495a018d21e082dd968a32826f6d7"},
+    ["linux-x86"]  = {"reaper_sws-i686.so",      "292db148a46636fabfe3e8c41527c083872f40441c339fcbb5a638cab484dab6"},
   },
 }
 
@@ -221,11 +262,30 @@ end
 
 function Deps.check_jsapi_status()
   -- Presence-only check (upstream is frozen at v1.310 since 2021).
+  if SupportExtFlag("optoutjsapi") then return "ok" end
   return reaper.JS_ReaScriptAPI_Version and "ok" or "missing"
 end
 
+function Deps.check_sws_status()
+  -- Returns "ok" | "missing" | "too_old" [, installed_version_string].
+  if SupportExtFlag("optoutsws") then return "ok" end
+  if not reaper.CF_GetSWSVersion then return "missing" end
+  local ok, ver = pcall(reaper.CF_GetSWSVersion)
+  if not ok or not ver or ver == "" then
+    ok, ver = pcall(reaper.CF_GetSWSVersion, "")
+  end
+  if not ok or not ver or ver == "" then return "ok" end
+  local installed = Deps.parse_version(ver)
+  if Deps.cmp_version(installed, Deps.SWS.min_version_num) < 0 then
+    return "too_old", ver
+  end
+  return "ok", ver
+end
+
 -- Build the install queue for the current platform. Order: ReaImGui
--- first (UI dependency, blocks anything from rendering), JS_API second
+-- first (UI dependency, blocks anything from rendering), SWS second
+-- when REQUIRE_SWS_EXTENSION is enabled (expanded script API surface),
+-- JS_API last
 -- (file dialogs, only blocks save/attach UX). Each queue item carries
 -- everything the install pipeline needs: dep table, asset filename,
 -- expected SHA, full destination path under UserPlugins/, and the
@@ -254,6 +314,23 @@ function Deps.build_queue(platform)
     end
   end
 
+  if REQUIRE_SWS_EXTENSION and not SupportExtFlag("optoutsws") then
+    local sws_status, sws_ver = Deps.check_sws_status()
+    if sws_status ~= "ok" then
+      local entry = Deps.SWS.assets[platform]
+      if entry then
+        queue[#queue + 1] = {
+          dep           = Deps.SWS,
+          kind          = sws_status,             -- "missing" or "too_old"
+          installed_ver = sws_ver,
+          asset         = entry[1],
+          expected_sha  = entry[2],
+          dest_path     = user_plugins .. entry[1],
+        }
+      end
+    end
+  end
+
   local jsapi_status = Deps.check_jsapi_status()
   if jsapi_status ~= "ok" then
     local entry = Deps.JSAPI.assets[platform]
@@ -272,6 +349,26 @@ function Deps.build_queue(platform)
   return queue
 end
 
+function Deps.cleanup_stale_backups(platform)
+  if not platform then return end
+  local user_plugins = reaper.GetResourcePath() .. "/UserPlugins/"
+  local deps = { Deps.REAIMGUI, Deps.SWS, Deps.JSAPI }
+  for _, dep in ipairs(deps) do
+    local entry = dep.assets[platform]
+    if entry then
+      local dest = user_plugins .. entry[1]
+      local f = io.open(dest, "rb")
+      if f then
+        f:close()
+        -- Left by successful loaded-DLL replacement when the OS keeps the
+        -- old mapped binary open until REAPER exits. Safe best-effort only:
+        -- never delete the backup if the real dependency file is absent.
+        os.remove(dest .. ".bak")
+      end
+    end
+  end
+end
+
 -- =============================================================================
 -- gfx-based ReaImGui installer UI
 -- =============================================================================
@@ -280,7 +377,7 @@ end
 -- show what is happening and surface failures.
 
 local InstallerGfx = {
-  W = 560, H = 340,
+  W = 640, H = 380,
   -- Theme colors lifted from PALETTE_DARK (kept in sync by hand; this
   -- block runs before COL is built so we can't reference it directly).
   C_BG_TOP    = 0x0B0B0BFF,
@@ -912,7 +1009,27 @@ function InstallerGfx.spawn_pipeline()
       "  & curl.exe -fsSL --max-time 60 -o $tmp $url",
       "  if ($LASTEXITCODE -ne 0) { Mark \"download_failed:$LASTEXITCODE\"; return }",
       "  Mark 'verifying'",
-      "  $actual = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()",
+      "  function Get-Sha256Hex($path) {",
+      "    if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {",
+      "      try {",
+      "        $fileHash = Get-FileHash -Algorithm SHA256 $path",
+      "        if ($fileHash -and $fileHash.Hash) { return $fileHash.Hash.ToLowerInvariant() }",
+      "      } catch { }",
+      "    }",
+      "    $stream = [System.IO.File]::OpenRead($path)",
+      "    try {",
+      "      $sha = [System.Security.Cryptography.SHA256]::Create()",
+      "      try {",
+      "        $hashBytes = $sha.ComputeHash($stream)",
+      "      } finally {",
+      "        $sha.Dispose()",
+      "      }",
+      "    } finally {",
+      "      $stream.Dispose()",
+      "    }",
+      "    return ([System.BitConverter]::ToString($hashBytes) -replace '-', '').ToLowerInvariant()",
+      "  }",
+      "  $actual = Get-Sha256Hex $tmp",
       "  if ($actual -ne $expected) {",
       "    Mark \"verify_failed:$actual\"",
       "    Remove-Item $tmp -Force -ErrorAction SilentlyContinue",
@@ -1125,10 +1242,13 @@ end
 -- assets, not an empty platform), but guard the case where GetOS is
 -- something neither Win/OSX/macOS-arm64/Other.
 if not _platform
-   and (Deps.check_imgui_status() ~= "ok" or Deps.check_jsapi_status() ~= "ok") then
+   and (Deps.check_imgui_status() ~= "ok"
+        or Deps.check_jsapi_status() ~= "ok"
+        or (REQUIRE_SWS_EXTENSION and Deps.check_sws_status() ~= "ok")) then
   InstallerGfx.start({})  -- triggers the unsupported-platform message
   return
 end
+Deps.cleanup_stale_backups(_platform)
 
 end -- do (closes the dependency-installer scope)
 
@@ -1336,7 +1456,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.1.4", -- public release version
+  VERSION           = "1.1.5", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -1573,6 +1693,8 @@ S = {
   context_loop_retries     = 0,    -- per-turn counter -- model re-asking for already-provided context (max 1 retry)
   api_validator_retries    = 0,    -- per-turn counter -- model emitted nonexistent reaper.* calls (max 1 retry)
   arity_validator_retries  = 0,    -- per-turn counter -- model emitted reaper.* call with wrong fixed arg count (max 1 retry)
+  sendidx_validator_retries = 0,   -- per-turn counter -- model ignored CreateTrackSend result and used literal send slots (max 1 retry)
+  stockfx_validator_retries = 0,   -- per-turn counter -- model substituted third-party FX for explicitly requested stock FX (max 1 retry)
   fxcheck_validator_retries = 0,   -- per-turn counter -- model emitted unchecked TrackFX_AddByName result (max 1 retry)
   upsert_validator_retries = 0,    -- per-turn counter -- chain-build script violated upsert pairing (Get without Add, or Add without Get) (max 1 retry)
   helper_int_validator_retries = 0,-- per-turn counter -- model rewrote a bundled helper body (e.g. dropped parens on the range-guard) (max 1 retry)
@@ -5900,7 +6022,23 @@ local function load_system_prompt()
   -- Strip the HTML comment header (<!-- ... -->) lines so they don't leak
   -- into the prompt sent to the API.
   raw = raw:gsub("<!%-%-.-%-%->\n?", "")
+  local sws_required_prompt =
+    REQUIRE_SWS_EXTENSION and not SupportExtFlag("optoutsws")
+  if sws_required_prompt then
+    raw = raw:gsub(
+      "%- Extension APIs: avoid SWS %(CF_%*%), js_ReaScriptAPI %(JS_%*%), and other non%-core extension functions unless the user explicitly requests them or the script first checks the function exists %(e%.g%. if reaper%.CF_GetClipboard then %.%.%. end%) and shows a clear error if missing%.",
+      "- Extension APIs: SWS Extension is available and required in this build. Treat documented SWS APIs (`CF_*`, `BR_*`, `NF_*`, `FNG_*`) as available after requesting `docs:sws` when needed. js_ReaScriptAPI (`JS_*`) and other non-core extension functions remain optional unless the user explicitly requests them or the script first checks the function exists and shows a clear error if missing."
+    )
+  end
   SYSTEM_PROMPT = raw:gsub("{VERSION}", CFG.VERSION)
+  if sws_required_prompt then
+    SYSTEM_PROMPT = SYSTEM_PROMPT .. [[
+
+SWS DOCS ROUTING:
+- Before using SWS-only calls, request <context_needed>docs:sws</context_needed> unless that section is already present in context.
+- Prefer native REAPER APIs when they are equally direct; use SWS for clipboard, mouse cursor context, GUID helpers, loudness analysis, SWS notes, FX-chain window helpers, and other APIs documented in docs:sws.
+]]
+  end
   -- Tamper guard for the SHIPPED prompt only: if the stock file has been
   -- gutted, partially truncated, or replaced with junk, route into bootstrap
   -- recovery so repair can restore it. Custom overrides bypass this check;
@@ -8213,14 +8351,19 @@ function CTX.target_hint(proj, user_text)
     end
     lines[#lines+1] = "Selected tracks at request time: " .. tbl_concat(list, "; ") .. "."
   end
-  lines[#lines+1] = "Use this captured target ONLY when the user request "
-    .. "refers to \"the/this/selected/current\" track or otherwise operates "
-    .. "on EXISTING tracks. IGNORE this block when the user asks to create, "
-    .. "insert, or add a new track -- those should call InsertTrackAtIndex "
-    .. "and target the freshly created track, not the captured one. When "
-    .. "honoring the hint: validate the target still exists (and preferably "
-    .. "still has the same name); fall back to reaper.GetSelectedTrack() "
-    .. "only if the captured target is invalid."
+  lines[#lines+1] = "Use this captured target ONLY when: (a) the user "
+    .. "request says \"the/this/selected/current\" track, OR (b) the request "
+    .. "operates on an existing track AND no prior turn in this conversation "
+    .. "already operated on a specific track. A targetless follow-up to a "
+    .. "prior turn that targeted Track N continues on Track N -- do NOT "
+    .. "switch to this captured target unless the user said "
+    .. "\"selected/current/this/the\" track or named a different one. "
+    .. "IGNORE this block when the user asks to create, insert, or add a "
+    .. "new track -- those should call InsertTrackAtIndex and target the "
+    .. "freshly created track, not the captured one. When honoring the "
+    .. "hint: validate the target still exists (and preferably still has "
+    .. "the same name); fall back to reaper.GetSelectedTrack() only if "
+    .. "the captured target is invalid."
   return tbl_concat(lines, "\n")
 end
 
@@ -8756,12 +8899,12 @@ end
 -- CTX.docs / CTX.midi / CTX.theme
 -- =============================================================================
 -- Loads the REAPER Lua API + workflow reference from a single file in the
--- script's Resources folder (API_Ref.md). The file contains nine buckets
+-- script's Resources folder (API_Ref.md). The file contains ten buckets
 -- delimited by `<!-- SECTION:name -->` markers:
 --   core      always-pinned when "Always include REAPER API reference" is
 --             on; otherwise fetched on-demand via the docs bucket.
 --   extended  less-common API surface; on-demand via docs_extended.
---   items / envelopes / take_fx / routing / tempo
+--   items / envelopes / take_fx / routing / tempo / sws
 --             on-demand via docs:NAME.
 --   midi      MIDI workflow reference; auto-injected on midi prompts or
 --             on-demand via the midi bucket. Served by CTX.midi.
@@ -8799,11 +8942,11 @@ local function _read_ref_file(path, filename)
 end
 
 -- The REAPER Lua API + workflow reference lives in a single physical file
--- (Resources/API_Ref.md) with nine buckets delimited by
+-- (Resources/API_Ref.md) with ten buckets delimited by
 -- `<!-- SECTION:name -->` ... `<!-- /SECTION:name -->` markers:
 --   core      always-pinned default reference (CTX.docs)
 --   extended  on-demand via <context_needed>docs_extended</context_needed>
---   items, envelopes, take_fx, routing, tempo
+--   items, envelopes, take_fx, routing, tempo, sws
 --             on-demand via <context_needed>docs:NAME</context_needed>
 --   midi      auto-injected on midi prompts / on-demand via
 --             <context_needed>midi</context_needed> (CTX.midi)
@@ -8825,6 +8968,7 @@ local API_REF_SECTION_NAMES = {
   take_fx   = true,
   routing   = true,
   tempo     = true,
+  sws       = true,
   midi      = true,
   theme     = true,
 }
@@ -8834,6 +8978,7 @@ local DOCS_SECTION_NAMES = {
   take_fx   = true,
   routing   = true,
   tempo     = true,
+  sws       = true,
 }
 -- Singular / hyphenated / spaced variants the model commonly emits. Map
 -- each to its canonical key in DOCS_SECTION_NAMES. Always lookup against
@@ -8848,6 +8993,13 @@ local DOCS_SECTION_ALIASES = {
   ["item"]     = "items",
   ["send"]     = "routing",
   ["receive"]  = "routing",
+  ["sws-extension"] = "sws",
+  ["sws extension"] = "sws",
+  ["sws_ext"]   = "sws",
+  ["cf"]        = "sws",
+  ["br"]        = "sws",
+  ["nf"]        = "sws",
+  ["fng"]       = "sws",
 }
 -- Normalize an incoming docs:<payload> to a canonical section key, or
 -- nil if the payload is not a known section. Used by both the dispatcher
@@ -11559,6 +11711,33 @@ local DOCS_PHRASE_HINTS = {
   { "%f[%w]tempo%f[%W]",     "tempo"     },
   { "time signature",        "tempo"     },
 }
+
+if REQUIRE_SWS_EXTENSION and not SupportExtFlag("optoutsws") then
+  -- SWS docs are advertised only when the rollout flag is enabled. The
+  -- loader accepts docs:sws either way, but normal releases should not
+  -- nudge the model toward extension-only calls while SWS is still optional.
+  local sws_hints = {
+    { "%f[%w]sws%f[%W]",                  "sws" },
+    { "s&m",                              "sws" },
+    { "system clipboard",                 "sws" },
+    { "%f[%w]clipboard%f[%W]",            "sws" },
+    { "mouse cursor context",             "sws" },
+    { "mouse cursor",                     "sws" },
+    { "under my mouse",                   "sws" },
+    { "under the mouse",                  "sws" },
+    { "%f[%w]hovering%f[%W]",             "sws" },
+    { "%f[%w]hovered%f[%W]",              "sws" },
+    { "br_getmousecursorcontext",         "sws" },
+    { "%f[%w]loudness%f[%W]",             "sws" },
+    { "%f[%w]lufs%f[%W]",                 "sws" },
+    { "sws notes",                        "sws" },
+    { "marker region subtitle",           "sws" },
+    { "region subtitle",                  "sws" },
+  }
+  for _, hint in ipairs(sws_hints) do
+    DOCS_PHRASE_HINTS[#DOCS_PHRASE_HINTS + 1] = hint
+  end
+end
 
 -- JSFX-intent detection: returns true when the user's prompt explicitly
 -- asks for JSFX/EEL2/custom-DSP work. Intentionally narrow -- only fires on
@@ -17576,6 +17755,8 @@ function Net.send_to_api(user_text)
   S.context_loop_retries   = 0
   S.api_validator_retries  = 0
   S.arity_validator_retries = 0
+  S.sendidx_validator_retries = 0
+  S.stockfx_validator_retries = 0
   S.fxcheck_validator_retries = 0
   S.upsert_validator_retries = 0
   S.helper_int_validator_retries = 0
@@ -18093,6 +18274,8 @@ function Net.clear_conversation()
   S.context_loop_retries       = 0
   S.api_validator_retries      = 0
   S.arity_validator_retries    = 0
+  S.sendidx_validator_retries  = 0
+  S.stockfx_validator_retries  = 0
   S.fxcheck_validator_retries  = 0
   S.upsert_validator_retries   = 0
   S.helper_int_validator_retries = 0
@@ -18161,6 +18344,475 @@ function Net.clear_conversation()
     Diag.rotate_chat_id()
   end
 end
+
+-- =============================================================================
+-- Code.extract_typed_actions / Code.validate_typed_actions_plan
+-- =============================================================================
+-- Phase-1 typed action support: parse and validate provider-neutral action JSON
+-- without executing or mutating the project. The executor is intentionally not
+-- wired in yet; these helpers establish a strict, testable model-output contract.
+do
+local _TYPED_ACTION_STOCK_FX = {
+  ReaEQ = true,
+  ReaComp = true,
+  ReaDelay = true,
+  ReaVerbate = true,
+  ReaGate = true,
+  ReaLimit = true,
+}
+
+local _TYPED_ACTION_OP_KEYS = {
+  "track.ensure",
+  "fx.add_stock",
+  "fx.set_param",
+  "send.create",
+}
+
+local _TYPED_ACTION_OP_ALLOWED = {}
+for _, op in ipairs(_TYPED_ACTION_OP_KEYS) do
+  _TYPED_ACTION_OP_ALLOWED[op] = true
+end
+
+local _TYPED_ACTION_PARAM_TYPES = {
+  ReaEQ = {
+    band = "number",
+    frequency_hz = "number",
+    gain_db = "number",
+    q = "number",
+    type = "string",
+  },
+  ReaComp = {
+    threshold_db = "number",
+    ratio = "number",
+    attack_ms = "number",
+    release_ms = "number",
+    knee_db = "number",
+    wet_db = "number",
+    dry_db = "number",
+    makeup_gain = "number",
+    rms_ms = "number",
+  },
+  ReaDelay = {
+    delay_ms = "number",
+    feedback = "number",
+    wet_db = "number",
+    dry_db = "number",
+  },
+  ReaVerbate = {
+    wet_db = "number",
+    dry_db = "number",
+    room_size = "number",
+    dampening = "number",
+  },
+  ReaGate = {
+    threshold_db = "number",
+    hysteresis_db = "number",
+    attack_ms = "number",
+    hold_ms = "number",
+    release_ms = "number",
+  },
+  ReaLimit = {
+    threshold_db = "number",
+    ceiling_db = "number",
+    release_ms = "number",
+  },
+}
+
+local function _typed_action_error(code, path, message)
+  return { code = code, path = path or "$", message = message }
+end
+
+local function _typed_action_trim(s)
+  return (s or ""):match("^%s*(.-)%s*$") or ""
+end
+
+local function _typed_action_is_nonempty_string(v)
+  return type(v) == "string" and v:match("%S") ~= nil
+end
+
+local function _typed_action_is_array(t)
+  if type(t) ~= "table" or t == JSON.NULL then return false end
+  local n = #t
+  if n == 0 then return false end
+  local count = 0
+  for k in pairs(t) do
+    if type(k) ~= "number" or k < 1 or k > n or k % 1 ~= 0 then
+      return false
+    end
+    count = count + 1
+  end
+  return count == n
+end
+
+local function _typed_action_is_object(t)
+  if type(t) ~= "table" or t == JSON.NULL then return false end
+  if #t > 0 then return false end
+  return true
+end
+
+local function _typed_action_add_error(errors, code, path, message)
+  errors[#errors+1] = _typed_action_error(code, path, message)
+end
+
+local function _typed_action_check_fields(errors, obj, path, allowed)
+  for k in pairs(obj) do
+    if type(k) ~= "string" or not allowed[k] then
+      _typed_action_add_error(errors, "unknown_field",
+        path .. "." .. tostring(k), "Unsupported typed-action field")
+    end
+  end
+end
+
+local function _typed_action_first_error_code(errors)
+  local first = type(errors) == "table" and errors[1] or nil
+  return first and first.code or nil
+end
+
+local function _typed_action_blank_op_counts()
+  local counts = {}
+  for _, op in ipairs(_TYPED_ACTION_OP_KEYS) do counts[op] = 0 end
+  return counts
+end
+
+local function _typed_action_count_ops(plan)
+  local counts = _typed_action_blank_op_counts()
+  local actions = type(plan) == "table" and plan.actions or nil
+  if type(actions) ~= "table" then return counts end
+  for _, action in ipairs(actions) do
+    local op = type(action) == "table" and action.op or nil
+    if _TYPED_ACTION_OP_ALLOWED[op] then
+      counts[op] = counts[op] + 1
+    end
+  end
+  return counts
+end
+
+local function _typed_action_single_json_object(raw)
+  local s = _typed_action_trim(raw)
+  if s == "" then
+    return false, "Typed action block is empty"
+  end
+  if s:sub(1, 1) ~= "{" then
+    return false, "Typed action JSON must be a top-level object"
+  end
+
+  local depth, in_string, escaped = 0, false, false
+  for i = 1, #s do
+    local ch = s:sub(i, i)
+    if in_string then
+      if escaped then
+        escaped = false
+      elseif ch == "\\" then
+        escaped = true
+      elseif ch == "\"" then
+        in_string = false
+      end
+    else
+      if ch == "\"" then
+        in_string = true
+      elseif ch == "{" or ch == "[" then
+        depth = depth + 1
+      elseif ch == "}" or ch == "]" then
+        depth = depth - 1
+        if depth < 0 then
+          return false, "Typed action JSON has an unmatched closing bracket"
+        end
+        if depth == 0 and i ~= #s then
+          return false, "Typed action JSON has trailing content after the object"
+        end
+      end
+    end
+  end
+  if in_string then
+    return false, "Typed action JSON has an unterminated string"
+  end
+  if depth ~= 0 then
+    return false, "Typed action JSON has unbalanced brackets"
+  end
+  return true, nil
+end
+
+function Code.extract_typed_actions(text)
+  if type(text) ~= "string" or text == "" then return nil, nil end
+  local blocks = {}
+  for block in text:gmatch("```reaassist%-actions%s*\n(.-)\n%s*```") do
+    blocks[#blocks+1] = block
+  end
+  if #blocks == 0 then return nil, nil end
+  if #blocks > 1 then
+    return nil, {
+      _typed_action_error("multiple_action_blocks", "$",
+        "Use exactly one reaassist-actions block")
+    }
+  end
+  return blocks[1], nil
+end
+
+function Code.parse_typed_actions_block(raw)
+  local ok_shape, shape_err = _typed_action_single_json_object(raw)
+  if not ok_shape then
+    return nil, {
+      _typed_action_error("invalid_json_shape", "$", shape_err)
+    }
+  end
+
+  local plan, err = JSON.decode(_typed_action_trim(raw))
+  if not plan then
+    return nil, {
+      _typed_action_error("invalid_json", "$",
+        "Typed action block is not valid JSON: " .. tostring(err))
+    }
+  end
+  return plan, nil
+end
+
+function Code.validate_typed_actions_plan(plan)
+  local errors = {}
+  if not _typed_action_is_object(plan) then
+    _typed_action_add_error(errors, "invalid_top_level", "$",
+      "Typed action plan must be a JSON object")
+    return false, errors
+  end
+
+  _typed_action_check_fields(errors, plan, "$", {
+    version = true,
+    actions = true,
+  })
+
+  if plan.version ~= 1 then
+    _typed_action_add_error(errors, "invalid_version", "$.version",
+      "Typed action plan version must be 1")
+  end
+
+  if not _typed_action_is_array(plan.actions) then
+    _typed_action_add_error(errors, "invalid_actions", "$.actions",
+      "Typed action plan actions must be a non-empty array")
+    return false, errors
+  end
+
+  local track_ids, fx_ids, send_ids, fx_type_by_id = {}, {}, {}, {}
+
+  local function require_string(action, field, path)
+    if not _typed_action_is_nonempty_string(action[field]) then
+      _typed_action_add_error(errors, "invalid_type", path .. "." .. field,
+        field .. " must be a non-empty string")
+      return nil
+    end
+    return action[field]
+  end
+
+  local function require_number(action, field, path)
+    if type(action[field]) ~= "number" then
+      _typed_action_add_error(errors, "invalid_type", path .. "." .. field,
+        field .. " must be a number")
+      return nil
+    end
+    return action[field]
+  end
+
+  local function require_ref(refs, value, path, kind)
+    if not _typed_action_is_nonempty_string(value) then
+      _typed_action_add_error(errors, "invalid_type", path,
+        kind .. " reference must be a non-empty string")
+      return false
+    end
+    if not refs[value] then
+      _typed_action_add_error(errors, "unknown_ref", path,
+        "Unknown " .. kind .. " reference: " .. value)
+      return false
+    end
+    return true
+  end
+
+  local function register_id(set, id, path, kind)
+    if not id then return end
+    if set[id] then
+      _typed_action_add_error(errors, "duplicate_id", path,
+        "Duplicate " .. kind .. " id: " .. id)
+      return
+    end
+    set[id] = true
+  end
+
+  for i, action in ipairs(plan.actions) do
+    local path = "$.actions[" .. tostring(i) .. "]"
+    if not _typed_action_is_object(action) then
+      _typed_action_add_error(errors, "invalid_action", path,
+        "Each action must be a JSON object")
+    else
+      local op = require_string(action, "op", path)
+      if op == "track.ensure" then
+        _typed_action_check_fields(errors, action, path, {
+          op = true,
+          id = true,
+          name = true,
+          select = true,
+          color = true,
+          position = true,
+        })
+        local id = require_string(action, "id", path)
+        require_string(action, "name", path)
+        if action.select ~= nil and type(action.select) ~= "boolean" then
+          _typed_action_add_error(errors, "invalid_type", path .. ".select",
+            "select must be a boolean")
+        end
+        if action.color ~= nil and type(action.color) ~= "string" then
+          _typed_action_add_error(errors, "invalid_type", path .. ".color",
+            "color must be a string")
+        end
+        if action.position ~= nil then
+          if type(action.position) ~= "string" then
+            _typed_action_add_error(errors, "invalid_type", path .. ".position",
+              "position must be a string")
+          elseif action.position ~= "end" then
+            local dir, ref = action.position:match("^(after):(.-)$")
+            if not dir then dir, ref = action.position:match("^(before):(.-)$") end
+            if not dir or not track_ids[ref] then
+              _typed_action_add_error(errors, "unknown_ref", path .. ".position",
+                "position must be end, after:<existing-track-id>, or before:<existing-track-id>")
+            end
+          end
+        end
+        register_id(track_ids, id, path .. ".id", "track")
+
+      elseif op == "fx.add_stock" then
+        _typed_action_check_fields(errors, action, path, {
+          op = true,
+          track = true,
+          id = true,
+          fx = true,
+        })
+        require_ref(track_ids, action.track, path .. ".track", "track")
+        local id = require_string(action, "id", path)
+        local fx = require_string(action, "fx", path)
+        if fx and not _TYPED_ACTION_STOCK_FX[fx] then
+          _typed_action_add_error(errors, "unsupported_stock_fx", path .. ".fx",
+            "Unsupported or non-stock FX for typed actions: " .. fx)
+        end
+        register_id(fx_ids, id, path .. ".id", "fx")
+        if id and fx and _TYPED_ACTION_STOCK_FX[fx] then
+          fx_type_by_id[id] = fx
+        end
+
+      elseif op == "fx.set_param" then
+        _typed_action_check_fields(errors, action, path, {
+          op = true,
+          fx = true,
+          params = true,
+        })
+        local fx = require_string(action, "fx", path)
+        require_ref(fx_ids, fx, path .. ".fx", "fx")
+        if not _typed_action_is_object(action.params) or next(action.params) == nil then
+          _typed_action_add_error(errors, "invalid_type", path .. ".params",
+            "params must be a non-empty object")
+        else
+          local fx_name = fx and fx_type_by_id[fx]
+          local allowed_params = fx_name and _TYPED_ACTION_PARAM_TYPES[fx_name] or nil
+          for param, value in pairs(action.params) do
+            local ppath = path .. ".params." .. tostring(param)
+            if type(param) ~= "string" then
+              _typed_action_add_error(errors, "unknown_param", ppath,
+                "Parameter name must be a string")
+            elseif param:match("^normalized_") then
+              if type(value) ~= "number" then
+                _typed_action_add_error(errors, "invalid_type", ppath,
+                  "Normalized parameter values must be numeric")
+              elseif value < 0 or value > 1 then
+                _typed_action_add_error(errors, "out_of_range", ppath,
+                  "Normalized parameter values must be between 0 and 1")
+              end
+            elseif not allowed_params or not allowed_params[param] then
+              _typed_action_add_error(errors, "unknown_param", ppath,
+                "Unknown parameter for " .. tostring(fx_name or "FX") .. ": " .. param)
+            elseif type(value) ~= allowed_params[param] then
+              _typed_action_add_error(errors, "invalid_type", ppath,
+                param .. " must be a " .. allowed_params[param])
+            end
+          end
+        end
+
+      elseif op == "send.create" then
+        _typed_action_check_fields(errors, action, path, {
+          op = true,
+          id = true,
+          ["from"] = true,
+          ["to"] = true,
+          volume_db = true,
+          pan = true,
+          mode = true,
+          muted = true,
+        })
+        local id = require_string(action, "id", path)
+        require_ref(track_ids, action["from"], path .. ".from", "track")
+        require_ref(track_ids, action["to"], path .. ".to", "track")
+        if action.volume_db ~= nil then require_number(action, "volume_db", path) end
+        if action.pan ~= nil then
+          local pan = require_number(action, "pan", path)
+          if pan and (pan < -1 or pan > 1) then
+            _typed_action_add_error(errors, "out_of_range", path .. ".pan",
+              "pan must be between -1 and 1")
+          end
+        end
+        if action.mode ~= nil
+           and type(action.mode) ~= "string"
+           and type(action.mode) ~= "number" then
+          _typed_action_add_error(errors, "invalid_type", path .. ".mode",
+            "mode must be a string or number")
+        end
+        if action.muted ~= nil and type(action.muted) ~= "boolean" then
+          _typed_action_add_error(errors, "invalid_type", path .. ".muted",
+            "muted must be a boolean")
+        end
+        register_id(send_ids, id, path .. ".id", "send")
+
+      elseif op then
+        _typed_action_add_error(errors, "unknown_op", path .. ".op",
+          "Unsupported typed action op: " .. tostring(op))
+      end
+    end
+  end
+
+  return #errors == 0, errors
+end
+
+function Code.inspect_typed_actions(text)
+  local metrics = {
+    present = false,
+    valid = false,
+    executed = false,
+    fallback_to_lua = false,
+    retry_count = 0,
+    error = nil,
+    op_counts = _typed_action_blank_op_counts(),
+  }
+
+  local raw, extract_errors = Code.extract_typed_actions(text)
+  if not raw then
+    if extract_errors and #extract_errors > 0 then
+      metrics.present = true
+      metrics.error = _typed_action_first_error_code(extract_errors)
+    end
+    return metrics
+  end
+
+  metrics.present = true
+  local plan, parse_errors = Code.parse_typed_actions_block(raw)
+  if not plan then
+    metrics.error = _typed_action_first_error_code(parse_errors) or "invalid_json"
+    return metrics
+  end
+
+  metrics.op_counts = _typed_action_count_ops(plan)
+  local valid, validate_errors = Code.validate_typed_actions_plan(plan)
+  if not valid then
+    metrics.error = _typed_action_first_error_code(validate_errors) or "invalid_plan"
+    return metrics
+  end
+
+  metrics.valid = true
+  return metrics
+end
+end -- close typed action validator scope
 
 -- =============================================================================
 -- Code safety: risky-call scanner + execution gate
@@ -18254,6 +18906,9 @@ local _REAPER_FIXED_ARITY = {
   TakeFX_GetParamNormalized       = 3,
   TrackFX_GetFormattedParamValue  = 4,
   TakeFX_GetFormattedParamValue   = 4,
+  GetTrackSendInfo_Value          = 4,
+  SetTrackSendInfo_Value          = 5,
+  TrackList_AdjustWindows         = 1,
 }
 
 function Code.find_reaper_arity_mismatches(lua_code)
@@ -18319,6 +18974,310 @@ function Code.find_reaper_arity_mismatches(lua_code)
     return a.got < b.got
   end)
   return mismatches
+end
+
+-- =============================================================================
+-- Code.find_untracked_createtracksend_results
+-- =============================================================================
+-- CreateTrackSend returns the new send index. When a script creates multiple
+-- sends from the same source track and then sets send properties using literal
+-- indices (0/1/2), it can silently set the wrong send if REAPER orders sends
+-- differently than the model assumed. Keep this intentionally narrow: only
+-- flag standalone CreateTrackSend calls whose return value is ignored, paired
+-- with later SetTrackSendInfo_Value calls on the same source track that use
+-- hard-coded numeric send indices.
+function Code.find_untracked_createtracksend_results(lua_code)
+  if not lua_code or lua_code == "" then return nil end
+  local stripped = lua_code:gsub("%-%-[^\n]*", "")
+
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+
+  local function normalize_arg(v)
+    return tostring(v or ""):gsub("%s+", "")
+  end
+
+  local function parse_args(open_pos)
+    local args, field = {}, {}
+    local depth = 1
+    local i = open_pos + 1
+    local in_str = nil
+    while i <= #stripped do
+      local c = stripped:sub(i, i)
+      if in_str then
+        field[#field + 1] = c
+        if c == "\\" then
+          i = i + 1
+          if i <= #stripped then field[#field + 1] = stripped:sub(i, i) end
+        elseif c == in_str then
+          in_str = nil
+        end
+      else
+        if c == '"' or c == "'" then
+          in_str = c
+          field[#field + 1] = c
+        elseif c == "(" or c == "[" or c == "{" then
+          depth = depth + 1
+          field[#field + 1] = c
+        elseif c == ")" or c == "]" or c == "}" then
+          depth = depth - 1
+          if depth == 0 then
+            args[#args + 1] = table.concat(field):match("^%s*(.-)%s*$") or ""
+            return args
+          end
+          field[#field + 1] = c
+        elseif c == "," and depth == 1 then
+          args[#args + 1] = table.concat(field):match("^%s*(.-)%s*$") or ""
+          field = {}
+        else
+          field[#field + 1] = c
+        end
+      end
+      i = i + 1
+    end
+    return nil
+  end
+
+  local ignored_by_source = {}
+  local pos = 1
+  while true do
+    local s, open_pos = stripped:find("reaper%.CreateTrackSend%s*%(", pos)
+    if not s then break end
+    local line_start = stripped:sub(1, s):match(".*()\n")
+    line_start = line_start and (line_start + 1) or 1
+    local prefix = stripped:sub(line_start, s - 1)
+    if prefix:match("^%s*$") then
+      local args = parse_args(open_pos)
+      if args and args[1] and args[1] ~= "" then
+        local src = normalize_arg(args[1])
+        ignored_by_source[src] = ignored_by_source[src] or {}
+        ignored_by_source[src][#ignored_by_source[src] + 1] = {
+          pos = s,
+          line = line_for_pos(s),
+        }
+      end
+    end
+    pos = open_pos + 1
+  end
+
+  local violations, seen = {}, {}
+  pos = 1
+  while true do
+    local s, open_pos = stripped:find("reaper%.SetTrackSendInfo_Value%s*%(", pos)
+    if not s then break end
+    local args = parse_args(open_pos)
+    if args and args[1] and args[3] then
+      local src = normalize_arg(args[1])
+      local creates = ignored_by_source[src]
+      local sendidx = tostring(args[3]):match("^%s*(.-)%s*$") or ""
+      if creates and sendidx:match("^%d+$") then
+        local risky = tonumber(sendidx) ~= 0 or #creates > 1
+        local follows_create = false
+        local create_line = nil
+        for _, c in ipairs(creates) do
+          if c.pos < s then
+            follows_create = true
+            create_line = create_line or c.line
+          end
+        end
+        if risky and follows_create then
+          local key = src .. ":" .. sendidx
+          if not seen[key] then
+            seen[key] = true
+            violations[#violations + 1] = {
+              source = args[1],
+              sendidx = sendidx,
+              create_line = create_line,
+              set_line = line_for_pos(s),
+            }
+          end
+        end
+      end
+    end
+    pos = open_pos + 1
+  end
+
+  if #violations == 0 then return nil end
+  table.sort(violations, function(a, b)
+    if a.set_line ~= b.set_line then return a.set_line < b.set_line end
+    return tostring(a.source) < tostring(b.source)
+  end)
+  return violations
+end
+
+-- =============================================================================
+-- Code.find_stock_fx_substitutions
+-- =============================================================================
+-- If the user explicitly names a stock Cockos plugin, do not let the generated
+-- script silently substitute a third-party or JSFX alternative from the same
+-- plugin family. This is intentionally narrow and only checks Track/Take
+-- FX_AddByName string literals: explicit exact plugin requests are user intent,
+-- not preference-hint suggestions.
+function Code.find_stock_fx_substitutions(lua_code, user_prompt)
+  if not lua_code or lua_code == "" then return nil end
+  local prompt = tostring(user_prompt or ""):lower()
+  if prompt == "" then return nil end
+
+  local specs = {
+    {
+      requested = "ReaEQ",
+      prompt_token = "reaeq",
+      substitutes = {
+        { pattern = "pro%-q", label = "FabFilter Pro-Q" },
+        { pattern = "reeq",  label = "ReEQ" },
+      },
+    },
+    {
+      requested = "ReaComp",
+      prompt_token = "reacomp",
+      substitutes = {
+        { pattern = "pro%-c", label = "FabFilter Pro-C" },
+      },
+    },
+  }
+
+  local requested = {}
+  for _, spec in ipairs(specs) do
+    if prompt:find(spec.prompt_token, 1, true) then
+      requested[spec.requested] = true
+    end
+  end
+  if next(requested) == nil then return nil end
+
+  local stripped = lua_code:gsub("%-%-[^\n]*", "")
+
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+
+  local function parse_args(open_pos)
+    local args, field = {}, {}
+    local depth = 1
+    local i = open_pos + 1
+    local in_str = nil
+    while i <= #stripped do
+      local c = stripped:sub(i, i)
+      if in_str then
+        field[#field + 1] = c
+        if c == "\\" then
+          i = i + 1
+          if i <= #stripped then field[#field + 1] = stripped:sub(i, i) end
+        elseif c == in_str then
+          in_str = nil
+        end
+      else
+        if c == '"' or c == "'" then
+          in_str = c
+          field[#field + 1] = c
+        elseif c == "(" or c == "[" or c == "{" then
+          depth = depth + 1
+          field[#field + 1] = c
+        elseif c == ")" or c == "]" or c == "}" then
+          depth = depth - 1
+          if depth == 0 then
+            args[#args + 1] = table.concat(field):match("^%s*(.-)%s*$") or ""
+            return args
+          end
+          field[#field + 1] = c
+        elseif c == "," and depth == 1 then
+          args[#args + 1] = table.concat(field):match("^%s*(.-)%s*$") or ""
+          field = {}
+        else
+          field[#field + 1] = c
+        end
+      end
+      i = i + 1
+    end
+    return nil
+  end
+
+  local function string_literal_value(v)
+    v = tostring(v or ""):match("^%s*(.-)%s*$") or ""
+    local q = v:sub(1, 1)
+    if q ~= '"' and q ~= "'" then return nil end
+    local out = {}
+    local i = 2
+    while i <= #v do
+      local c = v:sub(i, i)
+      if c == "\\" then
+        i = i + 1
+        if i <= #v then out[#out + 1] = v:sub(i, i) end
+      elseif c == q then
+        return table.concat(out)
+      else
+        out[#out + 1] = c
+      end
+      i = i + 1
+    end
+    return nil
+  end
+
+  local calls = {}
+  for _, fn in ipairs({ "TrackFX_AddByName", "TakeFX_AddByName" }) do
+    local pos = 1
+    while true do
+      local s, open_pos = stripped:find("reaper%." .. fn .. "%s*%(", pos)
+      if not s then break end
+      local args = parse_args(open_pos)
+      local plugin = args and string_literal_value(args[2])
+      if plugin and plugin ~= "" then
+        calls[#calls + 1] = {
+          fn = fn,
+          plugin = plugin,
+          plugin_lower = plugin:lower(),
+          line = line_for_pos(s),
+        }
+      end
+      pos = open_pos + 1
+    end
+  end
+  if #calls == 0 then return nil end
+
+  local function code_adds_requested(spec)
+    local token = spec.requested:lower()
+    for _, call in ipairs(calls) do
+      if call.plugin_lower:find(token, 1, true) then return true end
+    end
+    return false
+  end
+
+  local violations, seen = {}, {}
+  for _, spec in ipairs(specs) do
+    if requested[spec.requested] and not code_adds_requested(spec) then
+      for _, call in ipairs(calls) do
+        for _, sub in ipairs(spec.substitutes) do
+          if call.plugin_lower:find(sub.pattern)
+             and not prompt:find(sub.pattern) then
+            local key = spec.requested .. ":" .. call.plugin_lower .. ":"
+              .. tostring(call.line)
+            if not seen[key] then
+              seen[key] = true
+              violations[#violations + 1] = {
+                requested = spec.requested,
+                substitute = call.plugin,
+                substitute_label = sub.label,
+                fn = call.fn,
+                line = call.line,
+              }
+            end
+          end
+        end
+      end
+    end
+  end
+
+  if #violations == 0 then return nil end
+  table.sort(violations, function(a, b)
+    if a.line ~= b.line then return a.line < b.line end
+    if a.requested ~= b.requested then return a.requested < b.requested end
+    return tostring(a.substitute) < tostring(b.substitute)
+  end)
+  return violations
 end
 
 -- =============================================================================
@@ -18804,23 +19763,44 @@ function Code.find_param_calls_outside_defer(lua_code)
   -- handles transitivity (helper A calls helper B, A is called from
   -- defer -> B is also "in defer").
   local fns = _find_local_function_regions(stripped)
-  local function _name_called_in_regions(fn_name, regs)
-    -- Pattern: NAME followed by `(`, preceded by a non-identifier and
-    -- non-`.` character so we don't match obj.NAME() field accesses.
-    -- Method-call syntax `obj:NAME()` is technically a different binding
-    -- (it's calling obj.NAME, not the local), but the model doesn't write
-    -- `obj:set_param_display(...)`-shape calls in practice -- a tolerable
-    -- false-positive risk in exchange for simpler matching.
-    local pat = "[^%w_%.]" .. fn_name .. "%s*%("
+  local function _local_call_positions(fn_name)
+    local positions = {}
     local ps = 1
     while true do
-      local cs = stripped:find(pat, ps)
-      if not cs then return false end
+      local cs, ce = stripped:find(fn_name .. "%s*%(", ps)
+      if not cs then break end
+      local prev = cs > 1 and stripped:sub(cs - 1, cs - 1) or ""
+      if not prev:match("[%w_%.:]") then
+        positions[#positions + 1] = cs
+      end
+      ps = ce + 1
+    end
+    return positions
+  end
+
+  local function _local_token_positions(fn_name)
+    local positions = {}
+    local ps = 1
+    while true do
+      local cs, ce = stripped:find(fn_name, ps, true)
+      if not cs then break end
+      local prev = cs > 1 and stripped:sub(cs - 1, cs - 1) or ""
+      local next_ch = ce < #stripped and stripped:sub(ce + 1, ce + 1) or ""
+      if not prev:match("[%w_%.:]") and not next_ch:match("[%w_]") then
+        positions[#positions + 1] = cs
+      end
+      ps = ce + 1
+    end
+    return positions
+  end
+
+  local function _name_called_in_regions(fn_name, regs)
+    for _, cs in ipairs(_local_call_positions(fn_name)) do
       for _, r in ipairs(regs) do
         if cs >= r[1] and cs <= r[2] then return true end
       end
-      ps = cs + 1
     end
+    return false
   end
   local known_in_defer = {}
   local added = true
@@ -18847,16 +19827,25 @@ function Code.find_param_calls_outside_defer(lua_code)
   -- like `local function apply() ... end; apply()` outside defer).
   for _, fn in ipairs(fns) do
     if not known_in_defer[fn] then
-      local pat = "[^%w_%.]" .. fn.name .. "%s*%("
-      local ps, has_external = 1, false
-      while true do
-        local cs = stripped:find(pat, ps)
-        if not cs then break end
+      local has_external = false
+      for _, cs in ipairs(_local_call_positions(fn.name)) do
         if cs < fn.def_start or cs > fn.body_end then
           has_external = true
           break
         end
-        ps = cs + 1
+      end
+      if not has_external then
+        -- `pcall(main)`, `xpcall(main, ...)`, or assigning/passing a local
+        -- function as a callback still makes that function reachable even
+        -- though it is not written as `main(...)`. Treat any out-of-body
+        -- token reference as reachable so wrapper mains don't mask nested
+        -- helper-param calls from the defer validator.
+        for _, cs in ipairs(_local_token_positions(fn.name)) do
+          if cs < fn.def_start or cs > fn.body_end then
+            has_external = true
+            break
+          end
+        end
       end
       if not has_external then
         regions[#regions+1] = { fn.body_start, fn.body_end }
@@ -23613,6 +24602,10 @@ function Net.try_finish_curl()
     code = lua_code
     code_type = "lua"
   end
+  local typed_action_metrics = Code.inspect_typed_actions(text)
+  if typed_action_metrics.present and code_type == "lua" then
+    typed_action_metrics.fallback_to_lua = true
+  end
 
   -- No unlabeled-fence fallback. Previously we extracted ANY ```<lang>
   -- fence as code and tagged it "lua" unless its first line was "desc:",
@@ -24017,6 +25010,184 @@ function Net.try_finish_curl()
     end
   end
 
+  -- SEND-INDEX VALIDATOR: CreateTrackSend returns the new send index.
+  -- If the model ignores that return value and later uses hard-coded
+  -- send indices while setting send properties, it can silently set the
+  -- wrong send when multiple sends exist on the same source track. Same
+  -- recovery shape as the other validators: one hidden retry, then block
+  -- auto-run if the pattern persists.
+  local sendidx_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+     and not arity_gate_hit then
+    local sendidx_bad = Code.find_untracked_createtracksend_results(lua_code)
+    if sendidx_bad and #sendidx_bad > 0 then
+      if (S.sendidx_validator_retries or 0) < 1 then
+        S.sendidx_validator_retries =
+          (S.sendidx_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "sendidx")
+        local lines = {}
+        for _, e in ipairs(sendidx_bad) do
+          lines[#lines+1] = "  - source `" .. tostring(e.source)
+            .. "` uses literal send index " .. tostring(e.sendidx)
+            .. " after an ignored CreateTrackSend result"
+        end
+        Log.line("SENDIDX-VALIDATOR",
+          "ignored CreateTrackSend result(s) with literal send index use ("
+          .. #sendidx_bad .. "); retrying with hint (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply called "
+          .. "reaper.CreateTrackSend(...) without storing its return value, "
+          .. "then called reaper.SetTrackSendInfo_Value(...) with hard-coded "
+          .. "send indices. CreateTrackSend returns the new send index; "
+          .. "you MUST store that return value and use it when setting send "
+          .. "attributes. Do not assume send indices 0/1/2 after creating "
+          .. "multiple sends from the same source track.\n\n"
+          .. "Affected send property call(s):\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Use this pattern:\n"
+          .. "  local sidx = reaper.CreateTrackSend(src, dst)\n"
+          .. "  reaper.SetTrackSendInfo_Value(src, 0, sidx, \"D_VOL\", amp)\n\n"
+          .. "Regenerate the code with every configured send using its own "
+          .. "returned send index variable. Respond as if this is your FIRST "
+          .. "reply -- do NOT apologize, do NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history+1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("sendidx_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + sendidx_retry") or "sendidx_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error("Auto-retry for ignored CreateTrackSend result did "
+            .. "not go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      sendidx_gate_hit = true
+      Log.line("SENDIDX-VALIDATOR",
+        "ignored CreateTrackSend result persists after retry; auto-run blocked")
+      local user_lines = {}
+      for _, e in ipairs(sendidx_bad) do
+        user_lines[#user_lines+1] = tostring(e.source)
+          .. " send index " .. tostring(e.sendidx)
+      end
+      Log.add_error("The model created sends without using the returned "
+        .. "send index, even after a retry: "
+        .. tbl_concat(user_lines, "; ")
+        .. ". Auto-run is blocked; review and edit the code before clicking "
+        .. "Run manually.")
+    end
+  end
+
+  -- STOCK-FX VALIDATOR: When the user explicitly names a stock Cockos plugin
+  -- (for example ReaEQ or ReaComp), generated code must not substitute a
+  -- curated third-party/JSFX alternative from the same plugin family. This is
+  -- intentionally narrow: it only fires on exact stock-plugin names in the
+  -- user request and obvious same-family AddByName substitutions.
+  local stockfx_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+     and not arity_gate_hit and not sendidx_gate_hit then
+    local stockfx_bad = Code.find_stock_fx_substitutions(
+      lua_code, S.pending_orig_prompt or "")
+    if stockfx_bad and #stockfx_bad > 0 then
+      if (S.stockfx_validator_retries or 0) < 1 then
+        S.stockfx_validator_retries =
+          (S.stockfx_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "stockfx")
+        local lines = {}
+        for _, e in ipairs(stockfx_bad) do
+          lines[#lines + 1] = "  - line " .. tostring(e.line)
+            .. ": " .. tostring(e.fn) .. " added `"
+            .. tostring(e.substitute) .. "` instead of requested stock `"
+            .. tostring(e.requested) .. "`"
+        end
+        Log.line("STOCKFX-VALIDATOR",
+          "stock plugin substitution(s) (" .. #stockfx_bad
+          .. "); retrying with hint (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: The user explicitly requested "
+          .. "stock Cockos plugin(s), but your previous reply substituted "
+          .. "third-party or JSFX alternatives:\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Exact plugin names in the user request are hard requirements. "
+          .. "If the user says ReaEQ, use `reaper.TrackFX_AddByName(tr, "
+          .. "\"ReaEQ\", false, -1)` or the equivalent stock Cockos ReaEQ "
+          .. "identifier. If the user says ReaComp, use `ReaComp`. Do NOT "
+          .. "substitute FabFilter Pro-Q/Pro-C, ReEQ, or other alternatives "
+          .. "unless the user explicitly asks for those plugins.\n\n"
+          .. "Regenerate the FULL script with the requested stock plugins, "
+          .. "preserving the rest of the requested routing and parameter work. "
+          .. "Respond as if this is your FIRST reply -- do NOT apologize, do "
+          .. "NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history + 1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("stockfx_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + stockfx_retry") or "stockfx_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error("Auto-retry for stock plugin substitution did not "
+            .. "go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      stockfx_gate_hit = true
+      Log.line("STOCKFX-VALIDATOR",
+        "stock plugin substitution persists after retry; auto-run blocked")
+      local user_lines = {}
+      for _, e in ipairs(stockfx_bad) do
+        user_lines[#user_lines + 1] = tostring(e.requested)
+          .. " -> " .. tostring(e.substitute)
+      end
+      Log.add_error("The model substituted third-party or JSFX plugin(s) for "
+        .. "explicitly requested stock Cockos plugin(s), even after a retry: "
+        .. tbl_concat(user_lines, "; ")
+        .. ". Auto-run is blocked; review and edit the code before clicking "
+        .. "Run manually.")
+    end
+  end
+
   -- FX-CHECK VALIDATOR: After the API/arity validators pass, scan
   -- generated code for `local NAME = reaper.(Track|Take)FX_AddByName(...)`
   -- where NAME is never tested in a failure-direction comparison
@@ -24037,7 +25208,8 @@ function Net.try_finish_curl()
   -- workflow this rule is meant to protect.
   local fxcheck_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit then
+     and not arity_gate_hit and not sendidx_gate_hit
+     and not stockfx_gate_hit then
     local unchecked = Code.find_unchecked_addbyname_results(lua_code)
     if unchecked and #unchecked > 0 then
       if (S.fxcheck_validator_retries or 0) < 1 then
@@ -24150,7 +25322,8 @@ function Net.try_finish_curl()
     return false
   end
   if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not fxcheck_gate_hit
+     and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
+     and not fxcheck_gate_hit
      and S.fx_chains_already_sent
      and _is_chain_build_prompt(S.pending_orig_prompt) then
     local upsert_bad = Code.find_chain_upsert_violations(lua_code)
@@ -24258,8 +25431,8 @@ function Net.try_finish_curl()
   -- prompt, surface a visible error if the retry still fails.
   local defer_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not fxcheck_gate_hit
-     and not upsert_gate_hit then
+     and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
+     and not fxcheck_gate_hit and not upsert_gate_hit then
     local violations = Code.find_param_calls_outside_defer(lua_code)
     if violations and #violations > 0 then
       if (S.defer_validator_retries or 0) < 1 then
@@ -24278,10 +25451,33 @@ function Net.try_finish_curl()
           .. "\n\nWithout defer, some VST3 plugins silently ignore parameter "
           .. "changes -- the script appears to succeed but the audio doesn't "
           .. "change. Regenerate the code with all plugin param Get/Set "
-          .. "calls inside a reaper.defer block (the standard pattern: do "
-          .. "all FX add/insert work synchronously, then put a single "
-          .. "reaper.defer(function() ... end) around all the param work + "
-          .. "Undo_BeginBlock/EndBlock). Respond as if this is your FIRST "
+          .. "calls inside a reaper.defer block.\n\n"
+          .. "Required structure:\n"
+          .. "  1. In the main body: create tracks/items/sends, add or find "
+          .. "FX, and store any returned FX/send indices in variables.\n"
+          .. "  2. Then use exactly one `reaper.defer(function() ... end)` "
+          .. "callback for every plugin parameter read/write.\n"
+          .. "  3. Put `reaper.TrackFX_SetParam*`, `reaper.TrackFX_GetParam*`, "
+          .. "`reaper.TrackFX_GetFormattedParamValue`, and helper calls such "
+          .. "as `set_param_display(...)` inside that callback.\n"
+          .. "  4. `Undo_EndBlock`, `UpdateArrange`, and `PreventUIRefresh(-1)` "
+          .. "may run after the parameter writes in that same callback.\n\n"
+          .. "This is STILL WRONG and will be rejected: doing track/FX work "
+          .. "and parameter writes in the main body, then deferring only "
+          .. "`Undo_EndBlock`, `UpdateArrange`, or cleanup. Deferring cleanup "
+          .. "does not defer the parameter writes.\n\n"
+          .. "Correct skeleton:\n"
+          .. "  reaper.Undo_BeginBlock()\n"
+          .. "  reaper.PreventUIRefresh(1)\n"
+          .. "  -- main body: create tracks, add FX, create sends, store "
+          .. "indices\n"
+          .. "  reaper.defer(function()\n"
+          .. "    -- ALL TrackFX_Get/SetParam calls go here\n"
+          .. "    reaper.PreventUIRefresh(-1)\n"
+          .. "    reaper.UpdateArrange()\n"
+          .. "    reaper.Undo_EndBlock(\"ReaAssist: ...\", -1)\n"
+          .. "  end)\n\n"
+          .. "Respond as if this is your FIRST "
           .. "reply to the user's request -- do NOT apologize, do NOT say "
           .. "'let me try again' or mention a retry. Just deliver the "
           .. "correct code with a normal brief description.)\n\n"
@@ -24353,8 +25549,8 @@ function Net.try_finish_curl()
   -- auto-run block + visible error if it persists.
   local helper_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not fxcheck_gate_hit
-     and not upsert_gate_hit and not defer_gate_hit then
+     and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
+     and not fxcheck_gate_hit and not upsert_gate_hit and not defer_gate_hit then
     local missing = Code.find_helper_calls_without_definition(lua_code)
     if missing and #missing > 0 then
       if (S.helper_validator_retries or 0) < 1 then
@@ -24456,8 +25652,8 @@ function Net.try_finish_curl()
   -- "Script completed OK." Same recovery shape as the other validators.
   local helper_int_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not fxcheck_gate_hit
-     and not upsert_gate_hit and not defer_gate_hit
+     and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
+     and not fxcheck_gate_hit and not upsert_gate_hit and not defer_gate_hit
      and not helper_gate_hit then
     local int_bad = Code.find_helper_integrity_violations(lua_code)
     if int_bad and #int_bad > 0 then
@@ -24563,12 +25759,14 @@ function Net.try_finish_curl()
   -- validator is added. A bug from exactly that drift slipped past the
   -- auto-run gate in commit 89cd276's predecessor: HELPER-INTEGRITY-VALIDATOR
   -- correctly set helper_int_gate_hit, but auto-run still ran the corrupted
-  -- script because the gate list was stale. Defined here, after all nine
+  -- script because the gate list was stale. Defined here, after all validator
   -- flags are in scope, so adding a new gate now means updating one place.
   local function _any_gate_hit()
     return docs_gate_hit
         or validator_gate_hit
         or arity_gate_hit
+        or sendidx_gate_hit
+        or stockfx_gate_hit
         or fxcheck_gate_hit
         or upsert_gate_hit
         or defer_gate_hit
@@ -24909,7 +26107,9 @@ function Net.try_finish_curl()
     -- api_ref in session). Chat bubble renderers can key off this to show a
     -- warning banner; auto-run was already suppressed above.
     docs_gate_hit   = docs_gate_hit or nil,
+    typed_actions   = typed_action_metrics,
   }
+  Probe.add_typed_action(S.probe_turn, typed_action_metrics)
 
   -- Prune oldest display messages beyond the soft cap to prevent unbounded
   -- memory growth. History is bounded by CFG.MAX_HISTORY_TURNS for the API;

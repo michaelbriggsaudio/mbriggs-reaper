@@ -1456,7 +1456,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.2.0", -- public release version
+  VERSION           = "1.2.1", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -1472,6 +1472,12 @@ CFG = {
   -- details card has always had (was a fixed SC(11) against chat 12).
   DETAILS_FONT_SIZES = { 9, 11, 13 },
   CHAT_FONT_LABELS   = { "Small", "Medium", "Large" },
+  REPLY_LANGUAGE_LABELS = {
+    "English", "Spanish", "French", "German", "Italian", "Portuguese",
+  },
+  REPLY_LANGUAGE_CODES = {
+    "English", "Spanish", "French", "German", "Italian", "Portuguese",
+  },
   MAX_HISTORY_TURNS = 6,         -- sliding window size (keep even)
   MAX_DISPLAY_MSGS  = 120,       -- soft cap on display_messages; oldest pruned
   MAX_CACHED_PARAMS = 80,        -- per-plugin cap in scan_fx_params / scan_fx_params_deep_body / _estimate_deep_probes (cache file size + LLM context budget)
@@ -2516,6 +2522,7 @@ prefs = {
   ui_scale_idx     = 3,  -- index into CFG.UI_SCALE_OPTIONS (default 3 = 1.0)
   theme            = "auto",  -- "auto", "dark", or "light"
   chat_font_idx    = 2,  -- index into CHAT_FONT_SIZES: 1=Small, 2=Medium, 3=Large
+  reply_language_idx = 1, -- 1=English; visible assistant prose language only
   cloud_request_timeout = 180,  -- seconds; user-facing watchdog timeout for cloud providers (Claude/ChatGPT/Gemini). Set below from ExtState. Custom providers use their own per-provider timeout instead.
   -- Testing-only: when true, a per-send timestamp is appended to the
   -- system prompt as a hidden comment so every request hashes to a new
@@ -4495,6 +4502,12 @@ ICON = {
 
 -- Load chat_font_idx (default 2 = Medium/14px).
 prefs.chat_font_idx = _prefs_load_idx("chat_font_idx", 2, CFG.CHAT_FONT_SIZES)
+
+-- Load reply_language_idx (default 1 = English). This controls visible
+-- assistant prose only; code, tags, diagnostics, identifiers, and UI strings
+-- stay exact.
+prefs.reply_language_idx = _prefs_load_idx(
+  "reply_language_idx", 1, CFG.REPLY_LANGUAGE_LABELS)
 
 -- Help-page text-scale multiplier (applies only to help section titles
 -- and body text, not to chat / settings / chrome). Default 1.0, range
@@ -8369,10 +8382,13 @@ function CTX.reaassist_settings_status(user_text)
   local wants_update_check = clean:find("update check", 1, true) ~= nil
     or clean:find("update checking", 1, true) ~= nil
     or clean:find("check for updates", 1, true) ~= nil
+  local wants_reply_language = clean:find("reply language", 1, true) ~= nil
+    or clean:find("response language", 1, true) ~= nil
+    or clean:find("chat language", 1, true) ~= nil
   local wants_summary = mentions_reaassist and mentions_settings
   if not (wants_summary or wants_auto_run or wants_auto_backup
       or wants_snapshot or wants_api_ref or wants_structured
-      or wants_debug or wants_update_check) then
+      or wants_debug or wants_update_check or wants_reply_language) then
     return nil
   end
   if type(prefs) ~= "table" then return nil end
@@ -8386,16 +8402,19 @@ function CTX.reaassist_settings_status(user_text)
   end
   if wants_structured and not (wants_summary or wants_auto_run
       or wants_auto_backup or wants_snapshot or wants_api_ref
-      or wants_debug or wants_update_check) then
+      or wants_debug or wants_update_check or wants_reply_language) then
     return "Structured track edits: " .. structured_state
   end
+  local lang_label = CFG.REPLY_LANGUAGE_LABELS[prefs.reply_language_idx or 1]
+    or "English"
   return "ReaAssist settings:\n"
     .. "Auto-run scripts: " .. onoff(prefs.auto_run) .. "\n"
     .. "Auto-backup before run: " .. onoff(prefs.auto_backup) .. "\n"
     .. "Include project snapshot: " .. onoff(prefs.include_snapshot) .. "\n"
     .. "Always include API reference: " .. onoff(prefs.include_api_ref) .. "\n"
     .. "Debug logging: " .. onoff(prefs.debug_logging) .. "\n"
-    .. "Check for updates: " .. onoff(prefs.update_check)
+    .. "Check for updates: " .. onoff(prefs.update_check) .. "\n"
+    .. "Reply language: " .. lang_label
 end
 
 function CTX.diagnostics_status(user_text)
@@ -8677,6 +8696,98 @@ function CTX.track_properties(proj, opts)
   table.insert(rows, 1,
     "Track properties [idx|name|vol_db|pan_pct|muted|solo|armed|main_send]:")
   return tbl_concat(rows, "\n")
+end
+
+function CTX.local_track_label(index, name)
+  local nm = tostring(name or "")
+  if nm ~= "" then return nm end
+  if index then return "Track " .. tostring(index) end
+  return "track"
+end
+
+function CTX.local_track_property_kind(lt)
+  local text = tostring(lt or ""):lower()
+  local kinds = {}
+  local function add(kind)
+    for _, existing in ipairs(kinds) do
+      if existing == kind then return end
+    end
+    kinds[#kinds + 1] = kind
+  end
+  if text:find("%f[%w]volume%f[%W]")
+      or text:find("%f[%w]volumes%f[%W]")
+      or text:find("%f[%w]fader%f[%W]")
+      or text:find("%f[%w]faders%f[%W]") then
+    add("volume")
+  end
+  if text:find("%f[%w]pan%f[%W]")
+      or text:find("%f[%w]pans%f[%W]")
+      or text:find("%f[%w]panned%f[%W]") then
+    add("pan")
+  end
+  if text:find("%f[%w]mute%f[%W]")
+      or text:find("%f[%w]muted%f[%W]")
+      or text:find("%f[%w]unmute%f[%W]")
+      or text:find("%f[%w]unmuted%f[%W]") then
+    add("mute")
+  end
+  if text:find("%f[%w]solo%f[%W]")
+      or text:find("%f[%w]soloed%f[%W]")
+      or text:find("%f[%w]unsolo%f[%W]")
+      or text:find("%f[%w]unsoloed%f[%W]") then
+    add("solo")
+  end
+  if text:find("%f[%w]armed%f[%W]")
+      or text:find("%f[%w]unarmed%f[%W]")
+      or text:find("record arm", 1, true)
+      or text:find("record-armed", 1, true) then
+    add("armed")
+  end
+  if text:find("main output", 1, true)
+      or text:find("master output", 1, true)
+      or text:find("main send", 1, true)
+      or text:find("master send", 1, true)
+      or text:find("master/parent", 1, true)
+      or text:find("parent send", 1, true) then
+    add("main_send")
+  end
+  return #kinds == 1 and kinds[1] or nil
+end
+
+function CTX.track_property_answer(source_track, source_index, source_name, kind)
+  if not source_track then return nil end
+  local label = CTX.local_track_label(source_index, source_name)
+  if kind == "volume" then
+    local vol = R_GetMediaTrackInfo_Value(source_track, "D_VOL") or 1
+    local vol_db = vol > 0 and str_format("%.2f dB",
+      20 * math.log(vol, 10)) or "-inf dB"
+    return str_format("%s volume is %s.", label, vol_db)
+  elseif kind == "pan" then
+    local raw_pan_pct = (R_GetMediaTrackInfo_Value(
+      source_track, "D_PAN") or 0) * 100
+    local pan_pct = raw_pan_pct >= 0
+      and math_floor(raw_pan_pct + 0.5)
+      or -math_floor(math.abs(raw_pan_pct) + 0.5)
+    if pan_pct == 0 then return str_format("%s pan is centered.", label) end
+    local side = pan_pct < 0 and "left" or "right"
+    return str_format("%s pan is %d%% %s.", label, math.abs(pan_pct), side)
+  elseif kind == "mute" then
+    local muted = R_GetMediaTrackInfo_Value(source_track, "B_MUTE") == 1
+    return str_format("%s is %s.", label, muted and "muted" or "not muted")
+  elseif kind == "solo" then
+    local soloed = (R_GetMediaTrackInfo_Value(source_track, "I_SOLO") or 0) ~= 0
+    return str_format("%s is %s.", label, soloed and "soloed" or "not soloed")
+  elseif kind == "armed" then
+    local armed = R_GetMediaTrackInfo_Value(source_track, "I_RECARM") == 1
+    return str_format("%s is %s.", label,
+      armed and "record armed" or "not record armed")
+  elseif kind == "main_send" then
+    local main_send = R_GetMediaTrackInfo_Value(source_track, "B_MAINSEND") ~= 0
+    return main_send
+      and str_format("%s sends to the master/parent output.", label)
+      or str_format("%s does not send to the master/parent output.", label)
+  end
+  return nil
 end
 
 function CTX.tracks_without_master_output(proj, opts)
@@ -8980,8 +9091,13 @@ function CTX.fx_on_track_presence(proj, source_track, source_index, source_name,
     end
   end
   if total == 0 then
-    return "FX presence: no, " .. tostring(source_name or "track")
-      .. " does not have " .. tostring(query or "")
+    local label = CTX.local_track_label(source_index, source_name)
+    local q = tostring(query or ""):lower()
+    if q == "" or q == "fx" or q == "plugin" or q == "plugins"
+        or q == "effect" or q == "effects" or q == "there fx" then
+      return label .. " has no FX."
+    end
+    return label .. " has no " .. tostring(query or "") .. " FX."
   end
   local lines = {
     str_format("FX presence: yes, %s has %s (N=%d) [track_idx|track_name|fx_idx|fx_name]:",
@@ -8992,6 +9108,23 @@ function CTX.fx_on_track_presence(proj, source_track, source_index, source_name,
     lines[#lines + 1] = str_format("(+%d more)", total - CTX.MAX_FX_REPORT)
   end
   return tbl_concat(lines, "\n")
+end
+
+function CTX.track_fx_presence_answer(proj, source_track, source_index, source_name)
+  if not source_track then return nil end
+  local label = CTX.local_track_label(source_index, source_name)
+  local fx_count = R_TrackFX_GetCount(source_track) or 0
+  if fx_count == 0 then return label .. " has no FX." end
+  local names = {}
+  for f = 0, fx_count - 1 do
+    local _, fx_nm = R_TrackFX_GetFXName(source_track, f, "")
+    names[#names + 1] = tostring(fx_nm or "FX")
+    if #names >= 3 then break end
+  end
+  local suffix = fx_count > #names and str_format(", +%d more",
+    fx_count - #names) or ""
+  return str_format("%s has %d FX: %s%s.", label, fx_count,
+    tbl_concat(names, ", "), suffix)
 end
 
 function CTX.local_track_target_in_text(facts, query, prefix, force_singular_error)
@@ -9027,6 +9160,17 @@ function CTX.local_track_target_in_text(facts, query, prefix, force_singular_err
     end
   end
   return source_track, source_index, source_name, nil
+end
+
+function CTX.local_any_track_target_in_text(facts, query, prefix)
+  local source_track, source_index, source_name, missing_index =
+    CTX.local_track_index_in_text(facts, query)
+  if missing_index then
+    return nil, nil, nil, tostring(prefix or "Track target")
+      .. ": track " .. tostring(missing_index) .. " not found"
+  end
+  if source_track then return source_track, source_index, source_name, nil end
+  return CTX.local_track_target_in_text(facts, query, prefix, true)
 end
 
 function CTX.local_track_fx_query_in_text(facts, query, prefix)
@@ -10262,6 +10406,25 @@ function CTX.local_read_answer(user_text, proj)
       return CTX.track_master_output_answer(source_track, source_name)
     end
   end
+  local send_presence_text = lt:gsub("[%.%?%!]+$", "")
+  local send_presence_target =
+       send_presence_text:match("^%s*does%s+(.+)%s+have%s+any%s+sends%s*$")
+    or send_presence_text:match("^%s*does%s+(.+)%s+have%s+sends%s*$")
+    or send_presence_text:match("^%s*do%s+(.+)%s+have%s+any%s+sends%s*$")
+    or send_presence_text:match("^%s*do%s+(.+)%s+have%s+sends%s*$")
+    or send_presence_text:match("^%s*is%s+(.+)%s+sending%s+to%s+any%s+other%s+tracks%s*$")
+    or send_presence_text:match("^%s*is%s+(.+)%s+sending%s+to%s+any%s+other%s+track%s*$")
+    or send_presence_text:match("^%s*does%s+(.+)%s+send%s+to%s+any%s+other%s+tracks%s*$")
+    or send_presence_text:match("^%s*does%s+(.+)%s+send%s+to%s+any%s+other%s+track%s*$")
+  if send_presence_target then
+    local source_track, source_index, source_name, target_error =
+      CTX.local_any_track_target_in_text(facts, send_presence_target, "Sends")
+    if target_error then return target_error end
+    if source_track then
+      return CTX.track_send_presence_answer(
+        proj, source_track, source_index, source_name)
+    end
+  end
   if route_yesno_read then
     local source_fragment, dest_fragment =
       lt:match("^%s*does%s+(.+)%s+send%s+to%s+(.+)%??%s*$")
@@ -10666,6 +10829,13 @@ function CTX.local_read_answer(user_text, proj)
         and not prop_opts.source_track then
       return nil
     end
+    local property_kind = CTX.local_track_property_kind(lt)
+    if property_kind
+        and prop_opts.source_track
+        and not wants_track_property_list then
+      return CTX.track_property_answer(prop_opts.source_track,
+        prop_opts.source_index, prop_opts.source_name, property_kind)
+    end
     return CTX.track_properties(proj, prop_opts)
   end
   if lt:find("tracks have no fx", 1, true)
@@ -10682,6 +10852,28 @@ function CTX.local_read_answer(user_text, proj)
     return CTX.tracks_without_fx(proj, {
       selected_only = selected_track_phrase,
     })
+  end
+  local fx_presence_text = lt:gsub("[%.%?%!]+$", "")
+  local generic_fx_presence_target =
+       fx_presence_text:match("^%s*are%s+there%s+any%s+fx%s+on%s+(.+)$")
+    or fx_presence_text:match("^%s*is%s+there%s+any%s+fx%s+on%s+(.+)$")
+    or fx_presence_text:match("^%s*are%s+there%s+any%s+plugins%s+on%s+(.+)$")
+    or fx_presence_text:match("^%s*are%s+there%s+any%s+effects%s+on%s+(.+)$")
+    or fx_presence_text:match("^%s*does%s+(.+)%s+have%s+any%s+fx%s*$")
+    or fx_presence_text:match("^%s*does%s+(.+)%s+have%s+fx%s*$")
+    or fx_presence_text:match("^%s*does%s+(.+)%s+have%s+any%s+plugins%s*$")
+    or fx_presence_text:match("^%s*does%s+(.+)%s+have%s+plugins%s*$")
+    or fx_presence_text:match("^%s*does%s+(.+)%s+have%s+any%s+effects%s*$")
+    or fx_presence_text:match("^%s*does%s+(.+)%s+have%s+effects%s*$")
+  if generic_fx_presence_target then
+    local source_track, source_index, source_name, target_error =
+      CTX.local_any_track_target_in_text(
+        facts, generic_fx_presence_target, "FX presence")
+    if target_error then return target_error end
+    if source_track then
+      return CTX.track_fx_presence_answer(
+        proj, source_track, source_index, source_name)
+    end
   end
   local fx_presence_track, fx_presence_query = CTX.local_fx_presence_query(lt)
   if fx_presence_track then
@@ -11031,6 +11223,35 @@ function CTX.sends(proj, opts)
     lines[#lines + 1] = str_format("(+%d more)", total - CTX.MAX_SEND_REPORT)
   end
   return tbl_concat(lines, "\n")
+end
+
+function CTX.track_send_presence_answer(proj, source_track, source_index, source_name)
+  if not source_track then return nil end
+  local label = CTX.local_track_label(source_index, source_name)
+  if not reaper.GetTrackNumSends or not reaper.GetTrackSendInfo_Value then
+    return "Sends: unavailable"
+  end
+  local send_count = reaper.GetTrackNumSends(source_track, 0) or 0
+  if send_count == 0 then return label .. " has no sends to other tracks." end
+  local dests = {}
+  for si = 0, send_count - 1 do
+    local dest = reaper.GetTrackSendInfo_Value(source_track, 0, si, "P_DESTTRACK")
+    if dest then
+      local _, nm = R_GetTrackName(dest)
+      dests[#dests + 1] = CTX.local_track_label(
+        math_floor(R_GetMediaTrackInfo_Value(dest, "IP_TRACKNUMBER") or 0),
+        nm)
+    end
+    if #dests >= 3 then break end
+  end
+  if #dests == 0 then
+    return str_format("%s has %d send%s to other tracks.", label, send_count,
+      send_count == 1 and "" or "s")
+  end
+  local suffix = send_count > #dests and str_format(", +%d more",
+    send_count - #dests) or ""
+  return str_format("%s has %d send%s to %s%s.", label, send_count,
+    send_count == 1 and "" or "s", tbl_concat(dests, ", "), suffix)
 end
 
 function CTX.tracks_without_sends(proj, opts)
@@ -17816,13 +18037,26 @@ end
 -- Starting a fresh cold test: toggle off, then toggle on again -- that
 -- mints a new stamp.
 function Net.system_prompt_text()
+  local text = SYSTEM_PROMPT
+  local lang = CFG.REPLY_LANGUAGE_CODES[prefs.reply_language_idx or 1]
+  if lang and lang ~= "English" then
+    text = text .. "\n\nVISIBLE REPLY LANGUAGE:\n"
+      .. "- When visible natural-language prose is allowed, write it in "
+      .. lang .. ".\n"
+      .. "- Do not translate code, code fence labels, REAPER API names, "
+      .. "plugin names/identifiers, JSON, XML-like tags such as "
+      .. "<context_needed>, paths, filenames, model/provider names, "
+      .. "diagnostic labels, or quoted project/user text.\n"
+      .. "- If a contract requires raw code, JSON, or a bare "
+      .. "<context_needed> tag only, obey that contract exactly."
+  end
   if prefs.test_force_cold_cache and S.cold_cache_stamp then
-    return SYSTEM_PROMPT
+    return text
       .. "\n\n<!-- test_force_cold_cache: "
       .. S.cold_cache_stamp
       .. " -->"
   end
-  return SYSTEM_PROMPT
+  return text
 end
 
 -- =============================================================================
@@ -27849,14 +28083,63 @@ function Code.find_track_creation_index_misuse(lua_code, user_text, snapshot)
   end
   if not track_count then track_count = 0 end
 
+  local table_lengths = {}
+  for var, body in lua_code:gmatch(
+      "local%s+([%a_][%w_]*)%s*=%s*{%s*(.-)%s*}") do
+    local count = 0
+    for _ in body:gmatch("[\"'][^\"']+[\"']") do
+      count = count + 1
+    end
+    if count > 0 then table_lengths[var] = count end
+  end
+
   local violations = {}
   local line_no = 0
+  local active_loop = nil
+  local active_ensure_count = nil
+  local ensure_counted = false
   for line in lua_code:gmatch("[^\r\n]+") do
     line_no = line_no + 1
+    local ensure_count = line:match(
+      "^%s*while%s+reaper%.CountTracks%s*%(%s*0%s*%)%s*<%s*(%d+)%s*do%s*$")
+    if ensure_count then
+      active_ensure_count = tonumber(ensure_count)
+      ensure_counted = false
+    end
+    local loop_var, loop_first, loop_last = line:match(
+      "^%s*for%s+([%a_][%w_]*)%s*=%s*(%d+)%s*,%s*(%d+)%s*do%s*$")
+    if not loop_var then
+      local len_var
+      loop_var, loop_first, len_var = line:match(
+        "^%s*for%s+([%a_][%w_]*)%s*=%s*(%d+)%s*,%s*#([%a_][%w_]*)%s*do%s*$")
+      loop_last = len_var and table_lengths[len_var] or nil
+    end
+    if loop_var then
+      active_loop = {
+        var = loop_var,
+        first = tonumber(loop_first),
+        last = tonumber(loop_last),
+        counted_insert = false,
+      }
+    end
     local insert_idx =
       tonumber(line:match("reaper%.InsertTrackAtIndex%s*%(%s*(%d+)%s*,"))
     if insert_idx then
       track_count = track_count + 1
+    elseif active_loop and not active_loop.counted_insert
+        and active_loop.first and active_loop.last
+        and (line:find("reaper%.InsertTrackAtIndex%s*%(%s*"
+          .. active_loop.var .. "%s*,")
+          or line:find("reaper%.InsertTrackAtIndex%s*%(%s*"
+            .. active_loop.var .. "%s*[%+%-]%s*%d+%s*,")) then
+      track_count = track_count + math.abs(active_loop.last - active_loop.first) + 1
+      active_loop.counted_insert = true
+    elseif active_ensure_count and not ensure_counted
+        and line:find("reaper%.InsertTrackAtIndex%s*%(%s*reaper%.CountTracks%s*%(%s*0%s*%)%s*,") then
+      if active_ensure_count > track_count then
+        track_count = active_ensure_count
+      end
+      ensure_counted = true
     end
     for idx_text in line:gmatch("reaper%.GetTrack%s*%(%s*0%s*,%s*(%d+)%s*%)") do
       local api_idx = tonumber(idx_text)
@@ -27869,6 +28152,13 @@ function Code.find_track_creation_index_misuse(lua_code, user_text, snapshot)
           source = line:match("^%s*(.-)%s*$"),
         }
       end
+    end
+    if active_loop and line:match("^%s*end%s*$") then
+      active_loop = nil
+    end
+    if active_ensure_count and line:match("^%s*end%s*$") then
+      active_ensure_count = nil
+      ensure_counted = false
     end
   end
   if #violations == 0 then return nil end
@@ -27910,6 +28200,55 @@ function Code.find_folder_child_boundary_misuse(lua_code, user_text)
     local normalized_name = norm(name)
     ref_to_name[ref] = normalized_name
     name_to_ref[normalized_name] = ref
+  end
+  local names_var = lua_code:match("local%s+([%a_][%w_]*)%s*=%s*{%s*[\"']")
+  if names_var then
+    local names_body = lua_code:match(
+      "local%s+" .. names_var .. "%s*=%s*{%s*(.-)%s*}")
+    local indexed_names = {}
+    if names_body then
+      for name in names_body:gmatch("[\"']([^\"']+)[\"']") do
+        indexed_names[#indexed_names + 1] = norm(name)
+      end
+    end
+    if #indexed_names > 0 then
+      local active_loop = nil
+      for line in lua_code:gmatch("[^\r\n]+") do
+        local loop_var, first, last = line:match(
+          "^%s*for%s+([%a_][%w_]*)%s*=%s*(%d+)%s*,%s*(%d+)%s*do%s*$")
+        if loop_var then
+          active_loop = {
+            var = loop_var,
+            first = tonumber(first),
+            last = tonumber(last),
+          }
+        end
+        if active_loop and active_loop.first and active_loop.last then
+          local track_table, track_idx_var, name_idx_var = line:match(
+            "reaper%.GetSetMediaTrackInfo_String%s*%(%s*([%a_][%w_]*)%[%s*([%a_][%w_]*)%s*%]%s*,%s*[\"']P_NAME[\"']%s*,%s*"
+              .. names_var .. "%[%s*([%a_][%w_]*)%s*%+%s*1%s*%]")
+          if track_table
+              and track_idx_var == active_loop.var
+              and name_idx_var == active_loop.var then
+            local step = active_loop.first <= active_loop.last and 1 or -1
+            local i = active_loop.first
+            while true do
+              local name = indexed_names[i - active_loop.first + 1]
+              if name then
+                local ref = track_table .. "[" .. tostring(i) .. "]"
+                ref_to_name[ref] = name
+                name_to_ref[name] = ref
+              end
+              if i == active_loop.last then break end
+              i = i + step
+            end
+          end
+        end
+        if active_loop and line:match("^%s*end%s*$") then
+          active_loop = nil
+        end
+      end
+    end
   end
   if not next(ref_to_name) then return nil end
 
@@ -28422,49 +28761,68 @@ end
 -- on the AddByName succeeding; if it doesn't, that's a broken chain the
 -- user should be told about.
 --
--- Detection: for each `local NAME = reaper.(Track|Take)FX_AddByName(...)`,
--- check that NAME appears in a failure-direction comparison somewhere in
--- the script. Acceptable patterns: `NAME < 0`, `NAME == -1`, `NAME <= -1`.
+-- Detection: for each `NAME = reaper.(Track|Take)FX_AddByName(...)`, check
+-- that NAME appears in a failure-direction comparison somewhere in the
+-- script. Acceptable patterns: `NAME < 0`, `NAME == -1`, `NAME <= -1`.
 -- If only the success-direction (`NAME >= 0`, `NAME > -1`) appears, that's
--- the silent-skip pattern -- still flagged. GetByName is intentionally
--- NOT covered: returning -1 from GetByName is a legitimate "not present"
--- signal in upsert patterns and forcing an early-error would break them.
+-- the silent-skip pattern -- still flagged. Bare unassigned AddByName calls
+-- are also flagged because the script cannot observe or report load failure.
+-- GetByName is intentionally NOT covered: returning -1 from GetByName is a
+-- legitimate "not present" signal in upsert patterns and forcing an
+-- early-error would break them.
 --
 -- Returns a sorted list of `{name, line}` entries (line is approximate),
--- or nil if every AddByName-bound local is properly checked.
+-- or nil if every AddByName result is properly checked.
 function Code.find_unchecked_addbyname_results(lua_code)
   if not lua_code or lua_code == "" then return nil end
   local stripped = lua_code:gsub("%-%-[^\n]*", "")
   local violations, seen = {}, {}
-  local function _scan(pattern)
+  local function _line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+  local function _assignment_name(call_start)
+    local prefix = stripped:sub(math.max(1, call_start - 160), call_start - 1)
+    return prefix:match("([%w_]+)%s*=%s*$")
+  end
+  local function _scan(fn)
     local pos = 1
     while true do
-      local s, e, name = stripped:find(pattern, pos)
+      local s, e = stripped:find("reaper%." .. fn .. "%s*%(", pos)
       if not s then break end
-      if not seen[name] then
-        seen[name] = true
-        -- Append a sentinel newline so end-of-string patterns behave
-        -- the same as mid-string ones (the trailing [^%w_%.] needs a
-        -- non-identifier byte to consume).
-        local hay = stripped .. "\n"
-        local nid = "[^%w_]"
-        local end_  = "[^%w_%.]"  -- excludes "." so "< 0.5" doesn't match "< 0"
-        local checked =
-             hay:find(nid .. name .. "%s*<%s*0"   .. end_)   -- NAME < 0
-          or hay:find(nid .. name .. "%s*==%s*%-%s*1" .. end_)  -- NAME == -1
-          or hay:find(nid .. name .. "%s*<=%s*%-%s*1" .. end_)  -- NAME <= -1
-          or hay:find(nid .. name .. "%s*<%s*%-%s*1"  .. end_)  -- NAME < -1
-        if not checked then
-          local line = 1
-          for _ in stripped:sub(1, s):gmatch("\n") do line = line + 1 end
-          violations[#violations+1] = { name = name, line = line }
+      local name = _assignment_name(s)
+      local seen_key = name or ("@unassigned:" .. tostring(s))
+      if not seen[seen_key] then
+        seen[seen_key] = true
+        if not name then
+          violations[#violations+1] = {
+            name = "(unassigned result)",
+            line = _line_for_pos(s),
+            unassigned = true,
+          }
+        else
+          -- Append a sentinel newline so end-of-string patterns behave
+          -- the same as mid-string ones (the trailing [^%w_%.] needs a
+          -- non-identifier byte to consume).
+          local hay = stripped .. "\n"
+          local nid = "[^%w_]"
+          local end_  = "[^%w_%.]"  -- excludes "." so "< 0.5" doesn't match "< 0"
+          local checked =
+               hay:find(nid .. name .. "%s*<%s*0"   .. end_)   -- NAME < 0
+            or hay:find(nid .. name .. "%s*==%s*%-%s*1" .. end_)  -- NAME == -1
+            or hay:find(nid .. name .. "%s*<=%s*%-%s*1" .. end_)  -- NAME <= -1
+            or hay:find(nid .. name .. "%s*<%s*%-%s*1"  .. end_)  -- NAME < -1
+          if not checked then
+            violations[#violations+1] = { name = name, line = _line_for_pos(s) }
+          end
         end
       end
       pos = e + 1
     end
   end
-  _scan("local%s+([%w_]+)%s*=%s*reaper%.TrackFX_AddByName%s*%(")
-  _scan("local%s+([%w_]+)%s*=%s*reaper%.TakeFX_AddByName%s*%(")
+  _scan("TrackFX_AddByName")
+  _scan("TakeFX_AddByName")
   if #violations == 0 then return nil end
   table.sort(violations, function(a, b)
     if a.line ~= b.line then return a.line < b.line end
@@ -36569,9 +36927,14 @@ function Net.try_finish_curl()
         Probe.add_validator_retry(S.probe_turn, "fxcheck")
         local lines = {}
         for _, e in ipairs(unchecked) do
-          lines[#lines+1] = "  - " .. e.name
-            .. " (assigned from TrackFX_AddByName / TakeFX_AddByName near "
-            .. "line " .. e.line .. ")"
+          if e.unassigned then
+            lines[#lines+1] = "  - unassigned TrackFX_AddByName / "
+              .. "TakeFX_AddByName result near line " .. e.line
+          else
+            lines[#lines+1] = "  - " .. e.name
+              .. " (assigned from TrackFX_AddByName / TakeFX_AddByName near "
+              .. "line " .. e.line .. ")"
+          end
         end
         Log.line("FX-CHECK-VALIDATOR",
           "unchecked AddByName result(s) (" .. #unchecked .. "): "
@@ -36583,9 +36946,9 @@ function Net.try_finish_curl()
           .. "; retrying with hint (user-invisible)")
         local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
           .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply called "
-          .. "TrackFX_AddByName / TakeFX_AddByName and assigned the result "
-          .. "to a local, but the result is never tested in a "
-          .. "failure-direction comparison (`fx < 0`, `fx == -1`, `fx <= -1`). "
+          .. "TrackFX_AddByName / TakeFX_AddByName without preserving and "
+          .. "testing every result in a failure-direction comparison "
+          .. "(`fx < 0`, `fx == -1`, `fx <= -1`). "
           .. "If the plugin fails to load, AddByName returns -1 and "
           .. "downstream code that assumes the fx is valid will silently "
           .. "produce the wrong result -- the script will report 'OK' "

@@ -1,5 +1,5 @@
 {
-  "version": "1.2.0",
+  "version": "1.2.1",
   "removed_files": [
     "Resources/MIDI_Ref.md",
     "Resources/Theme_Ref.md",
@@ -8,7 +8,7 @@
   "files": [
     {
       "name": "CHANGELOG.md",
-      "sha256": "f90d4454e027f3032debd3aa6e186a96a38f7f7443e4a03d1b996397f7ff2f6f"
+      "sha256": "afdf6a1a12198506c4086a33094b76391a311d837e35f2126a21159c515d73d6"
     },
     {
       "name": "LICENSE.txt",
@@ -20,7 +20,7 @@
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "18146d919369ebbc81e145388cc453d24d7ce25a6063a200dbff63dfa78b508c"
+      "sha256": "42e8b1919e8ba12afb9063b438ee344c4dd80f6640f703d3d4a14a3820d8323c"
     },
     {
       "name": "Resources/API_Ref.md",
@@ -76,7 +76,7 @@
     },
     {
       "name": "Resources/UI.lua",
-      "sha256": "283d2c8ed003623bfafc1a4851e1d4526c3d406a177344299deda3a67b2fe6f4"
+      "sha256": "5b0a40dd911422ce3e6d57086e4032797b226193be908416a444f25f6e5cdcde"
     },
     {
       "name": "Resources/fonts/Inter_18pt-Bold.ttf",

@@ -1,5 +1,15 @@
 # ReaAssist - Changelog
 
+## v1.2.1 - 2026-05-13
+
+- **Chat reply language is now configurable in beta.** Settings has a Chat Language selector for English, Spanish, French, German, Italian, and Portuguese; it changes assistant prose only while keeping code, diagnostics, provider/model names, REAPER API names, paths, filenames, and raw tags unchanged.
+
+- **More track-state questions answer instantly.** ReaAssist can answer common local questions about track volume, pan, mute/solo/record-arm, master/parent output, sends, and generic FX presence without spending a model call.
+
+- **Generated track scripts are guarded more tightly.** The validator better follows track counts through simple creation loops and table-driven naming, catching off-by-one track and folder-child mistakes before code can run.
+
+- **FX loading failures are caught earlier.** The AddByName validator now flags unassigned `TrackFX_AddByName` / `TakeFX_AddByName` calls as well as unchecked assigned results, so scripts retry instead of silently treating a missing plugin as success.
+
 ## v1.2.0 - 2026-05-13
 
 - **Local structured edits are now built in.** ReaAssist can handle common track edits locally and offline, including creating tracks, renaming tracks, building folders, setting sends, changing mute/solo states, and applying exact track-order edits with stronger validation before anything runs.

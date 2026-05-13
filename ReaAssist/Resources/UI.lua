@@ -1069,6 +1069,7 @@ function UI.hero_band_v5(phase)
       api_keys.saved_update_check         = prefs.update_check
       api_keys.saved_auto_backup          = prefs.auto_backup
       api_keys.saved_chat_font_idx        = prefs.chat_font_idx
+      api_keys.saved_reply_language_idx   = prefs.reply_language_idx
       api_keys.saved_include_snapshot     = prefs.include_snapshot
       api_keys.saved_include_api_ref      = prefs.include_api_ref
       api_keys.saved_diag_auto_tier       = prefs.diag_auto_tier
@@ -2543,6 +2544,7 @@ function UI.footer_rail_v5()
         api_keys.saved_update_check         = prefs.update_check
         api_keys.saved_auto_backup          = prefs.auto_backup
         api_keys.saved_chat_font_idx        = prefs.chat_font_idx
+        api_keys.saved_reply_language_idx   = prefs.reply_language_idx
         api_keys.saved_include_snapshot     = prefs.include_snapshot
         api_keys.saved_include_api_ref      = prefs.include_api_ref
         api_keys.saved_diag_auto_tier       = prefs.diag_auto_tier
@@ -3393,8 +3395,9 @@ end
 -- card-styled popup (via UI.push_card_popup_style) listing items.
 -- `items_str` is null-separated ("One\0Two\0Three\0"); `cur_idx` is
 -- 0-based (matches ImGui_Combo return for easy drop-in). Returns
--- (changed, new_idx).
-function UI.v5_select_row(id, label, items_str, cur_idx, tooltip, col_w)
+-- (changed, new_idx). Optional `badge_text` renders a small status pill
+-- beside the row label.
+function UI.v5_select_row(id, label, items_str, cur_idx, tooltip, col_w, badge_text)
   local dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
   local sx, sy  = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
   local cur_x   = GetCursorPosX(RA.ctx)
@@ -3410,6 +3413,9 @@ function UI.v5_select_row(id, label, items_str, cur_idx, tooltip, col_w)
   local CHIP_PAD_X = RA.SC(9)
   local CHEV_GAP   = RA.SC(4)
   local ROUND_PILL = RA.SC(5)
+  local BADGE_SZ   = RA.SC(9)
+  local BADGE_H    = RA.SC(16)
+  local BADGE_PAD_X = RA.SC(5)
 
   -- Card bg + border (the outer row).
   ImGui.ImGui_DrawList_AddRectFilled(dl, sx, sy, sx + col_w, sy + ROW_H, TK.card, ROUND)
@@ -3417,11 +3423,34 @@ function UI.v5_select_row(id, label, items_str, cur_idx, tooltip, col_w)
 
   -- Label on the left, vertically centered on its cap line.
   PushFont(RA.ctx, FONT.inter_reg, LABEL_SZ)
+  local label_w = CalcTextSize(RA.ctx, label)
   local _, lh = CalcTextSize(RA.ctx, "M")
   PopFont(RA.ctx)
   local label_y = sy + math_floor((ROW_H - lh) * 0.5)
   ImGui.ImGui_DrawList_AddTextEx(dl, FONT.inter_reg, LABEL_SZ,
     sx + PAD_X, label_y, TK.text, label)
+  if badge_text and badge_text ~= "" then
+    local badge_label = tostring(badge_text):upper()
+    PushFont(RA.ctx, FONT.mono_med, BADGE_SZ)
+    local badge_text_w = CalcTextSize(RA.ctx, badge_label)
+    local _, badge_text_h = CalcTextSize(RA.ctx, "M")
+    PopFont(RA.ctx)
+    local badge_gap = RA.SC(7)
+    local badge_w = badge_text_w + BADGE_PAD_X * 2
+    local badge_x = sx + PAD_X + label_w + badge_gap
+    local badge_y = sy + math_floor((ROW_H - BADGE_H) * 0.5)
+    local badge_fill = UI.lerp_u32(TK.card, TK.accent_ui, 0.16)
+    local badge_border = UI.lerp_u32(TK.border, TK.accent_ui, 0.36)
+    ImGui.ImGui_DrawList_AddRectFilled(dl, badge_x, badge_y,
+      badge_x + badge_w, badge_y + BADGE_H, badge_fill, ROUND_PILL)
+    ImGui.ImGui_DrawList_AddRect(dl, badge_x, badge_y,
+      badge_x + badge_w, badge_y + BADGE_H, badge_border, ROUND_PILL, 0, 1)
+    ImGui.ImGui_DrawList_AddTextEx(dl, FONT.mono_med, BADGE_SZ,
+      badge_x + BADGE_PAD_X,
+      badge_y + math_floor((BADGE_H - badge_text_h) * 0.5),
+      TK.text_muted, badge_label)
+    label_w = label_w + badge_gap + badge_w
+  end
 
   -- Extract current value text for the chip label; uppercase to match
   -- the home-screen provider/model chips (CLAUDE / AUTO / ASK style).
@@ -3432,15 +3461,36 @@ function UI.v5_select_row(id, label, items_str, cur_idx, tooltip, col_w)
     idx = idx + 1
   end
   local chip_label = cur_value:upper()
+  local chip_draw_label = chip_label
 
   -- Measure the chip: mono_med label + Lucide chevron + inner padding.
   PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
-  local lw = CalcTextSize(RA.ctx, chip_label)
+  local lw = CalcTextSize(RA.ctx, chip_draw_label)
   PopFont(RA.ctx)
   PushFont(RA.ctx, FONT.lucide, CHEV_SIZE)
   local cw = CalcTextSize(RA.ctx, ICON.CHEVRON_DOWN)
   PopFont(RA.ctx)
+  local max_chip_w = col_w - PAD_X * 2 - label_w - RA.SC(8)
+  local min_chip_w = CHIP_PAD_X * 2 + cw + CHEV_GAP + RA.SC(18)
+  if max_chip_w < min_chip_w then max_chip_w = min_chip_w end
   local chip_w  = CHIP_PAD_X * 2 + lw + CHEV_GAP + cw
+  if chip_w > max_chip_w then
+    local max_text_w = max_chip_w - CHIP_PAD_X * 2 - CHEV_GAP - cw
+    local ell = "..."
+    chip_draw_label = chip_label
+    PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
+    while #chip_draw_label > 0
+        and CalcTextSize(RA.ctx, chip_draw_label .. ell) > max_text_w do
+      chip_draw_label = chip_draw_label:sub(1, #chip_draw_label - 1)
+    end
+    if chip_draw_label ~= chip_label then
+      chip_draw_label = (#chip_draw_label > 0) and (chip_draw_label .. ell)
+        or ell
+      lw = CalcTextSize(RA.ctx, chip_draw_label)
+      chip_w = CHIP_PAD_X * 2 + lw + CHEV_GAP + cw
+    end
+    PopFont(RA.ctx)
+  end
   local chip_sx = sx + col_w - PAD_X - chip_w
   local chip_sy = sy + math_floor((ROW_H - CHIP_H) * 0.5)
   local chip_x2 = chip_sx + chip_w
@@ -3482,7 +3532,7 @@ function UI.v5_select_row(id, label, items_str, cur_idx, tooltip, col_w)
   PopFont(RA.ctx)
   local t_y = chip_sy + math_floor((CHIP_H - mono_th) * 0.5)
   ImGui.ImGui_DrawList_AddTextEx(dl, FONT.mono_med, MONO_SIZE,
-    chip_sx + CHIP_PAD_X, t_y, TK.text, chip_label)
+    chip_sx + CHIP_PAD_X, t_y, TK.text, chip_draw_label)
   -- Lucide chevron, centered vertically in the chip.
   local ch_y = chip_sy + math_floor((CHIP_H - CHEV_SIZE) * 0.5)
   ImGui.ImGui_DrawList_AddTextEx(dl, FONT.lucide, CHEV_SIZE,
@@ -5968,6 +6018,7 @@ function Render._factory_reset_execute()
   prefs.ui_scale_idx          = 3   -- 100%
   prefs.theme                 = "auto"
   prefs.chat_font_idx         = 2   -- Medium
+  prefs.reply_language_idx    = 1   -- English
   prefs.help_font_scale       = 1.0
   apply_palette(PALETTES[resolve_theme("auto")])
   S._reset_window_size = true
@@ -7357,6 +7408,7 @@ local function _exit_settings_screen()
   api_keys.saved_update_check          = nil
   api_keys.saved_auto_backup           = nil
   api_keys.saved_chat_font_idx         = nil
+  api_keys.saved_reply_language_idx    = nil
   api_keys.saved_include_snapshot      = nil
   api_keys.saved_include_api_ref       = nil
   api_keys.saved_diag_auto_tier        = nil
@@ -8100,6 +8152,21 @@ function Render._shared_key_screen_impl()
   end
   Dummy(RA.ctx, 1, RA.SC(6))
 
+  -- Chat Language: full-width preference row because translated language
+  -- names need more room than a compact utility-button slot provides.
+  do
+    local lang_combo_str = table.concat(CFG.REPLY_LANGUAGE_LABELS, "\0") .. "\0"
+    local lang_changed, lang_new = UI.v5_select_row("##pref_reply_language",
+      "Chat Language", lang_combo_str, prefs.reply_language_idx - 1,
+      "Assistant chat replies only. App UI, code, diagnostics, plugin "
+        .. "names, and REAPER API names stay unchanged.",
+      inner_w, "Beta")
+    if lang_changed then
+      prefs.reply_language_idx = lang_new + 1
+    end
+  end
+  Dummy(RA.ctx, 1, RA.SC(6))
+
   -- 3-column select grid: Theme / UI Scale / Chat Font (mockup order).
   -- Column widths split the content region evenly with SC(6) inter-col
   -- gap; cursor is manually advanced so the rows line up.
@@ -8150,22 +8217,18 @@ function Render._shared_key_screen_impl()
   end
   Dummy(RA.ctx, 1, RA.SC(6))
 
-  -- Preferred Plugins + Check for Updates row. Preferred Plugins
-  -- sized to content (left-aligned under Theme). Check for Updates
-  -- right-aligned so it sits under the Chat Font column of the grid
-  -- above. Both rendered at the same y-baseline so they read as one
-  -- paired row of Settings actions.
+  -- Preferred Plugins + Check for Updates row. Equal widths preserve the
+  -- tidy grid cadence after the full-width preference rows above.
   do
+    local GRID_GAP = RA.SC(6)
+    local col_w    = math_floor((inner_w - GRID_GAP * 2) / 3)
     local row_x = GetCursorPosX(RA.ctx)
     local row_y = ImGui.ImGui_GetCursorPosY(RA.ctx)
 
-    -- Preferred Plugins nav: sized to content (not the 1/3-column grid
-    -- width the Theme/UI Scale/Chat Font row uses) so it reads as a
-    -- compact nav button consistent with "Local & Custom Providers"
-    -- and "FX Param Cache". Same width formula:
-    --   label_w + gap(SC(8)) + chevron(SC(4)) + 2*pad(SC(24))
+    -- Preferred Plugins nav: same width as the adjacent Chat Language
+    -- and Check for Updates controls so the row reads as a tidy grid.
     local pp_label  = "Preferred Plugins"
-    local pp_btn_w  = CalcTextSize(RA.ctx, pp_label) + RA.SC(36)
+    local pp_btn_w  = col_w
     local pp_tip    = "Set default plugins for each type (EQ, compressor, reverb, etc.)"
     if S.status ~= "waiting" then
       if UI.v5_nav_row("##pref_pref_plugins", pp_label, pp_tip, pp_btn_w) then
@@ -8179,11 +8242,9 @@ function Render._shared_key_screen_impl()
     end
 
     -- Check for Updates action: icon + label card pill, right-aligned.
-    -- Width formula matches pp_btn_w (label + SC(36)) with extra space
-    -- for the Lucide icon and icon-label gap.
     local cu_label = "Check for Updates"
     local cu_tip   = "Check now for a newer ReaAssist release or missing files"
-    local cu_btn_w = CalcTextSize(RA.ctx, cu_label) + RA.SC(56)
+    local cu_btn_w = col_w
     ImGui.ImGui_SetCursorPos(RA.ctx, row_x + inner_w - cu_btn_w, row_y)
     local busy = Updater.is_busy()
     if busy or CFG.UPDATE_BASE_URL == "" then
@@ -8538,6 +8599,8 @@ function Render._shared_key_screen_impl()
           prefs.auto_backup and "1" or "0", true)
         reaper.SetExtState(CFG.EXT_NS, "chat_font_idx",
           tostring(prefs.chat_font_idx), true)
+        reaper.SetExtState(CFG.EXT_NS, "reply_language_idx",
+          tostring(prefs.reply_language_idx), true)
         reaper.SetExtState(CFG.EXT_NS, "include_snapshot",
           prefs.include_snapshot and "1" or "0", true)
         reaper.SetExtState(CFG.EXT_NS, "include_api_ref",
@@ -8570,6 +8633,9 @@ function Render._shared_key_screen_impl()
         end
         if api_keys.saved_chat_font_idx then
           prefs.chat_font_idx = api_keys.saved_chat_font_idx
+        end
+        if api_keys.saved_reply_language_idx then
+          prefs.reply_language_idx = api_keys.saved_reply_language_idx
         end
         if api_keys.saved_include_snapshot ~= nil then
           prefs.include_snapshot = api_keys.saved_include_snapshot
@@ -8639,6 +8705,8 @@ function Render._shared_key_screen_impl()
     and prefs.auto_backup ~= api_keys.saved_auto_backup
   local font_changed    = api_keys.saved_chat_font_idx
     and prefs.chat_font_idx ~= api_keys.saved_chat_font_idx
+  local lang_changed    = api_keys.saved_reply_language_idx
+    and prefs.reply_language_idx ~= api_keys.saved_reply_language_idx
   -- Merged from the old Advanced page:
   local snap_changed    = api_keys.saved_include_snapshot ~= nil
     and prefs.include_snapshot ~= api_keys.saved_include_snapshot
@@ -8650,7 +8718,7 @@ function Render._shared_key_screen_impl()
     and prefs.cloud_request_timeout ~= api_keys.saved_cloud_request_timeout
 
   local any_pref_changed = scale_changed or theme_changed
-    or upd_changed or bak_changed or font_changed
+    or upd_changed or bak_changed or font_changed or lang_changed
     or snap_changed or ref_changed or diag_changed or to_changed
 
   -- has_any_key flips true if any provider is usable: a built-in with
@@ -8948,6 +9016,11 @@ function Render._shared_key_screen_impl()
       reaper.SetExtState(CFG.EXT_NS, "chat_font_idx",
         tostring(prefs.chat_font_idx), true)
       api_keys.saved_chat_font_idx = nil
+    end
+    if api_keys.saved_reply_language_idx then
+      reaper.SetExtState(CFG.EXT_NS, "reply_language_idx",
+        tostring(prefs.reply_language_idx), true)
+      api_keys.saved_reply_language_idx = nil
     end
     if api_keys.saved_include_snapshot ~= nil then
       reaper.SetExtState(CFG.EXT_NS, "include_snapshot",
@@ -13422,6 +13495,7 @@ function Render.main_window()
       api_keys.saved_update_check         = nil
       api_keys.saved_auto_backup          = nil
       api_keys.saved_chat_font_idx        = nil
+      api_keys.saved_reply_language_idx   = nil
       api_keys.saved_include_snapshot     = nil
       api_keys.saved_include_api_ref      = nil
       api_keys.saved_diag_auto_tier       = nil

@@ -369,8 +369,8 @@ Param 1 (Ratio) normalized 0..1. Use TrackFX_SetParamNormalized.
 Both normalized 0..1. Use TrackFX_SetParamNormalized.
 
 ```
-  Attack:   0.0=0ms  0.005=5ms  0.01=10ms  0.05=50ms  0.1=100ms  1.0=1000ms
-  Release:  0.0=0ms  0.02=20ms  0.05=50ms  0.10=100ms 0.3=300ms  1.0=1000ms
+  Attack:   0.0=0ms  0.01=5ms   0.02=10ms  0.10=50ms  0.24=120ms  1.0=500ms
+  Release:  0.0=0ms  0.02=100ms 0.024=120ms 0.05=250ms 0.10=500ms  1.0=5000ms
 ```
 
 ### WET / DRY SCALE
@@ -390,8 +390,8 @@ Default: Dry=0 (off), Wet=1.0 (full wet). Leave at defaults for normal use.
 ```lua
   reaper.TrackFX_SetParam(tr, fx, 0, 0.5)               -- Threshold: -6dBFS
   reaper.TrackFX_SetParamNormalized(tr, fx, 1, 0.03)    -- Ratio: ~4:1
-  reaper.TrackFX_SetParamNormalized(tr, fx, 2, 0.01)    -- Attack: ~10ms
-  reaper.TrackFX_SetParamNormalized(tr, fx, 3, 0.10)    -- Release: ~100ms
+  reaper.TrackFX_SetParamNormalized(tr, fx, 2, 0.01)    -- Attack: ~5ms
+  reaper.TrackFX_SetParamNormalized(tr, fx, 3, 0.02)    -- Release: ~100ms
   reaper.TrackFX_SetParamNormalized(tr, fx, 14, 0.3)    -- Knee: soft
   reaper.TrackFX_SetParamNormalized(tr, fx, 15, 1.0)    -- Auto make-up gain on
 ```
@@ -401,8 +401,8 @@ Default: Dry=0 (off), Wet=1.0 (full wet). Leave at defaults for normal use.
 ```lua
   reaper.TrackFX_SetParam(tr, fx, 0, 0.35)              -- Threshold: ~-9dBFS
   reaper.TrackFX_SetParamNormalized(tr, fx, 1, 0.10)    -- Ratio: ~8:1
-  reaper.TrackFX_SetParamNormalized(tr, fx, 2, 0.003)   -- Attack: ~3ms
-  reaper.TrackFX_SetParamNormalized(tr, fx, 3, 0.05)    -- Release: ~50ms
+  reaper.TrackFX_SetParamNormalized(tr, fx, 2, 0.006)   -- Attack: ~3ms
+  reaper.TrackFX_SetParamNormalized(tr, fx, 3, 0.01)    -- Release: ~50ms
   reaper.TrackFX_SetParamNormalized(tr, fx, 14, 0.0)    -- Knee: hard
   reaper.TrackFX_SetParamNormalized(tr, fx, 15, 1.0)    -- Auto make-up gain on
 ```
@@ -413,7 +413,7 @@ Default: Dry=0 (off), Wet=1.0 (full wet). Leave at defaults for normal use.
   reaper.TrackFX_SetParam(tr, fx, 0, 0.9)               -- Threshold: just under 0dBFS
   reaper.TrackFX_SetParamNormalized(tr, fx, 1, 1.0)     -- Ratio: inf:1
   reaper.TrackFX_SetParamNormalized(tr, fx, 2, 0.0)     -- Attack: 0ms
-  reaper.TrackFX_SetParamNormalized(tr, fx, 3, 0.02)    -- Release: ~20ms
+  reaper.TrackFX_SetParamNormalized(tr, fx, 3, 0.004)   -- Release: ~20ms
 ```
 
 ### FULL PATTERN (add ReaComp, gentle compression)
@@ -427,8 +427,8 @@ reaper.defer(function()
   if fx == -1 then return end
   reaper.TrackFX_SetParam(tr, fx, 0, 0.5)               -- Threshold: -6dBFS
   reaper.TrackFX_SetParamNormalized(tr, fx, 1, 0.03)    -- Ratio: ~4:1
-  reaper.TrackFX_SetParamNormalized(tr, fx, 2, 0.01)    -- Attack: ~10ms
-  reaper.TrackFX_SetParamNormalized(tr, fx, 3, 0.10)    -- Release: ~100ms
+  reaper.TrackFX_SetParamNormalized(tr, fx, 2, 0.01)    -- Attack: ~5ms
+  reaper.TrackFX_SetParamNormalized(tr, fx, 3, 0.02)    -- Release: ~100ms
   reaper.TrackFX_SetParamNormalized(tr, fx, 14, 0.3)    -- Knee: soft
   reaper.TrackFX_SetParamNormalized(tr, fx, 15, 1.0)    -- Auto make-up gain on
   reaper.PreventUIRefresh(-1)
@@ -746,14 +746,24 @@ Default is 0.0 (-inf dB), meaning the gate is fully open by default.
   1.0   = 0 dBFS
 ```
 
+### ATTACK / RELEASE / HOLD SCALE
+
+Use TrackFX_SetParamNormalized.
+
+```
+  Attack:  0.0=0ms  0.01=5ms   0.02=10ms  0.10=50ms  0.24=120ms  1.0=500ms
+  Release: 0.0=0ms  0.02=100ms 0.024=120ms 0.05=250ms 0.10=500ms  1.0=5000ms
+  Hold:    0.0=0ms  0.005=5ms  0.01=10ms  0.05=50ms  0.10=100ms  1.0=1000ms
+```
+
 ### COMMON RECIPES
 
 **"Standard noise gate":**
 
 ```lua
   reaper.TrackFX_SetParam(tr, fx, 0, 0.125)             -- Threshold: -18dBFS
-  reaper.TrackFX_SetParamNormalized(tr, fx, 1, 0.001)   -- Attack: ~1ms
-  reaper.TrackFX_SetParamNormalized(tr, fx, 3, 0.05)    -- Release: ~50ms
+  reaper.TrackFX_SetParamNormalized(tr, fx, 1, 0.002)   -- Attack: ~1ms
+  reaper.TrackFX_SetParamNormalized(tr, fx, 2, 0.01)    -- Release: ~50ms
   reaper.TrackFX_SetParamNormalized(tr, fx, 4, 0.01)    -- Hold: ~10ms
 ```
 
@@ -762,7 +772,7 @@ Default is 0.0 (-inf dB), meaning the gate is fully open by default.
 ```lua
   reaper.TrackFX_SetParam(tr, fx, 0, 0.25)              -- Threshold: -12dBFS
   reaper.TrackFX_SetParamNormalized(tr, fx, 1, 0.0005)  -- Attack: <1ms
-  reaper.TrackFX_SetParamNormalized(tr, fx, 3, 0.02)    -- Release: ~20ms
+  reaper.TrackFX_SetParamNormalized(tr, fx, 2, 0.004)   -- Release: ~20ms
   reaper.TrackFX_SetParamNormalized(tr, fx, 4, 0.005)   -- Hold: ~5ms
 ```
 
@@ -1570,8 +1580,10 @@ FabFilter's Pro series is a high-quality commercial plugin suite. ReaAssist
 auto-prefers installed FabFilter plugins over stock equivalents (see
 FALLBACK CHAINS). Param layouts are identical across VST3 / VST2 / AU / CLAP
 formats -- the sections below apply regardless of the format the user has
-installed. AddByName strings use the bare plugin name (e.g. "Pro-DS") so
-REAPER picks whichever format is available.
+installed. When preferred_plugins or a preempt header provides an exact
+format-prefixed AddByName identifier (for example "VST3: Pro-G"), use that
+exact identifier. Do not strip the prefix and do not add a vendor suffix.
+Bare names are reference labels only and may fail on some installs.
 
 All FabFilter params use TrackFX_SetParamNormalized (values 0..1). Raw ranges
 are not documented here since the normalized slider values are what scripts
@@ -1586,7 +1598,7 @@ FabFilter Pro-DS is a single-band de-esser with automatic range detection
 and sidechain HP/LP filtering. Works well for dialogue, vocals, and general
 sibilance reduction without user threshold hunting.
 
-AddByName string: "Pro-DS"
+AddByName identifier: use the exact preferred identifier, normally "VST3: Pro-DS"
 Total params (default instance): 23 useful (plus ~130 MIDI-CC routing params
 REAPER exposes but scripts should ignore)
 
@@ -1774,7 +1786,7 @@ FabFilter Pro-G is a gate / expander with upward and downward processing.
 Supports classic, clean, and vocal styles; sidechain HP/LP filtering;
 lookahead.
 
-AddByName string: "Pro-G"
+AddByName identifier: use the exact preferred identifier, normally "VST3: Pro-G"
 Total params (default instance): 38 useful (MIDI CC routing filtered out)
 
 ### PARAM INDEX TABLE (verified, main controls)
@@ -1801,9 +1813,27 @@ idx  Name                      Default val   Type        Notes
 27   Channel Mode              0             enum        0=Left/Right, etc.
 ```
 
-Utility I/O params (15-16, 20-24, 28-31) are standard level/pan/wet-dry and
-usually left at defaults. Bypass params (32, 35, 172) are redundant -- use
-idx 32 if scripting bypass.
+Utility I/O params are standard level/pan/wet-dry controls and usually left
+at defaults unless the user asks for them directly. Bypass params (32, 35,
+172) are redundant -- use idx 32 if scripting bypass.
+
+```
+idx  Name                      Default val   Type        Notes
+---  ------------------------  -----------   ----------  ---------------------------
+20   Wet Level                 0.5           continuous  dB wet trim; 0.5 = 0 dB
+21   Wet Pan                   0.5           continuous  pan; center at 0.5
+22   Dry Level                 0.0           continuous  dB dry trim; 0.0 = -INF
+23   Dry Pan                   0.5           continuous  pan; center at 0.5
+28   Input Level               0.5           continuous  dB input trim; 0.5 = 0 dB
+29   Input Pan                 0.5           continuous  pan; center at 0.5
+30   Output Level              0.5           continuous  dB output trim; 0.5 = 0 dB
+31   Output Pan                0.5           continuous  pan; center at 0.5
+```
+
+For relative utility edits such as "bump Output Level by 1 dB", read the
+current display value from the live instance first, add the delta in dB, then
+write the computed target. Do not treat "by 1 dB" as an absolute +1 dB set
+unless the current display is already 0 dB.
 
 ### THRESHOLD SCALE (-30..0 dB linear, shared by idx 0 and 1)
 
@@ -1906,7 +1936,7 @@ FabFilter Pro-L 2 is a true peak limiter with 8 character styles, true-peak
 metering, dither / noise shaping, and loudness monitoring. Used as the final
 stage of mastering chains.
 
-AddByName string: "Pro-L 2"
+AddByName identifier: use the exact preferred identifier, normally "VST3: Pro-L 2"
 Total params (default instance): 35 useful
 
 ### PARAM INDEX TABLE (verified, main controls)
@@ -2034,7 +2064,7 @@ FabFilter Pro-C 3 is a transparent / character compressor with 14 styles,
 auto-threshold, auto-release, auto-gain, character saturation, internal
 sidechain EQ, and mid/side stereo link. The go-to compressor for most work.
 
-AddByName string: "Pro-C 3"
+AddByName identifier: use the exact preferred identifier, normally "VST3: Pro-C 3"
 Total params (default instance): 67 useful
 
 ### PARAM INDEX TABLE (verified, main controls)
@@ -2227,7 +2257,7 @@ each with its own crossovers, dynamics mode, threshold, ratio, and sidechain
 filtering. Primary tool for surgical multiband problems (resonances,
 de-honking, mud cleanup, band-specific de-essing).
 
-AddByName string: "Pro-MB"
+AddByName identifier: use the exact preferred identifier, normally "VST3: Pro-MB"
 Total params: 66 useful (this reference covers Bands 1-2 as representative;
 bands 3-6 follow the same per-band offset pattern and exist at higher indices
 but are typically set via UI, not script).
@@ -2394,7 +2424,7 @@ FabFilter Pro-R 2 is a natural-sounding reverb with macro-style controls
 post-EQ. Designed for quick tonal shaping without managing individual
 reflections.
 
-AddByName string: "Pro-R 2"
+AddByName identifier: use the exact preferred identifier, normally "VST3: Pro-R 2"
 Total params (default instance): 75 useful -- mostly macros + internal EQ
 
 ### PARAM INDEX TABLE (macro controls, idx 0-18)
@@ -2545,7 +2575,7 @@ FabFilter Saturn 2 is a multiband saturation/distortion processor with 21+
 character styles (tube, tape, amp, transformer, etc.), per-band tone shaping
 (Bass/Mid/Treble/Presence), modulation, feedback, and up to 6 user bands.
 
-AddByName string: "Saturn 2"
+AddByName identifier: use the exact preferred identifier, normally "VST3: Saturn 2"
 Total params: 146 useful -- this reference covers global + Bands 1-2 as
 representative; bands 3-6 follow the same 17-param stride.
 
@@ -2705,7 +2735,7 @@ modes, multi-tap support, per-feedback-path filters, and feedback effects
 (drive, lo-fi, diffuse, dynamics, pitch shift). Heavy plugin; typical script
 use only touches the main delay/feedback/mix controls.
 
-AddByName string: "Timeless 3"
+AddByName identifier: use the exact preferred identifier, normally "VST3: Timeless 3"
 Total params: 169 useful. Most modulation/XLFO/EG/XY params at idx 162+ are
 intentionally not documented here -- use the UI for detailed modulation.
 
@@ -2897,7 +2927,7 @@ and multiple processing modes (Zero Latency / Natural Phase / Linear Phase).
 The most-used FabFilter plugin -- this section is the most important for
 typical EQ scripting.
 
-AddByName string: "Pro-Q 4"
+AddByName identifier: use the exact preferred identifier, normally "VST3: Pro-Q 4"
 Total params (default instance): 75 useful -- this reference covers Bands 1-2
 as representative; bands 3-24 follow the same 23-param stride.
 

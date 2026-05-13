@@ -1,5 +1,5 @@
 {
-  "version": "1.1.5",
+  "version": "1.2.0",
   "removed_files": [
     "Resources/MIDI_Ref.md",
     "Resources/Theme_Ref.md",
@@ -8,7 +8,7 @@
   "files": [
     {
       "name": "CHANGELOG.md",
-      "sha256": "268a7d265c73d28281dd0e020f15a89c03a4dbc05207344bb7250765623fb59e"
+      "sha256": "f90d4454e027f3032debd3aa6e186a96a38f7f7443e4a03d1b996397f7ff2f6f"
     },
     {
       "name": "LICENSE.txt",
@@ -16,31 +16,31 @@
     },
     {
       "name": "README.md",
-      "sha256": "19f498d0444e9ed294e6e13e52df9b95ed4a95f2da7db9c91d0261553eaa1441"
+      "sha256": "51b213612f19e21bcb190f5c3192fbb5799045c14f6e9f90b903ff5badaa27c5"
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "d8a0516411500b4d7f1fa5c4b1c7430ac2aa3d3fd93400550725f88d9b4cb940"
+      "sha256": "18146d919369ebbc81e145388cc453d24d7ce25a6063a200dbff63dfa78b508c"
     },
     {
       "name": "Resources/API_Ref.md",
-      "sha256": "cc1476da32bfdd313eb9b315e462d2a4ff6ae7c789c01da87df39a53f9c634f0"
+      "sha256": "982a0419a7ef2736eca3542159c3e8e224803732df4813844e306523bcc432d0"
     },
     {
       "name": "Resources/Diag.lua",
-      "sha256": "f7dc8b032e801d69de1ace9b12a02887c126616beb562fccbe8f6e792fce3ec7"
+      "sha256": "f483e9376e6d751782ba0447ac85d881a2a1e2c43f33286d689106c74014c04b"
     },
     {
       "name": "Resources/Help.md",
-      "sha256": "7a639012b92450eab32dd3f595398100ee69d1ece3ca7d29157d088b62f08208"
+      "sha256": "57c10a7e74ab5e2782080e5a5fa637ce597dc85b78e7b57fc943673c14b6bcf2"
     },
     {
       "name": "Resources/Plugin_Ref.md",
-      "sha256": "df56a288ae78e1b41c57bd09100056abf68816d8af469bd10d2432ef2d5ee4c1"
+      "sha256": "1cf247a68d36d91a355f092b822d12392ff1db5c1dcd9cd089070f72925a7151"
     },
     {
       "name": "Resources/Prompts.md",
-      "sha256": "ccc977707be16bffa3617d8fbe78c7a9a67b6465e30088afc2d5f3ecff7f02b1"
+      "sha256": "e984d685c987c101c483e4d23c800188b5a9e211fed5cd7ef94aa9d6efe3cd53"
     },
     {
       "name": "Resources/ReEQ/Dependencies/firhalfband.jsfx-inc",
@@ -63,16 +63,20 @@
       "sha256": "f32d3fa5c30b934cd0f1707d61d795f3d0a8f8eba505d0d52782a67e76bb4a9e"
     },
     {
+      "name": "Resources/Reaper_Recent_Changes.md",
+      "sha256": "62238ea440748c26e95b6136e762906894f5118e94d9ea26780c141d66318033"
+    },
+    {
       "name": "Resources/Relaunch.lua",
       "sha256": "3b9fb78c56ef10563c13ea7fe875a8b8144fdf7a6c2c96408eb109ac73b37e1f"
     },
     {
       "name": "Resources/System_Prompt.md",
-      "sha256": "b4b56a80bd92cd7e7ba0449a8e47568f1644a4f3565f7a0468bfb22a71e5db63"
+      "sha256": "7e67a4bbbd09786f9e5e67377675b5ff0924c9352c7357341309f21a91bf8b45"
     },
     {
       "name": "Resources/UI.lua",
-      "sha256": "77f14ca45d0caaa024d4fd9cc9e3aa37b7ea385069526ded21513deedca316af"
+      "sha256": "283d2c8ed003623bfafc1a4851e1d4526c3d406a177344299deda3a67b2fe6f4"
     },
     {
       "name": "Resources/fonts/Inter_18pt-Bold.ttf",
@@ -100,7 +104,7 @@
     },
     {
       "name": "Resources/fonts/lucide.ttf",
-      "sha256": "f83fe36729f3637393930d1d54458f867812b487c66ad64b02bb314a1f0eadb8"
+      "sha256": "008e877bcb61dcefec75161793df2e1a872f9ec1bd23d97824a1a274c583e294"
     }
   ]
 }

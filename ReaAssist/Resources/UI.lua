@@ -1071,6 +1071,7 @@ function UI.hero_band_v5(phase)
       api_keys.saved_chat_font_idx        = prefs.chat_font_idx
       api_keys.saved_include_snapshot     = prefs.include_snapshot
       api_keys.saved_include_api_ref      = prefs.include_api_ref
+      api_keys.saved_diag_auto_tier       = prefs.diag_auto_tier
       api_keys.saved_cloud_request_timeout = prefs.cloud_request_timeout
       -- Section-open state (per Settings session; not persisted across
       -- script reloads). API KEYS + PREFERENCES default open, ADVANCED
@@ -1604,6 +1605,8 @@ function UI.mode_model_row_v5()
   local CHEV_GAP   = RA.SC(4)
   local MONO_SIZE  = RA.SC(10)
   local CHEV_SIZE  = RA.SC(10)
+  local MENU_ICON_SIZE = RA.SC(11)
+  local MENU_ICON_LABEL_PFX = "   "
   local ROUND_PILL = RA.SC(5)
   local ROUND_SEG  = RA.SC(3)
 
@@ -1639,14 +1642,23 @@ function UI.mode_model_row_v5()
   -- Draws a chip (label + chevron) and places an InvisibleButton over it so
   -- hover/click/tooltips route through normal ImGui item flow. Returns the
   -- chip's left edge (for popup anchoring) and whether it was clicked.
-  local function draw_chip(label, btn_id, enabled, tooltip_text)
+  local function draw_chip(label, btn_id, enabled, tooltip_text,
+                           leading_icon, leading_icon_color)
     PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
     local lw = CalcTextSize(RA.ctx, label)
     PopFont(RA.ctx)
+    local iw = 0
+    local icon_gap = 0
+    if leading_icon then
+      PushFont(RA.ctx, FONT.lucide, CHEV_SIZE)
+      iw = CalcTextSize(RA.ctx, leading_icon)
+      PopFont(RA.ctx)
+      icon_gap = RA.SC(4)
+    end
     PushFont(RA.ctx, FONT.lucide, CHEV_SIZE)
     local cw = CalcTextSize(RA.ctx, ICON.CHEVRON_DOWN)
     PopFont(RA.ctx)
-    local w = CHIP_PAD_X * 2 + lw + CHEV_GAP + cw
+    local w = CHIP_PAD_X * 2 + iw + icon_gap + lw + CHEV_GAP + cw
     local cx1, cx2 = cursor_x, cursor_x + w
 
     ImGui.ImGui_BeginDisabled(RA.ctx, not enabled)
@@ -1658,28 +1670,45 @@ function UI.mode_model_row_v5()
     ImGui.ImGui_DrawList_AddRectFilled(dl, cx1, y1, cx2, y2,
       hovered and TK.card_hover or TK.card, ROUND_PILL)
     ImGui.ImGui_DrawList_AddRect(dl, cx1, y1, cx2, y2, TK.border, ROUND_PILL)
+    local text_x = cx1 + CHIP_PAD_X
+    if leading_icon then
+      PushFont(RA.ctx, FONT.lucide, CHEV_SIZE)
+      local icon_y = y1 + math_floor((ROW_H - CHEV_SIZE) * 0.5)
+      ImGui.ImGui_DrawList_AddText(dl, text_x, icon_y,
+        enabled and (leading_icon_color or TK.text_muted) or TK.text_faint,
+        leading_icon)
+      PopFont(RA.ctx)
+      text_x = text_x + iw + icon_gap
+    end
     PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
-    ImGui.ImGui_DrawList_AddText(dl, cx1 + CHIP_PAD_X, t_y,
+    ImGui.ImGui_DrawList_AddText(dl, text_x, t_y,
       enabled and TK.text or TK.text_faint, label)
     PopFont(RA.ctx)
     PushFont(RA.ctx, FONT.lucide, CHEV_SIZE)
     local ch_y = y1 + math_floor((ROW_H - CHEV_SIZE) * 0.5)
     ImGui.ImGui_DrawList_AddText(dl,
-      cx1 + CHIP_PAD_X + lw + CHEV_GAP, ch_y,
+      text_x + lw + CHEV_GAP, ch_y,
       TK.text_muted, ICON.CHEVRON_DOWN)
     PopFont(RA.ctx)
     cursor_x = cx2 + ROW_GAP
     return cx1, clicked
   end
 
+  local function draw_menu_status_icon(icon, color)
+    if not icon then return end
+    local x1, y1 = ImGui.ImGui_GetItemRectMin(RA.ctx)
+    local _,  y2 = ImGui.ImGui_GetItemRectMax(RA.ctx)
+    local ix = x1 + RA.SC(4)
+    local iy = y1 + math_floor((y2 - y1 - MENU_ICON_SIZE) * 0.5)
+    local menu_dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+    ImGui.ImGui_DrawList_AddTextEx(menu_dl, FONT.lucide, MENU_ICON_SIZE,
+      ix, iy, color or TK.text_muted, icon)
+  end
+
   -- ---- Provider chip ------------------------------------------------------
-  -- Hidden built-ins (experimental, gated by an ExtState unlock at startup;
-  -- see the unlock block after Custom.register_all in ReaAssist.lua) keep
-  -- their slot in PROVIDERS for id-based lookup but stay out of every UI
-  -- surface, including this dropdown.
   local prov_filtered = {}
   for i, p in ipairs(PROVIDERS) do
-    if not p.hidden and (p.is_custom or S.api_key_map[p.id]) then
+    if p.is_custom or S.api_key_map[p.id] then
       -- Label Gemini as "Gemini (Free)" in the dropdown when the free-tier
       -- detector has confirmed the key is on the free plan. The chip uses a
       -- separate suffix (same condition, capitalized to match UPPER casing).
@@ -1693,7 +1722,7 @@ function UI.mode_model_row_v5()
   local p_active = PROVIDERS.active()
 
   -- Hard cap on the mono text rendered inside each chip. The row holds
-  -- provider + model + thinking chips plus the Ask/Auto-Run pill and the
+  -- provider + model + optional thinking chip plus the Ask/Auto-Run pill and the
   -- "backup / details" text; letting a user-typed label grow unbounded
   -- (long custom-provider names, verbose model ids) pushes everything to
   -- the right off-screen. Ellipsis (U+2026) truncation hints at the cutoff
@@ -1912,24 +1941,23 @@ function UI.mode_model_row_v5()
         shortcut = row_descr[i]    -- no right column; plain descriptor
       end
 
-      -- Asterisk badge marks the provider's recommended model (per
-      -- p_active.default_model_idx). Non-recommended rows get a 2-space
-      -- prefix so model names line up vertically against "* ". The
-      -- right-side checkmark (sel) still indicates the user's current
-      -- selection -- the two cues read independently, so a
-      -- recommended-and-selected row appears as "* Sonnet 4.6 CHK".
-      -- Asterisk (vs. a Unicode star glyph) keeps us inside the basic
-      -- Latin range that the menu font's glyph map actually loads.
+      -- Badge-check marks the provider's recommended model (per
+      -- p_active.default_model_idx). Every row gets the same ASCII spacer in
+      -- the label; the Lucide glyph is drawn over that reserved left slot so
+      -- menu text stays aligned and the current-row checkmark remains the
+      -- native right-side selected-state cue.
       -- Custom providers carry a default_model_idx (typically 1) for
       -- bootstrap, but their model lists are user-defined so generic
       -- "recommended" guidance can't be reliable -- nil out rec_idx
       -- on custom providers so no row gets the badge, matching the
       -- same convention UI.COMBO_HINTS uses to skip custom providers.
       local rec_idx   = (not is_custom) and p_active.default_model_idx or nil
-      local label_pfx = (i == rec_idx) and "* " or "  "
+      local is_rec    = (i == rec_idx)
+      local label_pfx = MENU_ICON_LABEL_PFX
       ImGui.ImGui_BeginDisabled(RA.ctx, locked)
       local m_clicked = ImGui.ImGui_MenuItem(RA.ctx, label_pfx .. raw_m.label, shortcut, sel)
       ImGui.ImGui_EndDisabled(RA.ctx)
+      if is_rec then draw_menu_status_icon(ICON.BADGE_CHECK, TK.green) end
       if locked then
         UI.tooltip_v5("Requires Google's paid API tier. Upgrade at aistudio.google.com/apikey.")
       else
@@ -1969,60 +1997,74 @@ function UI.mode_model_row_v5()
   end
   UI.pop_card_popup_style()
 
-  -- ---- Thinking chip (only when provider has thinking levels) ------------
+  -- ---- Thinking chip (only when there is a real choice) -------------------
   if p_active.thinking_levels then
-    local active_model = p_active.models[prefs.model_idx] or p_active.models[1]
+    local active_model = MODELS[prefs.model_idx] or MODELS[1]
     local vis = {}
     for i, tl in ipairs(p_active.thinking_levels) do
       if not tl.flash_only or (active_model and active_model.is_flash) then
         vis[#vis+1] = { idx = i, label = tl.label }
       end
     end
-    local cur = p_active.thinking_levels[prefs.thinking_idx]
-    local tl_label = (cur and cur.label or "THINK"):upper()
-    local tl_cx1, tl_clicked = draw_chip(tl_label, "##mm_tl_btn", not req_live,
-      "Thinking depth: higher tiers think longer (smarter, slower, more expensive).")
-    if tl_clicked then ImGui.ImGui_OpenPopup(RA.ctx, "##mm_tl_popup") end
-    ImGui.ImGui_SetNextWindowPos(RA.ctx, tl_cx1, y2 + RA.SC(2))
-    UI.push_card_popup_style()
-    if ImGui.ImGui_BeginPopup(RA.ctx, "##mm_tl_popup") then
-      -- Header label, matching the Provider / Model dropdowns.
-      ImGui.ImGui_TextDisabled(RA.ctx, "Thinking:")
-      ImGui.ImGui_Separator(RA.ctx)
-      -- Same asterisk convention as the model dropdown: marks the
-      -- recommended thinking level for the active model. Cascade is the
-      -- same one PROVIDERS.load_thinking_idx uses for first-touch
-      -- defaults -- model.default_thinking_idx -> provider.
-      -- default_thinking_idx -> nil. Nil means no badge (custom
-      -- providers that haven't configured a default).
-      local rec_t_idx = (active_model and active_model.default_thinking_idx)
-                         or p_active.default_thinking_idx
-      for _, v in ipairs(vis) do
-        local t_pfx = (v.idx == rec_t_idx) and "* " or "  "
-        if ImGui.ImGui_MenuItem(RA.ctx, t_pfx .. v.label, nil, v.idx == prefs.thinking_idx) then
-          prefs.thinking_idx = v.idx
-          -- Save under the per-model slot via the helper. Falls back to
-          -- the legacy per-provider key only when no model id is available.
-          local active_m = MODELS[prefs.model_idx] or MODELS[1]
-          PROVIDERS.save_thinking_idx(p_active, active_m, prefs.thinking_idx)
-        end
-        -- Hover tooltip: show the (provider, model, this-thinking) explainer
-        -- line so the user can preview each row's tradeoff before clicking.
-        -- Same lookup the muted line below the chip row uses; here it
-        -- previews each option, while the muted line summarizes the
-        -- current pick. Custom providers without COMBO_HINTS entries
-        -- return nil and skip the tooltip.
-        local tl_obj = p_active.thinking_levels[v.idx]
-        local hint   = UI.combo_hint(p_active, active_model, tl_obj)
-        if hint then UI.tooltip_v5(hint) end
+    if #vis > 1 then
+      local cur = p_active.thinking_levels[prefs.thinking_idx]
+      local tl_label = (cur and cur.label or "THINK"):upper()
+      local cur_tone = UI.combo_tone(p_active, active_model, cur)
+      local tl_icon = (cur_tone == "warn") and ICON.TRIANGLE_ALERT or nil
+      local tl_tip = "Thinking depth: higher tiers think longer (smarter, slower, more expensive)."
+      if cur_tone == "warn" then
+        local hint = UI.combo_hint(p_active, active_model, cur)
+        if hint then tl_tip = "Warning: " .. hint end
       end
-      ImGui.ImGui_EndPopup(RA.ctx)
+      local tl_cx1, tl_clicked = draw_chip(tl_label, "##mm_tl_btn", not req_live,
+        tl_tip, tl_icon, TK.amber)
+      if tl_clicked then ImGui.ImGui_OpenPopup(RA.ctx, "##mm_tl_popup") end
+      ImGui.ImGui_SetNextWindowPos(RA.ctx, tl_cx1, y2 + RA.SC(2))
+      UI.push_card_popup_style()
+      if ImGui.ImGui_BeginPopup(RA.ctx, "##mm_tl_popup") then
+        -- Header label, matching the Provider / Model dropdowns.
+        ImGui.ImGui_TextDisabled(RA.ctx, "Thinking:")
+        ImGui.ImGui_Separator(RA.ctx)
+        -- Same badge convention as the model dropdown: badge-check marks the
+        -- recommended thinking level for the active model, while triangle-alert
+        -- takes precedence for explicitly discouraged combos. The recommended
+        -- cascade is the same one PROVIDERS.load_thinking_idx uses for
+        -- first-touch defaults -- model.default_thinking_idx -> provider.
+        -- default_thinking_idx -> nil. Nil means no recommended badge.
+        local rec_t_idx = (active_model and active_model.default_thinking_idx)
+                           or p_active.default_thinking_idx
+        for _, v in ipairs(vis) do
+          local tl_obj = p_active.thinking_levels[v.idx]
+          local row_tone = UI.combo_tone(p_active, active_model, tl_obj)
+          local row_icon = (row_tone == "warn") and ICON.TRIANGLE_ALERT
+                        or ((v.idx == rec_t_idx) and ICON.BADGE_CHECK or nil)
+          local row_col  = (row_tone == "warn") and TK.amber
+                        or ((v.idx == rec_t_idx) and TK.green or nil)
+          if ImGui.ImGui_MenuItem(RA.ctx, MENU_ICON_LABEL_PFX .. v.label, nil, v.idx == prefs.thinking_idx) then
+            prefs.thinking_idx = v.idx
+            -- Save under the per-model slot via the helper. Falls back to
+            -- the legacy per-provider key only when no model id is available.
+            local active_m = MODELS[prefs.model_idx] or MODELS[1]
+            PROVIDERS.save_thinking_idx(p_active, active_m, prefs.thinking_idx)
+          end
+          draw_menu_status_icon(row_icon, row_col)
+          -- Hover tooltip: show the (provider, model, this-thinking) explainer
+          -- line so the user can preview each row's tradeoff before clicking.
+          -- Same lookup the muted line below the chip row uses; here it
+          -- previews each option, while the muted line summarizes the
+          -- current pick. Custom providers without COMBO_HINTS entries
+          -- return nil and skip the tooltip.
+          local hint   = UI.combo_hint(p_active, active_model, tl_obj)
+          if hint then UI.tooltip_v5(hint) end
+        end
+        ImGui.ImGui_EndPopup(RA.ctx)
+      end
+      -- Use the helper instead of duplicating the pop sequence inline. If
+      -- push_card_popup_style ever changes its push counts (e.g. adds a
+      -- fourth color or a font-weight push) a manual three-pop block here
+      -- would silently leave the style stack imbalanced.
+      UI.pop_card_popup_style()
     end
-    -- Use the helper instead of duplicating the pop sequence inline. If
-    -- push_card_popup_style ever changes its push counts (e.g. adds a
-    -- fourth color or a font-weight push) a manual three-pop block here
-    -- would silently leave the style stack imbalanced.
-    UI.pop_card_popup_style()
   end
 
   -- ---- Ask | Auto-Run segmented pill --------------------------------------
@@ -2447,13 +2489,10 @@ function UI.footer_rail_v5()
     ImGui.ImGui_EndDisabled(RA.ctx)
     -- Accent tint when no key is configured for any provider (draws eye).
     -- Suppressed while the user is already on an api_keys flow screen --
-    -- they don't need the nudge when the keys UI is on-screen. Hidden
-    -- experimental providers do not count: they cannot be configured from
-    -- the visible Settings UI, so a stranded key on one of them must not
-    -- suppress the accent for users who have no other key set.
+    -- they don't need the nudge when the keys UI is on-screen.
     local keys_set = 0
     for _, pk in ipairs(PROVIDERS) do
-      if not pk.hidden and (pk.is_custom or S.api_key_map[pk.id]) then
+      if pk.is_custom or S.api_key_map[pk.id] then
         keys_set = keys_set + 1
       end
     end
@@ -2506,6 +2545,7 @@ function UI.footer_rail_v5()
         api_keys.saved_chat_font_idx        = prefs.chat_font_idx
         api_keys.saved_include_snapshot     = prefs.include_snapshot
         api_keys.saved_include_api_ref      = prefs.include_api_ref
+        api_keys.saved_diag_auto_tier       = prefs.diag_auto_tier
         api_keys.saved_cloud_request_timeout = prefs.cloud_request_timeout
         -- Section-open state (per Settings session; not persisted across
         -- script reloads). API KEYS + PREFERENCES default open, ADVANCED
@@ -3006,6 +3046,94 @@ function UI.v5_toggle(id, label, on, tooltip, width)
   ImGui.ImGui_DrawList_AddCircleFilled(dl, knob_cx, knob_cy, KNOB_R, 0xFFFFFFFF, 16)
 
   return (new_on ~= on), new_on
+end
+
+-- V5 segmented row: card-bg row with a compact segmented pill on the right.
+-- `items` is an array of labels, `cur_idx` is 0-based. Returns
+-- (changed, new_idx). Used for small finite choices where a dropdown would
+-- hide the important states.
+function UI.v5_segmented_row(id, label, items, cur_idx, tooltip, width)
+  local dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+  local sx, sy  = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
+  local cur_x   = GetCursorPosX(RA.ctx)
+  local cur_y   = ImGui.ImGui_GetCursorPosY(RA.ctx)
+  local w       = width or ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+
+  local ROW_H      = RA.SC(30)
+  local PAD_X      = RA.SC(12)
+  local ROUND      = RA.SC(6)
+  local LABEL_SZ   = RA.SC(12)
+  local MONO_SIZE  = RA.SC(10)
+  local SEG_H      = RA.SC(22)
+  local SEG_ROUND  = RA.SC(5)
+  local SEG_GAP    = RA.SC(2)
+  local item_count = #items
+
+  ImGui.ImGui_DrawList_AddRectFilled(dl, sx, sy, sx + w, sy + ROW_H, TK.card, ROUND)
+  ImGui.ImGui_DrawList_AddRect(dl, sx, sy, sx + w, sy + ROW_H, TK.border, ROUND, 0, 1)
+
+  PushFont(RA.ctx, FONT.inter_reg, LABEL_SZ)
+  local _, lh = CalcTextSize(RA.ctx, "M")
+  PopFont(RA.ctx)
+  local label_y = sy + math_floor((ROW_H - lh) * 0.5)
+  ImGui.ImGui_DrawList_AddTextEx(dl, FONT.inter_reg, LABEL_SZ,
+    sx + PAD_X, label_y, TK.text, label)
+
+  local max_item_w = 0
+  PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
+  for _, item in ipairs(items) do
+    local tw = CalcTextSize(RA.ctx, tostring(item):upper())
+    max_item_w = math_max(max_item_w, tw)
+  end
+  PopFont(RA.ctx)
+  local seg_w = math_max(RA.SC(56), max_item_w + RA.SC(18))
+  local gap_total = SEG_GAP * math_max(item_count - 1, 0)
+  local total_w = seg_w * item_count + gap_total
+  local max_total_w = w - PAD_X * 2
+  if total_w > max_total_w and item_count > 0 then
+    seg_w = math_floor((max_total_w - gap_total) / item_count)
+    total_w = seg_w * item_count + gap_total
+  end
+  local seg_x = sx + w - PAD_X - total_w
+  local seg_y = sy + math_floor((ROW_H - SEG_H) * 0.5)
+
+  local changed, new_idx = false, cur_idx
+  for i, item in ipairs(items) do
+    local idx = i - 1
+    local x1 = seg_x + (i - 1) * (seg_w + SEG_GAP)
+    local x2 = x1 + seg_w
+    ImGui.ImGui_SetCursorScreenPos(RA.ctx, x1, seg_y)
+    ImGui.ImGui_InvisibleButton(RA.ctx, id .. "_" .. idx, seg_w, SEG_H)
+    local hovered = ImGui.ImGui_IsItemHovered(RA.ctx)
+    local clicked = ImGui.ImGui_IsItemClicked(RA.ctx)
+    if hovered then
+      ImGui.ImGui_SetMouseCursor(RA.ctx, ImGui.ImGui_MouseCursor_Hand())
+      if tooltip then UI.tooltip(tooltip) end
+    end
+    if clicked and idx ~= cur_idx then
+      changed, new_idx = true, idx
+    end
+
+    local active = idx == cur_idx
+    local fill = active and TK.accent or (hovered and TK.card_hover or TK.card)
+    ImGui.ImGui_DrawList_AddRectFilled(dl, x1, seg_y, x2, seg_y + SEG_H,
+      fill, SEG_ROUND)
+    ImGui.ImGui_DrawList_AddRect(dl, x1, seg_y, x2, seg_y + SEG_H,
+      TK.border, SEG_ROUND, 0, 1)
+
+    local text = tostring(item):upper()
+    PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
+    local tw, th = CalcTextSize(RA.ctx, text)
+    PopFont(RA.ctx)
+    local tx = x1 + math_max(math_floor((seg_w - tw) * 0.5), RA.SC(3))
+    local ty = seg_y + math_floor((SEG_H - th) * 0.5)
+    ImGui.ImGui_DrawList_AddTextEx(dl, FONT.mono_med, MONO_SIZE,
+      tx, ty, active and 0xFFFFFFFF or TK.text, text)
+  end
+
+  ImGui.ImGui_SetCursorPos(RA.ctx, cur_x, cur_y)
+  Dummy(RA.ctx, w, ROW_H)
+  return changed, new_idx
 end
 
 -- V5 nav row / nav button: card-bg clickable surface with a centered
@@ -3933,8 +4061,8 @@ function Render.tos_screen()
   end
 
   -- Flat layout: render the TOS sections directly on the page (no inner
-  -- scrollable child). The TOS is short and won't grow -- v1.1's auto-
-  -- diagnostics opt-in lives in its own dedicated dialog, not here -- so
+  -- scrollable child). The TOS is short and won't grow -- detailed auto-
+  -- diagnostics controls live in Settings, not here -- so
   -- the previous container-with-scrollbar machinery was overkill. The
   -- main window's own scrollbar handles overflow on small screens.
   --
@@ -4571,28 +4699,55 @@ function Render.help_screen()
         -- orange section label via UI.v5_section_label above; ###
         -- gives a lighter visual divider inside a section.
         local htext = line:sub(5):gsub("^%s+", "")
-        Dummy(RA.ctx, 1, 4)
-        PushFont(RA.ctx, RA.bold_font, _help_body_sz + RA.SC(2))
+        local h3_is_prompt_group = (sec.title == "Prompt Examples")
+        Dummy(RA.ctx, 1, h3_is_prompt_group and 10 or 4)
+        if h3_is_prompt_group then
+          local hx, hy = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
+          local bar_w, bar_h = RA.SC(18), RA.SC(2)
+          ImGui.ImGui_DrawList_AddRectFilled(dl,
+            hx, hy + RA.SC(2), hx + bar_w, hy + RA.SC(2) + bar_h,
+            TK.text_muted, RA.SC(1))
+          Dummy(RA.ctx, 1, RA.SC(7))
+        end
+        PushFont(RA.ctx,
+          h3_is_prompt_group and FONT.inter_reg or RA.bold_font,
+          _help_body_sz + RA.SC(2))
+        if h3_is_prompt_group then
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),
+            TK.text_muted)
+        end
         Text(RA.ctx, htext)
+        if h3_is_prompt_group then PopStyleColor(RA.ctx) end
         PopFont(RA.ctx)
-        Dummy(RA.ctx, 1, 2)
+        Dummy(RA.ctx, 1, h3_is_prompt_group and 5 or 2)
         idx = idx + 1
       elseif line:sub(1, 2) == "- " then
         local content = line:sub(3)
+        local is_prompt_example =
+          sec.title == "Prompt Examples"
+          and content:sub(1, 1) == "\""
+          and content:sub(-1) == "\""
+        if is_prompt_example then
+          content = content:sub(2, -2)
+        end
         -- Bullet dot, muted. Pulled back from TK.accent to TK.text_muted
         -- so the bullet + bold lead-in combo doesn't read as a wall of
         -- blue -- the emphasis on the lead-in carries the hierarchy.
         local bx, by = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
         local th     = ImGui.ImGui_GetTextLineHeight(RA.ctx)
-        ImGui.ImGui_DrawList_AddCircleFilled(dl, bx + RA.SC(5), by + th * 0.55, RA.SC(2), TK.text_muted)
-        local indent_px = RA.SC(14)
+        local bullet_col = is_prompt_example
+          and UI.lerp_u32(TK.accent, TK.text_muted, 0.45)
+          or TK.text_muted
+        ImGui.ImGui_DrawList_AddCircleFilled(dl,
+          bx + RA.SC(5), by + th * 0.55, RA.SC(2), bullet_col)
+        local indent_px = is_prompt_example and RA.SC(16) or RA.SC(14)
         ImGui.ImGui_Indent(RA.ctx, indent_px)
         local wrap_w = body_wrap_x_off - indent_px
         local colon = line:find(":", 3, true)
         if qlower_body then
           -- Searching: no bold split -- render uniform content with highlights.
           draw_hl_wrapped(content, wrap_w)
-        elseif colon and (colon - 2) <= 32 then
+        elseif (not is_prompt_example) and colon and (colon - 2) <= 32 then
           -- Bold "Label:" lead-in + wrapped rest (ImGui wrap).
           local lead = line:sub(3, colon)
           local rest = line:sub(colon + 1):gsub("^%s+", "")
@@ -4614,7 +4769,7 @@ function Render.help_screen()
           ImGui.ImGui_PopTextWrapPos(RA.ctx)
         end
         ImGui.ImGui_Unindent(RA.ctx, indent_px)
-        Dummy(RA.ctx, 1, 2)
+        Dummy(RA.ctx, 1, is_prompt_example and 4 or 2)
         idx = idx + 1
       else
         if qlower_body then
@@ -5803,6 +5958,8 @@ function Render._factory_reset_execute()
   prefs.include_api_ref       = false
   prefs.include_snapshot      = true
   prefs.update_check          = true
+  prefs.typed_actions_opt_in  = true
+  prefs.diag_auto_tier        = "basic"
   prefs.test_force_cold_cache = false
   prefs.cloud_request_timeout = CFG.CLOUD_TIMEOUT_DEFAULT
   prefs.provider_idx          = 1   -- 1=Claude
@@ -5890,6 +6047,90 @@ function Render._factory_reset_popup(ctx)
   UI.pop_modal_style()
 end
 
+function Render._reaper_version_notice_popup()
+  if S.reaper_version_notice_session_dismissed then return end
+  if reaper.GetExtState(CFG.EXT_NS, "reaper_version_notice_dismissed") == "true" then
+    return
+  end
+
+  local app_ver = tostring(reaper.GetAppVersion() or "")
+  local major = tonumber(app_ver:match("^(%d+)"))
+  if not major or major >= 7 then return end
+
+  if not S._reaper_version_notice_opened then
+    S._reaper_version_notice_opened = true
+    ImGui.ImGui_OpenPopup(RA.ctx, "Older REAPER Version##reaper_version_notice")
+  end
+
+  local dlg_w, dlg_h = RA.SC(430), RA.SC(210)
+  if update._main_w then
+    ImGui.ImGui_SetNextWindowPos(RA.ctx,
+      update._main_x + (update._main_w - dlg_w) * 0.5,
+      update._main_y + (update._main_h - dlg_h) * 0.5,
+      ImGui.ImGui_Cond_Appearing())
+  end
+  ImGui.ImGui_SetNextWindowSize(RA.ctx, dlg_w, dlg_h, ImGui.ImGui_Cond_Appearing())
+
+  UI.push_modal_style()
+  if ImGui.ImGui_BeginPopupModal(RA.ctx,
+      "Older REAPER Version##reaper_version_notice", true,
+      ImGui.ImGui_WindowFlags_NoResize()) then
+    local cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+    ImGui.ImGui_Spacing(RA.ctx)
+
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
+    local title = "REAPER 7 or newer is recommended"
+    local title_w = CalcTextSize(RA.ctx, title)
+    SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx)
+      + math_floor((cw - title_w) * 0.5))
+    Text(RA.ctx, title)
+    PopStyleColor(RA.ctx)
+
+    ImGui.ImGui_Spacing(RA.ctx)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+    UI.text_multiline(
+      "Detected REAPER " .. app_ver .. ". ReaAssist will still open, "
+      .. "but newer REAPER features and APIs may not be available in "
+      .. "this install. Upgrade when practical for the best results.")
+    PopStyleColor(RA.ctx)
+
+    ImGui.ImGui_Spacing(RA.ctx)
+    ImGui.ImGui_Spacing(RA.ctx)
+    local open_w, later_w, hide_w, gap =
+      RA.SC(158), RA.SC(74), RA.SC(124), RA.SC(12)
+    local row_w = open_w + later_w + hide_w + gap * 2
+    SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx)
+      + math_floor((cw - row_w) * 0.5))
+
+    UI.push_modal_primary_btn()
+    if ImGui.ImGui_Button(RA.ctx, "Open Download Page", open_w, 0) then
+      UI.open_url("https://www.reaper.fm/download.php")
+    end
+    UI.pop_modal_primary_btn()
+    SameLine(RA.ctx, 0, gap)
+
+    if ImGui.ImGui_Button(RA.ctx, "Later", later_w, 0) then
+      S.reaper_version_notice_session_dismissed = true
+      ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+    end
+    SameLine(RA.ctx, 0, gap)
+
+    if ImGui.ImGui_Button(RA.ctx, "Don't Show Again", hide_w, 0) then
+      S.reaper_version_notice_session_dismissed = true
+      reaper.SetExtState(CFG.EXT_NS,
+        "reaper_version_notice_dismissed", "true", true)
+      ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+    end
+
+    if ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
+      S.reaper_version_notice_session_dismissed = true
+      ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+    end
+    ImGui.ImGui_EndPopup(RA.ctx)
+  end
+  UI.pop_modal_style()
+end
+
 -- Render._key_test_results_popup
 -- Shared "API Key Test Results" popup. Rendered by both the first-run and
 -- Settings screens so the popup comes up wherever the user fired the
@@ -5933,7 +6174,7 @@ function Render._key_test_results_popup()
       Text(RA.ctx, "Test Results:")
       ImGui.ImGui_Spacing(RA.ctx)
       for _, pk in ipairs(PROVIDERS) do
-        local r = (not pk.hidden) and api_keys.test_results[pk.id] or nil
+        local r = api_keys.test_results[pk.id]
         if r then
           if r.ok then
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.green)
@@ -7118,7 +7359,10 @@ local function _exit_settings_screen()
   api_keys.saved_chat_font_idx         = nil
   api_keys.saved_include_snapshot      = nil
   api_keys.saved_include_api_ref       = nil
+  api_keys.saved_diag_auto_tier        = nil
   api_keys.saved_cloud_request_timeout = nil
+  api_keys.pending_diag_auto_tier      = nil
+  api_keys.open_diag_auto_confirm      = nil
   api_keys.section_open = nil
   -- Restore previous-screen context (if the footer gear opened Settings
   -- from Help / Bug Report / Credits, this drops the user back where
@@ -7158,14 +7402,13 @@ function Render._shared_key_screen_impl()
   -- re-initialises without those sites needing to know about the change.
   local needs_init = false
   for i, prov in ipairs(PROVIDERS) do
-    if not prov.is_custom and not prov.hidden
-       and api_keys.key_bufs[i] == nil then
+    if not prov.is_custom and api_keys.key_bufs[i] == nil then
       needs_init = true; break
     end
   end
   if needs_init then
     for i, prov in ipairs(PROVIDERS) do
-      if not prov.is_custom and not prov.hidden then
+      if not prov.is_custom then
         api_keys.key_bufs[i]   = api_keys.key_bufs[i]   or ""
         api_keys.key_errors[i] = api_keys.key_errors[i] or nil
       end
@@ -7319,10 +7562,8 @@ function Render._shared_key_screen_impl()
     -- Custom providers are managed on the dedicated "Local & Custom
     -- Providers" page (entered via the nav row further down). Skip them
     -- here to avoid rendering the cloud-provider single-input layout
-    -- against a row that has its own multi-row schema. Hidden experimental
-    -- providers (gated by an ExtState unlock at startup) are also skipped:
-    -- they are not surfaced anywhere in the UI until unlocked.
-    if not prov.is_custom and not prov.hidden then
+    -- against a row that has its own multi-row schema.
+    if not prov.is_custom then
       if any_card_drawn then
         Dummy(RA.ctx, 1, RA.SC(5))
       end
@@ -7630,8 +7871,7 @@ function Render._shared_key_screen_impl()
           if shift_down then
             for j = i - 1, 1, -1 do
               local pj = PROVIDERS[j]
-              if pj and not pj.is_custom and not pj.hidden
-                 and not S.api_key_map[pj.id] then
+              if pj and not pj.is_custom and not S.api_key_map[pj.id] then
                 target = j
                 break
               end
@@ -7639,8 +7879,7 @@ function Render._shared_key_screen_impl()
           else
             for j = i + 1, #PROVIDERS do
               local pj = PROVIDERS[j]
-              if pj and not pj.is_custom and not pj.hidden
-                 and not S.api_key_map[pj.id] then
+              if pj and not pj.is_custom and not S.api_key_map[pj.id] then
                 target = j
                 break
               end
@@ -7729,15 +7968,12 @@ function Render._shared_key_screen_impl()
     -- Test API Keys: verifies all stored keys sequentially, then shows the
     -- results popup. Enabled if any provider has either a stored key OR a
     -- non-empty buffered (just-pasted, not yet saved) key. Disabled only
-    -- while a test is already running. Hidden providers cannot reach this
-    -- UI to enter a key, so they are excluded from the trigger condition.
+    -- while a test is already running.
     local has_keys = false
     for i, pk in ipairs(PROVIDERS) do
-      if not pk.hidden then
-        if S.api_key_map[pk.id] then has_keys = true; break end
-        local buf = not pk.is_custom and api_keys.key_bufs[i]
-        if buf and buf:match("%S") then has_keys = true; break end
-      end
+      if S.api_key_map[pk.id] then has_keys = true; break end
+      local buf = not pk.is_custom and api_keys.key_bufs[i]
+      if buf and buf:match("%S") then has_keys = true; break end
     end
     ImGui.ImGui_BeginDisabled(RA.ctx, not has_keys or api_keys.key_validating)
     if ImGui.ImGui_Button(RA.ctx, test_label .. "##key_recheck") then
@@ -7748,7 +7984,7 @@ function Render._shared_key_screen_impl()
       -- buffered key that fails format validation records an inline error
       -- and is NOT promoted.
       for i, prov in ipairs(PROVIDERS) do
-        if not prov.is_custom and not prov.hidden then
+        if not prov.is_custom then
           local buf = (api_keys.key_bufs[i] or ""):match("^%s*(.-)%s*$") or ""
           if buf ~= "" then
             local valid, reason = Key.validate_format(buf, prov)
@@ -7771,7 +8007,7 @@ function Render._shared_key_screen_impl()
       -- matters more than queue brevity. The order also matches what
       -- the user usually configures first (cloud keys -> custom).
       for i, pk in ipairs(PROVIDERS) do
-        if not pk.is_custom and not pk.hidden and S.api_key_map[pk.id] then
+        if not pk.is_custom and S.api_key_map[pk.id] then
           api_keys.test_queue[#api_keys.test_queue + 1] = { idx = i, prov = pk }
         end
       end
@@ -7806,7 +8042,7 @@ function Render._shared_key_screen_impl()
     if UI.v5_nav_row("##open_cllm_settings", cllm_label,
         "Manage any number of OpenAI-compatible providers: local "
         .. "servers (Ollama, LM Studio, llama.cpp, vLLM) and online "
-        .. "gateways (OpenRouter, Groq, DeepSeek, Together AI, etc.)",
+        .. "gateways (OpenRouter, Groq, Together AI, Mistral, etc.)",
         cllm_btn_w, custom_count > 0) then
       -- Remember which screen opened Custom Providers so its Save / Back
       -- can route correctly: first-run back-out drops the user directly
@@ -8006,6 +8242,32 @@ function Render._shared_key_screen_impl()
     end
     Dummy(RA.ctx, 1, RA.SC(6))
 
+    -- Automatic diagnostics. Basic is default-on anonymous metrics; Extended
+    -- also includes redacted chat/diagnostic detail and remains opt-in.
+    do
+      local cur = (prefs.diag_auto_tier == "basic") and 1
+               or (prefs.diag_auto_tier == "extended") and 2
+               or 0
+      local changed, idx = UI.v5_segmented_row("##adv_diag_auto_tier",
+        "Automatic diagnostics", { "Off", "Basic", "Extended" }, cur,
+        "Basic anonymous diagnostics are enabled by default and can be "
+          .. "turned off. Extended adds redacted chat, diagnostics, and "
+          .. "log/report detail. Sent on the next launch, never during "
+          .. "an active request.",
+        inner_w)
+      if changed then
+        local next_tier = (idx == 1) and "basic"
+          or (idx == 2) and "extended" or "off"
+        if next_tier ~= "extended" then
+          prefs.diag_auto_tier = next_tier
+        else
+          api_keys.pending_diag_auto_tier = next_tier
+          api_keys.open_diag_auto_confirm = true
+        end
+      end
+    end
+    Dummy(RA.ctx, 1, RA.SC(6))
+
     -- Cloud Timeout select row. (Was paired with a Max Tokens dropdown in
     -- a 2-column grid; the Max Tokens knob was removed once each model's
     -- output ceiling became metadata -- Anthropic gets the model's published
@@ -8153,13 +8415,12 @@ function Render._shared_key_screen_impl()
       Render._factory_reset_execute()
     end
   end
+
   end -- is_reentry: options section
 
-  -- ##unsaved_settings popup's BeginPopupModal is hoisted OUT of the
-  -- BeginChild scope (below EndChild). ImGui popup IDs are scoped
-  -- per-window; OpenPopup("##unsaved_settings") fires from the
-  -- Cancel handler after EndChild (main-window context), so
-  -- BeginPopupModal must live there too.
+  -- Settings modals are hoisted OUT of the BeginChild scope (below
+  -- EndChild). ImGui popup IDs are scoped per-window; opening/rendering
+  -- them in the main-window scope avoids child-stack imbalances.
 
   Dummy(RA.ctx, 1, 8)
 
@@ -8175,6 +8436,63 @@ function Render._shared_key_screen_impl()
   ImGui.ImGui_EndChild(RA.ctx)
   PopStyleColor(RA.ctx, 4)  -- ScrollbarBg, ScrollbarGrab, -Hovered, -Active
   ImGui.ImGui_PopStyleVar(RA.ctx, 2)  -- ChildBorderSize, WindowPadding
+
+  do
+    local pending = api_keys.pending_diag_auto_tier
+    local popup_id = "Enable Diagnostics##diag_auto_confirm"
+    if api_keys.open_diag_auto_confirm then
+      ImGui.ImGui_OpenPopup(RA.ctx, popup_id)
+      api_keys.open_diag_auto_confirm = nil
+    end
+    local pop_w, pop_h = RA.SC(440), RA.SC(215)
+    if update and update._main_x and update._main_w then
+      ImGui.ImGui_SetNextWindowPos(RA.ctx,
+        update._main_x + (update._main_w - pop_w) * 0.5,
+        update._main_y + (update._main_h - pop_h) * 0.5,
+        ImGui.ImGui_Cond_Appearing())
+    end
+    ImGui.ImGui_SetNextWindowSize(RA.ctx, pop_w, pop_h,
+      ImGui.ImGui_Cond_Appearing())
+    UI.push_modal_style()
+    if ImGui.ImGui_BeginPopupModal(RA.ctx, popup_id, true,
+        ImGui.ImGui_WindowFlags_NoResize()) then
+      local cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+      local tier_label = pending == "extended" and "Extended" or "Basic"
+      ImGui.ImGui_TextWrapped(RA.ctx,
+        tier_label .. " diagnostics are sent on the next launch, when "
+          .. "ReaAssist is idle.")
+      ImGui.ImGui_Spacing(RA.ctx)
+      ImGui.ImGui_TextWrapped(RA.ctx,
+        pending == "extended"
+          and "Extended includes Basic metrics plus redacted chat, diagnostics, "
+            .. "recent errors, and redacted Advanced Log/report detail."
+          or "Basic includes anonymous structured metrics only: counts, "
+            .. "providers, model tiers, tokens, cache, latency, and outcomes.")
+      ImGui.ImGui_Spacing(RA.ctx)
+      local cancel_w, enable_w, gap = RA.SC(82), RA.SC(128), RA.SC(12)
+      local row_w = cancel_w + gap + enable_w
+      SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx) + math_floor((cw - row_w) * 0.5))
+      if ImGui.ImGui_Button(RA.ctx, "Cancel##diag_auto_cancel", cancel_w, 0) then
+        api_keys.pending_diag_auto_tier = nil
+        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+      end
+      SameLine(RA.ctx, 0, gap)
+      UI.push_modal_primary_btn()
+      if ImGui.ImGui_Button(RA.ctx, "Enable " .. tier_label .. "##diag_auto_enable",
+          enable_w, 0) then
+        prefs.diag_auto_tier = pending or "off"
+        api_keys.pending_diag_auto_tier = nil
+        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+      end
+      UI.pop_modal_primary_btn()
+      if ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
+        api_keys.pending_diag_auto_tier = nil
+        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+      end
+      ImGui.ImGui_EndPopup(RA.ctx)
+    end
+    UI.pop_modal_style()
+  end
 
   -- Frame-local flag: set by the unsaved_settings popup's Esc handler
   -- so the outer Esc handler below knows the key was already consumed
@@ -8224,6 +8542,8 @@ function Render._shared_key_screen_impl()
           prefs.include_snapshot and "1" or "0", true)
         reaper.SetExtState(CFG.EXT_NS, "include_api_ref",
           prefs.include_api_ref and "1" or "0", true)
+        reaper.SetExtState(CFG.EXT_NS, "diag_auto_tier",
+          prefs.diag_auto_tier or "off", true)
         reaper.SetExtState(CFG.EXT_NS, "cloud_request_timeout",
           tostring(prefs.cloud_request_timeout), true)
         _exit_settings_screen()
@@ -8257,6 +8577,9 @@ function Render._shared_key_screen_impl()
         if api_keys.saved_include_api_ref ~= nil then
           prefs.include_api_ref = api_keys.saved_include_api_ref
         end
+        if api_keys.saved_diag_auto_tier ~= nil then
+          prefs.diag_auto_tier = api_keys.saved_diag_auto_tier
+        end
         if api_keys.saved_cloud_request_timeout then
           prefs.cloud_request_timeout = api_keys.saved_cloud_request_timeout
         end
@@ -8284,24 +8607,20 @@ function Render._shared_key_screen_impl()
   end
 
   -- Check if at least one cloud key field has new content. Custom LLM config
-  -- is managed on its own page, so it does not participate here. Hidden
-  -- providers do not render an input on this page, so their key_bufs slot
-  -- (if it ever got populated) cannot represent a real edit.
+  -- is managed on its own page, so it does not participate here.
   local any_new_input = false
   for i, prov in ipairs(PROVIDERS) do
-    if not prov.is_custom and not prov.hidden
+    if not prov.is_custom
        and api_keys.key_bufs[i] and api_keys.key_bufs[i]:match("%S") then
       any_new_input = true; break
     end
   end
 
   -- For first-run: need at least one new key. For re-entry: allow save with
-  -- no new input (user may have only removed keys), or with new input. A
-  -- key on a hidden provider does not count -- the user cannot reach it
-  -- from this UI, and it would suppress the "enter a key" gate.
+  -- no new input (user may have only removed keys), or with new input.
   local has_any_key = false
   for _, pk in ipairs(PROVIDERS) do
-    if pk.is_custom or (not pk.hidden and S.api_key_map[pk.id]) then
+    if pk.is_custom or S.api_key_map[pk.id] then
       has_any_key = true; break
     end
   end
@@ -8325,12 +8644,14 @@ function Render._shared_key_screen_impl()
     and prefs.include_snapshot ~= api_keys.saved_include_snapshot
   local ref_changed     = api_keys.saved_include_api_ref ~= nil
     and prefs.include_api_ref ~= api_keys.saved_include_api_ref
+  local diag_changed    = api_keys.saved_diag_auto_tier ~= nil
+    and prefs.diag_auto_tier ~= api_keys.saved_diag_auto_tier
   local to_changed      = api_keys.saved_cloud_request_timeout
     and prefs.cloud_request_timeout ~= api_keys.saved_cloud_request_timeout
 
   local any_pref_changed = scale_changed or theme_changed
     or upd_changed or bak_changed or font_changed
-    or snap_changed or ref_changed or to_changed
+    or snap_changed or ref_changed or diag_changed or to_changed
 
   -- has_any_key flips true if any provider is usable: a built-in with
   -- a saved key in api_key_map, OR a custom provider record (the loop
@@ -8638,6 +8959,11 @@ function Render._shared_key_screen_impl()
         prefs.include_api_ref and "1" or "0", true)
       api_keys.saved_include_api_ref = nil
     end
+    if api_keys.saved_diag_auto_tier ~= nil then
+      reaper.SetExtState(CFG.EXT_NS, "diag_auto_tier",
+        prefs.diag_auto_tier or "off", true)
+      api_keys.saved_diag_auto_tier = nil
+    end
     if api_keys.saved_cloud_request_timeout then
       reaper.SetExtState(CFG.EXT_NS, "cloud_request_timeout",
         tostring(prefs.cloud_request_timeout), true)
@@ -8648,7 +8974,7 @@ function Render._shared_key_screen_impl()
     local has_format_error = false
     for i, prov in ipairs(PROVIDERS) do
       api_keys.key_errors[i] = nil
-      if not prov.is_custom and not prov.hidden then
+      if not prov.is_custom then
         local trimmed = (api_keys.key_bufs[i] or ""):match("^%s*(.-)%s*$") or ""
         if trimmed ~= "" then
           local valid, reason = Key.validate_format(trimmed, prov)
@@ -8690,15 +9016,14 @@ function Render._shared_key_screen_impl()
         -- If the active provider's key was just removed (built-in with
         -- nothing left in api_key_map), snap prefs.provider_idx to the
         -- first usable provider before exiting. Otherwise the home
-        -- chip shows a stranded selection that the dropdown filter
-        -- has already hidden -- the model list still populates and the
-        -- send button stays disabled because S.api_key is nil. Mirrors
+        -- chip shows a stranded selection and the send button stays disabled
+        -- because S.api_key is nil. Mirrors
         -- the same failsafe in the Custom LLM save path.
         do
           local act = PROVIDERS.active()
           if act and not act.is_custom and not S.api_key_map[act.id] then
             for i, p in ipairs(PROVIDERS) do
-              if not p.hidden and (p.is_custom or S.api_key_map[p.id]) then
+              if p.is_custom or S.api_key_map[p.id] then
                 prefs.provider_idx = i
                 reaper.SetExtState(CFG.EXT_NS, "provider_idx",
                   tostring(prefs.provider_idx), true)
@@ -8927,7 +9252,7 @@ function Render.custom_providers_screen()
   Text(RA.ctx,
     "Register any number of OpenAI-compatible endpoints: local servers "
     .. "(Ollama, LM Studio, llama.cpp, vLLM) and online gateways "
-    .. "(OpenRouter, Groq, DeepSeek, Together AI, Mistral, etc.).")
+    .. "(OpenRouter, Groq, Together AI, Mistral, etc.).")
   PopStyleColor(RA.ctx)
   Dummy(RA.ctx, 1, RA.SC(4))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),
@@ -9307,7 +9632,7 @@ function Render.custom_llm_screen()
 
   Dummy(RA.ctx, 1, RA.SC(16))
 
-  -- Intro copy + experimental advisory. SC(12) Inter so the block
+  -- Intro copy + cautionary advisory. SC(12) Inter so the block
   -- reads as a compact lead-in (not competing with the section
   -- labels). TK.text body; muted-amber advisory -- a 50/50 blend of
   -- TK.amber and TK.text_muted so the line reads as cautionary but
@@ -9331,7 +9656,7 @@ function Render.custom_llm_screen()
   Text(RA.ctx,
     "Point ReaAssist at any OpenAI-compatible endpoint: a local "
     .. "server (Ollama, LM Studio, llama.cpp, vLLM) or an online "
-    .. "gateway (OpenRouter, Groq, DeepSeek, Together AI, Mistral, etc.).")
+    .. "gateway (OpenRouter, Groq, Together AI, Mistral, etc.).")
   PopStyleColor(RA.ctx)
   Dummy(RA.ctx, 1, RA.SC(4))
   -- Domain-specific size advisory: ReaAssist's worst failure mode with
@@ -9493,7 +9818,7 @@ function Render.custom_llm_screen()
     _push_input_style()
     ImGui.ImGui_SetNextItemWidth(RA.ctx, card_w)
     local _, new_label = ImGui.ImGui_InputTextWithHint(RA.ctx, "##cus_label",
-      "e.g. Ollama Local, DeepSeek, OpenRouter",
+      "e.g. Ollama Local, OpenRouter, Groq",
       edit.label)
     UI.focus_ring()
     _, new_label = UI.input_with_menu(RA.ctx, false, new_label)
@@ -9594,7 +9919,7 @@ function Render.custom_llm_screen()
 
     Dummy(RA.ctx, 1, RA.SC(4))
 
-    -- HOSTED row: OpenAI-compatible cloud gateways. The first three pills
+    -- HOSTED row: OpenAI-compatible cloud gateways. The first two pills
     -- only fill the URL (matching the LOCAL-row convention). The Kimi pill
     -- is opinionated: it also fills the provider label, seeds a kimi-k2.6
     -- model row (prices, context, thinking-disabled extra body) if the
@@ -9609,10 +9934,6 @@ function Render.custom_llm_screen()
     _preset_btn("Groq", "groq",
       "https://api.groq.com/openai/v1/chat/completions",
       "Fill in the Groq endpoint URL (API key required)")
-    SameLine(RA.ctx, 0, RA.SC(6))
-    _preset_btn("DeepSeek", "deepseek",
-      "https://api.deepseek.com/v1/chat/completions",
-      "Fill in the DeepSeek endpoint URL (API key required)")
     SameLine(RA.ctx, 0, RA.SC(6))
     -- Kimi (Moonshot): opinionated fill. The models list is considered
     -- "default / empty" when it has exactly one row that still matches
@@ -9692,7 +10013,7 @@ function Render.custom_llm_screen()
       "The bearer token sent as 'Authorization: Bearer <key>' on every "
       .. "request.\n\n"
       .. "REQUIRED for hosted gateways: OpenRouter (sk-or-...), Groq "
-      .. "(gsk_...), DeepSeek (sk-...), Together AI, Mistral, Fireworks, "
+      .. "(gsk_...), Together AI, Mistral, Fireworks, "
       .. "Anyscale, Cloudflare AI Gateway, etc.\n\n"
       .. "LEAVE BLANK for local servers (Ollama, LM Studio, llama.cpp, "
       .. "vLLM) that don't require auth. The Authorization header is "
@@ -9809,7 +10130,7 @@ function Render.custom_llm_screen()
     -- Trailing-boundary check (next char must NOT be alphanumeric) avoids
     -- false positives on tokens like "7bee" or "7b1234" (a hash); leading
     -- side is naturally bounded by the digit class. Names without a B-token
-    -- (gpt-4o, claude-sonnet-4-6, deepseek-v3, "model") return nil and the
+    -- (gpt-4o, claude-sonnet-4-6, mistral-large, "model") return nil and the
     -- prose advisory above remains the safety net.
     local function _detect_param_b(s)
       if not s or s == "" then return nil end
@@ -10372,7 +10693,7 @@ function Render.custom_llm_screen()
         .. "internal CA you haven't installed.\n"
         .. "  - Dev/staging endpoint with an expired cert.\n\n"
         .. "Never enable for a public hosted gateway (OpenRouter, Groq, "
-        .. "DeepSeek, etc.). If their cert stops validating, something "
+        .. "Together AI, etc.). If their cert stops validating, something "
         .. "is genuinely wrong and bypassing verification exposes your "
         .. "API key to any machine on the path.",
         adv_card_w)
@@ -10441,7 +10762,7 @@ function Render.custom_llm_screen()
   -- GET /v1/models probe stays the one-click default. Ticking it routes
   -- Test Connection through a real chat/completions POST with max_tokens=1
   -- and "hi" -- exercises the same path real chat will, but on reasoning
-  -- models like DeepSeek-R1 / o1 the thinking phase still runs (the cap
+  -- models like o1 or Qwen reasoning variants the thinking phase still runs (the cap
   -- only limits OUTPUT tokens), so the user pays for that one inference
   -- call. Transient: the checkbox state lives only in api_keys.custom_edit
   -- and is reset whenever the user enters/leaves the edit screen. Centered
@@ -10474,7 +10795,7 @@ function Render.custom_llm_screen()
         .. "server reachable and auth header works.\n\n"
         .. "On: POST /v1/chat/completions with max_tokens=1 and 'hi' against "
         .. "your first model. Exercises the same path real chat uses, but "
-        .. "reasoning models (DeepSeek-R1, o1, etc.) still run the full "
+        .. "reasoning models (o1, Qwen reasoning variants, etc.) still run the full "
         .. "thinking phase -- you'll pay for one short inference call.")
       Dummy(RA.ctx, 1, RA.SC(8))
     end
@@ -10802,8 +11123,8 @@ function Render.custom_llm_screen()
         -- newly-added custom record is unreachable.
         do
           local stranded = PROVIDERS[prefs.provider_idx]
-          if stranded and (stranded.hidden
-             or (not stranded.is_custom and not S.api_key_map[stranded.id]))
+          if stranded
+             and (not stranded.is_custom and not S.api_key_map[stranded.id])
              and PROVIDERS._by_id[edit.id] then
             prefs.provider_idx = PROVIDERS._by_id[edit.id]
             reaper.SetExtState(CFG.EXT_NS, "provider_idx",
@@ -13078,11 +13399,13 @@ function Render.main_window()
         Net.kill_curl()
         S.curl_pid            = nil
         S.send_time           = nil
+        S.request_start_time  = nil
         S.status              = "idle"
         S.pending_display_idx = nil
         S.pending_code        = nil
         S.retry_scheduled     = false
         S.retry_count         = 0
+        S.retry_max           = CFG.MAX_RETRIES
         S.retry_saved_body    = nil
       end
       -- Drop any screen / modal navigation state so the dispatcher
@@ -13101,7 +13424,10 @@ function Render.main_window()
       api_keys.saved_chat_font_idx        = nil
       api_keys.saved_include_snapshot     = nil
       api_keys.saved_include_api_ref      = nil
+      api_keys.saved_diag_auto_tier       = nil
       api_keys.saved_cloud_request_timeout = nil
+      api_keys.pending_diag_auto_tier     = nil
+      api_keys.open_diag_auto_confirm     = nil
       api_keys.section_open               = nil
       api_keys.is_reentry                 = false
       api_keys.key_bufs                   = {}
@@ -13772,6 +14098,10 @@ function Render.main_window()
         -- clears the bubble's geometry.
         local scroll_y = ImGui.ImGui_GetScrollY(RA.ctx)
         ImGui.ImGui_SetCursorPosY(RA.ctx, bubble_bottom_y - win_y + scroll_y)
+        -- Register the cursor move as a real layout boundary. Without an item
+        -- here, a final right-aligned user bubble can trip ReaImGui's EndChild
+        -- bounds check even though the bubble itself was drawn correctly.
+        Dummy(RA.ctx, 1, 0)
 
         -- V5 details card: mono label/value rows in a rounded container,
         -- right-aligned below the bubble. Single-column layout so every
@@ -14170,6 +14500,9 @@ function Render.main_window()
 
           -- Jump cursor past the container so subsequent turns don't collide.
           ImGui.ImGui_SetCursorPos(RA.ctx, start_local_x, start_local_y + details_h)
+          -- Same boundary registration as the bubble cursor jump above, but for
+          -- the optional details card's absolute cursor placement.
+          Dummy(RA.ctx, 1, 0)
         end
 
       else
@@ -14295,8 +14628,11 @@ function Render.main_window()
           -- Truncation banner: placed just above the recovery buttons so the
           -- cause + the fix are visually grouped at the bottom of the reply.
           if msg.truncated then
+            local trunc_msg = msg.typed_action_token_cap
+              and "Structured edit cut off at its compact action-token cap."
+              or "Response cut off - the model ran out of output tokens."
             UI.selectable_text(
-              "Response cut off - the model ran out of output tokens.",
+              trunc_msg,
               "##trunc_" .. i, content_w, COL.WARN)
             Dummy(RA.ctx, 1, RA.SC(6))
           end
@@ -14386,6 +14722,43 @@ function Render.main_window()
 
             PopFont(RA.ctx)
             PopStyleColor(RA.ctx, 1) -- Border
+            ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+          end
+        end
+
+        if msg.recovery == "google_model_capacity" then
+          local can_switch = msg.fallback_provider_id
+            and msg.fallback_model_id
+            and (S.status == "idle" or S.status == "error")
+          if can_switch then
+            ImGui.ImGui_Spacing(RA.ctx)
+            PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 1)
+            PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(),   RA.SC(4))
+            PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),    RA.SC(10), RA.SC(5))
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(), TK.border)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        TK.accent_ui)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), UI.lerp_u32(TK.accent_ui, TK.accent, 0.35))
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  UI.lerp_u32(TK.accent_ui, TK.accent, 0.55))
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.accent_text)
+            PushFont(RA.ctx, FONT.mono_med, RA.SC(11))
+            local label = "Switch to " .. (msg.fallback_label or "Flash 3") .. "##google_capacity_" .. i
+            if ImGui.ImGui_Button(RA.ctx, label, 0, 0) then
+              local ok, err = PROVIDERS.switch_to_model(
+                msg.fallback_provider_id, msg.fallback_model_id)
+              if ok then
+                msg.recovery_used = true
+                local sent, send_err = Net.resend_saved_prompt(
+                  msg.recovery_prompt, msg.recovery_attachments)
+                if not sent then
+                  UI.show_float_toast(send_err or "Could not resend message", "err")
+                end
+              else
+                UI.show_float_toast(err or "Could not switch models", "err")
+              end
+            end
+            UI.tooltip("Switch Gemini to Flash 3 and resend the original message.")
+            PopFont(RA.ctx)
+            PopStyleColor(RA.ctx, 5)
             ImGui.ImGui_PopStyleVar(RA.ctx, 3)
           end
         end
@@ -14526,6 +14899,9 @@ function Render.main_window()
             code_changed, new_code = UI.input_with_menu(RA.ctx, code_changed, new_code)
             if code_changed then
               msg.code_block = new_code
+              msg.lua_artifact = nil
+              msg._lua_artifact_src = nil
+              msg.run_blocked = nil
               -- Keep S.pending_code in sync when editing the latest block.
               if i == #S.display_messages and S.pending_code then
                 S.pending_code = new_code
@@ -14544,10 +14920,32 @@ function Render.main_window()
           -- Run Code, Undo, and Backup only appear for Lua code (not JSFX/EEL).
           ImGui.ImGui_Spacing(RA.ctx)
           local is_lua = (msg.code_type or "lua") == "lua"
+          local lua_artifact = nil
+          local run_blocked = false
+          if is_lua then
+            if msg._lua_artifact_src ~= msg.code_block then
+              msg.lua_artifact = Code.classify_lua_artifact(msg.code_block,
+                { context_text = msg.content or "" })
+              msg._lua_artifact_src = msg.code_block
+            end
+            lua_artifact = msg.lua_artifact
+            run_blocked = lua_artifact and not lua_artifact.runnable or false
+          end
 
           -- Risky-code warning. Scan BEFORE rendering buttons so the warning
           -- string is ready when the row is drawn.
-          local risk_warning = is_lua and Code.scan_risky(msg.code_block) or nil
+          local risk_warning = (is_lua and not run_blocked)
+            and Code.scan_risky(msg.code_block) or nil
+          if run_blocked then
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
+            ImGui.ImGui_TextWrapped(RA.ctx,
+              Code.lua_artifact_block_message(lua_artifact))
+            PopStyleColor(RA.ctx)
+          elseif msg.run_blocked then
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
+            ImGui.ImGui_TextWrapped(RA.ctx, msg.run_blocked)
+            PopStyleColor(RA.ctx)
+          end
 
           -- V5 action-row styling. Shared FrameBorderSize + FrameRounding so
           -- every button in the row gets a 1 px outline with matching corner
@@ -14581,12 +14979,18 @@ function Render.main_window()
             -- reads like a pending primary action when it isn't. Click
             -- behavior is unchanged so the user can still re-run on demand.
             local run_already = msg.auto_ran and true or false
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        run_already and V5_SEC_BG  or V5_RUN_BG)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), run_already and V5_SEC_HOV or V5_RUN_HOV)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  run_already and V5_SEC_ACT or V5_RUN_ACT)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          run_already and V5_SEC_TXT or V5_RUN_TXT)
+            local run_inactive = run_already or run_blocked
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        run_inactive and V5_SEC_BG  or V5_RUN_BG)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), run_inactive and V5_SEC_HOV or V5_RUN_HOV)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  run_inactive and V5_SEC_ACT or V5_RUN_ACT)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          run_inactive and V5_SEC_TXT or V5_RUN_TXT)
             if ImGui.ImGui_Button(RA.ctx, "\xe2\x96\xb6 Run##run_" .. i, 70, 0) then
-              if risk_warning then
+              if run_blocked then
+                msg.run_blocked = Code.lua_artifact_block_message(lua_artifact)
+                Log.add_error(msg.run_blocked)
+                if i == #S.display_messages then S.pending_code = nil end
+                S.refocus_prompt = true
+              elseif risk_warning then
                 -- Risky code: require explicit user confirmation before executing.
                 S.risky_warn_code   = msg.code_block
                 S.risky_warn_idx    = i
@@ -14615,7 +15019,9 @@ function Render.main_window()
                 S.refocus_prompt = true
               end
             end
-            UI.tooltip("Execute this code in REAPER")
+            UI.tooltip(run_blocked
+              and "This block is a fragment or patch, not a runnable script"
+              or "Execute this code in REAPER")
             PopStyleColor(RA.ctx, 4)  -- Run: Button/Hovered/Active/Text
 
             SameLine(RA.ctx, 0, RA.SC(4))
@@ -15029,7 +15435,39 @@ function Render.main_window()
         if Diag.uploader_enabled
            and S.status ~= "waiting"
            and (_fb_has_text or _fb_has_code) then
-          Dummy(RA.ctx, 1, RA.SC(20))   -- 20px margin above
+          Dummy(RA.ctx, 1, RA.SC(14))   -- breathing room below the reply
+
+          local FB_BTN_W = RA.SC(30)
+          local FB_BTN_H = RA.SC(24)
+          local FB_GAP   = RA.SC(6)
+
+          -- Compact left-aligned CTA: short rule, label, then thumbs. Keeping
+          -- the rule tied to the label width makes it feel intentional without
+          -- spanning the whole chat bubble.
+          local function _fb_chat_prompt(label)
+            local font_sz = RA.SC(10)
+            local line_col = TK.border
+            local text_col = TK.text_muted
+            local cx, cy = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
+            PushFont(RA.ctx, FONT.inter_reg, font_sz)
+            local text_w, text_h = CalcTextSize(RA.ctx, label)
+            text_h = text_h or ImGui.ImGui_GetTextLineHeight(RA.ctx)
+            local line_w = math.min(content_w, text_w)
+            local line_y = cy + RA.SC(1)
+            local text_y = cy + RA.SC(8)
+            local dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+            ImGui.ImGui_DrawList_AddLine(dl, cx, line_y,
+              cx + line_w, line_y, line_col, 1)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), text_col)
+            ImGui.ImGui_SetCursorScreenPos(RA.ctx, cx, text_y)
+            ImGui.ImGui_Text(RA.ctx, label)
+            PopStyleColor(RA.ctx)
+            PopFont(RA.ctx)
+            ImGui.ImGui_SetCursorScreenPos(RA.ctx, cx, text_y + text_h)
+          end
+
+          _fb_chat_prompt("Was this helpful?")
+          Dummy(RA.ctx, 1, RA.SC(3))
 
           -- Local helper: opens the modal for this assistant message,
           -- pre-selecting `with_thumb` ("up" / "down" / nil).
@@ -15055,19 +15493,23 @@ function Render.main_window()
           -- true if clicked. Hover overlay matches the modal's chips:
           -- subtle accent-tinted bg + accent border drawn after the
           -- button when hovered.
-          local function _fb_thumb_chat_btn(id, icon, tooltip)
+          local function _fb_thumb_chat_btn(id, icon, tooltip, btn_w, btn_h)
+            local fb_border = UI.lerp_u32(TK.border, TK.accent_ui, 0.42)
+            local fb_text   = UI.lerp_u32(TK.text_muted, TK.accent, 0.32)
             PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 1)
             PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(),   RA.SC(4))
             PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),    RA.SC(8), RA.SC(4))
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),        TK.border)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        0x00000000)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),        fb_border)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),
+              (TK.accent & 0xFFFFFF00) | 0x12)
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(),
               (TK.accent & 0xFFFFFF00) | 0x33)
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),
               (TK.accent & 0xFFFFFF00) | 0x55)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.text_muted)
-            PushFont(RA.ctx, FONT.lucide, RA.SC(12))
-            local clicked = ImGui.ImGui_Button(RA.ctx, icon .. "##" .. id)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          fb_text)
+            PushFont(RA.ctx, FONT.lucide, RA.SC(13))
+            local clicked = ImGui.ImGui_Button(RA.ctx, icon .. "##" .. id,
+              btn_w, btn_h)
             PopFont(RA.ctx)
             PopStyleColor(RA.ctx, 5)
             ImGui.ImGui_PopStyleVar(RA.ctx, 3)
@@ -15082,11 +15524,13 @@ function Render.main_window()
             return clicked
           end
 
-          if _fb_thumb_chat_btn("fbup_" .. i, ICON.THUMBS_UP, "Helpful") then
+          if _fb_thumb_chat_btn("fbup_" .. i, ICON.THUMBS_UP, "Helpful",
+              FB_BTN_W, FB_BTN_H) then
             _open_fb("up")
           end
-          ImGui.ImGui_SameLine(RA.ctx, 0, RA.SC(6))
-          if _fb_thumb_chat_btn("fbdown_" .. i, ICON.THUMBS_DOWN, "Not helpful") then
+          ImGui.ImGui_SameLine(RA.ctx, 0, FB_GAP)
+          if _fb_thumb_chat_btn("fbdown_" .. i, ICON.THUMBS_DOWN, "Not helpful",
+              FB_BTN_W, FB_BTN_H) then
             _open_fb("down")
           end
         end
@@ -15102,8 +15546,9 @@ function Render.main_window()
     -- response area, with the same gap and indent as a normal response. The
     -- normal "waiting" state shows a multi-line block with elapsed time and
     -- the (provider-aware) timeout ceiling so the user can judge whether a
-    -- slow local LLM is still alive or genuinely stuck. Retry-scheduled and
-    -- code-running states keep their compact single-line layout.
+    -- slow local LLM is still alive or genuinely stuck. Retry-scheduled keeps
+    -- the same whole-turn elapsed clock so provider backoff doesn't look like
+    -- a fresh request.
     if S.status == "waiting" or S.status == "running" or deep_scan.active
         or S.resolve_popup then
       ImGui.ImGui_SetCursorPosY(RA.ctx, ImGui.ImGui_GetCursorPosY(RA.ctx) + BUBBLE_GAP)
@@ -15140,9 +15585,10 @@ function Render.main_window()
           -- request keeps running in the background and may write a late
           -- response to tmp.out that gets picked up by the next request.
           Net.kill_curl()
-          S.curl_pid   = nil
-          S.send_time  = nil
-          S.status     = "idle"
+          S.curl_pid            = nil
+          S.send_time           = nil
+          S.request_start_time  = nil
+          S.status              = "idle"
           -- Remove the pending user bubble if the AI never responded.
           if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
             local last = #S.display_messages
@@ -15158,6 +15604,7 @@ function Render.main_window()
           S.pending_code        = nil
           S.retry_scheduled     = false
           S.retry_count         = 0
+          S.retry_max           = CFG.MAX_RETRIES
           S.retry_saved_body    = nil
           S.scroll_to_bottom    = true
         end
@@ -15178,26 +15625,35 @@ function Render.main_window()
         PopStyleColor(RA.ctx)
       elseif S.status == "waiting" or deep_scan.active then
         if S.retry_scheduled then
-          -- Retry countdown stays on a single line with Cancel SameLine.
+          -- Retry countdown gets its own line; Cancel sits below so the
+          -- countdown remains readable while the user decides whether to stop.
           local secs = math_max(0, math_floor(S.retry_fire_time - time_precise()))
+          local elapsed_start = S.request_start_time or S.send_time
+          local elapsed = elapsed_start and (time_precise() - elapsed_start) or 0
           PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), COL.WARN)
           Text(RA.ctx, str_format("Server busy; retrying in %ds (%d/%d)",
-            secs, S.retry_count, CFG.MAX_RETRIES))
+            secs, S.retry_count, S.retry_max or CFG.MAX_RETRIES))
           PopStyleColor(RA.ctx)
-          SameLine(RA.ctx, 0, 12)
+          PushFont(RA.ctx, FONT.mono_med, RA.SC(10))
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+          Text(RA.ctx, "Elapsed " .. fmt_mss(elapsed))
+          PopStyleColor(RA.ctx)
+          PopFont(RA.ctx)
+          ImGui.ImGui_Spacing(RA.ctx)
           render_cancel_btn()
         else
           -- Multi-line "Thinking" status with elapsed time and timeout ceiling.
-          -- Elapsed is whole-turn wall clock from the user's Send click
-          -- (S.request_start_time); using S.send_time would reset on every
-          -- <context_needed> round-trip, which looks like the timer is
-          -- bouncing even though the user's turn is still in progress.
+          -- Elapsed is whole-turn wall clock from the user's Send click.
+          -- S.request_start_time is the canonical anchor and is preserved
+          -- across hidden retries; S.send_time is only a defensive fallback
+          -- so a future missed path shows a live clock instead of 0:00.
           -- The timeout value is per-curl (mirrors the watchdog in
           -- Net.try_finish_curl) -- Custom local LLMs use their per-provider
           -- timeout + 15s slack; cloud providers use prefs.cloud_request_timeout
           -- (default 180s, extendable mid-request via the "Extend by Ns"
           -- button rendered below).
-          local elapsed      = (S.request_start_time and (time_precise() - S.request_start_time)) or 0
+          local elapsed_start = S.request_start_time or S.send_time
+          local elapsed      = elapsed_start and (time_precise() - elapsed_start) or 0
           local pa           = PROVIDERS.active()
           local poll_timeout = (pa.is_custom
             and ((tonumber(pa.request_timeout) or 600) + 15))
@@ -15419,6 +15875,9 @@ function Render.main_window()
       end
     end
 
+    -- This child adjusts scroll/cursor state while rendering chat rows. Leave a
+    -- real item at the end so ReaImGui can grow the child bounds before EndChild.
+    Dummy(RA.ctx, 1, 1)
     ImGui.ImGui_EndChild(RA.ctx)
     end  -- if chat_visible
     PopStyleColor(RA.ctx, 5)  -- scrollbar palette + ChildBg
@@ -17017,6 +17476,7 @@ function Render.main_window()
     -- with -- the user has to hit Esc to recover. Same call-site
     -- pattern as the Settings page's per-row "Details" popup, which
     -- lives inside its render scope and doesn't have this z-order bug.
+    Render._reaper_version_notice_popup()
     Render.feedback_modal()
     Render._ceiling_alert_popup()
 

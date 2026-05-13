@@ -1456,7 +1456,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.1.5", -- public release version
+  VERSION           = "1.2.0", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -1479,8 +1479,11 @@ CFG = {
   WIN_H             = 800,       -- initial window height
   MAX_API_REF_BYTES = 512 * 1024, -- reject API ref files larger than 512 KB
   POLL_THROTTLE     = 0.1,       -- min interval between poll-loop file checks
-  MAX_RETRIES       = 3,         -- max auto-retries on transient 529 failures
+  MAX_RETRIES       = 3,         -- max auto-retries on transient overload failures
+  GEMINI_OVERLOAD_MAX_RETRIES = 1, -- fail fast on Gemini 503 high-demand windows; offer Flash 3 recovery instead of long hidden waits
+  OPENAI_THROTTLE_MAX_RETRIES = 4, -- OpenAI TPM/rate-limit throttles are often sub-minute token-bucket recoveries
   RETRY_DELAY_BASE  = 2,         -- base seconds for exponential backoff
+  RETRY_JITTER_SECS = 1,         -- random retry jitter to avoid synchronized retry spikes
   MAX_CALLS_PER_TURN = 15,       -- hard cap on POSTs in a single user turn
                                  -- (initial send + every silent context fetch
                                  -- and validator retry combined). Trips before
@@ -1558,6 +1561,7 @@ S = {
   input_buf         = "",
   status            = "idle",  -- "idle" | "waiting" | "running" | "error"
   pending_code      = nil,     -- Lua code block waiting for user confirmation
+  latest_code_candidate = nil, -- last complete runnable Lua candidate for follow-ups
   show_help         = false,   -- true shows the full-window help overlay
   show_credits      = false,   -- true shows the full-window credits overlay
   show_bug_report   = false,   -- true shows the bug report overlay
@@ -1598,6 +1602,7 @@ S = {
   session_cost      = 0,       -- cumulative USD cost for the session
   -- curl/poll state
   curl_pid          = nil,     -- truthy while a request is pending, nil when idle
+  curl_debug        = nil,     -- structured diagnostics for the in-flight curl
   curl_os_pid       = nil,     -- OS PID of in-flight curl process (for Cancel kill)
   curl_exited_clean = false,   -- true once exit code 0 has been observed (skips
                                -- partial-read brace guard so HTML/non-JSON
@@ -1612,8 +1617,12 @@ S = {
                                -- turn, so the JSFX validator-retry path can rebuild the
                                -- snapshot with the same minimal-tracks trim used on the
                                -- first request
-  -- Retry state for 529 auto-retry
+  pending_drum_edit_intent = nil, -- mirrors CTX.prompt_indicates_drum_edit
+                                  -- so retry snapshot rebuilds keep the
+                                  -- Dynamic Split settings context
+  -- Retry state for provider overload auto-retry
   retry_count       = 0,
+  retry_max         = CFG.MAX_RETRIES,
   retry_scheduled   = false,
   retry_fire_time   = 0,
   retry_saved_body  = nil,     -- saved request body for retry
@@ -1648,9 +1657,13 @@ S = {
   -- input token cost. Created lazily at send time; deleted on invalidation.
   gemini_cache_name     = nil, -- e.g. "cachedContents/abc123"
   gemini_cache_model    = nil, -- model id the cache is bound to
+  gemini_cache_signature = nil, -- source fingerprint for system prompt + api_ref
   gemini_cache_expires  = 0,   -- os.time() epoch seconds when cache expires
   gemini_cache_creating   = false, -- true while a cache-create curl is in flight
   gemini_cache_started_at = 0,     -- time_precise() when cache-create curl launched (watchdog)
+  gemini_cache_last_state = nil,   -- request-time cache diagnostics for bench/details
+  gemini_cache_last_used  = false, -- true when the last Gemini body used cachedContent
+  gemini_cache_last_create_reason = nil, -- last explicit-cache create outcome/blocker
   last_cache_poll_time    = 0,     -- throttle for cache-create response polling
   -- Script save state
   saved_script_path = nil,
@@ -1672,6 +1685,9 @@ S = {
   open_no_tracks_warn   = false, -- triggers no-tracks-selected popup next frame
   -- Context follow-up state
   pending_orig_prompt    = nil,    -- bare user text, saved for follow-up resend
+  pending_typed_action_expected = false, -- true when a typed-action contract was appended to this turn
+  pending_typed_action_response_format = false, -- true when OpenAI response_format should emit raw typed-action JSON
+  pending_typed_action_profile = nil, -- optional model-scoped typed-action strengthening profile key
   pending_snapshot       = nil,    -- snapshot from original send
   docs_already_sent      = false,  -- one-shot guard per turn
   docs_extended_already_sent = false,  -- one-shot guard per turn (extended)
@@ -1692,15 +1708,43 @@ S = {
   pending_pref_plugin_types= {},   -- preferred_plugins types accumulated before a popup bailed the parse loop
   context_loop_retries     = 0,    -- per-turn counter -- model re-asking for already-provided context (max 1 retry)
   api_validator_retries    = 0,    -- per-turn counter -- model emitted nonexistent reaper.* calls (max 1 retry)
+  action_validator_retries = 0,    -- per-turn counter -- model guessed unverified numeric Main_OnCommand IDs (max 1 retry)
+  transient_validator_retries = 0, -- per-turn counter -- model used naive audio-accessor detector for drum-hit stretch markers (max 1 retry)
+  drum_quantize_validator_retries = 0, -- per-turn counter -- model moved whole drum items instead of using shared stretch-marker map (max 1 retry)
+  drum_marker_sync_validator_retries = 0, -- per-turn counter -- model set drum stretch markers without range normalization (max 1 retry)
   arity_validator_retries  = 0,    -- per-turn counter -- model emitted reaper.* call with wrong fixed arg count (max 1 retry)
   sendidx_validator_retries = 0,   -- per-turn counter -- model ignored CreateTrackSend result and used literal send slots (max 1 retry)
   stockfx_validator_retries = 0,   -- per-turn counter -- model substituted third-party FX for explicitly requested stock FX (max 1 retry)
+  fxident_validator_retries = 0,   -- per-turn counter -- model stripped exact preferred AddByName identifier prefix/vendor (max 1 retry)
+  typed_action_format_validator_retries = 0, -- per-turn counter -- model emitted typed-action JSON under wrong fence label (max 1 retry)
+  typed_action_schema_validator_retries = 0, -- per-turn counter -- model emitted malformed/invalid typed-action JSON (max 1 retry)
+  typed_action_semantic_validator_retries = 0, -- per-turn counter -- model emitted valid typed-action JSON with risky routing semantics (max 1 retry)
+  typed_action_retry_offset = 0, -- per-turn counter -- retries spent before fallback-model escalation
+  typed_action_escalation_used = false, -- per-turn flag -- weak typed-action model escalated to configured fallback once
+  typed_action_escalation_count = 0, -- per-turn counter -- typed-action model escalation requests
+  typed_action_escalation_model = nil, -- provider/model id for the active fallback, when escalation fires
+  typed_action_escalation_restore = nil, -- original provider/model to restore after a hidden fallback-model rescue
   fxcheck_validator_retries = 0,   -- per-turn counter -- model emitted unchecked TrackFX_AddByName result (max 1 retry)
   upsert_validator_retries = 0,    -- per-turn counter -- chain-build script violated upsert pairing (Get without Add, or Add without Get) (max 1 retry)
   helper_int_validator_retries = 0,-- per-turn counter -- model rewrote a bundled helper body (e.g. dropped parens on the range-guard) (max 1 retry)
   defer_validator_retries  = 0,    -- per-turn counter -- model emitted plugin param calls outside reaper.defer (max 1 retry)
+  fx_param_scope_validator_retries = 0, -- per-turn counter -- model wrote plugin params for add-only FX prompt (max 1 retry)
   helper_validator_retries = 0,    -- per-turn counter -- model called helper functions without including their definitions (max 1 retry)
   void_return_validator_retries = 0,-- per-turn counter -- model assigned a void reaper.* call result (max 1 retry)
+  track_creation_validator_retries = 0, -- per-turn counter -- model looked up tracks instead of creating requested tracks (max 1 retry)
+  track_creation_retry_used = false, -- per-turn flag -- one hidden retry for inert create-track scripts
+  track_creation_index_retry_used = false, -- per-turn flag -- one hidden retry for bad InsertTrackAtIndex/GetTrack pairing
+  folder_boundary_retry_used = false, -- per-turn flag -- one hidden retry for wrong I_FOLDERDEPTH close track
+  track_index_validator_retries = 0, -- per-turn counter -- model used 1-based SESSION track indices in GetTrack (max 1 retry)
+  track_index_retry_used = false, -- per-turn flag -- one hidden retry for literal GetTrack index mismatch
+  track_selection_validator_retries = 0, -- per-turn counter -- model wrote B/I_SELECTED via SetMediaTrackInfo_Value (max 1 retry)
+  track_selection_retry_used = false, -- per-turn flag -- one hidden retry for track selection write anti-pattern
+  track_pan_validator_retries = 0, -- per-turn counter -- model wrote send pan when asked for track pan (max 1 retry)
+  track_pan_retry_used = false, -- per-turn flag -- one hidden retry for track-pan API anti-pattern
+  master_send_validator_retries = 0, -- per-turn counter -- model used RemoveTrackSend for B_MAINSEND (max 1 retry)
+  master_send_retry_used = false, -- per-turn flag -- one hidden retry for master-send API anti-pattern
+  midi_item_validator_retries = 0, -- per-turn counter -- model used a plain media item as a new MIDI item (max 1 retry)
+  midi_item_retry_used    = false, -- per-turn flag -- one hidden retry for plain-item MIDI insertion anti-pattern
   bare_lua_retry_used      = false,-- per-turn flag -- valid-looking Lua arrived without a ```lua fence; one hidden re-fence retry
   unclosed_fence_retry_used = false,-- per-turn flag -- Lua fence was opened but not closed; one hidden re-fence retry
   parse_retry_used         = false,-- per-turn flag -- extracted ```lua block failed Lua syntax check; one hidden retry with the parser error
@@ -1925,18 +1969,18 @@ api_keys = {
   key_error_url        = nil,     -- console URL for the provider (clickable link)
   key_error_url_label  = nil,     -- display text for the URL
   -- TOS persistence.
-  tos_version    = "5",
+  tos_version    = "7",
   -- Disclaimer text shown on the first-run TOS screen. When this text
   -- changes substantively, bump tos_version above to force re-acceptance.
   tos_text = string.format([[
 YOUR PRIVACY
-API keys are encoded and stored locally on your machine. They are never sent to the author. Chat data is sent only to your chosen provider to fulfill your request. To provide relevant help, ReaAssist may send session data included in your prompt, such as track names, routing, and project settings. ReaAssist does not access, transmit, or create audio files. You may use a local LLM to keep all data offline and on your machine. You may optionally share feedback about a chat by opening the feedback dialog and pressing Send after reviewing the preview. The dialog previews what will be sent before anything is uploaded.
+API keys are encoded and stored locally on your machine. They are never sent to the author. Chat data is sent only to your chosen provider to fulfill your request. To provide relevant help, ReaAssist may send session data included in your prompt, such as track names, routing, and project settings. ReaAssist does not access, transmit, or create audio files. You may use a local LLM to keep all data offline and on your machine. Basic anonymous diagnostics are enabled by default and used to help improve the service. They can be turned off in Settings. The previewable manual feedback/report flows still show the exact bytes before sending.
 
 SECURITY & SAFEGUARDS
 ReaAssist scans generated code for potentially high-risk operations, such as file system changes or shell commands, and requires your confirmation before flagged code can run. Project backups can be created before execution, and REAPER Undo history is preserved. No project changes are made without your approval.
 
 TERMS & LIABILITY
-ReaAssist is provided "as is," without warranties of any kind, express or implied, including merchantability or fitness for a particular purpose. Generated code may contain errors or unintended results. You are responsible for reviewing code before execution. You are also responsible for your provider's terms, privacy practices, availability, and API charges. Displayed cost estimates are approximate only.
+ReaAssist is provided "as is," without warranties of any kind, express or implied, including merchantability or fitness for a particular purpose. Generated code may contain errors or unintended results. You are responsible for reviewing code before execution. You are also responsible for your provider's terms, privacy practices, availability, and API charges. Some requests may be retried or escalated to a stronger model from the same provider when needed, which can increase API charges. Displayed cost estimates are approximate only.
 
 Copyright %s Michael Briggs. All rights reserved. ReaAssist is proprietary software; redistribution, resale, repackaging, and presenting this software as your own (modified or unmodified) are prohibited without prior written permission.
 
@@ -2233,6 +2277,7 @@ do
   tmp.body   = tmp_dir .. "reaassist_body_"       .. tmp_suffix .. ".json"
   tmp.log    = tmp_dir .. "reaassist_last_error_" .. tmp_suffix .. ".json"
   tmp.auth   = tmp_dir .. "reaassist_auth_"       .. tmp_suffix .. ".txt"
+  tmp.err    = tmp_dir .. "reaassist_stderr_"     .. tmp_suffix .. ".txt"
   -- Exit code file. curl writes its exit code here so the poll loop can detect
   -- network errors on both platforms. Windows: written by the PowerShell
   -- command. macOS/Linux: written by the shell pipeline via "echo $?".
@@ -2277,6 +2322,7 @@ os.remove(tmp.pid)
 os.remove(tmp.out)
 os.remove(tmp.body)
 os.remove(tmp.log)
+os.remove(tmp.err)
 os.remove(tmp.exit)
 os.remove(tmp.cache_body)
 os.remove(tmp.cache_out)
@@ -2428,6 +2474,7 @@ reaper.atexit(function()
   os.remove(tmp.out)
   os.remove(tmp.body)
   os.remove(tmp.log)
+  os.remove(tmp.err)
   os.remove(tmp.auth)
   os.remove(tmp.gemini_auth)
   os.remove(tmp.exit)
@@ -2461,6 +2508,8 @@ prefs = {
   include_api_ref  = reaper.GetExtState(CFG.EXT_NS, "include_api_ref")  == "1",  -- default off (prompt-bundle era; request docs on-demand)
   include_snapshot = reaper.GetExtState(CFG.EXT_NS, "include_snapshot") ~= "0", -- default on
   update_check     = reaper.GetExtState(CFG.EXT_NS, "update_check")    ~= "0", -- default on
+  typed_actions_opt_in = true, -- built in; exact-fit structured track edits
+  diag_auto_tier   = reaper.GetExtState(CFG.EXT_NS, "diag_auto_tier"),
   provider_idx     = 1,  -- set below from ExtState (1=Claude, 2=ChatGPT, 3=Gemini)
   model_idx        = 2,  -- set below by MODELS.refresh() per active provider
   thinking_idx     = 0,  -- 0 = provider has no thinking; set by MODELS.refresh()
@@ -2484,6 +2533,11 @@ prefs = {
   -- (the flag's read sites all hit ExtState fresh, so a mirror would be
   -- dead state that could go stale if the signal ever missed a delivery).
 }
+if prefs.diag_auto_tier == "" then
+  prefs.diag_auto_tier = "basic" -- default on; explicit "off" persists opt-out
+elseif prefs.diag_auto_tier ~= "basic" and prefs.diag_auto_tier ~= "extended" then
+  prefs.diag_auto_tier = "off"
+end
 
 -- Forward-declare JSON so the Log module (defined below) can reference it;
 -- JSON is main-file-local and later assigned without `local` so it
@@ -3296,10 +3350,6 @@ end
 -- has_caching: true enables prompt-cache token display/accounting.
 -- cache_write applies to Claude only; OpenAI's caching is free to write and
 -- Gemini charges a separate per-hour storage fee which is not modeled here.
--- hidden:      true marks an experimental built-in that is invisible in every
---              UI surface (chip dropdown, Settings cards, Test API Keys, etc.)
---              until an ExtState unlock at startup clears the flag. The slot
---              still occupies its index so PROVIDERS.get(id) keeps working.
 PROVIDERS = {
   {
     id            = "anthropic",
@@ -3436,7 +3486,7 @@ PROVIDERS = {
     -- provider default applies.
     models = {
       { label = "GPT-5.4 nano", chip_label = "NANO", id = "gpt-5.4-nano",
-        price_in = 0.20,  price_out = 1.25,  price_cache_r = 0.02,  max_output = 128000, context_window = 400000,  default_thinking_idx = 1 },
+        price_in = 0.20,  price_out = 1.25,  price_cache_r = 0.02,  max_output = 128000, context_window = 400000,  default_thinking_idx = 1, typed_action_max_completion = 2048 },
       { label = "GPT-5.4 mini", chip_label = "MINI", id = "gpt-5.4-mini",
         price_in = 0.75,  price_out = 4.50,  price_cache_r = 0.075, max_output = 128000, context_window = 400000,  default_thinking_idx = 2 },
       { label = "GPT-5.4",      chip_label = "FULL", id = "gpt-5.4",
@@ -3487,7 +3537,7 @@ PROVIDERS = {
     -- context surcharge tier + the cost of every Pro turn make it
     -- the wrong daily-driver pick.
     models = {
-      { label = "Flash Lite 3.1", chip_label = "FLASH LITE", id = "gemini-3.1-flash-lite-preview",
+      { label = "Flash Lite 3.1", chip_label = "FLASH LITE", id = "gemini-3.1-flash-lite",
         price_in = 0.25,  price_out = 1.50, price_cache_r = 0.025, is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 2 },
       { label = "Flash 3",        chip_label = "FLASH",      id = "gemini-3-flash-preview",
         price_in = 0.50,  price_out = 3.00, price_cache_r = 0.05,  is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 1 },
@@ -3496,16 +3546,16 @@ PROVIDERS = {
     },
   },
   {
-    -- DeepSeek V4 (experimental, hidden until unlocked via ExtState
-    -- "experimental_deepseek" == "1"; see the unlock block after
-    -- Custom.register_all). OpenAI-compatible chat-completions wire format
-    -- so build_body_openai handles it; thinking is per-request via
+    -- DeepSeek V4 Flash. OpenAI-compatible chat-completions wire format so
+    -- build_body_openai handles it; thinking is per-request via
     -- extra_body.thinking.type ("disabled" / "enabled") instead of OpenAI's
     -- top-level reasoning_effort -- see the deepseek_extra_body branch in
     -- Net.build_body_openai. Caching is automatic on the prefix (no
     -- cache_control headers); usage.prompt_cache_hit_tokens reports hits in
     -- place of OpenAI's prompt_tokens_details.cached_tokens (see the
-    -- response parser branch in Net.try_finish_curl).
+    -- response parser branch in Net.try_finish_curl). The built-in picker
+    -- intentionally exposes only Flash: current bench data shows the pricier
+    -- tier adds latency without measured quality gain.
     id            = "deepseek",
     label         = "DeepSeek",
     endpoint      = "https://api.deepseek.com/v1/chat/completions",
@@ -3527,35 +3577,28 @@ PROVIDERS = {
     billing_url   = "https://platform.deepseek.com/usage",
     billing_label = "platform.deepseek.com/usage",
     default_model_idx = 1,  -- Flash: cheapest serious option in the lineup
-    -- DeepSeek thinking is binary, not an effort scale: extra_body.thinking
-    -- carries either "disabled" or "enabled". Net.build_body_openai branches
-    -- on thinking_style to emit the extra_body shape instead of the top-
-    -- level reasoning_effort field used by OpenAI proper.
+    -- DeepSeek thinking is binary, not an effort scale. ReaAssist exposes
+    -- only Non-Thinking for V4 Flash because bench runs show no quality lift
+    -- from Thinking, while it adds latency. Net.build_body_openai still emits
+    -- the explicit extra_body thinking shape so the server never falls back to
+    -- DeepSeek's server-side default.
     thinking_style = "deepseek_extra_body",
-    -- The chip dropdown has no field label, so naked "Enabled"/"Disabled"
-    -- reads as ambiguous in isolation. The wire-format `value` strings stay
-    -- as DeepSeek requires ("disabled"/"enabled"); the user-facing labels
-    -- name what is being toggled.
     thinking_levels = {
       { label = "Non-Thinking", value = "disabled" },
-      { label = "Thinking",     value = "enabled"  },
     },
-    default_thinking_idx = 1,  -- Non-Thinking (Thinking is opt-in via the chip)
+    default_thinking_idx = 1,  -- Non-Thinking (only exposed level)
     -- Pricing: post-discount steady-state numbers from
-    -- api-docs.deepseek.com/quick_start/pricing as of 2026-05-04. The
-    -- promotional 75% V4-Pro discount expires 2026-05-31; using the
-    -- non-promo prices here so the $ column does not lie after that date.
-    -- max_output: both models cap at 384K per the same page.
-    -- context_window: both V4 models advertise a 1M-token window. The
+    -- api-docs.deepseek.com/quick_start/pricing as of 2026-05-04. Pro is not
+    -- exposed as a built-in model because it underperformed Flash in DAW
+    -- latency tests.
+    -- max_output: V4 Flash caps at 384K per the same page.
+    -- context_window: V4 Flash advertises a 1M-token window. The
     -- preflight token gate needs this to be larger than max_output;
     -- otherwise the budget calc (limit - reserve) goes negative.
     models = {
       { label = "V4 Flash", chip_label = "FLASH", id = "deepseek-v4-flash",
         price_in = 0.14, price_out = 0.28, price_cache_r = 0.0028, max_output = 384000, context_window = 1000000 },
-      { label = "V4 Pro",   chip_label = "PRO",   id = "deepseek-v4-pro",
-        price_in = 1.74, price_out = 3.48, price_cache_r = 0.0145, max_output = 384000, context_window = 1000000 },
     },
-    hidden = true,
   },
 }
 
@@ -3611,7 +3654,7 @@ end
 -- Registers OpenAI-compatible chat-completions endpoints as additional
 -- providers. Works with truly local servers (Ollama, LM Studio, llama.cpp,
 -- vLLM, text-generation-webui) and online services that speak the OpenAI wire
--- format (OpenRouter, Groq, DeepSeek, Together AI, Mistral, Fireworks, etc.).
+-- format (OpenRouter, Groq, Together AI, Mistral, Fireworks, etc.).
 -- Configured via the Custom Providers list page, persisted to ExtState.
 --
 -- The user can register any number of custom providers. Each record is a
@@ -4245,7 +4288,7 @@ Custom.register_all()
 --   Claude:   Haiku=Medium (per-model override), Sonnet/Opus=None
 --   ChatGPT:  Medium (provider default)
 --   Gemini:   Medium (provider default)
---   DeepSeek: Thinking (provider default)
+--   DeepSeek: Non-Thinking (provider default)
 --
 -- Subsequent user picks via the chip dropdown persist normally. The
 -- sentinel lives in the user's ExtState, so this block needs to remain
@@ -4281,11 +4324,11 @@ end
 --   claude-haiku-4-5 default thinking: Low -> High;
 --   openai.default_model_idx: mini (2) -> full GPT-5.4 (3);
 --   gpt-5.4-nano default thinking: Low -> None;
---   gemini-3.1-flash-lite-preview default thinking: Minimal -> Low;
+--   gemini-3.1-flash-lite default thinking: Minimal -> Low;
 --   gemini-3-flash-preview default thinking: Low -> Minimal.
 -- Without this, users who'd already picked a model/thinking combo
 -- before v1.1.4 would silently keep it and never see the new
--- recommendations -- the "*" badge would still mark the recommended
+-- recommendations -- the picker badge would still mark the recommended
 -- row, but the user's saved selection would still load on launch.
 --
 -- Same sentinel pattern as v1 above: fires exactly once per install
@@ -4314,25 +4357,6 @@ do
   end
 end
 
--- Experimental built-in unlock. PROVIDERS may carry `hidden = true` on a
--- built-in entry to gate it behind an ExtState flag while the integration
--- is still being shaken out. Setting the flag to "1" clears the field on
--- every matching entry, making it indistinguishable from a regular built-in
--- for the rest of the script (chip dropdown, Settings cards, Test API Keys,
--- request build/response parse, etc.). Flipping the flag back to anything
--- else re-hides on the next script load -- the snap-back below pulls
--- prefs.provider_idx off any provider that ends up hidden so the home
--- screen does not boot into a blank chip.
-do
-  local function _unlock_if(extstate_key, provider_id)
-    if reaper.GetExtState(CFG.EXT_NS, extstate_key) == "1" then
-      local p = PROVIDERS.get(provider_id)
-      if p then p.hidden = nil end
-    end
-  end
-  _unlock_if("experimental_deepseek", "deepseek")
-end
-
 -- =============================================================================
 -- Provider + Model selector
 -- =============================================================================
@@ -4359,20 +4383,6 @@ local function _prefs_load_idx(key, default, list)
 end
 
 prefs.provider_idx = _prefs_load_idx("provider_idx", 1, PROVIDERS)
-
--- Hidden-provider snap-back. If the persisted provider_idx points at a
--- built-in that is currently hidden (the unlock flag was on previously,
--- the user picked it, and the flag is now off), every UI surface filters
--- it out -- the home chip would render blank and the model picker would
--- be empty. Snap to the canonical default (1 = Claude) and persist so
--- the next launch does not re-snap. Custom providers cannot carry the
--- hidden field, so the check is harmless when the active slot is custom.
-if PROVIDERS[prefs.provider_idx]
-   and PROVIDERS[prefs.provider_idx].hidden then
-  prefs.provider_idx = 1
-  reaper.SetExtState(CFG.EXT_NS, "provider_idx",
-    tostring(prefs.provider_idx), true)
-end
 
 -- Load cloud_request_timeout (default CFG.CLOUD_TIMEOUT_DEFAULT = 180s). Clamp
 -- to [CLOUD_TIMEOUT_MIN, CLOUD_TIMEOUT_MAX] so a corrupt ExtState value can't
@@ -4462,6 +4472,8 @@ ICON = {
   TRASH            = _utf8(0xE18E),  -- Lucide trash-2 glyph; row-delete affordance
   INFO             = _utf8(0xE0F9),
   CHECK            = _utf8(0xE06C),
+  BADGE_CHECK      = _utf8(0xE241),  -- Lucide badge-check glyph; model-picker recommended badge
+  TRIANGLE_ALERT   = _utf8(0xE193),  -- Lucide triangle-alert / alert-triangle glyph; model-picker warning badge
   PLAY             = _utf8(0xE13C),
   ZAP              = _utf8(0xE1B4),
   CORNER_DOWN_LEFT = _utf8(0xE0A1),
@@ -4543,6 +4555,59 @@ function MODELS.active_id()
   return m and m.id or PROVIDERS.active().models[1].id
 end
 
+function PROVIDERS.switch_to_model(provider_id, model_id)
+  local prov_idx = PROVIDERS._by_id[provider_id or ""]
+  local p_new = prov_idx and PROVIDERS[prov_idx] or nil
+  if not p_new then return false, "Provider is not available." end
+
+  local old_provider_idx = prefs.provider_idx
+  local p_old = PROVIDERS.active()
+  if p_old then
+    reaper.SetExtState(CFG.EXT_NS, "model_idx_" .. p_old.id,
+      tostring(prefs.model_idx), true)
+    if p_old.thinking_levels and prefs.thinking_idx > 0 then
+      local old_m = MODELS[prefs.model_idx] or MODELS[1]
+      PROVIDERS.save_thinking_idx(p_old, old_m, prefs.thinking_idx)
+    end
+    if p_old.id == "google" then Net.gemini_cache_invalidate() end
+  end
+
+  prefs.provider_idx = prov_idx
+  reaper.SetExtState(CFG.EXT_NS, "provider_idx", tostring(prov_idx), true)
+  MODELS.refresh()
+
+  local target_idx, target_model
+  for i, m in ipairs(MODELS) do
+    if m.id == model_id then
+      target_idx, target_model = i, m
+      break
+    end
+  end
+  if not target_idx then
+    prefs.provider_idx = old_provider_idx
+    reaper.SetExtState(CFG.EXT_NS, "provider_idx", tostring(old_provider_idx), true)
+    MODELS.refresh()
+    S.api_key = S.api_key_map[PROVIDERS.active().id]
+    return false, "That model is not available for the current account tier."
+  end
+
+  prefs.model_idx = target_idx
+  reaper.SetExtState(CFG.EXT_NS, "model_idx_" .. p_new.id,
+    tostring(target_idx), true)
+  if p_new.thinking_levels then
+    prefs.thinking_idx = PROVIDERS.load_thinking_idx(p_new, target_model)
+  else
+    prefs.thinking_idx = 0
+  end
+  if p_new.id == "google" then Net.gemini_cache_invalidate() end
+  S.api_key = S.api_key_map[p_new.id]
+  S.api_ref_message = nil
+  for _, att in ipairs(S.attachments or {}) do
+    att.cost = att.tokens * (target_model.price_in or 0) / 1000000
+  end
+  return true
+end
+
 -- =============================================================================
 -- API key loading
 -- =============================================================================
@@ -4603,20 +4668,16 @@ end
 -- leave paid_only models (Gemini Pro) visible to free-tier users.
 MODELS.refresh()
 
--- Determine the initial first-run screen. Order: TOS first, then API key, then main UI.
--- Show the first-run API key screen only if NO usable VISIBLE provider exists:
--- a built-in with a saved key (that isn't hidden) OR a registered custom
--- provider. A hidden provider's key in api_key_map (e.g. an experimental
--- DeepSeek key persisted from a prior unlocked session) does NOT count --
--- otherwise a tester who flips off the unlock would skip first-run and land
--- on the main UI with no usable provider chip.
+-- Determine the initial first-run screen. Order: TOS first, then API key,
+-- then main UI. Show the first-run API key screen only if no usable provider
+-- exists: a built-in with a saved key OR a registered custom provider.
 --
 -- The visibility scan lives inside a do-block so its locals don't count
 -- against the main chunk's 200-local limit (already very near the cap).
 do
   local has_usable = false
   for _, p in ipairs(PROVIDERS) do
-    if p.is_custom or (not p.hidden and S.api_key_map[p.id]) then
+    if p.is_custom or S.api_key_map[p.id] then
       has_usable = true; break
     end
   end
@@ -5119,11 +5180,10 @@ UI.MODEL_TIPS = {
   ["gpt-5.4-nano"]                   = "Cheapest GPT. Use None thinking. Simple tasks only -- pick full GPT-5.4 for complex.",
   ["gpt-5.4-mini"]                   = "Cheap GPT. Use Low thinking. Simple tasks only -- pick full GPT-5.4 for complex.",
   ["gpt-5.4"]                        = "Recommended OpenAI default. Use None thinking. Reliable on simple and complex tasks.",
-  ["gemini-3.1-flash-lite-preview"]  = "Cheapest Gemini. Use Low thinking. Pro 3.1 Medium is better for complex prompts.",
-  ["gemini-3-flash-preview"]         = "Cheap Gemini. Use Minimal thinking. Fastest combo in the lineup.",
-  ["gemini-3.1-pro-preview"]         = "Premium Gemini. Use Medium thinking. Slower and pricier than Flash.",
+  ["gemini-3.1-flash-lite"]          = "Cheapest Gemini. Use Low thinking. Stable fallback when Pro 3.1 Preview is at capacity.",
+  ["gemini-3-flash-preview"]         = "Cheap Gemini preview. Use Minimal thinking. Usually fast, but preview latency can spike; Flash Lite Low is steadier.",
+  ["gemini-3.1-pro-preview"]         = "Premium Gemini preview. Use Medium thinking. Capacity has been unreliable; Flash 3 is safer.",
   ["deepseek-v4-flash"]              = "Cheapest combo in the lineup. Use Non-Thinking. Strong cheap pick.",
-  ["deepseek-v4-pro"]                = "Higher-cost DeepSeek. Use Non-Thinking. Flash is usually the better pick.",
 }
 
 -- Per-(provider, model, thinking) explainer line. Rendered as a static muted
@@ -5180,34 +5240,53 @@ UI.COMBO_HINTS = {
     },
   },
   google = {
-    ["gemini-3.1-flash-lite-preview"] = {
+    ["gemini-3.1-flash-lite"] = {
       MINIMAL = "Simple tasks only | Cheap | Fast | Low is more reliable on complex routing",
       LOW     = "Recommended Level | Simple and complex | Cheap | Fast",
-      MEDIUM  = "Simple and complex | Cheap | Slow | Pro 3.1 usually better at this depth",
-      HIGH    = "Avoid complex prompts | Cheap | Very slow | Runtime-error risk; pick Flash Lite Low or Pro 3.1 Medium",
+      MEDIUM  = "Simple and complex | Cheap | Slow | Flash 3 Minimal is usually better value",
+      HIGH    = "Avoid complex prompts | Cheap | Very slow | Runtime-error risk; pick Flash Lite Low or Flash 3 Minimal",
     },
     ["gemini-3-flash-preview"] = {
-      MINIMAL = "Recommended Level | Simple and complex | Cheap | Very fast (fastest in lineup)",
-      LOW     = "Simple and complex | Cheap | Fast | Adds reasoning over Minimal at modest extra cost",
-      MEDIUM  = "Simple and complex | Cheap | Moderate speed | Solid for tougher prompts",
-      HIGH    = "Simple and complex | Cheap | Moderate speed | Pro 3.1 may fit complex prompts better",
+      MINIMAL = "Recommended Level | Simple and complex | Cheap | Usually fast, but preview latency can spike | Flash Lite Low is steadier",
+      LOW     = "Simple and complex | Cheap | Usually fast | Adds reasoning over Minimal, but Flash Lite Low is steadier",
+      MEDIUM  = "Simple and complex | Cheap | Moderate speed | Use Flash Lite Low if preview latency spikes",
+      HIGH    = "Simple and complex | Cheap | Moderate speed | Try Minimal or Flash Lite Low first",
     },
     ["gemini-3.1-pro-preview"] = {
-      LOW     = "Simple and complex | Mid-cost | Moderate speed | Underuses Pro -- Medium is provider default",
-      MEDIUM  = "Recommended Level | Simple and complex (best Gemini quality) | Mid-cost | Moderate speed",
-      HIGH    = "Simple and complex | Mid-cost | Moderate speed | Marginal lift over Medium",
+      LOW     = "Not recommended | Capacity-prone preview | Mid-cost | Underuses Pro -- use Flash 3 if 503s appear",
+      MEDIUM  = "Model default | Best Gemini quality when available | Capacity-prone preview | Use Flash 3 if 503s appear",
+      HIGH    = "Not recommended | Capacity-prone preview | Mid-cost | Marginal lift over Medium",
     },
   },
   deepseek = {
     ["deepseek-v4-flash"] = {
       disabled = "Recommended Level | Simple and complex | Cheapest in lineup | Very fast | Strong cheap pick",
-      enabled  = "Simple and complex | Cheap | Slow | Reasoning lift rarely worth the latency",
-    },
-    ["deepseek-v4-pro"] = {
-      disabled = "Recommended Level | Simple and complex | Mid-cost | Slow | Slower and pricier than Flash without measured gain -- use Flash",
-      enabled  = "Avoid for normal use | Mid-cost | Very slow (often times out) | Pick V4 Flash Non-Thinking",
     },
   },
+}
+
+-- Severity badges for the most discouraging provider/model/thinking combos.
+-- Keep this list intentionally short: the warning icon should mean "think hard
+-- before choosing this", not merely "not the default". These keys mirror
+-- UI.COMBO_HINTS so the row tooltip and the active-combo hint remain the
+-- source of the explanatory copy.
+UI.COMBO_TONES = {
+  anthropic = {
+    ["claude-sonnet-4-6"] = {
+      high = "warn",
+    },
+  },
+  google = {
+    ["gemini-3.1-flash-lite"] = {
+      HIGH = "warn",
+    },
+    ["gemini-3.1-pro-preview"] = {
+      LOW = "warn",
+      MEDIUM = "warn",
+      HIGH = "warn",
+    },
+  },
+  deepseek = {},
 }
 
 -- Look up the explainer line for the current (provider, model, thinking) pick.
@@ -5223,6 +5302,21 @@ function UI.combo_hint(provider, model, thinking_level)
   if not key then return nil end
   return m_tbl[key]
 end
+
+-- Look up the visual tone for the current (provider, model, thinking) pick.
+-- Returns "warn" for combos that should carry the triangle-alert badge, or nil
+-- for normal rows. Custom providers are skipped because their model/tuning
+-- semantics are user-defined.
+function UI.combo_tone(provider, model, thinking_level)
+  if not (provider and model) then return nil end
+  if provider.is_custom then return nil end
+  local p_tbl = UI.COMBO_TONES[provider.id]; if not p_tbl then return nil end
+  local m_tbl = p_tbl[model.id];             if not m_tbl then return nil end
+  local key = thinking_level and thinking_level.value
+  if not key then return nil end
+  return m_tbl[key]
+end
+
 
 -- Floating toast: a top-level rounded bubble near the bottom-center of the
 -- ReaAssist window. Draws its OWN window on top of whatever's below, so it's
@@ -7358,14 +7452,15 @@ function Log.scrub_url_secrets(s)
 end
 
 -- Queue an error message into S.display_messages as an assistant turn,
--- flip S.status to "error", clear S.send_time, and scroll to bottom.
+-- flip S.status to "error", clear in-flight timers, and scroll to bottom.
 -- Optional link_url/link_label render a clickable URL beneath the text.
--- Optional `recovery = "token_limit"` renders inline recovery buttons
--- (bump max tokens / lower thinking), scoped to the provider that was
--- active at error time via provider_id on the message.
-function Log.add_error(msg, link_url, link_label, recovery)
-  S.status    = "error"
-  S.send_time = nil
+-- Optional `recovery` renders inline recovery buttons scoped by provider/model
+-- metadata on the message. `extra` can stamp recovery-specific payload such as
+-- a saved prompt or fallback model id.
+function Log.add_error(msg, link_url, link_label, recovery, extra)
+  S.status             = "error"
+  S.send_time          = nil
+  S.request_start_time = nil
   local entry = {
     role       = "assistant",
     content    = Log.scrub_url_secrets(msg),
@@ -7373,9 +7468,12 @@ function Log.add_error(msg, link_url, link_label, recovery)
     link_label = link_label,
     recovery   = recovery,
   }
-  if recovery == "token_limit" then
+  if recovery == "token_limit" or recovery == "google_model_capacity" then
     local p = PROVIDERS.active()
     entry.provider_id = p and p.id or nil
+  end
+  if type(extra) == "table" then
+    for k, v in pairs(extra) do entry[k] = v end
   end
   S.display_messages[#S.display_messages+1] = entry
   S.scroll_to_bottom = true
@@ -8116,6 +8214,229 @@ end
 -- (Lua 5.x 200-local limit). Each function takes (proj) and returns a string.
 CTX = {}
 
+function CTX.reaper_version()
+  return "REAPER version: " .. tostring(reaper.GetAppVersion() or "unknown")
+end
+
+function CTX.reaassist_version()
+  return "ReaAssist version: " .. tostring(CFG.VERSION or "unknown")
+end
+
+function CTX.extension_status(user_text)
+  local text = tostring(user_text or ""):lower()
+  local clean = text:gsub("[_%-%s]+", " ")
+  local compact = clean:gsub("%s+", "")
+  local wants_imgui = compact:find("reaimgui", 1, true) ~= nil
+  local wants_sws = text:find("%f[%w]sws%f[%W]") ~= nil
+  local wants_jsapi = compact:find("jsreascriptapi", 1, true) ~= nil
+    or clean:find("js reascript api", 1, true) ~= nil
+    or clean:find("reascript api", 1, true) ~= nil
+  local wants_all = clean:find("%f[%w]extensions?%f[%W]") ~= nil
+    and (clean:find("%f[%w]installed%f[%W]") ~= nil
+      or clean:find("%f[%w]available%f[%W]") ~= nil
+      or clean:find("%f[%w]status%f[%W]") ~= nil
+      or clean:find("%f[%w]version%f[%W]") ~= nil
+      or clean:find("%f[%w]have%f[%W]") ~= nil)
+  if not (wants_imgui or wants_sws or wants_jsapi or wants_all) then
+    return nil
+  end
+
+  local function try(fn)
+    local ok, a, b, c, d = pcall(fn)
+    if ok then return a, b, c, d end
+  end
+  local function fmt(label, installed, version)
+    if not installed then return label .. ": not installed" end
+    return label .. ": installed"
+      .. (version and version ~= "" and (" (" .. tostring(version) .. ")") or "")
+  end
+  local function imgui_line()
+    local installed = reaper.ImGui_CreateContext ~= nil
+    local ver = nil
+    if installed and reaper.ImGui_GetVersion then
+      local a, _, _, d = try(function() return reaper.ImGui_GetVersion() end)
+      ver = d or a
+    end
+    return fmt("ReaImGui", installed, ver)
+  end
+  local function sws_line()
+    local installed = reaper.CF_GetSWSVersion ~= nil
+    local ver = nil
+    if installed then
+      ver = try(function() return reaper.CF_GetSWSVersion("") end)
+      if not ver or ver == "" then
+        ver = try(function() return reaper.CF_GetSWSVersion() end)
+      end
+    end
+    return fmt("SWS Extension", installed, ver)
+  end
+  local function jsapi_line()
+    local installed = reaper.JS_ReaScriptAPI_Version ~= nil
+    local ver = installed and try(function()
+      return reaper.JS_ReaScriptAPI_Version()
+    end) or nil
+    return fmt("js_ReaScriptAPI", installed, ver)
+  end
+
+  local lines = {}
+  if wants_all or wants_imgui then lines[#lines + 1] = imgui_line() end
+  if wants_all or wants_sws then lines[#lines + 1] = sws_line() end
+  if wants_all or wants_jsapi then lines[#lines + 1] = jsapi_line() end
+  if #lines == 1 then return lines[1] end
+  return "ReaAssist extension status:\n" .. tbl_concat(lines, "\n")
+end
+
+function CTX.ai_selection_status(user_text)
+  local text = tostring(user_text or ""):lower()
+  local clean = text:gsub("[_%-%s]+", " ")
+  local mentions_model = clean:find("%f[%w]model%f[%W]") ~= nil
+  local mentions_provider = clean:find("%f[%w]provider%f[%W]") ~= nil
+  local mentions_thinking = clean:find("%f[%w]thinking%f[%W]") ~= nil
+    or clean:find("%f[%w]reasoning%f[%W]") ~= nil
+  local mentions_ai = clean:find("%f[%w]ai%f[%W]") ~= nil
+    or clean:find("%f[%w]llm%f[%W]") ~= nil
+    or clean:find("%f[%w]reaassist%f[%W]") ~= nil
+  local selection_word = clean:find("%f[%w]selected%f[%W]") ~= nil
+    or clean:find("%f[%w]active%f[%W]") ~= nil
+    or clean:find("%f[%w]current%f[%W]") ~= nil
+    or clean:find("%f[%w]using%f[%W]") ~= nil
+    or clean:find("%f[%w]use%f[%W]") ~= nil
+    or clean:find("%f[%w]you%f[%W]") ~= nil
+  if not (mentions_model or mentions_provider or mentions_thinking) then
+    return nil
+  end
+  if not (selection_word or mentions_ai) then return nil end
+  if type(PROVIDERS) ~= "table"
+      or type(PROVIDERS.active) ~= "function"
+      or type(MODELS) ~= "table"
+      or type(prefs) ~= "table" then
+    return nil
+  end
+
+  local function try(fn)
+    local ok, v = pcall(fn)
+    if ok then return v end
+  end
+  local p = try(function() return PROVIDERS.active() end) or {}
+  local m = MODELS[prefs.model_idx] or MODELS[1] or {}
+  local provider_label = tostring(p.label or p.id or "unknown")
+  if p.id and p.id ~= p.label then
+    provider_label = provider_label .. " (" .. tostring(p.id) .. ")"
+  end
+  local model_id = try(function()
+    if type(MODELS.active_id) == "function" then return MODELS.active_id() end
+  end) or m.id
+  local model_label = tostring(m.label or model_id or "unknown")
+  if model_id and tostring(model_id) ~= model_label then
+    model_label = model_label .. " (" .. tostring(model_id) .. ")"
+  end
+  local thinking_label = "not available"
+  if p.thinking_levels and prefs.thinking_idx and prefs.thinking_idx > 0 then
+    local tl = p.thinking_levels[prefs.thinking_idx]
+    if tl and tl.label then thinking_label = tostring(tl.label) end
+  end
+  return "AI selection:\nProvider: " .. provider_label
+    .. "\nModel: " .. model_label
+    .. "\nThinking: " .. thinking_label
+end
+
+function CTX.reaassist_settings_status(user_text)
+  local text = tostring(user_text or ""):lower()
+  local clean = text:gsub("[_%-%s]+", " ")
+  local compact = clean:gsub("%s+", "")
+  local mentions_settings = clean:find("%f[%w]settings%f[%W]") ~= nil
+    or clean:find("%f[%w]preferences%f[%W]") ~= nil
+  local mentions_reaassist = clean:find("%f[%w]reaassist%f[%W]") ~= nil
+  local wants_auto_run = compact:find("autorun", 1, true) ~= nil
+  local wants_auto_backup = compact:find("autobackup", 1, true) ~= nil
+    or ((clean:find("%f[%w]backup%f[%W]") ~= nil
+      or clean:find("%f[%w]backups%f[%W]") ~= nil)
+      and (mentions_settings or mentions_reaassist
+        or clean:find("%f[%w]enabled%f[%W]") ~= nil
+        or clean:find("%f[%w]on%f[%W]") ~= nil
+        or clean:find("%f[%w]off%f[%W]") ~= nil))
+  local wants_snapshot = clean:find("project snapshot", 1, true) ~= nil
+    or clean:find("include snapshot", 1, true) ~= nil
+    or clean:find("snapshot context", 1, true) ~= nil
+  local wants_api_ref = clean:find("api reference", 1, true) ~= nil
+    or clean:find("api ref", 1, true) ~= nil
+  local wants_structured = clean:find("structured edit", 1, true) ~= nil
+    or clean:find("structured edits", 1, true) ~= nil
+    or clean:find("typed action", 1, true) ~= nil
+    or clean:find("typed actions", 1, true) ~= nil
+  local wants_debug = clean:find("debug logging", 1, true) ~= nil
+    or clean:find("debug log", 1, true) ~= nil
+  local wants_update_check = clean:find("update check", 1, true) ~= nil
+    or clean:find("update checking", 1, true) ~= nil
+    or clean:find("check for updates", 1, true) ~= nil
+  local wants_summary = mentions_reaassist and mentions_settings
+  if not (wants_summary or wants_auto_run or wants_auto_backup
+      or wants_snapshot or wants_api_ref or wants_structured
+      or wants_debug or wants_update_check) then
+    return nil
+  end
+  if type(prefs) ~= "table" then return nil end
+
+  local function onoff(v) return v and "ON" or "OFF" end
+  local structured_state = "built in"
+  if type(Code) == "table"
+      and type(Code.typed_actions_public_force_off) == "function"
+      and Code.typed_actions_public_force_off() then
+    structured_state = "temporarily disabled"
+  end
+  if wants_structured and not (wants_summary or wants_auto_run
+      or wants_auto_backup or wants_snapshot or wants_api_ref
+      or wants_debug or wants_update_check) then
+    return "Structured track edits: " .. structured_state
+  end
+  return "ReaAssist settings:\n"
+    .. "Auto-run scripts: " .. onoff(prefs.auto_run) .. "\n"
+    .. "Auto-backup before run: " .. onoff(prefs.auto_backup) .. "\n"
+    .. "Include project snapshot: " .. onoff(prefs.include_snapshot) .. "\n"
+    .. "Always include API reference: " .. onoff(prefs.include_api_ref) .. "\n"
+    .. "Debug logging: " .. onoff(prefs.debug_logging) .. "\n"
+    .. "Check for updates: " .. onoff(prefs.update_check)
+end
+
+function CTX.diagnostics_status(user_text)
+  local text = tostring(user_text or ""):lower()
+  local clean = text:gsub("[_%-%s]+", " ")
+  local mentions_diag = clean:find("%f[%w]diagnostics?%f[%W]") ~= nil
+    or clean:find("automatic diagnostics", 1, true) ~= nil
+    or clean:find("anonymous diagnostics", 1, true) ~= nil
+  if not mentions_diag then return nil end
+  local wants_status = clean:find("%f[%w]status%f[%W]") ~= nil
+    or clean:find("%f[%w]tier%f[%W]") ~= nil
+    or clean:find("%f[%w]setting%f[%W]") ~= nil
+    or clean:find("%f[%w]settings%f[%W]") ~= nil
+    or clean:find("%f[%w]selected%f[%W]") ~= nil
+    or clean:find("%f[%w]current%f[%W]") ~= nil
+    or clean:find("%f[%w]enabled%f[%W]") ~= nil
+    or clean:find("%f[%w]on%f[%W]") ~= nil
+    or clean:find("%f[%w]off%f[%W]") ~= nil
+    or clean:find("%f[%w]basic%f[%W]") ~= nil
+    or clean:find("%f[%w]extended%f[%W]") ~= nil
+  if not wants_status then return nil end
+
+  local tier = nil
+  if type(Diag) == "table" and type(Diag.current_tier) == "function" then
+    local ok, value = pcall(Diag.current_tier)
+    if ok then tier = value end
+  end
+  if (tier == nil or tier == "") and type(prefs) == "table" then
+    tier = prefs.diag_auto_tier
+  end
+  tier = tostring(tier or "basic"):lower()
+  if tier ~= "basic" and tier ~= "extended" then tier = "off" end
+
+  local label = tier == "extended" and "Extended"
+    or tier == "basic" and "Basic"
+    or "Off"
+  local enabled = tier ~= "off"
+  return "Automatic diagnostics: " .. (enabled and "ON" or "OFF")
+    .. " (" .. label .. ")"
+end
+
 function CTX.tempo(proj)
   -- TimeMap_GetTimeSigAtTime reads the actual tempo map at the edit cursor
   -- position, correctly reflecting any time signature and BPM set via tempo
@@ -8178,7 +8499,9 @@ function CTX.tracks(proj, opts)
   if count == 0 then return "Tracks: none" end
   local minimal = opts and opts.minimal
   local sel_lines = {}
-  local lines = { str_format("Tracks (N=%d) [idx|name|items]:", count) }
+  local lines = {
+    str_format("Tracks (N=%d) [idx|name|items|folder_delta]:", count),
+  }
   for i = 0, count - 1 do
     -- Long-lived defer scripts can race with project tab close / reload
     -- between R_CountTracks and the following R_GetTrack: the count
@@ -8188,13 +8511,17 @@ function CTX.tracks(proj, opts)
     if tr then
       local _, nm      = R_GetTrackName(tr)
       local item_count = R_CountTrackMediaItems(tr)
+      local folder_delta =
+        math_floor(R_GetMediaTrackInfo_Value(tr, "I_FOLDERDEPTH") or 0)
       if minimal then
         if R_IsTrackSelected(tr) then
           sel_lines[#sel_lines+1] = str_format(
-            "%d|%s|%d", i + 1, _scrub_pipes(nm), item_count)
+            "%d|%s|%d|%d", i + 1, _scrub_pipes(nm), item_count,
+            folder_delta)
         end
       else
-        lines[#lines+1] = str_format("%d|%s|%d", i + 1, _scrub_pipes(nm), item_count)
+        lines[#lines+1] = str_format("%d|%s|%d|%d",
+          i + 1, _scrub_pipes(nm), item_count, folder_delta)
       end
     end
   end
@@ -8206,7 +8533,7 @@ function CTX.tracks(proj, opts)
     end
     local out = {
       str_format(
-        "Tracks (N=%d, showing selected only -- JSFX prompt) [idx|name|items]:",
+        "Tracks (N=%d, showing selected only -- JSFX prompt) [idx|name|items|folder_delta]:",
         count),
     }
     for _, ln in ipairs(sel_lines) do out[#out+1] = ln end
@@ -8239,18 +8566,194 @@ function CTX.track_flags(proj)
   return tbl_concat(rows, "\n")
 end
 
+function CTX.tracks_matching_flags(proj, opts)
+  opts = opts or {}
+  local selected_only = opts.selected_only == true
+  local wanted_count = (opts.muted and 1 or 0)
+    + (opts.soloed and 1 or 0)
+    + (opts.armed and 1 or 0)
+  if wanted_count == 0 then return CTX.track_flags(proj) end
+  local single_label
+  if wanted_count == 1 then
+    if opts.muted then single_label = opts.invert and "Unmuted tracks" or "Muted tracks"
+    elseif opts.soloed then single_label = opts.invert and "Unsoloed tracks" or "Soloed tracks"
+    else single_label = opts.invert and "Unarmed tracks" or "Armed tracks" end
+    if selected_only then single_label = "Selected " .. single_label:lower() end
+  end
+  local rows = {}
+  local total = 0
+  local count = R_CountTracks(proj)
+  for i = 0, count - 1 do
+    local tr = R_GetTrack(proj, i)
+    if tr and (not selected_only or R_IsTrackSelected(tr)) then
+      local flags = {}
+      local muted_value = R_GetMediaTrackInfo_Value(tr, "B_MUTE")
+      local soloed_value = R_GetMediaTrackInfo_Value(tr, "I_SOLO")
+      local armed_value = R_GetMediaTrackInfo_Value(tr, "I_RECARM")
+      local is_muted = muted_value == true or (tonumber(muted_value) or 0) ~= 0
+      local is_soloed = soloed_value == true or (tonumber(soloed_value) or 0) ~= 0
+      local is_armed = armed_value == true or (tonumber(armed_value) or 0) ~= 0
+      if opts.muted and ((opts.invert and not is_muted)
+          or ((not opts.invert) and is_muted)) then
+        flags[#flags + 1] = "muted"
+      end
+      if opts.soloed and ((opts.invert and not is_soloed)
+          or ((not opts.invert) and is_soloed)) then
+        flags[#flags + 1] = "soloed"
+      end
+      if opts.armed and ((opts.invert and not is_armed)
+          or ((not opts.invert) and is_armed)) then
+        flags[#flags + 1] = "armed"
+      end
+      if #flags > 0 then
+        total = total + 1
+        if #rows < 40 then
+          local _, nm = R_GetTrackName(tr)
+          if single_label then
+            rows[#rows + 1] = str_format("%d. %s", i + 1,
+              nm ~= "" and nm or "(unnamed)")
+          else
+            rows[#rows + 1] = str_format("%d|%s|%s", i + 1,
+              _scrub_pipes(nm), tbl_concat(flags, ","))
+          end
+        end
+      end
+    end
+  end
+  if single_label then
+    if total == 0 then return single_label .. ": none" end
+    local lines = { str_format("%s: %d", single_label, total) }
+    for _, row in ipairs(rows) do lines[#lines + 1] = row end
+    if total > #rows then
+      lines[#lines + 1] = str_format("(+%d more)", total - #rows)
+    end
+    return tbl_concat(lines, "\n")
+  end
+  local label = selected_only and "Selected track flags" or "Track flags"
+  if total == 0 then return label .. ": none" end
+  table.insert(rows, 1, label .. " [idx|name|flags]:")
+  if total > #rows - 1 then
+    rows[#rows + 1] = str_format("(+%d more)", total - (#rows - 1))
+  end
+  return tbl_concat(rows, "\n")
+end
+
+function CTX.track_properties(proj, opts)
+  local selected_only = opts and opts.selected_only == true
+  local source_track = opts and opts.source_track or nil
+  local source_name = opts and opts.source_name or nil
+  local rows = {}
+  local count = R_CountTracks(proj)
+  for i = 0, count - 1 do
+    local tr = R_GetTrack(proj, i)
+    if tr
+        and (not selected_only or R_IsTrackSelected(tr))
+        and (not source_track or tr == source_track) then
+      local _, nm = R_GetTrackName(tr)
+      local vol = R_GetMediaTrackInfo_Value(tr, "D_VOL") or 1
+      local vol_db = vol > 0 and str_format("%.2f", 20 * math.log(vol, 10))
+        or "-inf"
+      local pan_pct = str_format("%.0f",
+        (R_GetMediaTrackInfo_Value(tr, "D_PAN") or 0) * 100)
+      local muted = R_GetMediaTrackInfo_Value(tr, "B_MUTE") == 1
+      local soloed = (R_GetMediaTrackInfo_Value(tr, "I_SOLO") or 0) ~= 0
+      local armed = R_GetMediaTrackInfo_Value(tr, "I_RECARM") == 1
+      local main_send = R_GetMediaTrackInfo_Value(tr, "B_MAINSEND") ~= 0
+      rows[#rows+1] = str_format("%d|%s|%s|%s|%s|%s|%s|%s",
+        i + 1, _scrub_pipes(nm), vol_db, pan_pct,
+        muted and "yes" or "no",
+        soloed and "yes" or "no",
+        armed and "yes" or "no",
+        main_send and "yes" or "no")
+    end
+  end
+  if #rows == 0 then
+    if source_track then
+      return "Track properties: none on " .. (source_name or "track")
+    end
+    return selected_only and "Track properties: none on selected tracks"
+      or "Track properties: none"
+  end
+  table.insert(rows, 1,
+    "Track properties [idx|name|vol_db|pan_pct|muted|solo|armed|main_send]:")
+  return tbl_concat(rows, "\n")
+end
+
+function CTX.tracks_without_master_output(proj, opts)
+  local selected_only = opts and opts.selected_only == true
+  local label = selected_only and "Selected tracks without master output"
+    or "Tracks without master output"
+  local total = 0
+  local rows = {}
+  local count = R_CountTracks(proj)
+  for i = 0, count - 1 do
+    local tr = R_GetTrack(proj, i)
+    if tr and (not selected_only or R_IsTrackSelected(tr)) then
+      if R_GetMediaTrackInfo_Value(tr, "B_MAINSEND") == 0 then
+        total = total + 1
+        if #rows < 40 then
+          local _, nm = R_GetTrackName(tr)
+          rows[#rows + 1] = str_format("%d. %s", i + 1,
+            nm ~= "" and nm or "(unnamed)")
+        end
+      end
+    end
+  end
+  if total == 0 then return label .. ": none" end
+  local lines = { str_format("%s: %d", label, total) }
+  for _, row in ipairs(rows) do lines[#lines + 1] = row end
+  if total > #rows then
+    lines[#lines + 1] = str_format("(+%d more)", total - #rows)
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.track_master_output_answer(source_track, source_name)
+  if not source_track then return nil end
+  local has_master = (R_GetMediaTrackInfo_Value(source_track, "B_MAINSEND") or 0) ~= 0
+  if has_master then
+    return "Master output: yes, " .. tostring(source_name or "track")
+      .. " sends to master"
+  end
+  return "Master output: no, " .. tostring(source_name or "track")
+    .. " does not send to master"
+end
+
+function CTX.local_master_output_presence_query(lt)
+  local text = tostring(lt or ""):lower()
+  text = text:gsub("[%.%?%!]+$", "")
+  local track_query =
+       text:match("^%s*does%s+(.+)%s+have%s+master%s+output%s*$")
+    or text:match("^%s*does%s+(.+)%s+have%s+main%s+output%s*$")
+    or text:match("^%s*does%s+(.+)%s+send%s+to%s+master%s*$")
+    or text:match("^%s*does%s+(.+)%s+send%s+to%s+the%s+master%s*$")
+    or text:match("^%s*is%s+(.+)%s+sent%s+to%s+master%s*$")
+    or text:match("^%s*is%s+(.+)%s+sent%s+to%s+the%s+master%s*$")
+    or text:match("^%s*is%s+(.+)%s+routed%s+to%s+master%s*$")
+    or text:match("^%s*is%s+(.+)%s+routed%s+to%s+the%s+master%s*$")
+  if not track_query then return nil end
+  track_query = track_query:gsub("^%s+", ""):gsub("%s+$", "")
+  if track_query == "" then return nil end
+  return track_query
+end
+
 -- Cap the per-snapshot FX listing so a 100+ track session doesn't dump
 -- 30K+ bytes of FX names every turn. Selected tracks are reported first and
 -- always survive the cap; remaining tracks fill up to the limit. The model
 -- can request the full listing on demand via <context_needed>fx_chains</...>.
 CTX.MAX_FX_REPORT = 30
 
-function CTX.fx(proj)
+function CTX.fx(proj, opts)
   local count = R_CountTracks(proj)
+  local selected_only = opts and opts.selected_only == true
+  local source_track = opts and opts.source_track or nil
+  local source_name = opts and opts.source_name or nil
   local sel_with_fx, other_with_fx = {}, {}
   for i = 0, count - 1 do
     local tr = R_GetTrack(proj, i)
-    if tr then
+    if tr
+        and (not selected_only or R_IsTrackSelected(tr))
+        and (not source_track or tr == source_track) then
       local fx_count = R_TrackFX_GetCount(tr)
       if fx_count > 0 then
         local _, nm = R_GetTrackName(tr)
@@ -8271,7 +8774,12 @@ function CTX.fx(proj)
     end
   end
   local total = #sel_with_fx + #other_with_fx
-  if total == 0 then return "FX chains: none" end
+  if total == 0 then
+    if source_track then
+      return "FX chains: none on " .. (source_name or "track")
+    end
+    return selected_only and "FX chains: none on selected tracks" or "FX chains: none"
+  end
   local lines = { "FX chains [track_idx|track_name|[fx_idx]fx_name,...]:" }
   for _, e in ipairs(sel_with_fx) do lines[#lines+1] = e end
   local remaining = math_max(0, CTX.MAX_FX_REPORT - #sel_with_fx)
@@ -8288,6 +8796,386 @@ function CTX.fx(proj)
       omitted)
   end
   return tbl_concat(lines, "\n")
+end
+
+function CTX.tracks_without_fx(proj, opts)
+  local selected_only = opts and opts.selected_only == true
+  local total = 0
+  local rows = {}
+  local count = R_CountTracks(proj)
+  for i = 0, count - 1 do
+    local tr = R_GetTrack(proj, i)
+    if tr and (not selected_only or R_IsTrackSelected(tr)) then
+      local fx_count = R_TrackFX_GetCount(tr) or 0
+      if fx_count == 0 then
+        total = total + 1
+        if #rows < 40 then
+          local _, nm = R_GetTrackName(tr)
+          rows[#rows + 1] = str_format("%d. %s", i + 1,
+            nm ~= "" and nm or "(unnamed)")
+        end
+      end
+    end
+  end
+  local label = selected_only and "Selected tracks without FX"
+    or "Tracks without FX"
+  if total == 0 then return label .. ": none" end
+  local lines = { str_format("%s: %d", label, total) }
+  for _, row in ipairs(rows) do lines[#lines + 1] = row end
+  if total > #rows then
+    lines[#lines + 1] = str_format("(+%d more)", total - #rows)
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.local_fx_search_key(s)
+  s = tostring(s or ""):lower()
+  s = s:gsub("^%w+:%s*", "")
+  s = s:gsub("%s*%(.-%)%s*$", "")
+  s = s:gsub("[^%a%d]", "")
+  return s
+end
+
+function CTX.local_fx_search_query(lt)
+  local q =
+       lt:match("^%s*which%s+tracks%s+have%s+(.+)$")
+    or lt:match("^%s*what%s+tracks%s+have%s+(.+)$")
+    or lt:match("^%s*list%s+tracks%s+with%s+(.+)$")
+    or lt:match("^%s*show%s+tracks%s+with%s+(.+)$")
+    or lt:match("^%s*which%s+tracks%s+use%s+(.+)$")
+    or lt:match("^%s*what%s+tracks%s+use%s+(.+)$")
+    or lt:match("^%s*where%s+is%s+(.+)$")
+  if not q then return nil end
+  q = q:gsub("[%.%?%!]+$", "")
+  q = q:gsub("%s+on%s+them%s*$", "")
+  q = q:gsub("%s+inserted%s*$", "")
+  q = q:gsub("%s+loaded%s*$", "")
+  local original_q = q:gsub("^%s+", ""):gsub("%s+$", "")
+  if original_q == "fx" or original_q == "plugin" or original_q == "plugins"
+      or original_q == "effect" or original_q == "effects" then
+    return "*"
+  end
+  q = q:gsub("%f[%w]plugins?%f[%W]", " ")
+  q = q:gsub("%f[%w]effects?%f[%W]", " ")
+  q = q:gsub("%f[%w]fx%f[%W]", " ")
+  q = q:gsub("^%s+", ""):gsub("%s+$", "")
+  if q == "" then return nil end
+  if q == "any" or q == "all" then return "*" end
+  return q
+end
+
+function CTX.local_fx_search_keys_for_track(query)
+  local raw = tostring(query or ""):lower()
+  raw = raw:gsub("[%.%?%!]+$", "")
+  raw = raw:gsub("^%s+", ""):gsub("%s+$", "")
+  raw = raw:gsub("^the%s+", ""):gsub("^a%s+", ""):gsub("^an%s+", "")
+  local seen, keys = {}, {}
+  local function add_key(value)
+    local key = CTX.local_fx_search_key(value)
+    if key ~= "" and not seen[key] then
+      keys[#keys + 1] = key
+      seen[key] = true
+    end
+  end
+  add_key(query)
+  local aliases = {
+    comp = { "reacomp", "comp" },
+    compression = { "reacomp", "comp" },
+    compressor = { "reacomp", "comp" },
+    delay = { "readelay", "delay" },
+    eq = { "reaeq", "eq" },
+    echo = { "readelay", "echo" },
+    gate = { "reagate", "gate" },
+    limiter = { "realimit", "limit" },
+    limit = { "realimit", "limit" },
+    reverb = { "reaverbate", "reverb", "verb" },
+    verb = { "reaverbate", "verb" },
+  }
+  for _, value in ipairs(aliases[raw] or {}) do add_key(value) end
+  return keys
+end
+
+function CTX.local_fx_query_without_track_name(query, track_name)
+  local track_tokens = {}
+  for word in tostring(track_name or ""):lower():gsub("[^%w]+", " "):gmatch("%w+") do
+    track_tokens[word] = true
+  end
+  local stop = {
+    a = true, an = true, any = true, ["do"] = true, does = true, did = true,
+    had = true, has = true, have = true, inserted = true, loaded = true,
+    on = true, running = true, selected = true, that = true, the = true,
+    this = true, track = true, tracks = true, use = true, uses = true,
+    using = true, with = true, current = true,
+  }
+  local out = {}
+  for word in tostring(query or ""):lower():gsub("[^%w]+", " "):gmatch("%w+") do
+    if not track_tokens[word] and not stop[word] then out[#out + 1] = word end
+  end
+  local narrowed = tbl_concat(out, " ")
+  if narrowed == "" then return nil end
+  return narrowed
+end
+
+function CTX.fx_on_track_matching(proj, source_track, source_index, source_name, query)
+  if not source_track then return nil end
+  local keys = CTX.local_fx_search_keys_for_track(query)
+  local total, rows = 0, {}
+  local fx_count = R_TrackFX_GetCount(source_track) or 0
+  for f = 0, fx_count - 1 do
+    local _, fx_nm = R_TrackFX_GetFXName(source_track, f, "")
+    local fx_key = CTX.local_fx_search_key(fx_nm)
+    local matched = false
+    for _, q in ipairs(keys) do
+      if (#q >= 3 or q == "eq") and fx_key:find(q, 1, true) then
+        matched = true
+        break
+      end
+    end
+    if matched then
+      total = total + 1
+      if #rows < CTX.MAX_FX_REPORT then
+        rows[#rows + 1] = str_format("%d|%s|%d|%s",
+          source_index or 0, _scrub_pipes(source_name or "(unnamed)"),
+          f, _scrub_pipes(fx_nm))
+      end
+    end
+  end
+  if total == 0 then
+    return "FX search: none matching " .. tostring(query or "")
+      .. " on " .. tostring(source_name or "track")
+  end
+  local lines = {
+    str_format("FX search: %s on %s (N=%d) [track_idx|track_name|fx_idx|fx_name]:",
+      tostring(query or ""), tostring(source_name or "track"), total)
+  }
+  for _, row in ipairs(rows) do lines[#lines + 1] = row end
+  if total > CTX.MAX_FX_REPORT then
+    lines[#lines + 1] = str_format("(+%d more)", total - CTX.MAX_FX_REPORT)
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.fx_on_track_presence(proj, source_track, source_index, source_name, query)
+  if not source_track then return nil end
+  local keys = CTX.local_fx_search_keys_for_track(query)
+  local total, rows = 0, {}
+  local fx_count = R_TrackFX_GetCount(source_track) or 0
+  for f = 0, fx_count - 1 do
+    local _, fx_nm = R_TrackFX_GetFXName(source_track, f, "")
+    local fx_key = CTX.local_fx_search_key(fx_nm)
+    local matched = false
+    for _, q in ipairs(keys) do
+      if (#q >= 3 or q == "eq") and fx_key:find(q, 1, true) then
+        matched = true
+        break
+      end
+    end
+    if matched then
+      total = total + 1
+      if #rows < CTX.MAX_FX_REPORT then
+        rows[#rows + 1] = str_format("%d|%s|%d|%s",
+          source_index or 0, _scrub_pipes(source_name or "(unnamed)"),
+          f, _scrub_pipes(fx_nm))
+      end
+    end
+  end
+  if total == 0 then
+    return "FX presence: no, " .. tostring(source_name or "track")
+      .. " does not have " .. tostring(query or "")
+  end
+  local lines = {
+    str_format("FX presence: yes, %s has %s (N=%d) [track_idx|track_name|fx_idx|fx_name]:",
+      tostring(source_name or "track"), tostring(query or ""), total)
+  }
+  for _, row in ipairs(rows) do lines[#lines + 1] = row end
+  if total > CTX.MAX_FX_REPORT then
+    lines[#lines + 1] = str_format("(+%d more)", total - CTX.MAX_FX_REPORT)
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.local_track_target_in_text(facts, query, prefix, force_singular_error)
+  local source_track, source_index, source_name, ambiguous, ambiguous_names =
+    CTX.local_track_named_in_text(facts, query)
+  if ambiguous then
+    return nil, nil, nil, CTX.local_track_ambiguity(prefix or "Track target", ambiguous_names)
+  end
+  if not source_track then
+    local text = tostring(query or ""):lower()
+    local plural_selected = text:find("%f[%w]selected%s+tracks%f[%W]")
+      or text:find("%f[%w]current%s+tracks%f[%W]")
+      or text:find("%f[%w]these%s+tracks%f[%W]")
+      or text:find("%f[%w]those%s+tracks%f[%W]")
+    local singular_selected = not plural_selected
+      and (text:find("%f[%w]selected%f[%W]")
+        or text:find("%f[%w]current%f[%W]")
+        or text:find("%f[%w]this%f[%W]")
+        or text:find("%f[%w]that%f[%W]"))
+    if singular_selected then
+      local singular_text = text:gsub("%f[%w]selected%f[%W]", "selected track")
+        :gsub("%f[%w]current%f[%W]", "current track")
+        :gsub("%f[%w]this%f[%W]", "this track")
+        :gsub("%f[%w]that%f[%W]", "that track")
+      local selected_error
+      source_track, source_index, source_name, selected_error =
+        CTX.local_singular_selected_track_in_text(
+          facts, singular_text, prefix or "Track target", true)
+      if selected_error and (force_singular_error
+          or CTX.local_fx_query_without_track_name(query, "")) then
+        return nil, nil, nil, selected_error
+      end
+    end
+  end
+  return source_track, source_index, source_name, nil
+end
+
+function CTX.local_track_fx_query_in_text(facts, query, prefix)
+  local source_track, source_index, source_name, target_error =
+    CTX.local_track_target_in_text(facts, query, prefix or "FX search")
+  if target_error then return nil, nil, nil, nil, target_error end
+  if not source_track then return nil end
+  local fx_query = CTX.local_fx_query_without_track_name(query, source_name)
+  if not fx_query then return nil end
+  return source_track, source_index, source_name, fx_query, nil
+end
+
+function CTX.local_track_fx_query_from_parts(facts, track_query, fx_query, prefix)
+  local source_track, source_index, source_name, target_error =
+    CTX.local_track_target_in_text(facts, track_query, prefix or "FX search", true)
+  if target_error then return nil, nil, nil, nil, target_error end
+  if not source_track then return nil end
+  local narrowed_fx_query = CTX.local_fx_query_without_track_name(fx_query, "")
+  if not narrowed_fx_query then return nil end
+  return source_track, source_index, source_name, narrowed_fx_query, nil
+end
+
+function CTX.local_fx_presence_query(lt)
+  local text = tostring(lt or ""):lower()
+  text = text:gsub("[%.%?%!]+$", "")
+  local track_query, fx_query = text:match("^%s*does%s+(.+)%s+have%s+(.+)$")
+  if not track_query then
+    track_query, fx_query = text:match("^%s*do%s+(.+)%s+have%s+(.+)$")
+  end
+  if not track_query then
+    track_query, fx_query = text:match("^%s*does%s+(.+)%s+use%s+(.+)$")
+  end
+  if not track_query then
+    track_query, fx_query = text:match("^%s*do%s+(.+)%s+use%s+(.+)$")
+  end
+  if not track_query then
+    track_query, fx_query = text:match("^%s*is%s+(.+)%s+using%s+(.+)$")
+  end
+  if not track_query then
+    track_query, fx_query = text:match("^%s*are%s+(.+)%s+using%s+(.+)$")
+  end
+  if not track_query then
+    fx_query, track_query = text:match("^%s*is%s+(.+)%s+on%s+(.+)$")
+  end
+  if not track_query then
+    fx_query, track_query = text:match("^%s*are%s+(.+)%s+on%s+(.+)$")
+  end
+  if not track_query or not fx_query then return nil end
+  track_query = track_query:gsub("^%s+", ""):gsub("%s+$", "")
+  fx_query = fx_query:gsub("^%s+", ""):gsub("%s+$", "")
+  local fx_clean = CTX.local_fx_query_without_track_name(fx_query, "")
+  if not fx_clean then return nil end
+  if fx_clean == "fx" or fx_clean == "plugin" or fx_clean == "plugins"
+      or fx_clean == "effect" or fx_clean == "effects" then
+    return nil
+  end
+  return track_query, fx_clean
+end
+
+function CTX.fx_tracks_with(proj, query)
+  local q = CTX.local_fx_search_key(query)
+  if q == "" then return nil end
+  if #q < 3 and q ~= "eq" then return nil end
+  local rows = {}
+  local total = 0
+  local count = R_CountTracks(proj)
+  for i = 0, count - 1 do
+    local tr = R_GetTrack(proj, i)
+    if tr then
+      local fx_count = R_TrackFX_GetCount(tr)
+      for f = 0, fx_count - 1 do
+        local _, fx_nm = R_TrackFX_GetFXName(tr, f, "")
+        local fx_key = CTX.local_fx_search_key(fx_nm)
+        if fx_key:find(q, 1, true) then
+          total = total + 1
+          if #rows < CTX.MAX_FX_REPORT then
+            local _, nm = R_GetTrackName(tr)
+            rows[#rows + 1] = str_format("%d|%s|%d|%s",
+              i + 1, _scrub_pipes(nm), f, _scrub_pipes(fx_nm))
+          end
+        end
+      end
+    end
+  end
+  local master = reaper.GetMasterTrack and reaper.GetMasterTrack(proj)
+  if master then
+    local fx_count = R_TrackFX_GetCount(master) or 0
+    for f = 0, fx_count - 1 do
+      local _, fx_nm = R_TrackFX_GetFXName(master, f, "")
+      local fx_key = CTX.local_fx_search_key(fx_nm)
+      if fx_key:find(q, 1, true) then
+        total = total + 1
+        if #rows < CTX.MAX_FX_REPORT then
+          local _, nm = R_GetTrackName(master)
+          if nm == "" or nm:lower() == "master" then nm = "Master" end
+          rows[#rows + 1] = str_format("%s|%s|%d|%s",
+            "M", _scrub_pipes(nm), f, _scrub_pipes(fx_nm))
+        end
+      end
+    end
+  end
+  if total == 0 then
+    return "FX search: none matching " .. tostring(query or "")
+  end
+  local lines = {
+    str_format("FX search: %s (N=%d) [track_idx|track_name|fx_idx|fx_name]:",
+      tostring(query or ""), total)
+  }
+  for _, row in ipairs(rows) do lines[#lines + 1] = row end
+  if total > CTX.MAX_FX_REPORT then
+    lines[#lines + 1] = str_format("(+%d more)", total - CTX.MAX_FX_REPORT)
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.master_fx(proj)
+  local master = reaper.GetMasterTrack and reaper.GetMasterTrack(proj)
+  if not master then return "FX chains: master track unavailable" end
+  local _, nm = R_GetTrackName(master)
+  if nm == "" or nm:lower() == "master" then nm = "Master" end
+  local fx_count = R_TrackFX_GetCount(master) or 0
+  if fx_count == 0 then return "FX chains: none on " .. nm end
+  local fx_names = {}
+  for f = 0, fx_count - 1 do
+    local _, fx_nm = R_TrackFX_GetFXName(master, f, "")
+    fx_names[#fx_names + 1] = str_format("[%d]%s", f, _scrub_pipes(fx_nm))
+  end
+  return "FX chains [track_idx|track_name|[fx_idx]fx_name,...]:\n"
+    .. str_format("%s|%s|%s", "M", _scrub_pipes(nm),
+      tbl_concat(fx_names, ","))
+end
+
+function CTX.master_properties(proj)
+  local master = reaper.GetMasterTrack and reaper.GetMasterTrack(proj)
+  if not master then return "Master properties: master track unavailable" end
+  local _, nm = R_GetTrackName(master)
+  if nm == "" or nm:lower() == "master" then nm = "Master" end
+  local vol = R_GetMediaTrackInfo_Value(master, "D_VOL") or 1
+  local vol_db = vol > 0 and str_format("%.2f", 20 * math.log(vol, 10))
+    or "-inf"
+  local pan_pct = str_format("%.0f",
+    (R_GetMediaTrackInfo_Value(master, "D_PAN") or 0) * 100)
+  local muted = R_GetMediaTrackInfo_Value(master, "B_MUTE") == 1
+  local soloed = (R_GetMediaTrackInfo_Value(master, "I_SOLO") or 0) ~= 0
+  local fx_count = R_TrackFX_GetCount(master) or 0
+  return "Master properties [name|vol_db|pan_pct|muted|solo|fx_count]:\n"
+    .. str_format("%s|%s|%s|%s|%s|%d", _scrub_pipes(nm), vol_db,
+      pan_pct, muted and "yes" or "no", soloed and "yes" or "no",
+      fx_count)
 end
 
 function CTX.selected(proj)
@@ -8369,11 +9257,16 @@ end
 
 -- Uses GetSet_LoopTimeRange2 (project-aware variant) instead of the non-project
 -- GetSet_LoopTimeRange so the correct tab's time selection is always queried.
-function CTX.time_selection(proj)
+function CTX.time_selection(proj, opts)
   local ts, te = reaper.GetSet_LoopTimeRange2(proj, false, false, 0, 0, false)
-  return te > ts
-    and str_format("Time selection: %.3fs - %.3fs", ts, te)
-    or  "Time selection: none"
+  if te > ts then
+    if opts and opts.include_length then
+      return str_format("Time selection: %.3fs - %.3fs | length=%.3fs",
+        ts, te, te - ts)
+    end
+    return str_format("Time selection: %.3fs - %.3fs", ts, te)
+  end
+  return "Time selection: none"
 end
 
 -- CTX.cursor(proj) -> string
@@ -8384,6 +9277,25 @@ end
 function CTX.cursor(proj)
   local pos = reaper.GetCursorPositionEx(proj)
   return str_format("Edit cursor: %.3fs", pos)
+end
+
+function CTX.project_length(proj)
+  local length = reaper.GetProjectLength and tonumber(reaper.GetProjectLength(proj)) or nil
+  if not length or length < 0 then
+    length = 0
+    if reaper.CountMediaItems and reaper.GetMediaItem then
+      local n = reaper.CountMediaItems(proj) or 0
+      for i = 0, n - 1 do
+        local item = reaper.GetMediaItem(proj, i)
+        if item then
+          local pos = R_GetMediaItemInfo_Value(item, "D_POSITION") or 0
+          local len = R_GetMediaItemInfo_Value(item, "D_LENGTH") or 0
+          if pos + len > length then length = pos + len end
+        end
+      end
+    end
+  end
+  return str_format("Project length: %.3fs", length or 0)
 end
 
 -- CTX.sample_rate(proj) -> string
@@ -8415,14 +9327,232 @@ end
 -- CTX.loop(proj) -> string
 -- Reports whether loop is enabled and the loop point range (distinct from the
 -- time selection). GetSet_LoopTimeRange2 with is_loop=true returns loop points.
-function CTX.loop(proj)
+function CTX.loop(proj, opts)
   local ls, le = reaper.GetSet_LoopTimeRange2(proj, false, true, 0, 0, false)
   local enabled = reaper.GetSetRepeatEx(proj, -1) == 1
   if le > ls then
+    if opts and opts.include_length then
+      return str_format("Loop: %s | %.3fs - %.3fs | length=%.3fs",
+        enabled and "enabled" or "disabled", ls, le, le - ls)
+    end
     return str_format("Loop: %s | %.3fs - %.3fs",
       enabled and "enabled" or "disabled", ls, le)
   end
   return "Loop: " .. (enabled and "enabled" or "disabled") .. " | no loop points set"
+end
+
+function CTX.dynamic_split_settings()
+  local resource = reaper.GetResourcePath()
+  local ini_path = resource .. RA.SEP .. "reaper.ini"
+  local dyn_preset_path = resource .. RA.SEP .. "reaper-dynsplit.ini"
+  local function _read_text(path)
+    if type(read_file_text) == "function" then return read_file_text(path) end
+    local f = io.open(path, "r")
+    if not f then return nil end
+    local data = f:read("*a")
+    f:close()
+    return data
+  end
+  local text = _read_text(ini_path)
+  if type(text) ~= "string" or text == "" then
+    return "Dynamic Split settings: unavailable"
+  end
+
+  local has_dyn = text:find("%[dynamicsplit%]") ~= nil
+  local dyn = text:match("%[dynamicsplit%]\r?\n(.-)\r?\n%[")
+    or text:match("%[dynamicsplit%]\r?\n(.*)$")
+    or ""
+  local function kv(src, key)
+    return src:match("\n" .. key .. "=([^\r\n]+)")
+      or src:match("^" .. key .. "=([^\r\n]+)")
+  end
+  local function n(src, key)
+    return tonumber(kv(src, key) or "")
+  end
+  local function ms100(v)
+    return v and str_format("%.1fms", v / 100) or "?"
+  end
+  local function db100(v)
+    return v and str_format("%.1fdB", v / 100) or "?"
+  end
+  local function dynsplit_preset_names()
+    local preset_text = _read_text(dyn_preset_path)
+    if type(preset_text) ~= "string" or preset_text == "" then return "none" end
+    local names = {}
+    for line in (preset_text .. "\n"):gmatch("([^\r\n]*)\r?\n") do
+      local name = line:match("^%s*([^%s]+)%s+")
+      if name and name ~= "" then names[#names + 1] = name end
+    end
+    return #names > 0 and tbl_concat(names, ", ") or "none"
+  end
+
+  local sens = n(text, "transientsensitivity")
+  local thresh = n(text, "transientthreshold")
+  local presets = dynsplit_preset_names()
+  if not has_dyn then
+    return "Dynamic Split settings [current]: "
+      .. "state=not_persisted_likely_defaults"
+      .. " | transient_sensitivity="
+      .. (sens and str_format("%.1f%%", sens * 100) or "?")
+      .. " | transient_threshold="
+      .. (thresh and str_format("%.1fdB", thresh) or "?")
+      .. " | action_mode=?"
+      .. " | min_slice=?"
+      .. " | min_silence=?"
+      .. " | split_groups=?"
+      .. " | saved_presets=" .. presets
+  end
+
+  local stretch_mode = n(dyn, "dostretchmarkers")
+  local stretch_label = stretch_mode == 3
+    and "add stretch markers to selected/grouped"
+    or ("raw " .. tostring(stretch_mode or "?"))
+
+  return "Dynamic Split settings [current]: "
+    .. "transient_sensitivity="
+    .. (sens and str_format("%.1f%%", sens * 100) or "?")
+    .. " | transient_threshold="
+    .. (thresh and str_format("%.1fdB", thresh) or "?")
+    .. " | splitflag=" .. tostring(n(dyn, "splitflag") or "?")
+    .. " | action_mode=" .. stretch_label
+    .. " | min_slice=" .. ms100(n(dyn, "minslice"))
+    .. " | min_silence=" .. ms100(n(dyn, "minsilence"))
+    .. " | gate_threshold=" .. db100(n(dyn, "gatethresh"))
+    .. " | gate_hysteresis=" .. db100(n(dyn, "gatehyst"))
+    .. " | split_groups=" .. tostring(n(dyn, "splitgroups") or "?")
+    .. " | snap_offset_window=" .. ms100(n(dyn, "snapoffstime"))
+    .. " | saved_presets=" .. presets
+end
+
+-- =============================================================================
+-- DrumEdit dynamic split profile helper
+-- =============================================================================
+-- Drum timing edits need deterministic local machinery. The model may choose
+-- the workflow, but global Dynamic Split / transient preferences are saved,
+-- applied, verified, and restored here rather than in generated ad hoc Lua.
+DrumEdit = DrumEdit or {}
+
+DrumEdit.RECOMMENDED_DYNSPLIT_PROFILE = {
+  name = "ReaAssist drum guide detection",
+  doubles = {
+    transientsensitivity = 0.70, -- Transient Detection Settings: Sensitivity
+    transientthreshold = -10.0,  -- Transient Detection Settings: Threshold dB
+  },
+  -- These are the desired Dynamic Split dialog values for the full profile.
+  -- The live SWS config API exposes the transient doubles above, but current
+  -- REAPER/SWS builds do not expose these Dynamic Split dialog fields as
+  -- SNM_*ConfigVar keys. Keep them as an explicit target profile for future
+  -- dedicated INI/startup or native-dialog work; do not claim live SWS support.
+  dynamic_split = {
+    splitflag = 1,        -- split at transients
+    minslice = 8900,      -- 89.0 ms
+    minsilence = 121000,  -- 1210.0 ms
+    postfx = 0,
+    minlenLR = 1,
+    gatethresh = -2400,
+    gatehyst = -600,
+    removesilence = 1,
+    beatbase = 1,
+    snapoffs = 0,
+    splitgroups = 1,
+    dostretchmarkers = 3, -- add stretch markers to selected/grouped items
+    chrommidi = 0,
+    padfade = 0,
+    snapoffstime = 5000,  -- 50.0 ms, inert while snapoffs=0
+    leadpad = 0,
+    trailpad = 0,
+    lastsplitslider = 100,
+    splitcnten = 0,
+  },
+}
+
+function DrumEdit._config_api(api)
+  api = api or reaper
+  if type(api) ~= "table" then
+    return nil, "REAPER API is unavailable"
+  end
+  local needed = {
+    "SNM_GetDoubleConfigVar",
+    "SNM_SetDoubleConfigVar",
+  }
+  for _, name in ipairs(needed) do
+    if type(api[name]) ~= "function" then
+      return nil, "SWS config API is unavailable: " .. name
+    end
+  end
+  return api, nil
+end
+
+function DrumEdit._sorted_keys(t)
+  local keys = {}
+  for k in pairs(t or {}) do keys[#keys + 1] = k end
+  table.sort(keys)
+  return keys
+end
+
+function DrumEdit.snapshot_dynamic_split_profile(opts)
+  opts = type(opts) == "table" and opts or {}
+  local api, err = DrumEdit._config_api(opts.reaper)
+  if not api then return nil, err end
+  local profile = opts.profile or DrumEdit.RECOMMENDED_DYNSPLIT_PROFILE
+  local snap = {
+    doubles = {},
+    ints = {},
+  }
+  for _, key in ipairs(DrumEdit._sorted_keys(profile.doubles)) do
+    local value = api.SNM_GetDoubleConfigVar(key, -987654321.25)
+    if value == -987654321.25 then
+      return nil, "Unsupported SWS double config key: " .. key
+    end
+    snap.doubles[key] = value
+  end
+  return snap, nil
+end
+
+function DrumEdit.apply_dynamic_split_profile(profile, opts)
+  opts = type(opts) == "table" and opts or {}
+  local api, err = DrumEdit._config_api(opts.reaper)
+  if not api then return false, err end
+  profile = profile or DrumEdit.RECOMMENDED_DYNSPLIT_PROFILE
+
+  for _, key in ipairs(DrumEdit._sorted_keys(profile.doubles)) do
+    api.SNM_SetDoubleConfigVar(key, profile.doubles[key])
+  end
+  return true, nil
+end
+
+function DrumEdit.verify_dynamic_split_profile(profile, opts)
+  opts = type(opts) == "table" and opts or {}
+  local api, err = DrumEdit._config_api(opts.reaper)
+  if not api then return false, err end
+  profile = profile or DrumEdit.RECOMMENDED_DYNSPLIT_PROFILE
+  local tolerance = tonumber(opts.tolerance) or 0.0001
+  local mismatches = {}
+
+  for _, key in ipairs(DrumEdit._sorted_keys(profile.doubles)) do
+    local got = api.SNM_GetDoubleConfigVar(key, -999999)
+    local want = profile.doubles[key]
+    if math.abs((got or 0) - want) > tolerance then
+      mismatches[#mismatches + 1] =
+        str_format("%s expected %.4f got %.4f", key, want, got or 0)
+    end
+  end
+  if #mismatches > 0 then return false, tbl_concat(mismatches, "; ") end
+  return true, nil
+end
+
+function DrumEdit.restore_dynamic_split_profile(snapshot, opts)
+  opts = type(opts) == "table" and opts or {}
+  local api, err = DrumEdit._config_api(opts.reaper)
+  if not api then return false, err end
+  if type(snapshot) ~= "table" then
+    return false, "Missing Dynamic Split settings snapshot"
+  end
+
+  for _, key in ipairs(DrumEdit._sorted_keys(snapshot.doubles)) do
+    api.SNM_SetDoubleConfigVar(key, snapshot.doubles[key])
+  end
+  return true, nil
 end
 
 -- CTX.markers(proj) -> string
@@ -8430,7 +9560,7 @@ end
 -- CTX.MAX_MARKER_REPORT to keep snapshot size bounded on heavily-markered projects).
 -- EnumProjectMarkers3 returns (retval, isrgn, pos, rgnend, name, idx).
 -- Markers and region boundaries are both reported; regions include an end pos.
-CTX.MAX_MARKER_REPORT, CTX.MAX_ITEM_REPORT = 20, 5
+CTX.MAX_MARKER_REPORT, CTX.MAX_ITEM_REPORT, CTX.MAX_SEND_REPORT = 20, 5, 40
 function CTX.markers(proj)
   local total = R_CountProjectMarkers(proj)
   if total == 0 then return "Markers/regions: none" end
@@ -8455,6 +9585,1223 @@ function CTX.markers(proj)
       "(+%d more)", total - CTX.MAX_MARKER_REPORT)
   end
   return tbl_concat(lines, "\n")
+end
+
+function CTX.local_project_facts(proj)
+  proj = proj or reaper.EnumProjects(-1)
+  local _, path = reaper.EnumProjects(-1)
+  local facts = {
+    proj = proj,
+    path = path,
+    project_name = path and path ~= "" and path:match("[^/\\]+$") or nil,
+    track_count = R_CountTracks(proj),
+    selected_tracks = {},
+  }
+  local _, marker_count, region_count = R_CountProjectMarkers(proj)
+  facts.marker_count = marker_count or 0
+  facts.region_count = region_count or 0
+  local selected_count = reaper.CountSelectedTracks(proj)
+  for i = 0, selected_count - 1 do
+    local tr = reaper.GetSelectedTrack(proj, i)
+    if tr then
+      local _, name = R_GetTrackName(tr)
+      facts.selected_tracks[#facts.selected_tracks + 1] = {
+        index = math_floor((R_GetMediaTrackInfo_Value(tr, "IP_TRACKNUMBER") or 0) + 0.5),
+        name = name ~= "" and name or "(unnamed)",
+      }
+    end
+  end
+  return facts
+end
+
+function CTX.local_read_selected_tracks(proj)
+  local facts = type(proj) == "table" and proj.selected_tracks and proj
+    or CTX.local_project_facts(proj)
+  local count = #facts.selected_tracks
+  if count == 0 then return "Selected tracks: none" end
+  local lines = { str_format("Selected tracks: %d", count) }
+  for _, tr in ipairs(facts.selected_tracks) do
+    lines[#lines + 1] = str_format("%d. %s", tr.index or 0, tr.name or "(unnamed)")
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.local_read_selection_summary(proj, facts)
+  facts = type(facts) == "table" and facts.selected_tracks and facts
+    or CTX.local_project_facts(proj)
+  local item_count = R_CountSelectedMediaItems(facts.proj) or 0
+  local lines = {
+    str_format("Selection: tracks=%d | items=%d",
+      #facts.selected_tracks, item_count)
+  }
+  lines[#lines + 1] = CTX.local_read_selected_tracks(facts)
+  lines[#lines + 1] = CTX.selected_items(facts.proj)
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.local_read_track_list(proj)
+  local facts = type(proj) == "table" and proj.track_count and proj
+    or CTX.local_project_facts(proj)
+  if facts.track_count == 0 then return "Tracks: none" end
+  local lines = { str_format("Tracks: %d", facts.track_count) }
+  local limit = math_min(facts.track_count, 40)
+  for i = 0, limit - 1 do
+    local tr = reaper.GetTrack(facts.proj, i)
+    if tr then
+      local _, name = R_GetTrackName(tr)
+      lines[#lines + 1] = str_format("%d. %s", i + 1,
+        name ~= "" and name or "(unnamed)")
+    end
+  end
+  if facts.track_count > limit then
+    lines[#lines + 1] = str_format("(+%d more)", facts.track_count - limit)
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.track_folders(proj)
+  local count = R_CountTracks(proj)
+  if count == 0 then return "Track folders: none" end
+  local rows = {}
+  local depth = 0
+  local has_folder = false
+  for i = 0, count - 1 do
+    local tr = R_GetTrack(proj, i)
+    if tr then
+      local _, name = R_GetTrackName(tr)
+      local delta = math_floor(R_GetMediaTrackInfo_Value(tr, "I_FOLDERDEPTH") or 0)
+      if depth > 0 or delta ~= 0 then has_folder = true end
+      rows[#rows + 1] = str_format("%d|%d|%s|%d",
+        i + 1, depth, _scrub_pipes(name ~= "" and name or "(unnamed)"), delta)
+      depth = math_max(0, depth + delta)
+    end
+  end
+  if not has_folder then return "Track folders: none" end
+  table.insert(rows, 1,
+    str_format("Track folders (N=%d) [idx|depth|name|folder_delta]:", count))
+  return tbl_concat(rows, "\n")
+end
+
+function CTX.local_track_named_in_text(facts, lt)
+  if type(facts) ~= "table" or not facts.track_count then
+    return nil
+  end
+  local text_key = " " .. tostring(lt or ""):gsub("[^%w]+", " ") .. " "
+  local exact_matches = {}
+  for i = 0, facts.track_count - 1 do
+    local tr = reaper.GetTrack(facts.proj, i)
+    if tr then
+      local _, name = R_GetTrackName(tr)
+      name = tostring(name or "")
+      local name_key = name:lower():gsub("[^%w]+", " ")
+      name_key = name_key:gsub("^%s+", ""):gsub("%s+$", "")
+      if name_key ~= "" and text_key:find(" " .. name_key .. " ", 1, true) then
+        exact_matches[#exact_matches + 1] = {
+          track = tr,
+          index = i + 1,
+          name = name ~= "" and name or "(unnamed)",
+        }
+      end
+    end
+  end
+  if #exact_matches == 1 then
+    local m = exact_matches[1]
+    return m.track, m.index, m.name, false
+  end
+  if #exact_matches > 1 then
+    local names = {}
+    for _, m in ipairs(exact_matches) do names[#names + 1] = m.name end
+    return nil, nil, nil, true, names
+  end
+
+  local stop = {
+    a = true, an = true, ["and"] = true, are = true, armed = true, count = true,
+    current = true,
+    effect = true, effects = true, fader = true, faders = true, from = true,
+    how = true, ["is"] = true, item = true, items = true, list = true,
+    main = true, many = true, master = true, media = true, mute = true,
+    muted = true, of = true, on = true, output = true, pan = true,
+    pans = true, plugin = true, plugins = true, project = true,
+    properties = true, property = true, record = true, send = true,
+    sends = true, session = true, show = true, solo = true, soloed = true,
+    selected = true, that = true, the = true, this = true, to = true, track = true,
+    tracks = true, volume = true, volumes = true, what = true,
+    whats = true, which = true,
+  }
+  local query = {}
+  for word in tostring(lt or ""):lower():gmatch("%w+") do
+    if #word >= 3 and not stop[word] then query[word] = true end
+  end
+
+  local best_score, matches = 0, {}
+  for i = 0, facts.track_count - 1 do
+    local tr = reaper.GetTrack(facts.proj, i)
+    if tr then
+      local _, name = R_GetTrackName(tr)
+      name = tostring(name or "")
+      local score = 0
+      for token in name:lower():gsub("[^%w]+", " "):gmatch("%w+") do
+        if query[token] then score = score + 1 end
+      end
+      if score > best_score then
+        best_score = score
+        matches = {
+          {
+            track = tr,
+            index = i + 1,
+            name = name ~= "" and name or "(unnamed)",
+          },
+        }
+      elseif score > 0 and score == best_score then
+        matches[#matches + 1] = {
+          track = tr,
+          index = i + 1,
+          name = name ~= "" and name or "(unnamed)",
+        }
+      end
+    end
+  end
+  if best_score <= 0 or #matches == 0 then return nil, nil, nil, false end
+  if #matches == 1 then
+    local m = matches[1]
+    return m.track, m.index, m.name, false
+  end
+  local names = {}
+  for _, m in ipairs(matches) do names[#names + 1] = m.name end
+  return nil, nil, nil, true, names
+end
+
+function CTX.local_track_ambiguity(prefix, names)
+  if type(names) ~= "table" or #names == 0 then
+    return tostring(prefix or "Track target") .. ": track name is ambiguous"
+  end
+  local lines = { tostring(prefix or "Track target") .. ": track name is ambiguous" }
+  for i, name in ipairs(names) do
+    lines[#lines + 1] = str_format("%d. %s", i, tostring(name or "(unnamed)"))
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.local_track_index_in_text(facts, lt)
+  if type(facts) ~= "table" or not facts.track_count then
+    return nil
+  end
+  local text = tostring(lt or ""):lower()
+  local raw = text:match("%f[%w]track%s+index%s*#?%s*(%d+)%f[%W]")
+    or text:match("%f[%w]track%s*#%s*(%d+)%f[%W]")
+    or text:match("%f[%w]track%s+(%d+)%f[%W]")
+  local idx = tonumber(raw)
+  if not idx or idx % 1 ~= 0 or idx < 1 then return nil end
+  local tr = reaper.GetTrack(facts.proj, idx - 1)
+  if not tr then return nil, nil, nil, idx end
+  local _, name = R_GetTrackName(tr)
+  return tr, idx, name ~= "" and name or "(unnamed)", nil
+end
+
+function CTX.local_selected_track_index_in_text(facts, lt)
+  if type(facts) ~= "table" or not facts.track_count then
+    return nil
+  end
+  local text = tostring(lt or ""):lower()
+  local idx = tonumber(
+    text:match("%f[%d](%d+)%s*%a*%s+selected%s+track%f[%W]")
+      or text:match("%f[%w]selected%s+track%s*#?%s*(%d+)%f[%W]")
+      or text:match("%f[%w]selected%s+index%s*#?%s*(%d+)%f[%W]"))
+  if not idx then
+    local ordinals = {
+      first = 1, second = 2, third = 3, fourth = 4, fifth = 5,
+      sixth = 6, seventh = 7, eighth = 8, ninth = 9, tenth = 10,
+    }
+    for word, n in pairs(ordinals) do
+      if text:find("%f[%a]" .. word .. "%s+selected%s+track%f[%W]") then
+        idx = n
+        break
+      end
+    end
+  end
+  if not idx or idx % 1 ~= 0 or idx < 1 then return nil end
+  local tr = reaper.GetSelectedTrack(facts.proj, idx - 1)
+  if not tr then return nil, nil, nil, idx end
+  local project_idx =
+    math_floor((R_GetMediaTrackInfo_Value(tr, "IP_TRACKNUMBER") or 0) + 0.5)
+  local _, name = R_GetTrackName(tr)
+  return tr, project_idx, name ~= "" and name or "(unnamed)", nil
+end
+
+function CTX.local_singular_selected_track_in_text(facts, lt, prefix, include_selected)
+  if type(facts) ~= "table" or not facts.track_count then
+    return nil
+  end
+  local text = tostring(lt or ""):lower()
+  if text:find("%f[%w]selected%s+tracks%f[%W]")
+      or text:find("%f[%w]current%s+tracks%f[%W]")
+      or text:find("%f[%w]these%s+tracks%f[%W]")
+      or text:find("%f[%w]those%s+tracks%f[%W]") then
+    return nil
+  end
+  include_selected = include_selected ~= false
+  local refers_to_singular =
+       (include_selected and text:find("%f[%w]selected%s+track%f[%W]") ~= nil)
+    or text:find("%f[%w]current%s+track%f[%W]") ~= nil
+    or text:find("%f[%w]this%s+track%f[%W]") ~= nil
+    or text:find("%f[%w]that%s+track%f[%W]") ~= nil
+  if not refers_to_singular then return nil end
+  if #facts.selected_tracks == 1 then
+    local tr = reaper.GetSelectedTrack(facts.proj, 0)
+    if tr then
+      local project_idx =
+        math_floor((R_GetMediaTrackInfo_Value(tr, "IP_TRACKNUMBER") or 0) + 0.5)
+      local _, name = R_GetTrackName(tr)
+      return tr, project_idx, name ~= "" and name or "(unnamed)", nil
+    end
+    return nil, nil, nil, tostring(prefix or "Track target")
+      .. ": selected track not found"
+  end
+  if #facts.selected_tracks > 1 then
+    local lines = {
+      tostring(prefix or "Track target") .. ": selected track is ambiguous",
+    }
+    for i, tr in ipairs(facts.selected_tracks) do
+      lines[#lines + 1] = str_format("%d. %s", i, tr.name or "(unnamed)")
+    end
+    return nil, nil, nil, tbl_concat(lines, "\n")
+  end
+  return nil, nil, nil, tostring(prefix or "Track target")
+    .. ": selected track not found"
+end
+
+function CTX.local_route_endpoint_in_text(facts, text)
+  if type(facts) ~= "table" or not facts.track_count then return nil end
+  local lt = tostring(text or ""):lower()
+  local selected_track, selected_index, selected_name, missing_selected =
+    CTX.local_selected_track_index_in_text(facts, lt)
+  if missing_selected then
+    return nil, nil, nil, "Route: selected track "
+      .. tostring(missing_selected) .. " not found"
+  end
+  if selected_track then return selected_track, selected_index, selected_name end
+
+  selected_track, selected_index, selected_name, missing_selected =
+    CTX.local_singular_selected_track_in_text(facts, lt, "Route")
+  if missing_selected then return nil, nil, nil, missing_selected end
+  if selected_track then return selected_track, selected_index, selected_name end
+
+  local track, index, name, missing_index = CTX.local_track_index_in_text(facts, lt)
+  if missing_index then
+    return nil, nil, nil, "Route: track " .. tostring(missing_index) .. " not found"
+  end
+  if track then return track, index, name end
+
+  local ambiguous, ambiguous_names = false, nil
+  track, index, name, ambiguous, ambiguous_names =
+    CTX.local_track_named_in_text(facts, lt)
+  if ambiguous then
+    return nil, nil, nil, CTX.local_track_ambiguity("Route", ambiguous_names)
+  end
+  return track, index, name
+end
+
+function CTX.local_route_fragment_for_match(text)
+  local s = tostring(text or "")
+  s = s:gsub("^%s+", ""):gsub("%s+$", "")
+  s = s:gsub("[%.%?%!]+$", "")
+  -- Multi-part readbacks often say "what send level goes to X, and what track
+  -- is selected?". Keep only the route endpoint before the next question.
+  s = s:gsub("%s*,%s*and%s+what.+$", "")
+  s = s:gsub("%s+and%s+what.+$", "")
+  s = s:gsub("%s*,%s*what.+$", "")
+  s = s:gsub("%s*,%s*whether.+$", "")
+  s = s:gsub("%s+whether.+$", "")
+  s = s:gsub("%s*,%s*which.+$", "")
+  s = s:gsub("^the%s+", "")
+  return s:gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+function CTX.local_read_project_summary(proj)
+  local facts = type(proj) == "table" and proj.track_count and proj
+    or CTX.local_project_facts(proj)
+  local lines = {
+    facts.project_name and ("Project: " .. facts.project_name) or "Project: unsaved",
+    CTX.tempo(facts.proj),
+    str_format("Tracks: %d", facts.track_count),
+    str_format("Selected tracks: %d", #facts.selected_tracks),
+    str_format("Markers: %d | Regions: %d", facts.marker_count, facts.region_count),
+  }
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.local_installed_plugin_answer(user_text)
+  local raw = tostring(user_text or "")
+  local lt = raw:lower()
+  local mentions_installed = lt:find("installed", 1, true) ~= nil
+  local have_plugin_query = lt:find("%f[%w]have%f[%W]") ~= nil
+    and (lt:find("plugin", 1, true) ~= nil
+      or lt:find("%f[%w]fx%f[%W]") ~= nil
+      or lt:find("effect", 1, true) ~= nil)
+  local available_plugin_query = lt:find("%f[%w]available%f[%W]") ~= nil
+    and (lt:find("plugin", 1, true) ~= nil
+      or lt:find("%f[%w]fx%f[%W]") ~= nil
+      or lt:find("effect", 1, true) ~= nil)
+  if not mentions_installed and not have_plugin_query and not available_plugin_query then
+    return nil
+  end
+  local term =
+    raw:match("^[Dd]o%s+I%s+have%s+(.+)%s+installed%??%s*$")
+    or raw:match("^[Dd]o%s+I%s+have%s+(.+)%??%s*$")
+    or raw:match("^[Ii]s%s+the%s+(.+)%s+plugin%s+installed%??%s*$")
+    or raw:match("^[Ii]s%s+(.+)%s+installed%??%s*$")
+    or raw:match("^[Ii]s%s+(.+)%s+available%??%s*$")
+  term = tostring(term or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  term = term:gsub("%?+$", ""):gsub("%s+$", "")
+  term = term:gsub("^the%s+", ""):gsub("%s+plugin$", "")
+  local term_l = term:lower()
+  if term == ""
+     or term_l == "plugin"
+     or term_l == "plugins"
+     or term_l == "fx"
+     or term_l == "effects"
+     or term_l == "any plugins"
+     or term_l == "any effects" then
+    return nil
+  end
+  local term_compact = term_l:gsub("[_%-%s]+", "")
+  if term_compact == "reaimgui"
+      or term_compact == "jsreascriptapi"
+      or term_l == "sws"
+      or term_l == "sws extension" then
+    return nil
+  end
+  if type(CTX.populate_installed_fx) ~= "function"
+     or not CTX.populate_installed_fx() then
+    return "Installed plugin search: unavailable in this REAPER version."
+  end
+  local matches = {}
+  for _, name in ipairs(CTX._installed_fx_list or {}) do
+    if CTX.fx_name_matches(name, { term }) then matches[#matches + 1] = name end
+  end
+  if #matches == 0 then
+    return 'Installed plugin search: no matches for "' .. term .. '".'
+  end
+  local lines = {
+    #matches == 1
+      and ('Installed plugin: yes, "' .. matches[1] .. '" is available.')
+      or ('Installed plugin: found ' .. tostring(#matches)
+          .. ' matches for "' .. term .. '":')
+  }
+  if #matches > 1 then
+    for i = 1, math_min(#matches, 8) do
+      lines[#lines + 1] = "- " .. matches[i]
+    end
+    if #matches > 8 then
+      lines[#lines + 1] = "... " .. tostring(#matches - 8) .. " more"
+    end
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.local_read_answer(user_text, proj)
+  local raw = tostring(user_text or "")
+  local lt = raw:lower()
+  lt = lt:gsub("^%s*no%s+code%s+this%s+time:%s*", "")
+  if lt:match("^%s*$") or #raw > 240 then return nil end
+  if lt:find("\n", 1, true) then return nil end
+  if lt:find("^%s*how%s+do%s+i")
+      or lt:find("^%s*how%s+can%s+i")
+      or lt:find("^%s*show%s+me%s+how")
+      or lt:find("^%s*show%s+how")
+      or lt:find("^%s*can%s+you%s+explain")
+      or lt:find("^%s*explain%s+") then
+    return nil
+  end
+  if lt:find("%f[%w]command%f[%W]") then
+    return nil
+  end
+  if lt:find("%f[%w]should%f[%W]")
+      or lt:find("shouldn't", 1, true)
+      or lt:find("shouldnt", 1, true)
+      or lt:find("shouldn\226\128\153t", 1, true)
+      or lt:find("%f[%w]recommend%w*%f[%W]")
+      or lt:find("%f[%w]best%f[%W]") then
+    return nil
+  end
+  if (lt:find("plugins", 1, true) and lt:find("installed", 1, true))
+      or (lt:find("effects", 1, true) and lt:find("installed", 1, true))
+      or lt:find("installed fx", 1, true)
+      or lt:find("fx installed", 1, true)
+      or lt:find("plugin inventory", 1, true)
+      or lt:find("fx inventory", 1, true) then
+    return "Installed plugin inventory: full installed-plugin lists are not "
+      .. "available from the current session. Ask me to check a specific "
+      .. "plugin name."
+  end
+  local installed_plugin_answer = CTX.local_installed_plugin_answer(raw)
+  if installed_plugin_answer then return installed_plugin_answer end
+  local read_start =
+       lt:find("^%s*what") ~= nil
+    or lt:find("^%s*what's") ~= nil
+    or lt:find("^%s*whats") ~= nil
+    or lt:find("^%s*which") ~= nil
+    or lt:find("^%s*do%s+") ~= nil
+    or lt:find("^%s*does%s+") ~= nil
+    or lt:find("^%s*is%s+") ~= nil
+    or lt:find("^%s*are%s+") ~= nil
+    or lt:find("^%s*how%s+many") ~= nil
+    or lt:find("^%s*how%s+long") ~= nil
+    or lt:find("^%s*tell%s+me%s+") ~= nil
+    or lt:find("^%s*list") ~= nil
+    or lt:find("^%s*show") ~= nil
+    or lt:find("^%s*where%s+is%s+") ~= nil
+    or lt:find("^%s*summarize") ~= nil
+    or lt:find("^%s*summary") ~= nil
+    or lt:find("^%s*project%s+summary") ~= nil
+    or lt:find("^%s*session%s+summary") ~= nil
+  if not read_start then return nil end
+  local incoming_send_read =
+    (lt:find("^%s*what") ~= nil
+      or lt:find("^%s*which") ~= nil
+      or lt:find("^%s*list") ~= nil
+      or lt:find("^%s*show") ~= nil
+      or lt:find("^%s*tell%s+me%s+") ~= nil
+      or lt:find("^%s*are%s+") ~= nil)
+    and (lt:find("tracks send to", 1, true) ~= nil
+      or lt:find("tracks send into", 1, true) ~= nil
+      or lt:find("tracks route to", 1, true) ~= nil
+      or lt:find("tracks route into", 1, true) ~= nil
+      or lt:find("tracks routed to", 1, true) ~= nil
+      or lt:find("tracks routed into", 1, true) ~= nil
+      or lt:find("tracks are routed to", 1, true) ~= nil
+      or lt:find("tracks are routed into", 1, true) ~= nil
+      or lt:find("tracks sending to", 1, true) ~= nil
+      or lt:find("tracks sending into", 1, true) ~= nil
+      or lt:find("tracks are sending to", 1, true) ~= nil
+      or lt:find("tracks are sending into", 1, true) ~= nil
+      or lt:find("tracks feed", 1, true) ~= nil
+      or lt:find("tracks feeding", 1, true) ~= nil)
+  local receive_from_read =
+    (lt:find("^%s*what") ~= nil
+      or lt:find("^%s*which") ~= nil
+      or lt:find("^%s*list") ~= nil
+      or lt:find("^%s*show") ~= nil)
+    and (lt:find("tracks receive from", 1, true) ~= nil
+      or lt:find("tracks receiving from", 1, true) ~= nil
+      or lt:find("tracks are receiving from", 1, true) ~= nil)
+  local send_level_read =
+    read_start
+    and (lt:find("send level", 1, true) ~= nil
+      or lt:find("send volume", 1, true) ~= nil
+      or lt:find("send gain", 1, true) ~= nil
+      or lt:find("level of the send", 1, true) ~= nil
+      or lt:find("volume of the send", 1, true) ~= nil
+      or lt:find("gain of the send", 1, true) ~= nil)
+  local route_yesno_read =
+    (lt:find("^%s*does%s+") ~= nil
+      or lt:find("^%s*is%s+") ~= nil)
+    and (lt:find("%f[%w]send%s+to%f[%W]") ~= nil
+      or lt:find("%f[%w]send%s+into%f[%W]") ~= nil
+      or lt:find("%f[%w]sending%s+to%f[%W]") ~= nil
+      or lt:find("%f[%w]sending%s+into%f[%W]") ~= nil
+      or lt:find("%f[%w]routed%s+to%f[%W]") ~= nil
+      or lt:find("%f[%w]routed%s+into%f[%W]") ~= nil
+      or lt:find("%f[%w]receive%s+from%f[%W]") ~= nil
+      or lt:find("%f[%w]receiving%s+from%f[%W]") ~= nil)
+  local mutating =
+       lt:find("%f[%w]create%f[%W]") ~= nil
+    or lt:find("%f[%w]add%f[%W]") ~= nil
+    or lt:find("%f[%w]insert%f[%W]") ~= nil
+    or lt:find("%f[%w]delete%f[%W]") ~= nil
+    or lt:find("%f[%w]remove%f[%W]") ~= nil
+    or (lt:find("%f[%w]route%f[%W]") ~= nil
+      and not incoming_send_read and not route_yesno_read)
+    or (lt:find("%f[%w]routed%f[%W]") ~= nil
+      and not incoming_send_read and not route_yesno_read)
+    or (lt:find("%f[%w]routing%f[%W]") ~= nil
+      and not incoming_send_read and not route_yesno_read)
+    or (lt:find("%f[%w]send%f[%W]") ~= nil
+      and not incoming_send_read and not send_level_read and not route_yesno_read)
+    or (lt:find("%f[%w]sending%f[%W]") ~= nil
+      and not incoming_send_read and not route_yesno_read)
+    or lt:find("%f[%w]set%f[%W]") ~= nil
+    or lt:find("%f[%w]change%f[%W]") ~= nil
+    or lt:find("%f[%w]move%f[%W]") ~= nil
+  if mutating then return nil end
+
+  proj = proj or reaper.EnumProjects(-1)
+  local facts = CTX.local_project_facts(proj)
+  local selected_track_phrase = lt:find("selected track", 1, true) ~= nil
+    or lt:find("selected tracks", 1, true) ~= nil
+  if lt:find("what is selected", 1, true)
+      or lt:find("what's selected", 1, true)
+      or lt:find("whats selected", 1, true)
+      or lt:find("current selection", 1, true)
+      or lt:find("selection status", 1, true)
+      or lt:find("^%s*is%s+anything%s+selected") then
+    return CTX.local_read_selection_summary(proj, facts)
+  end
+  if lt:find("project summary", 1, true)
+      or lt:find("session summary", 1, true)
+      or lt:find("project status", 1, true)
+      or lt:find("session status", 1, true)
+      or lt:find("^%s*summarize")
+      or lt:find("^%s*summary") then
+    return CTX.local_read_project_summary(facts)
+  end
+  if lt:find("project name", 1, true)
+      or lt:find("project file", 1, true)
+      or lt:find("session name", 1, true)
+      or lt:find("what project", 1, true)
+      or lt:find("which project", 1, true) then
+    return facts.project_name and ("Project: " .. facts.project_name)
+      or "Project: unsaved"
+  end
+  if lt:find("reaassist version", 1, true)
+      or lt:find("version of reaassist", 1, true) then
+    return CTX.reaassist_version()
+  end
+  if lt:find("reaper version", 1, true)
+      or lt:find("version of reaper", 1, true) then
+    return CTX.reaper_version()
+  end
+  local extension_answer = CTX.extension_status(raw)
+  if extension_answer then return extension_answer end
+  local ai_status = CTX.ai_selection_status(raw)
+  if ai_status then return ai_status end
+  local settings_status = CTX.reaassist_settings_status(raw)
+  if settings_status then return settings_status end
+  local diagnostics_status = CTX.diagnostics_status(raw)
+  if diagnostics_status then return diagnostics_status end
+  if lt:find("%f[%w]tempo%f[%W]")
+      or lt:find("%f[%w]bpm%f[%W]")
+      or lt:find("song speed", 1, true)
+      or lt:find("time signature", 1, true) then
+    return CTX.tempo(proj)
+  end
+  if lt:find("time selection", 1, true) then
+    return CTX.time_selection(proj, {
+      include_length = lt:find("^%s*how%s+long", 1, false) ~= nil
+        or lt:find("%f[%w]duration%f[%W]") ~= nil
+        or lt:find("%f[%w]length%f[%W]") ~= nil,
+    })
+  end
+  if lt:find("project length", 1, true)
+      or lt:find("project duration", 1, true)
+      or lt:find("session length", 1, true)
+      or lt:find("session duration", 1, true)
+      or lt:find("^%s*how%s+long%s+is%s+this%s+project")
+      or lt:find("^%s*how%s+long%s+is%s+the%s+project")
+      or lt:find("^%s*how%s+long%s+is%s+this%s+session")
+      or lt:find("^%s*how%s+long%s+is%s+the%s+session")
+      or lt:find("^%s*how%s+long%s+is%s+this%s+song")
+      or lt:find("^%s*how%s+long%s+is%s+the%s+song") then
+    return CTX.project_length(proj)
+  end
+  if lt:find("edit cursor", 1, true)
+      or lt:find("cursor position", 1, true)
+      or lt:find("play cursor", 1, true)
+      or lt:find("playhead", 1, true)
+      or lt:find("play head", 1, true) then
+    return CTX.cursor(proj)
+  end
+  if lt:find("sample rate", 1, true) then
+    return CTX.sample_rate(proj)
+  end
+  if lt:find("transport", 1, true)
+      or lt:find("play state", 1, true)
+      or lt:find("playback state", 1, true) then
+    return CTX.play_state(proj)
+  end
+  if lt:find("loop points", 1, true)
+      or lt:find("loop range", 1, true)
+      or lt:find("loop status", 1, true)
+      or lt:find("loop length", 1, true)
+      or lt:find("loop duration", 1, true)
+      or lt:find("length of the loop", 1, true)
+      or lt:find("duration of the loop", 1, true)
+      or lt:find("^%s*how%s+long%s+is%s+the%s+loop") then
+    return CTX.loop(proj, {
+      include_length = lt:find("^%s*how%s+long", 1, false) ~= nil
+        or lt:find("%f[%w]duration%f[%W]") ~= nil
+        or lt:find("%f[%w]length%f[%W]") ~= nil,
+    })
+  end
+  if lt:find("dynamic split", 1, true)
+      or lt:find("dynamic splitting", 1, true) then
+    return CTX.dynamic_split_settings()
+  end
+  local master_context = lt:find("%f[%w]master%f[%W]") ~= nil
+    and lt:find("master output", 1, true) == nil
+    and lt:find("master send", 1, true) == nil
+    and lt:find("master/parent", 1, true) == nil
+  if master_context
+      and (lt:find("%f[%w]fx%f[%W]") ~= nil
+      or lt:find("%f[%w]plugin%f[%W]") ~= nil
+      or lt:find("%f[%w]plugins%f[%W]") ~= nil
+      or lt:find("%f[%w]effect%f[%W]") ~= nil
+      or lt:find("%f[%w]effects%f[%W]") ~= nil
+      or lt:find("on the master", 1, true) ~= nil) then
+    return CTX.master_fx(proj)
+  end
+  if master_context
+      and (lt:find("%f[%w]volume%f[%W]") ~= nil
+      or lt:find("%f[%w]fader%f[%W]") ~= nil
+      or lt:find("%f[%w]pan%f[%W]") ~= nil
+      or lt:find("%f[%w]mute%f[%W]") ~= nil
+      or lt:find("%f[%w]muted%f[%W]") ~= nil
+      or lt:find("%f[%w]solo%f[%W]") ~= nil
+      or lt:find("%f[%w]soloed%f[%W]") ~= nil
+      or lt:find("%f[%w]properties%f[%W]") ~= nil
+      or lt:find("%f[%w]status%f[%W]") ~= nil) then
+    return CTX.master_properties(proj)
+  end
+  local master_output_query = CTX.local_master_output_presence_query(lt)
+  if master_output_query then
+    local source_track, _, source_name, target_error =
+      CTX.local_track_target_in_text(
+        facts, master_output_query, "Master output", true)
+    if target_error then return target_error end
+    if source_track then
+      return CTX.track_master_output_answer(source_track, source_name)
+    end
+  end
+  if route_yesno_read then
+    local source_fragment, dest_fragment =
+      lt:match("^%s*does%s+(.+)%s+send%s+to%s+(.+)%??%s*$")
+    if not source_fragment then
+      source_fragment, dest_fragment =
+        lt:match("^%s*does%s+(.+)%s+send%s+into%s+(.+)%??%s*$")
+    end
+    if not source_fragment then
+      source_fragment, dest_fragment =
+        lt:match("^%s*is%s+(.+)%s+sending%s+to%s+(.+)%??%s*$")
+    end
+    if not source_fragment then
+      source_fragment, dest_fragment =
+        lt:match("^%s*is%s+(.+)%s+sending%s+into%s+(.+)%??%s*$")
+    end
+    if not source_fragment then
+      source_fragment, dest_fragment =
+        lt:match("^%s*is%s+(.+)%s+routed%s+to%s+(.+)%??%s*$")
+    end
+    if not source_fragment then
+      source_fragment, dest_fragment =
+        lt:match("^%s*is%s+(.+)%s+routed%s+into%s+(.+)%??%s*$")
+    end
+    if not source_fragment then
+      dest_fragment, source_fragment =
+        lt:match("^%s*does%s+(.+)%s+receive%s+from%s+(.+)%??%s*$")
+    end
+    if not source_fragment then
+      dest_fragment, source_fragment =
+        lt:match("^%s*is%s+(.+)%s+receiving%s+from%s+(.+)%??%s*$")
+    end
+    if not source_fragment or not dest_fragment then return nil end
+    local source_track, source_index, source_name
+    local route_error
+    source_track, source_index, source_name, route_error =
+      CTX.local_route_endpoint_in_text(facts, source_fragment)
+    if route_error then return route_error end
+    local dest_track, dest_index, dest_name
+    dest_track, dest_index, dest_name, route_error =
+      CTX.local_route_endpoint_in_text(facts, dest_fragment)
+    if route_error then return route_error end
+    if not source_track or not dest_track then return nil end
+    return CTX.send_route_answer(proj, source_track, source_name,
+      dest_track, dest_name)
+  end
+  if lt:find("tracks have no sends", 1, true)
+      or lt:find("tracks with no sends", 1, true)
+      or lt:find("tracks without sends", 1, true)
+      or lt:find("tracks dont have sends", 1, true)
+      or lt:find("tracks don't have sends", 1, true) then
+    return CTX.tracks_without_sends(proj, {
+      selected_only = selected_track_phrase,
+    })
+  end
+  if lt:find("%f[%w]sends%f[%W]")
+      or incoming_send_read or receive_from_read or send_level_read then
+    local dest_fragment =
+         lt:match("%f[%w]go%s+to%s+(.+)$")
+      or lt:match("%f[%w]goes%s+to%s+(.+)$")
+      or lt:match("%f[%w]going%s+to%s+(.+)$")
+      or lt:match("%f[%w]send%s+to%s+(.+)$")
+      or lt:match("%f[%w]send%s+into%s+(.+)$")
+      or lt:match("%f[%w]route%s+to%s+(.+)$")
+      or lt:match("%f[%w]routed%s+to%s+(.+)$")
+      or lt:match("%f[%w]route%s+into%s+(.+)$")
+      or lt:match("%f[%w]feed%s+into%s+(.+)$")
+      or lt:match("%f[%w]feeding%s+into%s+(.+)$")
+      or lt:match("%f[%w]feed%s+(.+)$")
+      or lt:match("%f[%w]feeding%s+(.+)$")
+      or lt:match("%f[%w]to%s+(.+)$")
+      or lt:match("%f[%w]into%s+(.+)$")
+    local source_fragment = lt:match("%f[%w]from%s+(.+)%s+to%s+")
+      or lt:match("%f[%w]from%s+(.+)%s+into%s+")
+      or lt:match("%f[%w]from%s+(.+)$")
+    dest_fragment = CTX.local_route_fragment_for_match(dest_fragment)
+    source_fragment = CTX.local_route_fragment_for_match(source_fragment)
+    if dest_fragment == "" then dest_fragment = nil end
+    if source_fragment == "" then source_fragment = nil end
+    local dest_track, dest_index, dest_name
+    if dest_fragment then
+      local ambiguous, ambiguous_names = false, nil
+      dest_track, dest_index, dest_name, ambiguous, ambiguous_names =
+        CTX.local_track_named_in_text(facts, dest_fragment)
+      if ambiguous then return CTX.local_track_ambiguity("Sends", ambiguous_names) end
+      if not dest_track then
+        local target_error
+        dest_track, dest_index, dest_name, target_error =
+          CTX.local_singular_selected_track_in_text(
+            facts, dest_fragment, "Sends", false)
+        if target_error then return target_error end
+      end
+    end
+    local explicit_source_track, explicit_source_index, explicit_source_name
+    if source_fragment then
+      local ambiguous, ambiguous_names = false, nil
+      explicit_source_track, explicit_source_index, explicit_source_name,
+        ambiguous, ambiguous_names =
+        CTX.local_track_named_in_text(facts, source_fragment)
+      if ambiguous then return CTX.local_track_ambiguity("Sends", ambiguous_names) end
+      if not explicit_source_track then
+        local target_error
+        explicit_source_track, explicit_source_index, explicit_source_name,
+          target_error =
+          CTX.local_singular_selected_track_in_text(
+            facts, source_fragment, "Sends", false)
+        if target_error then return target_error end
+      end
+    end
+    local selected_track, selected_index, selected_name, missing_selected =
+      CTX.local_selected_track_index_in_text(facts, lt)
+    if missing_selected then
+      return "Sends: selected track " .. tostring(missing_selected) .. " not found"
+    end
+    if not selected_track and not dest_track and not explicit_source_track then
+      selected_track, selected_index, selected_name, missing_selected =
+        CTX.local_singular_selected_track_in_text(
+          facts, lt, "Sends", false)
+      if missing_selected then return missing_selected end
+    end
+    local send_opts = {
+      dest_track = dest_track,
+      dest_index = dest_index,
+      dest_name = dest_name,
+      selected_only = not selected_track
+        and not explicit_source_track
+        and (lt:find("selected track", 1, true) ~= nil
+          or lt:find("selected tracks", 1, true) ~= nil),
+    }
+    if explicit_source_track then
+      send_opts.source_track = explicit_source_track
+      send_opts.source_index = explicit_source_index
+      send_opts.source_name = explicit_source_name
+    elseif selected_track then
+      send_opts.source_track = selected_track
+      send_opts.source_index = selected_index
+      send_opts.source_name = selected_name
+    elseif not send_opts.selected_only and not dest_track then
+      local source_track, source_index, source_name, missing_index =
+        CTX.local_track_index_in_text(facts, lt)
+      if missing_index then
+        return "Sends: track " .. tostring(missing_index) .. " not found"
+      end
+      local ambiguous, ambiguous_names = false, nil
+      if not source_track then
+        source_track, source_index, source_name, ambiguous, ambiguous_names =
+          CTX.local_track_named_in_text(facts, lt)
+      end
+      if ambiguous then return CTX.local_track_ambiguity("Sends", ambiguous_names) end
+      if source_track then
+        send_opts.source_track = source_track
+        send_opts.source_index = source_index
+        send_opts.source_name = source_name
+      end
+    end
+    local answer = CTX.sends(proj, send_opts)
+    local dest_pat = tostring(dest_name or ""):lower():gsub("([^%w])", "%%%1")
+    local whether_source = dest_track and (
+         lt:match("%f[%w]whether%s+(.+)%s+feeds%s+it")
+      or lt:match("%f[%w]whether%s+(.+)%s+feeds%s+" .. dest_pat)
+      or lt:match("%f[%w]whether%s+(.+)%s+sends%s+to%s+it")
+      or lt:match("%f[%w]whether%s+(.+)%s+sends%s+to%s+" .. dest_pat))
+    whether_source = CTX.local_route_fragment_for_match(whether_source)
+    if whether_source and whether_source ~= "" then
+      local src_track, _, src_name
+      local route_error
+      src_track, _, src_name, route_error =
+        CTX.local_route_endpoint_in_text(facts, whether_source)
+      if route_error then return route_error end
+      if src_track then
+        answer = answer .. "\n" .. CTX.send_route_answer(proj, src_track,
+          src_name, dest_track, dest_name)
+      end
+    end
+    if lt:find("what track is selected", 1, true)
+        or lt:find("what tracks are selected", 1, true)
+        or lt:find("which track is selected", 1, true)
+        or lt:find("which tracks are selected", 1, true)
+        or lt:find("track is selected", 1, true)
+        or lt:find("tracks are selected", 1, true) then
+      answer = answer .. "\n" .. CTX.local_read_selected_tracks(facts)
+    end
+    return answer
+  end
+  if lt:find("tracks have items", 1, true)
+      or lt:find("any tracks have items", 1, true)
+      or lt:find("any track has items", 1, true)
+      or lt:find("tracks have media", 1, true)
+      or lt:find("any tracks have media", 1, true)
+      or lt:find("any track has media", 1, true)
+      or lt:find("tracks with items", 1, true)
+      or lt:find("tracks with media", 1, true)
+      or lt:find("tracks contain items", 1, true)
+      or lt:find("tracks contain media", 1, true) then
+    return CTX.tracks_with_items(proj, {
+      selected_only = selected_track_phrase,
+    })
+  end
+  if lt:find("selected item", 1, true)
+      or lt:find("selected items", 1, true)
+      or lt:find("item is selected", 1, true)
+      or lt:find("items are selected", 1, true) then
+    return CTX.selected_items(proj)
+  end
+  if lt:find("item count", 1, true)
+      or lt:find("number of items", 1, true)
+      or lt:find("how many items", 1, true)
+      or lt:find("media items", 1, true)
+      or lt:find("%f[%w]items%f[%W]") then
+    local selected_track, selected_index, selected_name, missing_selected =
+      CTX.local_selected_track_index_in_text(facts, lt)
+    if missing_selected then
+      return "Items: selected track " .. tostring(missing_selected) .. " not found"
+    end
+    if not selected_track then
+      selected_track, selected_index, selected_name, missing_selected =
+        CTX.local_singular_selected_track_in_text(
+          facts, lt, "Items", false)
+      if missing_selected then return missing_selected end
+    end
+    local item_opts = {
+      count_only = lt:find("item count", 1, true) ~= nil
+        or lt:find("number of items", 1, true) ~= nil
+        or lt:find("how many items", 1, true) ~= nil,
+      selected_only = not selected_track
+        and (lt:find("selected track", 1, true) ~= nil
+          or lt:find("selected tracks", 1, true) ~= nil),
+    }
+    if selected_track then
+      item_opts.source_track = selected_track
+      item_opts.source_index = selected_index
+      item_opts.source_name = selected_name
+    elseif not item_opts.selected_only then
+      local source_track, source_index, source_name, missing_index =
+        CTX.local_track_index_in_text(facts, lt)
+      if missing_index then
+        return "Items: track " .. tostring(missing_index) .. " not found"
+      end
+      local ambiguous, ambiguous_names = false, nil
+      if not source_track then
+        source_track, source_index, source_name, ambiguous, ambiguous_names =
+          CTX.local_track_named_in_text(facts, lt)
+      end
+      if ambiguous then return CTX.local_track_ambiguity("Items", ambiguous_names) end
+      if source_track then
+        item_opts.source_track = source_track
+        item_opts.source_index = source_index
+        item_opts.source_name = source_name
+      end
+    end
+    return CTX.media_items(proj, item_opts)
+  end
+  local wants_muted_flag =
+       lt:find("%f[%w]muted%f[%W]") ~= nil
+    or lt:find("%f[%w]mute%f[%W]") ~= nil
+    or lt:find("%f[%w]unmuted%f[%W]") ~= nil
+  local wants_soloed_flag =
+       lt:find("%f[%w]soloed%f[%W]") ~= nil
+    or lt:find("%f[%w]solo%f[%W]") ~= nil
+    or lt:find("%f[%w]unsoloed%f[%W]") ~= nil
+  local wants_armed_flag =
+       lt:find("%f[%w]armed%f[%W]") ~= nil
+    or lt:find("record armed", 1, true) ~= nil
+    or lt:find("record-armed", 1, true) ~= nil
+    or lt:find("%f[%w]unarmed%f[%W]") ~= nil
+  if (wants_muted_flag or wants_soloed_flag or wants_armed_flag)
+      and lt:find("%f[%w]tracks%f[%W]") ~= nil then
+    local flag_count = (wants_muted_flag and 1 or 0)
+      + (wants_soloed_flag and 1 or 0)
+      + (wants_armed_flag and 1 or 0)
+    local inverse_flag =
+         lt:find("not muted", 1, true) ~= nil
+      or lt:find("not mute", 1, true) ~= nil
+      or lt:find("%f[%w]unmuted%f[%W]") ~= nil
+      or lt:find("not soloed", 1, true) ~= nil
+      or lt:find("not solo", 1, true) ~= nil
+      or lt:find("%f[%w]unsoloed%f[%W]") ~= nil
+      or lt:find("not armed", 1, true) ~= nil
+      or lt:find("not record armed", 1, true) ~= nil
+      or lt:find("not record-armed", 1, true) ~= nil
+      or lt:find("%f[%w]unarmed%f[%W]") ~= nil
+    if inverse_flag and flag_count ~= 1 then return nil end
+    return CTX.tracks_matching_flags(proj, {
+      selected_only = selected_track_phrase,
+      muted = wants_muted_flag,
+      soloed = wants_soloed_flag,
+      armed = wants_armed_flag,
+      invert = inverse_flag,
+    })
+  end
+  if not selected_track_phrase
+      and (lt:find("track flags", 1, true)
+      or lt:find("muted tracks", 1, true)
+      or lt:find("tracks are muted", 1, true)
+      or lt:find("tracks muted", 1, true)
+      or lt:find("soloed tracks", 1, true)
+      or lt:find("tracks are soloed", 1, true)
+      or lt:find("tracks soloed", 1, true)
+      or lt:find("armed tracks", 1, true)
+      or lt:find("tracks are armed", 1, true)
+      or lt:find("tracks armed", 1, true)
+      or lt:find("record armed tracks", 1, true)) then
+    return CTX.track_flags(proj)
+  end
+  if lt:find("empty tracks", 1, true)
+      or lt:find("tracks are empty", 1, true)
+      or lt:find("tracks empty", 1, true)
+      or lt:find("tracks have no items", 1, true)
+      or lt:find("any tracks have no items", 1, true)
+      or lt:find("any track has no items", 1, true)
+      or lt:find("tracks with no items", 1, true)
+      or lt:find("tracks without items", 1, true) then
+    return CTX.empty_tracks(proj, {
+      selected_only = selected_track_phrase,
+    })
+  end
+  if lt:find("tracks have no master output", 1, true)
+      or lt:find("tracks with no master output", 1, true)
+      or lt:find("tracks without master output", 1, true)
+      or lt:find("tracks have no main output", 1, true)
+      or lt:find("tracks with no main output", 1, true)
+      or lt:find("tracks without main output", 1, true)
+      or lt:find("tracks are not sent to master", 1, true)
+      or lt:find("tracks not sent to master", 1, true)
+      or lt:find("tracks are not sending to master", 1, true)
+      or lt:find("tracks not sending to master", 1, true)
+      or lt:find("tracks are not routed to master", 1, true)
+      or lt:find("tracks not routed to master", 1, true) then
+    return CTX.tracks_without_master_output(proj, {
+      selected_only = selected_track_phrase,
+    })
+  end
+  local track_property_word =
+       lt:find("%f[%w]volume%f[%W]") ~= nil
+    or lt:find("%f[%w]volumes%f[%W]") ~= nil
+    or lt:find("%f[%w]fader%f[%W]") ~= nil
+    or lt:find("%f[%w]faders%f[%W]") ~= nil
+    or lt:find("%f[%w]pan%f[%W]") ~= nil
+    or lt:find("%f[%w]pans%f[%W]") ~= nil
+    or lt:find("%f[%w]mute%f[%W]") ~= nil
+    or lt:find("%f[%w]muted%f[%W]") ~= nil
+    or lt:find("%f[%w]solo%f[%W]") ~= nil
+    or lt:find("%f[%w]soloed%f[%W]") ~= nil
+    or lt:find("%f[%w]armed%f[%W]") ~= nil
+    or lt:find("record arm", 1, true) ~= nil
+    or lt:find("main output", 1, true) ~= nil
+    or lt:find("master output", 1, true) ~= nil
+    or lt:find("track properties", 1, true) ~= nil
+    or lt:find("track property", 1, true) ~= nil
+  local wants_track_property_list =
+       lt:find("track properties", 1, true) ~= nil
+    or lt:find("track property", 1, true) ~= nil
+    or lt:find("track volume", 1, true) ~= nil
+    or lt:find("track volumes", 1, true) ~= nil
+    or lt:find("track fader", 1, true) ~= nil
+    or lt:find("track faders", 1, true) ~= nil
+    or lt:find("track pan", 1, true) ~= nil
+    or lt:find("track pans", 1, true) ~= nil
+  if track_property_word then
+    local selected_track, selected_index, selected_name, missing_selected =
+      CTX.local_selected_track_index_in_text(facts, lt)
+    if missing_selected then
+      return "Track properties: selected track "
+        .. tostring(missing_selected) .. " not found"
+    end
+    if not selected_track then
+      selected_track, selected_index, selected_name, missing_selected =
+        CTX.local_singular_selected_track_in_text(
+          facts, lt, "Track properties", false)
+      if missing_selected then return missing_selected end
+    end
+    local prop_opts = {
+      selected_only = not selected_track
+        and (lt:find("selected track", 1, true) ~= nil
+          or lt:find("selected tracks", 1, true) ~= nil),
+    }
+    if selected_track then
+      prop_opts.source_track = selected_track
+      prop_opts.source_index = selected_index
+      prop_opts.source_name = selected_name
+    elseif not prop_opts.selected_only then
+      local source_track, source_index, source_name, missing_index =
+        CTX.local_track_index_in_text(facts, lt)
+      if missing_index then
+        return "Track properties: track " .. tostring(missing_index) .. " not found"
+      end
+      local ambiguous, ambiguous_names = false, nil
+      if not source_track then
+        source_track, source_index, source_name, ambiguous, ambiguous_names =
+          CTX.local_track_named_in_text(facts, lt)
+      end
+      if ambiguous then
+        return CTX.local_track_ambiguity("Track properties", ambiguous_names)
+      end
+      if source_track then
+        prop_opts.source_track = source_track
+        prop_opts.source_index = source_index
+        prop_opts.source_name = source_name
+      end
+    end
+    if not wants_track_property_list
+        and not prop_opts.selected_only
+        and not prop_opts.source_track then
+      return nil
+    end
+    return CTX.track_properties(proj, prop_opts)
+  end
+  if lt:find("tracks have no fx", 1, true)
+      or lt:find("tracks with no fx", 1, true)
+      or lt:find("tracks without fx", 1, true)
+      or lt:find("tracks have no plugins", 1, true)
+      or lt:find("tracks with no plugins", 1, true)
+      or lt:find("tracks without plugins", 1, true)
+      or lt:find("tracks have no effects", 1, true)
+      or lt:find("tracks with no effects", 1, true)
+      or lt:find("tracks without effects", 1, true)
+      or lt:find("tracks dont have fx", 1, true)
+      or lt:find("tracks don't have fx", 1, true) then
+    return CTX.tracks_without_fx(proj, {
+      selected_only = selected_track_phrase,
+    })
+  end
+  local fx_presence_track, fx_presence_query = CTX.local_fx_presence_query(lt)
+  if fx_presence_track then
+    local source_track, source_index, source_name, narrowed_fx_query, fx_error =
+      CTX.local_track_fx_query_from_parts(
+        facts, fx_presence_track, fx_presence_query, "FX presence")
+    if fx_error then return fx_error end
+    if source_track and narrowed_fx_query then
+      return CTX.fx_on_track_presence(
+        proj, source_track, source_index, source_name, narrowed_fx_query)
+    end
+  end
+  if lt:find("fx chains", 1, true)
+      or lt:find("track fx", 1, true)
+      or lt:find("have fx", 1, true)
+      or lt:find("has fx", 1, true)
+      or lt:find("have plugin", 1, true)
+      or lt:find("has plugin", 1, true)
+      or lt:find("have effect", 1, true)
+      or lt:find("has effect", 1, true)
+      or lt:find("fx are on", 1, true)
+      or lt:find("fx on ", 1, true)
+      or lt:find("plugins are on", 1, true)
+      or lt:find("plugins on ", 1, true)
+      or lt:find("effects are on", 1, true)
+      or lt:find("effects on ", 1, true) then
+    local selected_track, selected_index, selected_name, missing_selected =
+      CTX.local_selected_track_index_in_text(facts, lt)
+    if missing_selected then
+      return "FX chains: selected track " .. tostring(missing_selected) .. " not found"
+    end
+    if not selected_track then
+      selected_track, selected_index, selected_name, missing_selected =
+        CTX.local_singular_selected_track_in_text(
+          facts, lt, "FX chains", false)
+      if missing_selected then return missing_selected end
+    end
+    local fx_opts = {
+      selected_only = not selected_track
+        and (lt:find("selected track", 1, true) ~= nil
+          or lt:find("selected tracks", 1, true) ~= nil),
+    }
+    if selected_track then
+      fx_opts.source_track = selected_track
+      fx_opts.source_index = selected_index
+      fx_opts.source_name = selected_name
+    elseif not fx_opts.selected_only then
+      local source_track, source_index, source_name, missing_index =
+        CTX.local_track_index_in_text(facts, lt)
+      if missing_index then
+        return "FX chains: track " .. tostring(missing_index) .. " not found"
+      end
+      local ambiguous, ambiguous_names = false, nil
+      if not source_track then
+        source_track, source_index, source_name, ambiguous, ambiguous_names =
+          CTX.local_track_named_in_text(facts, lt)
+      end
+      if ambiguous then return CTX.local_track_ambiguity("FX chains", ambiguous_names) end
+      if source_track then
+        fx_opts.source_track = source_track
+        fx_opts.source_index = source_index
+        fx_opts.source_name = source_name
+      end
+    end
+    return CTX.fx(proj, fx_opts)
+  end
+  local fx_query = CTX.local_fx_search_query(lt)
+  if fx_query then
+    if fx_query ~= "*" then
+      local source_track, source_index, source_name, narrowed_fx_query, fx_error =
+        CTX.local_track_fx_query_in_text(facts, fx_query)
+      if fx_error then return fx_error end
+      if source_track and narrowed_fx_query then
+        return CTX.fx_on_track_matching(
+          proj, source_track, source_index, source_name, narrowed_fx_query)
+      end
+    end
+    return fx_query == "*" and CTX.fx(proj, {}) or CTX.fx_tracks_with(proj, fx_query)
+  end
+  if lt:find("selected track", 1, true)
+      or lt:find("selected tracks", 1, true)
+      or lt:find("track is selected", 1, true)
+      or lt:find("tracks are selected", 1, true) then
+    return CTX.local_read_selected_tracks(facts)
+  end
+  if lt:find("marker count", 1, true)
+      or lt:find("region count", 1, true)
+      or lt:find("how many markers", 1, true)
+      or lt:find("how many regions", 1, true) then
+    return str_format("Markers: %d | Regions: %d",
+      facts.marker_count, facts.region_count)
+  end
+  if lt:find("track count", 1, true)
+      or lt:find("number of tracks", 1, true)
+      or lt:find("how many tracks", 1, true) then
+    return str_format("Track count: %d", facts.track_count)
+  end
+  if lt:find("folder structure", 1, true)
+      or lt:find("track folder", 1, true)
+      or lt:find("track folders", 1, true)
+      or lt:find("folder tracks", 1, true)
+      or lt:find("folders in this project", 1, true)
+      or lt:find("folders in the project", 1, true) then
+    return CTX.track_folders(proj)
+  end
+  if lt:find("track names", 1, true)
+      or lt:find("list tracks", 1, true)
+      or lt:find("show tracks", 1, true)
+      or lt:find("show all tracks", 1, true)
+      or lt:find("what tracks", 1, true)
+      or lt:find("which tracks", 1, true) then
+    return CTX.local_read_track_list(facts)
+  end
+  if lt:find("%f[%w]markers%f[%W]")
+      or lt:find("%f[%w]marker%f[%W]")
+      or lt:find("%f[%w]regions%f[%W]")
+      or lt:find("%f[%w]region%f[%W]") then
+    return CTX.markers(proj)
+  end
+  return nil
 end
 
 -- CTX.selected_items(proj) -> string
@@ -8497,6 +10844,242 @@ function CTX.selected_items(proj)
       "(+%d more)", count - CTX.MAX_ITEM_REPORT)
   end
   return tbl_concat(lines, "\n")
+end
+
+function CTX.media_items(proj, opts)
+  local selected_only = opts and opts.selected_only == true
+  local source_track = opts and opts.source_track or nil
+  local source_name = opts and opts.source_name or nil
+  local count_only = opts and opts.count_only == true
+  local total = 0
+  local items = {}
+  if source_track then
+    total = R_CountTrackMediaItems(source_track)
+    local report_n = math_min(total, CTX.MAX_ITEM_REPORT)
+    for i = 0, report_n - 1 do
+      local item = reaper.GetTrackMediaItem(source_track, i)
+      if item then items[#items+1] = item end
+    end
+  else
+    local project_total = reaper.CountMediaItems
+      and (reaper.CountMediaItems(proj) or 0)
+      or 0
+    for i = 0, project_total - 1 do
+      local item = reaper.GetMediaItem and reaper.GetMediaItem(proj, i) or nil
+      local tr = item and R_GetMediaItem_Track(item) or nil
+      if item and (not selected_only or (tr and R_IsTrackSelected(tr))) then
+        total = total + 1
+        if #items < CTX.MAX_ITEM_REPORT then items[#items+1] = item end
+      end
+    end
+  end
+  if count_only then
+    if source_track then
+      return str_format("Items on %s: %d", source_name or "track", total)
+    end
+    return selected_only and str_format("Items on selected tracks: %d", total)
+      or str_format("Items: %d", total)
+  end
+  if total == 0 then
+    if source_track then
+      return "Items: none on " .. (source_name or "track")
+    end
+    return selected_only and "Items: none on selected tracks" or "Items: none"
+  end
+  local lines = {
+    str_format("Items (N=%d) [item_idx|track_idx|track_name|pos_s|len_s]:", total)
+  }
+  for i, item in ipairs(items) do
+    local pos = R_GetMediaItemInfo_Value(item, "D_POSITION") or 0
+    local len = R_GetMediaItemInfo_Value(item, "D_LENGTH") or 0
+    local track = R_GetMediaItem_Track(item)
+    local track_idx = -1
+    local track_nm = "unknown"
+    if track then
+      track_idx = math_floor(R_GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER") or -1)
+      local _, nm = R_GetTrackName(track)
+      track_nm = nm
+    end
+    lines[#lines+1] = str_format("%d|%d|%s|%.3f|%.3f",
+      i, track_idx, _scrub_pipes(track_nm), pos, len)
+  end
+  if total > CTX.MAX_ITEM_REPORT then
+    lines[#lines+1] = str_format("(+%d more)", total - CTX.MAX_ITEM_REPORT)
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.empty_tracks(proj, opts)
+  local selected_only = opts and opts.selected_only == true
+  local total = 0
+  local rows = {}
+  local track_count = R_CountTracks(proj)
+  for i = 0, track_count - 1 do
+    local tr = R_GetTrack(proj, i)
+    if tr
+        and (not selected_only or R_IsTrackSelected(tr))
+        and R_CountTrackMediaItems(tr) == 0 then
+      total = total + 1
+      if #rows < 40 then
+        local _, nm = R_GetTrackName(tr)
+        rows[#rows + 1] = str_format("%d. %s", i + 1,
+          nm ~= "" and nm or "(unnamed)")
+      end
+    end
+  end
+  local label = selected_only and "Empty selected tracks" or "Empty tracks"
+  if total == 0 then return label .. ": none" end
+  local lines = { str_format("%s: %d", label, total) }
+  for _, row in ipairs(rows) do lines[#lines + 1] = row end
+  if total > #rows then
+    lines[#lines + 1] = str_format("(+%d more)", total - #rows)
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.tracks_with_items(proj, opts)
+  local selected_only = opts and opts.selected_only == true
+  local total = 0
+  local rows = {}
+  local track_count = R_CountTracks(proj)
+  for i = 0, track_count - 1 do
+    local tr = R_GetTrack(proj, i)
+    if tr and (not selected_only or R_IsTrackSelected(tr)) then
+      local item_count = R_CountTrackMediaItems(tr) or 0
+      if item_count > 0 then
+        total = total + 1
+        if #rows < 40 then
+          local _, nm = R_GetTrackName(tr)
+          rows[#rows + 1] = str_format("%d. %s | items=%d", i + 1,
+            nm ~= "" and nm or "(unnamed)", item_count)
+        end
+      end
+    end
+  end
+  local label = selected_only and "Selected tracks with items"
+    or "Tracks with items"
+  if total == 0 then return label .. ": none" end
+  local lines = { str_format("%s: %d", label, total) }
+  for _, row in ipairs(rows) do lines[#lines + 1] = row end
+  if total > #rows then
+    lines[#lines + 1] = str_format("(+%d more)", total - #rows)
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.sends(proj, opts)
+  if not reaper.GetTrackNumSends or not reaper.GetTrackSendInfo_Value then
+    return "Sends: unavailable"
+  end
+  local selected_only = opts and opts.selected_only == true
+  local source_track = opts and opts.source_track or nil
+  local source_name = opts and opts.source_name or nil
+  local dest_track = opts and opts.dest_track or nil
+  local dest_name = opts and opts.dest_name or nil
+  local total = 0
+  local rows = {}
+  local track_count = R_CountTracks(proj)
+  for i = 0, track_count - 1 do
+    local src = R_GetTrack(proj, i)
+    if src
+        and (not selected_only or R_IsTrackSelected(src))
+        and (not source_track or src == source_track) then
+      local _, src_name = R_GetTrackName(src)
+      local send_count = reaper.GetTrackNumSends(src, 0) or 0
+      for si = 0, send_count - 1 do
+        local dest = reaper.GetTrackSendInfo_Value(src, 0, si, "P_DESTTRACK")
+        if not dest_track or dest == dest_track then
+          total = total + 1
+          if #rows < CTX.MAX_SEND_REPORT then
+            local dest_idx = -1
+            local row_dest_name = "unknown"
+            if dest then
+              dest_idx = math_floor(R_GetMediaTrackInfo_Value(dest, "IP_TRACKNUMBER") or -1)
+              local _, nm = R_GetTrackName(dest)
+              row_dest_name = nm
+            end
+            local vol = reaper.GetTrackSendInfo_Value(src, 0, si, "D_VOL") or 1
+            local vol_db = vol > 0 and (20 * math.log(vol, 10)) or -150
+            local pan = reaper.GetTrackSendInfo_Value(src, 0, si, "D_PAN") or 0
+            local mode = math_floor(reaper.GetTrackSendInfo_Value(src, 0, si, "I_SENDMODE") or 0)
+            rows[#rows + 1] = str_format("%d|%s|%d|%d|%s|%.2f|%.2f|%d",
+              i + 1, _scrub_pipes(src_name), si + 1, dest_idx,
+              _scrub_pipes(row_dest_name), vol_db, pan, mode)
+          end
+        end
+      end
+    end
+  end
+  if total == 0 then
+    if source_track and dest_track then
+      return "Sends: none from " .. (source_name or "track")
+        .. " to " .. (dest_name or "track")
+    end
+    if dest_track then
+      return "Sends: none to " .. (dest_name or "track")
+    end
+    if source_track then
+      return "Sends: none on " .. (source_name or "track")
+    end
+    return selected_only and "Sends: none on selected tracks" or "Sends: none"
+  end
+  local lines = {
+    str_format("Sends (N=%d) [src_idx|src_name|send_idx|dest_idx|dest_name|vol_db|pan|mode]:", total)
+  }
+  for _, row in ipairs(rows) do lines[#lines + 1] = row end
+  if total > CTX.MAX_SEND_REPORT then
+    lines[#lines + 1] = str_format("(+%d more)", total - CTX.MAX_SEND_REPORT)
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.tracks_without_sends(proj, opts)
+  local selected_only = opts and opts.selected_only == true
+  local label = selected_only and "Selected tracks without sends"
+    or "Tracks without sends"
+  if not reaper.GetTrackNumSends then return label .. ": unavailable" end
+  local total = 0
+  local rows = {}
+  local track_count = R_CountTracks(proj)
+  for i = 0, track_count - 1 do
+    local tr = R_GetTrack(proj, i)
+    if tr and (not selected_only or R_IsTrackSelected(tr)) then
+      local send_count = reaper.GetTrackNumSends(tr, 0) or 0
+      if send_count == 0 then
+        total = total + 1
+        if #rows < 40 then
+          local _, nm = R_GetTrackName(tr)
+          rows[#rows + 1] = str_format("%d. %s", i + 1,
+            nm ~= "" and nm or "(unnamed)")
+        end
+      end
+    end
+  end
+  if total == 0 then return label .. ": none" end
+  local lines = { str_format("%s: %d", label, total) }
+  for _, row in ipairs(rows) do lines[#lines + 1] = row end
+  if total > #rows then
+    lines[#lines + 1] = str_format("(+%d more)", total - #rows)
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.send_route_answer(proj, source_track, source_name, dest_track, dest_name)
+  if not source_track or not dest_track then return nil end
+  if not reaper.GetTrackNumSends or not reaper.GetTrackSendInfo_Value then
+    return "Route: unavailable"
+  end
+  local send_count = reaper.GetTrackNumSends(source_track, 0) or 0
+  for si = 0, send_count - 1 do
+    local dest = reaper.GetTrackSendInfo_Value(source_track, 0, si, "P_DESTTRACK")
+    if dest == dest_track then
+      return "Route: yes, " .. (source_name or "source track")
+        .. " sends to " .. (dest_name or "destination track")
+        .. str_format(" (send %d)", si + 1)
+    end
+  end
+  return "Route: no, " .. (source_name or "source track")
+    .. " does not send to " .. (dest_name or "destination track")
 end
 
 -- =============================================================================
@@ -9116,6 +11699,25 @@ function CTX.docs_section(name)
     .. S.api_ref_section_cache[name]
 end
 
+function CTX.recent_reaper_changes()
+  local path = RA.RESOURCES_DIR .. "Reaper_Recent_Changes.md"
+  local f = io.open(path, "r")
+  if not f then
+    return nil, "Recent REAPER changes file not found at:\n" .. path
+  end
+  local content = f:read("*a") or ""
+  f:close()
+  content = content:gsub("^%s+", ""):gsub("%s+$", "")
+  if content == "" then
+    return nil, "Recent REAPER changes file is empty:\n" .. path
+  end
+  if #content > 65536 then
+    return nil, "Recent REAPER changes file is too large ("
+      .. tostring(#content) .. " bytes)."
+  end
+  return "RECENT REAPER CHANGES (OFFICIAL CHANGELOG EXCERPT):\n" .. content
+end
+
 -- =============================================================================
 -- CTX.prompt_bundle
 -- =============================================================================
@@ -9517,6 +12119,13 @@ local CURATED_IDENT = {
   ["ReaEQ"]               = "ReaEQ",
   ["ReaComp"]             = "ReaComp",
   ["ReaXcomp"]            = "ReaXcomp",
+  ["ReaGate"]             = "ReaGate",
+  ["ReaDelay"]            = "ReaDelay",
+  ["ReaLimit"]            = "ReaLimit",
+  ["ReaPitch"]            = "ReaPitch",
+  ["ReaTune"]             = "ReaTune",
+  ["ReaSynth"]            = "ReaSynth",
+  ["ReaVerbate"]          = "ReaVerbate",
   -- FabFilter (format-agnostic chain entries)
   ["Pro-Q 4"]             = "Pro-Q 4",
   ["Pro-C 3"]             = "Pro-C 3",
@@ -11637,6 +14246,8 @@ local CHAIN_PHRASE_HINTS = {
   -- like "rock vocal chain" already hit via vocal%s+chain anyway,
   -- since the substring "vocal chain" is present.
   { "chain%s+of%s+effects.-vocal", {"eq", "compressor", "deesser", "reverb"} },
+  { "chain.-rock%s+vocal", {"gate", "eq", "compressor", "saturation", "limiter"} },
+  { "chain.-vocal", {"eq", "compressor", "deesser", "reverb"} },
   { "vocal%s+chain",      {"eq", "compressor", "deesser", "reverb"} },
   { "vocal.-chain",       {"eq", "compressor", "deesser", "reverb"} },
   { "vocal%s+bus",        {"eq", "compressor"} },
@@ -11647,6 +14258,39 @@ local CHAIN_PHRASE_HINTS = {
   { "mastering%s+chain",  {"eq", "compressor", "limiter"} },
   { "recording%s+chain",  {"eq", "compressor", "gate"} },
 }
+
+function CTX.prompt_indicates_chain_context(text)
+  if type(text) ~= "string" or text == "" then return false end
+  local t = text:lower()
+  for _, hint in ipairs(CHAIN_PHRASE_HINTS) do
+    if t:find(hint[1]) then return true end
+  end
+  if not t:find("%f[%w]chain%f[%W]") then return false end
+  return t:find("%f[%w]drum%f[%W]") ~= nil
+    or t:find("%f[%w]drums%f[%W]") ~= nil
+    or t:find("%f[%w]snare%f[%W]") ~= nil
+    or t:find("%f[%w]kick%f[%W]") ~= nil
+    or t:find("%f[%w]tom%f[%W]") ~= nil
+    or t:find("%f[%w]percussion%f[%W]") ~= nil
+    or t:find("%f[%w]vocal%f[%W]") ~= nil
+    or t:find("%f[%w]guitar%f[%W]") ~= nil
+    or t:find("%f[%w]bass%f[%W]") ~= nil
+    or t:find("%f[%w]mix%f[%W]") ~= nil
+    or t:find("%f[%w]master%f[%W]") ~= nil
+    or t:find("%f[%w]mastering%f[%W]") ~= nil
+    or t:find("%f[%w]recording%f[%W]") ~= nil
+    or t:find("%f[%w]effects%f[%W]") ~= nil
+    or t:find("%f[%w]processing%f[%W]") ~= nil
+end
+
+function CTX.prompt_indicates_typed_action_plan(text)
+  if type(text) ~= "string" or text == "" then return false end
+  local t = text:lower()
+  return t:find("typed action plan", 1, true) ~= nil
+    or t:find("typed-action plan", 1, true) ~= nil
+    or t:find("typed-action contract", 1, true) ~= nil
+    or t:find("reaassist-actions", 1, true) ~= nil
+end
 
 -- DOCS_PHRASE_HINTS: keyword/phrase -> docs:<section> pre-pin map. When the
 -- user prompt contains any of these, the matched section is loaded into
@@ -11673,6 +14317,13 @@ local DOCS_PHRASE_HINTS = {
   -- routing (multi-word phrases avoid frontier-pattern needs)
   { "sidechain",             "routing"   },
   { "send to",               "routing"   },
+  { "send from",             "routing"   },
+  { "create a send",         "routing"   },
+  { "create send",           "routing"   },
+  { "add a send",            "routing"   },
+  { "add send",              "routing"   },
+  { "set up a send",         "routing"   },
+  { "set up send",           "routing"   },
   { "receive from",          "routing"   },
   { "%f[%w]route%f[%W]",     "routing"   },
   { "%f[%w]routing%f[%W]",   "routing"   },
@@ -11707,10 +14358,47 @@ local DOCS_PHRASE_HINTS = {
   { "razor edit",            "items"     },
   { "razor area",            "items"     },
   { "media item",            "items"     },
+  { "midi item",             "items"     },
+  { "midi items",            "items"     },
   -- tempo (markers/regions stay in core, so don't pin tempo on those words)
   { "%f[%w]tempo%f[%W]",     "tempo"     },
   { "time signature",        "tempo"     },
 }
+
+CTX = CTX or {}
+CTX.DRUM_EDIT_PHRASE_HINTS = {
+  "quantize drums",
+  "quantize the drums",
+  "drum quantize",
+  "edit drums",
+  "edit the drums",
+  "editing drums",
+  "tighten drums",
+  "tighten the drums",
+  "snap drums",
+  "snap the drums",
+  "drum transients",
+  "drum hits",
+  "drum editing",
+}
+
+function CTX.prompt_indicates_drum_edit(text)
+  if type(text) ~= "string" or text == "" then return false end
+  local t = text:lower()
+  for _, phrase in ipairs(CTX.DRUM_EDIT_PHRASE_HINTS) do
+    if t:find(phrase, 1, true) then return true end
+  end
+  local has_drum =
+       t:find("%f[%w]drum%f[%W]") ~= nil
+    or t:find("%f[%w]drums%f[%W]") ~= nil
+  if not has_drum then return false end
+  if t:find("%f[%w]quantiz") then return true end
+  if t:find("%f[%w]tighten") then return true end
+  if t:find("%f[%w]transient") then return true end
+  if t:find("stretch marker", 1, true) then return true end
+  if t:find("guide track", 1, true) then return true end
+  return false
+end
 
 if REQUIRE_SWS_EXTENSION and not SupportExtFlag("optoutsws") then
   -- SWS docs are advertised only when the rollout flag is enabled. The
@@ -11757,6 +14445,16 @@ end
 local function _prompt_indicates_jsfx(text)
   if type(text) ~= "string" or text == "" then return false end
   local t = text:lower()
+  -- Ignore negative/instructional mentions such as the typed-action
+  -- contract's "Do not write Lua, ReaScript, JSFX..." line. Those are
+  -- constraints, not JSFX authoring intent, and pre-pinning the JSFX bundle
+  -- wastes tokens on otherwise compact local-action plans.
+  t = t:gsub("do%s+not%s+write[^%.\n]*%f[%w]jsfx%f[%W][^%.\n]*", " ")
+  t = t:gsub("don't%s+write[^%.\n]*%f[%w]jsfx%f[%W][^%.\n]*", " ")
+  t = t:gsub("dont%s+write[^%.\n]*%f[%w]jsfx%f[%W][^%.\n]*", " ")
+  t = t:gsub("without%s+%f[%w]jsfx%f[%W]", " ")
+  t = t:gsub("no%s+%f[%w]jsfx%f[%W]", " ")
+  t = t:gsub("not%s+%f[%w]jsfx%f[%W]", " ")
   if t:find("%f[%w]jsfx%f[%W]")  then return true end
   if t:find("%f[%w]eel2?%f[%W]") then return true end
   if t:find("%f[%w]reajs%f[%W]") then return true end
@@ -11792,9 +14490,140 @@ local JSFX_FAMILY_HINTS = {
 -- Keep the local in scope for in-module callers that already use it.
 CTX.prompt_indicates_jsfx = _prompt_indicates_jsfx
 
+function CTX.prompt_has_explicit_stock_fx_constraint(text)
+  if type(text) ~= "string" or text == "" then return false end
+  local t = text:lower()
+  local stock_word = t:find("%f[%w]stock%f[%W]") ~= nil
+    or t:find("%f[%w]cockos%f[%W]") ~= nil
+  if not stock_word then return false end
+  local names = { "reaeq", "reacomp", "reaxcomp", "reagate", "readelay",
+    "realimit", "reapitch", "reatune", "reasynth", "reaverbate" }
+  for _, name in ipairs(names) do
+    if t:find(name, 1, true) then return true end
+  end
+  return t:find("%f[%w]only%f[%W]") ~= nil
+    or t:find("stock only", 1, true) ~= nil
+    or t:find("stock%-only", 1, false) ~= nil
+    or t:find("no third%-party", 1, false) ~= nil
+    or t:find("no third party", 1, true) ~= nil
+end
+
+function CTX.sticky_has_fx_params_for_ident(ident)
+  if not ident or ident == "" or not S.sticky_context then return false end
+  local target = _curated_for_ident(ident) or tostring(ident)
+  target = target:gsub("^%w+:%s*", ""):lower()
+  if target == "" then return false end
+  for k in pairs(S.sticky_context) do
+    local payload = k:match("^fx:(.+)$")
+    if payload then
+      for piece in payload:gmatch("[^/]+") do
+        local name = piece:gsub("@%d+$", ""):lower()
+        if name ~= "" and (name:find(target, 1, true)
+            or target:find(name, 1, true)) then
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
+function CTX.prompt_has_fx_param_read_intent(text)
+  if type(text) ~= "string" or text == "" then return false end
+  local t = text:lower()
+  local names_params =
+       t:find("%f[%w]parameters?%f[%W]") ~= nil
+    or t:find("%f[%w]params?%f[%W]") ~= nil
+  local names_settings =
+       t:find("%f[%w]settings?%f[%W]") ~= nil
+    or t:find("%f[%w]values?%f[%W]") ~= nil
+    or t:find("set%s+to") ~= nil
+  if not names_params and not names_settings then return false end
+  return t:find("^%s*what%s+") ~= nil
+    or t:find("^%s*which%s+") ~= nil
+    or t:find("^%s*show%s+") ~= nil
+    or t:find("^%s*list%s+") ~= nil
+    or t:find("^%s*tell%s+") ~= nil
+    or t:find("%f[%w]current%f[%W]") ~= nil
+    or t:find("%f[%w]live%f[%W]") ~= nil
+    or t:find("%f[%w]read%f[%W]") ~= nil
+end
+
+function CTX.live_fx_params_filter_for_ident(ident)
+  if not ident or ident == "" then return nil end
+  local proj = S.pending_project or reaper.EnumProjects(-1)
+  if not proj then return nil end
+  local target = _curated_for_ident(ident) or tostring(ident)
+  target = target:gsub("^%w+:%s*", "")
+  if target == "" then return nil end
+  local queries = { target }
+  if tostring(ident) ~= target then queries[#queries+1] = tostring(ident) end
+  local track_count = R_CountTracks(proj)
+  local tracks, seen = {}, {}
+  for ti = 0, track_count - 1 do
+    local tr = R_GetTrack(proj, ti)
+    if tr then
+      local fx_count = R_TrackFX_GetCount(tr) or 0
+      for fi = 0, fx_count - 1 do
+        local _, fx_nm = R_TrackFX_GetFXName(tr, fi, "")
+        if CTX.fx_name_matches(fx_nm, queries) then
+          local track_idx = ti + 1
+          if not seen[track_idx] then
+            tracks[#tracks+1] = track_idx
+            seen[track_idx] = true
+          end
+        end
+      end
+    end
+  end
+  if #tracks == 1 then
+    return { name = target, track = tracks[1] }
+  end
+  if #tracks > 1 and reaper.CountSelectedTracks and reaper.GetSelectedTrack then
+    local selected_count = reaper.CountSelectedTracks(proj) or 0
+    for si = 0, selected_count - 1 do
+      local sel = reaper.GetSelectedTrack(proj, si)
+      if sel then
+        for ti = 0, track_count - 1 do
+          if R_GetTrack(proj, ti) == sel and seen[ti + 1] then
+            return { name = target, track = ti + 1 }
+          end
+        end
+      end
+    end
+  end
+  return nil
+end
+
+function CTX.preempt_live_fx_params_for_ident(ident, injected, reason, need_helpers)
+  local filter = CTX.live_fx_params_filter_for_ident(ident)
+  if not filter then return false end
+  local fp_key = "fx:" .. CTX.fx_filter_key({ filter })
+  if not S.sticky_context[fp_key] then
+    local fx_str, matched = CTX.fx_params(S.pending_project or reaper.EnumProjects(-1),
+      { filter })
+    if not fx_str or not matched or matched < 1 then return false end
+    Net.sticky_set(fp_key, fx_str, "preempt")
+    injected[#injected+1] = fp_key
+    Log.line("PREEMPT",
+      "injected " .. fp_key .. " (live fx_params for " .. tostring(reason) .. ")")
+  end
+  if need_helpers then
+    Net.copin_plugin_bundle(injected)
+    Net.copin_docs_core(injected)
+    Net.copin_plugin_helpers(injected, "preempt")
+  end
+  return true
+end
+
 function CTX.preempt_buckets_for_prompt(user_text)
   if not user_text or user_text == "" then return {} end
   local text = user_text:lower()
+  if CTX.prompt_indicates_typed_action_plan(user_text) then
+    Log.line("PREEMPT",
+      "skipped context preempt (typed-action plan prompt)")
+    return {}
+  end
   local cache = FXCache.load()
   local pref_types = cache.preferred_types or {}
   -- JSFX-only intent suppresses the plugin_ref / pref / docs co-pin path
@@ -11808,24 +14637,74 @@ function CTX.preempt_buckets_for_prompt(user_text)
   -- the model writes EEL2, not reaper.* TrackFX_AddByName, and the docs
   -- gate is the safety net if it does choose to add a Lua companion.
   local jsfx_intent = _prompt_indicates_jsfx(user_text)
+  local stock_fx_constraint = CTX.prompt_has_explicit_stock_fx_constraint(user_text)
 
   -- Scan chain-phrase hints first. Builds tkey -> matching_phrase so the
   -- main loop below can treat phrase hits identically to keyword hits and
   -- the log line can attribute the trigger.
   local phrase_implied = {}
-  for _, hint in ipairs(CHAIN_PHRASE_HINTS) do
-    if text:find(hint[1]) then
-      for _, t in ipairs(hint[2]) do
-        if not phrase_implied[t] then phrase_implied[t] = hint[1] end
+  if not stock_fx_constraint then
+    for _, hint in ipairs(CHAIN_PHRASE_HINTS) do
+      if text:find(hint[1]) then
+        for _, t in ipairs(hint[2]) do
+          if not phrase_implied[t] then phrase_implied[t] = hint[1] end
+        end
       end
     end
   end
+  if phrase_implied.gate == "chain.-rock%s+vocal" then
+    if phrase_implied.deesser == "chain.-vocal" then phrase_implied.deesser = nil end
+    if phrase_implied.reverb == "chain.-vocal" then phrase_implied.reverb = nil end
+  end
+  local chain_phrase_hit = next(phrase_implied) ~= nil
+  local preempt_needs_plugin_helpers =
+    chain_phrase_hit or Code.prompt_has_param_write_intent(user_text)
+  local preempt_live_fx_params =
+    CTX.prompt_has_fx_param_read_intent(user_text)
+    or Code.prompt_has_param_write_intent(user_text)
 
   -- injected: collected sticky_context keys we pre-pin this call. Hoisted
   -- above the docs-phrase scan so both the docs scan and the existing
   -- preferred-types loop below append to the same list. Returned at the end
   -- as the caller's "what we just preempted" log payload.
   local injected = {}
+
+  do
+    local recent_hit = false
+    local recent_phrases = {
+      "latest reaper", "current reaper", "new reaper", "recent reaper",
+      "new in reaper", "what's new", "whats new",
+      "reaper 7.65", "reaper 7.66", "reaper 7.67", "reaper 7.68",
+      "reaper 7.69", "reaper 7.70", "reaper 7.71", "reaper 7.72",
+      "sample edit", "sample editing", "sample edit envelope",
+      "set sample values to zero", "render hidden marker",
+      "render hidden region", "hidden marker", "hidden region",
+      "wavpack", "render metadata", "embed project markers",
+      "embed project regions", "font scaling", "font-size scaling",
+      "theme font", "item label font", "ruler lane", "mouse modifier",
+      "marker left drag", "region edge", "ruler lane header",
+    }
+    for _, phrase in ipairs(recent_phrases) do
+      if text:find(phrase, 1, true) then
+        recent_hit = phrase
+        break
+      end
+    end
+    if recent_hit and not S.sticky_context["recent_reaper_changes"] then
+      local recent_content, recent_err = CTX.recent_reaper_changes()
+      if recent_content then
+        Net.sticky_set("recent_reaper_changes", recent_content, "preempt")
+        injected[#injected+1] = "recent_reaper_changes"
+        Log.line("PREEMPT",
+          "injected recent_reaper_changes (recent phrase: '"
+          .. tostring(recent_hit) .. "')")
+      else
+        Log.line("PREEMPT",
+          "wanted to inject recent_reaper_changes but loader failed: "
+          .. (recent_err or "?"))
+      end
+    end
+  end
 
   -- Chain-build follow-up: pre-pin fx_chains so the model can honor the
   -- ADD-VS-REUSE rule. When the prompt is a chain phrase AND there's
@@ -11837,7 +14716,7 @@ function CTX.preempt_buckets_for_prompt(user_text)
   -- it needs to actually do it. First-turn chain prompts skip this
   -- (no prior plugins to reuse) so we don't pay for a snapshot that
   -- adds nothing.
-  if next(phrase_implied) and #S.history > 0
+  if chain_phrase_hit and #S.history > 0
      and not S.fx_chains_already_sent
      and not S.sticky_context["fx_chains"] then
     local proj = S.pending_project or 0
@@ -11900,6 +14779,49 @@ function CTX.preempt_buckets_for_prompt(user_text)
               "wanted to inject " .. sticky_key
               .. " but loader failed: " .. (sec_err or "?"))
           end
+        end
+      end
+    end
+  end
+  if CTX.prompt_indicates_drum_edit(user_text) then
+    local docs_already = S.api_ref_message ~= nil
+    Net.copin_docs_core(injected)
+    if not docs_already and S.api_ref_message then
+      Log.line("PREEMPT",
+        "injected docs (drum edit/quantize workflow)")
+    end
+    if not S.sticky_context["docs_extended"]
+       and not S.docs_extended_already_sent then
+      S.docs_extended_already_sent = true
+      local ext_content, ext_err = CTX.docs_extended()
+      if ext_content then
+        Net.sticky_set("docs_extended", ext_content)
+        injected[#injected+1] = "docs_extended"
+        Log.line("PREEMPT",
+          "injected docs_extended (drum edit/quantize workflow)")
+      else
+        Log.line("PREEMPT",
+          "wanted to inject docs_extended for drum edit/quantize but "
+          .. "loader failed: " .. (ext_err or "?"))
+      end
+    end
+    for _, section in ipairs({ "items", "tempo" }) do
+      local sticky_key = "docs:" .. section
+      if not S.sticky_context[sticky_key]
+         and not S.docs_section_sent[section] then
+        local sec_content, sec_err = CTX.docs_section(section)
+        if sec_content then
+          Net.sticky_set(sticky_key, sec_content)
+          S.docs_section_sent[section] = true
+          injected[#injected+1] = sticky_key
+          Log.line("PREEMPT",
+            "injected " .. sticky_key
+            .. " (drum edit/quantize workflow)")
+        else
+          Log.line("PREEMPT",
+            "wanted to inject " .. sticky_key
+            .. " for drum edit/quantize but loader failed: "
+            .. (sec_err or "?"))
         end
       end
     end
@@ -12002,6 +14924,11 @@ function CTX.preempt_buckets_for_prompt(user_text)
   for _, name in pairs(CURATED_IDENT) do curated_unique[name] = true end
   for curated_name in pairs(curated_unique) do
     if text:find(curated_name:lower(), 1, true) then
+      if preempt_live_fx_params
+         and CTX.preempt_live_fx_params_for_ident(curated_name, injected,
+           "direct curated name match", Code.prompt_has_param_write_intent(user_text)) then
+        goto continue_curated_name
+      end
       local pr_key = "plugin_ref:" .. curated_name
       if not S.sticky_context[pr_key]
          and not (S.plugin_ref_sent or {})[curated_name] then
@@ -12021,7 +14948,7 @@ function CTX.preempt_buckets_for_prompt(user_text)
           if S.plugin_ref_sent then S.plugin_ref_sent[curated_name] = true end
           Net.copin_plugin_bundle(injected)
           Net.copin_docs_core(injected)
-          if Code.prompt_has_param_write_intent(user_text) then
+          if preempt_needs_plugin_helpers then
             Net.copin_plugin_helpers(injected, "preempt")
           end
           injected[#injected+1] = pr_key
@@ -12061,6 +14988,15 @@ function CTX.preempt_buckets_for_prompt(user_text)
         end
       end
     end
+    ::continue_curated_name::
+  end
+
+  if stock_fx_constraint then
+    if #keys > 0 then
+      Log.line("PREEMPT",
+        "skipped preferred-plugin keyword loop (explicit stock FX constraint)")
+    end
+    return injected
   end
 
   for _, tkey in ipairs(keys) do
@@ -12090,6 +15026,20 @@ function CTX.preempt_buckets_for_prompt(user_text)
       -- tag -- so the two paths would chase each other forever. Letting
       -- the preempt fall through lets the resolve handler fire the popup.
       if not ident or ident == "" then
+        goto continue_preempt
+      end
+      if preempt_live_fx_params
+         and CTX.preempt_live_fx_params_for_ident(ident, injected,
+           trigger, Code.prompt_has_param_write_intent(user_text)) then
+        goto continue_preempt
+      end
+      if Code.prompt_has_param_write_intent(user_text)
+         and CTX.sticky_has_fx_params_for_ident(ident) then
+        Net.copin_plugin_bundle(injected)
+        Net.copin_docs_core(injected)
+        Net.copin_plugin_helpers(injected, "preempt")
+        Log.line("PREEMPT",
+          "skipped " .. tkey .. " plugin_ref (scoped live fx_params already pinned)")
         goto continue_preempt
       end
       -- Use the prefix/vendor-tolerant lookup so canonicalized prefs
@@ -12147,16 +15097,13 @@ function CTX.preempt_buckets_for_prompt(user_text)
             -- would otherwise happen on every subsequent growing-rung
             -- invalidation (each new plugin_ref / pref / fx_inspect).
             --
-            -- Gated on prompt_has_param_write_intent so add-only prompts
-            -- ("add Pro-Q to track 1") don't pre-pin the ~17.8K-char
-            -- helpers bundle the model won't actually use. The write-intent
-            -- detector requires a write verb AND a value-shape pattern, so
-            -- it fires for "set the EQ Q to 0.7" / "boost 3 kHz by +2 dB"
-            -- but not for "add an EQ" or "make it sound brighter". The
-            -- dispatcher's existing fx_params / fx_inspect / preferred_
-            -- plugins paths still copin helpers (as "copin" -> growing)
-            -- when those triggers fire mid-flow.
-            if Code.prompt_has_param_write_intent(user_text) then
+            -- Pre-pin helpers for explicit value writes and open-ended
+            -- chain phrases. Add-only prompts ("add Pro-Q to track 1") still
+            -- skip the ~17.8K-char helper bundle, but "build a vocal chain"
+            -- / "chain suitable for a rock vocal" usually makes the model
+            -- choose display-unit values and helper calls on its own. Pinning
+            -- helpers here prevents the missing-helper retry for that family.
+            if preempt_needs_plugin_helpers then
               Net.copin_plugin_helpers(injected, "preempt")
             end
             injected[#injected+1] = pr_key
@@ -12227,11 +15174,11 @@ function CTX.preempt_buckets_for_prompt(user_text)
             -- plugin_ref branch above: every pref-plugin pin drives a
             -- plugin task that needs both the workflow guide and the
             -- reaper.* signatures). Helpers rides the stable rung via
-            -- the "preempt" source tag, gated on prompt_has_param_write_
-            -- intent (see curated branch comment for why).
+            -- the "preempt" source tag when this is an explicit value write
+            -- or an open-ended chain phrase.
             Net.copin_plugin_bundle(injected)
             Net.copin_docs_core(injected)
-            if Code.prompt_has_param_write_intent(user_text) then
+            if preempt_needs_plugin_helpers then
               Net.copin_plugin_helpers(injected, "preempt")
             end
             injected[#injected+1] = pp_key
@@ -12255,8 +15202,34 @@ end
 -- unaffected (the cache stores the full listing; reusing it across modes
 -- would either return the wrong shape on a re-entry or require keying the
 -- cache by mode).
+function CTX.prompt_wants_routing_snapshot(user_text)
+  local lt = tostring(user_text or ""):lower()
+  if lt == "" then return false end
+  if lt:find("send level", 1, true)
+      or lt:find("send volume", 1, true)
+      or lt:find("send gain", 1, true)
+      or lt:find("level of the send", 1, true)
+      or lt:find("volume of the send", 1, true)
+      or lt:find("%f[%w]sends%f[%W]")
+      or lt:find("%f[%w]receives%f[%W]")
+      or lt:find("%f[%w]receive%s+from%f[%W]")
+      or lt:find("%f[%w]send%s+to%f[%W]")
+      or lt:find("%f[%w]send%s+into%f[%W]")
+      or lt:find("%f[%w]route%s+to%f[%W]")
+      or lt:find("%f[%w]routed%s+to%f[%W]")
+      or lt:find("%f[%w]routing%f[%W]")
+      or lt:find("%f[%w]sidechain%f[%W]")
+      or lt:find("%f[%w]aux%f[%W]")
+      or lt:find("%f[%w]bus%f[%W]")
+      or lt:find("return track", 1, true) then
+    return true
+  end
+  return false
+end
+
 CTX.build_snapshot = function(proj, opts)
   local minimal_tracks = opts and opts.minimal_tracks
+  local drum_edit = (opts and opts.drum_edit) or S.pending_drum_edit_intent
   local state_count = reaper.GetProjectStateChangeCount(proj or 0)
   local c = CTX._snapshot_heavy_cache
   local tracks_txt, markers_txt
@@ -12281,6 +15254,7 @@ CTX.build_snapshot = function(proj, opts)
     }
   end
   local parts = {
+    CTX.reaper_version(),
     CTX.tempo(proj),
     CTX.sample_rate(proj),
     CTX.play_state(proj),
@@ -12292,6 +15266,11 @@ CTX.build_snapshot = function(proj, opts)
     CTX.cursor(proj),
     CTX.selected_items(proj),
   }
+  if not minimal_tracks
+      and CTX.prompt_wants_routing_snapshot(S.pending_orig_prompt) then
+    parts[#parts + 1] = CTX.sends(proj, {})
+  end
+  if drum_edit then parts[#parts + 1] = CTX.dynamic_split_settings() end
   -- Multi-row sections (Tracks, FX chains, Track flags, Markers/regions,
   -- Selected items) use a compact pipe-delimited format with a header row
   -- declaring the columns. This shaves ~15-25% snapshot tokens on large
@@ -12884,6 +15863,31 @@ end
 -- checks for the function before using and falls back to its own SHA-256
 -- if absent.
 RA.sha256_hex = sha256_hash
+
+-- =============================================================================
+-- Local deterministic action modules
+-- =============================================================================
+-- These sidecars hold focused, non-LLM feature implementations that are too
+-- substantial to keep in ReaAssist.lua. They are non-critical at startup:
+-- a missing/corrupt module disables that local action but must not prevent the
+-- chat UI, updater, or recovery flow from loading.
+RA.Local = RA.Local or {}
+do
+  local path = RA.RESOURCES_DIR .. "Local" .. RA.SEP .. "Drum_Edit.lua"
+  local ok, mod_or_err = pcall(dofile, path)
+  if ok and type(mod_or_err) == "table" then
+    RA.Local.Drum_Edit = mod_or_err
+  else
+    RA.Local.Drum_Edit = {
+      name = "Drum_Edit",
+      ready = false,
+      unavailable_reason = tostring(mod_or_err),
+    }
+    if not ok and type(Log) == "table" and type(Log.line) == "function" then
+      Log.line("LOCAL", "Drum_Edit.lua load failed: " .. tostring(mod_or_err))
+    end
+  end
+end
 
 -- Cross-chunk namespace. The UI file's Update-Available and File-
 -- Integrity dialogs call Updater.download_start / Updater.force_reinstall,
@@ -15234,11 +18238,12 @@ function Net.sticky_evict(user_text)
     end
   end
   -- Drop stale keys + clean up orphaned age entries.
-  -- Exemption: docs:* and docs_extended are stable session-wide reference
-  -- material, not per-task context that should churn. The full set of doc
-  -- payloads totals ~5K tokens; once loaded, cheaper to keep than to
-  -- re-fetch on a follow-up keyword mention. Also makes the system prompt's
-  -- "stays pinned for the rest of the conversation" promise truthful.
+  -- Exemption: docs:*, docs_extended, and recent_reaper_changes are stable
+  -- session-wide reference material, not per-task context that should churn.
+  -- The full set of doc payloads totals ~5K tokens; once loaded, cheaper to
+  -- keep than to re-fetch on a follow-up keyword mention. Also makes the
+  -- system prompt's "stays pinned for the rest of the conversation" promise
+  -- truthful.
   -- Trade-off: a misfired pre-pin stays alive forever (bounded ~850-1800
   -- tokens × cache rolls; if this becomes a problem, a softer "evict at
   -- 25 turns of no-keyword-mention" rule could be added).
@@ -15246,7 +18251,8 @@ function Net.sticky_evict(user_text)
   for k, t in pairs(age) do
     if not S.sticky_context[k] then
       age[k] = nil
-    elseif k == "docs_extended" or k:find("^docs:") then
+    elseif k == "docs_extended" or k == "recent_reaper_changes"
+        or k:find("^docs:") then
       -- exempt; see comment above.
     elseif (now - t) > STICKY_MAX_AGE then
       Net.sticky_unset(k)   -- also removes k from sticky_context_order
@@ -15258,6 +18264,53 @@ function Net.sticky_evict(user_text)
   if evicted then
     Log.line("STICKY", "evicted (age > " .. STICKY_MAX_AGE
       .. " turns): " .. tbl_concat(evicted, ", "))
+  end
+end
+
+function Net.sticky_prune_after_plugin_success(user_text, code_text)
+  if not (CTX and CTX.prompt_indicates_chain_context
+      and CTX.prompt_indicates_chain_context(user_text)) then
+    return
+  end
+  if not S.sticky_context then return end
+
+  local code = tostring(code_text or "")
+  local helper_used =
+       code:find("%f[%w]find_param%s*%(") ~= nil
+    or code:find("%f[%w]set_param_display%s*%(") ~= nil
+    or code:find("%f[%w]set_param_enum%s*%(") ~= nil
+    or code:find("%f[%w]set_param_enum_paced%s*%(") ~= nil
+  local evict = {}
+  for k in pairs(S.sticky_context) do
+    if k == "fx_chains"
+       or k:find("^plugin_ref:")
+       or k:find("^pref:")
+       or (k == "prompt_bundle:plugin_helpers" and not helper_used) then
+      evict[#evict+1] = k
+    end
+  end
+  table.sort(evict)
+  for _, k in ipairs(evict) do
+    if k == "fx_chains" then
+      S.fx_chains_already_sent = false
+    elseif k == "prompt_bundle:plugin_helpers" then
+      if S.prompt_bundle_sent then S.prompt_bundle_sent["plugin_helpers"] = nil end
+    else
+      local refs = k:match("^plugin_ref:(.+)$")
+      if refs and S.plugin_ref_sent then
+        for name in refs:gmatch("[^/]+") do S.plugin_ref_sent[name] = nil end
+      end
+      local prefs = k:match("^pref:(.+)$")
+      if prefs and S.pref_plugins_sent then
+        for name in prefs:gmatch("[^/]+") do S.pref_plugins_sent[name] = nil end
+      end
+    end
+    Net.sticky_unset(k)
+    if S.sticky_context_age then S.sticky_context_age[k] = nil end
+  end
+  if #evict > 0 then
+    Log.line("STICKY", "pruned after successful chain action: "
+      .. tbl_concat(evict, ", "))
   end
 end
 
@@ -15753,6 +18806,15 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
   if p.is_custom and p.model_prefix and p.model_prefix ~= "" then
     model_id = p.model_prefix .. model_id
   end
+  local response_format = ""
+  if p.id == "openai"
+     and S.pending_typed_action_expected == true
+     and S.pending_typed_action_response_format == true
+     and type(Code.typed_actions_openai_response_format_field) == "function" then
+    response_format =
+      Code.typed_actions_openai_response_format_field(
+        S.pending_orig_prompt or "") or ""
+  end
   -- Custom-provider extra_body: merge provider-wide + per-model JSON objects
   -- into the outer request body. Net.merge_custom_extra_body is the shared
   -- helper -- used here for real chat AND from Net.fire_key_test's opt-in
@@ -15764,15 +18826,36 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
     extra_suffix = Net.merge_custom_extra_body(p, MODELS[prefs.model_idx])
   end
   -- max_completion_tokens: optional on the OpenAI Chat Completions API. For
-  -- cloud OpenAI, omit it entirely so the server applies its own per-model
+  -- normal cloud OpenAI chat, omit it so the server applies its own per-model
   -- ceiling -- avoids the GPT-5-thinking failure mode where a fixed cap got
-  -- consumed by reasoning tokens and produced empty visible output. For
-  -- custom providers (Ollama / LM Studio / vLLM / OpenRouter etc.), keep
+  -- consumed by reasoning tokens and produced empty visible output. Typed-action
+  -- response-format requests are different: the only valid answer is compact
+  -- JSON, so cap them to prevent runaway structured-output completions. Keep
+  -- enough room for GPT-5 mini Low thinking, which can spend several thousand
+  -- hidden reasoning tokens before emitting the compact JSON object. Small
+  -- typed-action profiles can opt into a lower cap; if they hit it, the
+  -- validator fails closed and escalates instead of waiting on an 8K-token loop.
+  -- For custom providers (Ollama / LM Studio / vLLM / OpenRouter etc.), keep
   -- the cap derived from the per-model context_window field on the API Keys
-  -- page, since local servers commonly run with tight context windows that
-  -- need a real bound on output.
+  -- page, since local servers commonly run with tight context windows that need
+  -- a real bound on output.
   local max_tokens_field = ""
-  if p.is_custom then
+  if p.id == "openai" and response_format ~= "" then
+    local typed_action_cap = 8192
+    local active_model = MODELS[prefs.model_idx]
+    local model_cap = active_model
+      and tonumber(active_model.typed_action_max_completion)
+    if model_cap and model_cap > 0 then
+      typed_action_cap = math_floor(model_cap)
+    end
+    local tl = p.thinking_levels and p.thinking_levels[effective_thinking_idx]
+    if S.typed_action_escalation_used == true
+       and tl and tl.value == "none" then
+      typed_action_cap = math_min(typed_action_cap, 2048)
+    end
+    max_tokens_field =
+      str_format(',"max_completion_tokens":%d', typed_action_cap)
+  elseif p.is_custom then
     local custom_active = MODELS[prefs.model_idx]
     local ctx_window    = (custom_active and tonumber(custom_active.context_window))
                           or CUSTOM_DEFAULT_CTX
@@ -15794,9 +18877,9 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
       model_id, tbl_concat(msg_parts, ","), reasoning, extra_suffix)
   end
   return str_format(
-    '{"model":"%s"%s,"prompt_cache_key":"%s","messages":[%s]%s%s}',
+    '{"model":"%s"%s,"prompt_cache_key":"%s","messages":[%s]%s%s%s}',
     model_id, max_tokens_field, JSON.escape(S.INSTANCE_ID),
-    tbl_concat(msg_parts, ","), reasoning, extra_suffix)
+    tbl_concat(msg_parts, ","), reasoning, response_format, extra_suffix)
 end
 
 -- =============================================================================
@@ -15812,6 +18895,9 @@ end
 function Net.build_body_google(msgs, snapshot, msg_attachments)
   local msg_parts = {}
   local use_cache = Net.gemini_cache_is_usable()
+  S.gemini_cache_last_used = use_cache == true
+  S.gemini_cache_last_state =
+    Net.gemini_cache_debug_state("body_build", use_cache)
 
   -- Bundle the long-lived static refs (api_ref + midi_ref + theme_ref) into
   -- ONE pinned user+model exchange instead of three. Fewer turns inside
@@ -16011,9 +19097,11 @@ end
 -- triggered this turn).
 --
 -- compact_eligible only fires for the safe case: auto-ran-ok + a real
--- code body + not truncated. Everything else (errored, manual_run,
--- truncated, no_code, gate-hit-without-retry) stays verbatim so the
--- model can still see the original on a "fix that" follow-up.
+-- code body + not truncated + a summary that actually saves bytes.
+-- Everything else (errored, manual_run, truncated, no_code,
+-- gate-hit-without-retry, tiny scripts) stays verbatim so the model can
+-- still see the original on a "fix that" follow-up.
+Net._COMPACT_MIN_SAVINGS = 128
 function Net.assistant_attach_compact_metadata(hist_idx, info)
   local row = S.history and S.history[hist_idx]
   if not row or row.role ~= "assistant" then return end
@@ -16057,17 +19145,30 @@ function Net.assistant_attach_compact_metadata(hist_idx, info)
     code_hash   = row.code_hash,
     user_intent = info.user_intent,
   })
+  row.compact_savings = #(row.content or "") - #(row.compact_summary or "")
   -- Eligibility gate. Conservative: only ran_ok turns with real code
-  -- and no truncation are safe to compact. Anything else stays
-  -- verbatim with a recorded skip reason for the [HISTORY-COMPACT]
+  -- and no truncation are safe to compact, and only when the summary is
+  -- meaningfully smaller than the original assistant content. Anything
+  -- else stays verbatim with a recorded skip reason for the [HISTORY-COMPACT]
   -- diagnostic line.
-  if row.run_status == "ran_ok" and code_bytes > 0 and not row.truncated then
+  if row.run_status == "ran_ok"
+     and code_bytes > 0
+     and not row.truncated
+     and row.compact_savings >= Net._COMPACT_MIN_SAVINGS then
     row.compact_eligible = true
     row.compact_skip_reason = nil
   else
     row.compact_eligible = false
-    row.compact_skip_reason = (row.run_status == "ran_ok") and "no_code"
-      or row.run_status or "unknown"
+    if row.run_status == "ran_ok" and code_bytes <= 0 then
+      row.compact_skip_reason = "no_code"
+    elseif row.run_status == "ran_ok" and row.truncated then
+      row.compact_skip_reason = "truncated"
+    elseif row.run_status == "ran_ok"
+           and row.compact_savings < Net._COMPACT_MIN_SAVINGS then
+      row.compact_skip_reason = "too_small"
+    else
+      row.compact_skip_reason = row.run_status or "unknown"
+    end
   end
 end
 
@@ -16078,8 +19179,17 @@ end
 -- disable savings for that turn (no correctness regression).
 -- Constants attached to Net (not file-scope locals) to stay under Lua
 -- 5.4's 200-local-per-function limit on the top-level chunk.
-Net._MODIFY_PRIOR_VERBS = "modify|tweak|fix|change|adjust|update|revise|rework"
-Net._MODIFY_PRIOR_NOUNS = "that|it|this|previous|last|script|code|one"
+Net._MODIFY_PRIOR_VERBS =
+  "modify|tweak|fix|change|adjust|update|revise|rework|redo|strip|remove"
+  .. "|move|swap|replace|drop|delete"
+Net._MODIFY_PRIOR_CODE_VERBS =
+  "modify|tweak|fix|change|adjust|update|revise|rework|redo|strip|remove"
+  .. "|move|swap|replace|drop|delete"
+Net._MODIFY_PRIOR_REF_NOUNS =
+  "that|it|this|previous|last|one|version|pass|result"
+Net._MODIFY_PRIOR_CODE_NOUNS = "script|code"
+Net._MODIFY_PRIOR_DIRECT_VERBS = "make|use"
+Net._MODIFY_PRIOR_DIRECT_NOUNS = "it|that|this|one"
 function Net._is_modify_prior_followup(hist)
   -- Last role=user turn (current turn's prompt -- already in hist as
   -- the trailing entry).
@@ -16089,17 +19199,65 @@ function Net._is_modify_prior_followup(hist)
   end
   if not last_user or last_user == "" then return false end
   local lo = last_user:lower()
-  -- Look for verb followed (within ~60 chars) by a deictic noun.
-  for verb in Net._MODIFY_PRIOR_VERBS:gmatch("[^|]+") do
-    local vstart = lo:find("%f[%w]" .. verb .. "%f[%W]")
-    if vstart then
-      local window = lo:sub(vstart, vstart + 60)
-      for noun in Net._MODIFY_PRIOR_NOUNS:gmatch("[^|]+") do
-        if window:find("%f[%w]" .. noun .. "%f[%W]") then
-          return true, verb .. "-" .. noun
+  local function has_word(word)
+    return lo:find("%f[%w]" .. word .. "%f[%W]") ~= nil
+  end
+  local function verb_near_noun(verbs, nouns)
+    for verb in verbs:gmatch("[^|]+") do
+      local pos = 1
+      while true do
+        local vstart, vend = lo:find("%f[%w]" .. verb .. "%f[%W]", pos)
+        if not vstart then break end
+        -- Look both directions within ~60 chars so "last script, change..."
+        -- is treated the same as "change the last script".
+        local window = lo:sub(math.max(1, vstart - 60), vend + 60)
+        for noun in nouns:gmatch("[^|]+") do
+          if window:find("%f[%w]" .. noun .. "%f[%W]") then
+            return verb .. "-" .. noun
+          end
         end
+        pos = vend + 1
       end
     end
+    return nil
+  end
+  local function direct_ref(verbs, nouns)
+    for verb in verbs:gmatch("[^|]+") do
+      local pos = 1
+      while true do
+        local _vstart, vend = lo:find("%f[%w]" .. verb .. "%f[%W]", pos)
+        if not vend then break end
+        -- Tight direct-reference window so "make it brighter" hits but
+        -- "make a script that..." does not.
+        local window = lo:sub(vend + 1, vend + 18)
+        for noun in nouns:gmatch("[^|]+") do
+          if window:find("^%W*%f[%w]" .. noun .. "%f[%W]") then
+            return verb .. "-" .. noun
+          end
+        end
+        pos = vend + 1
+      end
+    end
+    return nil
+  end
+
+  local match = verb_near_noun(
+    Net._MODIFY_PRIOR_VERBS, Net._MODIFY_PRIOR_REF_NOUNS)
+  if match then return true, match end
+  match = verb_near_noun(
+    Net._MODIFY_PRIOR_CODE_VERBS, Net._MODIFY_PRIOR_CODE_NOUNS)
+  if match then return true, match end
+  match = direct_ref(
+    Net._MODIFY_PRIOR_DIRECT_VERBS, Net._MODIFY_PRIOR_DIRECT_NOUNS)
+  if match then return true, match end
+
+  -- Common natural-language correction pattern with no explicit "that/it":
+  -- "actually I want EQ before the comp", "instead, put delay after..."
+  -- These false positives only skip savings for the current send.
+  if (has_word("actually") or has_word("instead"))
+     and (has_word("before") or has_word("after")
+          or has_word("without") or has_word("instead")) then
+    return true, has_word("actually") and "actually-edit" or "instead-edit"
   end
   return false
 end
@@ -16134,7 +19292,9 @@ function Net._maybe_compact_history(hist)
     if row.role == "assistant"
        and i ~= last_asst_idx
        and row.compact_eligible
-       and row.compact_summary then
+       and row.compact_summary
+       and (#(row.content or "") - #(row.compact_summary or ""))
+           >= Net._COMPACT_MIN_SAVINGS then
       out[#out+1] = { role = "assistant", content = row.compact_summary }
       compacted = compacted + 1
     else
@@ -16142,7 +19302,14 @@ function Net._maybe_compact_history(hist)
       if row.role == "assistant" then
         kept_asst = kept_asst + 1
         if i ~= last_asst_idx then
-          local r = row.compact_skip_reason or "unknown"
+          local r = row.compact_skip_reason
+          if row.compact_eligible
+             and row.compact_summary
+             and (#(row.content or "") - #(row.compact_summary or ""))
+                 < Net._COMPACT_MIN_SAVINGS then
+            r = "too_small"
+          end
+          r = r or "unknown"
           skip_reasons[r] = (skip_reasons[r] or 0) + 1
         end
       end
@@ -16158,9 +19325,10 @@ function Net._maybe_compact_history(hist)
       for r, c in pairs(skip_reasons) do parts[#parts+1] = r .. "(" .. c .. ")" end
       skip_str = tbl_concat(parts, ",")
     end
+    local delta = after - before
     Log.line("HISTORY-COMPACT", string.format(
-      "before=%dB after=%dB delta=-%dB compacted=%d kept=%d skipped=%s",
-      before, after, before - after, compacted, kept_asst, skip_str))
+      "before=%dB after=%dB delta=%+dB compacted=%d kept=%d skipped=%s",
+      before, after, delta, compacted, kept_asst, skip_str))
   end
   return out
 end
@@ -16178,7 +19346,7 @@ end
 --               curl. Each provider specifies its own auth_header name.
 --
 -- Both platforms use an async pattern: curl runs in the background, writes
--- its response to tmp.out, and echoes its exit code to tmp.exit.
+-- its response to tmp.out, stderr to tmp.err, and echoes its exit code to tmp.exit.
 -- Net.try_finish_curl() polls both files each frame to detect completion.
 --
 -- Windows: the curl command is inlined directly into a PowerShell -Command
@@ -16201,6 +19369,83 @@ function Net._restore_pending_user_history()
      and S.history[#S.history].role == "user" then
     S.history[#S.history].content = "USER REQUEST:\n" .. S.pending_orig_prompt
   end
+end
+
+-- Retry prompts sometimes fire on terse follow-ups ("1", "yes", "use built
+-- in", "snap them"), where S.pending_orig_prompt alone is not enough context.
+-- Expand those into a compact task-context block so hidden validator retries
+-- don't make the model reconstruct the user's real intent from luck.
+function Net._retry_trim_text(text)
+  return tostring(text or "")
+    :gsub("\r\n", "\n")
+    :gsub("^%s+", "")
+    :gsub("%s+$", "")
+end
+
+function Net._retry_extract_user_request(content)
+  local text = tostring(content or "")
+  if text:find("INTERNAL NOTE TO THE MODEL", 1, true) then return "" end
+  local marker, last = "USER REQUEST:", nil
+  local pos = 1
+  while true do
+    local s, e = text:find(marker, pos, true)
+    if not s then break end
+    last = e + 1
+    pos = e + 1
+  end
+  if last then text = text:sub(last) end
+  return Net._retry_trim_text(text)
+end
+
+function Net._retry_prompt_needs_context(text)
+  local t = Net._retry_trim_text(text)
+  local lo = t:lower()
+  if lo == "" then return false end
+  if #lo <= 24 then return true end
+  if lo:match("^%d+[%.)]?$") then return true end
+  if lo:find("%f[%w]option%f[%W]") then return true end
+  if lo:find("%f[%w]same%f[%W]") then return true end
+  if lo:find("%f[%w]previous%f[%W]") then return true end
+  if lo:find("%f[%w]last%f[%W]") then return true end
+  if lo:find("%f[%w]that%f[%W]") then return true end
+  if lo:find("%f[%w]this%f[%W]") then return true end
+  if lo:find("%f[%w]them%f[%W]") then return true end
+  if lo:find("%f[%w]those%f[%W]") then return true end
+  if lo:find("built in", 1, true) or lo:find("built%-in") then return true end
+  return false
+end
+
+function Net._retry_request_is_substantive(text, current)
+  local t = Net._retry_trim_text(text)
+  if t == "" or t == current then return false end
+  if #t <= 12 then return false end
+  if t:match("^[%d%p%s]+$") then return false end
+  return true
+end
+
+function Net.retry_user_request_context()
+  local current = Net._retry_trim_text(S.pending_orig_prompt or "")
+  if not Net._retry_prompt_needs_context(current) then return current end
+  local prior_rev = {}
+  for i = #S.history, 1, -1 do
+    local row = S.history[i]
+    if row and row.role == "user" then
+      local req = Net._retry_extract_user_request(row.content)
+      if Net._retry_request_is_substantive(req, current) then
+        prior_rev[#prior_rev + 1] = req
+        if #prior_rev >= 2 then break end
+      end
+    end
+  end
+  if #prior_rev == 0 then return current end
+  local prior = {}
+  for i = #prior_rev, 1, -1 do
+    local req = prior_rev[i]
+    if #req > 700 then req = req:sub(1, 697) .. "..." end
+    prior[#prior + 1] = req
+  end
+  return "Prior task context:\n" .. tbl_concat(prior, "\n\n")
+    .. "\n\nLatest user reply / option selection:\n" .. current
 end
 
 -- Tier-aware copy for the per-turn-call-cap abort. Small / local models
@@ -16241,6 +19486,334 @@ function Net._call_cap_message()
          :format(CFG.MAX_CALLS_PER_TURN, hint)
 end
 
+function Net._ensure_request_start_time()
+  -- Hidden same-turn retries fire curl directly instead of re-entering
+  -- Net.send_to_api(), so they must preserve the original wall-clock anchor
+  -- for the visible "Elapsed" timer. If an older path already lost it, fall
+  -- back to the current request clock rather than showing a frozen 0:00.
+  if not S.request_start_time then
+    S.request_start_time = S.send_time or time_precise()
+  end
+end
+
+function Net.try_local_read_answer(user_text, attachments, probe_turn)
+  if attachments then return false end
+  if not CTX or not CTX.local_read_answer then return false end
+  local answer = CTX.local_read_answer(user_text, S.pending_project)
+  if not answer then return false end
+
+  S.history[#S.history + 1] = {
+    role = "user",
+    content = "USER REQUEST:\n" .. tostring(user_text or ""),
+  }
+  S.history[#S.history + 1] = {
+    role = "assistant",
+    content = answer,
+  }
+
+  S.display_messages[#S.display_messages + 1] = {
+    role = "user",
+    content = tostring(user_text or ""),
+    ctx_label = "local_read",
+    model_label = "Local",
+    provider_id = "local",
+    from_card = S.from_card or nil,
+  }
+  S.display_messages[#S.display_messages + 1] = {
+    role = "assistant",
+    content = answer,
+    provider_id = "local",
+    model_label = "Local",
+    local_answer = true,
+  }
+  S.from_card = false
+  if #S.display_messages > CFG.MAX_DISPLAY_MSGS then
+    if Diag.uploader_enabled and Diag.capture_current_chat then
+      Diag.capture_current_chat()
+    end
+    while #S.display_messages > CFG.MAX_DISPLAY_MSGS do
+      tbl_remove(S.display_messages, 1)
+    end
+    S.wrap_cache = {}
+  end
+
+  S.status = "idle"
+  S.request_start_time = nil
+  S.send_time = nil
+  S.pending_code = nil
+  S.pending_display_idx = nil
+  S.pending_orig_prompt = nil
+  S.pending_typed_action_expected = false
+  S.pending_typed_action_response_format = false
+  S.pending_typed_action_profile = nil
+  S.pending_project = nil
+  S.pending_snapshot = nil
+  S.pending_attachments = nil
+  S._fx_cache_events = nil
+  S.scroll_to_bottom = true
+  Probe.end_turn(probe_turn, "success")
+  S.probe_turn = nil
+  return true
+end
+
+function Net._try_escalate_typed_actions(reason_code, detail)
+  local profile =
+    Code.typed_actions_model_profile_by_key(S.pending_typed_action_profile)
+  local fallback = type(profile) == "table" and profile.fallback or nil
+  if type(fallback) ~= "table" then return false end
+  if S.typed_action_escalation_used then return false end
+
+  local original_p = PROVIDERS.active() or {}
+  local original_m = MODELS[prefs.model_idx] or MODELS[1] or {}
+  local original_thinking_override_idx = S.thinking_override_idx
+  local ok, switch_reason =
+    PROVIDERS.switch_to_model(fallback.provider_id, fallback.model_id)
+  if not ok then
+    Log.line("TYPED-ACTION-ESCALATION",
+      "fallback model unavailable: " .. tostring(switch_reason or "unknown"))
+    return false
+  end
+
+  local p = PROVIDERS.active() or {}
+  local m = MODELS[prefs.model_idx] or MODELS[1] or {}
+  local response_format = p.id == "openai"
+  local fallback_profile = Code.typed_actions_model_profile(p.id, m.id)
+  local fallback_model_id = m.id or fallback.model_id or "?"
+  if fallback.thinking_value and p.thinking_levels then
+    local found_thinking_idx
+    for i, tl in ipairs(p.thinking_levels) do
+      if tostring(tl.value or "") == tostring(fallback.thinking_value) then
+        found_thinking_idx = i
+        break
+      end
+    end
+    if found_thinking_idx then
+      S.thinking_override_idx = found_thinking_idx
+    else
+      Log.line("TYPED-ACTION-ESCALATION",
+        "fallback thinking level unavailable: "
+        .. tostring(fallback.thinking_value))
+    end
+  end
+  S.pending_typed_action_response_format = response_format
+  S.pending_typed_action_profile =
+    type(fallback_profile) == "table" and fallback_profile.key or nil
+  S.typed_action_retry_offset =
+    (S.typed_action_retry_offset or 0)
+    + (S.typed_action_format_validator_retries or 0)
+    + (S.typed_action_schema_validator_retries or 0)
+    + (S.typed_action_semantic_validator_retries or 0)
+  S.typed_action_format_validator_retries = 0
+  S.typed_action_schema_validator_retries = 0
+  S.typed_action_semantic_validator_retries = 0
+  S.typed_action_escalation_used = true
+  S.typed_action_escalation_count =
+    (S.typed_action_escalation_count or 0) + 1
+  S.typed_action_escalation_model =
+    tostring(p.id or fallback.provider_id or "") .. "/"
+    .. tostring(fallback_model_id)
+  S.typed_action_escalation_restore = {
+    provider_id = original_p.id,
+    model_id = original_m.id,
+    fallback_provider_id = p.id or fallback.provider_id,
+    fallback_model_id = fallback_model_id,
+    thinking_override_idx = original_thinking_override_idx,
+  }
+  Probe.add_validator_retry(S.probe_turn, "typed_action_escalation")
+
+  Log.line("TYPED-ACTION-ESCALATION",
+    "escalating typed-action turn to "
+    .. tostring(S.typed_action_escalation_model)
+    .. " after " .. tostring(reason_code or "typed_action_failure")
+    .. " (" .. tostring(detail or "") .. ")")
+
+  local retry_contract =
+    Code.typed_actions_prompt_contract(S.pending_orig_prompt or "",
+      {
+        force_enabled = true,
+        response_format = response_format,
+        profile = fallback_profile,
+      }) or ""
+  local reemit_hint = response_format
+    and "the raw JSON object required by the active response schema"
+    or "a single ```reaassist-actions fenced JSON object"
+  local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+    .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: A weaker model could "
+    .. "not produce a safe typed-action plan for this request. Reason: "
+    .. tostring(reason_code or "typed_action_failure")
+    .. ". Details: " .. tostring(detail or "") .. ". Re-solve the original "
+    .. "request from scratch using the active typed-action contract. Emit "
+    .. "the complete plan as " .. reemit_hint .. ". Do not copy any prior "
+    .. "bad JSON. Do not write Lua, ReaScript, JSFX, prose, apologies, or "
+    .. "omit any actions.)\n\n"
+    .. (retry_contract ~= "" and (retry_contract .. "\n\n") or "")
+    .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+  if #S.history > 0 and S.history[#S.history].role == "assistant" then
+    S.history[#S.history] = nil
+  end
+  if #S.history > 0 and S.history[#S.history].role == "user" then
+    S.history[#S.history] = nil
+  end
+  S.history[#S.history + 1] = { role = "user", content = history_content }
+
+  if S.pending_display_idx
+     and S.display_messages[S.pending_display_idx] then
+    local dmsg = S.display_messages[S.pending_display_idx]
+    local existing = dmsg.ctx_label or ""
+    if not existing:find("typed_action_escalated", 1, true) then
+      dmsg.ctx_label = existing ~= ""
+        and (existing .. " + typed_action_escalated")
+        or "typed_action_escalated"
+    end
+  end
+
+  if prefs.include_snapshot then
+    S.pending_project  = _resolve_pending_project()
+    S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+      S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+  end
+  S.status = "waiting"
+  Net._ensure_request_start_time()
+  Code.safe_write(tmp.out, "")
+  local fired, fire_reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+    S.pending_snapshot, S.pending_attachments))
+  if not fired then
+    Net._restore_typed_action_escalation_model()
+    if fire_reason ~= "call_cap_exceeded" then
+      Log.add_error("Typed-action fallback model request did not go through. "
+        .. "Please resend the last message.")
+    end
+  end
+  S.scroll_to_bottom = true
+  return true
+end
+
+function Net._restore_typed_action_escalation_model()
+  local restore = S.typed_action_escalation_restore
+  if type(restore) ~= "table" then return false end
+  S.typed_action_escalation_restore = nil
+  S.thinking_override_idx = restore.thinking_override_idx
+
+  if not restore.provider_id or not restore.model_id then return false end
+
+  local p = PROVIDERS.active() or {}
+  local m = MODELS[prefs.model_idx] or MODELS[1] or {}
+  if tostring(p.id or "") ~= tostring(restore.fallback_provider_id or "")
+     or tostring(m.id or "") ~= tostring(restore.fallback_model_id or "") then
+    Log.line("TYPED-ACTION-ESCALATION",
+      "not restoring original model because active model changed from "
+      .. tostring(restore.fallback_provider_id or "") .. "/"
+      .. tostring(restore.fallback_model_id or "") .. " to "
+      .. tostring(p.id or "") .. "/" .. tostring(m.id or ""))
+    return false
+  end
+
+  local ok, reason = PROVIDERS.switch_to_model(restore.provider_id,
+    restore.model_id)
+  if not ok then
+    Log.line("TYPED-ACTION-ESCALATION",
+      "could not restore original model "
+      .. tostring(restore.provider_id) .. "/" .. tostring(restore.model_id)
+      .. ": " .. tostring(reason or "unknown"))
+    return false
+  end
+
+  Log.line("TYPED-ACTION-ESCALATION",
+    "restored original model after hidden fallback rescue: "
+    .. tostring(restore.provider_id) .. "/" .. tostring(restore.model_id))
+  return true
+end
+
+function Net._read_file_limited(path, cap)
+  if not path or path == "" then return "", 0, false end
+  local f = io.open(path, "rb")
+  if not f then return "", 0, false end
+  cap = cap or 4096
+  local data = f:read(cap + 1) or ""
+  local size = f:seek("end") or #data
+  f:close()
+  local truncated = #data > cap
+  if truncated then data = data:sub(1, cap) end
+  return data, size, truncated
+end
+
+function Net._debug_scrub(s)
+  if not s or s == "" then return s end
+  if type(Diag) == "table" and type(Diag.redact_log) == "function" then
+    local ok, redacted = pcall(Diag.redact_log, s)
+    if ok and type(redacted) == "string" then return redacted end
+  end
+  return Log.scrub_url_secrets(s)
+end
+
+function Net._debug_endpoint(p, endpoint)
+  if not endpoint or endpoint == "" then return nil end
+  if p and p.is_custom then return "(custom endpoint redacted)" end
+  return Net._debug_scrub(endpoint)
+end
+
+function Net._curl_exit_meaning(code)
+  local meanings = {
+    [5]  = "could not resolve proxy",
+    [6]  = "could not resolve host",
+    [7]  = "failed to connect",
+    [18] = "partial file / transfer closed early",
+    [23] = "local write error",
+    [28] = "operation timed out",
+    [35] = "TLS/SSL connect error",
+    [52] = "empty reply from server",
+    [56] = "receive failure",
+    [60] = "certificate verification failed",
+    [77] = "certificate file problem",
+    [92] = "HTTP/2 stream error",
+  }
+  return meanings[tonumber(code)] or "unmapped curl error"
+end
+
+function Net._curl_failure_debug(exit_code, detail, failure_kind)
+  local dbg = {}
+  if type(S.curl_debug) == "table" then
+    for k, v in pairs(S.curl_debug) do dbg[k] = v end
+  end
+  dbg.failure_kind = failure_kind or "curl_exit"
+  if exit_code ~= nil then
+    dbg.exit_code = exit_code
+    dbg.exit_meaning = Net._curl_exit_meaning(exit_code)
+  end
+  dbg.user_message = detail
+  dbg.failed_at_utc = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  dbg.api_calls_this_turn = S.api_calls_this_turn
+  dbg.retry_count = S.retry_count
+  dbg.retry_max = S.retry_max
+  dbg.gemini_tier_pending = S.gemini_tier_pending or nil
+  dbg.key_test_pending = S.key_test_pending or nil
+  if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
+    local dmsg = S.display_messages[S.pending_display_idx]
+    dbg.display_context = dmsg.ctx_label
+    dbg.display_model = dmsg.model_label
+    dbg.display_thinking = dmsg.thinking_label
+  end
+
+  local stderr, stderr_size, stderr_truncated =
+    Net._read_file_limited(tmp.err, 4096)
+  if stderr and stderr ~= "" then
+    dbg.stderr = Net._debug_scrub(stderr)
+    dbg.stderr_bytes = stderr_size
+    dbg.stderr_truncated = stderr_truncated or nil
+  else
+    dbg.stderr_bytes = stderr_size or 0
+  end
+
+  local body_head, body_size, body_truncated =
+    Net._read_file_limited(tmp.out, 2048)
+  dbg.response_bytes = body_size or 0
+  if body_head and body_head ~= "" then
+    dbg.response_head = Net._debug_scrub(body_head)
+    dbg.response_head_truncated = body_truncated or nil
+  end
+  return dbg
+end
+
 function Net.fire_curl(body, opts)
   -- TCP/TLS handshake timeout (seconds). Default 10 for cloud providers;
   -- per-record override for customs set below.
@@ -16276,10 +19849,16 @@ function Net.fire_curl(body, opts)
      and (S.api_calls_this_turn or 0) >= CFG.MAX_CALLS_PER_TURN then
     Log.add_error(Net._call_cap_message())
     Net._restore_pending_user_history()
+    Net._restore_typed_action_escalation_model()
     S.status               = "idle"
     S.pending_display_idx  = nil
     S.pending_orig_prompt  = nil
+    S.pending_typed_action_expected = false
+    S.pending_typed_action_response_format = false
+    S.pending_typed_action_profile = nil
     S.request_start_time   = nil
+    S.retry_count          = 0
+    S.retry_max            = CFG.MAX_RETRIES
     S.retry_scheduled      = false
     S.retry_saved_body     = nil
     if S.probe_turn then Probe.end_turn(S.probe_turn, "call_cap") end
@@ -16356,6 +19935,22 @@ function Net.fire_curl(body, opts)
   else
     endpoint = p.endpoint
   end
+  local active_model = MODELS[prefs.model_idx] or MODELS[1] or {}
+  S.curl_debug = {
+    launched_at_utc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    method = method,
+    provider_id = p.id,
+    provider_label = p.label,
+    model_id = active_model.id or MODELS.active_id(),
+    model_label = active_model.label,
+    endpoint = Net._debug_endpoint(p, endpoint),
+    connect_timeout_s = connect_timeout,
+    curl_timeout_s = curl_timeout,
+    request_body_bytes = (not is_get and type(body) == "string") and #body or 0,
+    is_turn_post = is_turn_post and true or false,
+    provider_idx = prefs.provider_idx,
+    model_idx = prefs.model_idx,
+  }
   -- Write the auth header file (header-based auth only). Custom providers may
   -- have no key at all -- in that case skip the auth file so we don't send a
   -- bare "Authorization: Bearer " header that some servers reject.
@@ -16375,8 +19970,10 @@ function Net.fire_curl(body, opts)
   -- will even JSON-parse) before the new curl has had a chance to overwrite
   -- it, producing a stale instant "response".
   os.remove(tmp.exit)
+  os.remove(tmp.err)
   os.remove(tmp.pid)
   Code.safe_write(tmp.out, "")
+  Code.safe_write(tmp.err, "")
 
   -- Build the list of extra header flags. Skip the Anthropic extended-cache
   -- beta header if it has been rejected earlier this session -- paired with
@@ -16413,17 +20010,17 @@ function Net.fire_curl(body, opts)
     local body_flags = is_get and ""
       or (' -d @"""' .. tmp.body .. '"""')
     local cmd_line = str_format(
-      'curl -s%s --connect-timeout %d --max-time %d'
+      'curl -sS%s --connect-timeout %d --max-time %d'
       .. ' -X %s """%s"""'
       .. '%s'
-      .. '%s -o """%s"""'
-      .. ' & echo %%errorlevel%% > """%s"""'
+      .. '%s -o """%s""" 2> """%s"""'
+      .. ' & call echo ^%%errorlevel^%% > """%s"""'
       .. '%s',
       insecure_flag,
       connect_timeout, curl_timeout,
       method, endpoint,
       h_flags,
-      body_flags, tmp.out,
+      body_flags, tmp.out, tmp.err,
       tmp.exit,
       cleanup)
 
@@ -16470,15 +20067,15 @@ function Net.fire_curl(body, opts)
     -- write it to tmp.pid (so Net.kill_curl can `kill -9 <pid>` on Cancel),
     -- then `wait` for curl and record its real exit code in tmp.exit.
     local unix_curl = str_format(
-      '(curl -s%s --connect-timeout %d --max-time %d'
+      '(curl -sS%s --connect-timeout %d --max-time %d'
       .. ' -X %s %s'
       .. '%s'
-      .. '%s -o %s & CURL_PID=$! ; echo $CURL_PID > %s ; wait $CURL_PID ; echo $? > %s%s) &',
+      .. '%s -o %s 2> %s & CURL_PID=$! ; echo $CURL_PID > %s ; wait $CURL_PID ; echo $? > %s%s) &',
       insecure_flag,
       connect_timeout, curl_timeout,
       method, sq(endpoint),
       h_flags,
-      body_flags, sq(tmp.out),
+      body_flags, sq(tmp.out), sq(tmp.err),
       sq(tmp.pid),
       sq(tmp.exit),
       cleanup)
@@ -17102,6 +20699,9 @@ function Net.handle_key_test(raw)
     end
     S.api_key = S.api_key_map[PROVIDERS.active().id]
     S.refocus_prompt   = true
+    if Diag.uploader_enabled and Diag.capture_current_chat then
+      Diag.capture_current_chat()
+    end
     S.display_messages = {}
     S.history          = {}
     S.scroll_to_bottom = true
@@ -17174,6 +20774,7 @@ function Net.fire_gemini_tier_test()
   local CONNECT_TIMEOUT_SECS = 10
 
   os.remove(tmp.exit)
+  os.remove(tmp.err)
   -- Clear any stale tmp.pid from a previous real curl. This path does not
   -- launch curl with PID capture (no Start-Process -PassThru / $! plumbing),
   -- so leaving an old PID on disk would let Net.kill_curl `taskkill` an
@@ -17181,18 +20782,33 @@ function Net.fire_gemini_tier_test()
   -- worse, a recycled PID owned by some other application).
   os.remove(tmp.pid)
   Code.safe_write(tmp.out, "")
+  Code.safe_write(tmp.err, "")
+  S.curl_debug = {
+    launched_at_utc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    method = "POST",
+    provider_id = "google",
+    provider_label = google_prov.label,
+    model_id = pro_id,
+    model_label = "Gemini tier probe",
+    endpoint = Net._debug_endpoint(google_prov, endpoint),
+    connect_timeout_s = CONNECT_TIMEOUT_SECS,
+    curl_timeout_s = 30,
+    request_body_bytes = #body,
+    is_turn_post = false,
+    probe_kind = "gemini_tier_test",
+  }
 
   if RA.IS_WINDOWS then
     local function ps_escape(path) return path:gsub("'", "''") end
     local cmd_line = str_format(
-      'curl -s --connect-timeout %d --max-time 30'
+      'curl -sS --connect-timeout %d --max-time 30'
       .. ' -X POST %s'
       .. ' -H """content-type: application/json"""'
       .. ' -H @"""%s"""'
-      .. ' -d @"""%s""" -o """%s"""'
-      .. ' & del """%s""" & echo %%errorlevel%% > """%s"""',
+      .. ' -d @"""%s""" -o """%s""" 2> """%s"""'
+      .. ' & call echo ^%%errorlevel^%% > """%s""" & del """%s"""',
       CONNECT_TIMEOUT_SECS, endpoint, tmp.gemini_auth, tmp.body, tmp.out,
-      tmp.gemini_auth, tmp.exit)
+      tmp.err, tmp.exit, tmp.gemini_auth)
     local ps_cmd = str_format(
       'powershell -NoProfile -WindowStyle Hidden'
       .. ' -Command "Start-Process cmd -ArgumentList \'/c %s\''
@@ -17203,14 +20819,14 @@ function Net.fire_gemini_tier_test()
     local function sq(path) return "'" .. path:gsub("'", "'\\''") .. "'" end
     -- Wrap entire pipeline in a subshell so & backgrounds curl+echo together.
     local unix_curl = str_format(
-      '(curl -s --connect-timeout %d --max-time 30'
+      '(curl -sS --connect-timeout %d --max-time 30'
       .. ' -X POST %s'
       .. ' -H "content-type: application/json"'
       .. ' -H @%s'
-      .. ' -d @%s -o %s ; rm -f %s ; echo $? > %s) &',
+      .. ' -d @%s -o %s 2> %s ; rc=$? ; rm -f %s ; echo $rc > %s) &',
       CONNECT_TIMEOUT_SECS, endpoint,
       sq(tmp.gemini_auth),
-      sq(tmp.body), sq(tmp.out),
+      sq(tmp.body), sq(tmp.out), sq(tmp.err),
       sq(tmp.gemini_auth), sq(tmp.exit))
     os.execute(unix_curl)
   end
@@ -17318,16 +20934,104 @@ local GEMINI_CACHE_SAFETY    = 60    -- treat as expired if within 60s of TTL
 -- Net.gemini_cache_is_usable
 -- =============================================================================
 -- True when we have a live, non-expired cache that matches the current model.
+function Net.gemini_cache_source_signature(api_ref)
+  local sys = tostring((Net.system_prompt_text and Net.system_prompt_text())
+    or SYSTEM_PROMPT or "")
+  local ref = tostring(api_ref or "")
+  local h = 5381
+  local function fold(s)
+    for i = 1, #s do
+      h = (h * 33 + s:byte(i)) % 4294967296
+    end
+  end
+  fold(sys)
+  h = (h * 33 + 10) % 4294967296
+  fold(ref)
+  return tostring(#sys) .. ":" .. tostring(#ref)
+    .. ":" .. str_format("%08x", h)
+end
+
 function Net.gemini_cache_is_usable()
   if not S.gemini_cache_name then return false end
   if S.gemini_paid_tier ~= true then return false end
+  if not S.api_ref_message or S.api_ref_message == "" then return false end
   local p = PROVIDERS.active()
   if p.id ~= "google" then return false end
   if S.gemini_cache_model ~= MODELS.active_id() then return false end
+  if S.gemini_cache_signature
+      ~= Net.gemini_cache_source_signature(S.api_ref_message) then
+    return false
+  end
   if os.time() >= (S.gemini_cache_expires - GEMINI_CACHE_SAFETY) then
     return false
   end
   return true
+end
+
+function Net.gemini_cache_debug_state(stage, used_cache, reported_read_tokens)
+  local p = PROVIDERS.active()
+  local provider_id = p and p.id or ""
+  local active_model = MODELS.active_id and MODELS.active_id() or ""
+  local has_name = type(S.gemini_cache_name) == "string"
+    and S.gemini_cache_name ~= ""
+  local has_api_ref = type(S.api_ref_message) == "string"
+    and S.api_ref_message ~= ""
+  local current_signature = has_api_ref
+    and Net.gemini_cache_source_signature(S.api_ref_message)
+    or ""
+  local expires_in = (tonumber(S.gemini_cache_expires) or 0) - os.time()
+  local status, reason
+  if provider_id ~= "google" then
+    status, reason = "disabled", "provider_not_google"
+  elseif S.gemini_paid_tier ~= true then
+    status = "disabled"
+    reason = (S.gemini_paid_tier == false)
+      and "paid_tier_false"
+      or "paid_tier_unknown"
+  elseif not has_api_ref then
+    status, reason = "disabled", "api_ref_missing"
+  elseif used_cache == true then
+    local reported = tonumber(reported_read_tokens)
+    if reported and reported <= 0 then
+      status, reason = "used_unreported", "cached_content_sent_no_token_report"
+    elseif reported and reported > 0 then
+      status, reason = "used", "cached_content_sent_reported"
+    else
+      status, reason = "used", "cached_content_sent"
+    end
+  elseif S.gemini_cache_creating then
+    status, reason = "pending", "create_in_flight"
+  elseif not has_name then
+    status, reason = "miss", "not_created"
+  elseif S.gemini_cache_model ~= active_model then
+    status, reason = "miss", "model_mismatch"
+  elseif S.gemini_cache_signature ~= current_signature then
+    status, reason = "miss", "source_mismatch"
+  elseif expires_in <= GEMINI_CACHE_SAFETY then
+    status, reason = "miss", "expired_or_near_expiry"
+  else
+    status, reason = "ready", "usable"
+  end
+  return {
+    stage = stage or "",
+    provider = provider_id,
+    status = status,
+    reason = reason,
+    used = used_cache == true,
+    paid_tier = S.gemini_paid_tier == true and "true"
+      or S.gemini_paid_tier == false and "false"
+      or "unknown",
+    cache_name_present = has_name,
+    cache_signature_present = type(S.gemini_cache_signature) == "string"
+      and S.gemini_cache_signature ~= "",
+    creating = S.gemini_cache_creating == true,
+    api_ref_present = has_api_ref,
+    active_model = active_model,
+    cache_model = S.gemini_cache_model or "",
+    expires_in_s = expires_in > 0 and math_floor(expires_in) or 0,
+    reported_read_tokens = tonumber(reported_read_tokens) or 0,
+    create_reason = S.gemini_cache_last_create_reason or "",
+  }
 end
 
 -- =============================================================================
@@ -17401,6 +21105,7 @@ function Net.gemini_cache_invalidate()
   local old_name = S.gemini_cache_name
   S.gemini_cache_name    = nil
   S.gemini_cache_model   = nil
+  S.gemini_cache_signature = nil
   S.gemini_cache_expires = 0
   -- A create in-flight will land with a name we no longer want; mark the
   -- flight as aborted so the poll path discards the response.
@@ -17426,6 +21131,8 @@ function Net.gemini_cache_persist()
     S.gemini_cache_name, true)
   reaper.SetExtState(CFG.EXT_NS, "gemini_cache_model",
     S.gemini_cache_model or "", true)
+  reaper.SetExtState(CFG.EXT_NS, "gemini_cache_signature",
+    S.gemini_cache_signature or "", true)
   reaper.SetExtState(CFG.EXT_NS, "gemini_cache_expires",
     tostring(S.gemini_cache_expires or 0), true)
 end
@@ -17433,6 +21140,7 @@ end
 function Net.gemini_cache_clear_persisted()
   reaper.DeleteExtState(CFG.EXT_NS, "gemini_cache_name",    true)
   reaper.DeleteExtState(CFG.EXT_NS, "gemini_cache_model",   true)
+  reaper.DeleteExtState(CFG.EXT_NS, "gemini_cache_signature", true)
   reaper.DeleteExtState(CFG.EXT_NS, "gemini_cache_expires", true)
 end
 
@@ -17440,6 +21148,7 @@ function Net.gemini_cache_restore()
   local name = reaper.GetExtState(CFG.EXT_NS, "gemini_cache_name")
   if not name or name == "" then return end
   local model = reaper.GetExtState(CFG.EXT_NS, "gemini_cache_model")
+  local signature = reaper.GetExtState(CFG.EXT_NS, "gemini_cache_signature")
   local expires_str = reaper.GetExtState(CFG.EXT_NS, "gemini_cache_expires")
   local expires = tonumber(expires_str) or 0
   -- Discard expired caches (or those within the safety window). Server-side
@@ -17450,9 +21159,11 @@ function Net.gemini_cache_restore()
   end
   S.gemini_cache_name    = name
   S.gemini_cache_model   = (model ~= "") and model or nil
+  S.gemini_cache_signature = (signature ~= "") and signature or nil
   S.gemini_cache_expires = expires
   Log.line("GEMINI_CACHE", "restored " .. name
     .. " (model=" .. tostring(S.gemini_cache_model)
+    .. ", signature=" .. tostring(S.gemini_cache_signature)
     .. ", expires_in=" .. tostring(expires - os.time()) .. "s)")
 end
 
@@ -17468,14 +21179,27 @@ end
 -- exchange), and a TTL. Minimum token counts are naturally met since the api
 -- ref alone is ~8k tokens.
 function Net.fire_gemini_cache_create()
-  if S.gemini_cache_creating then return end
-  if not gemini_cache_should_create() then return end
+  if S.gemini_cache_creating then
+    S.gemini_cache_last_create_reason = "already_creating"
+    return
+  end
+  if not gemini_cache_should_create() then
+    S.gemini_cache_last_create_reason = "not_eligible"
+    return
+  end
 
   local google_key = S.api_key_map and S.api_key_map.google
-  if not google_key then return end
+  if not google_key or google_key == "" then
+    S.gemini_cache_last_create_reason = "api_key_map_missing"
+    return
+  end
 
   local model_id = MODELS.active_id()
-  if not model_id then return end
+  if not model_id then
+    S.gemini_cache_last_create_reason = "model_missing"
+    return
+  end
+  local source_signature = Net.gemini_cache_source_signature(S.api_ref_message)
 
   -- Build the create body: system_instruction + the same user/model priming
   -- exchange we'd otherwise inline into every request.
@@ -17486,14 +21210,20 @@ function Net.fire_gemini_cache_create()
     .. '{"role":"model","parts":[{"text":"Understood."}]}],'
     .. '"ttl":"%ds"}',
     model_id,
-    JSON.escape(SYSTEM_PROMPT),
+    JSON.escape(Net.system_prompt_text()),
     JSON.escape(S.api_ref_message),
     GEMINI_CACHE_TTL_SECS)
 
-  if not Code.safe_write(tmp.cache_body, body) then return end
+  if not Code.safe_write(tmp.cache_body, body) then
+    S.gemini_cache_last_create_reason = "cache_body_write_failed"
+    return
+  end
 
   -- Write auth header to temp file (keeps key off command line).
-  if not Code.safe_write(tmp.gemini_auth, "x-goog-api-key: " .. google_key) then return end
+  if not Code.safe_write(tmp.gemini_auth, "x-goog-api-key: " .. google_key) then
+    S.gemini_cache_last_create_reason = "auth_write_failed"
+    return
+  end
 
   local url = "https://generativelanguage.googleapis.com/v1beta/cachedContents"
 
@@ -17533,6 +21263,8 @@ function Net.fire_gemini_cache_create()
   S.gemini_cache_creating   = true
   S.gemini_cache_started_at = reaper.time_precise()
   S.gemini_cache_model      = model_id  -- remember intended model for poll
+  S.gemini_cache_signature  = source_signature
+  S.gemini_cache_last_create_reason = "launched"
 end
 
 -- =============================================================================
@@ -17542,10 +21274,22 @@ end
 -- don't (yet), fire an async create. Never blocks; the current send proceeds
 -- with whatever state exists right now.
 function Net.gemini_cache_ensure()
+  if S.gemini_cache_creating then
+    Net.try_finish_gemini_cache_create()
+  end
+  if S.gemini_cache_name
+      and S.gemini_paid_tier == true
+      and S.api_ref_message and S.api_ref_message ~= ""
+      and not Net.gemini_cache_is_usable() then
+    Net.gemini_cache_invalidate()
+  end
   if gemini_cache_should_create() then
     Net.fire_gemini_cache_create()
   elseif Net.gemini_cache_should_renew() then
     Net.fire_gemini_cache_renew()
+  elseif not Net.gemini_cache_is_usable() then
+    local gc = Net.gemini_cache_debug_state("ensure", false)
+    S.gemini_cache_last_create_reason = gc and gc.reason or "not_eligible"
   end
 end
 
@@ -17637,6 +21381,8 @@ function Net.try_finish_gemini_cache_create()
   if started > 0 and (reaper.time_precise() - started) > 45 then
     S.gemini_cache_creating = false
     S.gemini_cache_model    = nil
+    S.gemini_cache_signature = nil
+    S.gemini_cache_last_create_reason = "watchdog_timeout"
     os.remove(tmp.cache_exit)
     Code.safe_write(tmp.cache_out, "")
     return
@@ -17655,6 +21401,8 @@ function Net.try_finish_gemini_cache_create()
       if exit_code and exit_code ~= 0 then
         S.gemini_cache_creating = false
         S.gemini_cache_model    = nil
+        S.gemini_cache_signature = nil
+        S.gemini_cache_last_create_reason = "curl_exit_" .. tostring(exit_code)
         os.remove(tmp.cache_exit)
         return
       elseif exit_code == 0 then
@@ -17683,25 +21431,36 @@ function Net.try_finish_gemini_cache_create()
     -- Non-JSON response (e.g. proxy HTML); caching stays unusable this turn
     -- but the "creating" flag is already cleared so future sends can retry.
     S.gemini_cache_model = nil
+    S.gemini_cache_signature = nil
+    S.gemini_cache_last_create_reason = "non_json_response"
     return
   end
 
   -- Error envelope: {"error":{"code":N,"message":"...","status":"..."}}
   if type(resp.error) == "table" and resp.error ~= JSON.NULL then
     S.gemini_cache_model = nil
+    S.gemini_cache_signature = nil
+    local err = resp.error
+    S.gemini_cache_last_create_reason =
+      "api_error_" .. tostring(err.status or err.code or "unknown")
     return
   end
 
   -- Success: {"name":"cachedContents/abc","model":"models/...","expireTime":"..."}
   if type(resp.name) == "string" and resp.name ~= "" then
     S.gemini_cache_name = resp.name
+    S.gemini_cache_signature = S.gemini_cache_signature
+      or Net.gemini_cache_source_signature(S.api_ref_message)
     -- We set ttl=3600s in the create request, so expires = now + TTL is
     -- accurate. The server also returns expireTime (RFC3339 UTC) but parsing
     -- it via os.time() applies local-timezone offset and skews the result.
     S.gemini_cache_expires = os.time() + GEMINI_CACHE_TTL_SECS
     Net.gemini_cache_persist()  -- survive script restart
+    S.gemini_cache_last_create_reason = "success"
   else
     S.gemini_cache_model = nil
+    S.gemini_cache_signature = nil
+    S.gemini_cache_last_create_reason = "missing_cache_name"
   end
 end
 
@@ -17723,11 +21482,11 @@ end
 --   6. Fire curl. The snapshot is injected by Net.build_body(), not stored in S.history.
 function Net.send_to_api(user_text)
   -- Phase 1 instrumentation: open a Probe turn at the outermost
-  -- boundary. Probe is dormant unless Dev/diagnostics_enabled exists,
-  -- so this is a no-op in shipped builds. If a previous turn somehow
-  -- didn't reach an end_turn site (re-entrance, missed exit path),
-  -- close it as "aborted" so its record is still written before we
-  -- clobber S.probe_turn with the new handle.
+  -- boundary. Probe is currently an in-line no-op compatibility surface
+  -- so older instrumentation call sites stay harmless while the local
+  -- probe module is retired. If a previous turn somehow didn't reach an
+  -- end_turn site (re-entrance, missed exit path), close it as "aborted"
+  -- before clobbering S.probe_turn with the new handle.
   if S.probe_turn then
     Probe.end_turn(S.probe_turn, "aborted")
     S.probe_turn = nil
@@ -17754,16 +21513,44 @@ function Net.send_to_api(user_text)
   S.pending_pref_plugin_types = {}
   S.context_loop_retries   = 0
   S.api_validator_retries  = 0
+  S.action_validator_retries = 0
+  S.transient_validator_retries = 0
+  S.drum_quantize_validator_retries = 0
+  S.drum_marker_sync_validator_retries = 0
   S.arity_validator_retries = 0
   S.sendidx_validator_retries = 0
   S.stockfx_validator_retries = 0
+  S.fxident_validator_retries = 0
+  S.typed_action_format_validator_retries = 0
+  S.typed_action_schema_validator_retries = 0
+  S.typed_action_semantic_validator_retries = 0
+  S.typed_action_retry_offset = 0
+  S.typed_action_escalation_used = false
+  S.typed_action_escalation_count = 0
+  S.typed_action_escalation_model = nil
+  S.typed_action_escalation_restore = nil
   S.fxcheck_validator_retries = 0
   S.upsert_validator_retries = 0
   S.helper_int_validator_retries = 0
   S.defer_validator_retries = 0
+  S.fx_param_scope_validator_retries = 0
   S.helper_validator_retries = 0
   S.void_return_validator_retries = 0
   S.void_return_retry_used = false
+  S.track_creation_validator_retries = 0
+  S.track_creation_retry_used = false
+  S.track_creation_index_retry_used = false
+  S.folder_boundary_retry_used = false
+  S.track_index_validator_retries = 0
+  S.track_index_retry_used = false
+  S.track_selection_validator_retries = 0
+  S.track_selection_retry_used = false
+  S.track_pan_validator_retries = 0
+  S.track_pan_retry_used = false
+  S.master_send_validator_retries = 0
+  S.master_send_retry_used = false
+  S.midi_item_validator_retries = 0
+  S.midi_item_retry_used = false
   S.bare_lua_retry_used = false
   S.unclosed_fence_retry_used = false
   S.parse_retry_used       = false
@@ -17787,7 +21574,13 @@ function Net.send_to_api(user_text)
   S._fx_params_pending_assemble  = nil
   S._fx_inspect_silent_for_fx_params = nil
   S.pending_orig_prompt   = user_text
+  Code.maybe_update_latest_from_user(user_text)
+  Code.maybe_mark_latest_candidate_working(user_text)
+  S.pending_typed_action_expected = false
+  S.pending_typed_action_response_format = false
+  S.pending_typed_action_profile = nil
   S.retry_count           = 0          -- reset retry counter for each new user send
+  S.retry_max             = CFG.MAX_RETRIES
   S.retry_scheduled       = false
 
   -- Capture current attachments and clear the queue before any early returns.
@@ -17811,6 +21604,9 @@ function Net.send_to_api(user_text)
 
   -- 1b. Capture the active project.
   S.pending_project = reaper.EnumProjects(-1)
+  if Net.try_local_read_answer(user_text, msg_attachments, probe_turn) then
+    return true
+  end
 
   -- 1c. JSFX intent detection. Used by the snapshot tracks-trim and the
   -- plugin_ref / pref / docs preempt skip. Mirrored to S.pending_jsfx_intent
@@ -17822,10 +21618,19 @@ function Net.send_to_api(user_text)
   -- plugin treatment.
   local jsfx_intent = CTX.prompt_indicates_jsfx(user_text)
   S.pending_jsfx_intent = jsfx_intent or nil
+  local drum_edit_intent = CTX.prompt_indicates_drum_edit(user_text)
+  S.pending_drum_edit_intent = drum_edit_intent or nil
 
   -- 2. Build a fresh session snapshot if enabled.
+  local snapshot_opts = nil
+  if jsfx_intent or drum_edit_intent then
+    snapshot_opts = {
+      minimal_tracks = jsfx_intent or nil,
+      drum_edit = drum_edit_intent or nil,
+    }
+  end
   local snapshot = prefs.include_snapshot
-    and CTX.build_snapshot(S.pending_project, jsfx_intent and { minimal_tracks = true } or nil)
+    and CTX.build_snapshot(S.pending_project, snapshot_opts)
     or nil
   S.pending_snapshot    = snapshot        -- saved for potential docs follow-up
   S.pending_attachments = msg_attachments -- saved for beta-header fallback rebuild
@@ -17928,8 +21733,104 @@ function Net.send_to_api(user_text)
   -- Bump the turn counter and prune stale sticky_context entries first, so
   -- preempt's relevance-driven re-touches happen against a fresh state and
   -- this turn's adds don't get accidentally evicted by their own arrival.
+  local typed_action_backup_ready = true
+  if prefs.auto_backup then
+    local _, typed_action_proj_path = reaper.EnumProjects(-1)
+    typed_action_backup_ready = type(typed_action_proj_path) == "string"
+      and typed_action_proj_path:match("%.[rR][pP][pP]$") ~= nil
+  end
+  local active_provider = PROVIDERS.active()
+  local active_model = MODELS[prefs.model_idx] or MODELS[1]
+  local typed_action_profile =
+    Code.typed_actions_model_profile(active_provider.id,
+      active_model and active_model.id or nil)
+  local typed_action_response_format =
+    active_provider.id == "openai"
+  local typed_action_contract =
+    (prefs.auto_run and typed_action_backup_ready)
+    and Code.typed_actions_prompt_contract(user_text, {
+      response_format = typed_action_response_format,
+      profile = typed_action_profile,
+    }) or nil
+  local typed_action_plan_prompt =
+    CTX.prompt_indicates_typed_action_plan(user_text)
+  local reascript_prompt = false
+  do
+    local lt = user_text:lower()
+    local edit_verb =
+         lt:find("%f[%w]create%f[%W]") ~= nil
+      or lt:find("%f[%w]add%f[%W]") ~= nil
+      or lt:find("%f[%w]make%f[%W]") ~= nil
+      or lt:find("%f[%w]insert%f[%W]") ~= nil
+      or lt:find("%f[%w]rename%f[%W]") ~= nil
+      or lt:find("%f[%w]delete%f[%W]") ~= nil
+      or lt:find("%f[%w]remove%f[%W]") ~= nil
+      or lt:find("%f[%w]route%f[%W]") ~= nil
+      or lt:find("%f[%w]send%f[%W]") ~= nil
+      or lt:find("%f[%w]split%f[%W]") ~= nil
+      or lt:find("%f[%w]select%f[%W]") ~= nil
+    local edit_noun =
+         lt:find("%f[%w]track%f[%W]") ~= nil
+      or lt:find("%f[%w]tracks%f[%W]") ~= nil
+      or lt:find("%f[%w]item%f[%W]") ~= nil
+      or lt:find("%f[%w]items%f[%W]") ~= nil
+      or lt:find("%f[%w]marker%f[%W]") ~= nil
+      or lt:find("%f[%w]region%f[%W]") ~= nil
+      or lt:find("%f[%w]midi%f[%W]") ~= nil
+      or lt:find("%f[%w]fx%f[%W]") ~= nil
+      or lt:find("%f[%w]effect%f[%W]") ~= nil
+      or lt:find("%f[%w]plugin%f[%W]") ~= nil
+      or lt:find("%f[%w]send%f[%W]") ~= nil
+      or lt:find("%f[%w]bus%f[%W]") ~= nil
+      or lt:find("%f[%w]folder%f[%W]") ~= nil
+      or lt:find("%f[%w]envelope%f[%W]") ~= nil
+      or lt:find("%f[%w]automation%f[%W]") ~= nil
+    local qna_prompt =
+         lt:find("^%s*how%s+") ~= nil
+      or lt:find("^%s*what%s+") ~= nil
+      or lt:find("^%s*why%s+") ~= nil
+      or lt:find("^%s*where%s+") ~= nil
+      or lt:find("^%s*when%s+") ~= nil
+      or lt:find("^%s*is%s+") ~= nil
+      or lt:find("^%s*are%s+") ~= nil
+    reascript_prompt =
+         lt:find("reaper lua script", 1, true) ~= nil
+      or lt:find("reascript", 1, true) ~= nil
+      or lt:find("lua script", 1, true) ~= nil
+      or (lt:find("write", 1, true) ~= nil
+          and lt:find("script", 1, true) ~= nil
+          and lt:find("reaper", 1, true) ~= nil)
+      or (edit_verb and edit_noun and not qna_prompt)
+  end
+  local preempted_context = nil
   Net.sticky_evict(user_text)
-  CTX.preempt_buckets_for_prompt(user_text)
+  if not typed_action_contract and not typed_action_plan_prompt then
+    preempted_context = CTX.preempt_buckets_for_prompt(user_text)
+  elseif typed_action_plan_prompt then
+    Log.line("PREEMPT",
+      "skipped context preempt (typed-action plan prompt)")
+  end
+  if preempted_context and #preempted_context > 0 then
+    for _, key in ipairs(preempted_context) do
+      if key == "recent_reaper_changes" then
+        user_text = "(INTERNAL CONTEXT NOTE -- DO NOT MENTION THIS: "
+          .. "Recent REAPER changes are pinned above. Use that bucket "
+          .. "for recent or version-specific REAPER feature facts; it "
+          .. "overrides stale training data.)\n\n" .. user_text
+        break
+      end
+    end
+  end
+  if not typed_action_contract
+     and not typed_action_plan_prompt
+     and reascript_prompt then
+    local docs_already = S.api_ref_message ~= nil
+    Net.copin_docs_core(preempted_context)
+    if not docs_already and S.api_ref_message then
+      Log.line("PREEMPT",
+        "injected docs (explicit ReaScript/Lua-script prompt)")
+    end
+  end
   -- Re-evaluate ref-injected flags: preempt's copin_docs_core (and the
   -- chain-phrase preempt path generally) can set S.api_ref_message AFTER
   -- the initial ref_injected probe ran above. Without this, the ctx_label
@@ -17972,6 +21873,57 @@ function Net.send_to_api(user_text)
     history_text = "USER REQUEST:\n" .. user_text
   end
 
+  do
+    local latest_note = Code.latest_code_followup_note(user_text)
+    if latest_note then
+      history_text = latest_note .. "\n\n" .. history_text
+    end
+  end
+
+  if not typed_action_contract and reascript_prompt then
+    local ref_note = S.api_ref_message
+      and (" Core REAPER API docs are already pinned above, so do NOT "
+        .. "emit <context_needed>docs</context_needed>.")
+      or ""
+    history_text = "(INTERNAL OUTPUT NOTE -- DO NOT MENTION THIS: "
+      .. "If you generate Lua/ReaScript for this request, return the "
+      .. "entire runnable script inside one complete ```lua ... ``` "
+      .. "code fence. Do not return bare Lua." .. ref_note .. ")\n\n"
+      .. history_text
+  end
+
+  if not typed_action_contract
+     and type(preempted_context) == "table"
+     and #preempted_context > 0 then
+    local seen_resolve, resolved_tags = {}, {}
+    for _, key in ipairs(preempted_context) do
+      if type(key) == "string" then
+        local tkey = key:match("^pref:(.+)$")
+        if tkey and not seen_resolve[tkey] then
+          seen_resolve[tkey] = true
+          resolved_tags[#resolved_tags + 1] = "resolve:" .. tkey
+        end
+      end
+    end
+    if #resolved_tags > 0 then
+      table.sort(resolved_tags)
+      history_text = "(INTERNAL CONTEXT NOTE -- DO NOT MENTION THIS: "
+        .. "The generic plugin type(s) for this request are already "
+        .. "resolved and pinned above: " .. tbl_concat(resolved_tags, ", ")
+        .. ". Do NOT emit <context_needed> for these resolve tags. "
+        .. "Use the pinned plugin_ref / preferred-plugin content now.)\n\n"
+        .. history_text
+    end
+  end
+
+  if typed_action_contract then
+    history_text = history_text .. "\n\n" .. typed_action_contract
+    S.pending_typed_action_expected = true
+    S.pending_typed_action_response_format = typed_action_response_format
+    S.pending_typed_action_profile =
+      typed_action_profile and typed_action_profile.key or nil
+  end
+
   -- Collect sticky labels for the Show Details display (the content itself
   -- is emitted downstream by build_body_*).
   local sticky_labels = {}
@@ -17985,6 +21937,7 @@ function Net.send_to_api(user_text)
   if ref_injected   then ctx_parts[#ctx_parts+1] = "api_ref" end
   if midi_injected  then ctx_parts[#ctx_parts+1] = "midi"    end
   if theme_injected then ctx_parts[#ctx_parts+1] = "theme"   end
+  if typed_action_contract then ctx_parts[#ctx_parts+1] = "typed_actions" end
   if msg_attachments then
     for _, a in ipairs(msg_attachments) do ctx_parts[#ctx_parts+1] = a.name end
   end
@@ -18040,7 +21993,7 @@ function Net.send_to_api(user_text)
   -- Per-model context_window on the active model wins. Built-in providers
   -- now carry context_window on each model entry where it differs from the
   -- 200K default (Sonnet/Opus 1M, GPT-5.4 nano/mini 400K, GPT-5.4 1.05M,
-  -- Gemini 3.x 1,048,576, DeepSeek V4 Flash/Pro 1M); a provider-level
+  -- Gemini 3.x 1,048,576, DeepSeek V4 Flash 1M); a provider-level
   -- field is honored as a fallback if a model row omits it. Custom
   -- providers always carry context_window per-model (set by the user on
   -- the API Keys page from each loaded model's actual server-side limit;
@@ -18060,6 +22013,12 @@ function Net.send_to_api(user_text)
   -- gap between mark_phase_end("preempt") and Net.build_body's
   -- internal mark_phase_start("body_build") is negligible.
   Probe.mark_phase_end(probe_turn, "preempt")
+  -- Gemini explicit cache eligibility can appear late in preempt: the
+  -- ReaScript prompt path may co-pin API docs after the early ensure above.
+  -- Re-check here, once all static refs for this request are settled.
+  if PROVIDERS.active().id == "google" then
+    Net.gemini_cache_ensure()
+  end
   local body = Net.build_body(Net.trimmed_history(), snapshot, msg_attachments)
   -- Phase 1 instrumentation: byte accounting for the request body.
   -- Pre-escape source bytes (raw strings before JSON encoding inflates
@@ -18150,6 +22109,9 @@ function Net.send_to_api(user_text)
     -- intentionally left applied; the next attempt should re-run those
     -- buckets fresh.
     S.pending_orig_prompt  = nil
+    S.pending_typed_action_expected = false
+    S.pending_typed_action_response_format = false
+    S.pending_typed_action_profile = nil
     S.pending_project      = nil
     S.pending_snapshot     = nil
     S.pending_attachments  = nil
@@ -18186,6 +22148,9 @@ function Net.send_to_api(user_text)
     -- Clear pending_* / event-tracking state and restore last_run_error;
     -- mirrors the token-budget rollback above.
     S.pending_orig_prompt  = nil
+    S.pending_typed_action_expected = false
+    S.pending_typed_action_response_format = false
+    S.pending_typed_action_profile = nil
     S.pending_project      = nil
     S.pending_snapshot     = nil
     S.pending_attachments  = nil
@@ -18211,13 +22176,30 @@ function Net.send_to_api(user_text)
   -- Step 9 audits and adds remaining error/cancel exit paths.
 end
 
+function Net.resend_saved_prompt(user_text, attachments)
+  user_text = tostring(user_text or ""):match("^%s*(.-)%s*$")
+  if user_text == "" then return false, "No saved message to resend." end
+  local queued = S.attachments or {}
+  S.attachments = type(attachments) == "table" and attachments or {}
+  local ok, err = pcall(Net.send_to_api, user_text)
+  S.attachments = queued
+  if not ok then
+    return false, tostring(err or "Could not resend the message.")
+  end
+  return true
+end
+
 -- =============================================================================
 -- Net.clear_conversation
 -- =============================================================================
 -- Resets all conversation, token, cost, and pending state. The API reference
 -- file content cache is preserved (file doesn't change). S.api_ref_message is
--- cleared so it is re-pinned on the next send with a fresh cache entry.
-function Net.clear_conversation()
+-- cleared so it is re-pinned on the next send; the Gemini explicit cache is
+-- app-scoped static reference state and remains usable when its source
+-- signature still matches.
+function Net.clear_conversation(opts)
+  local clear_gemini_cache =
+    type(opts) == "table" and opts.clear_gemini_cache == true
   -- =========================================================================
   -- CLEAR CONVERSATION -- reset every conversation-scoped piece of S.* state.
   -- =========================================================================
@@ -18228,6 +22210,9 @@ function Net.clear_conversation()
   -- warmth, network in-flight tracking) -- those should survive a chat clear.
   -- =========================================================================
   -- Conversation history + display
+  if Diag.uploader_enabled and Diag.capture_current_chat then
+    Diag.capture_current_chat()
+  end
   S.history              = {}
   S.display_messages     = {}
   S.sticky_context       = {}
@@ -18245,8 +22230,12 @@ function Net.clear_conversation()
   S.turn_counter         = 0
   S.last_run_error       = nil
   -- Pending follow-up state (mid-flight when clear is hit)
+  Net._restore_typed_action_escalation_model()
   S.pending_code         = nil
   S.pending_orig_prompt  = nil
+  S.pending_typed_action_expected = false
+  S.pending_typed_action_response_format = false
+  S.pending_typed_action_profile = nil
   S.pending_snapshot     = nil
   S.pending_project      = nil
   S.pending_display_idx  = nil
@@ -18257,6 +22246,7 @@ function Net.clear_conversation()
   S.pending_provider_idx      = nil
   S.pending_model_idx         = nil
   S.pending_jsfx_intent       = nil
+  S.pending_drum_edit_intent  = nil
   -- Per-turn one-shot guards
   S.docs_already_sent          = false
   S.docs_extended_already_sent = false
@@ -18273,16 +22263,44 @@ function Net.clear_conversation()
   S.pref_plugins_sent          = {}
   S.context_loop_retries       = 0
   S.api_validator_retries      = 0
+  S.action_validator_retries   = 0
+  S.transient_validator_retries = 0
+  S.drum_quantize_validator_retries = 0
+  S.drum_marker_sync_validator_retries = 0
   S.arity_validator_retries    = 0
   S.sendidx_validator_retries  = 0
   S.stockfx_validator_retries  = 0
+  S.fxident_validator_retries  = 0
+  S.typed_action_format_validator_retries = 0
+  S.typed_action_schema_validator_retries = 0
+  S.typed_action_semantic_validator_retries = 0
+  S.typed_action_retry_offset = 0
+  S.typed_action_escalation_used = false
+  S.typed_action_escalation_count = 0
+  S.typed_action_escalation_model = nil
+  S.typed_action_escalation_restore = nil
   S.fxcheck_validator_retries  = 0
   S.upsert_validator_retries   = 0
   S.helper_int_validator_retries = 0
   S.defer_validator_retries    = 0
+  S.fx_param_scope_validator_retries = 0
   S.helper_validator_retries   = 0
   S.void_return_validator_retries = 0
   S.void_return_retry_used     = false
+  S.track_creation_validator_retries = 0
+  S.track_creation_retry_used   = false
+  S.track_creation_index_retry_used = false
+  S.folder_boundary_retry_used = false
+  S.track_index_validator_retries = 0
+  S.track_index_retry_used = false
+  S.track_selection_validator_retries = 0
+  S.track_selection_retry_used = false
+  S.track_pan_validator_retries = 0
+  S.track_pan_retry_used = false
+  S.master_send_validator_retries = 0
+  S.master_send_retry_used = false
+  S.midi_item_validator_retries = 0
+  S.midi_item_retry_used       = false
   S.bare_lua_retry_used        = false
   S.unclosed_fence_retry_used  = false
   S.parse_retry_used           = false
@@ -18317,15 +22335,20 @@ function Net.clear_conversation()
   S.resolve_popup_sel         = 0
   S.resolve_popup_last_filter = nil
   S.resolve_popup_refocus     = false
-  -- Drop any active Gemini context cache: clearing chat effectively resets
-  -- the pinned api_ref, and a new cache will be created on the next send.
-  Net.gemini_cache_invalidate()
+  -- Keep app-scoped Gemini static-reference caches across chat clears. They
+  -- contain only the system prompt + API reference, not user conversation
+  -- content, and Net.gemini_cache_is_usable verifies the source signature
+  -- before reuse. Explicit test/reset paths can still force invalidation.
+  if clear_gemini_cache then
+    Net.gemini_cache_invalidate()
+  end
   -- Session totals
   S.session_tok_in       = 0
   S.session_tok_out      = 0
   S.session_cost         = 0
   -- Retry / attachment state
   S.retry_count          = 0
+  S.retry_max            = CFG.MAX_RETRIES
   S.retry_scheduled      = false
   S.retry_saved_body     = nil
   S.attachments          = {}
@@ -18348,9 +22371,10 @@ end
 -- =============================================================================
 -- Code.extract_typed_actions / Code.validate_typed_actions_plan
 -- =============================================================================
--- Phase-1 typed action support: parse and validate provider-neutral action JSON
--- without executing or mutating the project. The executor is intentionally not
--- wired in yet; these helpers establish a strict, testable model-output contract.
+-- Phase-1/2 typed action support: parse and validate provider-neutral action
+-- JSON, plus a fail-closed local executor for exact-fit structured track edits.
+-- The normal Lua path remains first-class for every request outside this
+-- deliberately narrow stock track/FX/folder/send graph lane.
 do
 local _TYPED_ACTION_STOCK_FX = {
   ReaEQ = true,
@@ -18363,6 +22387,9 @@ local _TYPED_ACTION_STOCK_FX = {
 
 local _TYPED_ACTION_OP_KEYS = {
   "track.ensure",
+  "track.resolve",
+  "track.set",
+  "track.folder",
   "fx.add_stock",
   "fx.set_param",
   "send.create",
@@ -18378,23 +22405,18 @@ local _TYPED_ACTION_PARAM_TYPES = {
     band = "number",
     frequency_hz = "number",
     gain_db = "number",
-    q = "number",
-    type = "string",
   },
   ReaComp = {
     threshold_db = "number",
-    ratio = "number",
     attack_ms = "number",
     release_ms = "number",
-    knee_db = "number",
     wet_db = "number",
     dry_db = "number",
-    makeup_gain = "number",
     rms_ms = "number",
   },
   ReaDelay = {
-    delay_ms = "number",
-    feedback = "number",
+    feedback_pct = "number",
+    feedback_db = "number",
     wet_db = "number",
     dry_db = "number",
   },
@@ -18414,8 +22436,32 @@ local _TYPED_ACTION_PARAM_TYPES = {
   ReaLimit = {
     threshold_db = "number",
     ceiling_db = "number",
-    release_ms = "number",
   },
+}
+
+local _TYPED_ACTION_REAEQ_FREQ_POINTS = {
+  { 20, 0.0078 }, { 50, 0.0625 }, { 80, 0.1094 },
+  { 100, 0.1406 }, { 150, 0.1953 }, { 200, 0.2344 },
+  { 250, 0.2656 }, { 300, 0.2891 }, { 400, 0.3320 },
+  { 500, 0.3672 }, { 600, 0.3945 }, { 700, 0.4199 },
+  { 800, 0.4414 }, { 900, 0.4590 }, { 1000, 0.4766 },
+  { 1200, 0.5059 }, { 1500, 0.5410 }, { 2000, 0.5884 },
+  { 2500, 0.6250 }, { 3000, 0.6553 }, { 3500, 0.6802 },
+  { 4000, 0.7026 }, { 5000, 0.7393 }, { 6000, 0.7695 },
+  { 7000, 0.7952 }, { 8000, 0.8173 }, { 10000, 0.8542 },
+  { 12000, 0.8846 }, { 14000, 0.9103 }, { 16000, 0.9325 },
+  { 18000, 0.9521 }, { 20000, 0.9696 }, { 24000, 1.0000 },
+}
+
+local _TYPED_ACTION_REAEQ_GAIN_POINTS = {
+  { -12, 0.1250 }, { -10, 0.1582 }, { -8, 0.1992 },
+  { -6, 0.2500 }, { -5, 0.2813 }, { -4, 0.3164 },
+  { -3, 0.3555 }, { -2, 0.3984 }, { -1, 0.4453 },
+  { 0, 0.5000 }, { 1, 0.5195 }, { 2, 0.5430 },
+  { 3, 0.5684 }, { 4, 0.5977 }, { 5, 0.6289 },
+  { 6, 0.6641 }, { 7, 0.7070 }, { 8, 0.7500 },
+  { 9, 0.8047 }, { 10, 0.8594 }, { 11, 0.9219 },
+  { 12, 0.9961 },
 }
 
 local function _typed_action_error(code, path, message)
@@ -18468,6 +22514,1787 @@ local function _typed_action_first_error_code(errors)
   return first and first.code or nil
 end
 
+local function _typed_action_signature_value(v)
+  if v == JSON.NULL then return "null" end
+  local tv = type(v)
+  if tv ~= "table" then return tv .. ":" .. tostring(v) end
+  if _typed_action_is_array(v) then
+    local parts = {}
+    for i = 1, #v do
+      parts[#parts+1] = _typed_action_signature_value(v[i])
+    end
+    return "array:[" .. table.concat(parts, ",") .. "]"
+  end
+  local keys, parts = {}, {}
+  for k in pairs(v) do keys[#keys+1] = k end
+  table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+  for _, k in ipairs(keys) do
+    parts[#parts+1] = tostring(k) .. "=" .. _typed_action_signature_value(v[k])
+  end
+  return "object:{" .. table.concat(parts, ",") .. "}"
+end
+
+-- Some smaller models occasionally loop exact duplicate JSON actions. Exact
+-- repeats cannot express an intentional second object because ids must be
+-- unique, so collapse them before validation while preserving non-identical
+-- duplicate-id failures.
+function Code.normalize_typed_actions_plan(plan)
+  if not _typed_action_is_object(plan)
+     or not _typed_action_is_array(plan.actions) then
+    return plan, 0
+  end
+
+  local seen, out, dropped = {}, {}, 0
+  for _, action in ipairs(plan.actions) do
+    local sig = _typed_action_signature_value(action)
+    if seen[sig] then
+      dropped = dropped + 1
+    else
+      seen[sig] = true
+      out[#out+1] = action
+    end
+  end
+
+  if dropped > 0 then plan.actions = out end
+  return plan, dropped
+end
+
+function Code._typed_action_selected_indexes_from_user_text(user_text)
+  local text = tostring(user_text or ""):lower()
+  text = text
+    :gsub("do not use selected_index", "")
+    :gsub("do not use selected index", "")
+    :gsub("don't use selected_index", "")
+    :gsub("don't use selected index", "")
+    :gsub("without selected_index", "")
+    :gsub("without selected index", "")
+    :gsub("not selected_index", "")
+    :gsub("not selected index", "")
+  local indexes, seen = {}, {}
+  local function add(raw)
+    local n = tonumber(raw)
+    if not n or n % 1 ~= 0 or n < 1 then return end
+    if seen[n] then return end
+    seen[n] = true
+    indexes[#indexes + 1] = n
+  end
+
+  for raw in text:gmatch("selected[_%-%s]+index%s*[:=]?%s*(%d+)") do
+    add(raw)
+  end
+  for raw in text:gmatch("%f[%d](%d+)%s*%a*%s+selected%s+track") do
+    add(raw)
+  end
+  for raw in text:gmatch("selected%s+track%s+(%d+)") do
+    add(raw)
+  end
+
+  local ordinals = {
+    first = 1, second = 2, third = 3, fourth = 4, fifth = 5,
+    sixth = 6, seventh = 7, eighth = 8, ninth = 9, tenth = 10,
+  }
+  for word, n in pairs(ordinals) do
+    if text:find("%f[%a]" .. word .. "%s+selected%s+track", 1) then
+      add(n)
+    elseif text:find("%f[%a]" .. word .. "%s+selected%f[%A]", 1) then
+      add(n)
+    end
+  end
+
+  table.sort(indexes)
+  local required = #indexes > 0
+    or text:find("selected_index", 1, true) ~= nil
+    or text:find("selected index", 1, true) ~= nil
+  return indexes, required
+end
+
+function Code._typed_action_forbids_positional_track_selector(user_text)
+  local text = tostring(user_text or ""):lower()
+  return text:find("do not use selected_index", 1, true) ~= nil
+    or text:find("do not use selected index", 1, true) ~= nil
+    or text:find("don't use selected_index", 1, true) ~= nil
+    or text:find("don't use selected index", 1, true) ~= nil
+    or text:find("without selected_index", 1, true) ~= nil
+    or text:find("without selected index", 1, true) ~= nil
+    or text:find("do not use absolute track index", 1, true) ~= nil
+    or text:find("do not use absolute track indexes", 1, true) ~= nil
+    or text:find("don't use absolute track index", 1, true) ~= nil
+    or text:find("don't use absolute track indexes", 1, true) ~= nil
+    or text:find("without absolute track index", 1, true) ~= nil
+    or text:find("without absolute track indexes", 1, true) ~= nil
+end
+
+function Code._typed_action_forbids_absolute_track_index(user_text)
+  local text = tostring(user_text or ""):lower()
+  return text:find("do not use absolute track index", 1, true) ~= nil
+    or text:find("do not use absolute track indexes", 1, true) ~= nil
+    or text:find("don't use absolute track index", 1, true) ~= nil
+    or text:find("don't use absolute track indexes", 1, true) ~= nil
+    or text:find("without absolute track index", 1, true) ~= nil
+    or text:find("without absolute track indexes", 1, true) ~= nil
+    or text:match("do not use[^%.\n;]*absolute track indexes?") ~= nil
+    or text:match("don't use[^%.\n;]*absolute track indexes?") ~= nil
+    or text:match("without[^%.\n;]*absolute track indexes?") ~= nil
+end
+
+function Code._typed_action_user_request_text(user_text)
+  local text = tostring(user_text or "")
+  local marker, last = "USER REQUEST:", nil
+  local pos = 1
+  while true do
+    local s, e = text:find(marker, pos, true)
+    if not s then break end
+    last = e + 1
+    pos = e + 1
+  end
+  if last then text = text:sub(last) end
+
+  local cut_at
+  for _, stop in ipairs({
+    "\n\nTYPED ACTION CONTRACT",
+    "\nTYPED ACTION CONTRACT",
+    "\n\nSESSION CONTEXT",
+    "\nSESSION CONTEXT",
+  }) do
+    local s = text:find(stop, 1, true)
+    if s and (not cut_at or s < cut_at) then cut_at = s end
+  end
+  if cut_at then text = text:sub(1, cut_at - 1) end
+  return text:gsub("\r\n", "\n"):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+function Code._typed_action_user_requests_master_send_state(user_text)
+  local lt = Code._typed_action_user_request_text(user_text)
+    :lower()
+    :gsub("%s+", " ")
+  if lt == "" then return false end
+  return lt:find("master send", 1, true) ~= nil
+    or lt:find("master sends", 1, true) ~= nil
+    or lt:find("main send", 1, true) ~= nil
+    or lt:find("main sends", 1, true) ~= nil
+    or lt:find("master/parent", 1, true) ~= nil
+    or lt:find("master parent", 1, true) ~= nil
+    or lt:find("parent send", 1, true) ~= nil
+    or lt:find("parent sends", 1, true) ~= nil
+    or lt:find("master output", 1, true) ~= nil
+    or lt:find("master_send", 1, true) ~= nil
+    or lt:find("going only to the master", 1, true) ~= nil
+    or lt:find("only goes to master", 1, true) ~= nil
+    or lt:find("only to the master", 1, true) ~= nil
+end
+
+function Code._typed_action_track_property_intent_text(user_text)
+  local text = Code._typed_action_user_request_text(user_text):lower()
+  text = text
+    :gsub("post%-fader", "")
+    :gsub("post fader", "")
+    :gsub("pre%-fader", "")
+    :gsub("pre fader", "")
+  for _, phrase in ipairs({
+    "do not create, delete, rename, mute, solo, pan, or change any other tracks",
+    "do not create, delete, rename, mute, solo, pan, or change any other track",
+    "do not create, delete, rename, mute, pan, or change any other tracks",
+    "do not create, delete, rename, mute, pan, or change any other track",
+    "do not create, delete, rename, solo, or change any other tracks",
+    "do not create, delete, rename, solo, or change any other track",
+    "do not rename, mute, solo, pan, or change any other tracks",
+    "do not rename, mute, solo, pan, or change any other track",
+    "do not rename, mute, pan, or change any other tracks",
+    "do not rename, mute, pan, or change any other track",
+    "do not create, delete, rename, mute, solo, pan",
+    "do not create, delete, rename, mute, pan",
+    "do not create, delete, rename, solo",
+    "do not rename, mute, solo, pan",
+    "do not rename, mute, pan",
+    "do not rename any tracks",
+    "do not rename any track",
+    "don't rename any tracks",
+    "don't rename any track",
+    "without renaming",
+    "rename any tracks",
+    "rename any track",
+    "no rename",
+    "not rename",
+    "do not rename",
+    "don't rename",
+    "do not mute any tracks",
+    "do not mute any track",
+    "don't mute any tracks",
+    "don't mute any track",
+    "without muting",
+    "mute any tracks",
+    "mute any track",
+    "no mute",
+    "not mute",
+    "do not mute",
+    "don't mute",
+    "do not solo any tracks",
+    "do not solo any track",
+    "don't solo any tracks",
+    "don't solo any track",
+    "without soloing",
+    "solo any tracks",
+    "solo any track",
+    "no solo",
+    "not solo",
+    "do not solo",
+    "don't solo",
+    "do not pan any tracks",
+    "do not pan any track",
+    "don't pan any tracks",
+    "don't pan any track",
+    "without panning",
+    "pan any tracks",
+    "pan any track",
+    "no pan",
+    "not pan",
+    "do not pan",
+    "don't pan",
+  }) do
+    text = text:gsub(phrase, "")
+  end
+  return text
+end
+
+function Code._typed_action_send_intent_text(user_text)
+  local text = Code._typed_action_user_request_text(user_text):lower()
+  text = text
+    :gsub("master/parent send", "")
+    :gsub("master send", "")
+    :gsub("main send", "")
+    :gsub("master parent send", "")
+    :gsub("parent send", "")
+  for _, pattern in ipairs({
+    "do not add[^%.\n;]-sends?[^%.\n;]*",
+    "don't add[^%.\n;]-sends?[^%.\n;]*",
+    "do not create[^%.\n;]-sends?[^%.\n;]*",
+    "don't create[^%.\n;]-sends?[^%.\n;]*",
+    "without[^%.\n;]-sends?[^%.\n;]*",
+    "no%s+other%s+sends?[^%.\n;]*",
+    "no%s+sends?[^%.\n;]*",
+  }) do
+    text = text:gsub(pattern, "")
+  end
+  return text
+end
+
+function Code.typed_action_user_requests_track_creation(user_text)
+  local u = Code._typed_action_user_request_text(user_text):lower()
+  local mentions_existing_targets =
+    u:find("existing track", 1, true) ~= nil
+    or u:find("existing tracks", 1, true) ~= nil
+    or u:find("resolve the existing", 1, true) ~= nil
+  if mentions_existing_targets then return false end
+  return u:find("blank project", 1, true) ~= nil
+    or u:find("blank-project", 1, true) ~= nil
+    or u:find("blank reaper project", 1, true) ~= nil
+    or u:match("create exactly%s+[%w%-]+%s+tracks?") ~= nil
+    or u:match("create exactly%s+[%w%-]+%s+new%s+tracks?") ~= nil
+    or u:find("create one track", 1, true) ~= nil
+    or u:find("create two tracks", 1, true) ~= nil
+    or u:find("create three tracks", 1, true) ~= nil
+    or u:find("create four tracks", 1, true) ~= nil
+    or u:find("create five tracks", 1, true) ~= nil
+    or u:find("create six tracks", 1, true) ~= nil
+    or u:find("routing template", 1, true) ~= nil
+end
+
+function Code.typed_action_user_forbids_track_creation(user_text)
+  if Code.typed_action_user_requests_track_creation(user_text) then
+    return false
+  end
+  local u = Code._typed_action_user_request_text(user_text):lower()
+  for _, pattern in ipairs({
+    "do not create[^%.\n;]*tracks?",
+    "don't create[^%.\n;]*tracks?",
+    "do not add[^%.\n;]*tracks?",
+    "don't add[^%.\n;]*tracks?",
+    "do not make[^%.\n;]*tracks?",
+    "don't make[^%.\n;]*tracks?",
+    "do not create[^%.\n;]*replacement%s+tracks?",
+    "don't create[^%.\n;]*replacement%s+tracks?",
+    "no%s+new%s+tracks?",
+    "no%s+replacement%s+tracks?",
+  }) do
+    if u:match(pattern) then return true end
+  end
+  return false
+end
+
+function Code.typed_action_user_requests_selected_target(user_text)
+  local clean_text = Code._typed_action_user_request_text(user_text)
+  local u = clean_text:lower()
+  local _, selected_index_required =
+    Code._typed_action_selected_indexes_from_user_text(clean_text)
+  return selected_index_required
+    or u:find("selected track", 1, true) ~= nil
+    or u:find("selected tracks", 1, true) ~= nil
+    or u:find("currently selected", 1, true) ~= nil
+end
+
+function Code.typed_action_user_requests_folder(user_text)
+  local u = Code._typed_action_user_request_text(user_text):lower()
+  for _, phrase in ipairs({
+    "do not create folders",
+    "do not create a folder",
+    "do not make folders",
+    "do not make a folder",
+    "don't create folders",
+    "don't create a folder",
+    "don't make folders",
+    "don't make a folder",
+    "without folders",
+    "without a folder",
+    "no folders",
+    "no folder",
+    "not folders",
+    "not a folder",
+  }) do
+    u = u:gsub(phrase, "")
+  end
+  local has_folder =
+    u:find("folder", 1, true) ~= nil
+    or u:find("folders", 1, true) ~= nil
+  if not has_folder then return false end
+  return u:find("track", 1, true) ~= nil
+    or u:find("tracks", 1, true) ~= nil
+    or u:find("parent", 1, true) ~= nil
+    or u:find("contain", 1, true) ~= nil
+    or u:find("containing", 1, true) ~= nil
+    or u:find("create", 1, true) ~= nil
+    or u:find("make", 1, true) ~= nil
+    or u:find("set up", 1, true) ~= nil
+    or u:find("setup", 1, true) ~= nil
+    or u:find("build", 1, true) ~= nil
+end
+
+function Code.repair_typed_actions_plan(plan, opts)
+  opts = type(opts) == "table" and opts or {}
+  if not _typed_action_is_object(plan)
+     or not _typed_action_is_array(plan.actions) then
+    return plan, false
+  end
+
+  local repaired = false
+  do
+    local out, dropped = {}, 0
+    for _, action in ipairs(plan.actions) do
+      if type(action) == "table"
+         and action.op == "fx.set_param"
+         and (_typed_action_is_object(action.params)
+              and next(action.params) == nil) then
+        dropped = dropped + 1
+      else
+        out[#out + 1] = action
+      end
+    end
+    if dropped > 0 and #out > 0 then
+      plan.actions = out
+      repaired = true
+    end
+  end
+
+  do
+    local add_stock_ids_by_fx, param_actions_by_fx = {}, {}
+    for _, action in ipairs(plan.actions) do
+      if action.op == "fx.add_stock"
+         and _typed_action_is_nonempty_string(action.id)
+         and _TYPED_ACTION_STOCK_FX[action.fx] then
+        local list = add_stock_ids_by_fx[action.fx]
+        if not list then
+          list = {}
+          add_stock_ids_by_fx[action.fx] = list
+        end
+        list[#list + 1] = action.id
+      elseif action.op == "fx.set_param"
+         and _typed_action_is_nonempty_string(action.fx)
+         and _TYPED_ACTION_STOCK_FX[action.fx] then
+        local list = param_actions_by_fx[action.fx]
+        if not list then
+          list = {}
+          param_actions_by_fx[action.fx] = list
+        end
+        list[#list + 1] = action
+      end
+    end
+
+    for fx_name, param_actions in pairs(param_actions_by_fx) do
+      local fx_ids = add_stock_ids_by_fx[fx_name]
+      if fx_ids and #fx_ids == #param_actions then
+        for i, action in ipairs(param_actions) do
+          action.fx = fx_ids[i]
+          repaired = true
+        end
+      end
+    end
+  end
+
+  local user_text = tostring(opts.user_text or "")
+  if user_text == "" then return plan, repaired end
+
+  local user_text_lower = user_text:lower()
+  local repair_user_words = " "
+    .. user_text_lower:gsub("[^%w_]+", " ")
+    .. " "
+  local repair_mentions_stock_fx_name = false
+  local repair_literal_track_names = {}
+  for fx_name in pairs(_TYPED_ACTION_STOCK_FX) do
+    local fx_lower = tostring(fx_name):lower()
+    if user_text_lower:find(fx_lower, 1, true) then
+      repair_mentions_stock_fx_name = true
+    end
+    if repair_user_words:find(" track named " .. fx_lower .. " ", 1, true)
+       or repair_user_words:find(" track called " .. fx_lower .. " ", 1, true) then
+      repair_literal_track_names[fx_lower] = true
+    end
+  end
+  local repair_has_stock_fx_action_word =
+    repair_user_words:find(" add ", 1, true) ~= nil
+    or repair_user_words:find(" insert ", 1, true) ~= nil
+    or repair_user_words:find(" load ", 1, true) ~= nil
+    or repair_user_words:find(" put ", 1, true) ~= nil
+    or repair_user_words:find(" apply ", 1, true) ~= nil
+    or repair_user_words:find(" use ", 1, true) ~= nil
+    or repair_user_words:find(" using ", 1, true) ~= nil
+    or repair_user_words:find(" with ", 1, true) ~= nil
+  local repair_requests_stock_fx = repair_mentions_stock_fx_name
+    and repair_has_stock_fx_action_word
+  repair_requests_stock_fx = repair_requests_stock_fx
+    or user_text_lower:find("stock fx", 1, true) ~= nil
+    or user_text_lower:find("stock effect", 1, true) ~= nil
+    or user_text_lower:find("stock plugin", 1, true) ~= nil
+  local function repair_normalized_name(s)
+    return tostring(s or ""):lower()
+      :gsub("^%s+", "")
+      :gsub("%s+$", "")
+      :gsub("%s+", " ")
+  end
+  local function repair_user_mentions_name(name)
+    local n = repair_normalized_name(name):gsub("[^%w_]+", " ")
+    n = n:gsub("%s+", " ")
+    return n ~= "" and repair_user_words:find(" " .. n .. " ", 1, true) ~= nil
+  end
+  local function repair_requested_exact_track_order(text)
+    text = tostring(text or "")
+    local function parse_order_fragment(fragment)
+      fragment = tostring(fragment or "")
+      fragment = fragment:gsub("^%s*.-:%s*", "")
+      fragment = fragment:gsub("%f[%a][Tt]hen%f[%A]", ",")
+      fragment = fragment:gsub("%f[%a][Aa]nd%f[%A]", ",")
+      local out = {}
+      for part in fragment:gmatch("[^,]+") do
+        local name = tostring(part or "")
+          :gsub("^%s+", "")
+          :gsub("%s+$", "")
+          :gsub("^then%s+", "")
+          :gsub("^and%s+", "")
+          :gsub("^create%s+", "")
+          :gsub("^make%s+", "")
+          :gsub("^set%s+up%s+", "")
+          :gsub("^build%s+", "")
+          :gsub("^exactly%s+[%w]+%s+tracks?%s+named%s+", "")
+          :gsub("^[%w]+%s+tracks?%s+named%s+", "")
+          :gsub("^tracks?%s+named%s+", "")
+          :gsub("^named%s+", "")
+          :gsub("^the%s+", "")
+          :gsub("^a%s+", "")
+        name = repair_normalized_name(name)
+        if name ~= "" then out[#out + 1] = name end
+      end
+      return #out >= 2 and out or nil
+    end
+    local explicit_fragment =
+      text:match("[Tt]rack%s+order%s+must%s+be%s+([^%.\n]+)")
+      or text:match("[Oo]rder%s+must%s+be%s+([^%.\n]+)")
+    if explicit_fragment then return parse_order_fragment(explicit_fragment) end
+    local lt = text:lower()
+    local marker = lt:find(" in that exact order", 1, true)
+      or lt:find(" in exact order", 1, true)
+      or lt:find(" in that order", 1, true)
+    if not marker then return nil end
+    local before = text:sub(1, marker - 1)
+    local cut = 0
+    for i = 1, #before do
+      local ch = before:sub(i, i)
+      if ch == "." or ch == "\n" then cut = i end
+    end
+    if cut > 0 then before = before:sub(cut + 1) end
+    before = before:gsub("^.*[Cc]reate%s+exactly%s+[%w%-]+%s+tracks?%s+named%s+", "")
+    before = before:gsub("^.*[Cc]reate%s+[%w%-]+%s+tracks?%s+named%s+", "")
+    before = before:gsub("^.*[Mm]ake%s+exactly%s+[%w%-]+%s+tracks?%s+named%s+", "")
+    before = before:gsub("^.*[Ss]et%s+up%s+exactly%s+[%w%-]+%s+tracks?%s+named%s+", "")
+    before = before:gsub("^.*%f[%a]with%s+", "")
+    return parse_order_fragment(before)
+  end
+  local function repair_user_mentions_db_value(db)
+    local want = tonumber(db)
+    if not want then return false end
+    for raw in user_text:gmatch("([%+%-]?%d+%.?%d*)%s*[dD][bB]") do
+      local got = tonumber(raw)
+      if got and math.abs(got - want) <= 0.25 then return true end
+    end
+    return false
+  end
+  local function repair_user_mentions_param(param, value, params)
+    param = tostring(param or "")
+    if param == "band" then
+      return (params.frequency_hz ~= nil
+          and repair_user_mentions_param("frequency_hz", params.frequency_hz, params))
+        or (params.gain_db ~= nil
+          and repair_user_mentions_param("gain_db", params.gain_db, params))
+    elseif param == "frequency_hz" then
+      return user_text_lower:find("frequency", 1, true) ~= nil
+        or user_text_lower:find("freq", 1, true) ~= nil
+        or user_text_lower:find(" hz", 1, true) ~= nil
+        or user_text_lower:find("khz", 1, true) ~= nil
+    elseif param == "gain_db" then
+      return user_text_lower:find("gain", 1, true) ~= nil
+        or user_text_lower:find("boost", 1, true) ~= nil
+        or user_text_lower:find("cut", 1, true) ~= nil
+        or (user_text_lower:find("band", 1, true) ~= nil
+          and repair_user_mentions_db_value(value))
+    elseif param == "threshold_db" then
+      return user_text_lower:find("threshold", 1, true) ~= nil
+    elseif param == "ratio" then
+      return user_text_lower:find("ratio", 1, true) ~= nil
+    elseif param == "attack_ms" then
+      return user_text_lower:find("attack", 1, true) ~= nil
+    elseif param == "release_ms" then
+      return user_text_lower:find("release", 1, true) ~= nil
+    elseif param == "wet_db" then
+      return user_text_lower:find("wet", 1, true) ~= nil
+    elseif param == "dry_db" then
+      return user_text_lower:find("dry", 1, true) ~= nil
+    elseif param == "rms_ms" then
+      return user_text_lower:find("rms", 1, true) ~= nil
+    elseif param == "feedback_pct" or param == "feedback_db" then
+      return user_text_lower:find("feedback", 1, true) ~= nil
+    elseif param == "room_size" then
+      return user_text_lower:find("room size", 1, true) ~= nil
+        or user_text_lower:find("room", 1, true) ~= nil
+    elseif param == "dampening" then
+      return user_text_lower:find("dampening", 1, true) ~= nil
+        or user_text_lower:find("damping", 1, true) ~= nil
+    elseif param == "hysteresis_db" then
+      return user_text_lower:find("hysteresis", 1, true) ~= nil
+    elseif param == "hold_ms" then
+      return user_text_lower:find("hold", 1, true) ~= nil
+    elseif param == "ceiling_db" then
+      return user_text_lower:find("ceiling", 1, true) ~= nil
+    end
+    return false
+  end
+  local repair_exact_track_order, repair_exact_track_names
+  do
+    local order = repair_requested_exact_track_order(user_text)
+    if order then
+      repair_exact_track_order = order
+      repair_exact_track_names = {}
+      for _, name in ipairs(order) do repair_exact_track_names[name] = true end
+    end
+  end
+
+  do
+    local known_fx_ids = {}
+    for _, action in ipairs(plan.actions) do
+      if type(action) == "table"
+         and action.op == "fx.add_stock"
+         and _typed_action_is_nonempty_string(action.id) then
+        known_fx_ids[action.id] = true
+      end
+    end
+    local out, dropped = {}, 0
+    for _, action in ipairs(plan.actions) do
+      local drop = false
+      if type(action) == "table"
+         and action.op == "fx.set_param"
+         and known_fx_ids[action.fx]
+         and type(action.params) == "table" then
+        local has_param, has_requested_param = false, false
+        for param, value in pairs(action.params) do
+          if value ~= nil then
+            has_param = true
+            if repair_user_mentions_param(param, value, action.params) then
+              has_requested_param = true
+            end
+          end
+        end
+        drop = has_param and not has_requested_param
+      end
+      if drop then
+        dropped = dropped + 1
+      else
+        out[#out + 1] = action
+      end
+    end
+    if dropped > 0 and #out > 0 then
+      plan.actions = out
+      repaired = true
+    end
+  end
+
+  if not Code.typed_action_user_requests_folder(user_text) then
+    local out, dropped = {}, 0
+    for _, action in ipairs(plan.actions) do
+      if type(action) == "table" and action.op == "track.folder" then
+        dropped = dropped + 1
+      else
+        out[#out + 1] = action
+      end
+    end
+    if dropped > 0 then
+      plan.actions = out
+      repaired = true
+    end
+  end
+
+  local function repair_reference_state(actions)
+    local refs, non_resolve = {}, false
+    for _, action in ipairs(actions) do
+      if type(action) ~= "table" then return nil, nil end
+      if action.op == "track.set" then
+        refs[action.track] = true
+        non_resolve = true
+      elseif action.op == "track.folder" then
+        refs[action.parent] = true
+        non_resolve = true
+        if type(action.children) == "table" then
+          for _, child in ipairs(action.children) do
+            refs[child] = true
+          end
+        end
+      elseif action.op == "fx.add_stock" then
+        refs[action.track] = true
+        non_resolve = true
+      elseif action.op == "send.create" then
+        refs[action["from"]] = true
+        refs[action.to] = true
+        non_resolve = true
+      elseif action.op and action.op ~= "track.resolve" then
+        non_resolve = true
+      end
+    end
+    return refs, non_resolve
+  end
+
+  local referenced_tracks, has_non_resolve =
+    repair_reference_state(plan.actions)
+  if not referenced_tracks then return plan, false end
+  if has_non_resolve then
+    local existing_target_only =
+      not Code.typed_action_user_requests_track_creation(user_text)
+      and (user_text_lower:find("existing track", 1, true) ~= nil
+        or user_text_lower:find("existing tracks", 1, true) ~= nil
+        or user_text_lower:find("resolve the existing", 1, true) ~= nil
+        or user_text_lower:find("do not create", 1, true) ~= nil
+        or user_text_lower:find("don't create", 1, true) ~= nil)
+    if existing_target_only then
+      local out, dropped = {}, 0
+      for _, action in ipairs(plan.actions) do
+        local name = tostring(action.name or "")
+        local id_key = tostring(action.id or ""):lower():gsub("[^%w]+", "")
+        local name_key = name:lower():gsub("[^%w]+", "")
+        local junk_ensure = action.op == "track.ensure"
+          and _typed_action_is_nonempty_string(action.id)
+          and not referenced_tracks[action.id]
+          and (not _typed_action_is_nonempty_string(action.name)
+            or name:find("%w") == nil
+            or name:lower():gsub("%s+", "") == ":null"
+            or name:lower():gsub("%s+", "") == "null"
+            or id_key:find("send", 1, true) ~= nil
+            or name_key:find("send", 1, true) ~= nil)
+        if junk_ensure then
+          dropped = dropped + 1
+        else
+          out[#out + 1] = action
+        end
+      end
+      if dropped > 0 and #out > 0 then
+        plan.actions = out
+        repaired = true
+        referenced_tracks, has_non_resolve =
+          repair_reference_state(plan.actions)
+        if not referenced_tracks then return plan, false end
+      end
+    end
+  end
+  if has_non_resolve then
+    if repair_exact_track_order
+       and Code.typed_action_user_requests_track_creation(user_text)
+       and not Code.typed_action_user_requests_folder(user_text) then
+      local ensure_slots, ensure_by_name = {}, {}
+      local bad_order_repair = false
+      for i, action in ipairs(plan.actions) do
+        if type(action) ~= "table" then
+          bad_order_repair = true
+          break
+        elseif action.op == "track.ensure" then
+          if not _typed_action_is_nonempty_string(action.id)
+             or not _typed_action_is_nonempty_string(action.name) then
+            bad_order_repair = true
+            break
+          end
+          local name_key = repair_normalized_name(action.name)
+          if ensure_by_name[name_key] then
+            bad_order_repair = true
+            break
+          end
+          ensure_by_name[name_key] = action
+          ensure_slots[#ensure_slots + 1] = i
+        elseif action.op == "track.folder" then
+          bad_order_repair = true
+          break
+        end
+      end
+      if not bad_order_repair
+         and #ensure_slots == #repair_exact_track_order then
+        local ordered = {}
+        for _, name in ipairs(repair_exact_track_order) do
+          local action = ensure_by_name[name]
+          if not action then
+            bad_order_repair = true
+            break
+          end
+          ordered[#ordered + 1] = action
+        end
+        if not bad_order_repair then
+          local changed = false
+          for i, slot in ipairs(ensure_slots) do
+            if plan.actions[slot] ~= ordered[i] then changed = true end
+            plan.actions[slot] = ordered[i]
+          end
+          if changed then repaired = true end
+        end
+      end
+    end
+
+    if repair_exact_track_names then
+      local out, dropped = {}, 0
+      for _, action in ipairs(plan.actions) do
+        local extra_track = action.op == "track.ensure"
+          and _typed_action_is_nonempty_string(action.id)
+          and not referenced_tracks[action.id]
+          and not repair_exact_track_names[repair_normalized_name(action.name)]
+        if extra_track then
+          dropped = dropped + 1
+        else
+          out[#out + 1] = action
+        end
+      end
+      if dropped > 0 then
+        plan.actions = out
+        repaired = true
+      end
+    end
+
+    local out, dropped = {}, 0
+    for _, action in ipairs(plan.actions) do
+      if action.op == "track.resolve"
+         and _typed_action_is_nonempty_string(action.id)
+         and not referenced_tracks[action.id] then
+        dropped = dropped + 1
+      else
+        out[#out + 1] = action
+      end
+    end
+    if dropped > 0 then
+      plan.actions = out
+      repaired = true
+    end
+  end
+
+  if has_non_resolve then
+    local referenced_ensure_name = {}
+    local stock_fx_action_ids = {}
+    for _, action in ipairs(plan.actions) do
+      if action.op == "track.ensure"
+         and _typed_action_is_nonempty_string(action.id)
+         and _typed_action_is_nonempty_string(action.name)
+         and referenced_tracks[action.id] then
+        referenced_ensure_name[action.name] = true
+      elseif action.op == "fx.add_stock"
+         and _typed_action_is_nonempty_string(action.id)
+         and _TYPED_ACTION_STOCK_FX[action.fx] then
+        stock_fx_action_ids[action.id] = true
+      end
+    end
+    local out, dropped = {}, 0
+    for _, action in ipairs(plan.actions) do
+      local helper_fx_id = action.op == "track.ensure"
+        and _typed_action_is_nonempty_string(action.id)
+        and stock_fx_action_ids[action.id]
+      local helper_name_stock_fx = action.op == "track.ensure"
+        and repair_requests_stock_fx
+        and _typed_action_is_nonempty_string(action.name)
+        and not repair_literal_track_names[tostring(action.name):lower()]
+        and _TYPED_ACTION_STOCK_FX[tostring(action.name)] == true
+      local helper_id = action.op == "track.ensure"
+        and _typed_action_is_nonempty_string(action.id)
+        and (action.id:match("_[Ee][Qq]$")
+          or action.id:match("_[Cc][Oo][Mm][Pp]$")
+          or action.id:match("_[Rr][Ee][Vv][Ee][Rr][Bb]$")
+          or action.id:match("_[Dd][Ee][Ll][Aa][Yy]$")
+          or action.id:match("_[Gg][Aa][Tt][Ee]$")
+          or action.id:match("_[Ll][Ii][Mm][Ii][Tt]$")
+          or action.id:match("_[Rr][Ee][Aa][Ee][Qq]$")
+          or action.id:match("_[Rr][Ee][Aa][Cc][Oo][Mm][Pp]$")
+          or action.id:match("_[Rr][Ee][Aa][Vv][Ee][Rr][Bb][Aa][Tt][Ee]$")
+          or action.id:match("_[Rr][Ee][Aa][Dd][Ee][Ll][Aa][Yy]$")
+          or action.id:match("_[Rr][Ee][Aa][Gg][Aa][Tt][Ee]$")
+          or action.id:match("_[Rr][Ee][Aa][Ll][Ii][Mm][Ii][Tt]$")
+          or (repair_requests_stock_fx and action.id:match("_[Ff][Xx]$"))
+          or (helper_name_stock_fx and action.id:match("_[Ff][Xx]$")))
+      local helper_name_ok = _typed_action_is_nonempty_string(action.name)
+        and tostring(action.name):find("%w") ~= nil
+      local helper_id_unmentioned = helper_id
+        and repair_requests_stock_fx
+        and not repair_user_mentions_name(action.name)
+      if (helper_id or helper_name_stock_fx or helper_fx_id)
+         and not referenced_tracks[action.id]
+         and (helper_name_stock_fx
+          or helper_fx_id
+          or helper_id_unmentioned
+          or not helper_name_ok
+          or referenced_ensure_name[action.name]) then
+        dropped = dropped + 1
+      else
+        out[#out + 1] = action
+      end
+    end
+    if dropped > 0 then
+      plan.actions = out
+      repaired = true
+    end
+  end
+
+  if has_non_resolve and Code.typed_action_user_requests_track_creation(user_text) then
+    local ensured_name_by_id = {}
+    for _, action in ipairs(plan.actions) do
+      if action.op == "track.ensure"
+         and _typed_action_is_nonempty_string(action.id) then
+        ensured_name_by_id[action.id] = repair_normalized_name(action.name)
+      end
+    end
+    local out, dropped = {}, 0
+    for _, action in ipairs(plan.actions) do
+      local ensured_name = action.op == "track.resolve"
+        and _typed_action_is_nonempty_string(action.id)
+        and ensured_name_by_id[action.id]
+      local resolve_name = repair_normalized_name(action.name)
+      local redundant_resolve = ensured_name
+        and action.selected ~= true
+        and action.selected_index == nil
+        and action.index == nil
+        and (resolve_name == "" or resolve_name == ensured_name)
+      if redundant_resolve then
+        dropped = dropped + 1
+      else
+        out[#out + 1] = action
+      end
+    end
+    if dropped > 0 then
+      plan.actions = out
+      repaired = true
+    end
+  end
+
+  local u = user_text:lower()
+  if Code.typed_action_user_requests_track_creation(user_text) then
+    for _, action in ipairs(plan.actions) do
+      if action.op == "track.resolve"
+         and _typed_action_is_nonempty_string(action.name)
+         and action.selected ~= true
+         and action.selected_index == nil
+         and action.index == nil then
+        action.op = "track.ensure"
+        action.position = action.position or "end"
+        action.selected = nil
+        action.selected_index = nil
+        action.index = nil
+        repaired = true
+      end
+    end
+  end
+
+  local u_words = tostring(user_text or ""):lower()
+    :gsub("[^%w]+", " ")
+    :gsub("%s+", " ")
+  local fx_order
+  if u_words:find("reaeq first and reacomp second", 1, true)
+     or u_words:find("reaeq followed by reacomp", 1, true)
+     or (u_words:find("reaeq first", 1, true)
+       and u_words:find("reacomp second", 1, true)) then
+    fx_order = { ReaEQ = 1, ReaComp = 2 }
+  elseif u_words:find("reacomp first and reaeq second", 1, true)
+      or u_words:find("reacomp followed by reaeq", 1, true)
+      or (u_words:find("reacomp first", 1, true)
+        and u_words:find("reaeq second", 1, true)) then
+    fx_order = { ReaComp = 1, ReaEQ = 2 }
+  end
+  if fx_order then
+    local track_order, seen_track, fx_actions = {}, {}, {}
+    local prefix, suffix = {}, {}
+    for i, action in ipairs(plan.actions) do
+      if action.op == "track.ensure" or action.op == "track.resolve" then
+        if _typed_action_is_nonempty_string(action.id)
+           and not seen_track[action.id] then
+          seen_track[action.id] = #track_order + 1
+          track_order[#track_order + 1] = action.id
+        end
+        prefix[#prefix + 1] = action
+      elseif action.op == "track.set" or action.op == "track.folder" then
+        prefix[#prefix + 1] = action
+      elseif action.op == "fx.add_stock" then
+        fx_actions[#fx_actions + 1] = { action = action, index = i }
+      else
+        suffix[#suffix + 1] = action
+      end
+    end
+    if #fx_actions > 1 then
+      table.sort(fx_actions, function(a, b)
+        local aa, bb = a.action, b.action
+        local at = seen_track[aa.track] or math.huge
+        local bt = seen_track[bb.track] or math.huge
+        if at ~= bt then return at < bt end
+        local af = fx_order[aa.fx] or 1000
+        local bf = fx_order[bb.fx] or 1000
+        if af ~= bf then return af < bf end
+        return a.index < b.index
+      end)
+      local out = {}
+      for _, action in ipairs(prefix) do out[#out + 1] = action end
+      for _, item in ipairs(fx_actions) do out[#out + 1] = item.action end
+      for _, action in ipairs(suffix) do out[#out + 1] = action end
+      plan.actions = out
+      repaired = true
+    end
+  end
+
+  local selected_indexes, selected_index_required =
+    Code._typed_action_selected_indexes_from_user_text(user_text)
+  local positional_selector_forbidden =
+    Code._typed_action_forbids_positional_track_selector(user_text)
+  local function selected_send_index_order()
+    if not selected_index_required then return nil, nil end
+    local words = " " .. Code._typed_action_user_request_text(user_text):lower()
+      :gsub("[^%w]+", " ")
+      :gsub("%s+", " ") .. " "
+    local ordinals = {
+      { "first", 1 },
+      { "second", 2 },
+      { "third", 3 },
+      { "fourth", 4 },
+      { "fifth", 5 },
+      { "sixth", 6 },
+    }
+    local function has_order(from_word, from_idx, to_word, to_idx)
+      return words:find(" from the " .. from_word
+          .. " selected track to the " .. to_word .. " selected track ",
+          1, true) ~= nil
+        or words:find(" from " .. from_word
+          .. " selected track to " .. to_word .. " selected track ",
+          1, true) ~= nil
+        or words:find(" " .. from_word
+          .. " selected track to the " .. to_word .. " selected track ",
+          1, true) ~= nil
+        or words:find(" " .. from_word
+          .. " selected to " .. to_word .. " selected ", 1, true) ~= nil
+        or words:find(" from selected index " .. tostring(from_idx)
+          .. " to selected index " .. tostring(to_idx) .. " ", 1, true) ~= nil
+    end
+    for _, from in ipairs(ordinals) do
+      for _, to in ipairs(ordinals) do
+        if from[2] ~= to[2] and has_order(from[1], from[2], to[1], to[2]) then
+          return from[2], to[2]
+        end
+      end
+    end
+    return nil, nil
+  end
+  local track_property_text =
+    Code._typed_action_track_property_intent_text(user_text)
+  local requests_track_properties =
+    (track_property_text:find("volume", 1, true) ~= nil
+      or track_property_text:find("fader", 1, true) ~= nil
+      or track_property_text:find("pan", 1, true) ~= nil
+      or track_property_text:find("panned", 1, true) ~= nil
+      or track_property_text:find("mute", 1, true) ~= nil
+      or track_property_text:find("muted", 1, true) ~= nil
+      or track_property_text:find("unmute", 1, true) ~= nil
+      or track_property_text:find("solo", 1, true) ~= nil
+      or track_property_text:find("soloed", 1, true) ~= nil
+      or track_property_text:find("unsolo", 1, true) ~= nil
+      or track_property_text:find("master send", 1, true) ~= nil
+      or track_property_text:find("main send", 1, true) ~= nil
+      or track_property_text:find("master/parent", 1, true) ~= nil
+      or track_property_text:find("master parent", 1, true) ~= nil
+      or track_property_text:find("parent send", 1, true) ~= nil
+      or track_property_text:find("master output", 1, true) ~= nil)
+    and (track_property_text:find("track", 1, true) ~= nil
+      or track_property_text:find("bus", 1, true) ~= nil
+      or track_property_text:find("aux", 1, true) ~= nil)
+  local requests_track_rename =
+    (track_property_text:find("rename", 1, true) ~= nil
+      or track_property_text:find("renamed", 1, true) ~= nil
+      or track_property_text:find("call ", 1, true) ~= nil
+      or track_property_text:find("called", 1, true) ~= nil)
+    and (track_property_text:find("track", 1, true) ~= nil
+      or track_property_text:find("bus", 1, true) ~= nil
+      or track_property_text:find("aux", 1, true) ~= nil)
+
+  if requests_track_properties
+     and not Code.typed_action_user_requests_track_creation(user_text)
+     and selected_index_required
+     and #selected_indexes == 1 then
+    local placeholder_only, placeholder_count = true, 0
+    for _, action in ipairs(plan.actions) do
+      if type(action) ~= "table" or action.op ~= "track.ensure" then
+        placeholder_only = false
+        break
+      end
+      local name = tostring(action.name or "")
+      if _typed_action_is_nonempty_string(action.name)
+         and name:find("%w") ~= nil then
+        placeholder_only = false
+        break
+      end
+      placeholder_count = placeholder_count + 1
+    end
+    if placeholder_only and placeholder_count > 0 then
+      plan.actions = {
+        {
+          op = "track.resolve",
+          id = "target",
+          selected_index = selected_indexes[1],
+        },
+      }
+      repaired = true
+    end
+  end
+
+  do
+    local send_text = Code._typed_action_send_intent_text(user_text)
+    local requests_selected_send =
+      selected_index_required
+      and not Code.typed_action_user_requests_track_creation(user_text)
+      and (send_text:find("send", 1, true) ~= nil
+        or send_text:find("route", 1, true) ~= nil
+        or send_text:find("routing", 1, true) ~= nil)
+    if requests_selected_send then
+      local from_index, to_index = selected_send_index_order()
+      if from_index and to_index then
+        local send_action, send_count, repairable = nil, 0, true
+        for _, action in ipairs(plan.actions) do
+          if type(action) ~= "table" then
+            repairable = false
+            break
+          elseif action.op == "send.create" then
+            send_count = send_count + 1
+            send_action = send_action or action
+          elseif action.op ~= "track.resolve" then
+            repairable = false
+            break
+          end
+        end
+        if repairable and send_count == 1 and send_action then
+          plan.actions = {
+            {
+              op = "track.resolve",
+              id = "selected_send_from",
+              selected_index = from_index,
+            },
+            {
+              op = "track.resolve",
+              id = "selected_send_to",
+              selected_index = to_index,
+            },
+            {
+              op = "send.create",
+              id = send_action.id,
+              ["from"] = "selected_send_from",
+              to = "selected_send_to",
+              volume_db = send_action.volume_db,
+              pan = send_action.pan,
+              mode = send_action.mode,
+              muted = send_action.muted,
+            },
+          }
+          return plan, true
+        end
+      end
+    end
+  end
+
+  if not requests_track_properties and not requests_track_rename then
+    return plan, repaired
+  end
+
+  if requests_track_rename then
+    local exact_id, exact_names, exact_seen, exact_repairable =
+      nil, {}, {}, true
+    for _, action in ipairs(plan.actions) do
+      if type(action) ~= "table"
+         or action.op ~= "track.resolve"
+         or not _typed_action_is_nonempty_string(action.id)
+         or not _typed_action_is_nonempty_string(action.name)
+         or action.selected == true
+         or action.selected_index ~= nil
+         or action.index ~= nil then
+        exact_repairable = false
+        break
+      end
+      exact_id = exact_id or action.id
+      if action.id ~= exact_id then
+        exact_repairable = false
+        break
+      end
+      if not exact_seen[action.name] then
+        exact_seen[action.name] = true
+        exact_names[#exact_names + 1] = action.name
+      end
+    end
+    if exact_repairable and #exact_names == 2 then
+      local first_pos = track_property_text:find(exact_names[1]:lower(), 1, true)
+      local second_pos = track_property_text:find(exact_names[2]:lower(), 1, true)
+      if first_pos and second_pos and first_pos < second_pos then
+        plan.actions = {
+          {
+            op = "track.resolve",
+            id = exact_id,
+            name = exact_names[1],
+          },
+          {
+            op = "track.set",
+            track = exact_id,
+            name = exact_names[2],
+          },
+        }
+        return plan, true
+      end
+    end
+
+    local rename_target, rename_selector_key, resolved_name = nil, nil, nil
+    local rename_repairable = true
+    for _, action in ipairs(plan.actions) do
+      if type(action) ~= "table"
+         or action.op ~= "track.resolve"
+         or not _typed_action_is_nonempty_string(action.id) then
+        rename_repairable = false
+        break
+      end
+      local has_positional_selector =
+        type(action.index) == "number"
+        or type(action.selected_index) == "number"
+        or action.selected == true
+      local has_name_selector = _typed_action_is_nonempty_string(action.name)
+      if has_positional_selector then
+        if positional_selector_forbidden then
+          rename_repairable = false
+          break
+        end
+        if has_name_selector then
+          rename_repairable = false
+          break
+        end
+        local selector_key
+        if type(action.selected_index) == "number" then
+          selector_key = "selected_index:" .. tostring(action.selected_index)
+        elseif type(action.index) == "number" then
+          selector_key = "index:" .. tostring(action.index)
+        else
+          selector_key = "selected:true"
+        end
+        if rename_selector_key and rename_selector_key ~= selector_key then
+          rename_repairable = false
+          break
+        end
+        rename_selector_key = selector_key
+        rename_target = rename_target or action
+      elseif has_name_selector then
+        if resolved_name and resolved_name ~= action.name then
+          rename_repairable = false
+          break
+        end
+        resolved_name = action.name
+      else
+        rename_repairable = false
+        break
+      end
+    end
+    if rename_repairable and rename_target and resolved_name then
+      if selected_index_required then
+        local target_selected_index = tonumber(rename_target.selected_index)
+        if not target_selected_index then return plan, repaired end
+        if #selected_indexes == 1
+           and target_selected_index ~= selected_indexes[1] then
+          return plan, repaired
+        end
+      end
+
+      local resolved = {
+        op = "track.resolve",
+        id = rename_target.id,
+      }
+      if type(rename_target.index) == "number" then
+        resolved.index = rename_target.index
+      end
+      if type(rename_target.selected_index) == "number" then
+        resolved.selected_index = rename_target.selected_index
+      end
+      if rename_target.selected == true then
+        resolved.selected = true
+      end
+      plan.actions = {
+        resolved,
+        {
+          op = "track.set",
+          track = rename_target.id,
+          name = resolved_name,
+        },
+      }
+      return plan, true
+    end
+  end
+
+  local allow_noisy_resolve_only_track_set =
+    requests_track_properties
+    and not requests_track_rename
+    and not Code.typed_action_user_requests_track_creation(user_text)
+  local function resolve_matches_requested_selected_index(action)
+    if not selected_index_required then return false end
+    local n = tonumber(action and action.selected_index)
+    if not n then return false end
+    if #selected_indexes == 0 then return true end
+    for _, want in ipairs(selected_indexes) do
+      if n == want then return true end
+    end
+    return false
+  end
+
+  local target_id, target_action, rename_target_action, rename_name, has_mutation =
+    nil, nil, nil, nil, false
+  local target_action_priority = 0
+  for _, action in ipairs(plan.actions) do
+    if type(action) ~= "table" then return plan, false end
+    if action.op == "track.resolve" then
+      if not _typed_action_is_nonempty_string(action.id) then
+        return plan, false
+      end
+      target_id = target_id or action.id
+      if action.id ~= target_id and not allow_noisy_resolve_only_track_set then
+        return plan, false
+      end
+      local has_positional_selector =
+        type(action.index) == "number"
+        or type(action.selected_index) == "number"
+        or action.selected == true
+      if has_positional_selector and not rename_target_action then
+        rename_target_action = action
+      end
+      local selector_priority = 0
+      if resolve_matches_requested_selected_index(action) then
+        selector_priority = 3
+      elseif not selected_index_required
+          and _typed_action_is_nonempty_string(action.name)
+          and repair_user_mentions_name(action.name) then
+        selector_priority = 2
+      elseif _typed_action_is_nonempty_string(action.name)
+          or type(action.index) == "number"
+          or type(action.selected_index) == "number"
+          or action.selected == true then
+        selector_priority = 1
+      end
+      if selector_priority > target_action_priority then
+        target_action = action
+        target_action_priority = selector_priority
+      end
+      if requests_track_rename
+         and _typed_action_is_nonempty_string(action.name)
+         and not has_positional_selector then
+        if rename_name and action.name ~= rename_name then
+          return plan, repaired
+        end
+        rename_name = action.name
+      end
+    else
+      has_mutation = true
+    end
+  end
+  if has_mutation or not target_action then return plan, repaired end
+  if allow_noisy_resolve_only_track_set then
+    target_id = target_action.id
+  end
+
+  if requests_track_rename and rename_target_action and rename_name then
+    if positional_selector_forbidden then return plan, repaired end
+    if selected_index_required then
+      local target_selected_index = tonumber(rename_target_action.selected_index)
+      if not target_selected_index then return plan, repaired end
+      if #selected_indexes == 1
+         and target_selected_index ~= selected_indexes[1] then
+        return plan, repaired
+      end
+    end
+
+    local resolved = {
+      op = "track.resolve",
+      id = target_id,
+    }
+    if type(rename_target_action.index) == "number" then
+      resolved.index = rename_target_action.index
+    end
+    if type(rename_target_action.selected_index) == "number" then
+      resolved.selected_index = rename_target_action.selected_index
+    end
+    if rename_target_action.selected == true then
+      resolved.selected = true
+    end
+    plan.actions = {
+      resolved,
+      {
+        op = "track.set",
+        track = target_id,
+        name = rename_name,
+      },
+    }
+    return plan, true
+  end
+
+  if not requests_track_properties then return plan, repaired end
+
+  if positional_selector_forbidden then
+    local uses_positional_selector =
+      type(target_action.index) == "number"
+      or type(target_action.selected_index) == "number"
+      or target_action.selected == true
+    if uses_positional_selector then return plan, repaired end
+  end
+
+  if selected_index_required then
+    local target_selected_index = tonumber(target_action.selected_index)
+    if not target_selected_index then return plan, repaired end
+    if #selected_indexes == 1
+       and target_selected_index ~= selected_indexes[1] then
+      return plan, repaired
+    end
+  end
+
+  local volume_db = nil
+  for raw in user_text:gmatch("([%+%-]?%d+%.?%d*)%s*[dD][bB]") do
+    volume_db = tonumber(raw)
+  end
+
+  local pan_pct = nil
+  local right = u:match("([%+%-]?%d+%.?%d*)%s*percent%s+right")
+    or u:match("([%+%-]?%d+%.?%d*)%s*%%%s*right")
+  local left = u:match("([%+%-]?%d+%.?%d*)%s*percent%s+left")
+    or u:match("([%+%-]?%d+%.?%d*)%s*%%%s*left")
+  if right then
+    pan_pct = math.abs(tonumber(right) or 0)
+  elseif left then
+    pan_pct = -math.abs(tonumber(left) or 0)
+  end
+
+  local mute = nil
+  if track_property_text:find("unmute", 1, true) ~= nil then
+    mute = false
+  elseif track_property_text:find("mute", 1, true) ~= nil
+      or track_property_text:find("muted", 1, true) ~= nil then
+    mute = true
+  end
+
+  local solo = nil
+  if track_property_text:find("unsolo", 1, true) ~= nil then
+    solo = false
+  elseif track_property_text:find("solo", 1, true) ~= nil
+      or track_property_text:find("soloed", 1, true) ~= nil then
+    solo = true
+  end
+
+  local master_send = nil
+  if track_property_text:find("turn off master send", 1, true) ~= nil
+      or track_property_text:find("turn off main send", 1, true) ~= nil
+      or track_property_text:find("turn off master/parent", 1, true) ~= nil
+      or track_property_text:find("disable master send", 1, true) ~= nil
+      or track_property_text:find("disable main send", 1, true) ~= nil
+      or track_property_text:find("disable master/parent", 1, true) ~= nil
+      or track_property_text:find("master_send false", 1, true) ~= nil
+      or track_property_text:find("master send false", 1, true) ~= nil
+      or track_property_text:find("no master send", 1, true) ~= nil then
+    master_send = false
+  elseif track_property_text:find("turn on master send", 1, true) ~= nil
+      or track_property_text:find("turn on main send", 1, true) ~= nil
+      or track_property_text:find("turn on master/parent", 1, true) ~= nil
+      or track_property_text:find("enable master send", 1, true) ~= nil
+      or track_property_text:find("enable main send", 1, true) ~= nil
+      or track_property_text:find("enable master/parent", 1, true) ~= nil
+      or track_property_text:find("master_send true", 1, true) ~= nil
+      or track_property_text:find("master send true", 1, true) ~= nil then
+    master_send = true
+  end
+
+  if volume_db == nil and pan_pct == nil and mute == nil
+      and solo == nil and master_send == nil then
+    return plan, false
+  end
+
+  local resolved = {
+    op = "track.resolve",
+    id = target_id,
+  }
+  if _typed_action_is_nonempty_string(target_action.name) then
+    resolved.name = target_action.name
+  end
+  if type(target_action.index) == "number" then
+    resolved.index = target_action.index
+  end
+  if type(target_action.selected_index) == "number" then
+    resolved.selected_index = target_action.selected_index
+  end
+  if target_action.selected == true then
+    resolved.selected = true
+  end
+  plan.actions = {
+    resolved,
+    {
+      op = "track.set",
+      track = target_id,
+      volume_db = volume_db,
+      pan_pct = pan_pct,
+      mute = mute,
+      solo = solo,
+      master_send = master_send,
+    },
+  }
+  return plan, true
+end
+
+function Code._typed_action_folder_depth_plan(plan)
+  local errors = {}
+  local track_order, track_order_index = {}, {}
+  local folder_specs = {}
+
+  for i, action in ipairs((plan and plan.actions) or {}) do
+    if type(action) == "table" then
+      if action.op == "track.ensure"
+         and _typed_action_is_nonempty_string(action.id)
+         and not track_order_index[action.id] then
+        track_order[#track_order + 1] = action.id
+        track_order_index[action.id] = #track_order
+      elseif action.op == "track.folder" then
+        folder_specs[#folder_specs + 1] = {
+          parent = action.parent,
+          children = action.children,
+          path = "$.actions[" .. tostring(i) .. "]",
+        }
+      end
+    end
+  end
+
+  local children_by_parent, parent_by_child = {}, {}
+  local parent_order = {}
+
+  for _, spec in ipairs(folder_specs) do
+    local parent = spec.parent
+    local children = spec.children
+    if _typed_action_is_nonempty_string(parent)
+       and track_order_index[parent]
+       and _typed_action_is_array(children) then
+      if children_by_parent[parent] then
+        _typed_action_add_error(errors, "duplicate_folder_parent",
+          spec.path .. ".parent",
+          "A typed-action folder parent can be declared only once")
+      else
+        children_by_parent[parent] = {}
+        parent_order[#parent_order + 1] = parent
+      end
+
+      local seen_children = {}
+      for cidx, child in ipairs(children) do
+        local cpath = spec.path .. ".children[" .. tostring(cidx) .. "]"
+        if _typed_action_is_nonempty_string(child)
+           and track_order_index[child] then
+          if child == parent then
+            _typed_action_add_error(errors, "folder_self_child", cpath,
+              "A folder parent cannot also be its child")
+          elseif seen_children[child] then
+            _typed_action_add_error(errors, "duplicate_folder_child", cpath,
+              "Duplicate folder child: " .. tostring(child))
+          elseif parent_by_child[child] and parent_by_child[child] ~= parent then
+            _typed_action_add_error(errors, "overlapping_folder", cpath,
+              "A typed-action folder child can have only one direct parent")
+          else
+            seen_children[child] = true
+            parent_by_child[child] = parent
+            if children_by_parent[parent] then
+              children_by_parent[parent][#children_by_parent[parent] + 1] = child
+            end
+          end
+        end
+      end
+    end
+  end
+
+  local visiting, visited = {}, {}
+  local function visit(id, path)
+    if visiting[id] then
+      _typed_action_add_error(errors, "folder_cycle", path or "$.actions",
+        "Nested typed-action folders cannot form a cycle")
+      return
+    end
+    if visited[id] then return end
+    visiting[id] = true
+    for _, child in ipairs(children_by_parent[id] or {}) do
+      visit(child, path)
+    end
+    visiting[id] = nil
+    visited[id] = true
+  end
+  for _, parent in ipairs(parent_order) do visit(parent) end
+
+  local function append_subtree(id, out)
+    out[#out + 1] = id
+    for _, child in ipairs(children_by_parent[id] or {}) do
+      append_subtree(child, out)
+    end
+  end
+
+  if #errors == 0 then
+    for _, parent in ipairs(parent_order) do
+      local expected = {}
+      append_subtree(parent, expected)
+      local pidx = track_order_index[parent]
+      for offset, id in ipairs(expected) do
+        if track_order[pidx + offset - 1] ~= id then
+          _typed_action_add_error(errors, "folder_order_mismatch",
+            "$.actions",
+            "track.folder requires each parent to be followed immediately by "
+              .. "its full nested child subtree in track.ensure order")
+          break
+        end
+      end
+    end
+  end
+
+  if #errors > 0 then return nil, errors end
+
+  local depths, touched, touched_set = {}, {}, {}
+  local function mark(id)
+    if not touched_set[id] then
+      touched_set[id] = true
+      touched[#touched + 1] = id
+    end
+  end
+  local function mark_subtree(id)
+    mark(id)
+    for _, child in ipairs(children_by_parent[id] or {}) do
+      mark_subtree(child)
+    end
+  end
+  local function last_descendant(id)
+    local children = children_by_parent[id]
+    if children and #children > 0 then
+      return last_descendant(children[#children])
+    end
+    return id
+  end
+
+  for _, parent in ipairs(parent_order) do
+    depths[parent] = (depths[parent] or 0) + 1
+    local last = last_descendant(parent)
+    depths[last] = (depths[last] or 0) - 1
+    mark_subtree(parent)
+  end
+
+  table.sort(touched, function(a, b)
+    return (track_order_index[a] or 0) < (track_order_index[b] or 0)
+  end)
+
+  return { depths = depths, order = touched }, nil
+end
+
+local function _typed_action_db_to_amp(db)
+  return 10 ^ ((tonumber(db) or 0) / 20)
+end
+
+local function _typed_action_clamp01(v)
+  v = tonumber(v) or 0
+  if v < 0 then return 0 end
+  if v > 1 then return 1 end
+  return v
+end
+
+local function _typed_action_ms_to_norm(ms, full_scale_ms)
+  return _typed_action_clamp01((tonumber(ms) or 0) / (tonumber(full_scale_ms) or 1000))
+end
+
+local function _typed_action_percent_to_norm(v)
+  v = tonumber(v) or 0
+  if v > 1 then v = v / 100 end
+  return _typed_action_clamp01(v)
+end
+
+local function _typed_action_interp(points, x)
+  x = tonumber(x)
+  if not x or x < points[1][1] or x > points[#points][1] then return nil end
+  for i = 1, #points do
+    if x == points[i][1] then return points[i][2] end
+  end
+  for i = 1, #points - 1 do
+    local ax, ay = points[i][1], points[i][2]
+    local bx, by = points[i + 1][1], points[i + 1][2]
+    if x >= ax and x <= bx then
+      local t = (x - ax) / (bx - ax)
+      return ay + (by - ay) * t
+    end
+  end
+  return nil
+end
+
+local function _typed_action_param_setters(fx_name, params, path)
+  local setters, errors = {}, {}
+  local function add_error(code, p, msg)
+    errors[#errors+1] = _typed_action_error(code, p or path, msg)
+  end
+  local function add(method, index, value)
+    setters[#setters+1] = { method = method, index = index, value = value }
+  end
+  local function unsupported(param, why)
+    add_error("unsupported_param", path .. ".params." .. tostring(param),
+      why or ("Typed-action executor does not support " .. tostring(fx_name)
+        .. "." .. tostring(param)))
+  end
+
+  if type(params) ~= "table" then
+    add_error("invalid_type", path .. ".params", "params must be an object")
+    return nil, errors
+  end
+
+  for param, value in pairs(params) do
+    local norm_idx = type(param) == "string"
+      and param:match("^normalized_(%d+)$") or nil
+    if norm_idx then
+      add("normalized", tonumber(norm_idx), value)
+
+    elseif fx_name == "ReaEQ" then
+      if param == "band" then
+        -- Selector for the other ReaEQ params in this action.
+      elseif param == "frequency_hz" then
+        local band = tonumber(params.band or 1)
+        if not band or band % 1 ~= 0 or band < 1 or band > 4 then
+          add_error("out_of_range", path .. ".params.band",
+            "ReaEQ typed actions support bands 1-4")
+        else
+          local norm = _typed_action_interp(_TYPED_ACTION_REAEQ_FREQ_POINTS, value)
+          if not norm then
+            add_error("out_of_range", path .. ".params.frequency_hz",
+              "ReaEQ frequency_hz must be between 20 and 24000")
+          else
+            add("normalized", (band - 1) * 3, norm)
+          end
+        end
+      elseif param == "gain_db" then
+        local band = tonumber(params.band or 1)
+        if not band or band % 1 ~= 0 or band < 1 or band > 4 then
+          add_error("out_of_range", path .. ".params.band",
+            "ReaEQ typed actions support bands 1-4")
+        else
+          local norm = _typed_action_interp(_TYPED_ACTION_REAEQ_GAIN_POINTS, value)
+          if not norm then
+            add_error("out_of_range", path .. ".params.gain_db",
+              "ReaEQ gain_db must be between -12 and +12")
+          else
+            add("normalized", (band - 1) * 3 + 1, norm)
+          end
+        end
+      else
+        unsupported(param, param == "type"
+          and "ReaEQ band type is UI-only and is not scriptable"
+          or nil)
+      end
+
+    elseif fx_name == "ReaComp" then
+      if param == "threshold_db" then
+        add("raw", 0, _typed_action_db_to_amp(value))
+      elseif param == "attack_ms" then
+        add("normalized", 2, _typed_action_ms_to_norm(value, 500))
+      elseif param == "release_ms" then
+        add("normalized", 3, _typed_action_ms_to_norm(value, 5000))
+      elseif param == "dry_db" then
+        add("raw", 10, _typed_action_db_to_amp(value))
+      elseif param == "wet_db" then
+        add("raw", 11, _typed_action_db_to_amp(value))
+      elseif param == "rms_ms" then
+        add("raw", 13, (tonumber(value) or 0) / 1000)
+      else
+        unsupported(param)
+      end
+
+    elseif fx_name == "ReaDelay" then
+      if param == "wet_db" then
+        add("raw", 0, _typed_action_db_to_amp(value))
+      elseif param == "dry_db" then
+        add("raw", 1, _typed_action_db_to_amp(value))
+      elseif param == "feedback_pct" then
+        add("raw", 5, _typed_action_clamp01((tonumber(value) or 0) / 100))
+      elseif param == "feedback_db" then
+        add("raw", 5, _typed_action_db_to_amp(value))
+      else
+        unsupported(param)
+      end
+
+    elseif fx_name == "ReaVerbate" then
+      if param == "wet_db" then
+        add("raw", 0, _typed_action_db_to_amp(value))
+      elseif param == "dry_db" then
+        add("raw", 1, _typed_action_db_to_amp(value))
+      elseif param == "room_size" then
+        add("normalized", 2, _typed_action_percent_to_norm(value))
+      elseif param == "dampening" then
+        add("normalized", 3, _typed_action_percent_to_norm(value))
+      else
+        unsupported(param)
+      end
+
+    elseif fx_name == "ReaGate" then
+      if param == "threshold_db" then
+        add("raw", 0, _typed_action_db_to_amp(value))
+      elseif param == "attack_ms" then
+        add("normalized", 1, _typed_action_ms_to_norm(value, 500))
+      elseif param == "release_ms" then
+        add("normalized", 2, _typed_action_ms_to_norm(value, 5000))
+      elseif param == "hold_ms" then
+        add("normalized", 4, _typed_action_ms_to_norm(value))
+      elseif param == "hysteresis_db" then
+        add("raw", 12, _typed_action_db_to_amp(value))
+      else
+        unsupported(param)
+      end
+
+    elseif fx_name == "ReaLimit" then
+      if param == "threshold_db" then
+        add("normalized", 0, _typed_action_clamp01(((tonumber(value) or 0) + 60) / 72))
+      elseif param == "ceiling_db" then
+        add("normalized", 1, _typed_action_clamp01(((tonumber(value) or 0) + 24) / 24))
+      else
+        unsupported(param)
+      end
+
+    else
+      unsupported("*", "Typed-action executor has no parameter map for "
+        .. tostring(fx_name))
+    end
+  end
+
+  if #errors > 0 then return nil, errors end
+  if #setters == 0 then
+    add_error("unsupported_param", path .. ".params",
+      "fx.set_param contains no executable parameter writes")
+    return nil, errors
+  end
+  return setters, nil
+end
+
 local function _typed_action_blank_op_counts()
   local counts = {}
   for _, op in ipairs(_TYPED_ACTION_OP_KEYS) do counts[op] = 0 end
@@ -18485,6 +24312,19 @@ local function _typed_action_count_ops(plan)
     end
   end
   return counts
+end
+
+local function _typed_action_strip_json_nulls(value)
+  if value == JSON.NULL then return nil end
+  if type(value) ~= "table" then return value end
+  for k, v in pairs(value) do
+    if v == JSON.NULL then
+      value[k] = nil
+    else
+      value[k] = _typed_action_strip_json_nulls(v)
+    end
+  end
+  return value
 end
 
 local function _typed_action_single_json_object(raw)
@@ -18538,6 +24378,12 @@ function Code.extract_typed_actions(text)
   for block in text:gmatch("```reaassist%-actions%s*\n(.-)\n%s*```") do
     blocks[#blocks+1] = block
   end
+  if #blocks == 0 then
+    for block in text:gmatch("```%s*\n(.-)\n%s*```") do
+      local payload = block:match("^%s*reaassist%-actions%s*\n(.*)$")
+      if payload then blocks[#blocks+1] = payload end
+    end
+  end
   if #blocks == 0 then return nil, nil end
   if #blocks > 1 then
     return nil, {
@@ -18563,6 +24409,14 @@ function Code.parse_typed_actions_block(raw)
         "Typed action block is not valid JSON: " .. tostring(err))
     }
   end
+  if _typed_action_is_object(plan)
+     and _typed_action_is_object(plan["reaassist-actions"]) then
+    local wrapper_keys = 0
+    for _ in pairs(plan) do wrapper_keys = wrapper_keys + 1 end
+    if wrapper_keys == 1 then plan = plan["reaassist-actions"] end
+  end
+  plan = _typed_action_strip_json_nulls(plan)
+  Code.normalize_typed_actions_plan(plan)
   return plan, nil
 end
 
@@ -18590,7 +24444,9 @@ function Code.validate_typed_actions_plan(plan)
     return false, errors
   end
 
-  local track_ids, fx_ids, send_ids, fx_type_by_id = {}, {}, {}, {}
+  local action_ids, track_ids, track_id_kind = {}, {}, {}
+  local fx_ids, send_ids, fx_type_by_id = {}, {}, {}
+  local resolve_count, has_non_resolve_action = 0, false
 
   local function require_string(action, field, path)
     if not _typed_action_is_nonempty_string(action[field]) then
@@ -18624,14 +24480,40 @@ function Code.validate_typed_actions_plan(plan)
     return true
   end
 
-  local function register_id(set, id, path, kind)
+  local function require_created_track_ref(value, path)
+    if not require_ref(track_ids, value, path, "track") then return false end
+    if track_id_kind[value] ~= "ensure" then
+      _typed_action_add_error(errors, "unsupported_existing_folder_target", path,
+        "track.folder currently supports only track ids created by track.ensure")
+      return false
+    end
+    return true
+  end
+
+  local function validate_track_name(name, path)
+    if not name then return end
+    if not tostring(name):find("%w") then
+      _typed_action_add_error(errors, "invalid_track_name", path,
+        "track.ensure name must contain at least one letter or number")
+    end
+  end
+
+  local function register_id(set, id, path, kind, id_kind)
     if not id then return end
     if set[id] then
       _typed_action_add_error(errors, "duplicate_id", path,
         "Duplicate " .. kind .. " id: " .. id)
       return
     end
+    if action_ids[id] then
+      _typed_action_add_error(errors, "duplicate_id", path,
+        "Duplicate typed-action id: " .. id
+          .. " was already used for " .. tostring(action_ids[id]))
+      return
+    end
+    action_ids[id] = kind
     set[id] = true
+    if kind == "track" then track_id_kind[id] = id_kind or "ensure" end
   end
 
   for i, action in ipairs(plan.actions) do
@@ -18641,24 +24523,25 @@ function Code.validate_typed_actions_plan(plan)
         "Each action must be a JSON object")
     else
       local op = require_string(action, "op", path)
+      if op == "track.resolve" then
+        resolve_count = resolve_count + 1
+      elseif _TYPED_ACTION_OP_ALLOWED[op] then
+        has_non_resolve_action = true
+      end
       if op == "track.ensure" then
         _typed_action_check_fields(errors, action, path, {
           op = true,
           id = true,
           name = true,
           select = true,
-          color = true,
           position = true,
         })
         local id = require_string(action, "id", path)
-        require_string(action, "name", path)
+        local name = require_string(action, "name", path)
+        validate_track_name(name, path .. ".name")
         if action.select ~= nil and type(action.select) ~= "boolean" then
           _typed_action_add_error(errors, "invalid_type", path .. ".select",
             "select must be a boolean")
-        end
-        if action.color ~= nil and type(action.color) ~= "string" then
-          _typed_action_add_error(errors, "invalid_type", path .. ".color",
-            "color must be a string")
         end
         if action.position ~= nil then
           if type(action.position) ~= "string" then
@@ -18673,7 +24556,154 @@ function Code.validate_typed_actions_plan(plan)
             end
           end
         end
-        register_id(track_ids, id, path .. ".id", "track")
+        register_id(track_ids, id, path .. ".id", "track", "ensure")
+
+      elseif op == "track.resolve" then
+        _typed_action_check_fields(errors, action, path, {
+          op = true,
+          id = true,
+          name = true,
+          selected = true,
+          selected_index = true,
+          index = true,
+        })
+        local id = require_string(action, "id", path)
+        local has_name = false
+        local has_selected = false
+        local has_selected_index = false
+        local has_index = false
+        if action.name ~= nil then
+          has_name = true
+          require_string(action, "name", path)
+        end
+        if action.selected ~= nil then
+          has_selected = true
+          if action.selected ~= true then
+            _typed_action_add_error(errors, "invalid_type",
+              path .. ".selected", "selected must be true when provided")
+          end
+        end
+        if action.selected_index ~= nil then
+          has_selected_index = true
+          if type(action.selected_index) ~= "number"
+             or action.selected_index % 1 ~= 0
+             or action.selected_index < 1 then
+            _typed_action_add_error(errors, "out_of_range",
+              path .. ".selected_index",
+              "selected_index must be a positive 1-based selected-track number")
+          end
+        end
+        if action.index ~= nil then
+          has_index = true
+          if type(action.index) ~= "number"
+             or action.index % 1 ~= 0
+             or action.index < 1 then
+            _typed_action_add_error(errors, "out_of_range", path .. ".index",
+              "index must be a positive 1-based track number")
+          end
+        end
+        if has_selected and (has_name or has_index or has_selected_index) then
+          _typed_action_add_error(errors, "invalid_target_selector", path,
+            "track.resolve selected:true cannot be combined with other selectors")
+        elseif has_selected_index and (has_name or has_index) then
+          _typed_action_add_error(errors, "invalid_target_selector", path,
+            "track.resolve selected_index cannot be combined with name or index")
+        elseif not has_selected and not has_selected_index
+            and not (has_name or has_index) then
+          _typed_action_add_error(errors, "invalid_target_selector", path,
+            "track.resolve must include name, index, name+index, "
+              .. "selected:true, or selected_index")
+        end
+        register_id(track_ids, id, path .. ".id", "track", "resolve")
+
+      elseif op == "track.set" then
+        _typed_action_check_fields(errors, action, path, {
+          op = true,
+          track = true,
+          volume_db = true,
+          pan_pct = true,
+          name = true,
+          mute = true,
+          solo = true,
+          master_send = true,
+        })
+        require_ref(track_ids, action.track, path .. ".track", "track")
+        local has_property = false
+        if action.name ~= nil then
+          has_property = true
+          require_string(action, "name", path)
+        end
+        if action.volume_db ~= nil then
+          has_property = true
+          local volume_db = require_number(action, "volume_db", path)
+          if volume_db and (volume_db < -150 or volume_db > 24) then
+            _typed_action_add_error(errors, "out_of_range", path .. ".volume_db",
+              "volume_db must be between -150 and +24")
+          end
+        end
+        if action.pan_pct ~= nil then
+          has_property = true
+          local pan_pct = require_number(action, "pan_pct", path)
+          if pan_pct and (pan_pct < -100 or pan_pct > 100) then
+            _typed_action_add_error(errors, "out_of_range", path .. ".pan_pct",
+              "pan_pct must be between -100 and 100")
+          end
+        end
+        if action.mute ~= nil then
+          has_property = true
+          if type(action.mute) ~= "boolean" then
+            _typed_action_add_error(errors, "invalid_type", path .. ".mute",
+              "mute must be a boolean")
+          end
+        end
+        if action.solo ~= nil then
+          has_property = true
+          if type(action.solo) ~= "boolean" then
+            _typed_action_add_error(errors, "invalid_type", path .. ".solo",
+              "solo must be a boolean")
+          end
+        end
+        if action.master_send ~= nil then
+          has_property = true
+          if type(action.master_send) ~= "boolean" then
+            _typed_action_add_error(errors, "invalid_type",
+              path .. ".master_send", "master_send must be a boolean")
+          end
+        end
+        if not has_property then
+          _typed_action_add_error(errors, "missing_track_property", path,
+            "track.set must include name, volume_db, pan_pct, mute, solo, or master_send")
+        end
+
+      elseif op == "track.folder" then
+        _typed_action_check_fields(errors, action, path, {
+          op = true,
+          parent = true,
+          children = true,
+        })
+        require_created_track_ref(action.parent, path .. ".parent")
+
+        if not _typed_action_is_array(action.children) then
+          _typed_action_add_error(errors, "invalid_type", path .. ".children",
+            "children must be a non-empty array of track ids")
+        else
+          local seen_children = {}
+          for cidx, child in ipairs(action.children) do
+            local cpath = path .. ".children[" .. tostring(cidx) .. "]"
+            require_created_track_ref(child, cpath)
+            if child == action.parent then
+              _typed_action_add_error(errors, "folder_self_child", cpath,
+                "A folder parent cannot also be its child")
+            end
+            if _typed_action_is_nonempty_string(child) and seen_children[child] then
+              _typed_action_add_error(errors, "duplicate_folder_child", cpath,
+                "Duplicate folder child: " .. tostring(child))
+            end
+            if _typed_action_is_nonempty_string(child) then
+              seen_children[child] = true
+            end
+          end
+        end
 
       elseif op == "fx.add_stock" then
         _typed_action_check_fields(errors, action, path, {
@@ -18742,7 +24772,10 @@ function Code.validate_typed_actions_plan(plan)
           mode = true,
           muted = true,
         })
-        local id = require_string(action, "id", path)
+        local id = nil
+        if action.id ~= nil then
+          id = require_string(action, "id", path)
+        end
         require_ref(track_ids, action["from"], path .. ".from", "track")
         require_ref(track_ids, action["to"], path .. ".to", "track")
         if action.volume_db ~= nil then require_number(action, "volume_db", path) end
@@ -18772,19 +24805,2167 @@ function Code.validate_typed_actions_plan(plan)
     end
   end
 
+  if resolve_count > 0 and not has_non_resolve_action then
+    _typed_action_add_error(errors, "missing_mutation_action", "$.actions",
+      "track.resolve only binds target ids; add track.set, fx.add_stock, "
+        .. "send.create, or another supported mutation action")
+  end
+
+  if #errors == 0 then
+    local _, folder_errors = Code._typed_action_folder_depth_plan(plan)
+    for _, err in ipairs(folder_errors or {}) do errors[#errors + 1] = err end
+  end
+
   return #errors == 0, errors
 end
 
-function Code.inspect_typed_actions(text)
+function Code.find_typed_actions_wrong_fence(text)
+  if type(text) ~= "string" or text == "" then return nil end
+  local raw_text = _typed_action_trim(text)
+  local raw_plan = Code.parse_typed_actions_block(raw_text)
+  if raw_plan then
+    local raw_valid = Code.validate_typed_actions_plan(raw_plan)
+    if raw_valid then
+      return {
+        label = "(unfenced)",
+        raw = raw_text,
+        op_counts = _typed_action_count_ops(raw_plan),
+      }
+    end
+  end
+
+  for label, block in text:gmatch("```([^\n]*)\n(.-)\n%s*```") do
+    local lowered = string.lower(label or "")
+    local trimmed = lowered:gsub("^%s+", ""):gsub("%s+$", "")
+    if trimmed == "json" or trimmed == ""
+       or (trimmed ~= "reaassist-actions"
+           and trimmed:find("reaassist%-actions") ~= nil) then
+      local plan = Code.parse_typed_actions_block(block)
+      if plan then
+        local valid = Code.validate_typed_actions_plan(plan)
+        if valid then
+          return {
+            label = trimmed ~= "" and label or "(unlabeled)",
+            raw = block,
+            op_counts = _typed_action_count_ops(plan),
+          }
+        end
+      end
+    end
+  end
+  return nil
+end
+
+function Code.typed_actions_dev_gate_enabled()
+  if type(reaper) ~= "table" or type(reaper.file_exists) ~= "function" then
+    return false
+  end
+  if type(reaper.GetExePath) ~= "function" then
+    return false
+  end
+  local exe_path = tostring(reaper.GetExePath() or ""):lower():gsub("/", "\\")
+  exe_path = exe_path:gsub("\\+$", "")
+  if exe_path ~= "c:\\reaper - test"
+     and not exe_path:find("c:\\reaper - test\\", 1, true) then
+    return false
+  end
+  if type(RA) ~= "table" or type(RA.script_path) ~= "string" then
+    return false
+  end
+  local sep = RA.SEP or package.config:sub(1, 1)
+  local function file_exists_normalized(path)
+    local exists_raw = reaper.file_exists(path)
+    if exists_raw == true or exists_raw == 1 then return true end
+    for _ = 1, 32 do
+      local normalized, n = path:gsub("[^\\/]+[\\/]%.%.[\\/]", "")
+      path = normalized
+      if n == 0 then break end
+    end
+    exists_raw = reaper.file_exists(path)
+    if exists_raw == true or exists_raw == 1 then return true end
+    local f = io.open(path, "rb")
+    if f then
+      f:close()
+      return true
+    end
+    return false
+  end
+  local candidates = {
+    RA.script_path .. "Dev" .. sep .. "typed_actions_enabled",
+    RA.script_path .. ".." .. sep .. "typed_actions_enabled",
+    RA.script_path .. ".." .. sep .. ".." .. sep .. "typed_actions_enabled",
+  }
+  for _, path in ipairs(candidates) do
+    if file_exists_normalized(path) then return true end
+  end
+  return false
+end
+
+function Code.typed_actions_public_force_off()
+  return type(reaper) == "table"
+    and type(reaper.GetExtState) == "function"
+    and type(CFG) == "table"
+    and reaper.GetExtState(CFG.EXT_NS, "typed_actions_force_off") == "1"
+end
+
+function Code.typed_actions_executor_enabled()
+  if Code.typed_actions_dev_gate_enabled() then return true end
+  if Code.typed_actions_public_force_off() then return false end
+  return true
+end
+
+function Code.typed_actions_executor_disabled_message()
+  if Code.typed_actions_public_force_off() then
+    return "Structured track edits are temporarily disabled."
+  end
+  return "Structured track edits are unavailable in this install."
+end
+
+local _TYPED_ACTION_PROMPT_CONTRACT = [[
+TYPED ACTION CONTRACT (use only when the request is an exact fit):
+- If this contract fits the user request, output exactly one fenced block whose label is `reaassist-actions`.
+- Do not output Lua, ReaScript, JSFX, prose, apologies, raw JSON, `json`, `json reaassist-actions`, or any other code fence when using this contract.
+- The block must contain one JSON object: {"version":1,"actions":[...]}.
+- Do not emit `<context_needed>` when this contract fits; include the complete track, FX, parameter, folder, and send plan in this one response.
+- Supported ops only:
+  - {"op":"track.ensure","id":"lead","name":"Lead Vocal","position":"end","select":true}
+  - {"op":"track.resolve","id":"lead","name":"Lead Vocal","selected":null,"selected_index":null,"index":null}
+  - {"op":"track.set","track":"lead","name":null,"volume_db":-6,"pan_pct":null,"mute":false,"solo":null,"master_send":null}
+  - {"op":"track.folder","parent":"drums","children":["kick","snare"]}
+  - {"op":"fx.add_stock","track":"lead","id":"lead_eq","fx":"ReaEQ"}
+  - {"op":"fx.set_param","fx":"lead_eq","params":{"band":2,"frequency_hz":300,"gain_db":-3}}
+  - {"op":"send.create","from":"lead","to":"bus","volume_db":-12,"pan":0,"mode":"post_fader","muted":false}
+- Supported stock FX: ReaEQ, ReaComp, ReaDelay, ReaVerbate, ReaGate, ReaLimit.
+- Use `track.resolve` for existing tracks only. It supports exactly one selector:
+  exact unique `name`, `selected`:true for exactly one selected track, 1-based
+  `selected_index` for the Nth selected track when multiple tracks are selected,
+  1-based `index`, or `name`+`index` as a checked lookup. If the target is
+  ambiguous or missing, do not use typed actions.
+- `track.resolve` only binds a target id; it does not change the track. Follow it
+  with `track.set`, `fx.add_stock`, or `send.create` for the requested change.
+- Use `track.ensure` only when creating or ensuring a named track exists.
+- FX ids are created only by `fx.add_stock`. Never use `track.resolve` for ids
+  like `lead_eq`, `lead_comp`, `verb_fx`, or send ids.
+- Add only the stock FX the user named for each target track; do not infer extra EQ/compressor chain members.
+- `track.set` supports `name`, `volume_db`, `pan_pct` (-100 left to 100 right), `mute`, `solo`, and `master_send`. At least one value must be non-null.
+- Use `track.set` only when the user explicitly requests track rename/name, volume, fader, pan, mute, unmute, solo, unsolo, or master/parent send state.
+- In `track.set`, use JSON null for every supported property the user did not request. Do not fill unused booleans with false.
+- Do not set `master_send`:true or `master_send`:false unless the user explicitly requests master/parent send state.
+- Use `track.folder` only when the user explicitly requests a folder. Children are immediate child tracks only. For nested folders, emit one `track.folder` action per folder parent and create tracks in depth-first order so every parent is followed immediately by its full child subtree.
+- Emit actions in dependency order: all `track.ensure` and `track.resolve` before `track.folder`, FX after tracks, params after FX, and sends after tracks.
+- The examples above show JSON shape only. Do not copy placeholder ids/names like `lead` or `Lead Vocal` unless the user requested them.
+- Every `id` must be unique across track, FX, and send actions.
+- Supported params:
+  - ReaEQ: band, frequency_hz, gain_db
+  - ReaComp: threshold_db, attack_ms, release_ms, wet_db, dry_db, rms_ms
+  - ReaDelay: feedback_pct, feedback_db, wet_db, dry_db
+  - ReaVerbate: wet_db, dry_db, room_size, dampening
+  - ReaGate: threshold_db, hysteresis_db, attack_ms, hold_ms, release_ms
+  - ReaLimit: threshold_db, ceiling_db
+- References must point to ids created by earlier `track.ensure`,
+  `track.resolve`, `fx.add_stock`, or `send.create` actions. Do not embed Lua in JSON fields.
+- If the request needs MIDI, JSFX authoring, third-party plugins, items/takes, envelopes, markers, regions, colors, presets, unsupported FX, or unsupported params, ignore this contract and write normal Lua instead.
+]]
+
+local _TYPED_ACTION_RESPONSE_FORMAT_PROMPT_CONTRACT = [[
+TYPED ACTION CONTRACT (use only when the request is an exact fit):
+- If this contract fits the user request, output the action plan as the raw JSON object required by the API response schema.
+- Do not output Lua, ReaScript, JSFX, prose, apologies, markdown, code fences, or a `reaassist-actions` wrapper when using this contract.
+- The JSON object must be {"version":1,"actions":[...]}.
+- Do not emit `<context_needed>` when this contract fits; include the complete track, FX, parameter, folder, and send plan in this one response.
+- Supported ops only:
+  - {"op":"track.ensure","id":"lead","name":"Lead Vocal","position":"end","select":true}
+  - {"op":"track.resolve","id":"lead","name":"Lead Vocal","selected":null,"selected_index":null,"index":null}
+  - {"op":"track.set","track":"lead","name":null,"volume_db":-6,"pan_pct":null,"mute":false,"solo":null,"master_send":null}
+  - {"op":"track.folder","parent":"drums","children":["kick","snare"]}
+  - {"op":"fx.add_stock","track":"lead","id":"lead_eq","fx":"ReaEQ"}
+  - {"op":"fx.set_param","fx":"lead_eq","params":{"band":2,"frequency_hz":300,"gain_db":-3}}
+  - {"op":"send.create","from":"lead","to":"bus","volume_db":-12,"pan":0,"mode":"post_fader","muted":false}
+- Supported stock FX: ReaEQ, ReaComp, ReaDelay, ReaVerbate, ReaGate, ReaLimit.
+- Use `track.resolve` for existing tracks only. It supports exactly one selector:
+  exact unique `name`, `selected`:true for exactly one selected track, 1-based
+  `selected_index` for the Nth selected track when multiple tracks are selected,
+  1-based `index`, or `name`+`index` as a checked lookup. If the target is
+  ambiguous or missing, do not use typed actions.
+- `track.resolve` only binds a target id; it does not change the track. Follow it
+  with `track.set`, `fx.add_stock`, or `send.create` for the requested change.
+- Use `track.ensure` only when creating or ensuring a named track exists.
+- FX ids are created only by `fx.add_stock`. Never use `track.resolve` for ids
+  like `lead_eq`, `lead_comp`, `verb_fx`, or send ids.
+- Add only the stock FX the user named for each target track; do not infer extra EQ/compressor chain members.
+- `track.set` supports `name`, `volume_db`, `pan_pct` (-100 left to 100 right), `mute`, `solo`, and `master_send`. At least one value must be non-null.
+- Use `track.set` only when the user explicitly requests track rename/name, volume, fader, pan, mute, unmute, solo, unsolo, or master/parent send state.
+- In `track.set`, use JSON null for every supported property the user did not request. Do not fill unused booleans with false.
+- Do not set `master_send`:true or `master_send`:false unless the user explicitly requests master/parent send state.
+- Use `track.folder` only when the user explicitly requests a folder. Children are immediate child tracks only. For nested folders, emit one `track.folder` action per folder parent and create tracks in depth-first order so every parent is followed immediately by its full child subtree.
+- Emit actions in dependency order: all `track.ensure` and `track.resolve` before `track.folder`, FX after tracks, params after FX, and sends after tracks.
+- The examples above show JSON shape only. Do not copy placeholder ids/names like `lead` or `Lead Vocal` unless the user requested them.
+- Every `id` must be unique across track, FX, and send actions.
+- References must point to ids created by earlier `track.ensure`,
+  `track.resolve`, `fx.add_stock`, or `send.create` actions. Do not embed Lua in JSON fields.
+- If the request needs MIDI, JSFX authoring, third-party plugins, items/takes, envelopes, markers, regions, colors, presets, unsupported FX, or unsupported params, ignore this contract and write normal Lua instead.
+]]
+
+local _TYPED_ACTION_ROUTING_SEMANTIC_HELP = [[
+
+MODEL-SCOPED ROUTING CHECKLIST:
+- For a track-template request that includes tracks, stock FX, FX parameter
+  values, and sends, the plan must include all required action families:
+  `track.ensure`, `fx.add_stock`, `fx.set_param`, and `send.create`.
+- Plugin names and FX ids are never tracks. Do not emit `track.ensure` for
+  ReaEQ/ReaComp/ReaDelay/ReaVerbate/ReaGate/ReaLimit, or ids ending in
+  `_eq`, `_comp`, `_reverb`, `_delay`, `_gate`, or `_limit`.
+- For source tracks routed to a bus, use `volume_db`:0 unless the user explicitly asks for a different bus level.
+- Wet effect sends are separate from bus routing: use the requested negative dB values only for verb/delay sends.
+- Do not invent return/parallel-track sends into a bus. Create only the sends the user explicitly requested, especially when the user says the graph is exact.
+- Use `fx.add_stock` for effects. Never create tracks named like Kick EQ, Snare Comp, or Vocal Reverb unless the user explicitly asks for those tracks.
+- Do not duplicate the same stock FX on the same track unless the user explicitly asks for multiple copies.
+- Do not spread FX across target groups. If one group gets ReaComp and another group gets ReaEQ, keep those assignments separate.
+- Put source-chain FX on source tracks, return FX on return tracks, and no extra FX on bus tracks unless requested.
+- When the user says tracks are "in that exact order", emit track.ensure actions in exactly that order.
+- For `track.ensure.name`, copy the user's exact requested track name. Do not substitute example names such as `Lead Vocal`, `Guitar Bus`, or generic role labels.
+- If the user says exactly N tracks, emit exactly N `track.ensure` actions. Never create `track.ensure` actions for FX units, plugin names, or ids ending in `_eq`, `_comp`, `_reverb`, `_delay`, `_gate`, or `_limit`.
+- For folder requests, create tracks in depth-first folder order, then emit `track.folder` actions. Nested folders need one `track.folder` action for each folder parent, and each action's `children` list should include only immediate children.
+- For routing plans, emit actions in this order: all `track.ensure` and `track.resolve`, then any `track.set`, then any `track.folder`, then all `fx.add_stock`, then all `fx.set_param`, then all `send.create`.
+- If the user requests any FX parameter value, do not stop after tracks, FX, and sends. Add the matching `fx.set_param` action before sends.
+- For each requested parameter setting, find the stock FX action on that same target track and copy that exact FX `id` into `fx.set_param.fx`.
+- Every reference field (`track`, `fx`, `from`, `to`) must match an `id` from an earlier `track.ensure`, `track.resolve`, or `fx.add_stock` action in this same plan.
+- Do not create helper ids like `lead_set` or `guitar_bus_set`. Resolve the track once, then use that same id in `track.set`, `fx.add_stock`, or `send.create`.
+- Never emit `track.resolve` as a substitute for `track.set` or `send.create`.
+  Resolving a track is only the first step.
+- Never emit `track.resolve` with `name`:null, `index`:null,
+  `selected_index`:null, and `selected`:null. That action resolves nothing and
+  will be rejected.
+- For `fx.set_param`, `fx` must be the earlier `fx.add_stock.id`, not the track id, plugin name, blank string, or example placeholder.
+- Before finalizing, verify every `fx.set_param.fx` value appears exactly as an `fx.add_stock.id` value in the same plan. If it equals `ReaEQ`, `ReaComp`, `lead`, or `lead_eq`, replace it with the real FX id.
+- Never reuse example ids such as `lead`, `lead_eq`, or generic numbered lead ids unless the user explicitly requested those tracks.
+- Do not emit `track.set` for created tracks unless the user requested track rename/name, volume, fader, pan, mute, unmute, solo, unsolo, or master/parent send state.
+- For `track.set`, leave unused fields null. Do not set `mute`:false,
+  `solo`:false, `master_send`:true, or `master_send`:false unless the user
+  explicitly requested that state.
+- For exact routing graphs, create only the send edges named by the user. Do not add a bus feed from a parallel/return track just because it receives source tracks.
+- Re-emit the complete plan; do not omit sends, FX, or parameter actions.
+]]
+
+local _TYPED_ACTION_MINIMAL_PLAN_HELP = [[
+
+MODEL-SCOPED MINIMAL ACTION CHECKLIST:
+- Emit the shortest complete action list that satisfies the request.
+- Every `id` must be unique across track, FX, and send actions.
+- Do not repeat the same action, id, track/FX pair, or send edge.
+- Add each requested stock FX exactly once per target track unless the user explicitly asks for multiple copies.
+- Do not add a stock FX to a track unless that track was named in the user's request for that FX.
+- If the user says exactly N tracks, emit exactly N `track.ensure` actions.
+  Plugin names and FX ids are not tracks.
+- Never create `track.ensure` actions for names or ids containing `ReaEQ`,
+  `ReaComp`, `ReaDelay`, `ReaVerbate`, `ReaGate`, or `ReaLimit`; use
+  `fx.add_stock` for those.
+- For blank-project or create-track requests, use `track.ensure` for each requested track. Do not use `track.resolve` for tracks that do not exist yet.
+- For requested track rename/name, volume, pan, mute, unmute, solo, unsolo, or master/parent send state, emit one `track.set` action for the already-created track id.
+- In `track.set`, set only requested properties; unused properties must be null.
+- If the target is an existing track, emit `track.resolve` first, then one `track.set` action using that same id. Do not emit a second `track.resolve` as the change.
+- Existing-track volume/pan pattern: one valid `track.resolve`, then one
+  `track.set` using the same id. For example, to set an existing target track
+  to -9 dB and 20 percent right, the action shapes are exactly
+  `track.resolve(id="target", name="<exact track name>")` then
+  `track.set(track="target", volume_db=-9, pan_pct=20)`.
+- A plan with only `track.resolve` actions does nothing. If the user asks to set
+  rename/name, volume, pan, mute, solo, master send, FX, or sends on an existing track, the
+  plan must include the matching mutation action after `track.resolve`.
+- For requested FX, create a real `fx.add_stock` action. Do not create helper
+  `track.resolve` actions for ids like `lead_eq`, `lead_comp`, or `verb_fx`;
+  those ids belong on `fx.add_stock`, not `track.resolve`.
+- Never emit `track.resolve` with all selectors null. Use one valid selector and
+  then emit the requested mutation action.
+- If the user did not request track rename/name, volume, pan, mute, unmute, solo, unsolo, or master/parent send state, do not emit `track.set`.
+- For requested folders, emit one `track.folder` action after the parent and child tracks exist. For nested folders, emit one action for each folder parent.
+- Always emit all `track.ensure` actions before any `track.folder` action.
+- For each requested parameter setting, emit one `fx.set_param` action for the already-created FX id.
+- For each requested route, emit one `send.create` action.
+]]
+
+local _TYPED_ACTION_STRICT_FENCE_HELP = [[
+
+MODEL-SCOPED ACTION FORMAT CHECKLIST:
+- When this typed-action contract is present, it overrides normal context-bucket requests for supported stock track, stock FX, parameter, and send actions.
+- Do not emit `<context_needed>` for requests that fit the typed-action contract; use the stock FX names and values already present in the user request.
+- Emit exactly one `reaassist-actions` fenced JSON block.
+- Do not omit the fence, change the fence label, emit raw JSON, emit Lua, or add prose outside the fence.
+- The JSON object must contain only top-level fields `version` and `actions`.
+- Do not include `pinned`, metadata, comments, explanations, or any other top-level field.
+- For `track.ensure`, use `"position":"end"` or `null`; do not use numeric positions.
+- For `fx.set_param`, `fx` must be the earlier `fx.add_stock.id`, not the track id, plugin name, blank string, or example placeholder.
+- Re-emit the complete action plan in that single block.
+]]
+
+local _TYPED_ACTION_PROFILE_ROUTING_HELP = {
+  key = "routing_semantic_help",
+  extra_prompt = _TYPED_ACTION_ROUTING_SEMANTIC_HELP,
+  semantic_retry = true,
+  semantic_retry_from_scratch = true,
+  schema_fast_escalate = true,
+  semantic_fast_escalate = true,
+  fallback = {
+    provider_id = "openai",
+    model_id = "gpt-5.4",
+    thinking_value = "low",
+    reason = "typed_action_semantic_retry_failed",
+  },
+}
+
+local _TYPED_ACTION_PROFILE_MINIMAL_PLAN_HELP = {
+  key = "minimal_plan_help",
+  extra_prompt = _TYPED_ACTION_MINIMAL_PLAN_HELP,
+  semantic_retry = true,
+  fallback = {
+    provider_id = "openai",
+    model_id = "gpt-5.4",
+    thinking_value = "none",
+    reason = "typed_action_semantic_retry_failed",
+  },
+}
+
+local _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP = {
+  key = "strict_fence_help",
+  extra_prompt = _TYPED_ACTION_STRICT_FENCE_HELP,
+  semantic_retry = true,
+}
+
+local _TYPED_ACTION_PROFILES_BY_KEY = {
+  routing_semantic_help = _TYPED_ACTION_PROFILE_ROUTING_HELP,
+  routing_semantic_retry_help = {
+    key = "routing_semantic_retry_help",
+    extra_prompt = _TYPED_ACTION_ROUTING_SEMANTIC_HELP,
+    semantic_retry = true,
+    semantic_retry_from_scratch = true,
+    fallback = {
+      provider_id = "openai",
+      model_id = "gpt-5.4",
+      thinking_value = "low",
+      reason = "typed_action_semantic_retry_failed",
+    },
+  },
+  nano_complete_plan_help = {
+    key = "nano_complete_plan_help",
+    extra_prompt = _TYPED_ACTION_ROUTING_SEMANTIC_HELP .. [[
+
+MODEL-SCOPED NANO ACTION MAP:
+- Do not stop after creating tracks. If the user also asks for stock FX,
+  parameters, folders, or sends, include those action families too.
+- Count only real tracks as `track.ensure`; never represent FX, sends, params,
+  or folders as extra `track.ensure` actions.
+- "Create/add/make tracks" -> one `track.ensure` per requested track.
+- "Add ReaEQ/ReaComp/ReaDelay/ReaVerbate/ReaGate/ReaLimit" ->
+  `fx.add_stock`, never `track.ensure`.
+  `fx.set_param` that references the matching `fx.add_stock.id`.
+- "Send/feed/route X to Y", "routing graph", or "routing setup" ->
+  `send.create`; do not create helper or folder tracks for graph words.
+- Never create folder tracks or `track.folder` unless the user explicitly asks
+  for folders.
+- "Exactly N tracks" or "do not add other tracks" means exactly N
+  `track.ensure` actions. Plugin names, FX ids, folders, and helper ids are
+  not extra tracks.
+- For exact-track-count requests, `track.ensure` ids and names must be only the
+  requested track names. Never use `track.ensure` with blank names, "." names,
+  or plugin-looking ids such as `_eq`, `_comp`, `_reaeq`, `_reacomp`, or `_fx`.
+- For requests with tracks + stock FX + parameter values + sends, the complete
+  plan must include all four families: `track.ensure`, `fx.add_stock`,
+  `fx.set_param`, and `send.create`.
+- Mini example shape:
+  {"op":"track.ensure","id":"kick","name":"Kick","position":"end","select":false}
+  {"op":"fx.add_stock","id":"kick_eq","track":"kick","fx":"ReaEQ"}
+  {"op":"fx.set_param","fx":"bus_comp","params":{"threshold_db":-12}}
+  {"op":"send.create","id":"kick_to_bus","from":"kick","to":"bus","volume_db":0,"pan":0,"muted":false,"mode":"post_fader"}
+    ]],
+    semantic_retry = true,
+    semantic_retry_from_scratch = true,
+    semantic_max_retries = 2,
+    schema_fast_escalate = true,
+    semantic_fast_escalate = true,
+    fallback = {
+      provider_id = "openai",
+      model_id = "gpt-5.4",
+      thinking_value = "low",
+      reason = "typed_action_semantic_retry_failed",
+    },
+  },
+  minimal_plan_help = _TYPED_ACTION_PROFILE_MINIMAL_PLAN_HELP,
+  strict_fence_help = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
+}
+
+local _TYPED_ACTION_MODEL_PROFILES = {
+  openai = {
+    ["gpt-5.4-mini"] = {
+      key = "mini_routing_semantic_help",
+      extra_prompt = _TYPED_ACTION_ROUTING_SEMANTIC_HELP,
+      semantic_retry = true,
+      schema_fast_escalate = true,
+      semantic_fast_escalate = true,
+      fallback = {
+        provider_id = "openai",
+        model_id = "gpt-5.4",
+        thinking_value = "none",
+        reason = "typed_action_semantic_retry_failed",
+      },
+    },
+    ["gpt-5.4-nano"] = _TYPED_ACTION_PROFILES_BY_KEY.nano_complete_plan_help,
+  },
+  deepseek = {
+    ["deepseek-v4-flash"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
+  },
+  anthropic = {
+    ["claude-haiku-4-5"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
+  },
+  google = {
+    ["gemini-3-flash-preview"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
+    ["gemini-3.1-flash-lite"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
+  },
+}
+_TYPED_ACTION_PROFILES_BY_KEY.mini_routing_semantic_help =
+  _TYPED_ACTION_MODEL_PROFILES.openai["gpt-5.4-mini"]
+assert(_TYPED_ACTION_PROFILES_BY_KEY.mini_routing_semantic_help,
+  "missing typed-action mini routing profile")
+
+function Code.typed_actions_model_profile(provider_id, model_id)
+  local by_provider = _TYPED_ACTION_MODEL_PROFILES[tostring(provider_id or "")]
+  if not by_provider then return nil end
+  return by_provider[tostring(model_id or "")]
+end
+
+function Code.typed_actions_model_profile_by_key(key)
+  return _TYPED_ACTION_PROFILES_BY_KEY[tostring(key or "")]
+end
+
+local function _typed_action_contract_for_profile(contract, profile)
+  if not contract or contract == "" then return contract end
+  if type(profile) ~= "table" then return contract end
+  local extra = profile.extra_prompt
+  if type(extra) ~= "string" or extra == "" then return contract end
+  return contract .. extra
+end
+
+function Code.typed_action_request_specific_help(user_text)
+  if not Code.typed_action_user_forbids_track_creation(user_text) then
+    return ""
+  end
+  return [[
+
+REQUEST-SPECIFIC TYPED ACTION RULE:
+- The user explicitly forbids creating tracks. Do not emit `track.ensure`.
+  Resolve existing target tracks with `track.resolve`, then apply the requested
+  `track.set`, `fx.add_stock`, or `send.create` action.
+]]
+end
+
+local _TYPED_ACTION_SCHEMA_PARAM_KEYS = {
+  "band",
+  "frequency_hz",
+  "gain_db",
+  "threshold_db",
+  "ceiling_db",
+  "attack_ms",
+  "release_ms",
+  "wet_db",
+  "dry_db",
+  "rms_ms",
+  "feedback_pct",
+  "feedback_db",
+  "room_size",
+  "dampening",
+  "hysteresis_db",
+  "hold_ms",
+}
+
+local function _typed_action_json_type(...)
+  local out = {}
+  for i = 1, select("#", ...) do out[#out+1] = select(i, ...) end
+  return { type = out }
+end
+
+local function _typed_action_string_enum(value)
+  return { type = "string", enum = { value } }
+end
+
+local function _typed_action_required_from_properties(properties)
+  local required = {}
+  for key in pairs(properties or {}) do required[#required+1] = key end
+  table.sort(required)
+  return required
+end
+
+local function _typed_action_schema_object(properties, required)
+  return {
+    type = "object",
+    properties = properties,
+    required = required or _typed_action_required_from_properties(properties),
+    additionalProperties = false,
+  }
+end
+
+local function _typed_action_schema_action(properties, required)
+  return _typed_action_schema_object(properties, required)
+end
+
+local function _typed_action_schema_params_object()
+  local props = {}
+  for _, name in ipairs(_TYPED_ACTION_SCHEMA_PARAM_KEYS) do
+    props[name] = _typed_action_json_type("number", "null")
+  end
+  return _typed_action_schema_object(props, _TYPED_ACTION_SCHEMA_PARAM_KEYS)
+end
+
+function Code.typed_actions_openai_response_format_field(user_text)
+  user_text = tostring(user_text
+    or (type(S) == "table" and S.pending_orig_prompt) or "")
+  local selected_indexes, selected_index_required =
+    Code._typed_action_selected_indexes_from_user_text(user_text)
+  local include_track_resolve = true
+  local include_track_ensure = true
+  local include_absolute_index_resolve =
+    not Code._typed_action_forbids_absolute_track_index(user_text)
+  if Code.typed_action_user_requests_track_creation(user_text)
+     and not Code.typed_action_user_requests_selected_target(user_text) then
+    include_track_resolve = false
+  elseif Code.typed_action_user_forbids_track_creation(user_text) then
+    include_track_ensure = false
+  end
+  local selected_index_schema = { type = "number" }
+  if #selected_indexes > 0 then
+    selected_index_schema = { type = "number", enum = selected_indexes }
+  end
+
+  local action_variants = {}
+  local function add_action(schema)
+    action_variants[#action_variants + 1] = schema
+  end
+
+  if include_track_ensure then
+    add_action(_typed_action_schema_action({
+      op = _typed_action_string_enum("track.ensure"),
+      id = { type = "string" },
+      name = { type = "string" },
+      position = _typed_action_json_type("string", "null"),
+      select = _typed_action_json_type("boolean", "null"),
+    }))
+  end
+
+  -- For blank-project/create-track requests, the model has no existing target
+  -- to resolve. Do not offer track.resolve in the structured-output schema:
+  -- weak models were legally choosing that branch as a fake FX/send placeholder
+  -- and then failing semantic validation before any safe mutation could run.
+  if include_track_resolve then
+    add_action(_typed_action_schema_action({
+      op = _typed_action_string_enum("track.resolve"),
+      id = { type = "string" },
+      name = { type = "string" },
+      selected = _typed_action_json_type("null"),
+      selected_index = _typed_action_json_type("null"),
+      index = _typed_action_json_type("null"),
+    }))
+    if not selected_index_required then
+      add_action(_typed_action_schema_action({
+        op = _typed_action_string_enum("track.resolve"),
+        id = { type = "string" },
+        name = _typed_action_json_type("null"),
+        selected = { type = "boolean", enum = { true } },
+        selected_index = _typed_action_json_type("null"),
+        index = _typed_action_json_type("null"),
+      }))
+    end
+    add_action(_typed_action_schema_action({
+      op = _typed_action_string_enum("track.resolve"),
+      id = { type = "string" },
+      name = _typed_action_json_type("null"),
+      selected = _typed_action_json_type("null"),
+      selected_index = selected_index_schema,
+      index = _typed_action_json_type("null"),
+    }))
+    if include_absolute_index_resolve then
+      add_action(_typed_action_schema_action({
+        op = _typed_action_string_enum("track.resolve"),
+        id = { type = "string" },
+        name = _typed_action_json_type("null"),
+        selected = _typed_action_json_type("null"),
+        selected_index = _typed_action_json_type("null"),
+        index = { type = "number" },
+      }))
+      add_action(_typed_action_schema_action({
+        op = _typed_action_string_enum("track.resolve"),
+        id = { type = "string" },
+        name = { type = "string" },
+        selected = _typed_action_json_type("null"),
+        selected_index = _typed_action_json_type("null"),
+        index = { type = "number" },
+      }))
+    end
+  end
+
+  add_action(_typed_action_schema_action({
+    op = _typed_action_string_enum("track.set"),
+    track = { type = "string" },
+    name = _typed_action_json_type("string", "null"),
+    volume_db = _typed_action_json_type("number", "null"),
+    pan_pct = _typed_action_json_type("number", "null"),
+    mute = _typed_action_json_type("boolean", "null"),
+    solo = _typed_action_json_type("boolean", "null"),
+    master_send = _typed_action_json_type("boolean", "null"),
+  }))
+  add_action(_typed_action_schema_action({
+    op = _typed_action_string_enum("track.folder"),
+    parent = { type = "string" },
+    children = {
+      type = "array",
+      items = { type = "string" },
+    },
+  }))
+  add_action(_typed_action_schema_action({
+    op = _typed_action_string_enum("fx.add_stock"),
+    track = { type = "string" },
+    id = { type = "string" },
+    fx = {
+      type = "string",
+      enum = { "ReaEQ", "ReaComp", "ReaDelay", "ReaVerbate", "ReaGate", "ReaLimit" },
+    },
+  }))
+  add_action(_typed_action_schema_action({
+    op = _typed_action_string_enum("fx.set_param"),
+    fx = { type = "string" },
+    params = _typed_action_schema_params_object(),
+  }))
+  add_action(_typed_action_schema_action({
+    op = _typed_action_string_enum("send.create"),
+    id = _typed_action_json_type("string", "null"),
+    ["from"] = { type = "string" },
+    to = { type = "string" },
+    volume_db = _typed_action_json_type("number", "null"),
+    pan = _typed_action_json_type("number", "null"),
+    mode = _typed_action_json_type("string", "number", "null"),
+    muted = _typed_action_json_type("boolean", "null"),
+  }))
+
+  local action_schema = { anyOf = action_variants }
+  local schema = _typed_action_schema_object({
+    version = { type = "integer", enum = { 1 } },
+    actions = {
+      type = "array",
+      items = action_schema,
+      maxItems = 64,
+    },
+  }, { "version", "actions" })
+  local encoded = JSON.encode({
+    type = "json_schema",
+    json_schema = {
+      name = "reaassist_actions_v1",
+      strict = true,
+      schema = schema,
+    },
+  })
+  if not encoded then return "" end
+  return ',"response_format":' .. encoded
+end
+
+local function _typed_action_text_has_any(lt, terms)
+  for _, term in ipairs(terms) do
+    if lt:find(term, 1, true) then return true end
+  end
+  return false
+end
+
+function Code.typed_actions_prompt_contract(user_text, opts)
+  opts = type(opts) == "table" and opts or {}
+  if not opts.force_enabled and not Code.typed_actions_executor_enabled() then
+    return nil, "executor_disabled"
+  end
+  if type(user_text) ~= "string" or user_text == "" then
+    return nil, "empty_prompt"
+  end
+
+  local lt = user_text:lower()
+  local trimmed_lt = lt:gsub("^%s+", "")
+  local words = " " .. lt:gsub("[^%w]+", " "):gsub("%s+", " ") .. " "
+  local function has_word_phrase(term)
+    return words:find(" " .. term .. " ", 1, true) ~= nil
+  end
+  local fx_presence_question =
+       trimmed_lt:find("^does%s+.+%s+have%s+") ~= nil
+    or trimmed_lt:find("^do%s+.+%s+have%s+") ~= nil
+    or trimmed_lt:find("^does%s+.+%s+use%s+") ~= nil
+    or trimmed_lt:find("^do%s+.+%s+use%s+") ~= nil
+  local question_or_readonly =
+       trimmed_lt:find("^how%s+") ~= nil
+    or trimmed_lt:find("^what%s+") ~= nil
+    or trimmed_lt:find("^why%s+") ~= nil
+    or trimmed_lt:find("^where%s+") ~= nil
+    or trimmed_lt:find("^when%s+") ~= nil
+    or trimmed_lt:find("^is%s+") ~= nil
+    or trimmed_lt:find("^are%s+") ~= nil
+    or trimmed_lt:find("^explain%s+") ~= nil
+    or trimmed_lt:find("^tell%s+me%s+") ~= nil
+    or trimmed_lt:find("^show%s+me%s+how%s+") ~= nil
+    or trimmed_lt:find("^list%s+") ~= nil
+    or trimmed_lt:find("^show%s+") ~= nil
+    or trimmed_lt:find("^inspect%s+") ~= nil
+    or trimmed_lt:find("^analyze%s+") ~= nil
+    or trimmed_lt:find("^review%s+") ~= nil
+    or trimmed_lt:find("^diagnose%s+") ~= nil
+    or trimmed_lt:find("^summarize%s+") ~= nil
+    or fx_presence_question
+  if question_or_readonly then
+    return nil, "question_or_readonly"
+  end
+
+  local explicit_lua_request =
+       lt:find("reaper lua", 1, true) ~= nil
+    or lt:find("lua script", 1, true) ~= nil
+    or lt:find("lua code", 1, true) ~= nil
+    or lt:find("reascript", 1, true) ~= nil
+    or lt:find("return only lua", 1, true) ~= nil
+    or lt:find("return only the lua", 1, true) ~= nil
+    or (has_word_phrase("write") and has_word_phrase("script")
+      and (has_word_phrase("reaper") or has_word_phrase("lua")))
+    or (has_word_phrase("generate") and has_word_phrase("script")
+      and (has_word_phrase("reaper") or has_word_phrase("lua")))
+  if explicit_lua_request then
+    return nil, "explicit_lua_request"
+  end
+
+  local blocked_terms = {
+    "midi", "jsfx", "eel2", "reajs", "theme", "marker", "region",
+    "item", "take", "envelope", "automation", "tempo", "time signature",
+    "render", "export", "install", "download", "color", "colors",
+    "colour", "colours", "third-party", "third party",
+    "vst3", "fabfilter", "pro-q", "pro q", "waves", "uad", "kontakt",
+    "serum", "vital", "omnisphere", "ozone", "soothe",
+  }
+  if _typed_action_text_has_any(lt, blocked_terms) then
+    return nil, "unsupported_scope"
+  end
+
+  local has_stock_fx = _typed_action_text_has_any(lt, {
+    "reaeq", "reacomp", "readelay", "reaverbate", "reagate", "realimit",
+  })
+  if not has_stock_fx then
+    local generic_fx_lt = lt
+    for _, phrase in ipairs({
+      "do not add any effects",
+      "do not add effects",
+      "do not add any effect",
+      "do not add effect",
+      "do not add any fx",
+      "do not add fx",
+      "add no effects",
+      "add no effect",
+      "add no fx",
+      "no effects",
+      "no effect",
+      "no fx",
+    }) do
+      generic_fx_lt = generic_fx_lt:gsub(phrase, "")
+    end
+    local generic_fx_words = " "
+      .. generic_fx_lt:gsub("[^%w]+", " "):gsub("%s+", " ") .. " "
+    local function has_generic_fx_word_phrase(term)
+      return generic_fx_words:find(" " .. term .. " ", 1, true) ~= nil
+    end
+    local generic_fx_terms = {
+      "chain", "fx", "effect", "effects", "plugin", "plugins",
+      "compressor", "eq", "equalizer", "reverb", "delay", "gate",
+      "limiter", "deesser", "saturation", "saturator", "chorus",
+      "phaser", "pitch correction", "pitch shift", "vocal chain",
+      "rock vocal", "suitable", "suitable for", "processing",
+      "processor", "rack", "strip", "channel strip", "mix ready",
+      "mixready", "sound good", "sound better", "amp", "amp sim",
+      "distortion", "drive", "auto tune", "autotune",
+    }
+    for _, term in ipairs(generic_fx_terms) do
+      if has_generic_fx_word_phrase(term) then
+        return nil, "generic_fx_chain"
+      end
+    end
+  end
+  local has_routing = _typed_action_text_has_any(lt, {
+    "route", "routing", "send", "sends", "bus", "buss", "aux",
+  })
+  local has_track_setup =
+    _typed_action_text_has_any(lt, { "create", "add", "make", "set up", "setup", "build" })
+    and _typed_action_text_has_any(lt, { "track", "tracks", "bus", "aux" })
+  local track_property_lt =
+    Code._typed_action_track_property_intent_text(user_text)
+  local has_track_property =
+    _typed_action_text_has_any(track_property_lt, {
+      "track", "tracks", "bus", "aux", "selected", "current", "existing",
+    })
+    and _typed_action_text_has_any(track_property_lt, {
+      "volume", "vol ", "fader", "pan", "panned", "mute", "muted", "unmute",
+      "solo", "soloed", "unsolo",
+      "master send", "main send", "master/parent", "master parent",
+      "parent send", "master output", "rename", "renamed", "call ", "called",
+    })
+  local has_folder = Code.typed_action_user_requests_folder(user_text)
+
+  if not (has_stock_fx or has_routing or has_track_setup
+      or has_track_property or has_folder) then
+    return nil, "no_typed_action_intent"
+  end
+
+  if opts.response_format then
+    local contract = _typed_action_contract_for_profile(
+      _TYPED_ACTION_RESPONSE_FORMAT_PROMPT_CONTRACT, opts.profile)
+    return contract .. Code.typed_action_request_specific_help(user_text),
+      "eligible"
+  end
+  local contract = _typed_action_contract_for_profile(
+    _TYPED_ACTION_PROMPT_CONTRACT, opts.profile)
+  return contract .. Code.typed_action_request_specific_help(user_text),
+    "eligible"
+end
+
+function Code.typed_actions_plan_from_text(text, opts)
+  opts = type(opts) == "table" and opts or {}
+  if opts.allow_raw_json then
+    local raw_json = _typed_action_trim(text)
+    if raw_json:sub(1, 1) == "{" then
+      local plan, errors = Code.parse_typed_actions_block(raw_json)
+      if plan then Code.repair_typed_actions_plan(plan, opts) end
+      return plan, errors
+    end
+  end
+  local raw, extract_errors = Code.extract_typed_actions(text)
+  if not raw then return nil, extract_errors end
+  local plan, errors = Code.parse_typed_actions_block(raw)
+  if plan then Code.repair_typed_actions_plan(plan, opts) end
+  return plan, errors
+end
+
+function Code.validate_typed_actions_semantics(plan, opts)
+  opts = type(opts) == "table" and opts or {}
+  local profile = opts.profile
+  if type(profile) == "string" then
+    profile = Code.typed_actions_model_profile_by_key(profile)
+  end
+  if type(profile) ~= "table"
+     and tostring(opts.user_text or "") ~= "" then
+    profile = _TYPED_ACTION_PROFILE_MINIMAL_PLAN_HELP
+  end
+  if type(profile) ~= "table" or profile.semantic_retry ~= true then
+    return true, nil
+  end
+
+  local tracks, track_order, fx_seen_by_track, fx_by_track, op_counts, errors =
+    {}, {}, {}, {}, {}, {}
+  local fx_type_by_id = {}
+  local folder_children_by_parent = {}
+  local function lower(s) return tostring(s or ""):lower() end
+  local function trim(s) return tostring(s or ""):match("^%s*(.-)%s*$") end
+  local function normalized_name(s)
+    return lower(trim(s)):gsub("%s+", " ")
+  end
+  local function name_has(name, needle)
+    return lower(name):find(tostring(needle or ""), 1, true) ~= nil
+  end
+  local function is_bus_name(name)
+    local n = lower(name)
+    return n:find("bus", 1, true) ~= nil or n:find("buss", 1, true) ~= nil
+  end
+  local function is_return_name(name)
+    local n = lower(name)
+    return n:find("verb", 1, true) ~= nil
+      or n:find("reverb", 1, true) ~= nil
+      or n:find("delay", 1, true) ~= nil
+      or n:find("return", 1, true) ~= nil
+      or n:find("aux", 1, true) ~= nil
+  end
+  local function is_aux_like_name(name)
+    local n = lower(name)
+    return is_return_name(name)
+      or n:find("crush", 1, true) ~= nil
+      or n:find("parallel", 1, true) ~= nil
+  end
+  local function word_text(s)
+    return normalized_name(tostring(s or ""):gsub("[^%w]+", " "))
+  end
+  local u = lower(opts.user_text)
+  local u_words = word_text(opts.user_text)
+  local exact_send_graph_requested =
+    u:find("keep the graph exact", 1, true) ~= nil
+    or u:find("do not add any other", 1, true) ~= nil
+    or u:find("do not add extra", 1, true) ~= nil
+    or u:find("no other sends", 1, true) ~= nil
+  local function explicit_send_requested(src_name, dst_name)
+    local src = word_text(src_name)
+    local dst = word_text(dst_name)
+    if src == "" or dst == "" then return false end
+    local phrases = {
+      src .. " to " .. dst,
+      src .. " into " .. dst,
+      src .. " feed " .. dst,
+      src .. " feeds " .. dst,
+      src .. " feeding " .. dst,
+      "route " .. src .. " to " .. dst,
+      "route " .. src .. " into " .. dst,
+      "send " .. src .. " to " .. dst,
+      "send " .. src .. " into " .. dst,
+    }
+    for _, phrase in ipairs(phrases) do
+      if u_words:find(phrase, 1, true) then return true end
+    end
+    return false
+  end
+  local function user_mentions_db_value(db)
+    local want = tonumber(db)
+    if not want then return false end
+    for raw in tostring(opts.user_text or ""):gmatch("([%+%-]?%d+%.?%d*)%s*[dD][bB]") do
+      local got = tonumber(raw)
+      if got and math.abs(got - want) <= 0.25 then return true end
+    end
+    return false
+  end
+  local required_selected_indexes, selected_index_required =
+    Code._typed_action_selected_indexes_from_user_text(opts.user_text)
+  local positional_selector_forbidden =
+    Code._typed_action_forbids_positional_track_selector(opts.user_text)
+  local seen_selected_indexes, any_selected_index_resolve = {}, false
+  local allow_duplicate_fx =
+    u:find("duplicate", 1, true) ~= nil
+    or u:find("another", 1, true) ~= nil
+    or u:find("two ", 1, true) ~= nil
+    or u:find("multiple", 1, true) ~= nil
+  local function user_mentions_name(name)
+    local n = word_text(name)
+    return n ~= "" and u_words:find(n, 1, true) ~= nil
+  end
+  local function requested_supported_stock_fx()
+    for fx_name in pairs(_TYPED_ACTION_STOCK_FX) do
+      if u:find(lower(fx_name), 1, true) ~= nil then return true end
+    end
+    return u:find("stock fx", 1, true) ~= nil
+      or u:find("stock effect", 1, true) ~= nil
+      or u:find("stock plugin", 1, true) ~= nil
+  end
+  local requests_stock_fx = requested_supported_stock_fx()
+  local requests_params =
+    requests_stock_fx
+    and (u:find("threshold", 1, true) ~= nil
+      or u:find("frequency", 1, true) ~= nil
+      or u:find("gain", 1, true) ~= nil
+      or u:find("ratio", 1, true) ~= nil
+      or u:find("attack", 1, true) ~= nil
+      or u:find("release", 1, true) ~= nil
+      or u:find("feedback", 1, true) ~= nil
+      or u:find("wet", 1, true) ~= nil
+      or u:find("dry", 1, true) ~= nil
+      or u:find("ceiling", 1, true) ~= nil)
+  local function user_mentions_param(param, value, params)
+    param = tostring(param or "")
+    if param == "band" then
+      return (params.frequency_hz ~= nil
+          and user_mentions_param("frequency_hz", params.frequency_hz, params))
+        or (params.gain_db ~= nil
+          and user_mentions_param("gain_db", params.gain_db, params))
+    elseif param == "frequency_hz" then
+      return u:find("frequency", 1, true) ~= nil
+        or u:find("freq", 1, true) ~= nil
+        or u:find(" hz", 1, true) ~= nil
+        or u:find("khz", 1, true) ~= nil
+    elseif param == "gain_db" then
+      return u:find("gain", 1, true) ~= nil
+        or u:find("boost", 1, true) ~= nil
+        or u:find("cut", 1, true) ~= nil
+        or (u:find("band", 1, true) ~= nil
+          and user_mentions_db_value(value))
+    elseif param == "threshold_db" then
+      return u:find("threshold", 1, true) ~= nil
+    elseif param == "ratio" then
+      return u:find("ratio", 1, true) ~= nil
+    elseif param == "attack_ms" then
+      return u:find("attack", 1, true) ~= nil
+    elseif param == "release_ms" then
+      return u:find("release", 1, true) ~= nil
+    elseif param == "wet_db" then
+      return u:find("wet", 1, true) ~= nil
+    elseif param == "dry_db" then
+      return u:find("dry", 1, true) ~= nil
+    elseif param == "rms_ms" then
+      return u:find("rms", 1, true) ~= nil
+    elseif param == "feedback_pct" or param == "feedback_db" then
+      return u:find("feedback", 1, true) ~= nil
+    elseif param == "room_size" then
+      return u:find("room size", 1, true) ~= nil
+        or u:find("room", 1, true) ~= nil
+    elseif param == "dampening" then
+      return u:find("dampening", 1, true) ~= nil
+        or u:find("damping", 1, true) ~= nil
+    elseif param == "hysteresis_db" then
+      return u:find("hysteresis", 1, true) ~= nil
+    elseif param == "hold_ms" then
+      return u:find("hold", 1, true) ~= nil
+    elseif param == "ceiling_db" then
+      return u:find("ceiling", 1, true) ~= nil
+    end
+    return false
+  end
+  local send_intent_text =
+    Code._typed_action_send_intent_text(opts.user_text)
+  local send_intent_words = " " .. word_text(send_intent_text) .. " "
+  local requests_sends =
+    (send_intent_words:find(" send ", 1, true) ~= nil
+      or send_intent_words:find(" sends ", 1, true) ~= nil
+      or send_intent_words:find(" route ", 1, true) ~= nil
+      or send_intent_words:find(" routes ", 1, true) ~= nil
+      or send_intent_words:find(" routed ", 1, true) ~= nil
+      or send_intent_words:find(" routing ", 1, true) ~= nil
+      or send_intent_words:find(" feed ", 1, true) ~= nil
+      or send_intent_words:find(" feeds ", 1, true) ~= nil
+      or send_intent_words:find(" feeding ", 1, true) ~= nil)
+  local track_property_text =
+    Code._typed_action_track_property_intent_text(opts.user_text)
+  local requests_master_send_state =
+    Code._typed_action_user_requests_master_send_state(opts.user_text)
+  local requests_track_properties =
+    (track_property_text:find("volume", 1, true) ~= nil
+      or track_property_text:find("fader", 1, true) ~= nil
+      or track_property_text:find("pan", 1, true) ~= nil
+      or track_property_text:find("panned", 1, true) ~= nil
+      or track_property_text:find("mute", 1, true) ~= nil
+      or track_property_text:find("muted", 1, true) ~= nil
+      or track_property_text:find("unmute", 1, true) ~= nil
+      or track_property_text:find("solo", 1, true) ~= nil
+      or track_property_text:find("soloed", 1, true) ~= nil
+      or track_property_text:find("unsolo", 1, true) ~= nil
+      or requests_master_send_state
+      or track_property_text:find("rename", 1, true) ~= nil
+      or track_property_text:find("renamed", 1, true) ~= nil
+      or track_property_text:find("call ", 1, true) ~= nil
+      or track_property_text:find("called", 1, true) ~= nil)
+    and (track_property_text:find("track", 1, true) ~= nil
+      or track_property_text:find("bus", 1, true) ~= nil
+      or track_property_text:find("aux", 1, true) ~= nil)
+  local requests_track_creation =
+    Code.typed_action_user_requests_track_creation(opts.user_text)
+  local user_text_lower = lower(opts.user_text)
+  local existing_target_only =
+    not requests_track_creation
+    and (user_text_lower:find("existing track", 1, true) ~= nil
+      or user_text_lower:find("existing tracks", 1, true) ~= nil
+      or user_text_lower:find("resolve the existing", 1, true) ~= nil
+      or user_text_lower:find("do not create", 1, true) ~= nil
+      or user_text_lower:find("don't create", 1, true) ~= nil)
+  local selected_target_requested =
+    Code.typed_action_user_requests_selected_target(opts.user_text)
+  local requests_folders =
+    Code.typed_action_user_requests_folder(opts.user_text)
+  local function is_fx_like_track_name(name)
+    local n = " " .. word_text(name) .. " "
+    return n:find(" eq ", 1, true) ~= nil
+      or n:find(" comp ", 1, true) ~= nil
+      or n:find(" compressor ", 1, true) ~= nil
+      or n:find(" reverb ", 1, true) ~= nil
+      or n:find(" delay ", 1, true) ~= nil
+      or n:find(" gate ", 1, true) ~= nil
+      or n:find(" limiter ", 1, true) ~= nil
+  end
+  local function requested_exact_track_order(text)
+    text = tostring(text or "")
+    local lt = lower(text)
+    local function parse_order_fragment(fragment)
+      fragment = tostring(fragment or "")
+      fragment = fragment:gsub("^%s*.-:%s*", "")
+      fragment = fragment:gsub("%f[%a][Tt]hen%f[%A]", ",")
+      fragment = fragment:gsub("%f[%a][Aa]nd%f[%A]", ",")
+      local out = {}
+      for part in fragment:gmatch("[^,]+") do
+        local name = trim(part)
+          :gsub("^then%s+", "")
+          :gsub("^and%s+", "")
+          :gsub("^create%s+", "")
+          :gsub("^make%s+", "")
+          :gsub("^set%s+up%s+", "")
+          :gsub("^build%s+", "")
+          :gsub("^exactly%s+[%w]+%s+tracks?%s+named%s+", "")
+          :gsub("^[%w]+%s+tracks?%s+named%s+", "")
+          :gsub("^tracks?%s+named%s+", "")
+          :gsub("^named%s+", "")
+          :gsub("^the%s+", "")
+          :gsub("^a%s+", "")
+        name = trim(name)
+        if name ~= "" then out[#out + 1] = normalized_name(name) end
+      end
+      return #out >= 2 and out or nil
+    end
+    local explicit_fragment =
+      text:match("[Tt]rack%s+order%s+must%s+be%s+([^%.\n]+)")
+      or text:match("[Oo]rder%s+must%s+be%s+([^%.\n]+)")
+    if explicit_fragment then
+      local explicit_order = parse_order_fragment(explicit_fragment)
+      if explicit_order then return explicit_order end
+    end
+    local marker = lt:find(" in that exact order", 1, true)
+      or lt:find(" in exact order", 1, true)
+      or lt:find(" in that order", 1, true)
+    if not marker then return nil end
+    local before = text:sub(1, marker - 1)
+    local cut = 0
+    for i = 1, #before do
+      local ch = before:sub(i, i)
+      if ch == "." or ch == "\n" then cut = i end
+    end
+    if cut > 0 then before = before:sub(cut + 1) end
+    before = before:gsub("^.*[Cc]reate%s+exactly%s+[%w%-]+%s+tracks?%s+named%s+", "")
+    before = before:gsub("^.*[Cc]reate%s+[%w%-]+%s+tracks?%s+named%s+", "")
+    before = before:gsub("^.*[Mm]ake%s+exactly%s+[%w%-]+%s+tracks?%s+named%s+", "")
+    before = before:gsub("^.*[Ss]et%s+up%s+exactly%s+[%w%-]+%s+tracks?%s+named%s+", "")
+    before = before:gsub("^.*%f[%a]with%s+", "")
+    return parse_order_fragment(before)
+  end
+
+  local function requested_folder_memberships(text)
+    text = tostring(text or "")
+    local wanted = {}
+    local function mentioned_names(fragment)
+      local f_words = " " .. word_text(fragment) .. " "
+      local out, seen = {}, {}
+      for _, name in ipairs(track_order) do
+        local key = word_text(name)
+        if key ~= "" and f_words:find(" " .. key .. " ", 1, true)
+            and not seen[key] then
+          out[#out + 1] = normalized_name(name)
+          seen[key] = true
+        end
+      end
+      return out
+    end
+    for sentence in text:gmatch("[^%.\n]+") do
+      local start_pos, end_pos = lower(sentence):find("folder%s+containing")
+      if start_pos then
+        local parents = mentioned_names(sentence:sub(1, start_pos - 1))
+        local children = mentioned_names(sentence:sub(end_pos + 1))
+        local parent = parents[#parents]
+        if parent and #children > 0 then
+          local filtered_children = {}
+          for _, child in ipairs(children) do
+            if child ~= parent then
+              filtered_children[#filtered_children + 1] = child
+            end
+          end
+          if #filtered_children > 0 then
+            wanted[#wanted + 1] = {
+              parent = parent,
+              children = filtered_children,
+            }
+          end
+        end
+      end
+    end
+    return wanted
+  end
+
+  for i, action in ipairs((type(plan) == "table" and plan.actions) or {}) do
+    local path = "$.actions[" .. tostring(i) .. "]"
+    local op = tostring(action.op or "")
+    op_counts[op] = (op_counts[op] or 0) + 1
+    if action.op == "track.ensure" and action.id then
+      tracks[action.id] = action.name
+      track_order[#track_order + 1] = action.name
+      if requests_stock_fx
+         and is_fx_like_track_name(action.name)
+         and not user_mentions_name(action.name) then
+        errors[#errors + 1] = _typed_action_error(
+          "fx_as_track", path .. ".name",
+          tostring(action.name) .. " looks like an effect track, but the user "
+            .. "asked for stock FX; use fx.add_stock on the intended track")
+      end
+    elseif action.op == "track.resolve" and action.id then
+      if positional_selector_forbidden
+         and type(action.selected_index) == "number" then
+        errors[#errors + 1] = _typed_action_error(
+          "forbidden_selected_index", path .. ".selected_index",
+          "User explicitly said not to use selected_index; use the requested "
+            .. "non-positional selector instead")
+      end
+      if positional_selector_forbidden
+         and type(action.index) == "number" then
+        errors[#errors + 1] = _typed_action_error(
+          "forbidden_track_index", path .. ".index",
+          "User explicitly said not to use absolute track indexes; use the "
+            .. "requested non-positional selector instead")
+      end
+      if requests_track_creation
+         and not selected_target_requested
+         and (action.selected == true
+           or type(action.selected_index) == "number"
+           or type(action.index) == "number") then
+        errors[#errors + 1] = _typed_action_error(
+          "unexpected_track_resolve_target", path,
+          "User requested creating tracks in a blank/project template; do not "
+            .. "target selected or indexed existing tracks")
+      end
+      if requests_stock_fx
+         and is_fx_like_track_name(action.id)
+         and not _typed_action_is_nonempty_string(action.name) then
+        errors[#errors + 1] = _typed_action_error(
+          "track_resolve_used_for_fx", path,
+          "Do not create FX ids with track.resolve. Use fx.add_stock with this "
+            .. "id on the intended track, then use fx.set_param if needed")
+      end
+      if _typed_action_is_nonempty_string(action.name) then
+        tracks[action.id] = action.name
+      elseif type(action.index) == "number" then
+        tracks[action.id] = "track " .. tostring(action.index)
+      elseif type(action.selected_index) == "number" then
+        any_selected_index_resolve = true
+        seen_selected_indexes[action.selected_index] = true
+        tracks[action.id] = "selected track " .. tostring(action.selected_index)
+      elseif action.selected == true then
+        tracks[action.id] = "selected track"
+      else
+        tracks[action.id] = action.id
+      end
+    elseif action.op == "track.set" then
+      if action.master_send ~= nil and not requests_master_send_state then
+        local track_name = tracks[action.track] or action.track
+        errors[#errors + 1] = _typed_action_error(
+          "unrequested_master_send_action", path .. ".master_send",
+          "User did not explicitly request master/parent send state for "
+            .. tostring(track_name)
+            .. "; leave master_send null and use send.create for routing")
+      end
+    elseif action.op == "fx.add_stock" then
+      local track_id = action.track
+      local track_name = tracks[track_id] or track_id
+      local fx = tostring(action.fx or "")
+      if _typed_action_is_nonempty_string(action.id) then
+        fx_type_by_id[action.id] = fx
+      end
+      local track_key = tostring(track_id or "")
+      fx_seen_by_track[track_key] = fx_seen_by_track[track_key] or {}
+      fx_by_track[track_key] = fx_by_track[track_key] or {}
+      fx_by_track[track_key][fx] = true
+      if fx_seen_by_track[track_key][fx] and not allow_duplicate_fx then
+        errors[#errors + 1] = _typed_action_error(
+          "duplicate_track_fx", path .. ".fx",
+          "Duplicate " .. fx .. " on " .. tostring(track_name)
+            .. "; add each requested source-chain FX once per track")
+      end
+      fx_seen_by_track[track_key][fx] = true
+
+      if name_has(track_name, "verb") and fx ~= "ReaVerbate" then
+        errors[#errors + 1] = _typed_action_error(
+          "return_fx_mismatch", path .. ".fx",
+          tostring(track_name) .. " is a reverb return; use ReaVerbate only "
+            .. "unless the user asks for more")
+      elseif name_has(track_name, "delay") and fx ~= "ReaDelay" then
+        errors[#errors + 1] = _typed_action_error(
+          "return_fx_mismatch", path .. ".fx",
+          tostring(track_name) .. " is a delay return; use ReaDelay only "
+            .. "unless the user asks for more")
+      end
+    elseif action.op == "send.create" then
+      local src_name = tracks[action["from"]] or action["from"]
+      local dst_name = tracks[action.to] or action.to
+      local volume_db = tonumber(action.volume_db)
+      if exact_send_graph_requested
+         and is_aux_like_name(src_name)
+         and is_bus_name(dst_name)
+         and not explicit_send_requested(src_name, dst_name) then
+        errors[#errors + 1] = _typed_action_error(
+          "extra_inferred_return_bus_send", path,
+          tostring(src_name) .. " -> " .. tostring(dst_name)
+            .. " was not explicitly requested; exact routing graphs must not "
+            .. "invent return/parallel-track sends")
+      end
+      if is_bus_name(dst_name)
+         and not is_return_name(src_name)
+         and volume_db ~= nil
+         and math.abs(volume_db) > 0.7
+         and not user_mentions_db_value(volume_db) then
+        errors[#errors + 1] = _typed_action_error(
+          "bus_send_not_unity", path .. ".volume_db",
+          tostring(src_name) .. " -> " .. tostring(dst_name)
+            .. " is bus routing and should use volume_db 0 unless the user "
+            .. "asks for a different bus level")
+      end
+    elseif action.op == "fx.set_param" and type(action.params) == "table" then
+      for param, value in pairs(action.params) do
+        if value ~= nil and not user_mentions_param(param, value, action.params) then
+          errors[#errors + 1] = _typed_action_error(
+            "unrequested_param_action", path .. ".params." .. tostring(param),
+            "User did not request " .. tostring(fx_type_by_id[action.fx] or "FX")
+              .. "." .. tostring(param) .. "; do not emit extra parameter writes")
+        end
+      end
+    elseif action.op == "track.folder" then
+      local children = {}
+      if type(action.children) == "table" then
+        for _, child in ipairs(action.children) do
+          children[#children + 1] = child
+        end
+      end
+      folder_children_by_parent[action.parent] = children
+    end
+  end
+
+  if selected_index_required then
+    if #required_selected_indexes == 0 then
+      if not any_selected_index_resolve then
+        errors[#errors + 1] = _typed_action_error(
+          "missing_selected_index", "$.actions",
+          "User explicitly requested selected_index targeting; use "
+            .. "track.resolve with selected_index and do not substitute name, "
+            .. "index, or selected:true")
+      end
+    else
+      for _, selected_index in ipairs(required_selected_indexes) do
+        if not seen_selected_indexes[selected_index] then
+          errors[#errors + 1] = _typed_action_error(
+            "missing_selected_index", "$.actions",
+            "User requested selected track " .. tostring(selected_index)
+              .. "; use track.resolve with selected_index="
+              .. tostring(selected_index)
+              .. " and do not substitute name, index, or selected:true")
+        end
+      end
+    end
+  end
+
+  if requests_track_creation and (op_counts["track.ensure"] or 0) == 0 then
+    errors[#errors + 1] = _typed_action_error(
+      "missing_track_ensure_actions", "$.actions",
+      "User requested creating tracks or a blank-project template; use "
+        .. "track.ensure for the requested tracks, not track.resolve")
+  end
+  if existing_target_only and (op_counts["track.ensure"] or 0) > 0 then
+    errors[#errors + 1] = _typed_action_error(
+      "unexpected_track_ensure_existing_target", "$.actions",
+      "User requested existing-track targets; use track.resolve for those "
+        .. "tracks and do not create replacement tracks")
+  end
+  if requests_stock_fx and (op_counts["fx.add_stock"] or 0) == 0 then
+    errors[#errors + 1] = _typed_action_error(
+      "missing_fx_actions", "$.actions",
+      "User requested supported stock FX; the typed-action plan must include "
+        .. "fx.add_stock actions, not only track.ensure")
+  end
+  if requests_params and (op_counts["fx.set_param"] or 0) == 0 then
+    errors[#errors + 1] = _typed_action_error(
+      "missing_param_actions", "$.actions",
+      "User requested FX parameter settings; the typed-action plan must include "
+        .. "fx.set_param actions")
+  end
+  if requests_sends and (op_counts["send.create"] or 0) == 0 then
+    errors[#errors + 1] = _typed_action_error(
+      "missing_send_actions", "$.actions",
+      "User requested routing/sends; the typed-action plan must include "
+        .. "send.create actions")
+  end
+  if requests_track_properties and (op_counts["track.set"] or 0) == 0 then
+    errors[#errors + 1] = _typed_action_error(
+      "missing_track_set_actions", "$.actions",
+      "User requested track rename/name, volume, pan, mute, unmute, solo, unsolo, or "
+        .. "master/parent send state; the typed-action plan must include "
+        .. "track.set actions")
+  end
+  if requests_folders and (op_counts["track.folder"] or 0) == 0 then
+    errors[#errors + 1] = _typed_action_error(
+      "missing_folder_actions", "$.actions",
+      "User requested a track folder; the typed-action plan must include "
+        .. "track.folder actions")
+  end
+  if not requests_folders and (op_counts["track.folder"] or 0) > 0 then
+    errors[#errors + 1] = _typed_action_error(
+      "unexpected_folder_actions", "$.actions",
+      "User did not request a track folder; do not emit track.folder actions")
+  end
+  if not requests_track_properties and (op_counts["track.set"] or 0) > 0 then
+    errors[#errors + 1] = _typed_action_error(
+      "unexpected_track_set_actions", "$.actions",
+      "User did not request track rename/name, volume, pan, mute, unmute, solo, unsolo, or "
+        .. "master/parent send state; do not emit track.set actions")
+  end
+
+  local requested_order = requested_exact_track_order(opts.user_text)
+  if requested_order then
+    if exact_send_graph_requested and #track_order > #requested_order then
+      errors[#errors + 1] = _typed_action_error(
+        "unexpected_track_ensure_actions", "$.actions",
+        "User requested an exact track order with "
+          .. tostring(#requested_order)
+          .. " tracks, but the plan creates "
+          .. tostring(#track_order)
+          .. "; do not create extra tracks for FX, folders, or helper ids")
+    end
+    for i, want in ipairs(requested_order) do
+      local got = normalized_name(track_order[i])
+      if got ~= want then
+        errors[#errors + 1] = _typed_action_error(
+          "track_order_mismatch", "$.actions",
+          "User requested exact track order; expected track "
+            .. tostring(i) .. " to be " .. tostring(want)
+            .. ", got " .. tostring(track_order[i] or "missing"))
+        break
+      end
+    end
+  end
+
+  if requests_folders then
+    local child_names_by_parent = {}
+    for parent_id, child_ids in pairs(folder_children_by_parent) do
+      local parent_name = normalized_name(tracks[parent_id] or parent_id)
+      child_names_by_parent[parent_name] = child_names_by_parent[parent_name] or {}
+      for _, child_id in ipairs(child_ids) do
+        child_names_by_parent[parent_name][normalized_name(tracks[child_id] or child_id)] = true
+      end
+    end
+    for _, want in ipairs(requested_folder_memberships(opts.user_text)) do
+      local got = child_names_by_parent[want.parent] or {}
+      for _, child_name in ipairs(want.children) do
+        if not got[child_name] then
+          errors[#errors + 1] = _typed_action_error(
+            "missing_folder_child", "$.actions",
+            "User requested " .. tostring(want.parent)
+              .. " to contain " .. tostring(child_name)
+              .. "; include that id in the parent track.folder children list")
+        end
+      end
+    end
+  end
+
+  local repeated_source_chain_requested =
+    (u_words:find("reaeq first and reacomp second", 1, true) ~= nil)
+    or (u_words:find("reaeq first", 1, true) ~= nil
+      and u_words:find("reacomp second", 1, true) ~= nil)
+    or (u_words:find("reacomp first and reaeq second", 1, true) ~= nil)
+    or (u_words:find("reacomp first", 1, true) ~= nil
+      and u_words:find("reaeq second", 1, true) ~= nil)
+    or (u_words:find("reaeq followed by reacomp", 1, true) ~= nil)
+    or (u_words:find("reacomp followed by reaeq", 1, true) ~= nil)
+    or (u_words:find("reaeq then reacomp", 1, true) ~= nil)
+    or (u_words:find("reacomp then reaeq", 1, true) ~= nil)
+    or (u_words:find("reaeq and reacomp to", 1, true) ~= nil)
+    or (u_words:find("reaeq and reacomp on", 1, true) ~= nil)
+    or (u_words:find("reacomp and reaeq to", 1, true) ~= nil)
+    or (u_words:find("reacomp and reaeq on", 1, true) ~= nil)
+  if repeated_source_chain_requested then
+    for track_id, name in pairs(tracks) do
+      if not is_bus_name(name)
+         and not is_return_name(name)
+         and not is_aux_like_name(name) then
+        local fx = fx_by_track[tostring(track_id)] or {}
+        if fx.ReaComp and not fx.ReaEQ then
+          errors[#errors + 1] = _typed_action_error(
+            "incomplete_source_fx_chain", "$.actions",
+            tostring(name) .. " has ReaComp but is missing ReaEQ; source "
+              .. "tracks in this repeated chain need both requested FX")
+        end
+      end
+    end
+  end
+
+  if exact_send_graph_requested and requests_stock_fx then
+    local requested_fx_by_track = {}
+    for sentence in tostring(opts.user_text or ""):gmatch("[^%.%!%?]+") do
+      local sw = word_text(sentence)
+      if sw ~= "" then
+        local sentence_fx = {}
+        for fx_name in pairs(_TYPED_ACTION_STOCK_FX) do
+          if sw:find(word_text(fx_name), 1, true) then
+            sentence_fx[fx_name] = true
+          end
+        end
+        if next(sentence_fx) then
+          local broad =
+            sw:find("all tracks", 1, true) ~= nil
+            or sw:find("every track", 1, true) ~= nil
+            or sw:find("each track", 1, true) ~= nil
+          for track_id, name in pairs(tracks) do
+            if broad or sw:find(word_text(name), 1, true) then
+              requested_fx_by_track[track_id] =
+                requested_fx_by_track[track_id] or {}
+              for fx_name in pairs(sentence_fx) do
+                requested_fx_by_track[track_id][fx_name] = true
+              end
+            end
+          end
+        end
+      end
+    end
+    for track_id, fx_set in pairs(fx_by_track) do
+      local requested = requested_fx_by_track[track_id]
+      if requested then
+        local track_name = tracks[track_id] or track_id
+        for fx_name in pairs(fx_set) do
+          if not requested[fx_name] then
+            errors[#errors + 1] = _typed_action_error(
+              "unexpected_track_fx", "$.actions",
+              tostring(track_name) .. " has " .. tostring(fx_name)
+                .. ", but the user did not request that stock FX for this "
+                .. "track; keep exact graph FX assignments separate")
+          end
+        end
+      end
+    end
+  end
+
+  return #errors == 0, (#errors > 0 and errors or nil)
+end
+
+function Code.format_typed_action_semantic_errors(errors, limit)
+  if type(errors) ~= "table" or #errors == 0 then return "semantic_mismatch" end
+  limit = tonumber(limit) or 3
+  local parts = {}
+  for i = 1, math.min(#errors, limit) do
+    local e = errors[i]
+    parts[#parts + 1] = tostring(e.code or "semantic_mismatch")
+      .. " at " .. tostring(e.path or "$")
+      .. ": " .. tostring(e.message or "")
+  end
+  if #errors > limit then
+    parts[#parts + 1] = tostring(#errors - limit) .. " more"
+  end
+  return table.concat(parts, "; ")
+end
+
+function Code.typed_action_semantic_detail_missing_action_family(detail)
+  detail = tostring(detail or "")
+  return detail:find("missing_fx_actions", 1, true) ~= nil
+    or detail:find("missing_param_actions", 1, true) ~= nil
+    or detail:find("missing_send_actions", 1, true) ~= nil
+end
+
+function Code.typed_action_semantic_retry_from_scratch(profile, detail)
+  detail = tostring(detail or "")
+  if type(profile) == "table"
+     and profile.semantic_retry_from_scratch == true then
+    return true
+  end
+  if detail:find("unexpected_track_ensure_existing_target", 1, true) then
+    return true
+  end
+  if Code.typed_action_semantic_detail_missing_action_family(detail)
+     and type(S) == "table"
+     and (S.typed_action_escalation_used == true
+       or (tonumber(S.typed_action_escalation_count or 0) or 0) > 0) then
+    return true
+  end
+  return false
+end
+
+function Code._typed_action_schema_retry_detail(text, opts)
+  opts = type(opts) == "table" and opts or {}
+  local plan, plan_errors = Code.typed_actions_plan_from_text(text, {
+    allow_raw_json = opts.allow_raw_json == true,
+  })
+  local detail = nil
+  if plan then
+    local valid, validate_errors = Code.validate_typed_actions_plan(plan)
+    if not valid then
+      detail = Code.format_typed_action_semantic_errors(validate_errors, 4)
+    end
+  else
+    detail = Code.format_typed_action_semantic_errors(plan_errors, 4)
+  end
+
+  local u = tostring(opts.user_text or ""):lower()
+  local track_property_text = u
+    :gsub("post%-fader", "")
+    :gsub("post fader", "")
+    :gsub("pre%-fader", "")
+    :gsub("pre fader", "")
+    :gsub("do not rename", "")
+    :gsub("don't rename", "")
+    :gsub("without renaming", "")
+    :gsub("rename any tracks", "")
+    :gsub("rename any track", "")
+    :gsub("no rename", "")
+    :gsub("not rename", "")
+  local requests_track_properties =
+    (track_property_text:find("volume", 1, true) ~= nil
+      or track_property_text:find("fader", 1, true) ~= nil
+      or track_property_text:find("pan", 1, true) ~= nil
+      or track_property_text:find("panned", 1, true) ~= nil
+      or track_property_text:find("mute", 1, true) ~= nil
+      or track_property_text:find("muted", 1, true) ~= nil
+      or track_property_text:find("unmute", 1, true) ~= nil
+      or track_property_text:find("solo", 1, true) ~= nil
+      or track_property_text:find("soloed", 1, true) ~= nil
+      or track_property_text:find("unsolo", 1, true) ~= nil
+      or track_property_text:find("master send", 1, true) ~= nil
+      or track_property_text:find("main send", 1, true) ~= nil
+      or track_property_text:find("master/parent", 1, true) ~= nil
+      or track_property_text:find("master parent", 1, true) ~= nil
+      or track_property_text:find("parent send", 1, true) ~= nil
+      or track_property_text:find("master output", 1, true) ~= nil
+      or track_property_text:find("rename", 1, true) ~= nil
+      or track_property_text:find("renamed", 1, true) ~= nil
+      or track_property_text:find("call ", 1, true) ~= nil
+      or track_property_text:find("called", 1, true) ~= nil)
+  if plan and requests_track_properties then
+    local counts = _typed_action_count_ops(plan)
+    if (counts["track.resolve"] or 0) > 0
+       and (counts["track.set"] or 0) == 0 then
+      local hint = "User requested track property changes; keep one valid "
+        .. "track.resolve for the target, then add one track.set using that "
+        .. "same id"
+      detail = detail and detail ~= "" and (detail .. "; " .. hint) or hint
+    end
+  end
+  return detail and detail ~= "" and detail or "invalid_plan"
+end
+
+local function _typed_action_executor_validate(plan)
+  local valid, errors = Code.validate_typed_actions_plan(plan)
+  if not valid then return false, errors end
+
+  local fx_type_by_id, exec_errors = {}, {}
+  for i, action in ipairs(plan.actions or {}) do
+    local path = "$.actions[" .. tostring(i) .. "]"
+    if action.op == "track.ensure" then
+      if action.color ~= nil
+         and not tostring(action.color):match("^#%x%x%x%x%x%x$") then
+        exec_errors[#exec_errors+1] = _typed_action_error(
+          "unsupported_color", path .. ".color",
+          "Typed-action executor supports only #RRGGBB colors")
+      end
+    elseif action.op == "fx.add_stock" and action.id and action.fx then
+      fx_type_by_id[action.id] = action.fx
+    elseif action.op == "fx.set_param" then
+      local fx_name = fx_type_by_id[action.fx]
+      local setters, perr = _typed_action_param_setters(
+        fx_name, action.params, path)
+      if not setters then
+        for _, e in ipairs(perr or {}) do exec_errors[#exec_errors+1] = e end
+      end
+    elseif action.op == "send.create" and action.mode ~= nil
+       and type(action.mode) == "string" then
+      local m = tostring(action.mode):lower():gsub("%s+", "_"):gsub("%-", "_")
+      local ok_mode = m == "post_fader"
+        or m == "post_fader_post_pan"
+        or m == "pre_fx"
+        or m == "pre_fader"
+        or m == "post_fx"
+      if not ok_mode then
+        exec_errors[#exec_errors+1] = _typed_action_error(
+          "unsupported_send_mode", path .. ".mode",
+          "Unsupported send mode: " .. tostring(action.mode))
+      end
+    end
+  end
+  return #exec_errors == 0, exec_errors
+end
+
+local function _typed_action_find_existing_track(api, name)
+  local found = {}
+  local n = api.CountTracks(0)
+  for i = 0, n - 1 do
+    local tr = api.GetTrack(0, i)
+    local _, tname = api.GetTrackName(tr, "")
+    if tname == name then found[#found+1] = tr end
+  end
+  return found
+end
+
+function Code._typed_action_resolve_existing_track(api, action)
+  if action.selected_index ~= nil then
+    if type(api.CountSelectedTracks) ~= "function"
+       or type(api.GetSelectedTrack) ~= "function" then
+      return nil, "selected_track_unavailable",
+        "REAPER selected-track APIs are unavailable"
+    end
+    local idx = tonumber(action.selected_index)
+    local count = api.CountSelectedTracks(0)
+    if not idx or idx % 1 ~= 0 or idx < 1 or idx > count then
+      return nil, "missing_selected_track",
+        "No selected track at 1-based selected index "
+          .. tostring(action.selected_index) .. "; found "
+          .. tostring(count or 0)
+    end
+    local tr = api.GetSelectedTrack(0, idx - 1)
+    if not tr then
+      return nil, "missing_selected_track",
+        "Could not resolve selected track index "
+          .. tostring(action.selected_index)
+    end
+    return tr
+  end
+
+  if action.selected == true then
+    if type(api.CountSelectedTracks) ~= "function"
+       or type(api.GetSelectedTrack) ~= "function" then
+      return nil, "selected_track_unavailable",
+        "REAPER selected-track APIs are unavailable"
+    end
+    local count = api.CountSelectedTracks(0)
+    if count ~= 1 then
+      return nil, "ambiguous_selected_track",
+        "track.resolve selected requires exactly one selected track; found "
+          .. tostring(count or 0)
+    end
+    local tr = api.GetSelectedTrack(0, 0)
+    if not tr then
+      return nil, "missing_selected_track",
+        "Could not resolve the selected track"
+    end
+    return tr
+  end
+
+  if action.index ~= nil then
+    local idx = tonumber(action.index)
+    local count = api.CountTracks(0)
+    if not idx or idx % 1 ~= 0 or idx < 1 or idx > count then
+      return nil, "missing_track",
+        "No existing track at 1-based index " .. tostring(action.index)
+    end
+    local tr = api.GetTrack(0, idx - 1)
+    if not tr then
+      return nil, "missing_track",
+        "Could not resolve track index " .. tostring(action.index)
+    end
+    if action.name ~= nil then
+      local _, tname = api.GetTrackName(tr, "")
+      if tname ~= action.name then
+        return nil, "track_name_mismatch",
+          "Track index " .. tostring(action.index) .. " is named "
+            .. tostring(tname) .. ", not " .. tostring(action.name)
+      end
+    end
+    return tr
+  end
+
+  if action.name ~= nil then
+    local found = _typed_action_find_existing_track(api, action.name)
+    if #found == 0 then
+      return nil, "missing_track",
+        "No existing track is named " .. tostring(action.name)
+    end
+    if #found > 1 then
+      return nil, "ambiguous_track",
+        "Multiple existing tracks are named " .. tostring(action.name)
+    end
+    return found[1]
+  end
+
+  return nil, "invalid_target_selector",
+    "track.resolve needs name, selected, selected_index, or index"
+end
+
+local function _typed_action_track_insert_index(api, action, tracks)
+  local count = api.CountTracks(0)
+  local pos = action.position
+  if not pos or pos == "" or pos == "end" then return count end
+  local dir, ref = pos:match("^(after):(.-)$")
+  if not dir then dir, ref = pos:match("^(before):(.-)$") end
+  local ref_tr = ref and tracks[ref] or nil
+  if not ref_tr then return nil, "Unknown position reference: " .. tostring(pos) end
+  local ref_num = api.GetMediaTrackInfo_Value(ref_tr, "IP_TRACKNUMBER")
+  if not ref_num or ref_num < 1 then
+    return nil, "Could not resolve position reference: " .. tostring(pos)
+  end
+  if dir == "before" then return math.max(0, ref_num - 1) end
+  return math.min(count, ref_num)
+end
+
+local function _typed_action_apply_track_color(api, tr, color)
+  if not color then return true end
+  local r, g, b = tostring(color):match("^#(%x%x)(%x%x)(%x%x)$")
+  if not r then
+    return false, "Only #RRGGBB track colors are supported"
+  end
+  local native = api.ColorToNative(tonumber(r, 16), tonumber(g, 16),
+    tonumber(b, 16)) | 0x1000000
+  api.SetTrackColor(tr, native)
+  return true
+end
+
+local function _typed_action_send_mode(mode)
+  if mode == nil then return nil, nil end
+  if type(mode) == "number" then return mode, nil end
+  local m = tostring(mode):lower():gsub("%s+", "_"):gsub("%-", "_")
+  local map = {
+    post_fader = 0,
+    post_fader_post_pan = 0,
+    pre_fx = 1,
+    pre_fader = 3,
+    post_fx = 3,
+  }
+  if map[m] == nil then return nil, "Unsupported send mode: " .. tostring(mode) end
+  return map[m], nil
+end
+
+local function _typed_action_error_result(code, path, message, result)
+  return false, {
+    code = code or "execution_error",
+    path = path or "$",
+    message = message or "Structured edit failed",
+    result = result,
+  }
+end
+
+function Code.typed_actions_user_failure_message(exec_result)
+  local code = exec_result and exec_result.code or "execution_failed"
+  local detail = exec_result and exec_result.message or nil
+  local result = exec_result and exec_result.result or nil
+  local changed = type(result) == "table"
+    and type(result.action_results) == "table"
+    and #result.action_results > 0
+  if code == "executor_disabled" then
+    return Code.typed_actions_executor_disabled_message()
+  end
+  if code == "invalid_json" or code == "missing_action_block"
+     or code == "invalid_plan" or code == "semantic_mismatch" then
+    local msg = "I blocked this structured edit before it changed the project because the plan did not match the request safely. No changes were made."
+    if detail and detail ~= "" then msg = msg .. " Details: " .. tostring(detail) end
+    return msg
+  end
+  if changed then
+    local msg = "Structured edit failed after making part of the change. ReaAssist stopped immediately; use REAPER Undo if the project is not in the state you want."
+    if detail and detail ~= "" then msg = msg .. " Details: " .. tostring(detail) end
+    return msg
+  end
+  local msg = "Structured edit failed before it changed the project. No changes were made."
+  if detail and detail ~= "" then msg = msg .. " Details: " .. tostring(detail) end
+  return msg
+end
+
+function Code.execute_typed_actions_plan(plan, opts)
+  opts = opts or {}
+  local api = opts.reaper or reaper
+  local result = {
+    executed = false,
+    completed = false,
+    deferred = false,
+    op_counts = _typed_action_count_ops(plan),
+    action_results = {},
+  }
+
+  if not opts.allow_dev_executor and not Code.typed_actions_executor_enabled() then
+    return _typed_action_error_result("executor_disabled", "$",
+      Code.typed_actions_executor_disabled_message(), result)
+  end
+
+  if type(api) ~= "table" then
+    return _typed_action_error_result("executor_unavailable", "$",
+      "REAPER API table is unavailable", result)
+  end
+
+  local valid, validation_errors = _typed_action_executor_validate(plan)
+  if not valid then
+    result.validation_errors = validation_errors
+    return _typed_action_error_result("invalid_plan", "$",
+      "Typed action plan failed executor validation", result)
+  end
+  local folder_depth_plan, folder_depth_errors =
+    Code._typed_action_folder_depth_plan(plan)
+  if folder_depth_errors and #folder_depth_errors > 0 then
+    result.validation_errors = folder_depth_errors
+    return _typed_action_error_result("invalid_plan", "$",
+      "Typed action folder plan failed executor validation", result)
+  end
+
+  local tracks, fx_by_id, param_actions = {}, {}, {}
+  local undo_open, refresh_open = false, false
+
+  local function close_block(label, flags)
+    if refresh_open then
+      pcall(api.PreventUIRefresh, -1)
+      refresh_open = false
+    end
+    if type(api.TrackList_AdjustWindows) == "function" then
+      pcall(api.TrackList_AdjustWindows, false)
+    end
+    if type(api.UpdateArrange) == "function" then pcall(api.UpdateArrange) end
+    if undo_open then
+      pcall(api.Undo_EndBlock, label or "ReaAssist: typed actions", flags or -1)
+      undo_open = false
+    end
+  end
+
+  local function fail(code, path, message)
+    close_block("ReaAssist: typed actions failed", -1)
+    local msg = "Structured edit failed: " .. tostring(message)
+    if type(Log) == "table" and type(Log.add_error) == "function" then
+      Log.add_error(msg)
+    end
+    if type(api.ShowMessageBox) == "function" then
+      pcall(api.ShowMessageBox, msg, "ReaAssist", 0)
+    end
+    return _typed_action_error_result(code, path, message, result)
+  end
+
+  local function complete(ok, done_result)
+    result.completed = true
+    result.executed = ok == true
+    if type(opts.on_done) == "function" then
+      local cb_ok, cb_err = pcall(opts.on_done, ok == true,
+        done_result or { result = result })
+      if not cb_ok and type(Log) == "table"
+         and type(Log.add_error) == "function" then
+        Log.add_error("Structured edit completion callback failed: "
+          .. tostring(cb_err))
+      end
+    end
+  end
+
+  api.Undo_BeginBlock()
+  undo_open = true
+  api.PreventUIRefresh(1)
+  refresh_open = true
+
+  for i, action in ipairs(plan.actions or {}) do
+    local path = "$.actions[" .. tostring(i) .. "]"
+    local op = action.op
+    if op == "track.ensure" then
+      local existing = _typed_action_find_existing_track(api, action.name)
+      local tr
+      if #existing > 1 then
+        return fail("ambiguous_track", path .. ".name",
+          "Multiple existing tracks are named " .. tostring(action.name))
+      elseif #existing == 1 then
+        tr = existing[1]
+      else
+        local idx, pos_err = _typed_action_track_insert_index(api, action, tracks)
+        if not idx then return fail("unknown_ref", path .. ".position", pos_err) end
+        api.InsertTrackAtIndex(idx, true)
+        tr = api.GetTrack(0, idx)
+        if not tr then
+          return fail("track_create_failed", path,
+            "Could not create track " .. tostring(action.name))
+        end
+      end
+      api.GetSetMediaTrackInfo_String(tr, "P_NAME", action.name, true)
+      local color_ok, color_err = _typed_action_apply_track_color(api, tr, action.color)
+      if not color_ok then return fail("unsupported_color", path .. ".color", color_err) end
+      if action.select == true then
+        api.SetTrackSelected(tr, true)
+      end
+      tracks[action.id] = tr
+      result.action_results[#result.action_results+1] = {
+        op = op, id = action.id, status = "ok"
+      }
+
+    elseif op == "track.resolve" then
+      local tr, code, err = Code._typed_action_resolve_existing_track(api, action)
+      if not tr then
+        return fail(code or "track_resolve_failed", path,
+          err or ("Could not resolve track " .. tostring(action.id)))
+      end
+      tracks[action.id] = tr
+      result.action_results[#result.action_results+1] = {
+        op = op, id = action.id, status = "ok"
+      }
+
+    elseif op == "track.set" then
+      local tr = tracks[action.track]
+      if not tr then
+        return fail("unknown_ref", path .. ".track",
+          "Unknown track id " .. tostring(action.track))
+      end
+      if action.name ~= nil then
+        api.GetSetMediaTrackInfo_String(tr, "P_NAME", action.name, true)
+      end
+      if action.volume_db ~= nil then
+        api.SetMediaTrackInfo_Value(tr, "D_VOL",
+          _typed_action_db_to_amp(action.volume_db))
+      end
+      if action.pan_pct ~= nil then
+        api.SetMediaTrackInfo_Value(tr, "D_PAN", action.pan_pct / 100)
+      end
+      if action.mute ~= nil then
+        api.SetMediaTrackInfo_Value(tr, "B_MUTE", action.mute and 1 or 0)
+      end
+      if action.solo ~= nil then
+        api.SetMediaTrackInfo_Value(tr, "I_SOLO", action.solo and 1 or 0)
+      end
+      if action.master_send ~= nil then
+        api.SetMediaTrackInfo_Value(tr, "B_MAINSEND",
+          action.master_send and 1 or 0)
+      end
+      result.action_results[#result.action_results+1] = {
+        op = op, id = action.track, status = "ok"
+      }
+
+    elseif op == "track.folder" then
+      result.action_results[#result.action_results+1] = {
+        op = op, id = action.parent, status = "ok"
+      }
+
+    elseif op == "fx.add_stock" then
+      local tr = tracks[action.track]
+      if not tr then
+        return fail("unknown_ref", path .. ".track",
+          "Unknown track id " .. tostring(action.track))
+      end
+      local fx = api.TrackFX_AddByName(tr, action.fx, false, -1)
+      if not fx or fx < 0 then
+        return fail("fx_add_failed", path .. ".fx",
+          "Could not add " .. tostring(action.fx))
+      end
+      fx_by_id[action.id] = { track = tr, fx = fx, fx_name = action.fx }
+      result.action_results[#result.action_results+1] = {
+        op = op, id = action.id, status = "ok"
+      }
+
+    elseif op == "fx.set_param" then
+      param_actions[#param_actions+1] = { action = action, path = path }
+
+    elseif op == "send.create" then
+      local src, dst = tracks[action["from"]], tracks[action.to]
+      if not src then
+        return fail("unknown_ref", path .. ".from",
+          "Unknown source track id " .. tostring(action["from"]))
+      end
+      if not dst then
+        return fail("unknown_ref", path .. ".to",
+          "Unknown destination track id " .. tostring(action.to))
+      end
+      local sidx = api.CreateTrackSend(src, dst)
+      if not sidx or sidx < 0 then
+        return fail("send_create_failed", path,
+          "Could not create send " .. tostring(action.id))
+      end
+      if action.volume_db ~= nil then
+        api.SetTrackSendInfo_Value(src, 0, sidx, "D_VOL",
+          _typed_action_db_to_amp(action.volume_db))
+      end
+      if action.pan ~= nil then
+        api.SetTrackSendInfo_Value(src, 0, sidx, "D_PAN", action.pan)
+      end
+      if action.muted ~= nil then
+        api.SetTrackSendInfo_Value(src, 0, sidx, "B_MUTE",
+          action.muted and 1 or 0)
+      end
+      if action.mode ~= nil then
+        local mode, mode_err = _typed_action_send_mode(action.mode)
+        if mode == nil then return fail("unsupported_send_mode", path .. ".mode", mode_err) end
+        api.SetTrackSendInfo_Value(src, 0, sidx, "I_SENDMODE", mode)
+      end
+      result.action_results[#result.action_results+1] = {
+        op = op, id = action.id, status = "ok"
+      }
+    end
+  end
+
+  for _, track_id in ipairs((folder_depth_plan and folder_depth_plan.order) or {}) do
+    local tr = tracks[track_id]
+    if not tr then
+      return fail("unknown_ref", "$.actions",
+        "Unknown folder track id " .. tostring(track_id))
+    end
+    api.SetMediaTrackInfo_Value(tr, "I_FOLDERDEPTH",
+      folder_depth_plan.depths[track_id] or 0)
+  end
+
+  local function apply_params_and_close()
+    local ok, err = xpcall(function()
+      for _, item in ipairs(param_actions) do
+        local action, path = item.action, item.path
+        local fx_ref = fx_by_id[action.fx]
+        if not fx_ref then error(path .. ": unknown FX id " .. tostring(action.fx)) end
+        local setters = assert(_typed_action_param_setters(
+          fx_ref.fx_name, action.params, path))
+        for _, setter in ipairs(setters) do
+          if setter.method == "raw" then
+            api.TrackFX_SetParam(fx_ref.track, fx_ref.fx, setter.index, setter.value)
+          else
+            api.TrackFX_SetParamNormalized(fx_ref.track, fx_ref.fx,
+              setter.index, setter.value)
+          end
+        end
+        result.action_results[#result.action_results+1] = {
+          op = action.op, id = action.fx, status = "ok"
+        }
+      end
+    end, debug and debug.traceback or tostring)
+    if not ok then
+      close_block("ReaAssist: typed actions failed", -1)
+      local msg = "Structured edit parameter write failed: " .. tostring(err)
+      if type(Log) == "table" and type(Log.add_error) == "function" then
+        Log.add_error(msg)
+      end
+      if type(api.ShowMessageBox) == "function" then
+        pcall(api.ShowMessageBox, msg, "ReaAssist", 0)
+      end
+      local _, err_result = _typed_action_error_result(
+        "param_write_failed", "$.actions", tostring(err), result)
+      complete(false, err_result)
+      return
+    end
+    close_block("ReaAssist: typed actions", -1)
+    complete(true, { result = result })
+  end
+
+  if #param_actions > 0 then
+    result.deferred = true
+    if type(api.defer) ~= "function" then
+      return fail("defer_unavailable", "$.actions",
+        "REAPER defer API is unavailable")
+    end
+    local defer_ok, defer_err = pcall(api.defer, apply_params_and_close)
+    if not defer_ok then
+      return fail("defer_failed", "$.actions", tostring(defer_err))
+    end
+  else
+    close_block("ReaAssist: typed actions", -1)
+    complete(true, { result = result })
+  end
+
+  return true, result
+end
+
+function Code.execute_typed_actions_from_text(text, opts)
+  opts = type(opts) == "table" and opts or {}
+  local plan, errors = Code.typed_actions_plan_from_text(text, opts)
+  if not plan then
+    local code = _typed_action_first_error_code(errors)
+    local result_code = (code == "invalid_json" or code == "invalid_json_shape")
+      and "invalid_json" or "missing_action_block"
+    return _typed_action_error_result(result_code, "$",
+      code or "No reaassist-actions block found", nil)
+  end
+  local semantic_ok, semantic_errors = Code.validate_typed_actions_semantics(
+    plan, {
+      profile = opts.profile,
+      user_text = opts.user_text or "",
+    })
+  if not semantic_ok then
+    return _typed_action_error_result("semantic_mismatch", "$.actions",
+      Code.format_typed_action_semantic_errors(semantic_errors, 4), nil)
+  end
+  return Code.execute_typed_actions_plan(plan, opts)
+end
+
+function Code.inspect_typed_actions(text, opts)
+  opts = type(opts) == "table" and opts or {}
   local metrics = {
     present = false,
     valid = false,
     executed = false,
     fallback_to_lua = false,
+    raw_json = false,
     retry_count = 0,
     error = nil,
     op_counts = _typed_action_blank_op_counts(),
   }
+
+  if opts.allow_raw_json then
+    local raw_json = _typed_action_trim(text)
+    if raw_json:sub(1, 1) == "{" then
+      metrics.present = true
+      metrics.raw_json = true
+      local plan, parse_errors = Code.parse_typed_actions_block(raw_json)
+      if not plan then
+        metrics.error = _typed_action_first_error_code(parse_errors) or "invalid_json"
+        return metrics
+      end
+      Code.repair_typed_actions_plan(plan, opts)
+      metrics.op_counts = _typed_action_count_ops(plan)
+      local valid, validate_errors = Code.validate_typed_actions_plan(plan)
+      if not valid then
+        metrics.error = _typed_action_first_error_code(validate_errors) or "invalid_plan"
+        return metrics
+      end
+      metrics.valid = true
+      return metrics
+    end
+  end
 
   local raw, extract_errors = Code.extract_typed_actions(text)
   if not raw then
@@ -18802,6 +26983,7 @@ function Code.inspect_typed_actions(text)
     return metrics
   end
 
+  Code.repair_typed_actions_plan(plan, opts)
   metrics.op_counts = _typed_action_count_ops(plan)
   local valid, validate_errors = Code.validate_typed_actions_plan(plan)
   if not valid then
@@ -18878,6 +27060,253 @@ function Code.find_unknown_reaper_calls(lua_code)
   if #unknown == 0 then return nil, total end
   table.sort(unknown)
   return unknown, total
+end
+
+-- =============================================================================
+-- Code.find_unverified_main_oncommand_ids
+-- =============================================================================
+-- Main_OnCommand(command_id, 0) is a sharp edge: any integer is syntactically
+-- valid, so the API validator cannot tell whether the model picked the right
+-- REAPER action. We only allow literal numeric IDs from the small documented
+-- common-action list, or IDs the user explicitly typed in the request. Other
+-- native actions should be implemented with direct API calls where possible,
+-- or the model should ask the user to confirm the exact Action List ID.
+
+function Code.find_unverified_main_oncommand_ids(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  local common = {
+    [1007] = true, [1008] = true, [1013] = true, [1016] = true,
+    [40044] = true, [40073] = true,
+
+    [40029] = true, [40030] = true, [40026] = true, [40012] = true,
+    [40061] = true, [40362] = true, [40548] = true, [40006] = true,
+    [40057] = true, [40058] = true, [40698] = true, [40434] = true,
+    [40033] = true, [40123] = true, [40719] = true,
+
+    [40001] = true, [40005] = true, [40062] = true, [40297] = true,
+    [40296] = true,
+
+    [40020] = true, [40635] = true, [40626] = true, [40364] = true,
+    [40769] = true,
+  }
+  local function user_text_mentions_action_id(id)
+    local text = tostring(user_text or "")
+    id = tostring(id or "")
+    if id == "" then return false end
+    local pos = 1
+    while true do
+      local s, e = text:find(id, pos, true)
+      if not s then return false end
+      local before = s > 1 and text:sub(s - 1, s - 1) or ""
+      local after = e < #text and text:sub(e + 1, e + 1) or ""
+      if not before:match("%d") and not after:match("%d") then
+        return true
+      end
+      pos = e + 1
+    end
+  end
+  local seen, bad = {}, {}
+  local line_no = 0
+  for raw_line in (lua_code .. "\n"):gmatch("([^\n]*)\n") do
+    line_no = line_no + 1
+    local line = raw_line:gsub("%-%-[^\n]*", "")
+    for _, fn in ipairs({ "Main_OnCommand", "Main_OnCommandEx" }) do
+      local pattern = "reaper%." .. fn .. "%s*%(%s*([+-]?%d+)"
+      for id_text in line:gmatch(pattern) do
+        local id = tonumber(id_text)
+        if id and not common[id]
+           and not user_text_mentions_action_id(id) then
+          local key = fn .. ":" .. tostring(id)
+          if not seen[key] then
+            seen[key] = true
+            bad[#bad + 1] = { fn = fn, id = id, line = line_no }
+          end
+        end
+      end
+    end
+  end
+  if #bad == 0 then return nil end
+  table.sort(bad, function(a, b)
+    if a.id ~= b.id then return a.id < b.id end
+    return a.fn < b.fn
+  end)
+  return bad
+end
+
+-- =============================================================================
+-- Code.find_audio_accessor_transient_marker_scripts
+-- =============================================================================
+-- A simple Lua peak/energy detector is much worse than REAPER's Dynamic Split
+-- for "every hit" drum/transient stretch-marker work: it tends to mark decays
+-- and bleed as hits. For that intent, block scripts that combine audio-accessor
+-- scanning with direct stretch-marker insertion unless the user explicitly
+-- asked for a custom/approximate threshold detector.
+function Code.find_audio_accessor_transient_marker_scripts(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  local prompt = tostring(user_text or ""):lower()
+  local prompt_names_drum_source =
+       prompt:find("%f[%w]drum%f[%W]")
+    or prompt:find("%f[%w]drums%f[%W]")
+    or prompt:find("%f[%w]kick%f[%W]")
+    or prompt:find("%f[%w]snare%f[%W]")
+    or prompt:find("guide track", 1, true)
+  local prompt_names_drum_edit =
+       prompt:find("%f[%w]quantiz")
+    or prompt:find("%f[%w]edit")
+    or prompt:find("%f[%w]tighten")
+    or prompt:find("%f[%w]sync")
+    or prompt:find("%f[%w]transient")
+    or prompt:find("%f[%w]hit%f[%W]")
+    or prompt:find("%f[%w]hits%f[%W]")
+    or prompt:find("stretch marker", 1, true)
+  local drum_edit_intent =
+       CTX
+   and CTX.prompt_indicates_drum_edit
+   and CTX.prompt_indicates_drum_edit(prompt)
+    or (prompt_names_drum_source and prompt_names_drum_edit)
+  local wants_markers =
+       prompt:find("stretch marker", 1, true)
+    or prompt:find("stretch%-marker")
+    or drum_edit_intent
+  if not wants_markers then return nil end
+  local wants_hits =
+       prompt:find("%f[%w]hit%f[%W]")
+    or prompt:find("%f[%w]hits%f[%W]")
+    or prompt:find("%f[%w]transient%f[%W]")
+    or prompt:find("%f[%w]transients%f[%W]")
+    or prompt:find("%f[%w]drum%f[%W]")
+    or prompt:find("%f[%w]drums%f[%W]")
+    or prompt:find("%f[%w]kick%f[%W]")
+    or prompt:find("%f[%w]snare%f[%W]")
+    or drum_edit_intent
+  if not wants_hits then return nil end
+  local explicitly_custom =
+       prompt:find("%f[%w]custom%f[%W]")
+    or prompt:find("%f[%w]approximate%f[%W]")
+    or prompt:find("%f[%w]approximation%f[%W]")
+    or prompt:find("%f[%w]threshold%f[%W]")
+    or prompt:find("%f[%w]energy%f[%W]")
+  if explicitly_custom then return nil end
+
+  local stripped = lua_code:gsub("%-%-[^\n]*", "")
+  if not stripped:find("reaper%.GetAudioAccessorSamples", 1, false) then
+    return nil
+  end
+  if not stripped:find("reaper%.SetTakeStretchMarker", 1, false) then
+    return nil
+  end
+  local findings = {}
+  local line_no = 0
+  for raw_line in (lua_code .. "\n"):gmatch("([^\n]*)\n") do
+    line_no = line_no + 1
+    local line = raw_line:gsub("%-%-[^\n]*", "")
+    if line:find("reaper%.GetAudioAccessorSamples", 1, false)
+       or line:find("reaper%.SetTakeStretchMarker", 1, false) then
+      findings[#findings + 1] = { line = line_no }
+    end
+  end
+  return #findings > 0 and findings or { { line = 1 } }
+end
+
+-- =============================================================================
+-- Code.find_drum_whole_item_quantize_scripts
+-- =============================================================================
+-- Drum quantize should move hit timing inside the drum items (normally shared
+-- stretch markers from explicit guide tracks), not treat media-item starts as
+-- drum hits. A whole-item D_POSITION script can pass validation, report "moved"
+-- counts, and still do nothing audible if the item starts are already on-grid.
+function Code.find_drum_whole_item_quantize_scripts(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  local prompt = tostring(user_text or ""):lower()
+  local has_drum =
+       prompt:find("%f[%w]drum%f[%W]")
+    or prompt:find("%f[%w]drums%f[%W]")
+  if not has_drum then return nil end
+  local timing_intent =
+       prompt:find("%f[%w]quantiz")
+    or prompt:find("%f[%w]tighten")
+    or prompt:find("%f[%w]transient")
+    or prompt:find("%f[%w]snap%f[%W]")
+    or prompt:find("stretch marker", 1, true)
+    or prompt:find("guide track", 1, true)
+    or prompt:find("edit drums", 1, true)
+    or prompt:find("editing drums", 1, true)
+  if not timing_intent then return nil end
+  local explicitly_whole_item =
+       prompt:find("move whole item", 1, true)
+    or prompt:find("move whole media item", 1, true)
+    or prompt:find("move the items", 1, true)
+    or prompt:find("move item starts", 1, true)
+  if explicitly_whole_item then return nil end
+
+  local stripped = lua_code:gsub("%-%-[^\n]*", "")
+  if not stripped:find("reaper%.SetMediaItemInfo_Value", 1, false)
+     or not stripped:find("[\"']D_POSITION[\"']") then
+    return nil
+  end
+  if stripped:find("reaper%.SetTakeStretchMarker", 1, false) then
+    return nil
+  end
+
+  local findings = {}
+  local line_no = 0
+  for raw_line in (lua_code .. "\n"):gmatch("([^\n]*)\n") do
+    line_no = line_no + 1
+    local line = raw_line:gsub("%-%-[^\n]*", "")
+    if line:find("reaper%.SetMediaItemInfo_Value", 1, false)
+       and line:find("[\"']D_POSITION[\"']") then
+      findings[#findings + 1] = { line = line_no }
+    end
+  end
+  return #findings > 0 and findings or { { line = 1 } }
+end
+
+-- Drum stretch-marker quantize must normalize every affected item to the same
+-- marker set. If a script adds/moves stretch markers without deleting/replacing
+-- the range first, guide tracks can keep Dynamic Split-only markers while the
+-- rest of the kit gets a different map.
+function Code.find_unsynced_drum_stretch_marker_scripts(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  local prompt = tostring(user_text or ""):lower()
+  local has_drum =
+       prompt:find("%f[%w]drum%f[%W]")
+    or prompt:find("%f[%w]drums%f[%W]")
+  if not has_drum then return nil end
+  local timing_intent =
+       prompt:find("%f[%w]quantiz")
+    or prompt:find("%f[%w]tighten")
+    or prompt:find("%f[%w]transient")
+    or prompt:find("%f[%w]snap%f[%W]")
+    or prompt:find("stretch marker", 1, true)
+    or prompt:find("guide track", 1, true)
+    or prompt:find("edit drums", 1, true)
+    or prompt:find("editing drums", 1, true)
+  if not timing_intent then return nil end
+  local explicit_existing =
+       prompt:find("existing stretch marker", 1, true)
+    or prompt:find("existing markers", 1, true)
+    or prompt:find("already has stretch marker", 1, true)
+    or prompt:find("already have stretch marker", 1, true)
+  if explicit_existing then return nil end
+
+  local stripped = lua_code:gsub("%-%-[^\n]*", "")
+  if not stripped:find("reaper%.SetTakeStretchMarker", 1, false) then
+    return nil
+  end
+  if stripped:find("reaper%.DeleteTakeStretchMarkers", 1, false) then
+    return nil
+  end
+
+  local findings = {}
+  local line_no = 0
+  for raw_line in (lua_code .. "\n"):gmatch("([^\n]*)\n") do
+    line_no = line_no + 1
+    local line = raw_line:gsub("%-%-[^\n]*", "")
+    if line:find("reaper%.SetTakeStretchMarker", 1, false) then
+      findings[#findings + 1] = { line = line_no }
+    end
+  end
+  return #findings > 0 and findings or { { line = 1 } }
 end
 
 -- =============================================================================
@@ -19041,7 +27470,9 @@ function Code.find_untracked_createtracksend_results(lua_code)
     return nil
   end
 
+  local violations, seen = {}, {}
   local ignored_by_source = {}
+  local assigned_sendidx = {}
   local pos = 1
   while true do
     local s, open_pos = stripped:find("reaper%.CreateTrackSend%s*%(", pos)
@@ -19049,8 +27480,22 @@ function Code.find_untracked_createtracksend_results(lua_code)
     local line_start = stripped:sub(1, s):match(".*()\n")
     line_start = line_start and (line_start + 1) or 1
     local prefix = stripped:sub(line_start, s - 1)
-    if prefix:match("^%s*$") then
-      local args = parse_args(open_pos)
+    local args = parse_args(open_pos)
+    local lhs = prefix:match("^%s*local%s+(.+)%s*=%s*$")
+      or prefix:match("^%s*(.-)%s*=%s*$")
+    if lhs and lhs:find(",", 1, true) then
+      local key = "multi_assign:" .. tostring(line_for_pos(s))
+      if not seen[key] then
+        seen[key] = true
+        violations[#violations + 1] = {
+          kind = "multi_assign",
+          source = args and args[1] or "",
+          sendidx = lhs,
+          create_line = line_for_pos(s),
+          set_line = line_for_pos(s),
+        }
+      end
+    elseif prefix:match("^%s*$") then
       if args and args[1] and args[1] ~= "" then
         local src = normalize_arg(args[1])
         ignored_by_source[src] = ignored_by_source[src] or {}
@@ -19059,11 +27504,41 @@ function Code.find_untracked_createtracksend_results(lua_code)
           line = line_for_pos(s),
         }
       end
+    elseif lhs then
+      local var = lhs:match("^%s*([%a_][%w_]*)%s*$")
+      if var and args and args[1] and args[1] ~= "" then
+        assigned_sendidx[var] = {
+          source = args[1],
+          create_line = line_for_pos(s),
+        }
+      end
     end
     pos = open_pos + 1
   end
 
-  local violations, seen = {}, {}
+  for var, create in pairs(assigned_sendidx) do
+    local esc = var:gsub("([^%w_])", "%%%1")
+    local bad_s, bad_e = stripped:find("%f[%w_]if%s+[^%n]-" .. esc
+      .. "%s*~=%s*0%f[^%w_]")
+    if not bad_s then
+      bad_s, bad_e = stripped:find("%f[%w_]if%s+[^%n]-" .. esc
+        .. "%s*>%s*0%f[^%w_]")
+    end
+    if bad_s and create.create_line and line_for_pos(bad_s) >= create.create_line then
+      local key = "zero_check:" .. tostring(var) .. ":" .. tostring(line_for_pos(bad_s))
+      if not seen[key] then
+        seen[key] = true
+        violations[#violations + 1] = {
+          kind = "zero_check",
+          source = create.source,
+          sendidx = var,
+          create_line = create.create_line,
+          set_line = line_for_pos(bad_s),
+        }
+      end
+    end
+  end
+
   pos = 1
   while true do
     local s, open_pos = stripped:find("reaper%.SetTrackSendInfo_Value%s*%(", pos)
@@ -19106,6 +27581,505 @@ function Code.find_untracked_createtracksend_results(lua_code)
     return tostring(a.source) < tostring(b.source)
   end)
   return violations
+end
+
+-- =============================================================================
+-- Code.find_master_send_remove_misuse
+-- =============================================================================
+-- Master/parent send is not a normal send slot. Removing category 1 sends removes
+-- hardware outputs; the master/parent send lives on B_MAINSEND.
+function Code.prompt_requests_master_send_change(user_text)
+  if Code._typed_action_user_requests_master_send_state
+     and Code._typed_action_user_requests_master_send_state(user_text) then
+    return true
+  end
+  local lt = tostring(user_text or ""):lower():gsub("%s+", " ")
+  if lt == "" then return false end
+  return lt:find("master send", 1, true) ~= nil
+    or lt:find("master sends", 1, true) ~= nil
+    or lt:find("main send", 1, true) ~= nil
+    or lt:find("main sends", 1, true) ~= nil
+    or lt:find("master/parent", 1, true) ~= nil
+    or lt:find("master parent", 1, true) ~= nil
+    or lt:find("parent send", 1, true) ~= nil
+    or lt:find("parent sends", 1, true) ~= nil
+    or lt:find("master output", 1, true) ~= nil
+    or lt:find("master_send", 1, true) ~= nil
+    or lt:find("going only to the master", 1, true) ~= nil
+    or lt:find("only goes to master", 1, true) ~= nil
+    or lt:find("only to the master", 1, true) ~= nil
+end
+
+function Code.find_master_send_remove_misuse(lua_code)
+  if not lua_code or lua_code == "" then return nil end
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+
+  local one_vars = {}
+  for name in stripped:gmatch("%f[%w_]local%s+([%a_][%w_]*)%s*=%s*1%f[^%w_]") do
+    local ln = name:lower()
+    if ln:find("master", 1, true)
+        or ln:find("send", 1, true)
+        or ln:find("cat", 1, true)
+        or ln:find("category", 1, true) then
+      one_vars[name] = true
+    end
+  end
+
+  local violations, seen = {}, {}
+  local pos = 1
+  while true do
+    local s, open_pos = stripped:find("reaper%.RemoveTrackSend%s*%(", pos)
+    if not s then break end
+    local depth, i = 1, open_pos + 1
+    local field, args, in_str = {}, {}, nil
+    while i <= #stripped do
+      local c = stripped:sub(i, i)
+      if in_str then
+        field[#field + 1] = c
+        if c == "\\" then
+          i = i + 1
+          if i <= #stripped then field[#field + 1] = stripped:sub(i, i) end
+        elseif c == in_str then
+          in_str = nil
+        end
+      else
+        if c == '"' or c == "'" then
+          in_str = c
+          field[#field + 1] = c
+        elseif c == "(" or c == "[" or c == "{" then
+          depth = depth + 1
+          field[#field + 1] = c
+        elseif c == ")" or c == "]" or c == "}" then
+          depth = depth - 1
+          if depth == 0 then
+            args[#args + 1] = table.concat(field):match("^%s*(.-)%s*$") or ""
+            break
+          end
+          field[#field + 1] = c
+        elseif c == "," and depth == 1 then
+          args[#args + 1] = table.concat(field):match("^%s*(.-)%s*$") or ""
+          field = {}
+        else
+          field[#field + 1] = c
+        end
+      end
+      i = i + 1
+    end
+    local category = args[2] and args[2]:match("^%s*(.-)%s*$") or ""
+    if category == "1" or one_vars[category] then
+      local key = tostring(line_for_pos(s)) .. ":" .. category
+      if not seen[key] then
+        seen[key] = true
+        violations[#violations + 1] = {
+          line = line_for_pos(s),
+          category = category,
+        }
+      end
+    end
+    pos = open_pos + 1
+  end
+  if #violations == 0 then return nil end
+  return violations
+end
+
+function Code.prompt_requests_track_pan(user_text)
+  local lt = tostring(user_text or ""):lower():gsub("%s+", " ")
+  if lt == "" then return false end
+  if lt:find("send pan", 1, true)
+      or lt:find("pan the send", 1, true)
+      or lt:find("pan send", 1, true) then
+    return false
+  end
+  return lt:find("%f[%w]pan%f[%W]") ~= nil
+    or lt:find("percent left", 1, true) ~= nil
+    or lt:find("percent right", 1, true) ~= nil
+end
+
+function Code.find_track_pan_sent_as_send_pan(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  if not Code.prompt_requests_track_pan(user_text) then return nil end
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  if stripped:find("reaper%.SetMediaTrackInfo_Value%s*%([^%)]-[\"']D_PAN[\"']") then
+    return nil
+  end
+  local violations = {}
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+  local pos = 1
+  while true do
+    local s = stripped:find("reaper%.SetTrackSendInfo_Value%s*%([^%)]-[\"']D_PAN[\"']", pos)
+    if not s then break end
+    violations[#violations + 1] = { line = line_for_pos(s) }
+    pos = s + 1
+  end
+  if #violations == 0 then return nil end
+  return violations
+end
+
+-- =============================================================================
+-- Code.prompt_requests_track_creation / Code.lua_creates_tracks
+-- =============================================================================
+-- Guard against syntactically valid but inert scripts where the user asked to
+-- create tracks and the model merely renames existing track handles.
+function Code.prompt_requests_track_creation(user_text)
+  local lt = tostring(user_text or ""):lower()
+  if lt == "" then return false end
+  lt = lt:gsub("%s+", " ")
+  local patterns = {
+    "%f[%w]create%s+exactly%s+.-%f[%w]track%f[%W]",
+    "%f[%w]create%s+exactly%s+.-%f[%w]tracks%f[%W]",
+    "%f[%w]creates%s+exactly%s+.-%f[%w]track%f[%W]",
+    "%f[%w]creates%s+exactly%s+.-%f[%w]tracks%f[%W]",
+    "%f[%w]create%s+one%s+track%f[%W]",
+    "%f[%w]creates%s+one%s+track%f[%W]",
+    "%f[%w]create%s+a%s+track%f[%W]",
+    "%f[%w]creates%s+a%s+track%f[%W]",
+    "%f[%w]create%s+track%s+named%f[%W]",
+    "%f[%w]creates%s+track%s+named%f[%W]",
+    "%f[%w]create%s+tracks%s+named%f[%W]",
+    "%f[%w]creates%s+tracks%s+named%f[%W]",
+    "%f[%w]insert%s+a%s+track%f[%W]",
+    "%f[%w]insert%s+tracks%s+named%f[%W]",
+    "%f[%w]add%s+a%s+track%f[%W]",
+    "%f[%w]add%s+tracks%s+named%f[%W]",
+  }
+  for _, pat in ipairs(patterns) do
+    if lt:find(pat) then return true end
+  end
+  return false
+end
+
+function Code.lua_creates_tracks(lua_code)
+  if not lua_code or lua_code == "" then return false end
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  if stripped:find("reaper%.InsertTrackAtIndex%s*%(") then return true end
+  if stripped:find("reaper%.Main_OnCommand%s*%(%s*40001%s*,") then return true end
+  return false
+end
+
+function Code.find_literal_gettrack_index_mismatches(lua_code, snapshot)
+  if type(lua_code) ~= "string" or lua_code == "" then return nil end
+  if type(snapshot) ~= "string" or snapshot == "" then return nil end
+  local tracks = {}
+  local track_count
+  track_count = tonumber(snapshot:match("Tracks%s*%(%s*N%s*=%s*(%d+)%s*%)"))
+  for line in snapshot:gmatch("[^\r\n]+") do
+    local idx, name = line:match("^(%d+)|([^|]*)|")
+    idx = tonumber(idx)
+    if idx and name then
+      tracks[#tracks + 1] = {
+        display_idx = idx,
+        api_idx = idx - 1,
+        name = name,
+        name_l = tostring(name):lower(),
+      }
+    end
+  end
+  if #tracks == 0 and not track_count then return nil end
+
+  local violations = {}
+  local line_no = 0
+  for line in lua_code:gmatch("[^\r\n]+") do
+    line_no = line_no + 1
+    local line_l = line:lower()
+    for idx_text in line:gmatch("reaper%.GetTrack%s*%(%s*0%s*,%s*(%d+)%s*%)") do
+      local api_idx = tonumber(idx_text)
+      local expected
+      local reason
+      if track_count and api_idx and api_idx >= track_count then
+        expected = track_count > 0 and (track_count - 1) or 0
+        reason = "out_of_range"
+      end
+      for _, tr in ipairs(tracks) do
+        local mentions_track_number =
+          line_l:find("%f[%w]track%s*" .. tostring(tr.display_idx) .. "%f[%W]") ~= nil
+        local mentions_name = tr.name_l ~= "" and line_l:find(tr.name_l, 1, true) ~= nil
+        if (mentions_track_number or mentions_name)
+            and api_idx and api_idx ~= tr.api_idx then
+          expected = tr.api_idx
+          reason = mentions_name and "name_comment_mismatch"
+            or "track_number_comment_mismatch"
+          break
+        end
+      end
+      if expected then
+        violations[#violations + 1] = {
+          line = line_no,
+          api_idx = api_idx,
+          expected_api_idx = expected,
+          reason = reason,
+          source = line:match("^%s*(.-)%s*$"),
+        }
+      end
+    end
+  end
+  if #violations == 0 then return nil end
+  return violations
+end
+
+function Code.find_track_creation_index_misuse(lua_code, user_text, snapshot)
+  if type(lua_code) ~= "string" or lua_code == "" then return nil end
+  if not Code.prompt_requests_track_creation(user_text) then return nil end
+  local lt = tostring(user_text or ""):lower():gsub("%s+", " ")
+  if lt:find("%f[%w]before%f[%W]")
+      or lt:find("%f[%w]after%f[%W]")
+      or lt:find("at position", 1, true)
+      or lt:find("at track", 1, true)
+      or lt:find("insert position", 1, true) then
+    return nil
+  end
+  local track_count = nil
+  if type(snapshot) == "string" then
+    track_count = tonumber(snapshot:match("Tracks%s*%(%s*N%s*=%s*(%d+)%s*%)"))
+  end
+  if not track_count then track_count = 0 end
+
+  local violations = {}
+  local line_no = 0
+  for line in lua_code:gmatch("[^\r\n]+") do
+    line_no = line_no + 1
+    local insert_idx =
+      tonumber(line:match("reaper%.InsertTrackAtIndex%s*%(%s*(%d+)%s*,"))
+    if insert_idx then
+      track_count = track_count + 1
+    end
+    for idx_text in line:gmatch("reaper%.GetTrack%s*%(%s*0%s*,%s*(%d+)%s*%)") do
+      local api_idx = tonumber(idx_text)
+      if api_idx and api_idx >= track_count then
+        violations[#violations + 1] = {
+          line = line_no,
+          api_idx = api_idx,
+          expected_api_idx = track_count > 0 and (track_count - 1) or 0,
+          reason = "created_track_out_of_range",
+          source = line:match("^%s*(.-)%s*$"),
+        }
+      end
+    end
+  end
+  if #violations == 0 then return nil end
+  return violations
+end
+
+function Code.find_folder_child_boundary_misuse(lua_code, user_text)
+  if type(lua_code) ~= "string" or lua_code == "" then return nil end
+  local lt = tostring(user_text or ""):lower():gsub("%s+", " ")
+  local child_text, parent_text =
+    lt:match("make%s+(.+)%s+children%s+of%s+([^%.]+)")
+  if not child_text or not parent_text then return nil end
+  if not lua_code:find("I_FOLDERDEPTH", 1, true) then return nil end
+
+  local function norm(s)
+    s = tostring(s or ""):lower()
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    s = s:gsub("^the%s+", ""):gsub("%s+tracks?$", "")
+    return s:gsub("%s+", " ")
+  end
+
+  child_text = child_text:gsub(",%s*and%s+", ",")
+    :gsub("%s+and%s+", ",")
+  local children, child_set = {}, {}
+  for part in child_text:gmatch("[^,]+") do
+    local child = norm(part)
+    if child ~= "" then
+      children[#children + 1] = child
+      child_set[child] = true
+    end
+  end
+  if #children == 0 then return nil end
+  local last_child = children[#children]
+
+  local ref_to_name = {}
+  local name_to_ref = {}
+  for ref, name in lua_code:gmatch(
+      "reaper%.GetSetMediaTrackInfo_String%s*%(%s*([%w_%.%[%]]+)%s*,%s*[\"']P_NAME[\"']%s*,%s*[\"']([^\"']+)[\"']") do
+    local normalized_name = norm(name)
+    ref_to_name[ref] = normalized_name
+    name_to_ref[normalized_name] = ref
+  end
+  if not next(ref_to_name) then return nil end
+
+  local negative_by_name = {}
+  local line_no = 0
+  for line in lua_code:gmatch("[^\r\n]+") do
+    line_no = line_no + 1
+    local ref, depth = line:match(
+      "reaper%.SetMediaTrackInfo_Value%s*%(%s*([%w_%.%[%]]+)%s*,%s*[\"']I_FOLDERDEPTH[\"']%s*,%s*(-?%d+)")
+    depth = tonumber(depth)
+    if ref and depth and depth < 0 then
+      local name = ref_to_name[ref]
+      if name then
+        negative_by_name[name] = { line = line_no, depth = depth, ref = ref }
+      end
+    end
+  end
+  local last_child_close = negative_by_name[last_child]
+  local violations = {}
+  for name, info in pairs(negative_by_name) do
+    if not child_set[name] then
+      violations[#violations + 1] = {
+        line = info.line,
+        name = name,
+        ref = info.ref,
+        expected_name = last_child,
+        expected_ref = name_to_ref[last_child],
+        parent = norm(parent_text),
+        reason = last_child_close and "outside_track_closes_folder"
+          or "last_child_not_closed",
+      }
+    end
+  end
+  if #violations == 0 then return nil end
+  return violations
+end
+
+function Code.repair_folder_child_boundary_misuse(lua_code, user_text)
+  local findings = Code.find_folder_child_boundary_misuse(lua_code, user_text)
+  if not findings or #findings == 0 then return lua_code, false, nil end
+  local f = findings[1]
+  if not f.ref or not f.expected_ref then return lua_code, false, findings end
+  local function patt(s)
+    return tostring(s or ""):gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
+  end
+  local call_pat = "reaper%.SetMediaTrackInfo_Value%s*%(%s*"
+    .. patt(f.ref)
+    .. "%s*,%s*[\"']I_FOLDERDEPTH[\"']%s*,%s*-?%d+%s*%)"
+  local replacement = "reaper.SetMediaTrackInfo_Value("
+    .. tostring(f.expected_ref) .. ", \"I_FOLDERDEPTH\", -1)\n"
+    .. "reaper.SetMediaTrackInfo_Value("
+    .. tostring(f.ref) .. ", \"I_FOLDERDEPTH\", 0)"
+  local repaired, n = lua_code:gsub(call_pat, function()
+    return replacement
+  end, 1)
+  if n == 0 then return lua_code, false, findings end
+  return repaired, true, findings
+end
+
+-- =============================================================================
+-- Code.find_nil_prone_settrackselected_args
+-- =============================================================================
+-- SetTrackSelected requires a real boolean. Lower-tier models sometimes pass an
+-- and/or expression that can evaluate to nil, which crashes at runtime.
+function Code.find_nil_prone_settrackselected_args(lua_code)
+  if not lua_code or lua_code == "" then return nil end
+  local stripped = lua_code:gsub("%-%-[^\n]*", "")
+
+  local function trim(v)
+    return tostring(v or ""):match("^%s*(.-)%s*$") or ""
+  end
+
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+
+  local assignments = {}
+  for line in stripped:gmatch("[^\r\n]+") do
+    local var, expr = line:match("^%s*local%s+([%a_][%w_]*)%s*=%s*(.-)%s*$")
+    if not var then
+      var, expr = line:match("^%s*([%a_][%w_]*)%s*=%s*(.-)%s*$")
+    end
+    if var and expr and expr:sub(1, 1) ~= "=" then
+      assignments[var] = trim(expr)
+    end
+  end
+
+  local function parse_args(open_pos)
+    local args, field = {}, {}
+    local depth = 1
+    local i = open_pos + 1
+    local in_str = nil
+    while i <= #stripped do
+      local c = stripped:sub(i, i)
+      if in_str then
+        field[#field + 1] = c
+        if c == "\\" then
+          i = i + 1
+          if i <= #stripped then field[#field + 1] = stripped:sub(i, i) end
+        elseif c == in_str then
+          in_str = nil
+        end
+      else
+        if c == '"' or c == "'" then
+          in_str = c
+          field[#field + 1] = c
+        elseif c == "(" or c == "[" or c == "{" then
+          depth = depth + 1
+          field[#field + 1] = c
+        elseif c == ")" or c == "]" or c == "}" then
+          depth = depth - 1
+          if depth == 0 then
+            args[#args + 1] = trim(table.concat(field))
+            return args
+          end
+          field[#field + 1] = c
+        elseif c == "," and depth == 1 then
+          args[#args + 1] = trim(table.concat(field))
+          field = {}
+        else
+          field[#field + 1] = c
+        end
+      end
+      i = i + 1
+    end
+    return nil
+  end
+
+  local function may_return_nil_boolean(expr)
+    expr = trim(expr)
+    if expr == "" or expr == "true" or expr == "false" then return false end
+    if expr:find("%f[%w_]and%s+true%s+or%s+false%f[^%w_]")
+       or expr:find("%f[%w_]and%s+false%s+or%s+true%f[^%w_]")
+       or expr:find("%f[%w_]or%s+false%s*$")
+       or expr:find("%f[%w_]or%s+true%s*$") then
+      return false
+    end
+    return expr:find("%f[%w_]and%f[^%w_]") ~= nil
+  end
+
+  local findings = {}
+  local pos = 1
+  while true do
+    local s, open_pos = stripped:find("reaper%.SetTrackSelected%s*%(", pos)
+    if not s then break end
+    local args = parse_args(open_pos)
+    local arg = args and args[2] or nil
+    local expr = nil
+    if arg and may_return_nil_boolean(arg) then
+      expr = arg
+    else
+      local var = arg and arg:match("^([%a_][%w_]*)$") or nil
+      if var and assignments[var] and may_return_nil_boolean(assignments[var]) then
+        expr = assignments[var]
+      end
+    end
+    if expr then
+      findings[#findings + 1] = {
+        line = line_for_pos(s),
+        arg = arg,
+        expr = expr,
+      }
+    end
+    pos = open_pos + 1
+  end
+
+  if #findings == 0 then return nil end
+  return findings
 end
 
 -- =============================================================================
@@ -19276,6 +28250,153 @@ function Code.find_stock_fx_substitutions(lua_code, user_prompt)
     if a.line ~= b.line then return a.line < b.line end
     if a.requested ~= b.requested then return a.requested < b.requested end
     return tostring(a.substitute) < tostring(b.substitute)
+  end)
+  return violations
+end
+
+-- =============================================================================
+-- Code.find_preferred_fx_identifier_drift
+-- =============================================================================
+-- Preferred-plugin context gives the model exact AddByName identifiers such as
+-- "VST3: Pro-G". After hidden repair retries, weaker models sometimes strip the
+-- prefix/vendor and fall back to bare names like "Pro-G", which can fail on
+-- installs where REAPER requires the exact identifier. Catch those before
+-- auto-run and ask for a focused identifier-only repair.
+function Code.find_preferred_fx_identifier_drift(lua_code)
+  if not lua_code or lua_code == "" then return nil end
+  if not FXCache or not FXCache.get_preferred_types then return nil end
+
+  local prefs_map = FXCache.get_preferred_types() or {}
+  local preferred = {}
+  local function strip_prefix(s)
+    return tostring(s or ""):gsub("^[A-Za-z][A-Za-z0-9]*:%s*", "")
+  end
+  local function strip_vendor(s)
+    return tostring(s or ""):gsub("%s+%b()", "")
+  end
+  local function has_prefix(s)
+    return tostring(s or ""):find("^[A-Za-z][A-Za-z0-9]*:%s*") ~= nil
+  end
+  for type_key, ident in pairs(prefs_map) do
+    ident = tostring(ident or "")
+    if ident ~= "" and has_prefix(ident) then
+      local bare = strip_vendor(strip_prefix(ident)):lower()
+      if bare ~= "" then
+        preferred[#preferred + 1] = {
+          type_key = tostring(type_key or ""),
+          exact = ident,
+          bare = bare,
+        }
+      end
+    end
+  end
+  if #preferred == 0 then return nil end
+
+  local stripped = lua_code:gsub("%-%-[^\n]*", "")
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+
+  local function parse_args(open_pos)
+    local args, field = {}, {}
+    local depth = 1
+    local i = open_pos + 1
+    local in_str = nil
+    while i <= #stripped do
+      local c = stripped:sub(i, i)
+      if in_str then
+        field[#field + 1] = c
+        if c == "\\" then
+          i = i + 1
+          if i <= #stripped then field[#field + 1] = stripped:sub(i, i) end
+        elseif c == in_str then
+          in_str = nil
+        end
+      else
+        if c == '"' or c == "'" then
+          in_str = c
+          field[#field + 1] = c
+        elseif c == "(" or c == "[" or c == "{" then
+          depth = depth + 1
+          field[#field + 1] = c
+        elseif c == ")" or c == "]" or c == "}" then
+          depth = depth - 1
+          if depth == 0 then
+            args[#args + 1] = table.concat(field):match("^%s*(.-)%s*$") or ""
+            return args
+          end
+          field[#field + 1] = c
+        elseif c == "," and depth == 1 then
+          args[#args + 1] = table.concat(field):match("^%s*(.-)%s*$") or ""
+          field = {}
+        else
+          field[#field + 1] = c
+        end
+      end
+      i = i + 1
+    end
+    return nil
+  end
+
+  local function string_literal_value(v)
+    v = tostring(v or ""):match("^%s*(.-)%s*$") or ""
+    local q = v:sub(1, 1)
+    if q ~= '"' and q ~= "'" then return nil end
+    local out = {}
+    local i = 2
+    while i <= #v do
+      local c = v:sub(i, i)
+      if c == "\\" then
+        i = i + 1
+        if i <= #v then out[#out + 1] = v:sub(i, i) end
+      elseif c == q then
+        return table.concat(out)
+      else
+        out[#out + 1] = c
+      end
+      i = i + 1
+    end
+    return nil
+  end
+
+  local violations, seen = {}, {}
+  for _, fn in ipairs({ "TrackFX_AddByName", "TakeFX_AddByName" }) do
+    local pos = 1
+    while true do
+      local s, open_pos = stripped:find("reaper%." .. fn .. "%s*%(", pos)
+      if not s then break end
+      local args = parse_args(open_pos)
+      local plugin = args and string_literal_value(args[2])
+      if plugin and plugin ~= "" and not has_prefix(plugin) then
+        local normalized = strip_vendor(plugin):lower()
+        for _, pref in ipairs(preferred) do
+          if normalized == pref.bare
+             or normalized:find(pref.bare, 1, true)
+             or pref.bare:find(normalized, 1, true) then
+            local key = fn .. ":" .. normalized .. ":" .. pref.exact .. ":"
+              .. tostring(line_for_pos(s))
+            if not seen[key] then
+              seen[key] = true
+              violations[#violations + 1] = {
+                fn = fn,
+                plugin = plugin,
+                exact = pref.exact,
+                type_key = pref.type_key,
+                line = line_for_pos(s),
+              }
+            end
+          end
+        end
+      end
+      pos = open_pos + 1
+    end
+  end
+  if #violations == 0 then return nil end
+  table.sort(violations, function(a, b)
+    if a.line ~= b.line then return a.line < b.line end
+    return tostring(a.plugin) < tostring(b.plugin)
   end)
   return violations
 end
@@ -19981,6 +29102,7 @@ local _WRITE_VERBS = {
   "set", "change", "configure", "adjust", "make", "turn",
   "boost", "cut", "raise", "lower", "lift", "drop", "tune",
   "tweak", "dial", "increase", "decrease", "shift", "move",
+  "bump", "nudge", "trim",
 }
 -- Value-shape patterns: number followed by a unit, or a colon-separated
 -- ratio. Lua patterns; %d is digit, %s is whitespace.
@@ -20013,6 +29135,170 @@ function Code.prompt_has_param_write_intent(text)
     if lo:find(pat) then return true end
   end
   return false
+end
+
+function Code.prompt_has_chain_or_recipe_intent(text)
+  if type(text) ~= "string" or text == "" then return false end
+  local lo = text:lower()
+  return lo:find("%f[%w]chain%f[%W]") ~= nil
+    or lo:find("%f[%w]recipe%f[%W]") ~= nil
+    or lo:find("%f[%w]preset%f[%W]") ~= nil
+    or lo:find("%f[%w]tone%f[%W]") ~= nil
+    or lo:find("%f[%w]sound%s+like%f[%W]") ~= nil
+    or lo:find("%f[%w]vibe%f[%W]") ~= nil
+end
+
+function Code.prompt_is_fx_add_only(text)
+  if type(text) ~= "string" or text == "" then return false end
+  if Code.prompt_has_param_write_intent(text)
+     or Code.prompt_has_chain_or_recipe_intent(text) then
+    return false
+  end
+  local lo = text:lower()
+  local add_verb =
+    lo:find("%f[%w]add%f[%W]") ~= nil
+    or lo:find("%f[%w]insert%f[%W]") ~= nil
+    or lo:find("%f[%w]load%f[%W]") ~= nil
+    or lo:find("%f[%w]put%f[%W]") ~= nil
+  if not add_verb then return false end
+  return lo:find("%f[%w]fx%f[%W]") ~= nil
+    or lo:find("%f[%w]plugin%f[%W]") ~= nil
+    or lo:find("%f[%w]effect%f[%W]") ~= nil
+    or lo:find("reaeq", 1, true) ~= nil
+    or lo:find("reacomp", 1, true) ~= nil
+    or lo:find("readelay", 1, true) ~= nil
+    or lo:find("reaverbate", 1, true) ~= nil
+    or lo:find("reagate", 1, true) ~= nil
+    or lo:find("realimit", 1, true) ~= nil
+    or lo:find("%f[%w]compressor%f[%W]") ~= nil
+    or lo:find("%f[%w]eq%f[%W]") ~= nil
+    or lo:find("%f[%w]delay%f[%W]") ~= nil
+    or lo:find("%f[%w]reverb%f[%W]") ~= nil
+    or lo:find("%f[%w]gate%f[%W]") ~= nil
+    or lo:find("%f[%w]limiter%f[%W]") ~= nil
+end
+
+function Code.lua_has_fx_param_writes(lua_code)
+  if type(lua_code) ~= "string" or lua_code == "" then return false end
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  return stripped:find("reaper%.TrackFX_SetParam%s*%(") ~= nil
+    or stripped:find("reaper%.TrackFX_SetParamNormalized%s*%(") ~= nil
+    or stripped:find("reaper%.TakeFX_SetParam%s*%(") ~= nil
+    or stripped:find("reaper%.TakeFX_SetParamNormalized%s*%(") ~= nil
+    or stripped:find("%f[%w]set_param_display%s*%(") ~= nil
+    or stripped:find("%f[%w]set_param_enum%s*%(") ~= nil
+    or stripped:find("%f[%w]set_param_enum_paced%s*%(") ~= nil
+end
+
+function Code.prompt_requests_full_param_readout(text)
+  if type(text) ~= "string" or text == "" then return false end
+  local lo = text:lower()
+  return lo:find("%f[%w]all%f[%W]") ~= nil
+    or lo:find("%f[%w]full%f[%W]") ~= nil
+    or lo:find("%f[%w]every%f[%W]") ~= nil
+    or lo:find("%f[%w]complete%f[%W]") ~= nil
+    or lo:find("%f[%w]raw%f[%W]") ~= nil
+  end
+
+function Code.filter_broad_fx_param_readout(user_text, response_text)
+  if type(response_text) ~= "string" or response_text == "" then
+    return response_text, 0
+  end
+  if response_text:find("```", 1, true) then return response_text, 0 end
+  if not (CTX and CTX.prompt_has_fx_param_read_intent
+      and CTX.prompt_has_fx_param_read_intent(user_text)) then
+    return response_text, 0
+  end
+  if Code.prompt_requests_full_param_readout(user_text) then
+    return response_text, 0
+  end
+
+  local prompt = tostring(user_text or ""):lower()
+  local function clean_name(name)
+    return tostring(name or "")
+      :gsub("[`*_]", "")
+      :gsub("^%s*(.-)%s*$", "%1")
+      :lower()
+  end
+  local function clean_display(display)
+    return tostring(display or "")
+      :gsub("[`*_]", "")
+      :gsub("^%s*(.-)%s*$", "%1")
+      :lower()
+  end
+  local function prompt_mentions_name(name)
+    local n = clean_name(name):gsub("[^%w]+", " "):gsub("^%s*(.-)%s*$", "%1")
+    if n == "" then return false end
+    return prompt:find(n, 1, true) ~= nil
+  end
+  local function defaultish_display(name, display)
+    local n, d = clean_name(name), clean_display(display)
+    if d == "" then return true end
+    if n:find("pan", 1, true) then
+      return d == "0" or d == "0.0" or d == "0.00" or d == "0.000"
+        or d == "center" or d == "centre" or d == "c"
+    end
+    if n:find("level", 1, true) or n:find("trim", 1, true) then
+      return d == "0 db" or d == "0.0 db" or d == "0.00 db"
+        or d == "+0 db" or d == "+0.0 db" or d == "+0.00 db"
+        or d == "-inf db" or d == "-inf" or d == "-infinity db"
+    end
+    if n:find("mix", 1, true) then
+      return d == "0" or d == "0.0" or d == "0.00" or d == "0.000"
+    end
+    if n:find("bypass", 1, true) then
+      return d:find("not bypass", 1, true) ~= nil
+        or d == "off" or d == "disabled"
+    end
+    if n == "midi state" then return d == "enabled" end
+    if n == "oversampling" or n == "expert mode"
+       or n == "audition side chain" then
+      return d == "off" or d == "disabled"
+    end
+    if n == "channel mode" then
+      return d == "left/right" or d == "stereo"
+    end
+    if n == "side chain input signal" then
+      return d == "normal input" or d == "normal"
+    end
+    if n == "interface" or n == "ex style" then return true end
+    return false
+  end
+  local function should_drop(name, display)
+    if prompt_mentions_name(name) then return false end
+    local n = clean_name(name)
+    local secondary =
+         n:find("side chain level", 1, true)
+      or n:find("side chain mix", 1, true)
+      or n == "side chain input signal"
+      or n == "wet level" or n == "wet pan"
+      or n == "dry level" or n == "dry pan"
+      or n == "input level" or n == "input pan"
+      or n == "output level" or n == "output pan"
+      or n == "midi state"
+      or n == "oversampling"
+      or n == "expert mode"
+      or n == "audition side chain"
+      or n == "channel mode"
+      or n == "interface"
+      or n == "ex style"
+      or n:find("bypass", 1, true)
+    return secondary and defaultish_display(n, display)
+  end
+
+  local out, removed = {}, 0
+  for line in (response_text .. "\n"):gmatch("(.-)\n") do
+    local name, display = line:match("^%s*[-*]%s+([^:]+):%s*(.-)%s*$")
+    if name and should_drop(name, display) then
+      removed = removed + 1
+    else
+      out[#out+1] = line
+    end
+  end
+  if removed == 0 then return response_text, 0 end
+  return tbl_concat(out, "\n"):gsub("%s+$", ""), removed
 end
 
 -- =============================================================================
@@ -20122,6 +29408,271 @@ do
     if #found == 0 then return nil end
     return "Warning: " .. tbl_concat(found, ", ")
   end
+end
+
+function Code._lua_artifact_trim(s)
+  s = tostring(s or "")
+  return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+function Code._lua_artifact_line_count(s)
+  s = tostring(s or "")
+  if s == "" then return 0 end
+  local n = 1
+  for _ in s:gmatch("\n") do n = n + 1 end
+  return n
+end
+
+function Code._lua_artifact_strip_comments(s)
+  return tostring(s or "")
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+end
+
+function Code._lua_artifact_context_says_fragment(text)
+  local lt = tostring(text or ""):lower()
+  if lt == "" then return false end
+  if lt:find("complete script", 1, true)
+     or lt:find("full script", 1, true)
+     or lt:find("entire script", 1, true)
+     or lt:find("runnable script", 1, true) then
+    return false
+  end
+  return lt:find("snippet", 1, true) ~= nil
+    or lt:find("fragment", 1, true) ~= nil
+    or lt:find("patch", 1, true) ~= nil
+    or lt:find("diff", 1, true) ~= nil
+    or lt:find("replace this", 1, true) ~= nil
+    or lt:find("replace the line", 1, true) ~= nil
+    or lt:find("change this line", 1, true) ~= nil
+    or lt:find("one-line", 1, true) ~= nil
+    or lt:find("one line", 1, true) ~= nil
+    or lt:find("single line", 1, true) ~= nil
+    or lt:find("only showed", 1, true) ~= nil
+    or lt:find("just reduce", 1, true) ~= nil
+end
+
+function Code.classify_lua_artifact(code, opts)
+  opts = opts or {}
+  local raw = tostring(code or "")
+  local trimmed = Code._lua_artifact_trim(raw)
+  local info = {
+    kind = "complete_script",
+    parse_ok = true,
+    runnable = true,
+    reason = nil,
+    line_count = Code._lua_artifact_line_count(trimmed),
+    byte_count = #raw,
+  }
+  if trimmed == "" then
+    info.kind = "empty"
+    info.runnable = false
+    info.reason = "empty Lua block"
+    return info
+  end
+
+  local _chunk, parse_err = load(trimmed, "lua_artifact_preflight", "t", {})
+  if not _chunk then
+    info.kind = "syntax_error"
+    info.parse_ok = false
+    info.runnable = false
+    info.parse_err = parse_err
+    info.reason = "Lua syntax check failed"
+    return info
+  end
+
+  local stripped = Code._lua_artifact_strip_comments(trimmed)
+  local lower = stripped:lower()
+  local first_line = stripped:match("^%s*([^\r\n]+)") or stripped
+  local short = info.line_count <= 4 and #trimmed <= 360
+  local has_reaper_or_gfx = stripped:find("reaper%.") ~= nil
+    or stripped:find("gfx%.") ~= nil
+  local has_complete_shape = lower:find("undo_beginblock", 1, true) ~= nil
+    or lower:find("undo_endblock", 1, true) ~= nil
+    or stripped:find("local%s+function%s+[%w_]+") ~= nil
+    or stripped:find("function%s+[%w_]+%s*%(") ~= nil
+    or stripped:find("reaper%.defer%s*%(") ~= nil
+  local starts_control =
+       first_line:match("^%s*if%s") ~= nil
+    or first_line:match("^%s*if%s*%(") ~= nil
+    or first_line:match("^%s*for%s") ~= nil
+    or first_line:match("^%s*while%s") ~= nil
+    or first_line:match("^%s*repeat%s*$") ~= nil
+    or first_line:match("^%s*elseif%s") ~= nil
+    or first_line:match("^%s*else%s*$") ~= nil
+    or first_line:match("^%s*return%s") ~= nil
+    or first_line:match("^%s*break%s*$") ~= nil
+
+  if trimmed:find("^%s*@@")
+     or trimmed:find("^%s*%-%-%-")
+     or trimmed:find("^%s*%+%+%+") then
+    info.kind = "patch"
+    info.runnable = false
+    info.reason = "diff or patch text"
+    return info
+  end
+
+  if short and starts_control and not has_reaper_or_gfx
+     and not has_complete_shape then
+    info.kind = "fragment"
+    info.runnable = false
+    info.reason = "short control-flow snippet without REAPER actions"
+    return info
+  end
+
+  if info.line_count <= 8
+     and Code._lua_artifact_context_says_fragment(opts.context_text)
+     and not has_complete_shape then
+    info.kind = "fragment"
+    info.runnable = false
+    info.reason = "surrounding text presents this as a snippet or patch"
+    return info
+  end
+
+  return info
+end
+
+function Code.lua_artifact_block_message(info)
+  info = info or {}
+  local kind = info.kind or "fragment"
+  local reason = info.reason or "it does not look self-contained"
+  if kind == "syntax_error" then
+    return "This Lua block failed syntax validation and was not run: "
+      .. tostring(info.parse_err or reason)
+  end
+  return "This Lua block looks like a " .. kind
+    .. ", not a complete runnable script (" .. tostring(reason) .. "). "
+    .. "ReaAssist did not run it. Ask for the complete script or edit "
+    .. "the block until it is self-contained before running."
+end
+
+function Code.record_latest_code_candidate(code, source, opts)
+  opts = opts or {}
+  if type(code) ~= "string" or code == "" then return nil end
+  local artifact = opts.artifact
+    or Code.classify_lua_artifact(code, { context_text = opts.context_text })
+  if not artifact or not artifact.parse_ok or not artifact.runnable then
+    return nil
+  end
+  local prev = S.latest_code_candidate
+  local keep_working = prev and prev.code == code and prev.working == true
+  S.latest_code_candidate = {
+    code = code,
+    source = source or "unknown",
+    code_type = "lua",
+    artifact_kind = artifact.kind,
+    runnable = true,
+    working = keep_working or opts.working == true,
+    working_note = keep_working and prev.working_note or opts.working_note,
+    captured_at = os.time and os.time() or nil,
+  }
+  return S.latest_code_candidate
+end
+
+function Code.extract_user_lua_candidate(user_text)
+  local text = tostring(user_text or "")
+  local parts = {}
+  for block in text:gmatch("```lua%s*\n(.-)\n%s*```") do
+    parts[#parts+1] = block
+  end
+  if #parts == 0 then
+    for block in text:gmatch("```reascript%s*\n(.-)\n%s*```") do
+      parts[#parts+1] = block
+    end
+  end
+  if #parts > 0 then
+    local code = tbl_concat(parts, "\n\n")
+    return code, Code.classify_lua_artifact(code, { context_text = text })
+  end
+
+  local trimmed = Code._lua_artifact_trim(text)
+  if trimmed == "" then return nil end
+  if not (trimmed:find("reaper%.") or trimmed:find("gfx%.")
+          or trimmed:find("local%s+function")
+          or trimmed:find("function%s+[%w_]+%s*%(")) then
+    return nil
+  end
+  local artifact = Code.classify_lua_artifact(trimmed, { context_text = text })
+  if artifact.parse_ok then return trimmed, artifact end
+  return nil
+end
+
+function Code.maybe_update_latest_from_user(user_text)
+  local code, artifact = Code.extract_user_lua_candidate(user_text)
+  if code and artifact then
+    return Code.record_latest_code_candidate(code, "user", {
+      artifact = artifact,
+      context_text = user_text,
+    })
+  end
+  return nil
+end
+
+function Code.maybe_mark_latest_candidate_working(user_text)
+  local cand = S.latest_code_candidate
+  if not cand then return false end
+  local lt = tostring(user_text or ""):lower()
+  if lt == "" then return false end
+  if lt:find("doesn't work", 1, true)
+     or lt:find("doesnt work", 1, true)
+     or lt:find("does not work", 1, true)
+     or lt:find("not working", 1, true)
+     or lt:find("won't work", 1, true)
+     or lt:find("wont work", 1, true)
+     or lt:find("runtime error", 1, true) then
+    return false
+  end
+  local positive = lt:find("%f[%w]works%f[%W]") ~= nil
+    or lt:find("%f[%w]worked%f[%W]") ~= nil
+    or lt:find("%f[%w]good%f[%W]") ~= nil
+    or lt:find("%f[%w]perfect%f[%W]") ~= nil
+    or lt:find("looks good", 1, true) ~= nil
+    or lt:find("that's it", 1, true) ~= nil
+    or lt:find("that is it", 1, true) ~= nil
+  if not positive then return false end
+  cand.working = true
+  cand.working_note = user_text
+  cand.working_at = os.time and os.time() or nil
+  return true
+end
+
+function Code.latest_code_followup_note(user_text)
+  local cand = S.latest_code_candidate
+  if not cand or type(cand.code) ~= "string" or cand.code == "" then
+    return nil
+  end
+  local lt = tostring(user_text or ""):lower()
+  local refers =
+       lt:find("latest script", 1, true) ~= nil
+    or lt:find("last script", 1, true) ~= nil
+    or lt:find("previous script", 1, true) ~= nil
+    or lt:find("complete script", 1, true) ~= nil
+    or lt:find("complete latest", 1, true) ~= nil
+    or lt:find("full script", 1, true) ~= nil
+    or lt:find("working script", 1, true) ~= nil
+    or lt:find("this script", 1, true) ~= nil
+    or lt:find("that script", 1, true) ~= nil
+    or lt:find("same script", 1, true) ~= nil
+    or lt:find("fix it", 1, true) ~= nil
+    or lt:find("change it", 1, true) ~= nil
+    or lt:find("make it", 1, true) ~= nil
+    or lt:find("add to it", 1, true) ~= nil
+    or lt:find("before you do", 1, true) ~= nil
+  if not refers then return nil end
+  local code = cand.code
+  local truncated = false
+  if #code > 40000 then
+    code = code:sub(1, 40000)
+      .. "\n-- [latest code candidate truncated for context]"
+    truncated = true
+  end
+  return "(INTERNAL CODE CONTEXT -- DO NOT MENTION THIS: The user appears "
+    .. "to be referring to the latest runnable Lua script candidate. Use "
+    .. "this as the current code base unless the user explicitly provides "
+    .. "a newer script. source=" .. tostring(cand.source)
+    .. ", working_base=" .. tostring(cand.working == true)
+    .. ", truncated=" .. tostring(truncated) .. ".)\n```lua\n"
+    .. code .. "\n```"
 end
 
 -- =============================================================================
@@ -20276,6 +29827,17 @@ local CODE_SANDBOX_BASE = {
 }
 
 function Code.run(code)
+  local artifact = Code.classify_lua_artifact(code)
+  if not artifact.runnable then
+    local msg = Code.lua_artifact_block_message(artifact)
+    Log.line("SCRIPT", "Blocked non-runnable Lua artifact: "
+      .. tostring(artifact.kind) .. " / " .. tostring(artifact.reason))
+    Log.add_error(msg)
+    S.last_run_error = "blocked non-runnable lua artifact: "
+      .. tostring(artifact.kind) .. " / " .. tostring(artifact.reason)
+    return false
+  end
+
   -- Per-call sandbox: shallow copy the static base and add the print redirect.
   -- Built BEFORE load() so we can pass the env directly via the 4th argument,
   -- which is cleaner and stricter than retrofitting _ENV via debug.setupvalue.
@@ -21660,19 +31222,22 @@ function Net.process_response_buckets(text)
   -- below catches the pathological case (model keeps re-requesting already-
   -- pinned data). Threshold: 40 non-whitespace characters of non-tag,
   -- non-code content -- short tags like "Fetching..." don't need the hint.
-  do
-    local non_tag = scrubbed:gsub("<%s*context_needed%s*>.-<%s*/%s*context_needed%s*>", "")
-    local non_ws_count = 0
-    for _ in non_tag:gmatch("%S") do
-      non_ws_count = non_ws_count + 1
-      if non_ws_count > 40 then break end
-    end
-    if non_ws_count > 40 then
-      Log.line("CONTEXT_NEEDED",
-        "tag emitted alongside prose; firing fetch with reminder (\""
-        .. bucket_str .. "\")")
-      S._mixed_output_hint = true
-    end
+  local non_tag = scrubbed:gsub("<%s*context_needed%s*>.-<%s*/%s*context_needed%s*>", "")
+  local non_ws_count = 0
+  for _ in non_tag:gmatch("%S") do
+    non_ws_count = non_ws_count + 1
+    if non_ws_count > 40 then break end
+  end
+  local raw_non_tag = text:gsub("<%s*context_needed%s*>.-<%s*/%s*context_needed%s*>", "")
+  local has_final_payload =
+       raw_non_tag:find("```%s*[%w_-]*%s*\n") ~= nil
+    or raw_non_tag:find("reaper%.") ~= nil
+    or raw_non_tag:find('"actions"%s*:') ~= nil
+  if non_ws_count > 40 then
+    Log.line("CONTEXT_NEEDED",
+      "tag emitted alongside prose; firing fetch with reminder (\""
+      .. bucket_str .. "\")")
+    S._mixed_output_hint = true
   end
 
   local wants_docs        = false
@@ -21693,6 +31258,7 @@ function Net.process_response_buckets(text)
   local wants_fx_chains   = false
   local wants_track_flags = false
   local wants_midi        = false
+  local wants_recent_reaper_changes = false
   local wants_pref_plugins = false
   local wants_theme       = false
   local wants_fx_inspect  = false
@@ -21716,7 +31282,7 @@ function Net.process_response_buckets(text)
   -- Two-pass approach: pass 1 finds fx_params and its inline payload; pass 2
   -- collects subsequent non-keyword tokens as additional plugin name filters,
   -- so "fx_params:Plugin1, Plugin2" correctly builds filter = {Plugin1, Plugin2}.
-  local recognised_keywords = { session=true, docs=true, docs_extended=true, fx_params=true, plugin_ref=true, fx_list=true, fx_chains=true, track_flags=true, midi=true, preferred_plugins=true, theme=true, fx_inspect=true, resolve=true, prompt_bundle=true }
+  local recognised_keywords = { session=true, docs=true, docs_extended=true, recent_reaper_changes=true, fx_params=true, plugin_ref=true, fx_list=true, fx_chains=true, track_flags=true, midi=true, preferred_plugins=true, theme=true, fx_inspect=true, resolve=true, prompt_bundle=true }
   -- Hoisted out of the resolve branch so the pre-pass (just below) and the
   -- popup-bail scan-ahead can both reference it.
   local VALID_RESOLVE_TYPES = {
@@ -21767,9 +31333,11 @@ function Net.process_response_buckets(text)
   --
   -- Scope: only static buckets that map 1:1 to pinned slots (sticky
   -- bundles, static refs, or the snapshot attached to this turn).
-  -- Dynamic buckets (fx_params, fx_list, fx_chains, fx_inspect,
-  -- track_flags, resolve:*) are NOT pre-deduped -- their data is live
-  -- and the model is allowed to re-emit them to get a fresh read.
+  -- Most dynamic buckets (fx_list, fx_chains, fx_inspect, track_flags,
+  -- resolve:*) are NOT pre-deduped -- their data is live and the model is
+  -- allowed to re-emit them to get a fresh read. Scoped fx_params is the
+  -- exception: preempt may have already pinned the exact live instance for
+  -- this turn, and re-requesting it just burns a follow-up round-trip.
   local dropped_pinned = {}
   do
     local function token_already_pinned(kw, payload)
@@ -21781,8 +31349,16 @@ function Net.process_response_buckets(text)
         return S.pending_snapshot ~= nil
       elseif kw == "docs" and payload == "" then
         return S.api_ref_message ~= nil or S.docs_already_sent
+      elseif kw == "docs" and payload ~= "" then
+        local canonical = _docs_section_canonical(payload)
+        return canonical
+          and S.docs_section_sent
+          and S.docs_section_sent[canonical] == true
       elseif kw == "docs_extended" then
         return S.docs_extended_already_sent == true
+      elseif kw == "recent_reaper_changes" then
+        return S.sticky_context
+          and S.sticky_context["recent_reaper_changes"] ~= nil
       elseif kw == "midi" then
         return S.midi_ref_message ~= nil or S.midi_already_sent
       elseif kw == "theme" then
@@ -21801,6 +31377,11 @@ function Net.process_response_buckets(text)
         return S.fx_chains_already_sent == true
       elseif kw == "track_flags" then
         return S.track_flags_already_sent == true
+      elseif kw == "fx_params" and payload ~= "" then
+        local fp_key = "fx:" .. CTX.fx_filter_key({ CTX.fx_filter_parse(payload) })
+        return S.sticky_context
+          and (S.sticky_context[fp_key] ~= nil
+            or CTX.sticky_has_fx_params_for_ident(payload))
       elseif kw == "fx_params" and payload == "" then
         return S.fx_params_already_sent == true
       elseif kw == "fx_list" and payload == "" then
@@ -21836,11 +31417,23 @@ function Net.process_response_buckets(text)
       for _, t in ipairs(dropped_pinned) do
         S._context_reuse_hint[#S._context_reuse_hint+1] = t
       end
-      -- All tokens dropped -> no real fetch will fire below. Set the
-      -- preempt-hint sentinel so the if-wants gate at the bottom of the
-      -- function still fires a follow-up turn (carrying the reuse hint)
-      -- instead of falling through to display the tag-only response.
-      if #kept == 0 then wants_preempt_hint = true end
+      -- All tokens dropped -> no real fetch will fire below. If the model
+      -- also emitted a runnable/structured final payload, ignore the stale
+      -- tag and let the normal final-response path strip it, validate code,
+      -- and continue. Plain prose is not enough: models often narrate
+      -- "let me check..." while still failing to produce a usable answer.
+      -- In that case, fire a follow-up turn carrying the reuse hint instead
+      -- of falling through to display the non-answer.
+      if #kept == 0 then
+        if has_final_payload then
+          S._context_reuse_hint = nil
+          S._mixed_output_hint = nil
+          Log.line("CONTEXT_ALREADY_PINNED",
+            "all requested tags already present; ignoring stale tag and continuing final response")
+          return false
+        end
+        wants_preempt_hint = true
+      end
     end
     raw_tokens = kept
   end
@@ -21877,6 +31470,16 @@ function Net.process_response_buckets(text)
       last_scoped = nil
     elseif kw == "docs_extended" and not S.docs_extended_already_sent then
       wants_docs_extended = true
+      last_scoped = nil
+    elseif kw == "recent_reaper_changes" then
+      if not (S.sticky_context and S.sticky_context["recent_reaper_changes"]) then
+        wants_recent_reaper_changes = true
+      else
+        wants_preempt_hint = true
+        S._context_reuse_hint = S._context_reuse_hint or {}
+        S._context_reuse_hint[#S._context_reuse_hint+1] =
+          "recent_reaper_changes"
+      end
       last_scoped = nil
     elseif kw == "plugin_ref" then
       last_scoped = "plugin_ref"
@@ -22152,7 +31755,7 @@ function Net.process_response_buckets(text)
     fx_list_search = {}
   end
 
-  if wants_docs or wants_docs_extended or wants_docs_section or wants_session or wants_fx_params or wants_plugin_ref or wants_fx_list or wants_fx_chains or wants_track_flags or wants_midi or wants_pref_plugins or wants_theme or wants_fx_inspect or wants_preempt_hint or wants_prompt_bundle or #bogus_docs_sections > 0 then
+  if wants_docs or wants_docs_extended or wants_docs_section or wants_session or wants_fx_params or wants_plugin_ref or wants_fx_list or wants_fx_chains or wants_track_flags or wants_midi or wants_recent_reaper_changes or wants_pref_plugins or wants_theme or wants_fx_inspect or wants_preempt_hint or wants_prompt_bundle or #bogus_docs_sections > 0 then
     -- Build a fresh session snapshot if requested and not already present.
     if wants_session then
       S.session_already_sent = true
@@ -22325,6 +31928,16 @@ function Net.process_response_buckets(text)
         else
           Log.add_error(sec_err or ("Failed to load docs:" .. name))
         end
+      end
+    end
+    if wants_recent_reaper_changes then
+      local recent_content, recent_err = CTX.recent_reaper_changes()
+      if recent_content then
+        Net.sticky_set("recent_reaper_changes", recent_content, "context_needed")
+        fetched_to_sticky[#fetched_to_sticky+1] = "recent_reaper_changes"
+      else
+        Log.add_error(recent_err or "Failed to load recent_reaper_changes")
+        wants_recent_reaper_changes = false
       end
     end
     if #bogus_docs_sections > 0 then
@@ -22890,6 +32503,9 @@ function Net.process_response_buckets(text)
         end
         if wants_midi  then parts[#parts+1] = "midi" end
         if wants_theme then parts[#parts+1] = "theme" end
+        if wants_recent_reaper_changes then
+          parts[#parts+1] = "recent_reaper_changes"
+        end
         if wants_pref_plugins then
           parts[#parts+1] = #pref_plugin_types > 0
             and ("pref:" .. tbl_concat(pref_plugin_types, "/")) or "pref_plugins"
@@ -23037,6 +32653,7 @@ function Net.process_response_buckets(text)
       or next(S.prompt_bundle_sent)
       or S.docs_already_sent
       or S.docs_extended_already_sent
+      or next(S.docs_section_sent)
       or S.session_already_sent
       or S.fx_params_already_sent
       or S.fx_list_already_sent
@@ -23081,8 +32698,7 @@ function Net.process_response_buckets(text)
       Log.line("CONTEXT_LOOP",
         "unresolvable context loop; aborting turn with user error")
       Log.add_error("The model re-requested context that was already provided. "
-        .. "Try rephrasing your request, or switch to a different model.",
-        nil, nil, "token_limit")
+        .. "Try rephrasing your request, or switch to a different model.")
       S.status = "idle"
       return true  -- treat as handled so caller doesn't display the raw tag
     end
@@ -23205,7 +32821,7 @@ end
 -- Called by the main loop (throttled to CFG.POLL_THROTTLE) while waiting for
 -- a curl response. Handles in order:
 --   1. Watchdog timeout: fires an error if the per-provider timeout is exceeded.
---   2. Exit code file: detects curl network errors (codes 6, 7, 28, 35, 60).
+--   2. Exit code file: detects curl network errors and captures diagnostics.
 --   3. Partial-read guard: waits for closing brace before parsing.
 --   4. JSON decode and API error envelope detection (auth, rate-limit, overload).
 --   5. Auto-retry on 529 (overloaded_error) with exponential backoff (2s, 4s, 8s).
@@ -23224,9 +32840,17 @@ function Net._handle_watchdog_timeout()
   local poll_timeout = (p_active.is_custom
     and ((tonumber(p_active.request_timeout) or 600) + 15))
     or (prefs.cloud_request_timeout or CFG.CLOUD_TIMEOUT_DEFAULT)
-  if not S.send_time or (time_precise() - S.send_time) <= poll_timeout then
+  local elapsed = S.send_time and (time_precise() - S.send_time) or 0
+  if not S.send_time or elapsed <= poll_timeout then
     return false
   end
+  local timeout_msg =
+    "The request timed out. The server may be busy, or your internet "
+    .. "connection may have dropped.\n\n"
+    .. "Try sending your message again."
+  local debug = Net._curl_failure_debug(nil, timeout_msg, "watchdog_timeout")
+  debug.elapsed_s = elapsed
+  debug.poll_timeout_s = poll_timeout
   S.curl_pid  = nil
   S.send_time = nil
   if S.gemini_tier_pending then
@@ -23272,10 +32896,8 @@ function Net._handle_watchdog_timeout()
   if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
     S.display_messages[S.pending_display_idx].ctx_label = "timeout"
   end
-  Log.add_error(
-    "The request timed out. The server may be busy, or your internet "
-    .. "connection may have dropped.\n\n"
-    .. "Try sending your message again.")
+  Log.add_error(timeout_msg, nil, nil, nil,
+    { error_kind = "watchdog_timeout", error_debug = debug })
   return true
 end
 
@@ -23296,6 +32918,7 @@ function Net._handle_curl_exit_failure()
     -- instead of looping until the watchdog fires.
     S.curl_exited_clean = true
     os.remove(tmp.exit)
+    os.remove(tmp.err)
     return false
   end
   S.curl_pid  = nil
@@ -23303,20 +32926,38 @@ function Net._handle_curl_exit_failure()
   os.remove(tmp.exit)
   local prov_label = PROVIDERS.active().label
   local curl_errors = {
+    [5]  = "Can't reach the proxy configured for " .. prov_label .. ". "
+           .. "Check your network or proxy settings and try again.",
     [6]  = "Can't reach the " .. prov_label .. " servers. Please check your "
            .. "internet connection and try again.",
     [7]  = "The server refused the connection. It may be temporarily "
            .. "down. Try again in a few minutes.",
+    [18] = "The connection closed before the full response arrived. "
+           .. "Try sending your message again.",
+    [23] = "ReaAssist could not write the server response to its temporary "
+           .. "file. Check that your REAPER resource folder is writable.",
     [28] = "The connection timed out. Please check your internet "
            .. "connection and try again.",
     [35] = "Couldn't establish a secure connection. A firewall or "
            .. "network setting may be blocking it.",
+    [52] = "The server closed the connection without sending a response. "
+           .. "Try again in a moment.",
+    [56] = "The connection dropped while ReaAssist was receiving the "
+           .. "response. Try again in a moment.",
     [60] = "There's an issue with the server's security certificate. "
            .. "Please check that your computer's date and time are correct.",
+    [77] = "curl could not read its certificate bundle. Check your curl "
+           .. "or system certificate installation.",
+    [92] = "The HTTP/2 connection failed while talking to the server. "
+           .. "Try again; if it repeats, switch networks or disable VPN/proxy.",
   }
   local detail = curl_errors[exit_code]
     or "A network error occurred. Please check your internet "
        .. "connection and try again."
+  local debug = Net._curl_failure_debug(exit_code, detail)
+  Log.line("CURL", string.format("exit=%s (%s), provider=%s, model=%s",
+    tostring(exit_code), tostring(debug.exit_meaning),
+    tostring(debug.provider_id or "?"), tostring(debug.model_id or "?")))
   if S.gemini_tier_pending then
     -- Tier test curl errored: ambiguous result. Same rationale as the
     -- watchdog branch above -- don't persist a wrong classification on
@@ -23372,13 +33013,15 @@ function Net._handle_curl_exit_failure()
     end
     -- Append rather than clobber (see timeout branch above).
     Log.add_error(detail .. "\n\n"
-      .. "Once you're back online, click the Settings button to try again.")
+      .. "Once you're back online, click the Settings button to try again.",
+      nil, nil, nil, { error_kind = "curl_exit", error_debug = debug })
     return true
   end
   if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
     S.display_messages[S.pending_display_idx].ctx_label = "network error"
   end
-  Log.add_error(detail)
+  Log.add_error(detail, nil, nil, nil,
+    { error_kind = "curl_exit", error_debug = debug })
   return true
 end
 
@@ -23422,18 +33065,126 @@ end
 --   "insufficient_quota", "RESOURCE_EXHAUSTED"). is_overloaded triggers the
 --   exponential-backoff auto-retry (up to CFG.MAX_RETRIES). is_auth wipes
 --   the stored key and prompts re-entry.
+function Net._recoverable_openai_throttle(p, inner_type, api_err)
+  if not p or p.id ~= "openai" then return false end
+  local code = tostring(inner_type or "")
+  if code ~= "rate_limit_exceeded" and code ~= "rate_limit_error" then return false end
+  local lmsg = tostring(api_err or ""):lower()
+  if lmsg:find("billing", 1, true)
+      or lmsg:find("credit", 1, true)
+      or lmsg:find("insufficient_quota", 1, true)
+      or lmsg:find("exceeded your current quota", 1, true) then
+    return false
+  end
+  return true
+end
+
+function Net._retry_after_hint_seconds(api_err)
+  local lmsg = tostring(api_err or ""):lower()
+  local n = tonumber(lmsg:match("try again in%s+([%d%.]+)%s*ms"))
+  if n then return n / 1000 end
+  n = tonumber(lmsg:match("try again in%s+([%d%.]+)%s*s"))
+  if n then return n end
+  n = tonumber(lmsg:match("try again in%s+([%d%.]+)%s*sec"))
+  if n then return n end
+  return nil
+end
+
+function Net._recoverable_anthropic_server_error(inner_type, api_err)
+  if tostring(inner_type or "") ~= "api_error" then return false end
+  local lmsg = tostring(api_err or ""):lower()
+  return lmsg:find("internal server error", 1, true) ~= nil
+end
+
+function Net._overload_retry_policy(p, inner_type, api_err)
+  local max_retries = CFG.MAX_RETRIES
+  local jitter = 0
+  local min_delay = nil
+  if p and p.id == "google"
+     and (tostring(inner_type) == "UNAVAILABLE" or tostring(inner_type) == "503") then
+    max_retries = CFG.GEMINI_OVERLOAD_MAX_RETRIES or max_retries
+    jitter = CFG.RETRY_JITTER_SECS or 0
+  elseif p and p.id == "anthropic"
+     and Net._recoverable_anthropic_server_error(inner_type, api_err) then
+    jitter = CFG.RETRY_JITTER_SECS or 0
+  elseif Net._recoverable_openai_throttle(p, inner_type, api_err) then
+    max_retries = CFG.OPENAI_THROTTLE_MAX_RETRIES or max_retries
+    jitter = CFG.RETRY_JITTER_SECS or 0
+    min_delay = Net._retry_after_hint_seconds(api_err)
+  end
+  return max_retries, CFG.RETRY_DELAY_BASE, jitter, min_delay
+end
+
+function Net._google_capacity_recovery(p)
+  if not p or p.id ~= "google" or not S.pending_orig_prompt then return nil end
+  local current_model = p.models and p.models[S.pending_model_idx or prefs.model_idx] or nil
+  if current_model and current_model.id == "gemini-3-flash-preview" then return nil end
+  local fallback
+  for _, m in ipairs(p.models or {}) do
+    if m.id == "gemini-3-flash-preview" then fallback = m; break end
+  end
+  if not fallback then return nil end
+  return {
+    provider_id = "google",
+    model_id = current_model and current_model.id or nil,
+    fallback_provider_id = "google",
+    fallback_model_id = fallback.id,
+    fallback_label = fallback.label or "Flash 3",
+    recovery_prompt = S.pending_orig_prompt,
+    recovery_attachments = S.pending_attachments,
+  }
+end
+
 function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth)
   -- Auto-retry on overload (Anthropic 529, or provider-specific equivalents).
-  if is_overloaded and S.retry_count < CFG.MAX_RETRIES then
+  local max_retries, retry_base, retry_jitter, retry_min_delay =
+    Net._overload_retry_policy(p, inner_type, api_err)
+  if is_overloaded and S.retry_count < max_retries then
     S.retry_count = S.retry_count + 1
-    local delay = CFG.RETRY_DELAY_BASE * (2 ^ (S.retry_count - 1))
+    S.retry_max = max_retries
+    local delay = retry_base * (2 ^ (S.retry_count - 1))
+    if retry_min_delay and retry_min_delay > delay then delay = retry_min_delay end
+    if retry_jitter > 0 then delay = delay + (math.random() * retry_jitter) end
     S.retry_scheduled = true
     S.retry_fire_time = time_precise() + delay
     S.status = "waiting"
     if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
       S.display_messages[S.pending_display_idx].ctx_label =
-        str_format("retrying in %ds (%d/%d)", delay, S.retry_count, CFG.MAX_RETRIES)
+        str_format("retrying in %.1fs (%d/%d)", delay, S.retry_count, max_retries)
     end
+    return
+  end
+
+  if Net._recoverable_openai_throttle(p, inner_type, api_err) then
+    if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
+      S.display_messages[S.pending_display_idx].ctx_label = "provider throttle"
+    end
+    Log.add_error(
+      "OpenAI is throttling this request because the account/model "
+      .. "token-per-minute limit is temporarily saturated. This is a "
+      .. "provider-side throughput limit, not a Lua or prompt failure.\n\n"
+      .. "ReaAssist retried with exponential backoff and OpenAI still returned "
+      .. "a rate-limit error. Wait a minute and retry, or switch to a smaller "
+      .. "model for this request.")
+    return
+  end
+
+  if p and p.id == "google" and is_overloaded then
+    if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
+      S.display_messages[S.pending_display_idx].ctx_label = "provider capacity"
+    end
+    local recovery = Net._google_capacity_recovery(p)
+    local msg = "Google's Gemini service says this model is currently at capacity. "
+      .. "This is a provider-side availability issue, not a problem with your "
+      .. "prompt, API key, or ReaAssist.\n\n"
+      .. "ReaAssist retried with exponential backoff and Google still returned "
+      .. "503 UNAVAILABLE. You can wait and retry later"
+    if recovery then
+      msg = msg .. ", or switch to Flash 3 and resend the same message."
+    else
+      msg = msg .. "."
+    end
+    Log.add_error(msg, nil, nil, recovery and "google_model_capacity" or nil, recovery)
     return
   end
 
@@ -23476,6 +33227,12 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth)
     overloaded_error      = { label = "overloaded",
       msg = "The servers are busy right now. "
         .. "Wait a moment and try again; this usually clears up quickly." },
+    api_error             = { label = "provider service error",
+      msg = "The provider service returned a temporary internal server error. "
+        .. "This is a provider-side service issue, not a problem with your "
+        .. "prompt, API key, or ReaAssist.\n\n"
+        .. "ReaAssist retried with exponential backoff and the provider still "
+        .. "failed. Wait a moment and try again, or switch models for this request." },
     invalid_request_error = { label = "invalid request",
       msg = "This conversation has gotten too long for the model to handle."
         .. "\n\nTo fix this:\n- Click + new chat to start fresh\n"
@@ -23490,9 +33247,22 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth)
         .. "or check your plan here:",
       link_url = p.billing_url, link_label = p.billing_label },
     -- OpenAI
-    rate_limit_exceeded   = { label = "rate limited",
-      msg = "Slow down! You're sending messages too quickly. "
-        .. "Wait about 30 seconds and try again." },
+    rate_limit_exceeded   = { label = "provider throttle",
+      msg = "OpenAI is throttling this request because the account/model "
+        .. "token-per-minute limit is temporarily saturated. This is a "
+        .. "provider-side throughput limit, not a Lua or prompt failure.\n\n"
+        .. "Wait a minute and try again, or switch to a smaller model for this request." },
+    server_error          = { label = "provider service error",
+      msg = "The provider service returned a temporary server error. "
+        .. "This is a provider-side service issue, not a problem with your "
+        .. "prompt, API key, or ReaAssist.\n\n"
+        .. "ReaAssist retried with exponential backoff and the provider still "
+        .. "failed. Wait a moment and try again, or switch models for this request." },
+    overloaded            = { label = "provider busy",
+      msg = "The provider service is busy right now. This is a provider-side "
+        .. "capacity issue, not a problem with your prompt, API key, or ReaAssist.\n\n"
+        .. "ReaAssist retried with exponential backoff and the provider still "
+        .. "failed. Wait a moment and try again, or switch models for this request." },
     insufficient_quota    = { label = "out of credits",
       msg = "Your " .. p.label .. " account has run out of credits."
         .. "\n\nTo continue using ReaAssist, add funds to your account:",
@@ -23664,7 +33434,8 @@ function Net.try_finish_curl()
         end
       end
       Net._handle_api_error(p, it, em,
-        it == "overloaded_error",
+        it == "overloaded_error"
+          or Net._recoverable_anthropic_server_error(it, em),
         it == "authentication_error")
       return
     end
@@ -23728,11 +33499,12 @@ function Net.try_finish_curl()
     -- etc.) and DeepSeek follow the same wire format, so they share this branch.
     if type(resp.error) == "table" and resp.error ~= JSON.NULL then
       local code = resp.error.code or resp.error.type or ""
+      local em = type(resp.error.message) == "string" and resp.error.message or ""
       local is_auth = (code == "invalid_api_key")
-        or (type(resp.error.message) == "string"
-            and resp.error.message:lower():find("api key"))
+        or (em:lower():find("api key", 1, true) ~= nil)
       local is_overloaded = (code == "server_error" or code == "overloaded")
-      Net._handle_api_error(p, code, resp.error.message, is_overloaded, is_auth)
+        or Net._recoverable_openai_throttle(p, code, em)
+      Net._handle_api_error(p, code, em, is_overloaded, is_auth)
       return
     end
     -- Validate structure: {"choices":[{"message":{"content":"..."}}]}
@@ -24030,7 +33802,7 @@ function Net.try_finish_curl()
           S.pending_jsfx_intent and { minimal_tracks = true } or nil)
       end
       S.status = "waiting"
-      S.request_start_time = nil
+      Net._ensure_request_start_time()
       Code.safe_write(tmp.out, "")
       local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
         S.pending_snapshot, S.pending_attachments))
@@ -24111,7 +33883,7 @@ function Net.try_finish_curl()
             S.pending_jsfx_intent and { minimal_tracks = true } or nil)
         end
         S.status = "waiting"
-        S.request_start_time = nil
+        Net._ensure_request_start_time()
         Code.safe_write(tmp.out, "")
         local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
           S.pending_snapshot, S.pending_attachments))
@@ -24144,15 +33916,24 @@ function Net.try_finish_curl()
         dmsg.tok_cache_create = tok_in_create or 0
         dmsg.cost             = fail_cost
       end
+      if p.id == "google" then
+        local gc = Net.gemini_cache_debug_state(
+          "response_empty", S.gemini_cache_last_used == true, tok_in_read)
+        local req_gc = S.gemini_cache_last_state
+        if type(req_gc) == "table" then
+          gc.request_status = req_gc.status
+          gc.request_reason = req_gc.reason
+          gc.request_used   = req_gc.used == true
+          gc.request_create_reason = req_gc.create_reason
+        end
+        dmsg.gemini_cache = gc
+      end
       if S.request_start_time then
         dmsg.response_time = reaper.time_precise() - S.request_start_time
       end
     end
-    -- request_start_time is cleared at end-of-turn (status -> idle), not
-    -- here. The empty-text branch returns straight to idle below via
-    -- Log.add_error so the next send_to_api overwrites it anyway, but
-    -- keeping it set in the meantime keeps the in-flight timer logic
-    -- consistent with the other early-return paths.
+    -- This branch ends the turn with a visible error after recording
+    -- response_time above, so clear the live elapsed timer before surfacing it.
     S.request_start_time = nil
     -- Pop the orphan user message that fired this empty turn. Without
     -- this, the user's manual retry (via the recovery row or by
@@ -24200,6 +33981,18 @@ function Net.try_finish_curl()
       dmsg.tok_out          = (dmsg.tok_out          or 0) + raw_tok_out
       dmsg.tok_cache_read   = (dmsg.tok_cache_read   or 0) + tok_in_read
       dmsg.tok_cache_create = (dmsg.tok_cache_create or 0) + tok_in_create
+      if p.id == "google" then
+        local gc = Net.gemini_cache_debug_state(
+          "response", S.gemini_cache_last_used == true, tok_in_read)
+        local req_gc = S.gemini_cache_last_state
+        if type(req_gc) == "table" then
+          gc.request_status = req_gc.status
+          gc.request_reason = req_gc.reason
+          gc.request_used   = req_gc.used == true
+          gc.request_create_reason = req_gc.create_reason
+        end
+        dmsg.gemini_cache = gc
+      end
       S.session_tok_in        = S.session_tok_in  + raw_tok_in
       S.session_tok_out       = S.session_tok_out + raw_tok_out
       -- Cost estimation: look up model entry from the provider/model indices
@@ -24335,6 +34128,7 @@ function Net.try_finish_curl()
     end
   end
   local lua_code = #lua_parts > 0 and tbl_concat(lua_parts, "\n\n") or nil
+  local lua_artifact_info = nil
 
   -- Recover once when a model returns apparent Lua but omits or breaks the
   -- ```lua fence. Never execute unfenced text directly: bare-Lua recovery is
@@ -24380,7 +34174,7 @@ function Net.try_finish_curl()
           S.pending_jsfx_intent and { minimal_tracks = true } or nil)
       end
       S.status = "waiting"
-      S.request_start_time = nil
+      Net._ensure_request_start_time()
       Code.safe_write(tmp.out, "")
       local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
         S.pending_snapshot, S.pending_attachments))
@@ -24433,6 +34227,8 @@ function Net.try_finish_curl()
       end
     end
   end
+
+  local validator_gate_hit = false
 
   -- High-confidence void-return API assignment validator. Some REAPER API
   -- calls mutate project state but do not return the object just created; if a
@@ -24498,12 +34294,558 @@ function Net.try_finish_curl()
           S.pending_jsfx_intent and { minimal_tracks = true } or nil)
       end
       S.status = "waiting"
-      S.request_start_time = nil
+      Net._ensure_request_start_time()
       Code.safe_write(tmp.out, "")
       local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
         S.pending_snapshot, S.pending_attachments))
       if not ok and reason ~= "call_cap_exceeded" then
         Log.add_error("Auto-retry after void-return API assignment did not go "
+          .. "through. Please resend the last message.")
+      end
+      S.scroll_to_bottom = true
+      return
+    end
+  end
+
+  -- High-confidence create-track intent validator. Some weaker models answer a
+  -- "create tracks" prompt by fetching GetTrack(0, 0/1) and renaming those
+  -- handles, which passes syntax but does nothing in an empty project.
+  if lua_code
+      and not S.track_creation_retry_used
+      and Code.prompt_requests_track_creation(S.pending_orig_prompt)
+      and not Code.lua_creates_tracks(lua_code) then
+    S.track_creation_retry_used = true
+    S.track_creation_validator_retries =
+      (S.track_creation_validator_retries or 0) + 1
+    Probe.add_validator_retry(S.probe_turn, "api")
+    Log.line("TRACK-CREATION-RETRY",
+      "track-creation prompt without InsertTrackAtIndex; retrying with hint")
+    local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+      .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked you "
+      .. "to create one or more tracks, but your previous script only "
+      .. "looked up existing tracks with reaper.GetTrack(...) and renamed "
+      .. "them. That is inert when the project has no matching existing "
+      .. "tracks. For each requested new track, call "
+      .. "reaper.InsertTrackAtIndex(index, true) as a statement, then get "
+      .. "the created track with reaper.GetTrack(0, index) and set its "
+      .. "name. Preserve the requested order, exact track names, plugins, "
+      .. "sends, markers, MIDI notes, and selections. Respond as if this "
+      .. "is your FIRST reply -- do NOT apologize, do NOT mention a "
+      .. "retry.)\n\nPrevious Lua to fix:\n```lua\n"
+      .. lua_code
+      .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+    if #S.history > 0 and S.history[#S.history].role == "assistant" then
+      S.history[#S.history] = nil
+    end
+    if #S.history > 0 and S.history[#S.history].role == "user" then
+      S.history[#S.history] = nil
+    end
+    S.history[#S.history+1] = { role = "user", content = history_content }
+    if S.pending_display_idx
+       and S.display_messages[S.pending_display_idx] then
+      local dmsg = S.display_messages[S.pending_display_idx]
+      local existing = dmsg.ctx_label or ""
+      if not existing:find("track_creation_retry", 1, true) then
+        dmsg.ctx_label = existing ~= ""
+          and (existing .. " + track_creation_retry")
+          or "track_creation_retry"
+      end
+    end
+    if prefs.include_snapshot then
+      S.pending_project  = _resolve_pending_project()
+      S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+        S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+    end
+    S.status = "waiting"
+    Net._ensure_request_start_time()
+    Code.safe_write(tmp.out, "")
+    local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+      S.pending_snapshot, S.pending_attachments))
+    if not ok and reason ~= "call_cap_exceeded" then
+      Log.add_error("Auto-retry after inert track-creation script did not go "
+        .. "through. Please resend the last message.")
+    end
+    S.scroll_to_bottom = true
+    return
+  end
+
+  if lua_code
+      and Code.prompt_requests_track_creation(S.pending_orig_prompt) then
+    local bad_created_track_indices =
+      Code.find_track_creation_index_misuse(lua_code, S.pending_orig_prompt,
+        S.pending_snapshot)
+    if bad_created_track_indices and #bad_created_track_indices > 0
+        and not S.track_creation_index_retry_used then
+      S.track_creation_index_retry_used = true
+      S.track_creation_validator_retries =
+        (S.track_creation_validator_retries or 0) + 1
+      Probe.add_validator_retry(S.probe_turn, "api")
+      local finding = bad_created_track_indices[1]
+      Log.line("TRACK-CREATION-INDEX-RETRY",
+        "new-track GetTrack index can be nil on line "
+        .. tostring(finding.line or "?") .. "; retrying with creation-index hint")
+      local details = {}
+      for _, e in ipairs(bad_created_track_indices) do
+        details[#details + 1] =
+          "line " .. tostring(e.line or "?")
+          .. " fetches GetTrack(0, " .. tostring(e.api_idx)
+          .. ") before that API index exists; expected "
+          .. tostring(e.expected_api_idx)
+      end
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked you "
+        .. "to create one or more tracks, but your previous script used a "
+        .. "GetTrack index that can be nil immediately after insertion. For "
+        .. "new tracks created at the start of a project, use consecutive "
+        .. "0-based API indices: first new track InsertTrackAtIndex(0, true) "
+        .. "then GetTrack(0, 0); second new track InsertTrackAtIndex(1, true) "
+        .. "then GetTrack(0, 1), and so on. Affected line(s): "
+        .. tbl_concat(details, "; ") .. ". Preserve the requested order, "
+        .. "exact track names, plugins, sends, MIDI notes, markers, and "
+        .. "settings. Respond as if this is your FIRST reply -- do NOT "
+        .. "apologize, do NOT mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+        .. lua_code
+        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      if #S.history > 0 and S.history[#S.history].role == "assistant" then
+        S.history[#S.history] = nil
+      end
+      if #S.history > 0 and S.history[#S.history].role == "user" then
+        S.history[#S.history] = nil
+      end
+      S.history[#S.history+1] = { role = "user", content = history_content }
+      if S.pending_display_idx
+         and S.display_messages[S.pending_display_idx] then
+        local dmsg = S.display_messages[S.pending_display_idx]
+        local existing = dmsg.ctx_label or ""
+        if not existing:find("track_creation_index_retry", 1, true) then
+          dmsg.ctx_label = existing ~= ""
+            and (existing .. " + track_creation_index_retry")
+            or "track_creation_index_retry"
+        end
+      end
+      if prefs.include_snapshot then
+        S.pending_project  = _resolve_pending_project()
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+      end
+      S.status = "waiting"
+      Net._ensure_request_start_time()
+      Code.safe_write(tmp.out, "")
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
+        Log.add_error("Auto-retry after new-track index mismatch did not go "
+          .. "through. Please resend the last message.")
+      end
+      S.scroll_to_bottom = true
+      return
+    elseif bad_created_track_indices and #bad_created_track_indices > 0 then
+      validator_gate_hit = true
+      Log.line("TRACK-CREATION-INDEX-VALIDATOR",
+        "new-track GetTrack index mismatch persisted after retry; auto-run blocked")
+      Log.add_error("The script appears to fetch a newly-created track with "
+        .. "a GetTrack index that does not exist yet. Auto-run is blocked; "
+        .. "review and correct the InsertTrackAtIndex/GetTrack pairing "
+        .. "before running manually.")
+    end
+  end
+
+  -- Literal GetTrack index validator. SESSION CONTEXT track rows are 1-based
+  -- for readability, but reaper.GetTrack uses 0-based API indices. Small
+  -- models sometimes copy "track 1/2" directly into GetTrack(0, 1/2), which
+  -- either targets the wrong track or returns nil and blocks auto-run behind a
+  -- message box.
+  if lua_code then
+    local bad_track_indices =
+      Code.find_literal_gettrack_index_mismatches(lua_code, S.pending_snapshot)
+    if bad_track_indices and #bad_track_indices > 0
+        and not S.track_index_retry_used then
+      S.track_index_retry_used = true
+      S.track_index_validator_retries =
+        (S.track_index_validator_retries or 0) + 1
+      Probe.add_validator_retry(S.probe_turn, "api")
+      local finding = bad_track_indices[1]
+      Log.line("TRACK-INDEX-RETRY",
+        "literal GetTrack index mismatch on line "
+        .. tostring(finding.line or "?") .. "; retrying with 0-based hint")
+      local details = {}
+      for _, e in ipairs(bad_track_indices) do
+        details[#details + 1] =
+          "line " .. tostring(e.line or "?")
+          .. " uses GetTrack(0, " .. tostring(e.api_idx)
+          .. "), expected API index " .. tostring(e.expected_api_idx)
+          .. " (" .. tostring(e.reason or "mismatch") .. ")"
+      end
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous "
+        .. "reply used SESSION CONTEXT's 1-based track numbers directly "
+        .. "inside reaper.GetTrack. REAPER's GetTrack API is 0-based: "
+        .. "SESSION track 1 -> reaper.GetTrack(0, 0), SESSION track 2 -> "
+        .. "reaper.GetTrack(0, 1), and so on. Fix only the track index "
+        .. "resolution unless another change is required to make the "
+        .. "script valid. Preserve the requested tracks, names, plugins, "
+        .. "sends, MIDI notes, markers, routing, and ordering. Affected "
+        .. "line(s): " .. tbl_concat(details, "; ") .. ". Respond as if "
+        .. "this is your FIRST reply -- do NOT apologize, do NOT mention "
+        .. "a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+        .. lua_code
+        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      if #S.history > 0 and S.history[#S.history].role == "assistant" then
+        S.history[#S.history] = nil
+      end
+      if #S.history > 0 and S.history[#S.history].role == "user" then
+        S.history[#S.history] = nil
+      end
+      S.history[#S.history+1] = { role = "user", content = history_content }
+      if S.pending_display_idx
+         and S.display_messages[S.pending_display_idx] then
+        local dmsg = S.display_messages[S.pending_display_idx]
+        local existing = dmsg.ctx_label or ""
+        if not existing:find("track_index_retry", 1, true) then
+          dmsg.ctx_label = existing ~= ""
+            and (existing .. " + track_index_retry")
+            or "track_index_retry"
+        end
+      end
+      if prefs.include_snapshot then
+        S.pending_project  = _resolve_pending_project()
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+      end
+      S.status = "waiting"
+      Net._ensure_request_start_time()
+      Code.safe_write(tmp.out, "")
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
+        Log.add_error("Auto-retry after literal track-index mismatch did not "
+          .. "go through. Please resend the last message.")
+      end
+      S.scroll_to_bottom = true
+      return
+    elseif bad_track_indices and #bad_track_indices > 0 then
+      validator_gate_hit = true
+      Log.line("TRACK-INDEX-VALIDATOR",
+        "literal GetTrack index mismatch persisted after retry; auto-run blocked")
+      local user_lines = {}
+      for _, e in ipairs(bad_track_indices) do
+        user_lines[#user_lines + 1] =
+          "line " .. tostring(e.line or "?")
+          .. " uses GetTrack(0, " .. tostring(e.api_idx)
+          .. "), expected " .. tostring(e.expected_api_idx)
+      end
+      Log.add_error("The script appears to use 1-based session track numbers "
+        .. "directly in reaper.GetTrack, which uses 0-based API indices: "
+        .. tbl_concat(user_lines, "; ")
+        .. ". Auto-run is blocked; review and correct the track indices "
+        .. "before running manually.")
+    end
+  end
+
+  if lua_code then
+    local repaired_folder_lua, did_folder_repair, bad_folder_boundary =
+      Code.repair_folder_child_boundary_misuse(lua_code, S.pending_orig_prompt)
+    if did_folder_repair then
+      lua_code = repaired_folder_lua
+      lua_artifact_info = nil
+      local finding = bad_folder_boundary and bad_folder_boundary[1] or {}
+      Log.line("FOLDER-BOUNDARY-REPAIR",
+        "moved folder close from "
+        .. tostring(finding.name or "outside track")
+        .. " to " .. tostring(finding.expected_name or "last child"))
+    end
+    bad_folder_boundary = did_folder_repair and nil or bad_folder_boundary
+    if bad_folder_boundary and #bad_folder_boundary > 0
+        and not S.folder_boundary_retry_used then
+      S.folder_boundary_retry_used = true
+      Probe.add_validator_retry(S.probe_turn, "api")
+      local finding = bad_folder_boundary[1]
+      Log.line("FOLDER-BOUNDARY-RETRY",
+        "folder close appears on outside track line "
+        .. tostring(finding.line or "?") .. "; retrying with folder-depth hint")
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked for "
+        .. "specific child tracks inside a folder. REAPER's I_FOLDERDEPTH "
+        .. "closes the folder on the last child track, not on the following "
+        .. "outside track. In this request, the last requested child is `"
+        .. tostring(finding.expected_name or "the last child")
+        .. "`, but your previous script put the negative folder depth on `"
+        .. tostring(finding.name or "another track")
+        .. "`. Move the negative I_FOLDERDEPTH close to the last child and "
+        .. "leave the outside track at 0 unless it starts/closes another "
+        .. "folder. Preserve the requested order, exact track names, plugins, "
+        .. "sends, MIDI notes, markers, and settings. Respond as if this is "
+        .. "your FIRST reply -- do NOT apologize, do NOT mention a retry.)\n\n"
+        .. "Previous Lua to fix:\n```lua\n"
+        .. lua_code
+        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      if #S.history > 0 and S.history[#S.history].role == "assistant" then
+        S.history[#S.history] = nil
+      end
+      if #S.history > 0 and S.history[#S.history].role == "user" then
+        S.history[#S.history] = nil
+      end
+      S.history[#S.history+1] = { role = "user", content = history_content }
+      if S.pending_display_idx
+         and S.display_messages[S.pending_display_idx] then
+        local dmsg = S.display_messages[S.pending_display_idx]
+        local existing = dmsg.ctx_label or ""
+        if not existing:find("folder_boundary_retry", 1, true) then
+          dmsg.ctx_label = existing ~= ""
+            and (existing .. " + folder_boundary_retry")
+            or "folder_boundary_retry"
+        end
+      end
+      if prefs.include_snapshot then
+        S.pending_project  = _resolve_pending_project()
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+      end
+      S.status = "waiting"
+      Net._ensure_request_start_time()
+      Code.safe_write(tmp.out, "")
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
+        Log.add_error("Auto-retry after folder-boundary mismatch did not go "
+          .. "through. Please resend the last message.")
+      end
+      S.scroll_to_bottom = true
+      return
+    elseif bad_folder_boundary and #bad_folder_boundary > 0 then
+      validator_gate_hit = true
+      Log.line("FOLDER-BOUNDARY-VALIDATOR",
+        "folder close stayed on outside track after retry; auto-run blocked")
+      local finding = bad_folder_boundary[1]
+      Log.add_error("The script appears to close a folder on `"
+        .. tostring(finding.name or "an outside track")
+        .. "` instead of the requested last child `"
+        .. tostring(finding.expected_name or "last child")
+        .. "`. Auto-run is blocked; review I_FOLDERDEPTH before running manually.")
+    end
+  end
+
+  -- High-confidence track-selection write validator. REAPER selection should be
+  -- changed through SetTrackSelected; writing B_SELECTED/I_SELECTED via
+  -- SetMediaTrackInfo_Value can appear to work in code but fail to persist in
+  -- real project state.
+  if lua_code and not S.track_selection_retry_used then
+    local stripped = lua_code
+      :gsub("%-%-%[%[.-%]%]", "")
+      :gsub("%-%-[^\n]*", "")
+    local bad_selection_key
+    for _, key in ipairs({ "B_SELECTED", "I_SELECTED" }) do
+      local pat = "reaper%.SetMediaTrackInfo_Value%s*%([^%)]-[\"']"
+        .. key .. "[\"']"
+      if stripped:find(pat) then
+        bad_selection_key = key
+        break
+      end
+    end
+    local bad_selection_bool =
+      Code.find_nil_prone_settrackselected_args(stripped)
+    if bad_selection_key or bad_selection_bool then
+      S.track_selection_retry_used = true
+      S.track_selection_validator_retries =
+        (S.track_selection_validator_retries or 0) + 1
+      Probe.add_validator_retry(S.probe_turn, "api")
+      local retry_note
+      if bad_selection_key then
+        Log.line("TRACK-SELECTION-RETRY",
+          "selection write via " .. tostring(bad_selection_key)
+          .. "; retrying with SetTrackSelected hint")
+        retry_note = "Your previous reply used "
+          .. "reaper.SetMediaTrackInfo_Value(..., \""
+          .. tostring(bad_selection_key)
+          .. "\", ...) to select or unselect tracks. For track selection "
+          .. "writes, use reaper.SetTrackSelected(track, true/false) instead."
+      else
+        local finding = bad_selection_bool and bad_selection_bool[1] or {}
+        Log.line("TRACK-SELECTION-RETRY",
+          "SetTrackSelected boolean argument can be nil on line "
+          .. tostring(finding.line or "?") .. "; retrying with boolean hint")
+        retry_note = "Your previous reply passed a value that can be nil "
+          .. "as the second argument to reaper.SetTrackSelected(...). "
+          .. "The second argument must always be a Lua boolean. Normalize "
+          .. "the selection expression before the call, for example by "
+          .. "using an explicit true/false value or comparing the variable "
+          .. "to true."
+      end
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: " .. retry_note .. " "
+        .. "Preserve the user's requested tracks, names, plugins, parameter "
+        .. "values, MIDI notes, markers, routing, and ordering. Only fix the "
+        .. "track-selection API usage unless another change is required to "
+        .. "make the script valid. Respond as if this is your FIRST reply -- "
+        .. "do NOT apologize, do NOT mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+        .. lua_code
+        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      if #S.history > 0 and S.history[#S.history].role == "assistant" then
+        S.history[#S.history] = nil
+      end
+      if #S.history > 0 and S.history[#S.history].role == "user" then
+        S.history[#S.history] = nil
+      end
+      S.history[#S.history+1] = { role = "user", content = history_content }
+      if S.pending_display_idx
+         and S.display_messages[S.pending_display_idx] then
+        local dmsg = S.display_messages[S.pending_display_idx]
+        local existing = dmsg.ctx_label or ""
+        if not existing:find("track_selection_retry", 1, true) then
+          dmsg.ctx_label = existing ~= ""
+            and (existing .. " + track_selection_retry")
+            or "track_selection_retry"
+        end
+      end
+      if prefs.include_snapshot then
+        S.pending_project  = _resolve_pending_project()
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+      end
+      S.status = "waiting"
+      Net._ensure_request_start_time()
+      Code.safe_write(tmp.out, "")
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
+        Log.add_error("Auto-retry after track-selection API write did not go "
+          .. "through. Please resend the last message.")
+      end
+      S.scroll_to_bottom = true
+      return
+    end
+  end
+
+  -- High-confidence master-send validator. Master/parent send is B_MAINSEND;
+  -- RemoveTrackSend category 1 is hardware output, not the master send.
+  if lua_code
+      and Code.prompt_requests_master_send_change(S.pending_orig_prompt) then
+    local bad_master_send = Code.find_master_send_remove_misuse(lua_code)
+    if bad_master_send and #bad_master_send > 0
+        and not S.master_send_retry_used then
+      S.master_send_retry_used = true
+      S.master_send_validator_retries =
+        (S.master_send_validator_retries or 0) + 1
+      Probe.add_validator_retry(S.probe_turn, "api")
+      local finding = bad_master_send[1]
+      Log.line("MASTER-SEND-RETRY",
+        "RemoveTrackSend category 1 used for master send on line "
+        .. tostring(finding.line or "?") .. "; retrying with B_MAINSEND hint")
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous "
+        .. "reply tried to change a track's master/parent send with "
+        .. "reaper.RemoveTrackSend(..., 1, ...). Category 1 is hardware "
+        .. "outputs, not the master send. To disable a track's master send, "
+        .. "use reaper.SetMediaTrackInfo_Value(track, \"B_MAINSEND\", 0); "
+        .. "to enable it, use value 1. Preserve the user's requested "
+        .. "tracks, names, plugins, parameter values, MIDI notes, markers, "
+        .. "routing, and ordering. Only fix the master-send API usage "
+        .. "unless another change is required to make the script valid. "
+        .. "Respond as if this is your FIRST reply -- do NOT apologize, "
+        .. "do NOT mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+        .. lua_code
+        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      if #S.history > 0 and S.history[#S.history].role == "assistant" then
+        S.history[#S.history] = nil
+      end
+      if #S.history > 0 and S.history[#S.history].role == "user" then
+        S.history[#S.history] = nil
+      end
+      S.history[#S.history+1] = { role = "user", content = history_content }
+      if S.pending_display_idx
+         and S.display_messages[S.pending_display_idx] then
+        local dmsg = S.display_messages[S.pending_display_idx]
+        local existing = dmsg.ctx_label or ""
+        if not existing:find("master_send_retry", 1, true) then
+          dmsg.ctx_label = existing ~= ""
+            and (existing .. " + master_send_retry")
+            or "master_send_retry"
+        end
+      end
+      if prefs.include_snapshot then
+        S.pending_project  = _resolve_pending_project()
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+      end
+      S.status = "waiting"
+      Net._ensure_request_start_time()
+      Code.safe_write(tmp.out, "")
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
+        Log.add_error("Auto-retry after master-send API misuse did not go "
+          .. "through. Please resend the last message.")
+      end
+      S.scroll_to_bottom = true
+      return
+    elseif bad_master_send and #bad_master_send > 0 then
+      validator_gate_hit = true
+      Log.line("MASTER-SEND-VALIDATOR",
+        "RemoveTrackSend category 1 master-send misuse persisted after retry; auto-run blocked")
+      Log.add_error("The script appears to change track master/parent sends "
+        .. "with reaper.RemoveTrackSend(..., 1, ...). Category 1 is hardware "
+        .. "output, not the master send. Use "
+        .. "reaper.SetMediaTrackInfo_Value(track, \"B_MAINSEND\", 0 or 1). "
+        .. "Auto-run is blocked; review and correct the master-send API "
+        .. "usage before running manually.")
+    end
+  end
+
+  -- High-confidence track-pan validator. When the user says to pan a track,
+  -- D_PAN belongs on SetMediaTrackInfo_Value; SetTrackSendInfo_Value D_PAN
+  -- changes a send pan and leaves the track pan untouched.
+  if lua_code and not S.track_pan_retry_used then
+    local bad_track_pan =
+      Code.find_track_pan_sent_as_send_pan(lua_code, S.pending_orig_prompt)
+    if bad_track_pan and #bad_track_pan > 0 then
+      S.track_pan_retry_used = true
+      S.track_pan_validator_retries =
+        (S.track_pan_validator_retries or 0) + 1
+      Probe.add_validator_retry(S.probe_turn, "api")
+      Log.line("TRACK-PAN-RETRY",
+        "send pan used for track-pan request; retrying with D_PAN track hint")
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked to pan "
+        .. "one or more tracks, but your previous reply used "
+        .. "reaper.SetTrackSendInfo_Value(..., \"D_PAN\", ...), which changes "
+        .. "send pan only. Track pan must use "
+        .. "reaper.SetMediaTrackInfo_Value(track, \"D_PAN\", value), where "
+        .. "value is -1.0 left through 1.0 right. Preserve the user's "
+        .. "requested tracks, names, plugins, parameter values, MIDI notes, "
+        .. "markers, routing, and ordering. Only fix the track-pan API usage "
+        .. "unless another change is required to make the script valid. "
+        .. "Respond as if this is your FIRST reply -- do NOT apologize, do "
+        .. "NOT mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+        .. lua_code
+        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      if #S.history > 0 and S.history[#S.history].role == "assistant" then
+        S.history[#S.history] = nil
+      end
+      if #S.history > 0 and S.history[#S.history].role == "user" then
+        S.history[#S.history] = nil
+      end
+      S.history[#S.history+1] = { role = "user", content = history_content }
+      if S.pending_display_idx
+         and S.display_messages[S.pending_display_idx] then
+        local dmsg = S.display_messages[S.pending_display_idx]
+        local existing = dmsg.ctx_label or ""
+        if not existing:find("track_pan_retry", 1, true) then
+          dmsg.ctx_label = existing ~= ""
+            and (existing .. " + track_pan_retry") or "track_pan_retry"
+        end
+      end
+      if prefs.include_snapshot then
+        S.pending_project  = _resolve_pending_project()
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+      end
+      S.status = "waiting"
+      Net._ensure_request_start_time()
+      Code.safe_write(tmp.out, "")
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
+        Log.add_error("Auto-retry after track-pan API misuse did not go "
           .. "through. Please resend the last message.")
       end
       S.scroll_to_bottom = true
@@ -24525,8 +34867,10 @@ function Net.try_finish_curl()
   -- fences from being mis-extracted, this stops ```lua-labeled blocks
   -- that aren't actually Lua from being mis-executed.
   if lua_code then
-    local _chunk, parse_err = load(lua_code, "preflight", "t", {})
-    if not _chunk then
+    lua_artifact_info = Code.classify_lua_artifact(lua_code,
+      { context_text = text })
+    if not lua_artifact_info.parse_ok then
+      local parse_err = lua_artifact_info.parse_err
       Log.line("EXTRACT",
         "```lua block did not parse; dropping from extraction. err="
         .. tostring(parse_err))
@@ -24577,7 +34921,7 @@ function Net.try_finish_curl()
             S.pending_jsfx_intent and { minimal_tracks = true } or nil)
         end
         S.status = "waiting"
-        S.request_start_time = nil
+        Net._ensure_request_start_time()
         Code.safe_write(tmp.out, "")
         local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
           S.pending_snapshot, S.pending_attachments))
@@ -24589,6 +34933,11 @@ function Net.try_finish_curl()
         return
       end
       lua_code = nil
+    elseif not lua_artifact_info.runnable then
+      Log.line("EXTRACT",
+        "```lua block classified as non-runnable "
+        .. tostring(lua_artifact_info.kind) .. ": "
+        .. tostring(lua_artifact_info.reason))
     end
   end
 
@@ -24602,10 +34951,428 @@ function Net.try_finish_curl()
     code = lua_code
     code_type = "lua"
   end
-  local typed_action_metrics = Code.inspect_typed_actions(text)
-  if typed_action_metrics.present and code_type == "lua" then
+  local typed_action_expected = S.pending_typed_action_expected == true
+  local typed_action_response_format =
+    S.pending_typed_action_response_format == true
+  local typed_action_profile =
+    Code.typed_actions_model_profile_by_key(S.pending_typed_action_profile)
+  if type(typed_action_profile) ~= "table" then
+    local pending_provider = PROVIDERS[S.pending_provider_idx] or PROVIDERS.active() or {}
+    local pending_model = MODELS[S.pending_model_idx or prefs.model_idx]
+      or MODELS[prefs.model_idx] or MODELS[1] or {}
+    typed_action_profile =
+      Code.typed_actions_model_profile(pending_provider.id, pending_model.id)
+  end
+  local typed_action_metrics = Code.inspect_typed_actions(text, {
+    allow_raw_json = typed_action_response_format,
+    user_text = S.pending_orig_prompt or "",
+  })
+  if (typed_action_metrics.present or typed_action_expected)
+     and code_type == "lua" then
     typed_action_metrics.fallback_to_lua = true
   end
+  typed_action_metrics.retry_count =
+    (S.typed_action_retry_offset or 0)
+    + (S.typed_action_format_validator_retries or 0)
+    + (S.typed_action_schema_validator_retries or 0)
+    + (S.typed_action_semantic_validator_retries or 0)
+    + (S.typed_action_escalation_count or 0)
+  typed_action_metrics.escalated = S.typed_action_escalation_used == true
+  typed_action_metrics.escalation_model = S.typed_action_escalation_model
+  local typed_action_semantic_block_reason = nil
+
+  -- TYPED-ACTION FORMAT VALIDATOR: Typed-action output is intentionally
+  -- strict; the executor/parser only accepts a `reaassist-actions` fence.
+  -- If the model understood the schema but wrapped the valid JSON in a
+  -- generic json/unlabeled fence, retry once with a format-only correction
+  -- instead of accepting the wrong contract or surfacing an empty response.
+  local typed_action_wrong_fence =
+    (not typed_action_response_format
+     and not typed_action_metrics.present and not code)
+    and Code.find_typed_actions_wrong_fence(text) or nil
+  if typed_action_expected and typed_action_wrong_fence then
+    if (S.typed_action_format_validator_retries or 0) < 1 then
+      S.typed_action_format_validator_retries =
+        (S.typed_action_format_validator_retries or 0) + 1
+      Probe.add_validator_retry(S.probe_turn, "typed_action_format")
+      Log.line("TYPED-ACTION-FORMAT-VALIDATOR",
+        "valid typed-action JSON was emitted under `"
+        .. tostring(typed_action_wrong_fence.label)
+        .. "` fence; retrying with exact fence label (user-invisible)")
+      local prior_json = typed_action_wrong_fence.raw or ""
+      if #prior_json > 10000 then
+        prior_json = prior_json:sub(1, 10000) .. "\n..."
+      end
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply "
+        .. "produced a valid typed-action JSON object, but used the wrong "
+        .. "fence label `" .. tostring(typed_action_wrong_fence.label)
+        .. "`. The contract requires exactly one fenced block labelled "
+        .. "`reaassist-actions` and no `json` fence. Re-emit the same JSON "
+        .. "plan inside a ```reaassist-actions fence. Do not write Lua, "
+        .. "ReaScript, JSFX, prose, apologies, or any other code fence.)\n\n"
+        .. "VALID ACTION JSON FROM YOUR PREVIOUS REPLY:\n"
+        .. prior_json .. "\n\nUSER REQUEST:\n"
+        .. (S.pending_orig_prompt or "")
+      if #S.history > 0 and S.history[#S.history].role == "assistant" then
+        S.history[#S.history] = nil
+      end
+      if #S.history > 0 and S.history[#S.history].role == "user" then
+        S.history[#S.history] = nil
+      end
+      S.history[#S.history + 1] = { role = "user", content = history_content }
+      if S.pending_display_idx
+         and S.display_messages[S.pending_display_idx] then
+        local dmsg = S.display_messages[S.pending_display_idx]
+        local existing = dmsg.ctx_label or ""
+        if not existing:find("typed_action_format_retry", 1, true) then
+          dmsg.ctx_label = existing ~= ""
+            and (existing .. " + typed_action_format_retry")
+            or "typed_action_format_retry"
+        end
+      end
+      if prefs.include_snapshot then
+        S.pending_project  = _resolve_pending_project()
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+      end
+      S.status = "waiting"
+      Net._ensure_request_start_time()
+      Code.safe_write(tmp.out, "")
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
+        Log.add_error("Auto-retry for typed-action fence label did not go "
+          .. "through. Please resend the last message.")
+      end
+      S.scroll_to_bottom = true
+      return
+    end
+    typed_action_metrics.error = "wrong_fence_label"
+  end
+
+  -- If the gated contract was active and the model ignored it entirely, retry
+  -- once with a format-only correction. This catches Lua/prose fallbacks on
+  -- exact-fit routing/stock-FX requests without changing the normal Lua path
+  -- for unsupported work.
+  if typed_action_expected
+     and not typed_action_metrics.present
+     and not typed_action_wrong_fence then
+    if (S.typed_action_format_validator_retries or 0) < 1 then
+      S.typed_action_format_validator_retries =
+        (S.typed_action_format_validator_retries or 0) + 1
+      Probe.add_validator_retry(S.probe_turn, "typed_action_format")
+      Log.line("TYPED-ACTION-FORMAT-VALIDATOR",
+        "typed-action contract was active but no action block was emitted; "
+        .. "retrying with contract-only correction (user-invisible)")
+      local retry_contract =
+        Code.typed_actions_prompt_contract(S.pending_orig_prompt or "",
+          {
+            force_enabled = true,
+            response_format = typed_action_response_format,
+            profile = typed_action_profile,
+          }) or ""
+      local reemit_hint = typed_action_response_format
+        and "full plan as the raw JSON object required by the active response schema. "
+            .. "Do not write Lua, ReaScript, JSFX, prose, apologies, markdown, "
+            .. "raw text outside the JSON object, or any code fence.)"
+        or "full plan as exactly one ```reaassist-actions fenced JSON object. "
+            .. "Do not write Lua, ReaScript, JSFX, prose, apologies, raw JSON, "
+            .. "or any other code fence.)"
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply "
+        .. "did not include the required typed-action block. This request is "
+        .. "an exact fit for the active TYPED ACTION CONTRACT. Re-emit the "
+        .. reemit_hint
+        .. (retry_contract ~= "" and ("\n\n" .. retry_contract) or "")
+        .. "\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      if #S.history > 0 and S.history[#S.history].role == "assistant" then
+        S.history[#S.history] = nil
+      end
+      if #S.history > 0 and S.history[#S.history].role == "user" then
+        S.history[#S.history] = nil
+      end
+      S.history[#S.history + 1] = { role = "user", content = history_content }
+      if S.pending_display_idx
+         and S.display_messages[S.pending_display_idx] then
+        local dmsg = S.display_messages[S.pending_display_idx]
+        local existing = dmsg.ctx_label or ""
+        if not existing:find("typed_action_format_retry", 1, true) then
+          dmsg.ctx_label = existing ~= ""
+            and (existing .. " + typed_action_format_retry")
+            or "typed_action_format_retry"
+        end
+      end
+      if prefs.include_snapshot then
+        S.pending_project  = _resolve_pending_project()
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+      end
+      S.status = "waiting"
+      Net._ensure_request_start_time()
+      Code.safe_write(tmp.out, "")
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
+        Log.add_error("Auto-retry for missing typed-action block did not go "
+          .. "through. Please resend the last message.")
+      end
+      S.scroll_to_bottom = true
+      return
+    end
+    if typed_action_metrics.error == "" then
+      typed_action_metrics.error = "missing_action_block"
+    end
+  end
+
+  -- TYPED-ACTION SCHEMA VALIDATOR: once the gated contract is active, an
+  -- invalid reaassist-actions block is more useful as a hidden repair turn
+  -- than as a raw JSON blob in chat. This stays independent from the wrong-
+  -- fence retry so we can measure format mistakes separately from schema
+  -- mistakes in probe/bench.
+  if typed_action_expected
+     and typed_action_metrics.present
+     and not typed_action_metrics.valid
+     and not code then
+    local schema_err = tostring(typed_action_metrics.error or "invalid_plan")
+    local schema_detail = Code._typed_action_schema_retry_detail(text, {
+      allow_raw_json = typed_action_response_format,
+      user_text = S.pending_orig_prompt or "",
+    })
+    local _, selected_index_required =
+      Code._typed_action_selected_indexes_from_user_text(
+        S.pending_orig_prompt or "")
+    local fast_schema_escalate =
+      type(typed_action_profile) == "table"
+      and typed_action_profile.schema_fast_escalate == true
+    if (selected_index_required or fast_schema_escalate)
+       and (S.typed_action_schema_validator_retries or 0) < 1
+       and type(typed_action_profile) == "table"
+       and type(typed_action_profile.fallback) == "table"
+       and Net._try_escalate_typed_actions(
+          selected_index_required
+            and "typed_action_selected_index_schema_failed"
+            or "typed_action_schema_fast_escalated",
+          schema_detail ~= "" and schema_detail or schema_err) then
+      return
+    end
+    if (S.typed_action_schema_validator_retries or 0) < 1 then
+      S.typed_action_schema_validator_retries =
+        (S.typed_action_schema_validator_retries or 0) + 1
+      Probe.add_validator_retry(S.probe_turn, "typed_action_schema")
+      Log.line("TYPED-ACTION-SCHEMA-VALIDATOR",
+        "invalid typed-action block (" .. schema_err
+        .. "); retrying with schema correction (user-invisible)")
+      local retry_contract =
+        Code.typed_actions_prompt_contract(S.pending_orig_prompt or "",
+          {
+            force_enabled = true,
+            response_format = typed_action_response_format,
+            profile = typed_action_profile,
+          }) or ""
+      local reemit_hint = typed_action_response_format
+        and "as the raw JSON object required by the active response schema. "
+            .. "Do not write Lua, ReaScript, JSFX, prose, apologies, markdown, "
+            .. "raw text outside the JSON object, or any code fence.)"
+        or "as exactly one ```reaassist-actions fenced JSON object using only "
+            .. "version=1 and supported v1 actions. Do not write Lua, ReaScript, "
+            .. "JSFX, prose, apologies, or any other code fence.)"
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply "
+        .. (typed_action_response_format
+            and "produced typed-action JSON, but it failed validation "
+            or "produced a `reaassist-actions` block, but it failed validation ")
+        .. "with error `" .. schema_err .. "`. Details: "
+        .. schema_detail .. ". Re-emit the full plan "
+        .. reemit_hint
+        .. (retry_contract ~= "" and ("\n\n" .. retry_contract) or "")
+        .. "\n\n"
+        .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      if #S.history > 0 and S.history[#S.history].role == "assistant" then
+        S.history[#S.history] = nil
+      end
+      if #S.history > 0 and S.history[#S.history].role == "user" then
+        S.history[#S.history] = nil
+      end
+      S.history[#S.history + 1] = { role = "user", content = history_content }
+      if S.pending_display_idx
+         and S.display_messages[S.pending_display_idx] then
+        local dmsg = S.display_messages[S.pending_display_idx]
+        local existing = dmsg.ctx_label or ""
+        if not existing:find("typed_action_schema_retry", 1, true) then
+          dmsg.ctx_label = existing ~= ""
+            and (existing .. " + typed_action_schema_retry")
+            or "typed_action_schema_retry"
+        end
+      end
+      if prefs.include_snapshot then
+        S.pending_project  = _resolve_pending_project()
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+      end
+      S.status = "waiting"
+      Net._ensure_request_start_time()
+      Code.safe_write(tmp.out, "")
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
+        Log.add_error("Auto-retry for typed-action schema did not go "
+          .. "through. Please resend the last message.")
+      end
+      S.scroll_to_bottom = true
+      return
+    end
+    if Net._try_escalate_typed_actions(
+        "typed_action_schema_retry_failed",
+        schema_detail ~= "" and schema_detail or schema_err) then
+      return
+    end
+  end
+
+  -- TYPED-ACTION SEMANTIC VALIDATOR: reject valid JSON that is obviously
+  -- wrong for the requested structured edit before it mutates the project. Model profiles
+  -- can add extra prompt help or fallback policy, but the local semantic
+  -- preflight runs for every typed-action plan that carries user text because
+  -- execution uses the same fail-closed check.
+  if typed_action_expected
+     and typed_action_metrics.present
+     and typed_action_metrics.valid
+     and not code then
+    local plan, plan_errors = Code.typed_actions_plan_from_text(text, {
+      allow_raw_json = typed_action_response_format,
+      user_text = S.pending_orig_prompt or "",
+    })
+    local semantic_ok, semantic_errors
+    if plan then
+      semantic_ok, semantic_errors = Code.validate_typed_actions_semantics(plan, {
+        profile = typed_action_profile,
+        user_text = S.pending_orig_prompt or "",
+      })
+    else
+      semantic_ok = false
+      semantic_errors = plan_errors
+    end
+    if not semantic_ok then
+      local semantic_detail = Code.format_typed_action_semantic_errors(
+        semantic_errors, 4)
+      local missing_action_family =
+        Code.typed_action_semantic_detail_missing_action_family(
+          semantic_detail)
+      local fast_semantic_escalate =
+        type(typed_action_profile) == "table"
+        and typed_action_profile.semantic_fast_escalate == true
+        and missing_action_family
+      if fast_semantic_escalate
+         and type(typed_action_profile.fallback) == "table"
+         and Net._try_escalate_typed_actions(
+          "typed_action_semantic_fast_escalated", semantic_detail) then
+        return
+      end
+      if (S.typed_action_semantic_validator_retries or 0)
+          < (type(typed_action_profile) == "table"
+            and tonumber(typed_action_profile.semantic_max_retries)
+            or 1) then
+        S.typed_action_semantic_validator_retries =
+          (S.typed_action_semantic_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "typed_action_semantic")
+        Log.line("TYPED-ACTION-SEMANTIC-VALIDATOR",
+          "typed-action plan failed semantic checks (" .. semantic_detail
+          .. "); retrying with concrete correction (user-invisible)")
+        local retry_from_scratch =
+          Code.typed_action_semantic_retry_from_scratch(
+            typed_action_profile, semantic_detail)
+        local prior_json = ""
+        if not retry_from_scratch then
+          prior_json = tostring(text or ""):match("^%s*(.-)%s*$") or ""
+          if #prior_json > 10000 then
+            prior_json = prior_json:sub(1, 10000) .. "\n..."
+          end
+        end
+        local retry_contract =
+          Code.typed_actions_prompt_contract(S.pending_orig_prompt or "",
+            {
+              force_enabled = true,
+              response_format = typed_action_response_format,
+              profile = typed_action_profile,
+            }) or ""
+        local reemit_hint = typed_action_response_format
+          and "raw JSON object required by the active response schema"
+          or "single ```reaassist-actions fenced JSON object"
+        local action_kind_hint = ""
+        if missing_action_family then
+          action_kind_hint = " Do not represent requested FX, parameter "
+            .. "changes, or sends as track.ensure actions; use fx.add_stock, "
+            .. "fx.set_param, and send.create."
+        end
+        local retry_instruction = retry_from_scratch
+          and "Do not copy, expand, or repair the previous bad plan. "
+            .. "Solve the original user request from scratch and emit the "
+            .. "complete plan as a "
+          or "Re-emit the complete corrected plan as a "
+        local prior_section = retry_from_scratch and "" or
+          ("PREVIOUS ACTION PLAN:\n" .. prior_json .. "\n\n")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous "
+          .. "typed-action plan was valid JSON, but it was semantically "
+          .. "wrong for the requested structured edit. Problems: "
+          .. semantic_detail .. "." .. action_kind_hint .. " "
+          .. retry_instruction .. reemit_hint
+          .. ". Do not write Lua, ReaScript, JSFX, prose, "
+          .. "apologies, or omit any actions.)\n\n"
+          .. (retry_contract ~= "" and (retry_contract .. "\n\n") or "")
+          .. prior_section
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history + 1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("typed_action_semantic_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + typed_action_semantic_retry")
+              or "typed_action_semantic_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Net._ensure_request_start_time()
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error("Auto-retry for typed-action semantics did not go "
+            .. "through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      if Net._try_escalate_typed_actions(
+          "typed_action_semantic_retry_failed", semantic_detail) then
+        return
+      end
+      typed_action_semantic_block_reason = semantic_detail
+      typed_action_metrics.valid = false
+      typed_action_metrics.error = "semantic_mismatch"
+    end
+  end
+  typed_action_metrics.retry_count =
+    (S.typed_action_retry_offset or 0)
+    + (S.typed_action_format_validator_retries or 0)
+    + (S.typed_action_schema_validator_retries or 0)
+    + (S.typed_action_semantic_validator_retries or 0)
+    + (S.typed_action_escalation_count or 0)
+  typed_action_metrics.escalated = S.typed_action_escalation_used == true
+  typed_action_metrics.escalation_model = S.typed_action_escalation_model
 
   -- No unlabeled-fence fallback. Previously we extracted ANY ```<lang>
   -- fence as code and tagged it "lua" unless its first line was "desc:",
@@ -24618,21 +35385,39 @@ function Net.try_finish_curl()
   -- in the explanation text.
 
   -- Strip all fences and unparsed context_needed tags from the explanation text.
-  if code then
-    explanation = text
-      :gsub("```%w*%s*\n.-\n%s*```", "")
-      :gsub("\n\n\n+", "\n\n")
-      :match("^%s*(.-)%s*$")
+  -- Typed-action-only responses also strip their JSON block; the gated
+  -- executor below will replace an otherwise empty explanation with a concise
+  -- status after it runs.
+  if code or typed_action_metrics.present then
+    if typed_action_metrics.raw_json then
+      explanation = ""
+    else
+      explanation = text
+        :gsub("```[^\n]*\n.-\n%s*```", "")
+        :gsub("\n\n\n+", "\n\n")
+        :match("^%s*(.-)%s*$")
+    end
   end
   explanation = explanation
     :gsub("<%s*context_needed%s*>.-<%s*/%s*context_needed%s*>%s*", "")
     :gsub("\n\n\n+", "\n\n")
     :match("^%s*(.-)%s*$")
+  if typed_action_semantic_block_reason then
+    explanation = "I blocked this structured edit before it changed the project because the structured edit plan did not match the request safely. No changes were made. Details: "
+      .. typed_action_semantic_block_reason
+  end
 
   -- If explanation AND code are both empty after stripping (e.g. model replied
   -- with only a <context_needed> tag whose buckets were already sent), surface
   -- an error instead of a blank bubble.
-  if (not explanation or explanation == "") and not code then
+  local typed_action_ready =
+    typed_action_expected
+    and typed_action_metrics.present
+    and typed_action_metrics.valid
+    and not code
+  if (not explanation or explanation == "")
+     and not code
+     and not typed_action_ready then
     Code.safe_write(tmp.log, raw)
     if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
       S.display_messages[S.pending_display_idx].ctx_label = "error"
@@ -24757,6 +35542,7 @@ function Net.try_finish_curl()
           dmsg.ctx_label = existing ~= ""
             and (existing .. " + docs") or "docs"
         end
+        dmsg.docs_retry = true
       end
 
       -- Match the bucket-recovery flow: refresh snapshot (cheap vs the
@@ -24815,7 +35601,6 @@ function Net.try_finish_curl()
   -- Skipped when docs_gate_hit is already set: that path is already
   -- blocking auto-run and surfacing a fetch-failure error; no point
   -- retrying again.
-  local validator_gate_hit = false
   if lua_code and not docs_gate_hit then
     local unknown, total_scanned = Code.find_unknown_reaper_calls(lua_code)
     if not unknown then
@@ -24913,6 +35698,464 @@ function Net.try_finish_curl()
         .. tbl_concat(unknown, ", reaper.")
         .. ". Auto-run is blocked; review and edit the code before clicking "
         .. "Run manually, or retry with a stronger model.")
+    end
+  end
+
+  -- MIDI-ITEM VALIDATOR: AddMediaItemToTrack creates a plain media item, not
+  -- a MIDI item. Lower-tier models sometimes create a plain item, then call
+  -- GetActiveTake/MIDI_InsertNote and "succeed" with zero notes. Retry once
+  -- when the user's task is clearly to create a MIDI item and the code uses
+  -- the plain-item path without CreateNewMIDIItemInProj.
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+     and not S.midi_item_retry_used then
+    local prompt_l = tostring(S.pending_orig_prompt or ""):lower()
+    local wants_new_midi_item =
+      prompt_l:find("midi%s+item")
+      and (prompt_l:find("create") or prompt_l:find("add")
+        or prompt_l:find("insert") or prompt_l:find("new"))
+    local stripped = lua_code
+      :gsub("%-%-%[%[.-%]%]", "")
+      :gsub("%-%-[^\n]*", "")
+    local plain_item_midi =
+      wants_new_midi_item
+      and stripped:find("reaper%.AddMediaItemToTrack%s*%(")
+      and not stripped:find("reaper%.CreateNewMIDIItemInProj%s*%(")
+      and (stripped:find("reaper%.MIDI_InsertNote%s*%(")
+        or stripped:find("reaper%.MIDI_InsertCC%s*%(")
+        or stripped:find("reaper%.MIDI_SetAllEvts%s*%("))
+    if plain_item_midi then
+      if (S.midi_item_validator_retries or 0) < 1 then
+        S.midi_item_retry_used = true
+        S.midi_item_validator_retries =
+          (S.midi_item_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "midi_item")
+        Log.line("MIDI-ITEM-VALIDATOR",
+          "plain media item used as MIDI item; retrying with hint")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous "
+          .. "reply created a plain media item with "
+          .. "reaper.AddMediaItemToTrack(), then attempted to insert MIDI "
+          .. "events into its active take. AddMediaItemToTrack does not "
+          .. "create a MIDI take. Use "
+          .. "reaper.CreateNewMIDIItemInProj(track, start_seconds, "
+          .. "end_seconds, false), get its active take, verify "
+          .. "reaper.TakeIsMIDI(take), convert absolute project-time note "
+          .. "start/end seconds with MIDI_GetPPQPosFromProjTime, then insert "
+          .. "the notes. Preserve the user's requested tracks, names, note "
+          .. "pitches, note times, markers, routing, plugins, and ordering. "
+          .. "Respond as if this is your FIRST reply -- do NOT apologize, "
+          .. "do NOT mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+          .. lua_code
+          .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history+1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("midi_item_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + midi_item_retry") or "midi_item_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Net._ensure_request_start_time()
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error("Auto-retry after plain-item MIDI creation did not "
+            .. "go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      validator_gate_hit = true
+      Log.line("MIDI-ITEM-VALIDATOR",
+        "plain media item MIDI pattern persisted after retry; auto-run blocked")
+      Log.add_error("The script creates a plain media item with "
+        .. "AddMediaItemToTrack but then inserts MIDI into it. "
+        .. "Auto-run is blocked because this produces an item with no MIDI "
+        .. "notes. Use CreateNewMIDIItemInProj for new MIDI items.")
+    end
+  end
+
+  -- ACTION-ID VALIDATOR: Main_OnCommand accepts any integer, so guessed
+  -- native action IDs pass the API-name validator and then silently do the
+  -- wrong thing or nothing at all. Allow only literal IDs from the documented
+  -- common-action list, or IDs the user explicitly provided.
+  local action_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit then
+    local action_user_text = Net.retry_user_request_context()
+    local action_bad = Code.find_unverified_main_oncommand_ids(
+      lua_code, action_user_text)
+    if action_bad and #action_bad > 0 then
+      if (S.action_validator_retries or 0) < 1 then
+        S.action_validator_retries = (S.action_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "action")
+        local lines, summary = {}, {}
+        for _, e in ipairs(action_bad) do
+          lines[#lines + 1] = "  - line " .. tostring(e.line) .. ": reaper."
+            .. e.fn .. "(" .. tostring(e.id) .. ", ...)"
+          summary[#summary + 1] = e.fn .. "(" .. tostring(e.id) .. ")"
+        end
+        Log.line("ACTION-VALIDATOR",
+          "unverified numeric Main_OnCommand ID(s) (" .. #action_bad
+          .. "): " .. tbl_concat(summary, ", ")
+          .. "; retrying with hint (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply passed "
+          .. "literal numeric REAPER action ID(s) to Main_OnCommand / "
+          .. "Main_OnCommandEx that are NOT in the documented common-action "
+          .. "allowlist and were NOT explicitly provided by the user:\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Do not guess native numeric action IDs. Use direct REAPER API "
+          .. "calls when possible. For native built-in actions that are not "
+          .. "in the common-action allowlist, look them up at runtime by exact "
+          .. "Action List text with reaper.SectionFromUniqueID(0) plus "
+          .. "reaper.kbd_enumerateActions(...), then call Main_OnCommand with "
+          .. "the returned variable. Use reaper.NamedCommandLookup only for "
+          .. "named SWS/extension/custom actions. For drum-hit/transient "
+          .. "stretch-marker requests, prefer REAPER's Dynamic Split / "
+          .. "transient-detection action via Action List lookup; do NOT "
+          .. "substitute a simple Lua energy-threshold detector unless the "
+          .. "user explicitly asked for a custom approximation. If the exact "
+          .. "native action cannot be found by text in the provided context, "
+          .. "ask the user to confirm it instead of emitting runnable code "
+          .. "with a guessed ID. Respond as if this is your FIRST reply -- "
+          .. "do NOT apologize, do NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. action_user_text
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history+1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("action_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + action_retry") or "action_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error("Auto-retry for unverified Main_OnCommand ID(s) "
+            .. "did not go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      action_gate_hit = true
+      -- Keep older chained validator guards suppressed without touching every
+      -- downstream condition; _any_gate_hit below also includes action_gate_hit.
+      validator_gate_hit = true
+      local user_lines = {}
+      for _, e in ipairs(action_bad) do
+        user_lines[#user_lines + 1] = "reaper." .. e.fn .. "("
+          .. tostring(e.id) .. ", ...) at line " .. tostring(e.line)
+      end
+      Log.line("ACTION-VALIDATOR",
+        "unverified numeric Main_OnCommand ID(s) persist after retry: "
+        .. tbl_concat(user_lines, "; ") .. "; auto-run blocked")
+      Log.add_error("The model emitted unverified numeric REAPER action ID(s), "
+        .. "even after a retry: " .. tbl_concat(user_lines, "; ")
+        .. ". Main_OnCommand accepts any integer, so this can silently run "
+        .. "the wrong action or do nothing. Auto-run is blocked; confirm the "
+        .. "exact Action List ID or rewrite the script with direct REAPER API "
+        .. "calls before running it.")
+    end
+  end
+
+  -- TRANSIENT-MARKER VALIDATOR: For drum-hit/transient stretch marker work,
+  -- a homegrown audio-accessor energy detector is a poor substitute for
+  -- REAPER's Dynamic Split/transient engine. It can pass every API validator
+  -- while inserting hundreds of false markers on decays/bleed.
+  local transient_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit then
+    local transient_user_text = Net.retry_user_request_context()
+    local transient_bad = Code.find_audio_accessor_transient_marker_scripts(
+      lua_code, transient_user_text)
+    if transient_bad and #transient_bad > 0 then
+      if (S.transient_validator_retries or 0) < 1 then
+        S.transient_validator_retries =
+          (S.transient_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "transient")
+        local lines = {}
+        for _, e in ipairs(transient_bad) do
+          lines[#lines + 1] = "  - line " .. tostring(e.line)
+        end
+        Log.line("TRANSIENT-VALIDATOR",
+          "audio-accessor detector used for hit/transient stretch markers ("
+          .. #transient_bad .. " finding(s)); retrying with hint (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply used a "
+          .. "custom Lua audio-accessor peak/energy detector and then inserted "
+          .. "stretch markers directly. For drum-hit/transient stretch-marker "
+          .. "requests, this over-detects decays and bleed and is lower quality "
+          .. "than REAPER's built-in Dynamic Split / transient engine.\n\n"
+          .. "Affected call-site line(s):\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Regenerate using REAPER's built-in Dynamic Split / transient "
+          .. "action path. Do NOT guess numeric Main_OnCommand IDs. Find the "
+          .. "native action at runtime by exact Action List text with "
+          .. "reaper.SectionFromUniqueID(0) and reaper.kbd_enumerateActions(...), "
+          .. "then call Main_OnCommand with the returned command variable. If "
+          .. "the only built-in path opens the Dynamic Split dialog or uses "
+          .. "the user's most recent Dynamic Split settings, say that plainly "
+          .. "in the visible reply. If no suitable action can be found by text, "
+          .. "ask the user to confirm the exact Action List action instead of "
+          .. "falling back to a custom detector. Respond as if this is your "
+          .. "FIRST reply -- do NOT apologize, do NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. transient_user_text
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history + 1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("transient_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + transient_retry") or "transient_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error("Auto-retry for poor transient stretch-marker "
+            .. "detector did not go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      transient_gate_hit = true
+      validator_gate_hit = true
+      Log.line("TRANSIENT-VALIDATOR",
+        "audio-accessor detector for hit/transient stretch markers persisted "
+        .. "after retry; auto-run blocked")
+      Log.add_error("The model tried to place drum-hit/transient stretch "
+        .. "markers with a custom Lua audio-accessor detector even after a "
+        .. "retry. That path tends to add false markers on decays and bleed. "
+        .. "Auto-run is blocked; use REAPER's Dynamic Split / transient "
+        .. "action, or explicitly ask for a custom threshold detector if you "
+        .. "want that lower-quality approximation.")
+    end
+  end
+
+  -- DRUM-QUANTIZE VALIDATOR: Drum quantize/edit prompts should not be
+  -- satisfied by moving whole media items to snapped item-start positions.
+  -- That treats clip starts as hits and can report "moved" even when no
+  -- meaningful timing changed. Require shared stretch-marker timing instead,
+  -- unless the user explicitly asked to move whole items.
+  local drum_quantize_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit then
+    local drum_quantize_user_text = Net.retry_user_request_context()
+    local drum_quantize_bad =
+      Code.find_drum_whole_item_quantize_scripts(
+        lua_code, drum_quantize_user_text)
+    if drum_quantize_bad and #drum_quantize_bad > 0 then
+      if (S.drum_quantize_validator_retries or 0) < 1 then
+        S.drum_quantize_validator_retries =
+          (S.drum_quantize_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "drum_quantize")
+        local lines = {}
+        for _, e in ipairs(drum_quantize_bad) do
+          lines[#lines + 1] = "  - line " .. tostring(e.line)
+        end
+        Log.line("DRUM-QUANTIZE-VALIDATOR",
+          "whole-item D_POSITION write used for drum quantize/edit ("
+          .. #drum_quantize_bad .. " finding(s)); retrying with hint "
+          .. "(user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply tried to "
+          .. "quantize/edit drums by writing media-item D_POSITION values. "
+          .. "That treats item starts as drum hits, can do nothing when item "
+          .. "starts are already on-grid, and is not the requested "
+          .. "phase-safe drum editing workflow.\n\n"
+          .. "Affected whole-item position write line(s):\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Regenerate without moving whole media items unless the user "
+          .. "explicitly asked for whole-item movement. Use explicit guide "
+          .. "track/item hit points and apply one shared source-time -> "
+          .. "target-time timing map to all drum items with stretch markers. "
+          .. "Prefer REAPER's Dynamic Split / transient engine or existing "
+          .. "guide stretch markers. For every grouped drum item overlapping "
+          .. "a guide hit, insert or move a stretch marker at the same "
+          .. "original project time and move it to the same snapped project "
+          .. "time, preserving srcpos when moving existing markers. Count "
+          .. "only real changes where abs(new_pos - old_pos) is greater than "
+          .. "a tiny tolerance; do not report attempted writes as moved. If "
+          .. "you cannot safely create/identify guide hit points, ask the user "
+          .. "to run/open Dynamic Split or confirm the action path instead of "
+          .. "emitting a no-op script. Respond as if this is your FIRST reply "
+          .. "-- do NOT apologize, do NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. drum_quantize_user_text
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history + 1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("drum_quantize_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + drum_quantize_retry")
+              or "drum_quantize_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error("Auto-retry for whole-item drum quantize did not "
+            .. "go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      drum_quantize_gate_hit = true
+      validator_gate_hit = true
+      Log.line("DRUM-QUANTIZE-VALIDATOR",
+        "whole-item D_POSITION write for drum quantize/edit persisted after "
+        .. "retry; auto-run blocked")
+      Log.add_error("The model tried to quantize/edit drums by moving whole "
+        .. "media items even after a retry. That can do nothing or move the "
+        .. "wrong musical material. Auto-run is blocked; use a shared "
+        .. "guide-track stretch-marker timing map instead.")
+    end
+  end
+
+  -- DRUM-MARKER-SYNC VALIDATOR: A drum stretch-marker script that does not
+  -- normalize the marker set in the edit range can leave guide tracks with
+  -- extra Dynamic Split markers and non-guide tracks with a different map,
+  -- causing phase and stretch-ratio mismatches.
+  local drum_marker_sync_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit then
+    local drum_marker_sync_user_text = Net.retry_user_request_context()
+    local drum_marker_sync_bad =
+      Code.find_unsynced_drum_stretch_marker_scripts(
+        lua_code, drum_marker_sync_user_text)
+    if drum_marker_sync_bad and #drum_marker_sync_bad > 0 then
+      if (S.drum_marker_sync_validator_retries or 0) < 1 then
+        S.drum_marker_sync_validator_retries =
+          (S.drum_marker_sync_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "drum_marker_sync")
+        local lines = {}
+        for _, e in ipairs(drum_marker_sync_bad) do
+          lines[#lines + 1] = "  - line " .. tostring(e.line)
+        end
+        Log.line("DRUM-MARKER-SYNC-VALIDATOR",
+          "drum stretch-marker script lacked range normalization ("
+          .. #drum_marker_sync_bad .. " finding(s)); retrying with hint "
+          .. "(user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply added or "
+          .. "moved drum stretch markers without first normalizing the marker "
+          .. "set across every affected drum item. This can leave guide tracks "
+          .. "with extra Dynamic Split markers while non-guide tracks get a "
+          .. "different marker map, creating phase drift and extreme stretch "
+          .. "ratios.\n\n"
+          .. "Affected SetTakeStretchMarker line(s):\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Regenerate so the final marker set is identical on every "
+          .. "affected drum item, including guide tracks. Guide tracks are "
+          .. "analysis sources only. After deriving the guide source-time -> "
+          .. "target-time map, delete/replace stretch markers in the edit "
+          .. "range on every affected item, then insert the same sorted, "
+          .. "de-duplicated map plus unchanged boundary anchors. Compute each "
+          .. "marker as pos = target_project_time - item_position and srcpos "
+          .. "= source_project_time - item_position; do not preserve arbitrary "
+          .. "existing guide-track srcpos. Merge/skip hits whose snapped target "
+          .. "times collide or cross. If the user did not authorize replacing "
+          .. "markers in the range, ask one question instead of emitting code. "
+          .. "Respond as if this is your FIRST reply -- do NOT apologize, do "
+          .. "NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. drum_marker_sync_user_text
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history + 1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("drum_marker_sync_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + drum_marker_sync_retry")
+              or "drum_marker_sync_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error("Auto-retry for unsynchronized drum stretch markers "
+            .. "did not go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      drum_marker_sync_gate_hit = true
+      validator_gate_hit = true
+      Log.line("DRUM-MARKER-SYNC-VALIDATOR",
+        "drum stretch-marker script without range normalization persisted "
+        .. "after retry; auto-run blocked")
+      Log.add_error("The model tried to write drum stretch markers without "
+        .. "normalizing the same marker map across every affected drum item. "
+        .. "Auto-run is blocked; the final stretch markers must be identical "
+        .. "on guide and non-guide tracks.")
     end
   end
 
@@ -25027,26 +36270,41 @@ function Net.try_finish_curl()
         Probe.add_validator_retry(S.probe_turn, "sendidx")
         local lines = {}
         for _, e in ipairs(sendidx_bad) do
-          lines[#lines+1] = "  - source `" .. tostring(e.source)
-            .. "` uses literal send index " .. tostring(e.sendidx)
-            .. " after an ignored CreateTrackSend result"
+          if e.kind == "multi_assign" then
+            lines[#lines+1] = "  - line " .. tostring(e.create_line)
+              .. " assigns CreateTrackSend with multiple return variables (`"
+              .. tostring(e.sendidx) .. "`), but it returns one integer"
+          elseif e.kind == "zero_check" then
+            lines[#lines+1] = "  - line " .. tostring(e.set_line)
+              .. " treats returned send index `" .. tostring(e.sendidx)
+              .. "` as failed when it is 0, but the first valid send index is 0"
+          else
+            lines[#lines+1] = "  - source `" .. tostring(e.source)
+              .. "` uses literal send index " .. tostring(e.sendidx)
+              .. " after an ignored CreateTrackSend result"
+          end
         end
         Log.line("SENDIDX-VALIDATOR",
-          "ignored CreateTrackSend result(s) with literal send index use ("
+          "unsafe CreateTrackSend result handling ("
           .. #sendidx_bad .. "); retrying with hint (user-invisible)")
         local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
           .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply called "
-          .. "reaper.CreateTrackSend(...) without storing its return value, "
-          .. "then called reaper.SetTrackSendInfo_Value(...) with hard-coded "
-          .. "send indices. CreateTrackSend returns the new send index; "
-          .. "you MUST store that return value and use it when setting send "
-          .. "attributes. Do not assume send indices 0/1/2 after creating "
-          .. "multiple sends from the same source track.\n\n"
+          .. "reaper.CreateTrackSend(...) with unsafe return-value handling. "
+          .. "CreateTrackSend returns exactly ONE value: the new send index. "
+          .. "It does NOT return `ok, sendidx`, so `local _, sidx = "
+          .. "reaper.CreateTrackSend(...)` makes sidx nil. It is also unsafe "
+          .. "to ignore the return value and later use hard-coded send indices. "
+          .. "A returned send index of 0 is valid for the first send; only -1 "
+          .. "means failure. "
+          .. "You MUST store the one returned integer and use it when setting "
+          .. "send attributes.\n\n"
           .. "Affected send property call(s):\n"
           .. tbl_concat(lines, "\n") .. "\n\n"
           .. "Use this pattern:\n"
           .. "  local sidx = reaper.CreateTrackSend(src, dst)\n"
-          .. "  reaper.SetTrackSendInfo_Value(src, 0, sidx, \"D_VOL\", amp)\n\n"
+          .. "  if sidx >= 0 then\n"
+          .. "    reaper.SetTrackSendInfo_Value(src, 0, sidx, \"D_VOL\", amp)\n"
+          .. "  end\n\n"
           .. "Regenerate the code with every configured send using its own "
           .. "returned send index variable. Respond as if this is your FIRST "
           .. "reply -- do NOT apologize, do NOT mention a retry.)\n\n"
@@ -25085,14 +36343,24 @@ function Net.try_finish_curl()
       end
       sendidx_gate_hit = true
       Log.line("SENDIDX-VALIDATOR",
-        "ignored CreateTrackSend result persists after retry; auto-run blocked")
+        "unsafe CreateTrackSend result handling persists after retry; auto-run blocked")
       local user_lines = {}
       for _, e in ipairs(sendidx_bad) do
-        user_lines[#user_lines+1] = tostring(e.source)
-          .. " send index " .. tostring(e.sendidx)
+        if e.kind == "multi_assign" then
+          user_lines[#user_lines+1] =
+            "line " .. tostring(e.create_line)
+            .. " uses multiple assignment for CreateTrackSend"
+        elseif e.kind == "zero_check" then
+          user_lines[#user_lines+1] =
+            "line " .. tostring(e.set_line)
+            .. " rejects valid send index 0"
+        else
+          user_lines[#user_lines+1] = tostring(e.source)
+            .. " send index " .. tostring(e.sendidx)
+        end
       end
-      Log.add_error("The model created sends without using the returned "
-        .. "send index, even after a retry: "
+      Log.add_error("The model created sends with unsafe CreateTrackSend "
+        .. "return-value handling, even after a retry: "
         .. tbl_concat(user_lines, "; ")
         .. ". Auto-run is blocked; review and edit the code before clicking "
         .. "Run manually.")
@@ -25188,6 +36456,90 @@ function Net.try_finish_curl()
     end
   end
 
+  -- FX-IDENT VALIDATOR: If preferred-plugin context provided an exact
+  -- AddByName identifier (for example "VST3: Pro-G"), do not let hidden repair
+  -- retries strip it down to a bare or vendor-suffixed guess. Bare identifiers
+  -- are not reliable across REAPER installs and can fail silently after the
+  -- script creates the track.
+  local fxident_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+     and not arity_gate_hit and not sendidx_gate_hit
+     and not stockfx_gate_hit then
+    local fxident_bad = Code.find_preferred_fx_identifier_drift(lua_code)
+    if fxident_bad and #fxident_bad > 0 then
+      if (S.fxident_validator_retries or 0) < 1 then
+        S.fxident_validator_retries =
+          (S.fxident_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "fxident")
+        local lines = {}
+        for _, e in ipairs(fxident_bad) do
+          lines[#lines + 1] = "  - line " .. tostring(e.line)
+            .. ": " .. tostring(e.fn) .. " used `" .. tostring(e.plugin)
+            .. "`; use exact `" .. tostring(e.exact) .. "`"
+        end
+        Log.line("FX-IDENT-VALIDATOR",
+          "bare preferred AddByName identifier(s) (" .. #fxident_bad
+          .. "); retrying with exact identifiers (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply "
+          .. "called TrackFX_AddByName / TakeFX_AddByName with bare or "
+          .. "vendor-suffixed plugin names even though the exact preferred "
+          .. "AddByName identifiers are already present in PINNED REFERENCES. "
+          .. "Bare names can fail on this install. Replace ONLY these plugin "
+          .. "identifier strings with the exact identifiers below; preserve "
+          .. "all track names, helper definitions, parameter values, routing, "
+          .. "and ordering:\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Regenerate the FULL script. Respond as if this is your FIRST "
+          .. "reply -- do NOT apologize, do NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history + 1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("fxident_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + fxident_retry") or "fxident_retry"
+          end
+        end
+        if prefs.include_snapshot then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error("Auto-retry for exact FX identifier repair did not "
+            .. "go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      fxident_gate_hit = true
+      Log.line("FX-IDENT-VALIDATOR",
+        "bare preferred AddByName identifier(s) persist after retry; auto-run blocked")
+      local user_lines = {}
+      for _, e in ipairs(fxident_bad) do
+        user_lines[#user_lines + 1] = tostring(e.plugin)
+          .. " -> " .. tostring(e.exact)
+      end
+      Log.add_error("The model stripped exact preferred plugin identifier(s), "
+        .. "even after a retry: " .. tbl_concat(user_lines, "; ")
+        .. ". Auto-run is blocked; review and edit the code before clicking "
+        .. "Run manually.")
+    end
+  end
+
   -- FX-CHECK VALIDATOR: After the API/arity validators pass, scan
   -- generated code for `local NAME = reaper.(Track|Take)FX_AddByName(...)`
   -- where NAME is never tested in a failure-direction comparison
@@ -25209,7 +36561,7 @@ function Net.try_finish_curl()
   local fxcheck_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit
-     and not stockfx_gate_hit then
+     and not stockfx_gate_hit and not fxident_gate_hit then
     local unchecked = Code.find_unchecked_addbyname_results(lua_code)
     if unchecked and #unchecked > 0 then
       if (S.fxcheck_validator_retries or 0) < 1 then
@@ -25536,6 +36888,77 @@ function Net.try_finish_curl()
     end
   end
 
+  -- ADD-ONLY FX PARAM-SCOPE VALIDATOR: A passing script can still be too
+  -- aggressive if the user only asked to add/load an FX and the model invents
+  -- "helpful" default parameter writes. Retry once with an add-only correction
+  -- before the script reaches auto-run.
+  local fx_param_scope_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+     and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
+     and not fxcheck_gate_hit and not upsert_gate_hit and not defer_gate_hit
+     and Code.prompt_is_fx_add_only(S.pending_orig_prompt or "")
+     and Code.lua_has_fx_param_writes(lua_code) then
+    if (S.fx_param_scope_validator_retries or 0) < 1 then
+      S.fx_param_scope_validator_retries =
+        (S.fx_param_scope_validator_retries or 0) + 1
+      Probe.add_validator_retry(S.probe_turn, "fx_param_scope")
+      Log.line("FX-PARAM-SCOPE-VALIDATOR",
+        "add-only FX prompt emitted parameter writes; retrying")
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user only asked "
+        .. "to add/load/insert the FX. Your previous script wrote plugin "
+        .. "parameters, which is extra configuration the user did not request. "
+        .. "Regenerate the script without TrackFX_SetParam*, "
+        .. "TakeFX_SetParam*, set_param_display, set_param_enum, or "
+        .. "set_param_enum_paced. Preserve the requested tracks, FX, sends, "
+        .. "items, MIDI, markers, and ordering. Keep required plugin-load "
+        .. "checks. Respond as if this is your FIRST reply -- do NOT "
+        .. "apologize or mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+        .. lua_code
+        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      if #S.history > 0 and S.history[#S.history].role == "assistant" then
+        S.history[#S.history] = nil
+      end
+      if #S.history > 0 and S.history[#S.history].role == "user" then
+        S.history[#S.history] = nil
+      end
+      S.history[#S.history+1] = { role = "user", content = history_content }
+      if S.pending_display_idx
+         and S.display_messages[S.pending_display_idx] then
+        local dmsg = S.display_messages[S.pending_display_idx]
+        local existing = dmsg.ctx_label or ""
+        if not existing:find("fx_param_scope_retry", 1, true) then
+          dmsg.ctx_label = existing ~= ""
+            and (existing .. " + fx_param_scope_retry")
+            or "fx_param_scope_retry"
+        end
+      end
+      if prefs.include_snapshot then
+        S.pending_project  = _resolve_pending_project()
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+      end
+      S.status = "waiting"
+      Code.safe_write(tmp.out, "")
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
+        Log.add_error("Auto-retry after unrequested FX parameter writes did "
+          .. "not go through. Please resend the last message.")
+      end
+      S.scroll_to_bottom = true
+      return
+    end
+    fx_param_scope_gate_hit = true
+    Log.line("FX-PARAM-SCOPE-VALIDATOR",
+      "unrequested FX parameter writes persisted after retry; auto-run blocked")
+    Log.add_error("The model wrote plugin parameter changes even though the "
+      .. "request only asked to add/load the FX. Auto-run is blocked because "
+      .. "those extra parameter writes may change the sound beyond the user's "
+      .. "request. Review and remove the TrackFX_SetParam*/TakeFX_SetParam* "
+      .. "lines before running manually.")
+  end
+
   -- HELPER-DEFINITION VALIDATOR: After defer-compliance check, scan for
   -- helper function calls (find_param, set_param_display, set_param_enum,
   -- set_param_enum_paced) that lack a matching `local function NAME(`
@@ -25550,7 +36973,8 @@ function Net.try_finish_curl()
   local helper_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
-     and not fxcheck_gate_hit and not upsert_gate_hit and not defer_gate_hit then
+     and not fxcheck_gate_hit and not upsert_gate_hit and not defer_gate_hit
+     and not fx_param_scope_gate_hit then
     local missing = Code.find_helper_calls_without_definition(lua_code)
     if missing and #missing > 0 then
       if (S.helper_validator_retries or 0) < 1 then
@@ -25654,7 +37078,7 @@ function Net.try_finish_curl()
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
      and not fxcheck_gate_hit and not upsert_gate_hit and not defer_gate_hit
-     and not helper_gate_hit then
+     and not fx_param_scope_gate_hit and not helper_gate_hit then
     local int_bad = Code.find_helper_integrity_violations(lua_code)
     if int_bad and #int_bad > 0 then
       if (S.helper_int_validator_retries or 0) < 1 then
@@ -25764,12 +37188,18 @@ function Net.try_finish_curl()
   local function _any_gate_hit()
     return docs_gate_hit
         or validator_gate_hit
+        or action_gate_hit
+        or transient_gate_hit
+        or drum_quantize_gate_hit
+        or drum_marker_sync_gate_hit
         or arity_gate_hit
         or sendidx_gate_hit
         or stockfx_gate_hit
+        or fxident_gate_hit
         or fxcheck_gate_hit
         or upsert_gate_hit
         or defer_gate_hit
+        or fx_param_scope_gate_hit
         or helper_gate_hit
         or helper_int_gate_hit
         or jsfx_gate_hit
@@ -25951,7 +37381,7 @@ function Net.try_finish_curl()
       -- stripped from the ORIGINAL `text`. Re-strip from the updated `text`
       -- so the explanation matches what's actually rendered.
       explanation = text
-        :gsub("```%w*%s*\n.-\n%s*```", "")
+        :gsub("```[^\n]*\n.-\n%s*```", "")
         :gsub("\n\n\n+", "\n\n")
         :match("^%s*(.-)%s*$") or ""
     else
@@ -25964,7 +37394,135 @@ function Net.try_finish_curl()
   local jsfx_saved_path_for_msg = nil   -- saved path to carry on the message
   local jsfx_saved_fx_name_for_msg = nil -- FX ref name to carry on the message
   local auto_ran_ok = false             -- V5: flag for the AUTO-RAN pill below code
+  local typed_defer = { probe_turn = S.probe_turn }
+  typed_defer.finish = function()
+    if not (typed_defer.pending and typed_defer.done) then
+      return
+    end
+    typed_defer.pending = false
+    typed_action_metrics.deferred_pending = nil
+    typed_action_metrics.executed = typed_defer.ok == true
+    local dmsg = S.display_messages[typed_defer.message_idx]
+    if typed_defer.ok then
+      auto_ran_ok = true
+      typed_action_metrics.error = nil
+      if not explanation or explanation == ""
+         or explanation == "Structured edit is applying..." then
+        explanation = "Done."
+      end
+      if S.history[_asst_hist_idx] then
+        S.history[_asst_hist_idx].run_status = "ran_ok"
+        S.history[_asst_hist_idx].code_bytes = 0
+        S.history[_asst_hist_idx].code_type  = "typed_actions"
+      end
+      if not typed_defer.pruned then
+        Net.sticky_prune_after_plugin_success(_compact_user_intent,
+          lua_code or code)
+        typed_defer.pruned = true
+      end
+    else
+      auto_ran_ok = false
+      typed_action_metrics.error =
+        (typed_defer.result and typed_defer.result.code) or "execution_failed"
+      explanation = Code.typed_actions_user_failure_message(typed_defer.result)
+      if S.history[_asst_hist_idx] then
+        S.history[_asst_hist_idx].run_status = "errored"
+        S.history[_asst_hist_idx].code_bytes = 0
+        S.history[_asst_hist_idx].code_type  = "typed_actions"
+      end
+    end
+    if dmsg then
+      dmsg.content = explanation
+      dmsg.auto_ran = auto_ran_ok
+      dmsg.typed_actions = typed_action_metrics
+    end
+    Probe.mark_phase_end(typed_defer.probe_turn, "execution")
+    Probe.add_typed_action(typed_defer.probe_turn, typed_action_metrics)
+    if typed_defer.probe_turn then
+      Probe.end_turn(typed_defer.probe_turn, "ok")
+      if S.probe_turn == typed_defer.probe_turn then S.probe_turn = nil end
+    end
+    S.scroll_to_bottom = true
+  end
   if prefs.auto_run and not _any_gate_hit() then
+    if typed_action_ready then
+      local skip_typed = false
+      if prefs.auto_backup then
+        local bok, berr = Code.safety_backup()
+        if berr == "unsaved" then
+          typed_action_metrics.error = "backup_required"
+          explanation = "Structured edit validated, but auto-run is blocked until the project is saved for safety backup."
+          skip_typed = true
+          if S.history[_asst_hist_idx] then
+            S.history[_asst_hist_idx].run_status = "manual_run"
+          end
+        elseif berr == "read_error" or berr == "write_error" then
+          typed_action_metrics.error = "backup_failed"
+          explanation = "Structured edit validated, but auto-run is blocked because ReaAssist could not create a safety backup."
+          Log.add_error(explanation)
+          skip_typed = true
+          if S.history[_asst_hist_idx] then
+            S.history[_asst_hist_idx].run_status = "manual_run"
+          end
+        end
+      end
+      if not skip_typed then
+        Probe.mark_phase_start(S.probe_turn, "execution")
+        local exec_ok, exec_result = Code.execute_typed_actions_from_text(text, {
+          allow_raw_json = typed_action_response_format,
+          user_text = S.pending_orig_prompt or "",
+          profile = typed_action_profile,
+          on_done = function(done_ok, done_result)
+            typed_defer.done = true
+            typed_defer.ok = done_ok == true
+            typed_defer.result = done_result
+            typed_defer.finish()
+          end,
+        })
+        local exec_pending = exec_ok and exec_result
+          and exec_result.deferred == true
+          and exec_result.completed ~= true
+        if exec_pending then
+          typed_defer.pending = true
+        else
+          Probe.mark_phase_end(S.probe_turn, "execution")
+        end
+        typed_action_metrics.deferred =
+          exec_result and exec_result.deferred == true or nil
+        typed_action_metrics.deferred_pending = exec_pending or nil
+        typed_action_metrics.executed = exec_ok == true and not exec_pending
+        if exec_ok then
+          if exec_pending then
+            explanation = "Structured edit is applying..."
+            if S.history[_asst_hist_idx] then
+              S.history[_asst_hist_idx].run_status = "pending"
+              S.history[_asst_hist_idx].code_bytes = 0
+              S.history[_asst_hist_idx].code_type  = "typed_actions"
+            end
+          else
+            auto_ran_ok = true
+            explanation = (explanation and explanation ~= "") and explanation or "Done."
+            if S.history[_asst_hist_idx] then
+              S.history[_asst_hist_idx].run_status = "ran_ok"
+              S.history[_asst_hist_idx].code_bytes = 0
+              S.history[_asst_hist_idx].code_type  = "typed_actions"
+            end
+          end
+        else
+          local code_or_nil = exec_result and exec_result.code or nil
+          typed_action_metrics.error = code_or_nil or "execution_failed"
+          explanation = Code.typed_actions_user_failure_message(exec_result)
+          Log.add_error("Structured edit failed: "
+            .. tostring(explanation or code_or_nil or "unknown error"))
+          if S.history[_asst_hist_idx] then
+            S.history[_asst_hist_idx].run_status = "errored"
+            S.history[_asst_hist_idx].code_bytes = 0
+            S.history[_asst_hist_idx].code_type  = "typed_actions"
+          end
+        end
+      end
+    end
+
     -- JSFX: auto-save to Effects/ReaAssist/ folder ONLY when a Lua companion
     -- block is also present (meaning the user asked for it on a track).
     -- If the user just asked for an example, there is no Lua block and the
@@ -26014,10 +37572,33 @@ function Net.try_finish_curl()
     if run_lua then
       S.pending_code = run_lua
       local skip_run = false
+      local run_lua_artifact = lua_artifact_info
+      if not run_lua_artifact or run_lua ~= lua_code then
+        run_lua_artifact = Code.classify_lua_artifact(run_lua,
+          { context_text = text })
+      end
+      if not run_lua_artifact.runnable then
+        local block_msg = Code.lua_artifact_block_message(run_lua_artifact)
+        Log.line("AUTO-RUN", "blocked non-runnable Lua artifact: "
+          .. tostring(run_lua_artifact.kind) .. " / "
+          .. tostring(run_lua_artifact.reason))
+        if explanation and explanation ~= "" then
+          explanation = explanation .. "\n\n" .. block_msg
+        else
+          explanation = block_msg
+        end
+        skip_run = true
+        S.pending_code = nil
+        if S.history[_asst_hist_idx] then
+          S.history[_asst_hist_idx].run_status = "blocked_fragment"
+          S.history[_asst_hist_idx].code_bytes = #run_lua
+          S.history[_asst_hist_idx].code_type  = "lua"
+        end
+      end
       -- Risky-code gate: if the scanner flags anything, require explicit
       -- confirmation before auto-executing. The modal index points to the
       -- message that will be appended just below this block.
-      local auto_risk = Code.scan_risky(run_lua)
+      local auto_risk = (not skip_run) and Code.scan_risky(run_lua) or nil
       if auto_risk then
         S.risky_warn_code   = run_lua
         S.risky_warn_idx    = #S.display_messages + 1
@@ -26027,7 +37608,7 @@ function Net.try_finish_curl()
         if S.history[_asst_hist_idx] then
           S.history[_asst_hist_idx].run_status = "manual_run"
         end
-      elseif prefs.auto_backup then
+      elseif not skip_run and prefs.auto_backup then
         local bok, berr = Code.safety_backup()
         if berr == "unsaved" then
           S.backup_warn_code = run_lua
@@ -26060,7 +37641,16 @@ function Net.try_finish_curl()
       end
     end
   end
-  if code and not S.pending_code then
+  if typed_action_ready
+     and not typed_action_metrics.executed
+     and (not explanation or explanation == "") then
+    typed_action_metrics.error = typed_action_metrics.error or "auto_run_disabled"
+    explanation = "Structured edit validated, but it was not run because Auto-run is off."
+  end
+  if code and not S.pending_code
+     and (code_type ~= "lua"
+       or not lua_artifact_info
+       or lua_artifact_info.runnable) then
     S.pending_code = code
   end
 
@@ -26072,6 +37662,20 @@ function Net.try_finish_curl()
   if was_truncated and S.history[_asst_hist_idx] then
     S.history[_asst_hist_idx].truncated   = true
     S.history[_asst_hist_idx].run_status  = "truncated"
+  end
+  if not code and not (typed_action_metrics and typed_action_metrics.present) then
+    local filtered_explanation, filtered_count =
+      Code.filter_broad_fx_param_readout(_compact_user_intent, explanation)
+    if filtered_count and filtered_count > 0 then
+      explanation = filtered_explanation
+      text = filtered_explanation
+      if S.history[_asst_hist_idx] then
+        S.history[_asst_hist_idx].content = filtered_explanation
+      end
+      Log.line("PARAM-READOUT",
+        "filtered " .. tostring(filtered_count)
+        .. " default utility parameter line(s) from broad readout")
+    end
   end
   S.display_messages[#S.display_messages+1] = {
     role       = "assistant",
@@ -26097,11 +37701,16 @@ function Net.try_finish_curl()
       return _m and _m.label or "?"
     end)(),
     lua_companion   = jsfx_code and lua_code or nil,  -- store companion for manual run
+    lua_artifact    = code_type == "lua" and lua_artifact_info or nil,
+    lua_companion_artifact = jsfx_code and lua_code and lua_artifact_info or nil,
     jsfx_auto_saved = jsfx_auto_status,               -- status text from auto-save
     jsfx_saved_path = jsfx_saved_path_for_msg,        -- path if already saved (avoids re-save)
     jsfx_saved_fx_name = jsfx_saved_fx_name_for_msg,  -- FX ref name if already saved
+    ceiling_injected = ceiling_inject_info ~= nil or nil,
     auto_ran        = auto_ran_ok,                    -- V5: show AUTO-RAN pill below code
     truncated       = was_truncated or nil,
+    typed_action_token_cap = (was_truncated and typed_action_response_format
+      and S.typed_action_escalation_used == true) or nil,
     recovery        = was_truncated and "token_limit" or nil,
     -- True when the response tripped the docs-gate (reaper.* emitted with no
     -- api_ref in session). Chat bubble renderers can key off this to show a
@@ -26109,7 +37718,22 @@ function Net.try_finish_curl()
     docs_gate_hit   = docs_gate_hit or nil,
     typed_actions   = typed_action_metrics,
   }
-  Probe.add_typed_action(S.probe_turn, typed_action_metrics)
+  typed_defer.message_idx = #S.display_messages
+  typed_defer.finish()
+  if code_type == "lua" and code then
+    Code.record_latest_code_candidate(code, "assistant", {
+      artifact = lua_artifact_info,
+      context_text = text,
+    })
+  end
+  if auto_ran_ok and not typed_defer.pruned then
+    Net.sticky_prune_after_plugin_success(_compact_user_intent, lua_code or code)
+    typed_defer.pruned = true
+  end
+  if not typed_defer.pending then
+    Probe.add_typed_action(S.probe_turn, typed_action_metrics)
+  end
+  Net._restore_typed_action_escalation_model()
 
   -- Prune oldest display messages beyond the soft cap to prevent unbounded
   -- memory growth. History is bounded by CFG.MAX_HISTORY_TURNS for the API;
@@ -26118,18 +37742,31 @@ function Net.try_finish_curl()
   -- every message ever rendered across a long session. The next frame rewrap
   -- is one-shot and imperceptible.
   if #S.display_messages > CFG.MAX_DISPLAY_MSGS then
+    if Diag.uploader_enabled and Diag.capture_current_chat then
+      Diag.capture_current_chat()
+    end
+    local pruned_count = 0
     while #S.display_messages > CFG.MAX_DISPLAY_MSGS do
       tbl_remove(S.display_messages, 1)
+      pruned_count = pruned_count + 1
+    end
+    if typed_defer.message_idx and pruned_count > 0 then
+      typed_defer.message_idx = typed_defer.message_idx - pruned_count
+      if typed_defer.message_idx < 1 then typed_defer.message_idx = nil end
     end
     S.wrap_cache = {}  -- invalidate per-bubble text-wrap cache
   end
 
   Code.safe_write(tmp.out, "")
-  -- Turn completed successfully -- clear resume-state that's only meaningful
-  -- during an in-flight turn (popup bail, context_needed follow-ups). Leaves
-  -- S.pending_code alone since that carries the generated Lua the user may
-  -- still want to Run manually.
+  -- Response processing is complete. For deferred typed-action param writes,
+  -- the execution result is finalized by typed_defer.finish() on the defer
+  -- tick, but the request/resume state below is no longer needed. Leaves
+  -- S.pending_code alone since that carries generated Lua the user may still
+  -- want to Run manually.
   S.pending_orig_prompt = nil
+  S.pending_typed_action_expected = false
+  S.pending_typed_action_response_format = false
+  S.pending_typed_action_profile = nil
   S.pending_snapshot    = nil
   S.pending_project     = nil
   S.pending_attachments = nil
@@ -26159,13 +37796,11 @@ function Net.try_finish_curl()
       user_intent     = _compact_user_intent,
     })
   end
-  -- Phase 1 instrumentation: canonical "turn completed successfully"
-  -- site. Probe is dormant unless Dev/diagnostics_enabled exists.
-  -- This fires once per fully-completed turn; idempotence on
-  -- Probe.end_turn means a re-entrance abort or earlier failure-path
-  -- end_turn cannot be overwritten. Step 9 adds remaining error /
-  -- cancel exit paths inside this same response handler.
-  if S.probe_turn then
+  -- Phase 1 instrumentation: canonical "turn completed successfully" site
+  -- for non-deferred turns. Deferred typed-action param writes close the same
+  -- probe from typed_defer.finish() after the REAPER defer tick reports the
+  -- actual result. Probe is currently a no-op compatibility surface.
+  if S.probe_turn and not typed_defer.pending then
     Probe.end_turn(S.probe_turn, "ok")
     S.probe_turn = nil
   end
@@ -26176,38 +37811,34 @@ Render = {}
 -- =============================================================================
 -- Diagnostics module (Phase 1 instrumentation)
 -- =============================================================================
--- Load Resources/Temp-Probe.lua unconditionally. The module is dormant
--- by default (gated by the presence of Dev/diagnostics_enabled, a file
--- that lives in a gitignored / manifest-excluded directory and so
--- cannot reach a public release). When dormant, every Probe.* entry is
--- a no-op early-return.
---
--- Loaded BEFORE the bootstrap critical-files check so Probe.* is
--- callable from any code path, including recovery mode. Diagnostics is
--- NOT a critical file -- if the load fails (file missing, corrupt, or
--- runtime error), install an in-line no-op fallback so call sites can
--- use Probe.* unconditionally and startup never breaks. The shipped
--- module installs its own no-op stubs when the gate is off; this
--- fallback is strictly for the load-failure case.
+-- The historical local-only Temp-Probe module is retired. Keep Probe.* as
+-- explicit no-op entries so instrumentation call sites remain harmless and
+-- can be removed opportunistically without turning this cleanup into a broad
+-- runtime refactor.
 do
-  local ok, err = pcall(dofile, RA.RESOURCES_DIR .. "Temp-Probe.lua")
-  if not ok or type(Probe) ~= "table" then
-    Probe = setmetatable({ enabled = false }, {
-      __index = function() return function() end end
-    })
-    if not ok then
-      Log.line("DIAGNOSTICS",
-        "Temp-Probe.lua load failed: " .. tostring(err))
-    end
-  end
+  local function noop() end
+  Probe = {
+    enabled = false,
+    start_turn = function() return nil end,
+    mark_phase_start = noop,
+    mark_phase_end = noop,
+    add_bytes = noop,
+    set_body_total = noop,
+    add_request = noop,
+    add_request_usage = noop,
+    add_validator_retry = noop,
+    add_fx_cache = noop,
+    add_typed_action = noop,
+    end_turn = noop,
+  }
 end
 
 -- =============================================================================
 -- Diag module dofile (uploader pathway: manual feedback now, auto-tier in v1.1)
 -- =============================================================================
--- Loaded AFTER Temp-Probe.lua (so RA.JSON and RA.sha256_hex exports above are
--- visible) and BEFORE UI.lua (so the in-chat link guard `Diag.uploader_enabled`
--- has a real value when UI renders). Diag (the namespace) is already populated
+-- Loaded AFTER the shared RA.JSON / RA.sha256_hex helpers above are visible and
+-- BEFORE UI.lua (so the in-chat link guard `Diag.uploader_enabled` has a real
+-- value when UI renders). Diag (the namespace) is already populated
 -- with .errors / .add_error / .build_report from earlier in this file; this
 -- dofile extends it with the network-uploader surface.
 --
@@ -26701,7 +38332,7 @@ What's causing the runaway, and what specific change would fix it? Do NOT modify
   S._ceiling_alert_open    = false
 end
 
--- Dispatch one tick of the curl pump. If a 529 retry is scheduled and its
+-- Dispatch one tick of the curl pump. If an overload retry is scheduled and its
 -- deadline has passed, re-fire the saved request body. Otherwise, when a
 -- request is in flight, throttle-poll the response file (0.1s minimum).
 function Loop.pump_curl_or_retry()
@@ -26721,12 +38352,14 @@ function Loop.pump_curl_or_retry()
               .. "go through. Please try again in a moment.")
           end
           S.retry_count = 0
+          S.retry_max = CFG.MAX_RETRIES
         end
       else
         Log.add_error(
           "The servers are still busy and the automatic retry didn't "
           .. "go through. Please try again in a moment.")
         S.retry_count = 0
+        S.retry_max = CFG.MAX_RETRIES
       end
     end
   elseif S.status == "waiting" or S.gemini_tier_pending then

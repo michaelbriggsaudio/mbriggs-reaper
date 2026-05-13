@@ -26,7 +26,7 @@ In addition to cloud providers, ReaAssist supports custom provider endpoints and
 
 - REAPER 7.0 or later
 - ReaImGui extension (install via ReaPack from the ReaTeam Extensions repository)
-- An API key from one of the supported cloud providers (Anthropic, OpenAI, Google), or a local / custom-endpoint setup as described above
+- An API key from one of the supported cloud providers (Claude, ChatGPT, Gemini, DeepSeek), or a local / custom-endpoint setup as described above
 
 ## Installation
 

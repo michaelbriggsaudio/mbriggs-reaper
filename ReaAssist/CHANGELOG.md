@@ -1,5 +1,19 @@
 # ReaAssist - Changelog
 
+## v1.2.0 - 2026-05-13
+
+- **Local structured edits are now built in.** ReaAssist can handle common track edits locally and offline, including creating tracks, renaming tracks, building folders, setting sends, changing mute/solo states, and applying exact track-order edits with stronger validation before anything runs.
+
+- **DeepSeek is now a first-class provider.** DeepSeek now appears alongside Claude, ChatGPT, and Gemini, with built-in model guidance, help coverage, request handling, and provider-specific safeguards.
+
+- **REAPER knowledge is refreshed through 7.72.** The bundled reference now includes recent ReaScript and workflow updates such as AddRegionOrMarker, GetUserFileName, ruler-lane APIs, displayed-color reads, sample-editing additions, and hidden marker/region render options.
+
+- **More project questions answer instantly.** ReaAssist can answer many track, item, FX, send, selection, playhead, project, settings, update, model, and diagnostics questions directly from REAPER state.
+
+- **Generated edits are safer.** The validator now catches more bad targets, invalid folders, empty parameter writes, stock-FX value mistakes, non-runnable Lua fragments, and other cases that could produce no-op or wrong-session results.
+
+- **Diagnostics are clearer.** Feedback reports now include better app, provider, model, extension, settings, and recovery context.
+
 ## v1.1.5 - 2026-05-08
 
 - **SWS Extension is now installed and managed by ReaAssist.** Fresh installs and outdated installs can automatically download, verify, and install SWS alongside ReaImGui and js_ReaScriptAPI, with the same restart-after-install flow.

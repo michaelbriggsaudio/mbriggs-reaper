@@ -2,334 +2,293 @@
 
 ## Overview
 
-ReaAssist is a technical and workflow assistant for REAPER. Type requests in plain English and get explanations or executable Lua code that runs inside your session.
+ReaAssist is a session-aware workflow assistant for REAPER. Type a plain-English request and ReaAssist can answer questions, inspect session metadata, generate Lua scripts, configure plugins, build routing, create JSFX when explicitly requested, and help troubleshoot results.
 
-When enabled, ReaAssist can read project state such as tracks, FX chains, tempo, items, and selections so it can give context-aware answers and write more accurate scripts.
+The in-app Help page is a quick reference while you are working. For the complete guide, use the Read Online Manual button at the top of this page.
 
-ReaAssist does not generate, process, or alter your audio files. It is strictly a scripting and workflow tool. You maintain full creative control over your sound.
+ReaAssist is not a generative music or audio model. It does not create songs, lyrics, performances, or finished creative ideas for you. It does not upload your audio files or process them through an AI audio model. Generated REAPER scripts can still edit item properties, fades, pitch, routing, FX, and other project settings when you ask for that.
 
-## Privacy & Data
-
-Your audio files are never uploaded or sent anywhere. ReaAssist sends text to the provider you choose: your typed messages, optional project metadata (track names, FX lists, tempo, etc.), and any files you explicitly attach (images, PDFs). All chat communication goes directly between your machine and your chosen provider's API. For fully offline use, custom local LLMs (LM Studio, Ollama, etc.) are supported and keep all chat data on your machine.
-
-ReaAssist itself does not send anything automatically. The only paths through which data leaves your machine to the ReaAssist project are the in-chat feedback dialog and the Report an Issue form on the Help page, and only after you open them, review a preview of the exact bytes, and explicitly press Send.
-
-## Sending Feedback
-
-Below every assistant reply, ReaAssist shows small thumbs-up and thumbs-down feedback buttons. Clicking either button opens a preview-and-send dialog with that choice preselected. The buttons themselves send nothing; they only open the dialog.
-
-Inside the dialog you can:
-
-- Pick or change a thumbs-up or thumbs-down rating for the assistant's reply
-- If thumbs-down, optionally tag what went wrong: wrong result, wrong plugin, didn't follow request, or too slow
-- Add a free-text comment (optional)
-- Expand **Preview feedback** to inspect the exact JSON bytes that would be sent
-- Expand **Details & privacy** for the full disclosure of what's included, redacted, and excluded
-- Press **Send** to upload, or **Cancel** to discard
-
-**What is sent (only when you press Send):**
-
-- The current chat session (all turns visible in the chat)
-- Your typed comment and any tags you ticked
-- Basic context: app version, REAPER version, OS, provider, model
-- A **Diagnostic Report** with app/REAPER/OS/ImGui versions, installed extensions, preferences, plugin cache status, recent errors, and recent token/cache/cost metrics
-
-**Automatically redacted before sending:**
-
-- API keys
-- `Authorization:` headers and `Bearer` tokens
-- Home-directory paths (e.g. `C:\Users\<user>`), including log-file paths in the Diagnostic Report
-
-**What may still appear in the chat content** (always review the preview before clicking Send):
-
-- Project, track, plugin, or other names you typed or that the assistant mentioned
-- Any other text you pasted into the chat
-
-**What is never sent:**
-
-- Audio files
-- REAPER project files (`.RPP`)
-- Your API keys
-
-**On send:**
-
-- **Successful sends:** the dialog confirms with a brief message and closes.
-- **Failed sends:** the dialog stays open with the error and a **Try Again** button. ReaAssist does not queue, retry, or save any feedback file in the background. If you cancel after a failure, the data is discarded.
-
-**Where it goes:**
-
-- Sent to the ReaAssist project maintainer via `https://d.reaassist.app`.
-- A random installation ID is generated **only on your first successful send** so duplicate reports from the same install can be deduplicated. This ID is not linked to your identity.
-
-## Reporting a Bug
-
-For issues that need more than a thumbs-down (something crashed, the wrong code ran, a feature isn't working as expected), open **Feedback / Report an Issue** from the Help page. The page hosts a form that collects everything the maintainer needs to investigate in one place.
-
-Inside the form you can:
-
-- Describe what happened, what you expected, and what actually happened (required)
-- Add an optional **Name** and **Email** if you'd like a reply (otherwise leave blank)
-- Expand **Preview report** to inspect the exact JSON bytes that would be sent (right-click the preview to copy)
-- Expand **Details & privacy** for the full disclosure of what's included, redacted, and excluded
-- Press **Send** to upload
-
-**What is sent (only when you press Send):**
-
-- Your description and any contact info you provided
-- The same Diagnostic Report as the in-chat dialog (app/REAPER/OS, installed extensions, recent errors, metrics)
-- One of the following, depending on the **Enable Advanced Log** toggle below the form:
-  - **If the log is enabled** (the default): the entire Advanced Log file, redacted before sending. The log captures full API request/response traffic, FX scan events, and exchange summaries — the most useful evidence for debugging.
-  - **If the log is disabled or empty:** the current chat session as a fallback, so reports are still useful when the log isn't available.
-
-**Automatically redacted before sending:**
-
-- API keys (yours and any pasted into chat)
-- `Authorization:` headers and `Bearer` tokens
-- Home-directory paths
-- `?key=` / `?token=` style URL query secrets
-- Custom-provider endpoint URLs (so LAN IPs and self-hosted hostnames stay private)
-
-**What is *not* redacted** (so the maintainer can read the report and reply):
-
-- Your **Name** and **Email**, if you typed them — sent as-is
-- Project, track, plugin, or file names that appear in the chat or the log
-- Anything else you pasted into the chat
-
-**What is never sent:**
-
-- Audio files
-- REAPER project files (`.RPP`)
-- Your API keys
-
-The **Preview report** expander shows the exact redacted bytes that will be POSTed. Always skim it before sending if you're worried about anything sensitive in your chat or log.
-
-**Contact info is remembered.** If you fill in Name and Email, they're saved locally so the next visit pre-fills them. They're never sent unless you press Send. Clear them by emptying the fields and sending another report (or by Factory Reset).
-
-**Where it goes:** same as in-chat feedback — the ReaAssist project maintainer via `https://d.reaassist.app`. Failed sends keep the form filled with a **Try Again** button; nothing is queued in the background.
+You remain responsible for the creative direction, generated code review, and backups of important projects.
 
 ## What It Can Do
 
-- **Session Awareness**: read tracks, FX, routing, tempo, items, and selections for context-aware responses
-- **Lua Scripting**: automate tasks, batch-process tracks, rename items, manage routing, and more
-- **JSFX Creation**: generate custom JSFX effects and install them to your tracks from a single prompt
-- **Mixing & Effects**: add and configure plugins, adjust levels and panning, set up sends, build FX chains
-- **Editing**: items, splits, nudges, crossfades, time selection, markers, and regions
-- **Project Management**: create tracks, set colors, manage folders, configure I/O
-- **General Questions**: shortcuts, features, best practices, and workflow tips
+- Read useful session metadata such as tracks, items, FX chains, plugin names, routing, sends, tempo, markers, regions, time selection, edit cursor, and selected objects.
+- Answer questions about the current REAPER session.
+- Generate Lua scripts that run inside REAPER.
+- Add, configure, and automate stock or preferred plugins.
+- Set up routing, sends, folders, markers, regions, edits, and project structure.
+- Use SWS Extension APIs for practical tasks such as mouse context, GUID helpers, clipboard reporting, SWS notes, marker/region subtitles, FX-chain window helpers, and peak/RMS/LUFS measurements.
+- Generate JSFX only when you explicitly ask for a custom JSFX effect.
+- Help diagnose failed or incorrect results when you tell it what happened.
 
 ## Getting Started
 
 1. On first launch, review and accept the Terms of Use.
-2. Get an API key from at least one provider (Claude, ChatGPT, Gemini, or a custom/local LLM).
-3. Enter your key on the intro screen, or open **Settings** later to add more.
-4. Select your provider and model from the dropdowns at the bottom.
-5. Type a message and press Send or Enter. Use **Shift+Enter** to add a new line without sending.
+2. Let ReaAssist install required extensions if prompted, then restart REAPER when asked.
+3. Add an API key for at least one provider, or configure a local/custom model server.
+4. Select your provider and model from the picker.
+5. Decide whether to send a session snapshot with each message.
+6. Type a request and press Send or Enter. Use Shift+Enter for a new line.
 
-## Example Prompts
+Before running generated code, read the code window and confirm the action makes sense for your session. For important projects, save or back up the project first.
 
-- "Add a reverb to every selected track"
-- "Set the tempo to 120 BPM"
-- "What FX are on track 3?"
-- "Write a script that fades in the first item on each track"
-- "Rename all tracks by their first item name"
-- "How do I set up a sidechain compressor?"
-- "Create a JSFX stereo widener and add it to track 1"
+## Prompt Examples
+
+The most useful ReaAssist prompts usually combine a target, a desired action, and the kind of report or cleanup you want afterward.
+
+### Session Review
+
+- "Audit this session for cleanup issues: armed tracks, muted tracks, hidden tracks, empty tracks, bypassed FX, and unusual routing. Give me a short checklist before writing code."
+- "Compare the selected tracks' FX chains, sends, colors, and folder placement, then suggest what should be standardized."
+- "Find every selected track that routes to more than one destination and explain the signal flow."
+- "Look at the selected vocal tracks and tell me which ones have missing compression, EQ, tuning, or reverb sends based on their FX chains."
+
+### Editing and Analysis
+
+- "Select the item under my mouse cursor, move the edit cursor to its start, and report its track, take name, start time, and length."
+- "Find selected audio items that peak above -1 dBFS, color them red, and copy a peak/LUFS report to the clipboard."
+- "Pitch-shift the selected melodic audio items up 2 semitones, leave drum tracks unchanged, and report which items were edited."
+- "Create 5 ms fades on selected items that do not already have fades, then tell me how many items were changed."
+- "Analyze the selected audio items and make a table with item name, track name, peak level, peak position, and integrated LUFS."
+
+### Track and Routing Automation
+
+- "Create a drum bus from the selected drum tracks, route them to it, color it, name it, and preserve any existing sends."
+- "Build a stem-print setup for the selected tracks: create matching print tracks, route each source to its print track, name them clearly, and leave the originals muted."
+- "Add subtitles to the current markers and regions using their names, then refresh the SWS notes window."
+- "Add track notes to the selected tracks summarizing each track's role, routing, and FX chain."
+
+### Mixing and Effects
+
+- "Build a parallel drum crush return for the selected drum tracks with ReaComp, route the tracks to it, and label/color the return."
+- "Set up sidechain compression on the bass from the kick, including the send and the ReaComp detector input settings."
+- "Create a shared plate reverb return for the selected vocal tracks, add sends at -18 dB, and name/color the return."
+- "Find tracks that have a limiter or clipper in the FX chain and make a report of where they are, including bypass/offline state."
+
+### Plugin Configuration
+
+- "On all selected vocal tracks, find Pro-Q 4 or ReaEQ and add a gentle high-pass around 80 Hz without changing existing bands."
+- "Normalize ReaComp settings across the selected backing vocal tracks: 3:1 ratio, 10 ms attack, 100 ms release, and auto makeup off."
+- "List every track using Pro-Q 4 or ReaEQ, include whether each instance is bypassed or offline, and copy the report to the clipboard."
+- "For selected guitar tracks, create a quarter-note delay return, send the tracks to it, and leave the existing insert FX alone."
+
+### MIDI
+
+- "In the active MIDI take, find overlapping notes, shorten or remove the duplicates safely, and report how many overlaps were fixed."
+- "For selected MIDI items, humanize selected notes by up to 8 ticks and 6 velocity steps while preserving note lengths."
+- "Transpose the selected MIDI items from C major to D major, update any marker or region names that mention the old key, and report how many notes were changed."
+- "Set all selected notes in the active MIDI take to velocity 96, keep their timing unchanged, and report the note count."
+- "Create a MIDI cleanup script for selected takes: remove muted notes, delete notes shorter than 1/128, and sort the events afterward."
+
+### Lua Scripting
+
+- "Write a Lua script that exports selected item metadata to the clipboard: track name, item name, GUID, start time, length, peak level, and LUFS if available."
+- "Write a script that saves the current selected items by GUID so I can restore that same selection later after editing the project."
+- "Write a script that lists the selected FX in the focused FX-chain window and copies their names and indexes to the clipboard."
+- "Write a script that creates a mix prep report from selected tracks: color, folder depth, sends, receives, FX chain, mute/solo state, and SWS track notes."
+
+Review scripts before running, especially scripts that write files or make broad project changes. For routing, pitch, batch edit, or cleanup scripts, save the project or make a backup first.
+
+### JSFX
+
+- "Create a JSFX stereo utility with width, balance, mono, mid/side solo, mono-safe bass below 120 Hz, and output trim."
+- "Create a JSFX gain trim with input/output meters, phase invert, clip indicator, and a simple output ceiling."
+- "Make a tempo-synced tremolo JSFX with selectable wave shape, stereo phase offset, smoothing, depth, and output level."
+
+Ask explicitly for JSFX when you want custom DSP code.
+
+Less effective prompts are vague or leave out the target, such as "fix my mix," "make this better," or "change the song key." Reword those with the exact tracks/items, the action, and what should happen afterward.
+
+## Session Awareness
+
+When session awareness is enabled, ReaAssist can include REAPER project metadata in requests so answers and scripts are grounded in the current session.
+
+Depending on the request and settings, context may include:
+
+- Track names, numbers, colors, folders, mute/solo/arm state, and selection.
+- Items, takes, selected items, time selection, and edit cursor.
+- FX chains and plugin names.
+- Routing and sends.
+- Tempo, markers, regions, and project-level state.
+- Preferred-plugin mappings and cached plugin parameter data.
+
+The assistant only knows what ReaAssist sends in text form. It does not hear, understand, or judge audio content, and it does not open or upload your .RPP project file. Generated scripts can still use REAPER and supported extensions to read project metadata or run measurements such as peak, RMS, and LUFS on selected items.
 
 ## Providers & Models
 
-ReaAssist supports Claude, ChatGPT, Gemini, and custom OpenAI-compatible endpoints, including local servers such as LM Studio, Ollama, llama.cpp, and vLLM.
+ReaAssist supports Claude, ChatGPT, Gemini, DeepSeek, and custom OpenAI-compatible endpoints, including local servers such as LM Studio, Ollama, llama.cpp, vLLM, and similar tools.
 
-Each provider has fast, balanced, and smart model tiers. Start with a balanced model for normal work, use a smart/full model for complex scripts or multi-plugin tasks, and use fast/mini models for quick questions or simple edits.
+Current v1.2.0 recommendations:
 
-For providers with configurable thinking, more is not always better. ReaAssist gives the model a structured recipe; strong models usually follow it best at low or minimal thinking. If a complex task fails, raise the model tier before raising the thinking level.
+- Claude: Sonnet 4.6, no thinking. All-around safe default. Pick Opus 4.7, no thinking, for highest quality at higher cost.
+- ChatGPT: GPT-5.4, no thinking. Fastest reliable combo.
+- Gemini: Flash 3, Minimal thinking. Cheapest fast option.
+- DeepSeek: V4 Flash, Non-Thinking. Cheapest combo in the built-in lineup; very fast, strong cheap pick.
 
-### Quick model guide
+The in-app model picker is the source of truth if this text ever differs from what you see in ReaAssist. Model availability, pricing, and names can change.
 
-| Provider | Recommended pick | Best for |
-|---|---|---|
-| Anthropic (Claude) | Sonnet 4.6, no thinking | All-around safe default. Pick Opus 4.7 (no thinking) for highest quality at higher cost. |
-| OpenAI (ChatGPT) | GPT-5.4, no thinking | Fastest reliable combo |
-| Google (Gemini) | Flash 3, Minimal thinking | Cheapest fast option |
+For providers with configurable thinking, more is not always better. ReaAssist already gives the model a structured recipe. For most prompts, a strong base model with no extra thinking is better than a smaller model running deeper thinking. If a complex task fails, raise the model tier before raising the thinking level.
 
-The model and thinking dropdowns mark each provider's recommended row with a `*` on the left. Hover any row to see what that combination is best for; the same explainer briefly appears as a muted line below the chips after you change the selection.
+You can connect more than one provider and switch per request. Add or remove keys from Settings > API Keys.
 
-You can connect more than one provider and switch per request from the provider picker above the chat input. Add or remove keys from **Settings > API Keys**. Model choices are remembered per provider.
+## Privacy & Data
 
-## Code Execution
+ReaAssist does not upload audio files. It does not send .RPP project files. It does not send API keys to the ReaAssist author.
 
-When the assistant returns a Lua code block, buttons appear beneath it:
+For normal chat requests, ReaAssist sends text to the provider you choose. That text can include:
 
-- **Run Code**: execute the code inside REAPER immediately.
-- **Undo**: revert the last action (Ctrl+Z).
-- **Backup**: save a timestamped backup of your project (.rpp-bak).
-- **Copy**: copy code to clipboard.
-- **Save**: save as a .lua file you can add to the Actions menu.
-- **Edit**: switch to editable mode for manual tweaks before running.
+- Your typed message.
+- Conversation history needed for the current chat.
+- Optional project/session metadata.
+- Files you explicitly attach, such as images, PDFs, or text files.
 
-All executed code is wrapped in an undo block, so Ctrl+Z can revert changes.
+All normal chat communication goes between your machine and your selected provider or custom model server. For fully offline use, configure a local model server. With a local server, chat data stays on your machine or local network, subject to how that server is configured.
+
+The paths through which data leaves your machine to the ReaAssist project are the in-chat feedback dialog, the Report an Issue form, and automatic diagnostics. Manual feedback and bug reports are sent only after you open them, review a preview of the exact bytes, and explicitly press Send. Basic anonymous diagnostics are enabled by default and can be turned off in Settings.
+
+## Running Code & Safety
+
+When the assistant returns a Lua code block, action buttons appear below it:
+
+- Run Code: execute the code inside REAPER.
+- Undo: revert the last action with REAPER's undo system.
+- Backup: save a timestamped .rpp-bak project backup.
+- Copy: copy code to the clipboard.
+- Save: save as a .lua file you can add to the Action List.
+- Edit: switch to editable mode before running or saving.
+
+Executed code is wrapped in a REAPER undo block, so normal Undo can revert many actions. You should still keep backups, especially before running code that edits many tracks, items, plugins, files, routing, pitch, or project settings.
+
+Before running generated code, ReaAssist scans for potentially dangerous Lua patterns such as file deletion, shell execution, file writes, loading external code, and debug-library access. If risky code is found, Run is replaced by a Review Before Running confirmation. Auto-run is blocked when safety review is required.
+
+The scanner reduces risk, but it cannot prove generated code is safe. Always skim generated code before running it.
+
+### Structured Track Edits
+
+Simple stock track, folder, stock-FX, parameter, and send requests can use a stricter local/offline executor instead of generated Lua. The supported scope is intentionally narrow: ReaEQ, ReaComp, ReaDelay, ReaVerbate, ReaGate, ReaLimit, track properties, folders, and sends. It does not handle MIDI, JSFX, items, takes, markers, regions, envelopes, third-party plugins, presets, or unsupported parameter names; those continue through the normal Lua workflow.
+
+Structured edits still require Auto-run, still use Auto-backup when enabled, and fail closed when the generated plan does not match the request safely.
 
 ## JSFX Creation
 
-JSFX generation is **opt-in**. Ask explicitly ("write me a JSFX stereo widener", "make a custom delay plugin") and the assistant produces the code. Generic effect requests ("add a reverb", "I need a delay") always use stock or preferred plugins; they never improvise a JSFX.
+JSFX generation is opt-in. Ask explicitly for a custom JSFX effect, such as "write a JSFX stereo widener" or "create a custom delay JSFX and add it to selected tracks."
 
-- Responses come with Copy and Save buttons. If you specify a track, a companion Lua script installs the JSFX on that track automatically.
-- **Add To Selected Track(s)**: saves the JSFX and adds it to all selected tracks in one click.
-- With Auto-run enabled, JSFX are saved and installed without prompting.
-- Files land in `Effects/ReaAssist/` with unique names (no overwrites). They appear in your FX Browser after REAPER rescans, or on the next restart.
+Generic effect requests do not automatically become JSFX. For example, "add a reverb" or "I need a delay" uses stock, preferred, or resolved plugins unless you explicitly request a custom JSFX.
+
+JSFX actions can include Copy JSFX, Save, Add To Selected Track(s), and a companion Lua install script when needed. Generated JSFX files are saved under REAPER's Effects/ReaAssist/ folder with unique names. ReaAssist avoids overwriting existing files.
+
+If a new JSFX does not appear in the FX Browser immediately, rescan REAPER's effects or restart REAPER.
+
+## Preferred Plugins & FX Cache
+
+Preferred Plugins let you choose which plugin ReaAssist should use for generic effect types such as EQ, compressor, reverb, delay, limiter, pitch correction, or synth.
+
+After setup, a request like "add an EQ to the vocal" can use your chosen EQ instead of asking every time. If no preference exists, ReaAssist can show a plugin resolve prompt or use a stock fallback when available.
+
+When you save a preferred plugin, ReaAssist scans parameter information for uncached plugins so future parameter changes can be more precise. The FX Parameter Cache stores scanned plugin data so repeated plugin work is faster and more reliable.
+
+Use Rescan after a plugin update. Use Deep scan only when a normal scan returns unclear values, which can happen with some VST3 plugins. Preferred-plugin mappings and cached parameter data live together in FX_Cache.json in the script folder.
 
 ## File Attachments
 
-Attach files to your messages for the assistant to analyze. Click the **+** button below the prompt to open the attachment menu:
+Use the + button below the prompt to attach files.
 
-- **Attach File**: open a file picker for images, PDFs, or text files.
-- **Screenshot**: capture the REAPER window as an image attachment.
-- **Paste Image**: attach an image from your clipboard.
-- **Drag & Drop**: you can also drop files anywhere on the window.
+Attachment options include:
 
-Supported formats: PNG, JPG, GIF, WebP, PDF, and text files. Max 10 attachments per message.
+- Attach File: choose an image, PDF, or text file.
+- Screenshot: capture the REAPER window as an image attachment.
+- Paste Image: attach an image from the clipboard.
+- Drag and drop: drop files onto the ReaAssist window.
 
-## Safety Scanner
+Supported formats include PNG, JPG, GIF, WebP, PDF, and text files. ReaAssist supports up to 10 attachments per message.
 
-Before running code, ReaAssist scans for potentially dangerous calls: file deletion/renaming (`os.remove`, `os.rename`), shell execution (`os.execute`, `io.popen`), writing to files (`io.open` in write/append mode), loading external code (`require`, `dofile`, `loadfile`, `loadstring`, `load`), and debug-library access.
+Attached files are sent to the selected provider or custom model server as part of the request. Use attachments for screenshots of errors, plugin windows, routing diagrams, notes, or PDFs you want summarized or interpreted.
 
-When any of these are detected, the Run button is replaced by a **Review Before Running** confirmation modal that lists what was found. You must explicitly accept it before the code will execute. Auto-run is blocked too. This is a hard gate, not a label; always read the warning and skim the code before accepting.
+## Feedback & Bug Reports
 
-## Theme & Appearance
+ReaAssist offers manual feedback through the thumbs-up/thumbs-down dialog below assistant replies and the Feedback / Report an Issue form on the Help page. Both are opt-in. Nothing is sent until you press Send, and both show a preview of the exact bytes first.
 
-ReaAssist includes Dark and Light themes plus an Auto mode that follows your operating system's appearance setting. Change the theme from the **Theme** dropdown on the Settings page.
+Feedback reports can include the current chat session, your rating, tags, comment, app version, REAPER version, OS, provider, model, and a diagnostic report with installed extensions, preferences, plugin cache status, recent errors, and recent token/cache/cost details.
 
-- **Auto** (default): detects your OS dark/light mode preference and applies the matching theme automatically. Supported on Windows, macOS, and Linux (GNOME/GTK).
-- **Dark**: dark background with light text, easy on the eyes in dim environments.
-- **Light**: light background with dark text, ideal for bright environments.
+Bug reports can include your issue description, optional name/email, the same diagnostic report, and either the redacted Advanced Log or the current chat session as a fallback.
 
-The theme is applied immediately as a live preview. Changes are saved when you click **Save & Return**.
+Automatic diagnostics are managed in Settings > Advanced. Basic anonymous diagnostics are enabled by default and send structured metrics only, such as versions, OS, provider class, model tier, token/cache/cost totals, latency, retry counters, and error counts. Extended is off unless you enable it and includes Basic plus redacted chat, diagnostic report, Advanced Log/report detail, and recent error detail.
 
-## UI Scale
+Before sending, ReaAssist redacts API keys, Authorization headers, Bearer tokens, URL query secrets, home-directory paths, install paths in diagnostic reports, and custom-provider endpoint URLs from Advanced Log bug reports.
 
-Adjust the interface size from the **UI Scale** dropdown on the Settings page. Available options: 75%, 85%, 100%, 125%, 150%, and 200%.
+Name and Email are sent as-is if you fill them in so the maintainer can reply. Project names, track names, plugin names, file names, or other text you typed may still appear in chat or logs. Always review the preview before sending if you are worried about sensitive text.
 
-- When you change the scale, a **confirmation popup** appears with a 10-second countdown. Click **Keep Scale** (or press Enter) to confirm. Click **Revert Now** (or press Escape) to undo. If you don't respond, the scale automatically reverts after 10 seconds. This prevents getting stuck at an unusable size.
-- The window size is **clamped to your monitor's work area**, so choosing a large scale on a small screen will not push the window off-screen. This works correctly on multi-monitor setups.
-- **Reset Window Size** on the Settings page restores the default window size and clears any saved position.
-- **Shift-Launch recovery**: if the UI becomes unreachable due to a bad scale setting, hold **Shift** while launching ReaAssist to reset the scale to 100%, theme to Auto, and clear saved window geometry. Requires js_ReaScriptAPI.
+Reports go to the ReaAssist project maintainer through https://d.reaassist.app. Failed manual sends keep the form/dialog open with a Try Again button. Automatic diagnostics use a next-launch pending queue so they are sent only when ReaAssist is idle and only up to the current tier you have enabled.
 
-ReaAssist remembers your window position and size between sessions. Moving or resizing the window is automatically saved.
+## Options & Appearance
 
-## Options
+Main-screen options:
 
-These checkboxes are available on the main screen:
+- Auto-run code: automatically execute eligible returned code. Use carefully.
+- Auto-backup: save a project backup before running code.
+- Show details: show model name, token counts, prompt-cache hits, estimated cost, and session total.
 
-- **Auto-run code**: automatically execute returned code without clicking Run. Use with caution.
-- **Auto-backup**: automatically save a project backup before running code.
-- **Show details**: display model name, token counts, prompt-cache hits, and estimated cost per exchange plus a running session total.
+Settings includes API Keys, provider/model selection, custom provider configuration, theme selection, UI scale, Send session snapshot, Always include REAPER API reference, update checks, Preferred Plugins, FX Param Cache, Reset Window Size, and Factory Reset.
 
-Additional options are available on the **Settings** page:
+Themes include Auto, Dark, and Light. Auto follows the operating system's light/dark appearance when supported.
 
-- **Send session snapshot**: attach a live project snapshot with every message (tracks, FX, tempo, markers, selections, cursor position).
-- **Always include REAPER API reference**: pin the REAPER Lua API reference to every request. Off by default; the assistant fetches docs on-demand when it needs them, which saves about 10K tokens per turn on non-code questions. Turn on if you do mostly code-generation work and want no docs-fetch round trips.
-- **Check for updates**: automatically check for new versions on startup.
-- **Preferred Plugins**: set default plugins for each generic type, e.g. "EQ" → your favorite EQ plugin (see below).
-- **FX Param Cache**: view and manage cached plugin parameter data (see below).
-- **Reset Window Size**: restore the default window size and clear saved position.
-- **Factory Reset**: clear all keys, preferences, settings, theme, scale, and window geometry to start fresh.
+UI Scale options are 75%, 85%, 100%, 125%, 150%, and 200%. When changing scale, ReaAssist shows a confirmation popup with a 10-second countdown so the UI cannot get stuck at an unusable size.
 
-## Preferred Plugins
+If the UI becomes unreachable, hold Shift while launching ReaAssist. Shift-launch recovery resets scale to 100%, theme to Auto, and saved window geometry. Shift-launch recovery requires js_ReaScriptAPI.
 
-Set default plugins for generic types (EQ, compressor, reverb, etc.) so the assistant uses your pick automatically when you say "add an EQ." Access from the **Settings** page.
+## Updates & Repair
 
-- **Autocomplete**: start typing a plugin name and matches appear. Arrow keys highlight, Enter or click selects. **Tab** / **Shift+Tab** move between the Type and Plugin name fields. Add comma-separated aliases in the type field (e.g. "EQ, equalizer, tone").
-- **Format dedup**: VST2 entries are hidden when a same-named VST3 is also installed (same for VSTi / VST3i). AU and CLAP builds are shown so you can pick a specific format.
-- **Save** commits your mappings and scans any plugins that aren't already cached. Already-cached plugins are skipped, so Save is cheap to run repeatedly. Scanning is what lets the assistant set specific parameters on your third-party plugins by name rather than guessing.
-- **Rescan All** / **Rescan** (per row): force a fresh parameter scan, e.g. after a plugin update.
-- **Clear All** wipes every preferred-plugin mapping (confirmation popup). Cached parameter data is kept, so re-picking the same plugin later doesn't force a rescan.
-- Leave a row blank for types you don't need; the assistant raises a resolve popup or falls back to a stock REAPER plugin when appropriate.
-- Preferences and cached parameter data live together in `FX_Cache.json` in the script folder. Back that file up to preserve your setup.
+ReaAssist can check for updates and repair missing or mismatched installed files. The update system checks installed files against the official release file list, downloads missing or outdated files, cleans up removed files, and relaunches ReaAssist after update or repair when needed.
 
-## FX Parameter Cache
+ReaAssist also checks required extensions such as ReaImGui and SWS Extension during startup. If a required extension is missing or too old, ReaAssist can install or update the pinned version from the upstream release. After extension installs or updates, restart REAPER so the newly installed binaries load.
 
-Whenever a plugin's parameters are scanned (through Preferred Plugins, the resolve popup, or an on-demand `fx_inspect`), the results are cached so future requests are instant. Open the cache page from the **FX Param Cache** button on the Settings page.
-
-- The top row shows how many plugins are cached and a **Clear All** button (with confirmation) that removes every entry. Preferred-plugin mappings are not affected.
-- Each plugin row has three actions:
-  - **Rescan**: re-scan this plugin's parameters quickly (one frame). Use after a plugin update.
-  - **Deep**: defer-paced scan with a per-probe delay. Use only when a normal Rescan returns garbage values, typically VST3 plugins that report parameters one frame late (e.g. Soundtoys). Shows live progress and can be cancelled.
-  - **Remove**: drop this entry from the cache. It will be re-scanned the next time it's needed.
-- A `needs deep scan` label (in amber) next to a plugin's param count means the normal scan couldn't read clean values; click Deep to finish it.
-- The cache is unified with your preferred-plugin mappings in `FX_Cache.json`, so "Clear All" here only wipes parameter data, not your type → plugin choices.
-
-## Plugin Resolve Prompts
-
-When a request needs a plugin of a generic type (e.g. "add a compressor") and you haven't set a preferred plugin for that type, a popup titled **"Choose a plugin to use..."** appears. Pick once and it's saved to Preferred Plugins so the popup doesn't come back for that type.
-
-- **Type a plugin name**: autocomplete shows matches as you type; arrow keys highlight, Enter or click selects. **Use this** confirms.
-- **Install ReEQ Instantly (Free)** (EQ only): one-click install of ReaAssist's bundled JSFX EQ (by Justin Johnson, MIT licensed). Better filter slopes than ReaEQ; recommended if you don't own a third-party EQ.
-- **Use [stock plugin] instead**: if REAPER ships a stock plugin or JSFX that fits the type, this proceeds immediately and saves it as your preference. See the table below for each type's fallback.
-- **Cancel**: appears only when there's no stock fallback (currently "custom"); aborts the turn.
-
-### Stock Fallbacks
-
-| Request type | Stock fallback | Saved as preferred on use? |
-|---|---|---|
-| EQ | ReaEQ | No: always re-prompts toward ReEQ or a third-party choice |
-| Compressor | ReaComp | Yes |
-| Multiband Compressor | ReaXcomp | Yes |
-| Gate | ReaGate | Yes |
-| Delay | ReaDelay | Yes |
-| Limiter | ReaLimit | Yes |
-| Pitch Shift | ReaPitch | Yes |
-| Pitch Correction | ReaTune | Yes |
-| Reverb | ReaVerbate | Yes |
-| Synth | ReaSynth | Yes |
-| De-esser | JSFX Liteon/deesser | Yes |
-| Saturation | JSFX LOSER/Saturation | Yes |
-| Chorus | JSFX SStillwell/chorus_stereo | Yes |
-| Phaser | JSFX Guitar/phaser | Yes |
-| Custom | n/a | Cancel only |
-
-All fallback plugins ship with a stock REAPER install. The JSFX entries use the source files found in REAPER's `Effects/` folder.
-
-## On-Demand Context
-
-The assistant can request extra context mid-conversation when needed, even if **Send session snapshot** is off. This happens automatically.
-
-Available context includes project snapshots, REAPER API docs, MIDI reference notes, curated plugin guidance, preferred-plugin settings, FX search results, FX chain listings, and live parameter scans for installed plugins.
-
-## Prompt Caching & Cost
-
-All three providers cache repeated prompt content between turns, which can cut per-turn costs by 5-10× on ongoing conversations. With **Show details** on, each exchange shows token counts, cache hits, and estimated USD cost; a session total appears below the options. Cost estimates are approximations only.
+If repair fails because a file is locked or unavailable, close REAPER, reopen it, and try again. If the problem persists, reinstall ReaAssist through ReaPack.
 
 ## Keyboard Shortcuts
 
-- **Enter**: send message
-- **Shift+Enter**: insert a new line in the prompt
-- **Escape**: close popups, help screen, and settings pages. On the main chat screen, Escape opens a quit confirmation dialog.
-- **Ctrl+C**: copy selected text from chat
-- **Right-click** on chat text: copy selection, copy all, or copy table
-
-## Button Reference
-
-- **+**: attach files, screenshots, or clipboard images.
-- **Settings**: manage API keys, models, preferred plugins, cache, theme, and scale.
-- **Clear Chat**: reset the current conversation.
-- **Copy Chat**: copy the full chat to clipboard.
-- **Run Code / Undo / Backup / Copy / Save / Edit**: actions shown below generated code.
+- Enter: send message.
+- Shift+Enter: insert a new line in the prompt.
+- Escape: close popups, Help, Settings, and other overlay screens. On the main chat screen, Escape opens quit confirmation.
+- Ctrl+C: copy selected chat text.
+- Right-click chat text: copy selection, copy all, or copy table.
 
 ## Troubleshooting
 
-- **Code doesn't run or buttons don't appear**: make sure ReaImGui is installed and up to date. ReaAssist auto-installs ReaImGui on first launch when missing; if you uninstalled it manually, relaunch ReaAssist and accept the install prompt, or update via ReaPack (Extensions > ReaPack > Browse Packages).
-- **API errors or "invalid key"**: double-check your key on the Settings page. Verify your billing status with your provider.
-- **Gemini free tier limits**: the free tier has lower rate limits and may reject large requests. Enable billing on your Google Cloud account for full access.
-- **Screenshots not working**: accurate window capture requires js_ReaScriptAPI. ReaAssist auto-installs it on first launch on Windows, macOS, and Linux x86_64; if it was skipped or you uninstalled it, install via ReaPack (Extensions > ReaPack > Browse Packages). Platforms without an upstream binary fall back to non-native capture.
-- **JSFX not showing in FX Browser**: REAPER needs to rescan. Go to Options > Preferences > Plug-ins > VST and click Re-scan, or restart REAPER.
-- **UI is too large or off-screen**: hold Shift while launching ReaAssist to reset the scale to 100%, theme to Auto, and clear saved window position.
+- Code buttons do not appear: make sure ReaImGui is installed and up to date. ReaAssist auto-installs required extensions on first launch when missing. If you uninstalled one manually, relaunch ReaAssist and accept the install prompt, or update via ReaPack.
+- ReaAssist will not launch: check that REAPER is version 7.0 or later, ReaImGui and SWS Extension are installed, Resources/ is directly beside ReaAssist.lua, and the install was not partially copied or interrupted.
+- API key errors: verify the key, selected provider, billing/account access, and chosen model.
+- Local model server errors: verify the server is running, the base URL is correct, the API is OpenAI-compatible, the model name exists, and firewall settings are not blocking localhost.
+- Gemini free tier limits: the free tier may reject large requests or hit lower rate limits. Enable billing on the Google account for full access, or use a smaller request/model when appropriate.
+- Screenshots do not work: accurate window capture requires js_ReaScriptAPI. ReaAssist auto-installs it on supported platforms. Platforms without an upstream binary use a non-native capture fallback.
+- JSFX does not appear in the FX Browser: restart REAPER, rescan effects, and check REAPER's Effects/ReaAssist/ folder.
+- UI is too large or off-screen: hold Shift while launching ReaAssist to reset UI scale, theme, and saved window geometry.
+- Plugin parameters are wrong: rescan the plugin in FX Param Cache, use Deep scan for plugins that report delayed values, reword the request with exact parameter names, or choose a stronger model.
+- Generated code did the wrong thing: use Undo if possible, then tell ReaAssist exactly what happened and what should have happened.
 
 ## Requirements
 
-- **ReaImGui** - required (auto-installed by ReaAssist on first launch; can also be installed via ReaPack)
-- **API key** for at least one provider - required
-- **curl** (built into Windows 10+, macOS, and Linux) - required
-- **js_ReaScriptAPI** - auto-installed by ReaAssist on first launch on Windows, macOS, and Linux x86_64; enables native file dialogs and accurate window screenshots. ReaAssist runs without it on platforms with no upstream binary, using non-native fallbacks.
+- REAPER 7.0 or later.
+- ReaImGui extension, required. ReaAssist auto-installs the pinned version on first launch if missing.
+- SWS Extension, required. ReaAssist auto-installs the pinned version on first launch if missing or too old.
+- curl, required. Built into current Windows, macOS, and Linux systems.
+- API key for at least one provider, or a configured local/custom model server.
+- js_ReaScriptAPI, optional. ReaAssist auto-installs the pinned version on supported platforms. It enables native file dialogs and more accurate window screenshots. Platforms without an upstream binary use non-native fallbacks.
+
+## Limitations
+
+- ReaAssist cannot hear, understand, or judge audio content. It can run supported REAPER/SWS measurements such as peak, RMS, and LUFS on selected items when a script uses those APIs.
+- It does not upload audio files.
+- It does not inspect .RPP project files as project documents.
+- Generated code can be wrong.
+- Plugin parameter names and values can vary by plugin version and format.
+- Smaller local models may be less reliable than stronger cloud models for complex scripting.
+- Safety scanning reduces risk but cannot prove code is safe.
+- Cost estimates are approximate.
+
+Use backups and review generated code before running it.
 
 ## Disclaimer and Terms of Use
 
-ReaAssist is provided as-is. Review generated code before running it, keep project backups, and follow your provider's terms and pricing. Cost estimates are approximations only.
+ReaAssist is provided as-is. Review generated code before running it. Keep project backups. Follow your provider's terms, pricing, and usage policies.
+
+You are responsible for deciding whether generated scripts, plugin changes, routing changes, or project edits are appropriate for your session.

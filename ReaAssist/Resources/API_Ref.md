@@ -6,7 +6,7 @@
 <!-- SECTION:core -->
 # REAPER ReaScript Lua API Reference
 
-Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.67)
+Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.72)
 Lua-only. All functions called as reaper.FunctionName().
 Use proj=0 for active project. Track/item indices in the API are 0-based.
 
@@ -24,6 +24,32 @@ state, colors, UI & display, named-action calls (Main_OnCommand), misc
 utilities. MIDI workflow (notes, CCs, PPQ, MIDI editor) lives in the `midi`
 bucket (auto-injected on midi prompts); theme color reference (ini_keys,
 SetThemeColor) lives in the `theme` bucket.
+
+## RECENT / VERSION-SENSITIVE APIS
+
+These are high-confusion post-7.62 additions. Use guards if supporting older
+REAPER installs: `if reaper.FunctionName then ... else ... end`.
+
+- REAPER 7.72+: `ProjectMarker reaper.AddRegionOrMarker(ReaProject proj, boolean isrgn, number pos, number rgnend, string name, integer wantidx, integer color)`.
+  Prefer it over AddProjectMarker/AddProjectMarker2 when you need to reference
+  the created marker/region.
+- REAPER 7.70+: `boolean retval, string fn = reaper.GetUserFileName(integer mode, string caption, string initial_file_or_path, string extension_list)`.
+  Native file picker modes: 0=new/save file, 1=existing/open file,
+  2=multiple files, 3=directory. `extension_list` uses pipe-separated pairs
+  like `Text files|*.txt|Audio files|*.wav;*.aiff|All files|*.*`, or empty for
+  the default; do not use NUL-separated Win32 filter strings. GetUserFileNameForRead
+  is superseded and is only an older fallback for existing-file selection.
+- REAPER 7.70+: `GetEnvelopeInfo_Value(env, "I_DISPLAYEDCOLOR")` reads the
+  actual displayed envelope color. For marker/region objects,
+  `GetRegionOrMarkerInfo_Value(..., "I_DISPLAYEDCOLOR")` reads displayed color.
+- Ruler lanes use exact `GetSetProjectInfo` keys, not MARKER_LANE_* names:
+  `RULER_LANE_COUNT`, `RULER_LANE_DEFAULT:X`, `RULER_LANE_FROM_GUID:X`.
+  Iterate numeric lane suffixes from 0 through `RULER_LANE_COUNT - 1`
+  (for example, `RULER_LANE_DEFAULT:0`). Value 1=default for new regions,
+  2=default for new markers, 3=default for both.
+- REAPER 7.67+: `TrackFX_GetParamSectionName(track, fx, param)` and
+  `TakeFX_GetParamSectionName(take, fx, param)` read VST3 unit / CLAP module
+  parameter section names when the plug-in exposes them.
 
 ## VALUE SCALES (read first -- silent-wrong-value bugs come from these)
 
@@ -51,6 +77,15 @@ COLORS:
 - I_CUSTOMCOLOR and track/item colors require ColorToNative(r,g,b)|0x1000000.
   Without the |0x1000000 high bit, REAPER reads the value as "no custom
   color" and shows the default.
+
+TRACK SELECTION:
+- To select or unselect a track, use
+  `reaper.SetTrackSelected(MediaTrack track, boolean selected)`.
+- Do not rely on `SetMediaTrackInfo_Value(track, "B_SELECTED", 1)` for
+  selection writes; use `SetTrackSelected` after creating/resolving the track.
+- The second argument must be a real boolean. Avoid maybe-nil `and/or`
+  expressions such as `newTr and tr == newTr`; normalize with an explicit
+  boolean before passing it to `SetTrackSelected`.
 
 ## COMMON PATTERNS
 
@@ -184,13 +219,42 @@ local ts, te = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
   I_FXEN (0=bypassed), I_RECARM, I_RECINPUT, I_RECMODE, I_RECMON,
   I_AUTOMODE (0=trim/off,1=read,2=touch,3=write,4=latch),
   I_NCHAN (2-128 even), I_SELECTED, I_FOLDERDEPTH, I_FOLDERCOMPACT,
+  I_FREEMODE (1=free item positioning,2=fixed lanes), I_NUMFIXEDLANES,
   D_VOL (1=+0dB), D_PAN (-1..1), D_WIDTH (-1..1),
   I_CUSTOMCOLOR (ColorToNative(r,g,b)|0x1000000),
   I_HEIGHTOVERRIDE, B_SHOWINMIXER, B_SHOWINTCP, B_MAINSEND,
   IP_TRACKNUMBER (read-only: 1-based, -1=master), P_PARTRACK (read-only).
 
+I_FOLDERDEPTH is a folder-depth delta: 1 starts a folder, 0 keeps the current
+depth, -1 closes one folder after this track, and lower negative values close
+multiple nested folders.
+
+I_FREEMODE is the track lane/free-position mode: 1 = free item positioning,
+2 = fixed lanes. Treat `GetMediaTrackInfo_Value(track, "I_FREEMODE") == 2`
+as fixed-lane state and call `reaper.UpdateTimeline()` after changing it.
+
+Toolbar toggle actions: do not use "script is running" as the lit toolbar
+state when the requested state is project/track state. For project-state
+buttons, keep any watcher/defer loop alive for observation only, derive the
+button state from live REAPER data (for example `I_FREEMODE == 2` on the
+primary selected track), and toggle the selected track(s) on each toolbar
+invocation. Capture the action ids once and refresh the toolbar after every
+state change:
+```lua
+local _, _, section_id, command_id = reaper.get_action_context()
+
+local function set_toolbar(on)
+  reaper.SetToggleCommandState(section_id, command_id, on and 1 or 0)
+  reaper.RefreshToolbar2(section_id, command_id)
+end
+```
+
 `boolean reaper.SetMediaTrackInfo_Value(MediaTrack tr, string parmname, number newvalue)`
   Set track numerical attribute.
+  Use `B_MAINSEND` for the track's master/parent send:
+  `reaper.SetMediaTrackInfo_Value(track, "B_MAINSEND", 0)` disables it and
+  value `1` enables it. Do not use `RemoveTrackSend(track, 1, ...)` for this;
+  category 1 is hardware output, not the master send.
 
 `boolean retval, string str reaper.GetSetMediaTrackInfo_String(MediaTrack tr, string parmname, string str, boolean setNewValue)`
   Get/set track string: P_NAME, P_ICON, P_MCP_LAYOUT, P_TCP_LAYOUT, P_EXT:xyz, GUID,
@@ -216,6 +280,11 @@ local ts, te = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
 
 `reaper.InsertTrackAtIndex(integer idx, boolean wantDefaults)`
   Insert a track at zero-based index. wantDefaults=true applies default envs/FX.
+  Returns nothing. Do NOT assign this call to a track variable; call it, then
+  fetch the handle with `GetTrack(0, idx)`.
+  For "create tracks" prompts, call this for each requested new track; do not
+  just rename handles returned by `GetTrack` because empty projects have no
+  tracks to rename.
 
 `reaper.DeleteTrack(MediaTrack tr)`
   Delete a track.
@@ -379,6 +448,16 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
 `boolean retval, string name reaper.TrackFX_GetParamName(MediaTrack track, integer fx, integer param, string buf)`
   Get FX parameter name.
 
+`string buf reaper.TrackFX_GetParamSectionName(MediaTrack track, integer fx, integer param)`
+  REAPER 7.67+. Get the VST3 unit / CLAP module / parameter section name for
+  a parameter when the plug-in exposes one. May return an empty string.
+
+`boolean retval, string buf reaper.TrackFX_GetNamedConfigParm(MediaTrack track, integer fx, string parmname)`
+  Read plug-in/chain metadata. Useful keys include `pdc`, `in_pin_X`,
+  `out_pin_X`, `fx_type`, `fx_ident`, `fx_name`, `original_name`,
+  `au_ids` (Audio Units), `param.X.automatable`, `container_count`,
+  `parent_container`, and `container_item.X`. Returns false if unsupported.
+
 `number reaper.TrackFX_GetParamNormalized(MediaTrack track, integer fx, integer param)`
   Get normalized parameter value (0..1).
 
@@ -432,11 +511,34 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
 `ProjectMarker reaper.GetRegionOrMarker(ReaProject proj, integer index, string guidStr)`
   Get marker/region by internal index (or by GUID if index<0).
 
+`number reaper.GetRegionOrMarkerInfo_Value(ReaProject proj, ProjectMarker regionOrMarker, string parameterName)`
+  REAPER 7.62+. Read marker/region object fields:
+  `D_STARTPOS`, `D_ENDPOS`, `I_INDEX` (internal index), `I_NUMBER` (displayed
+  number), `I_LANENUMBER`, `I_CUSTOMCOLOR`, `I_DISPLAYEDCOLOR`,
+  `B_ISREGION`, `B_UISEL`, `B_HIDDEN`, `B_VISIBLE` (marker and lane visible,
+  read-only).
+
+`number reaper.SetRegionOrMarkerInfo_Value(ReaProject proj, ProjectMarker regionOrMarker, string parameterName, number setNewValue)`
+  REAPER 7.62+. Set marker/region object fields such as `D_STARTPOS`,
+  `D_ENDPOS`, `I_NUMBER`, `I_LANENUMBER`, `I_CUSTOMCOLOR`, `B_UISEL`, and
+  `B_HIDDEN`.
+
+`boolean retval, string stringNeedBig reaper.GetSetRegionOrMarkerInfo_String(ReaProject proj, ProjectMarker regionOrMarker, string parameterName, string stringNeedBig, boolean setNewValue)`
+  REAPER 7.62+. Read/write string fields for a marker/region object. Use
+  `P_NAME` for the displayed name. `GUID` is read-only.
+
+`ProjectMarker reaper.AddRegionOrMarker(ReaProject proj, boolean isrgn, number pos, number rgnend, string name, integer wantidx, integer color)`
+  REAPER 7.72+. Preferred over AddProjectMarker/AddProjectMarker2 when the
+  script needs to reference the created marker/region; it returns a
+  ProjectMarker handle instead of an ambiguous index number.
+
 `integer reaper.AddProjectMarker(ReaProject proj, boolean isrgn, number pos, number rgnend, string name, integer wantidx)`
-  Add marker/region. Returns index or -1 on failure.
+  Legacy/discouraged in REAPER 7.72+. Add marker/region. Returns an index or
+  -1 on failure.
 
 `integer reaper.AddProjectMarker2(ReaProject proj, boolean isrgn, number pos, number rgnend, string name, integer wantidx, integer color)`
-  Add marker/region with color (ColorToNative(r,g,b)|0x1000000, or 0 for default).
+  Legacy/discouraged in REAPER 7.72+. Add marker/region with color
+  (ColorToNative(r,g,b)|0x1000000, or 0 for default).
 
 `boolean reaper.DeleteProjectMarker(ReaProject proj, integer markrgnindexnumber, boolean isrgn)`
   Delete marker/region by DISPLAYED number (the 1, 2, 3... shown in REAPER), NOT the internal index.
@@ -444,9 +546,20 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
 `boolean reaper.DeleteProjectMarkerByIndex(ReaProject proj, integer markrgnidx)`
   Delete marker/region by internal zero-based index.
 
-PITFALL: AddProjectMarker returns the assigned INTERNAL index. To delete a
-marker you just added, use DeleteProjectMarkerByIndex (NOT DeleteProjectMarker,
-which expects the displayed number).
+PITFALL: For REAPER 7.72+, prefer AddRegionOrMarker and keep the returned
+ProjectMarker handle for later Get/Set calls. If you must support older REAPER
+versions, guard it:
+
+```lua
+local color = 0
+if reaper.AddRegionOrMarker then
+  local marker = reaper.AddRegionOrMarker(0, false, 2.0, 0, "Cue", -1, color)
+else
+  local idx = reaper.AddProjectMarker2(0, false, 2.0, 0, "Cue", -1, color)
+  -- Older fallback returns an index; use DeleteProjectMarkerByIndex for that
+  -- internal index, not DeleteProjectMarker (which expects displayed number).
+end
+```
 
 `integer markeridx, integer regionidx reaper.GetLastMarkerAndCurRegion(ReaProject proj, number time)`
   Get last marker before time and region containing time.
@@ -545,6 +658,68 @@ end
 `string reaper.GetMediaSourceType(PCM_source source)`
   Get type string ("WAV", "MIDI", etc).
 
+### AUDIO ACCESSORS (TAKE ANALYSIS)
+
+`AudioAccessor reaper.CreateTakeAudioAccessor(MediaItem_Take take)`
+  Create an accessor for reading take audio.
+
+`reaper.DestroyAudioAccessor(AudioAccessor accessor)`
+  Release an accessor when finished.
+
+`reaper.array reaper.new_array(integer size)`
+  Allocate a numeric sample buffer for APIs that fill arrays.
+
+`integer reaper.GetAudioAccessorSamples(AudioAccessor accessor, integer samplerate, integer numchannels, number starttime_sec, integer numsamplesperchannel, reaper.array samplebuffer)`
+  Fill samplebuffer with interleaved samples. For take accessors, scripts in
+  this install use starttime_sec as take/item-relative seconds. Allocate at
+  least numsamplesperchannel*numchannels values.
+
+Use audio accessors for measurement, previews, or custom approximate detectors.
+Do NOT use a simple energy/peak threshold as the default way to place stretch
+markers on drum hits or transients; it over-detects decays and bleed. For
+"every hit", "transients", "built-in", or drum-editing requests, prefer
+REAPER's Dynamic Split / transient-detection actions via the Action List lookup
+pattern in ACTIONS. Only use a custom audio-accessor detector when the user
+explicitly asks for an approximate/custom detector.
+
+```lua
+-- Pattern: inspect take audio and report candidate peak windows only.
+-- Do not insert stretch markers from this approximation unless the user
+-- explicitly asked for a custom detector and accepted its tradeoffs.
+local item = reaper.GetSelectedMediaItem(0, 0)
+local take = item and reaper.GetActiveTake(item)
+if take and not reaper.TakeIsMIDI(take) then
+  local src = reaper.GetMediaItemTake_Source(take)
+  local sr = reaper.GetMediaSourceSampleRate(src)
+  local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+  local ch = math.max(1, reaper.GetMediaSourceNumChannels(src))
+  local step_s = 0.005
+  local n = math.max(1, math.floor(sr * step_s))
+  local buf = reaper.new_array(n * ch)
+  local acc = reaper.CreateTakeAudioAccessor(take)
+  local candidates, prev_peak = 0, 0
+
+  for pos = 0, len, step_s do
+    local ok = reaper.GetAudioAccessorSamples(acc, sr, ch, pos, n, buf)
+    if ok == 0 then break end
+    local peak = 0
+    for i = 1, n * ch do peak = math.max(peak, math.abs(buf[i])) end
+    if peak >= 0.15 and prev_peak < 0.15 then
+      candidates = candidates + 1
+    end
+    prev_peak = peak
+  end
+  reaper.DestroyAudioAccessor(acc)
+  reaper.ShowMessageBox("Approximate candidate windows: " .. candidates,
+    "ReaAssist", 0)
+end
+```
+
+PITFALL: do not blindly append stretch markers on rerun. Either use Dynamic
+Split, skip markers already near the target position, or delete/replace existing
+markers only when the user explicitly asks to replace them. Report
+inserted/skipped counts.
+
 ## PROJECT
 
 `string reaper.GetProjectPath()`
@@ -574,6 +749,39 @@ end
 `reaper.Main_SaveProject(ReaProject proj, boolean forceSaveAs)`
   Save the project.
 
+`number reaper.GetSetProjectInfo(ReaProject project, string desc, number value, boolean is_set)`
+  Get or set numeric project information.
+
+RULER LANE KEYS (REAPER 7.62+ / 7.65+ / 7.71+):
+- `RULER_HEIGHT`: ruler height in pixels.
+- `RULER_LANE_COUNT`: number of ruler lanes.
+- `:X` lane suffixes are numeric; iterate from 0 through
+  `RULER_LANE_COUNT - 1` when inspecting existing lanes.
+- `RULER_LANE_ORDER:X`: move lane at position X to a new position; -1 inserts
+  a new lane.
+- `RULER_LANE_COLOR:X`: default lane color; use ColorToNative(r,g,b)|0x1000000.
+- `RULER_LANE_HIDDEN:X`: 1 if hidden, 0 otherwise.
+- `RULER_LANE_LOCKED:X`: 1 if locked, 0 otherwise.
+- `RULER_LANE_VISIBLE:X`: 1 if visible, 0 otherwise (read-only).
+- `RULER_LANE_DEFAULT:X`: set which lane is default for new regions/markers:
+  1=regions, 2=markers, 3=both. OK to set; returned value is read-only.
+- `RULER_LANE_TIMEBASE:X`: -1=project default, 0=time,
+  1=beats (position, length, rate), 2=beats (position only).
+- `RULER_LANE_FROM_GUID:X`: lane number with unique identifier X.
+
+`boolean retval, string valuestrNeedBig reaper.GetSetProjectInfo_String(ReaProject project, string desc, string valuestrNeedBig, boolean is_set)`
+  Get or set string project information.
+
+Useful string keys:
+- `RULER_LANE_NAME:X`: ruler lane name.
+- `RULER_LANE_GUID:X`: ruler lane unique identifier.
+- `RULER_LANE_TYPE`: changelog-documented key that can create a new ruler lane;
+  current official HTML does not document value format, so do not guess values.
+- `RENDER_STATS`: read-only semicolon-separated stats for most recent renders.
+  Pass valuestr as an action ID string (for example `"42437"`) to run an
+  action before returning stats.
+- `RENDER_STATS_SUMMARY`: read-only human-readable render-stats summary.
+
 ## FILE & SYSTEM
 
 `string reaper.GetResourcePath()`
@@ -586,7 +794,20 @@ end
   "Win32", "Win64", "OSX32", "OSX64", "macOS-arm64", or "Other".
 
 `string reaper.GetAppVersion()`
-  REAPER version string (e.g. "7.67/x64").
+  REAPER version string (e.g. "7.72/x64").
+
+`boolean retval, string fn reaper.GetUserFileName(integer mode, string caption, string initial_file_or_path, string extension_list)`
+  REAPER 7.70+. Native file/directory picker. mode: 0=new file,
+  1=existing file, 2=multiple files, 3=directory. Returns false if canceled.
+  Multiple filenames are separated by `|`. Extension list format:
+  `Text files|*.txt|Audio files|*.wav;*.aiff|All files|*.*`, or empty for
+  default filters. Do not use NUL-separated Win32 filter strings. In directory
+  mode, `extension_list` is ignored. `initial_file_or_path` can be an extension
+  like `.txt` to set the default extension.
+
+`boolean retval, string filenameNeed4096 reaper.GetUserFileNameForRead(string filenameNeed4096, string title, string defext)`
+  Older open-file picker. Superseded by GetUserFileName in REAPER 7.70+.
+  Use only as a guarded fallback for existing-file selection.
 
 `boolean reaper.file_exists(string path)`
   Returns true if file exists and is readable.
@@ -691,6 +912,197 @@ end
 `string reaper.ReverseNamedCommandLookup(integer command_id)`
   Get command name by ID.
 
+`KbdSectionInfo reaper.SectionFromUniqueID(integer uniqueID)`
+  Get an action-list section. uniqueID=0 is Main.
+
+`integer command_id, string action_name reaper.kbd_enumerateActions(KbdSectionInfo section, integer idx)`
+  Enumerate native and extension actions in a section. Returns command_id=0
+  when done.
+
+`string reaper.kbd_getTextFromCmd(integer command_id, KbdSectionInfo section)`
+  Get display text for a command ID.
+
+### NATIVE ACTION LOOKUP BY NAME
+
+Use this when a native REAPER action is needed but its numeric ID is not in
+COMMON ACTION IDS. This avoids guessed IDs while still using built-in actions.
+
+```lua
+local function find_main_action_exact(name)
+  local section = reaper.SectionFromUniqueID(0) -- Main section
+  for i = 0, 100000 do
+    local cmd, action_name = reaper.kbd_enumerateActions(section, i)
+    if not cmd or cmd == 0 then break end
+    if action_name == name then return cmd end
+  end
+  return 0
+end
+
+local cmd = find_main_action_exact("Item: Dynamic split items...")
+if cmd ~= 0 then
+  reaper.Main_OnCommand(cmd, 0)
+else
+  reaper.ShowMessageBox("Could not find Dynamic Split in the Action List.",
+    "ReaAssist", 0)
+end
+```
+
+For drum-hit/transient stretch-marker requests, prefer REAPER's built-in
+Dynamic Split / transient-detection actions found by action-list text. Do not
+substitute a simple Lua energy-threshold detector unless the user explicitly
+asks for a custom approximation; it tends to add markers on decays and bleed.
+
+### DRUM EDIT / QUANTIZE WORKFLOW
+
+Drum timing edits are phase-critical. For multi-mic drums, derive timing from
+guide items (commonly kick and snare) and apply the same source-time ->
+target-time map to every selected/grouped drum item. Do not detect, split,
+or warp each mic independently unless the user explicitly asks.
+
+Best default workflow:
+1. If the user asks to find "every hit", "transients", "tighten drums", or
+   create stretch markers from drum audio, ask/resolve which guide tracks or
+   selected guide items drive detection. Do not assume tracks named Kick or
+   Snare are the guide mics; they may be folder/container tracks.
+2. Use REAPER's native Dynamic Split / transient engine via Action List lookup
+   on the guide items. Do not replace it with a custom GetAudioAccessorSamples
+   threshold detector.
+3. Build a shared edit map from guide marker project times to snapped project
+   times (bar/grid/strength as requested). Apply those same project-time moves
+   to every grouped drum item that overlaps each guide hit.
+4. If stretch markers already exist and the user asks to quantize or snap
+   drums, move existing markers with GetTakeStretchMarker + SnapToGrid +
+   SetTakeStretchMarker, preserving srcpos. For grouped drum items, use the
+   shared guide map, not independent per-item snapping.
+5. Do not quantize drums by moving whole media items or item starts with
+   D_POSITION unless the user explicitly asked for whole-item movement. Item
+   starts are not hit positions, and this can report success while doing
+   nothing useful.
+6. If the choice affects the sound, ask one concise question: guide track(s),
+   range, open Dynamic Split settings vs use most recent settings,
+   grid/bar value, strength/swing, or selected item vs whole selected drum
+   group.
+
+Setup prompt for under-specified drum quantize:
+- Guide tracks/items: ask the user to select or name the guide tracks/items.
+  Offer currently selected tracks/items only when they are a plausible small
+  guide selection. Do not infer guide mics from folder/container names like
+  Kick or Snare.
+- Edit scope: prefer the outermost folder track named Drums (case-insensitive)
+  and offer all child tracks/items in that folder as the default scope. Nested
+  Drums folders inside that parent are organizational subfolders, not separate
+  scope choices. Ask which track index to use only when there are multiple
+  separate outermost Drums folders.
+- Range: prefer the active time selection when one exists. If there is no time
+  selection, ask whether to use selected items, a time selection the user makes
+  first, or the whole song. Whole song is not the default.
+- Grid/feel: ask for bar line, beat, 1/8, 1/16, strength percentage, and swing
+  only when not already supplied or obvious from the user's wording.
+- Detection mode: offer automatic Dynamic Split using most recent settings,
+  one-time Dynamic Split settings dialog, or existing stretch markers. If the
+  user chooses automatic / "a", do not open the dialog; look up the action text
+  that clearly says it immediately uses recent/last Dynamic Split settings.
+  Only use the normal dialog action when the user chose settings/manual setup.
+- Dynamic Split settings: if session context includes a Dynamic Split settings
+  line, check it before automatic mode. Do not assume any saved preset exists,
+  and do not treat a preset name as special unless the user explicitly named
+  it. If settings say state=not_persisted_likely_defaults or show unknown
+  action/min-slice values, treat automatic Dynamic Split as unsafe unless a
+  dedicated ReaAssist recommended-settings helper is available. The ReaAssist
+  recommended drum-detection profile uses Transient Detection sensitivity 70%,
+  threshold -10 dB, split at transients, add stretch markers to selected/grouped
+  items, and grouped-item handling. The live SWS config API can set/restore
+  the Transient Detection settings, but current REAPER/SWS builds do not expose
+  the Dynamic Split dialog fields as live config vars; do not invent code that
+  claims otherwise. Automatic mode is suitable only when the current action
+  mode adds stretch markers, transient detection settings are plausible, and
+  min-slice is not obviously longer than the requested grid. Do not silently
+  edit or replace the user's Dynamic Split settings; ask the user to load/check
+  settings, use ReaAssist recommended settings if offered, or run one manual
+  Dynamic Split setup pass first if current settings do not look right.
+
+```lua
+local function action_text(section, cmd, fallback)
+  local text = reaper.kbd_getTextFromCmd(cmd, section)
+  if text and text ~= "" then return text end
+  return fallback or ""
+end
+
+local function find_main_action_contains_all(words)
+  local section = reaper.SectionFromUniqueID(0) -- Main section
+  for i = 0, 100000 do
+    local cmd, action_name = reaper.kbd_enumerateActions(section, i)
+    if not cmd or cmd == 0 then break end
+    local text = string.lower(action_text(section, cmd, action_name))
+    local ok = true
+    for _, word in ipairs(words) do
+      if not text:find(string.lower(word), 1, true) then
+        ok = false
+        break
+      end
+    end
+    if ok then return cmd end
+  end
+  return 0
+end
+
+local dynamic_split_cmd = find_main_action_contains_all({
+  "dynamic", "split", "immediately"
+})
+if dynamic_split_cmd == 0 then
+  dynamic_split_cmd = find_main_action_contains_all({
+    "dynamic", "split", "recent"
+  })
+end
+if dynamic_split_cmd == 0 then
+  dynamic_split_cmd = find_main_action_contains_all({
+    "dynamic", "split", "last"
+  })
+end
+if dynamic_split_cmd ~= 0 then
+  reaper.Main_OnCommand(dynamic_split_cmd, 0)
+else
+  reaper.ShowMessageBox("Could not find automatic Dynamic Split in the Action List.",
+    "ReaAssist", 0)
+end
+```
+
+For automatic Dynamic Split, verify marker counts on guide items increased
+before applying the map. If not, stop and tell the user their most recent
+Dynamic Split settings may not be set to add stretch markers. Do not continue
+into quantize with an empty or stale guide map.
+
+Guide-map application pattern:
+- Collect guide marker project times from the explicit guide items after native
+  transient detection.
+- Snap each guide time once (for example with SnapToGrid, or bar/grid math from
+  docs:tempo when the user asks for bar-line behavior).
+- For a Drums folder scope, choose the outermost matching parent. Derive child
+  tracks by walking tracks after that parent until the folder depth closes;
+  include nested subfolders and their children.
+- Normalize every affected drum item to the same marker map, including the
+  guide items. Guide tracks are analysis sources only; do not leave extra
+  Dynamic Split markers on guide items.
+- Delete/replace stretch markers in the edit range on every affected item,
+  then insert the same sorted source-time -> target-time pairs on every item
+  that overlaps those project times. Add unchanged boundary markers at the
+  range edges so stretching does not leak outside the edit range.
+- Convert project source/target times to item-relative values by subtracting
+  the item's D_POSITION. For each marker use pos = target_time - item_pos and
+  srcpos = source_time - item_pos. Do not preserve arbitrary existing/guide
+  srcpos values when rebuilding the shared map.
+- Count a marker as moved only when the target position differs from the old
+  position by more than a tiny tolerance. Do not count no-op SetTakeStretchMarker
+  calls as moved.
+- If guide tracks contain duplicate close hits (kick + snare flams, bleed,
+  layered samples), merge source times that are within a small musical/audio
+  tolerance before applying the map.
+- Also merge hit pairs whose snapped target grid position is the same or nearly
+  the same. Target collisions or crossed source/target ordering can create
+  extreme stretch ratios.
+- Report guide-hit count, affected item count, inserted marker count, and moved
+  marker count. This makes reruns auditable.
+
 ### COMMON ACTION IDS
 
 Verified stable across REAPER 6.x and 7.x. Use these directly with
@@ -773,6 +1185,9 @@ most general one (40012).
 `number reaper.parse_timestr(string timestr)`
   Parse time string to seconds.
 
+`number reaper.SnapToGrid(ReaProject proj, number time_pos)`
+  Return the project-time position snapped to the current grid.
+
 `boolean reaper.APIExists(string function_name)`
   Returns true if the named function exists in this REAPER version.
 
@@ -800,6 +1215,9 @@ most general one (40012).
 
 `MediaItem reaper.AddMediaItemToTrack(MediaTrack tr)`
   Create a new media item on the track.
+  Do NOT use this to create a MIDI item for notes. It creates a plain item
+  with no MIDI take; `GetActiveTake(item)` may be nil and MIDI_InsertNote will
+  not create notes. Use `CreateNewMIDIItemInProj` for new MIDI items.
 
 `MediaItem_Take reaper.AddTakeToMediaItem(MediaItem item)`
   Create a new take in an item.
@@ -857,6 +1275,7 @@ most general one (40012).
 
 `MediaItem reaper.CreateNewMIDIItemInProj(MediaTrack track, number starttime, number endtime, optional boolean qnIn)`
   Create a new empty MIDI item. Time in seconds unless qnIn=true.
+  Preferred for any script that creates a new MIDI item or inserts MIDI notes.
 
 `boolean reaper.MoveMediaItemToTrack(MediaItem item, MediaTrack desttr)`
   Move item to another track.
@@ -898,6 +1317,44 @@ most general one (40012).
 
 `boolean reaper.SetActiveTake(MediaItem_Take take)`
   Set the active take.
+
+### TAKE STRETCH MARKERS
+
+`integer reaper.GetTakeNumStretchMarkers(MediaItem_Take take)`
+  Count stretch markers on a take.
+
+`integer retval, number pos, number srcpos reaper.GetTakeStretchMarker(MediaItem_Take take, integer idx)`
+  Get stretch marker position and source position. Positions are take/item
+  relative seconds, not project time.
+
+`integer retval, number srcpos reaper.SetTakeStretchMarker(MediaItem_Take take, integer idx, number pos, optional number srcposInOptional)`
+  Set or insert a stretch marker. Pass idx=-1 to add a new marker at pos.
+  Preserve srcpos from GetTakeStretchMarker when moving an existing marker.
+
+`integer retval, integer countOut reaper.DeleteTakeStretchMarkers(MediaItem_Take take, integer idx, optional integer countInOptional)`
+  Delete stretch marker(s) starting at idx.
+
+```lua
+-- Pattern: snap existing stretch markers on a selected item to the project grid
+local item = reaper.GetSelectedMediaItem(0, 0)
+local take = item and reaper.GetActiveTake(item)
+if take then
+  local item_pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  for i = 0, reaper.GetTakeNumStretchMarkers(take) - 1 do
+    local _, pos, srcpos = reaper.GetTakeStretchMarker(take, i)
+    local snapped = reaper.SnapToGrid(0, item_pos + pos) - item_pos
+    reaper.SetTakeStretchMarker(take, i, snapped, srcpos)
+  end
+end
+```
+
+PITFALL: do not invent shortcut names like CountStretchMarkers,
+GetStretchMarker, or SetStretchMarker. The real API names are take-scoped.
+
+PITFALL: for drum quantize, this API is best for moving markers that already
+exist. If the task is to discover hit locations from audio, create markers with
+REAPER's Dynamic Split / transient workflow first; do not add markers from a
+simple energy threshold unless the user explicitly chose that approximation.
 
 ### ITEM GROUPING (I_GROUPID)
 
@@ -986,6 +1443,13 @@ inspect, filter, or programmatically pick which items go in which group.
 
 `boolean retval, string buf reaper.GetEnvelopeName(TrackEnvelope env)`
   Get envelope name.
+
+`number reaper.GetEnvelopeInfo_Value(TrackEnvelope env, string parmname)`
+  Read numeric envelope attributes. Common keys include `I_TCPY`, `I_TCPH`,
+  `I_TCPY_USED`, `I_TCPH_USED`, `P_TRACK`, `P_DESTTRACK`, `P_ITEM`,
+  `P_TAKE`, and REAPER 7.70+ `I_DISPLAYEDCOLOR`.
+  Use `I_DISPLAYEDCOLOR` when the user asks for the actual displayed envelope
+  color; use ColorFromNative() to split the returned native color into RGB.
 
 `boolean reaper.InsertEnvelopePoint(TrackEnvelope envelope, number time, number value, integer shape, number tension, boolean selected, optional boolean noSortIn)`
   Insert envelope point. shape: 0=linear,1=square,2=slow start/end,3=fast start,4=fast end,5=bezier.
@@ -1097,8 +1561,17 @@ Choosing track FX vs take FX:
 `number reaper.TakeFX_GetParamNormalized(MediaItem_Take take, integer fx, integer param)`
 `boolean reaper.TakeFX_SetParamNormalized(MediaItem_Take take, integer fx, integer param, number value)`
 `boolean retval, string name reaper.TakeFX_GetParamName(MediaItem_Take take, integer fx, integer param, string buf)`
+`string buf reaper.TakeFX_GetParamSectionName(MediaItem_Take take, integer fx, integer param)`
 `boolean retval, string buf reaper.TakeFX_GetFormattedParamValue(MediaItem_Take take, integer fx, integer param, string buf)`
   Param read/write functions. Identical semantics to the TrackFX_* equivalents.
+  REAPER 7.67+ GetParamSectionName returns the VST3 unit / CLAP module /
+  parameter section name when the plug-in exposes one.
+
+`boolean retval, string buf reaper.TakeFX_GetNamedConfigParm(MediaItem_Take take, integer fx, string parmname)`
+  Read take-FX metadata. Mirrors TrackFX_GetNamedConfigParm for take FX;
+  useful keys include `fx_type`, `fx_ident`, `fx_name`, `original_name`,
+  `param.X.automatable`, `container_count`, `parent_container`, and
+  `container_item.X`. Returns false if unsupported.
 
 `boolean reaper.TakeFX_GetOpen(MediaItem_Take take, integer fx)`
 `reaper.TakeFX_SetOpen(MediaItem_Take take, integer fx, boolean open)`
@@ -1136,9 +1609,12 @@ end)
 
 `integer reaper.CreateTrackSend(MediaTrack tr, MediaTrack desttrIn)`
   Create a send to desttrIn (nil=hardware output). Returns new send index.
+  The first valid send index is 0. Only -1 means failure; do not treat 0 as
+  false/failure when setting send attributes.
 
 `boolean reaper.RemoveTrackSend(MediaTrack tr, integer category, integer sendidx)`
   Remove send (0), receive (-1), or hardware output (1).
+  This does not control a track's master/parent send; use `B_MAINSEND`.
 
 `integer reaper.GetTrackNumSends(MediaTrack tr, integer category)`
   Count sends (0), receives (-1), or hardware outputs (1).
@@ -1148,6 +1624,8 @@ end)
   D_VOL, D_PAN, D_PANLAW, B_MUTE, B_PHASE, B_MONO, I_SENDMODE,
   I_SRCCHAN, I_DSTCHAN, I_MIDI_SRCCHAN, I_MIDI_DSTCHAN,
   P_DESTTRACK (read-only), P_SRCTRACK (read-only).
+  `D_PAN` here is send pan. For track pan, use
+  `SetMediaTrackInfo_Value(track, "D_PAN", value)`.
 
 `boolean reaper.SetTrackSendInfo_Value(MediaTrack tr, integer category, integer sendidx, string parmname, number newvalue)`
   Set send/receive attribute.
@@ -1534,6 +2012,10 @@ MIDI items, notes, CCs, and the MIDI editor in REAPER Lua scripts.
 All MIDI functions operate on a MediaItem_Take. Get the take from an item via
 reaper.GetActiveTake(item) or reaper.GetMediaItemTake(item, 0).
 
+To create a new MIDI item, use `reaper.CreateNewMIDIItemInProj`. Do NOT create
+a plain item with `AddMediaItemToTrack` and then call `GetActiveTake`; that item
+has no MIDI take, so note insertion silently does nothing or trips a nil check.
+
 ## VALUE RANGES (memorize these)
 
 ```
@@ -1571,6 +2053,19 @@ To go the other way:
   local secs = reaper.MIDI_GetProjTimeFromPPQPos(take, ppq)
 ```
 
+When creating MIDI items in seconds, note endpoints are still absolute project
+times before conversion. To make a note span an item from 0.5 to 1.0 seconds:
+```lua
+  local item = reaper.CreateNewMIDIItemInProj(track, 0.5, 1.0, false)
+  local take = reaper.GetActiveTake(item)
+  if not take or not reaper.TakeIsMIDI(take) then return end
+  local ppq_st = reaper.MIDI_GetPPQPosFromProjTime(take, 0.5)
+  local ppq_en = reaper.MIDI_GetPPQPosFromProjTime(take, 1.0)
+  reaper.MIDI_InsertNote(take, false, false, ppq_st, ppq_en, 0, 60, 100, false)
+```
+Do NOT pass an item-local duration like 0.5 as the end time for an item that
+starts later, and do NOT use hard-coded PPQ lengths like 960/1920 for seconds.
+
 For musical positions (e.g. "place a note on beat 2"), get the PPQ at the item
 start, then offset by multiples of one quarter note in PPQ:
 ```lua
@@ -1579,6 +2074,12 @@ start, then offset by multiples of one quarter note in PPQ:
   local ppq_st     = reaper.MIDI_GetPPQPosFromProjTime(take, item_t)
   local ppq_per_qn = reaper.MIDI_GetPPQPosFromProjTime(take, item_t + 60/bpm) - ppq_st
 ```
+
+Musical note lengths are tempo-derived. At 128 BPM, one quarter note is
+`60 / 128 = 0.46875` seconds. If starts are listed at 4, 5, 6, and 7 seconds
+and the user asks for quarter-note notes, each note ends at start + 0.46875,
+not at the next listed start, unless the user explicitly asks for sustained
+notes.
 
 ## BULK-OPS RULE (CRITICAL, ALWAYS APPLY)
 
@@ -1838,7 +2339,13 @@ typical user requests.
 - Pitch / velocity out of range. Clamp to 0..127; MIDI_InsertNote silently fails or wraps.
 - Velocity 0 = note off in the MIDI spec. Use 1 as the practical minimum.
 - Calling MIDI functions on a non-MIDI take. Check `reaper.TakeIsMIDI(take)` first when the source is uncertain.
+- Creating a note target with `AddMediaItemToTrack`. That is a plain media item,
+  not a MIDI item. Use `CreateNewMIDIItemInProj` whenever the script must create
+  a new item that receives MIDI notes or CCs.
 - CC chanmsg confusion. Plain MIDI CCs are 0xB0, NOT 0xC0 (program change). Pitch bend is 0xE0.
+- Using item-local seconds or fixed PPQ lengths when creating notes in later
+  MIDI items. Convert the requested absolute project start/end seconds with
+  MIDI_GetPPQPosFromProjTime for each take.
 <!-- /SECTION:midi -->
 
 <!-- SECTION:theme -->

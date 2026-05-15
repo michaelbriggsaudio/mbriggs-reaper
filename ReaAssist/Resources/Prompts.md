@@ -6,6 +6,7 @@
 <!--   plugin         end-to-end workflow for adding / modifying / configuring plugins. Decision spine, defer rules, minimal-write, EQ specifics, multi-track data-table pattern, output discipline. -->
 <!--   plugin_helpers find_param / set_param_display / set_param_enum / set_param_enum_paced + the DECIDE FIRST per-param helper-selection checklist (linear/log/custom-curve, self-verify, API DISPLAY RANGE MISMATCH). -->
 <!--   jsfx           EEL2 syntax, slider declarations, DSP safety, host plumbing for .jsfx files. -->
+<!--   jsfx_dsp_cookbook  Narrow delay/reverb/modulation JSFX memory-addressing recipes. -->
 <!--   theme          theme color change safety + ExtState backup schema for the Undo button. (The full ini_key catalog lives in API_Ref.md SECTION:theme.) -->
 
 <!-- SECTION:plugin -->
@@ -646,6 +647,14 @@ EEL2 SYNTAX (CRITICAL -- not C, not Lua; getting this wrong fails to compile wit
 
 Slider declaration syntax: `sliderN:default<min,max,step>Name` on its own line near the top of the file (e.g. `slider1:2.0<0.2,10,0.01>Decay (s)`, `slider2:20<0,100,0.1>Mix (%)`).
 
+JSFX HOST DETAILS THAT IMPROVE REAL PLUGINS:
+- Prefer named sliders for readable generated code: `slider1:gain_db=0<-24,24,0.1>Gain (dB)`, then read `gain_db` instead of `slider1`.
+- Use enum sliders for mode choices: `slider2:mode=0<0,2,1{Sine,Triangle,Square}>Waveform`.
+- `@init` can rerun on transport start or sample-rate changes unless the JSFX deliberately opts out with `ext_noinit = 1;`; initialize state deliberately and do not assume long buffers persist across playback starts.
+- `@slider` runs after `@init` and when sliders change; compute coefficients and slider-derived values there, then consume them in `@sample`.
+- Declare helper functions before `@init`, never inside a section. When reuse is high enough to justify a helper, use syntax exactly like `function filt.tick(x) instance(y, a) local(out) ( y += a*(x-y); out = y; out; );`; `instance(...)` comes after the argument list and before `local(...)`, and there is NO `end` keyword. For simple one- or two-channel effects, straight-line state in each section is fine.
+- Do not use `import`, file I/O, shared `regXX` / `_global`, or custom `gmem` unless explicitly requested; they create collision and portability risks.
+
 SAFETY (mandatory -- blown-up track/speakers otherwise):
 - Only generate JSFX when the design is stable, bounded, and suitable for real-time use.
 - Never create unbounded feedback, runaway gain, or self-oscillating networks. For any feedback-based effect (reverb, delay, resonator, chorus, flanger, comb filter, allpass chain, phaser), the following two are mandatory:
@@ -680,6 +689,19 @@ With track: ```jsfx block THEN ```lua block using TrackFX_AddByName(tr, "ReaAssi
 Filename derivation: 1) take the desc: value, 2) strip characters: <>:"/\|?*, 3) collapse runs of spaces to one, 4) trim leading/trailing whitespace, 5) truncate name to 60 chars (extension added on top), 6) append .jsfx. Single spaces in the name are preserved.
 Without track: only ```jsfx block.
 <!-- /SECTION:jsfx -->
+
+<!-- SECTION:jsfx_dsp_cookbook -->
+JSFX DELAY/REVERB MEMORY COOKBOOK (additive on top of prompt_bundle:jsfx):
+Use this only for generated JSFX delay, reverb, chorus, flanger, phaser, comb/allpass, or feedback-modulation memory work. The core JSFX bundle still owns syntax, lifecycle, feedback clamps, DC blocking, and output-stage safety.
+
+Validator-friendly JSFX memory:
+- Use explicit initialized base variables such as `bufL`, `bufR`, `comb_l1`, `ap_r2`. Read and write from the initialized base directly: `bufL[i0]`, `bufL[i1]`, `bufR[idx]`, `comb_l1[cidx]`.
+- Do not invent a generic `buf[]` array and do not write `buf[bufL + i0]`, `buf[bufR + idx]`, or `buf[comb_l1 + cidx]`. That pattern is blocked when `buf` is never assigned, and it is still wrong when `buf` is assigned because it sums two base addresses.
+- Avoid memory helper functions where the base pointer is only a parameter, such as `function read(base, pos) ( base[pos]; );`. Write the delay read inline at the initialized buffer variable so the validator can prove the base was assigned.
+- For fractional delay, compute `read_pos`, `i0`, `i1`, and `frac`; wrap both indices; then read `explicit_buffer[i0]` and `explicit_buffer[i1]` inline before interpolation.
+- Keep each circular index tied to one buffer length. Clamp lengths to at least 1 and wrap indices with simple comparisons or `%` after the length is valid.
+- For comb/allpass banks, do not create a separate generic `buf` root. If the initialized base is `combL1`, read and write `combL1[cL1_r]` and `combL1[cL1_w]`; if the base is `apR2`, use `apR2[apR2_r]` and `apR2[apR2_w]`. Example: `cL1_y = combL1[cL1_r]; combL1[cL1_w] = inputL + cL1_y * fb;`.
+<!-- /SECTION:jsfx_dsp_cookbook -->
 
 <!-- SECTION:jsfx_pitch -->
 JSFX PITCH/SHIMMER FAMILY (additive on top of prompt_bundle:jsfx):

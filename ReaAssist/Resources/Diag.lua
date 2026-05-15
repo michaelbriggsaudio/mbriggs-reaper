@@ -930,6 +930,9 @@ function Diag.set_auto_tier(tier)
   if type(reaper) == "table" and type(reaper.SetExtState) == "function" then
     reaper.SetExtState(EXT_NS, "diag_auto_tier", tier, true)
   end
+  if type(Store) == "table" and type(Store.save_config) == "function" then
+    Store.save_config()
+  end
 end
 
 function Diag.assemble_auto_payload(tier)
@@ -2042,8 +2045,12 @@ local function _send_first_chat_ping()
   _send_body(body, Diag.CURL_TIMEOUT_S, 60, function(ok, status, err)
     if ok then
       auto_state.ping_done = true
-      if type(reaper) == "table" and type(reaper.SetExtState) == "function" then
-        reaper.SetExtState(EXT_NS, "diag_auto_last_ping_at", tostring(os.time()), true)
+      local now = os.time()
+      if type(Store) == "table"
+         and type(Store.set_diag_auto_last_ping_at) == "function" then
+        Store.set_diag_auto_last_ping_at(now)
+      elseif type(reaper) == "table" and type(reaper.SetExtState) == "function" then
+        reaper.SetExtState(EXT_NS, "diag_auto_last_ping_at", tostring(now), true)
       end
       return
     end
@@ -2151,8 +2158,12 @@ local function _process_auto_file(file)
   _send_body(body, Diag.CURL_TIMEOUT_S, 60, function(ok, status, err)
     if ok then
       os.remove(claimed)
-      if type(reaper) == "table" and type(reaper.SetExtState) == "function" then
-        reaper.SetExtState(EXT_NS, "diag_auto_last_sent_at", tostring(os.time()), true)
+      local now = os.time()
+      if type(Store) == "table"
+         and type(Store.set_diag_auto_last_sent_at) == "function" then
+        Store.set_diag_auto_last_sent_at(now)
+      elseif type(reaper) == "table" and type(reaper.SetExtState) == "function" then
+        reaper.SetExtState(EXT_NS, "diag_auto_last_sent_at", tostring(now), true)
       end
       return
     end

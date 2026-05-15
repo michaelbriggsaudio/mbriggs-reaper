@@ -619,6 +619,82 @@ function UI.push_modal_primary_btn()
 end
 function UI.pop_modal_primary_btn() PopStyleColor(RA.ctx, 4) end
 
+function UI.update_dialog_center_cursor(inner_w, item_w)
+  local pad_x = ImGui.ImGui_GetStyleVar(RA.ctx,
+    ImGui.ImGui_StyleVar_WindowPadding())
+  SetCursorPosX(RA.ctx, pad_x + math_max((inner_w - item_w) * 0.5, 0))
+end
+
+function UI.update_dialog_wordmark(inner_w)
+  local size = RA.SC(22)
+  local pad_x = ImGui.ImGui_GetStyleVar(RA.ctx,
+    ImGui.ImGui_StyleVar_WindowPadding())
+  PushFont(RA.ctx, FONT.inter_reg, size)
+  local rea_w = CalcTextSize(RA.ctx, "Rea")
+  PopFont(RA.ctx)
+  PushFont(RA.ctx, FONT.inter_bold, size)
+  local assist_w = CalcTextSize(RA.ctx, "Assist")
+  PopFont(RA.ctx)
+
+  UI.update_dialog_center_cursor(inner_w, rea_w + assist_w)
+  local x, y = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
+  local dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+  ImGui.ImGui_DrawList_AddTextEx(dl, FONT.inter_reg, size, x, y,
+    UI.lerp_u32(0x000000FF, TK.accent, 0.72), "Rea")
+  ImGui.ImGui_DrawList_AddTextEx(dl, FONT.inter_bold, size, x + rea_w, y,
+    TK.accent, "Assist")
+  SetCursorPosX(RA.ctx, pad_x)
+  Dummy(RA.ctx, inner_w, math_floor(size * 1.25))
+end
+
+function UI.update_dialog_text_center(text, inner_w, color, font, size)
+  text = tostring(text or "")
+  if text == "" then return end
+  if size then PushFont(RA.ctx, font, size) elseif font then PushFont(RA.ctx, font) end
+  local text_w = CalcTextSize(RA.ctx, text)
+  UI.update_dialog_center_cursor(inner_w, text_w)
+  if color then
+    ImGui.ImGui_TextColored(RA.ctx, color, text)
+  else
+    Text(RA.ctx, text)
+  end
+  if size or font then PopFont(RA.ctx) end
+end
+
+-- Discrete update progress, mirroring the bootstrap installer's square
+-- activity row. Keep a minimum number of cells so one-file updates do not
+-- collapse into a single progress bar.
+function UI.update_dialog_progress_cells(total, done, active)
+  total = math_max(0, total or 0)
+  done  = math_max(0, math_min(done or 0, total))
+  local cells = (total > 0) and math_max(total, 12) or (active and 12 or 0)
+  local cell_h  = RA.SC(10)
+  local gap     = RA.SC(4)
+  local cx, cy  = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
+  local avail_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+  if cells > 0 then
+    local cell_w  = math_min(cell_h, math_max(RA.SC(4),
+      math_floor((avail_w - (cells - 1) * gap) / cells)))
+    local total_w = cells * cell_w + (cells - 1) * gap
+    local start_x = cx + math_floor((avail_w - total_w) * 0.5)
+    local dl      = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+    local lit = (total > 0) and math_floor((done / total) * cells + 0.0001) or 0
+    if done >= total and total > 0 then lit = cells end
+    local active_i = nil
+    if active and lit < cells then
+      local span = cells - lit
+      active_i = lit + (math_floor(time_precise() * 8) % span) + 1
+    end
+    for i = 1, cells do
+      local x = start_x + (i - 1) * (cell_w + gap)
+      local fill = (i <= lit or i == active_i) and TK.accent or TK.card_hover
+      ImGui.ImGui_DrawList_AddRectFilled(dl, x, cy, x + cell_w, cy + cell_h,
+        fill, RA.SC(2))
+    end
+  end
+  Dummy(RA.ctx, avail_w, cell_h)
+end
+
 -- Destructive modal button (Run Anyway / Clear Cache / Factory Reset /
 -- Confirm Clear / Confirm UI Scale down). Softened red: TK.red blended
 -- ~25% toward TK.text_muted so the fill reads as serious-but-not-
@@ -1758,19 +1834,17 @@ function UI.mode_model_row_v5()
       if ImGui.ImGui_MenuItem(RA.ctx, fp.label, nil, fp.idx == prefs.provider_idx)
          and fp.idx ~= prefs.provider_idx then
         local old_p = PROVIDERS.active()
-        reaper.SetExtState(CFG.EXT_NS, "model_idx_" .. old_p.id,
-          tostring(prefs.model_idx), true)
+        if Store and Store.remember_model_idx then
+          Store.remember_model_idx(old_p, MODELS, prefs.model_idx)
+        end
         -- Save thinking_idx under the OLD (provider, model) pair so the
-        -- per-model state survives the switch. The helper writes the
-        -- new "thinking_idx_<provider>_<model>" slot.
+        -- per-model state survives the switch.
         if old_p.thinking_levels and prefs.thinking_idx > 0 then
           local old_m = MODELS[prefs.model_idx] or MODELS[1]
           PROVIDERS.save_thinking_idx(old_p, old_m, prefs.thinking_idx)
         end
         if old_p.id == "google" then Net.gemini_cache_invalidate() end
         prefs.provider_idx = fp.idx
-        reaper.SetExtState(CFG.EXT_NS, "provider_idx",
-          tostring(prefs.provider_idx), true)
         MODELS.refresh()
         S.api_key = S.api_key_map[PROVIDERS.active().id]
         S.api_ref_message = nil
@@ -1780,6 +1854,7 @@ function UI.mode_model_row_v5()
             att.cost = att.tokens * nm.price_in / 1000000
           end
         end
+        if Store and Store.save_config then Store.save_config() end
       end
     end
     ImGui.ImGui_EndPopup(RA.ctx)
@@ -1976,8 +2051,6 @@ function UI.mode_model_row_v5()
           PROVIDERS.save_thinking_idx(p_active, old_m, prefs.thinking_idx)
         end
         prefs.model_idx = usable_idx
-        reaper.SetExtState(CFG.EXT_NS, "model_idx_" .. prov_id,
-          tostring(prefs.model_idx), true)
         -- Load thinking_idx for the NEW model. Helper cascades through
         -- per-model key -> model default -> provider default -> 1, so
         -- first switches to a model with a model-level default (e.g.
@@ -1992,6 +2065,7 @@ function UI.mode_model_row_v5()
         for _, att in ipairs(S.attachments) do
           att.cost = att.tokens * raw_m.price_in / 1000000
         end
+        if Store and Store.save_config then Store.save_config() end
       end
     end
     ImGui.ImGui_EndPopup(RA.ctx)
@@ -2117,13 +2191,13 @@ function UI.mode_model_row_v5()
   UI.tooltip_v5("Ask mode: replies only; returned code waits for you to click Run.")
   if ask_clicked and auto_on then
     prefs.auto_run = false
-    reaper.SetExtState(CFG.EXT_NS, "auto_run", "0", true)
+    if Store and Store.save_config then Store.save_config() end
   end
   local auto_clicked = btn_at("##mm_autorun_seg", s2x1, s2w, ROW_H - INNER_PAD * 2)
   UI.tooltip_v5("Auto-Run: returned code runs automatically after the reply arrives.")
   if auto_clicked and not auto_on then
     prefs.auto_run = true
-    reaper.SetExtState(CFG.EXT_NS, "auto_run", "1", true)
+    if Store and Store.save_config then Store.save_config() end
   end
   ImGui.ImGui_EndDisabled(RA.ctx)
   cursor_x = px2 + ROW_GAP
@@ -2157,8 +2231,7 @@ function UI.mode_model_row_v5()
     cursor_x)
   if bak_clicked then
     prefs.auto_backup = not prefs.auto_backup
-    reaper.SetExtState(CFG.EXT_NS, "auto_backup",
-      prefs.auto_backup and "1" or "0", true)
+    if Store and Store.save_config then Store.save_config() end
   end
   cursor_x = cursor_x + bak_w
 
@@ -2177,8 +2250,7 @@ function UI.mode_model_row_v5()
     cursor_x)
   if det_clicked then
     prefs.show_details = not prefs.show_details
-    reaper.SetExtState(CFG.EXT_NS, "show_details",
-      prefs.show_details and "1" or "0", true)
+    if Store and Store.save_config then Store.save_config() end
   end
 
   -- Advance the layout cursor past the row. InvisibleButton calls moved the
@@ -2595,7 +2667,7 @@ function UI.footer_rail_v5()
     PopFont(RA.ctx)
     if clicked then
       prefs.theme = next_theme
-      reaper.SetExtState(CFG.EXT_NS, "theme", prefs.theme, true)
+      if Store and Store.save_config then Store.save_config() end
       apply_palette(PALETTES[resolve_theme(prefs.theme)])
     end
     cursor_x = x1 - GAP
@@ -4415,15 +4487,14 @@ function Render.help_screen()
 
   -- Text-size controls. Scope: help content only (section body
   -- paragraphs + bullets). Doesn't affect chat, settings, or chrome.
-  -- Range 0.8 -> 1.5 in 0.1 steps; persisted to ExtState.
+  -- Range 0.8 -> 1.5 in 0.1 steps; persisted to Config.json.
   SameLine(RA.ctx, 0, GROUP_GAP)
   ImGui.ImGui_BeginDisabled(RA.ctx, prefs.help_font_scale <= 0.8 + 1e-6)
   if ImGui.ImGui_Button(RA.ctx, "\xe2\x88\x92##help_text_dec",
       SIZE_BTN_W, 0) then
     prefs.help_font_scale = math.max(0.8,
       (prefs.help_font_scale or 1.0) - 0.1)
-    reaper.SetExtState(CFG.EXT_NS, "help_font_scale",
-      tostring(prefs.help_font_scale), true)
+    if Store and Store.save_config then Store.save_config() end
   end
   ImGui.ImGui_EndDisabled(RA.ctx)
   if ImGui.ImGui_IsItemHovered(RA.ctx,
@@ -4438,8 +4509,7 @@ function Render.help_screen()
       SIZE_BTN_W, 0) then
     prefs.help_font_scale = math.min(1.5,
       (prefs.help_font_scale or 1.0) + 0.1)
-    reaper.SetExtState(CFG.EXT_NS, "help_font_scale",
-      tostring(prefs.help_font_scale), true)
+    if Store and Store.save_config then Store.save_config() end
   end
   ImGui.ImGui_EndDisabled(RA.ctx)
   if ImGui.ImGui_IsItemHovered(RA.ctx,
@@ -5559,8 +5629,7 @@ function Render.bug_report_screen()
       inner_w)
     if changed_dl then
       prefs.debug_logging = new_dl
-      reaper.SetExtState(CFG.EXT_NS, "debug_logging",
-        prefs.debug_logging and "1" or "0", true)
+      if Store and Store.save_config then Store.save_config() end
       if prefs.debug_logging then Log.session_header() end
     end
   end
@@ -5926,6 +5995,69 @@ end
 -- modal is rendered in the current context, matching the screen's
 -- center-of-window positioning.
 
+-- Render._delete_extstate_section
+-- Deletes every persisted key from an ExtState namespace by parsing
+-- reaper-extstate.ini directly. This keeps Factory Reset from depending on a
+-- hand-maintained list that can fall out of sync with future SetExtState keys.
+function Render._delete_extstate_section(ns)
+  if not ns or ns == "" then return 0 end
+  local ini_path = reaper.GetResourcePath() .. "/reaper-extstate.ini"
+  local f = io.open(ini_path, "r")
+  if not f then return 0 end
+  local keys = {}
+  local in_section = false
+  local line_no = 0
+  for line in f:lines() do
+    line_no = line_no + 1
+    -- Strip a UTF-8 BOM if present on the first line. Some text editors add
+    -- it, and without this strip the first section header would not match.
+    if line_no == 1 then line = line:gsub("^\xEF\xBB\xBF", "") end
+    line = line:match("^%s*(.-)%s*$") or ""
+    if line ~= "" and not line:match("^[;#]") then
+      local sec = line:match("^%[(.-)%]$")
+      if sec then
+        in_section = (sec == ns)
+      elseif in_section then
+        local key = line:match("^([^=]+)")
+        if key then
+          -- f:lines() strips '\n' but not '\r'. On a CRLF-newline ini file
+          -- the captured key would end with a literal '\r' and DeleteExtState
+          -- would not match the live key name.
+          key = key:match("^%s*(.-)%s*$") or ""
+          key = key:gsub("\r$", "")
+          if key ~= "" then keys[#keys + 1] = key end
+        end
+      end
+    end
+  end
+  f:close()
+  for _, k in ipairs(keys) do
+    reaper.DeleteExtState(ns, k, true)
+  end
+  return #keys
+end
+
+function Render._delete_extstate_key_all(ns, key)
+  if not ns or ns == "" or not key or key == "" then return end
+  reaper.DeleteExtState(ns, key, false)
+  reaper.DeleteExtState(ns, key, true)
+end
+
+function Render._clear_theme_backup_extstate()
+  local ns = "ReaAssist"
+  local manifest = reaper.GetExtState(ns, "ThemeBackup__KEYS")
+  if manifest ~= "" then
+    for key in manifest:gmatch("[^,]+") do
+      key = key:match("^%s*(.-)%s*$") or ""
+      if key ~= "" then
+        Render._delete_extstate_key_all(ns, "ThemeBackup_" .. key)
+      end
+    end
+  end
+  Render._delete_extstate_key_all(ns, "ThemeBackup__KEYS")
+  Render._delete_extstate_section(ns)
+end
+
 -- Render._factory_reset_execute
 -- Shared implementation of the Factory Reset flow. Called from the
 -- Settings page's ADVANCED section when the user confirms the popup.
@@ -5937,68 +6069,38 @@ function Render._factory_reset_execute()
   -- Restore any modified theme colors before wiping state, so the user
   -- doesn't get stuck with a modified REAPER theme and no way to revert.
   pcall(Theme.restore_backups)
+  -- Theme backups intentionally use the public "ReaAssist" namespace so
+  -- generated one-shot scripts can cooperate with the main script. Factory
+  -- Reset still owns that data and must clear both persisted and in-session
+  -- copies after attempting the restore above.
+  pcall(Render._clear_theme_backup_extstate)
   -- Unregister every custom provider from the in-memory PROVIDERS table.
   pcall(Custom.unregister_all)
   -- Gemini explicit cache: clear in-memory state, persisted ExtState
-  -- keys (gemini_cache_name/model/expires), and fire server-side DELETE.
+  -- keys (gemini_cache_name/model/signature/expires), and fire server-side
+  -- DELETE.
   pcall(Net.gemini_cache_invalidate)
 
-  -- Delete every persisted ExtState key under our section by
-  -- enumerating the reaper-extstate.ini file directly. Robust to legacy
-  -- keys and new additions; nothing to hand-maintain.
-  do
-    local ini_path = reaper.GetResourcePath() .. "/reaper-extstate.ini"
-    local f = io.open(ini_path, "r")
-    if f then
-      local keys = {}
-      local in_section = false
-      local line_no = 0
-      for line in f:lines() do
-        line_no = line_no + 1
-        -- Strip a UTF-8 BOM if present on the first line. Some text
-        -- editors add it, and without this strip the first section
-        -- header (`[reaassist]`) wouldn't match and the entire reset
-        -- would silently no-op on the live keys.
-        if line_no == 1 then line = line:gsub("^\xEF\xBB\xBF", "") end
-        line = line:match("^%s*(.-)%s*$") or ""
-        if line ~= "" and not line:match("^[;#]") then
-          local sec = line:match("^%[(.-)%]$")
-          if sec then
-            in_section = (sec == CFG.EXT_NS)
-          elseif in_section then
-            local key = line:match("^([^=]+)")
-            if key then
-              -- f:lines() strips '\n' but not '\r'. On a CRLF-newline
-              -- ini file the captured key would end with a literal '\r'
-              -- and DeleteExtState would not match the live key name.
-              key = key:match("^%s*(.-)%s*$") or ""
-              key = key:gsub("\r$", "")
-              if key ~= "" then keys[#keys + 1] = key end
-            end
-          end
-        end
-      end
-      f:close()
-      for _, k in ipairs(keys) do
-        reaper.DeleteExtState(CFG.EXT_NS, k, true)
-      end
-    end
-  end
+  -- Delete every persisted ExtState key under our private section. This wipes
+  -- API keys, feedback identity, migration sentinels, settings, and legacy
+  -- runtime state in one pass.
+  Render._delete_extstate_section(CFG.EXT_NS)
   -- Transient session locks (persist=false -- never hit the .ini file
   -- so the enumeration above misses them).
   reaper.DeleteExtState(CFG.EXT_NS, "running",       false)
   reaper.DeleteExtState(CFG.EXT_NS, "request_close", false)
+  reaper.DeleteExtState(CFG.EXT_NS, "dev_signal",    false)
+  reaper.SetExtState(CFG.EXT_NS, "factory_reset_clean_boot", "1", false)
 
-  -- Suppress in-session re-writes that would otherwise repopulate the
-  -- .ini file within seconds. Cleared by the relauncher fire below;
-  -- if the relauncher fails we leave them set and surface a toast so
-  -- the user knows to close-and-reopen manually.
-  S._suppress_geometry_save  = true  -- stops the periodic win_x/y/w/h save
+  -- Suppress writes that would otherwise repopulate the .ini/Data folder
+  -- within seconds. The transient clean-boot flag carries the same intent
+  -- across the relaunch, and is lifted only when the user accepts the TOS
+  -- or explicitly changes settings.
+  S._suppress_geometry_save  = true  -- stops periodic window geometry saves
   S._suppress_os_theme_cache = true  -- stops detect_os_theme from re-caching
   -- Reset every in-memory pref to its documented default. Without this,
-  -- any pref the running script later writes via SetExtState (provider
-  -- switch, debug-logging toggle, etc.) would re-persist its OLD
-  -- in-memory value into the just-cleared .ini, leaving the user with
+  -- any pref the running script later saves would re-persist its OLD
+  -- in-memory value into the just-cleared config, leaving the user with
   -- a non-default config that "factory reset" was supposed to wipe.
   -- Schema mirror of the prefs table at ReaAssist.lua:~2331.
   prefs.auto_run              = false
@@ -6026,8 +6128,60 @@ function Render._factory_reset_execute()
   S.api_key  = nil
   S.api_key_map = {}
   S.gemini_paid_tier = nil
+  api_keys.key_bufs = {}
+  api_keys.key_errors = {}
+  api_keys.key_error = nil
+  api_keys.key_error_provider = nil
+  api_keys.key_error_detail = nil
+  api_keys.key_error_hint = nil
+  api_keys.key_error_url = nil
+  api_keys.key_error_url_label = nil
+  api_keys.key_focused = false
+  api_keys.key_validating = false
+  api_keys.key_validating_idx = nil
+  api_keys.show_key_error_popup = false
+  api_keys.show_test_results = false
+  api_keys.test_results = {}
   api_keys.custom_edit = nil
-  os.remove(RA.FX_CACHE_PATH)
+  do
+    local function remove_family(path)
+      if not path or path == "" then return end
+      os.remove(path)
+      os.remove(path .. ".tmp")
+      os.remove(path .. ".bak")
+    end
+    local function remove_corrupt_artifacts(dir)
+      if not dir or dir == "" then return end
+      local victims = {}
+      local idx = 0
+      while true do
+        local fn = reaper.EnumerateFiles(dir, idx)
+        if not fn then break end
+        if fn:find(".corrupt.", 1, true) then
+          victims[#victims + 1] = fn
+        end
+        idx = idx + 1
+      end
+      local sep = (dir:sub(-1) == "/" or dir:sub(-1) == "\\") and "" or RA.SEP
+      for _, fn in ipairs(victims) do
+        os.remove(dir .. sep .. fn)
+      end
+    end
+    remove_family(RA.CONFIG_PATH)
+    remove_family(RA.PROVIDERS_PATH)
+    remove_family(RA.STATE_PATH)
+    remove_family(RA.DATA_DIR .. "FX_Cache.json")
+    remove_family(RA.DATA_DIR .. "Debug.log")
+    remove_corrupt_artifacts(RA.DATA_DIR)
+    remove_family(RA._LEGACY_FX_CACHE_PATH)
+    remove_family(RA._LEGACY_DEBUG_LOG_PATH)
+    remove_family(RA.FX_CACHE_PATH)
+    remove_family(Log and Log.path)
+    if Store then
+      Store._config_doc = nil
+      Store._state_doc = nil
+    end
+  end
   FXCache.invalidate()
   api_keys.screen     = "tos"
   api_keys.is_reentry = false
@@ -6046,7 +6200,7 @@ function Render._factory_reset_execute()
 end
 
 function Render._factory_reset_popup(ctx)
-  local fr_w, fr_h = RA.SC(340), RA.SC(150)
+  local fr_w, fr_h = RA.SC(470), RA.SC(238)
   if update._main_w then
     ImGui.ImGui_SetNextWindowPos(ctx,
       update._main_x + (update._main_w - fr_w) * 0.5,
@@ -6059,16 +6213,23 @@ function Render._factory_reset_popup(ctx)
       ImGui.ImGui_WindowFlags_NoResize()) then
     local fr_cw = ImGui.ImGui_GetContentRegionAvail(ctx)
     ImGui.ImGui_Spacing(ctx)
-    local fr_txt = "Reset all settings and restart as new?"
+    local fr_txt = "Delete all ReaAssist data?"
     local fr_tw  = CalcTextSize(ctx, fr_txt)
     SetCursorPosX(ctx, GetCursorPosX(ctx)
       + math_floor((fr_cw - fr_tw) * 0.5))
     Text(ctx, fr_txt)
     ImGui.ImGui_Spacing(ctx)
+    PushStyleColor(ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+    UI.text_multiline(
+      "This deletes settings, API keys, custom providers, feedback identity, "
+      .. "logs, caches, and local Data files. ReaAssist will relaunch and "
+      .. "start like a new install.")
+    PopStyleColor(ctx)
+    ImGui.ImGui_Spacing(ctx)
     ImGui.ImGui_Spacing(ctx)
 
     local fr_do_reset = false
-    local fr_yes_w, fr_no_w, fr_gap = RA.SC(88), RA.SC(72), RA.SC(16)
+    local fr_yes_w, fr_no_w, fr_gap = RA.SC(118), RA.SC(72), RA.SC(16)
     local fr_row = fr_yes_w + fr_gap + fr_no_w
     SetCursorPosX(ctx, GetCursorPosX(ctx)
       + math_floor((fr_cw - fr_row) * 0.5))
@@ -6076,7 +6237,7 @@ function Render._factory_reset_popup(ctx)
     -- (red fill, white text) so the commit button reads as "this will
     -- wipe your data," not "safe primary action."
     UI.push_modal_danger_btn()
-    if ImGui.ImGui_Button(ctx, "Confirm", fr_yes_w, 0) then fr_do_reset = true end
+    if ImGui.ImGui_Button(ctx, "Factory Reset", fr_yes_w, 0) then fr_do_reset = true end
     UI.pop_modal_danger_btn()
     SameLine(ctx, 0, fr_gap)
     if ImGui.ImGui_Button(ctx, "Cancel", fr_no_w, 0) then
@@ -6100,7 +6261,11 @@ end
 
 function Render._reaper_version_notice_popup()
   if S.reaper_version_notice_session_dismissed then return end
-  if reaper.GetExtState(CFG.EXT_NS, "reaper_version_notice_dismissed") == "true" then
+  if Store and Store.reaper_version_notice_dismissed
+     and Store.reaper_version_notice_dismissed() then
+    return
+  elseif not (Store and Store.reaper_version_notice_dismissed)
+     and reaper.GetExtState(CFG.EXT_NS, "reaper_version_notice_dismissed") == "true" then
     return
   end
 
@@ -6168,8 +6333,12 @@ function Render._reaper_version_notice_popup()
 
     if ImGui.ImGui_Button(RA.ctx, "Don't Show Again", hide_w, 0) then
       S.reaper_version_notice_session_dismissed = true
-      reaper.SetExtState(CFG.EXT_NS,
-        "reaper_version_notice_dismissed", "true", true)
+      if Store and Store.dismiss_reaper_version_notice then
+        Store.dismiss_reaper_version_notice()
+      else
+        reaper.SetExtState(CFG.EXT_NS,
+          "reaper_version_notice_dismissed", "true", true)
+      end
       ImGui.ImGui_CloseCurrentPopup(RA.ctx)
     end
 
@@ -7394,6 +7563,18 @@ function Render.settings_screen()
   Render._shared_key_screen_impl()
 end
 
+local function _settings_has_usable_provider()
+  if Store and Store.has_usable_provider then
+    return Store.has_usable_provider()
+  end
+  for _, p in ipairs(PROVIDERS or {}) do
+    if p and (p.is_custom or (S.api_key_map and S.api_key_map[p.id])) then
+      return true
+    end
+  end
+  return false
+end
+
 -- Shared cleanup invoked from every "leave Settings" branch in
 -- Render._shared_key_screen_impl: the unsaved-changes popup's Save and
 -- Discard buttons, and the no-popup cancel branch when there were no
@@ -7425,6 +7606,10 @@ local function _exit_settings_screen()
   S.show_help           = ret and ret.show_help     or false
   S.show_bug_report     = ret and ret.show_bug      or false
   S.show_credits        = ret and ret.show_credits  or false
+  if api_keys.screen == nil and not _settings_has_usable_provider()
+     and not (S.show_help or S.show_bug_report or S.show_credits) then
+    api_keys.screen = "first_run"
+  end
   api_keys.is_reentry   = false
   api_keys.key_bufs     = {}
   api_keys.key_errors   = {}
@@ -7847,8 +8032,11 @@ function Render._shared_key_screen_impl()
             S.api_key_map[prov.id] = nil
             Key.clear(prov.key_extstate)
             if prov.id == "google" then
-              S.gemini_paid_tier = nil
-              reaper.DeleteExtState(CFG.EXT_NS, "gemini_paid_tier", true)
+              if Store and Store.set_gemini_paid_tier then
+                Store.set_gemini_paid_tier(nil)
+              else
+                S.gemini_paid_tier = nil
+              end
             end
             if prov.id == PROVIDERS.active().id then
               S.api_key = nil
@@ -8031,8 +8219,8 @@ function Render._shared_key_screen_impl()
     if ImGui.ImGui_Button(RA.ctx, test_label .. "##key_recheck") then
       -- Promote any buffered (freshly-pasted) keys into S.api_key_map so the
       -- test queue below picks them up. Mirrors what Save does -- the key
-      -- is only moved in-memory here; persistence to ExtState happens in
-      -- the test-success callback, same as for a Save-then-test flow. Any
+      -- is only moved in-memory here; persistence happens in the
+      -- test-success callback, same as for a Save-then-test flow. Any
       -- buffered key that fails format validation records an inline error
       -- and is NOT promoted.
       for i, prov in ipairs(PROVIDERS) do
@@ -8439,10 +8627,9 @@ function Render._shared_key_screen_impl()
 
     if ImGui.ImGui_Button(RA.ctx, "Reset Window Size##adv_reset_win") then
       S._reset_window_size = true
-      reaper.DeleteExtState(CFG.EXT_NS, "win_x", true)
-      reaper.DeleteExtState(CFG.EXT_NS, "win_y", true)
-      reaper.DeleteExtState(CFG.EXT_NS, "win_w", true)
-      reaper.DeleteExtState(CFG.EXT_NS, "win_h", true)
+      if Store and Store.clear_window_geometry then
+        Store.clear_window_geometry()
+      end
     end
     UI.tooltip("Reset window to default size and clear saved position")
     SameLine(RA.ctx, 0, adv_gap)
@@ -8589,26 +8776,8 @@ function Render._shared_key_screen_impl()
       UI.push_modal_primary_btn()
       if ImGui.ImGui_Button(RA.ctx, "Save##us_save", us_save_w, 0) then
         -- Persist every staged Preference. Mirrors the main Save handler
-        -- below so this "Save on exit" path writes the same ExtState keys.
-        reaper.SetExtState(CFG.EXT_NS, "ui_scale_idx",
-          tostring(prefs.ui_scale_idx), true)
-        reaper.SetExtState(CFG.EXT_NS, "theme", prefs.theme, true)
-        reaper.SetExtState(CFG.EXT_NS, "update_check",
-          prefs.update_check and "1" or "0", true)
-        reaper.SetExtState(CFG.EXT_NS, "auto_backup",
-          prefs.auto_backup and "1" or "0", true)
-        reaper.SetExtState(CFG.EXT_NS, "chat_font_idx",
-          tostring(prefs.chat_font_idx), true)
-        reaper.SetExtState(CFG.EXT_NS, "reply_language_idx",
-          tostring(prefs.reply_language_idx), true)
-        reaper.SetExtState(CFG.EXT_NS, "include_snapshot",
-          prefs.include_snapshot and "1" or "0", true)
-        reaper.SetExtState(CFG.EXT_NS, "include_api_ref",
-          prefs.include_api_ref and "1" or "0", true)
-        reaper.SetExtState(CFG.EXT_NS, "diag_auto_tier",
-          prefs.diag_auto_tier or "off", true)
-        reaper.SetExtState(CFG.EXT_NS, "cloud_request_timeout",
-          tostring(prefs.cloud_request_timeout), true)
+        -- below so this "Save on exit" path writes the same config fields.
+        if Store and Store.save_config then Store.save_config() end
         _exit_settings_screen()
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
       end
@@ -8990,58 +9159,40 @@ function Render._shared_key_screen_impl()
   -- test for the first newly entered valid key. If no new keys were entered
   -- (re-entry with only removals), return to the main UI immediately.
   if save_clicked and can_submit then
-    -- Persist every staged Preference to ExtState. Each saved_* stash
+    -- Persist every staged Preference to Config.json. Each saved_* stash
     -- is cleared so the screen starts "clean" if the user re-enters
     -- Settings without leaving the script.
     if api_keys.saved_ui_scale_idx then
-      reaper.SetExtState(CFG.EXT_NS, "ui_scale_idx",
-        tostring(prefs.ui_scale_idx), true)
       api_keys.saved_ui_scale_idx = nil
     end
     if api_keys.saved_theme then
-      reaper.SetExtState(CFG.EXT_NS, "theme", prefs.theme, true)
       api_keys.saved_theme = nil
     end
     if api_keys.saved_update_check ~= nil then
-      reaper.SetExtState(CFG.EXT_NS, "update_check",
-        prefs.update_check and "1" or "0", true)
       api_keys.saved_update_check = nil
     end
     if api_keys.saved_auto_backup ~= nil then
-      reaper.SetExtState(CFG.EXT_NS, "auto_backup",
-        prefs.auto_backup and "1" or "0", true)
       api_keys.saved_auto_backup = nil
     end
     if api_keys.saved_chat_font_idx then
-      reaper.SetExtState(CFG.EXT_NS, "chat_font_idx",
-        tostring(prefs.chat_font_idx), true)
       api_keys.saved_chat_font_idx = nil
     end
     if api_keys.saved_reply_language_idx then
-      reaper.SetExtState(CFG.EXT_NS, "reply_language_idx",
-        tostring(prefs.reply_language_idx), true)
       api_keys.saved_reply_language_idx = nil
     end
     if api_keys.saved_include_snapshot ~= nil then
-      reaper.SetExtState(CFG.EXT_NS, "include_snapshot",
-        prefs.include_snapshot and "1" or "0", true)
       api_keys.saved_include_snapshot = nil
     end
     if api_keys.saved_include_api_ref ~= nil then
-      reaper.SetExtState(CFG.EXT_NS, "include_api_ref",
-        prefs.include_api_ref and "1" or "0", true)
       api_keys.saved_include_api_ref = nil
     end
     if api_keys.saved_diag_auto_tier ~= nil then
-      reaper.SetExtState(CFG.EXT_NS, "diag_auto_tier",
-        prefs.diag_auto_tier or "off", true)
       api_keys.saved_diag_auto_tier = nil
     end
     if api_keys.saved_cloud_request_timeout then
-      reaper.SetExtState(CFG.EXT_NS, "cloud_request_timeout",
-        tostring(prefs.cloud_request_timeout), true)
       api_keys.saved_cloud_request_timeout = nil
     end
+    if Store and Store.save_config then Store.save_config() end
     api_keys.key_error    = nil
     local first_valid_idx  = nil
     local has_format_error = false
@@ -9081,11 +9232,11 @@ function Render._shared_key_screen_impl()
         api_keys.key_validating = true
         api_keys.key_validating_idx = first_valid_idx
         Net.fire_key_test(test_prov)
-      elseif is_reentry or has_any_key then
-        -- No new cloud keys to test. Re-entry: user may have only
-        -- removed keys or just toggled prefs. First-run: user has a
-        -- custom provider already configured (has_any_key) and isn't
-        -- pasting a cloud key. Either way, exit the screen.
+      elseif has_any_key then
+        -- No new cloud keys to test, but at least one provider is usable:
+        -- a re-entry user may have only toggled prefs, or a first-run user
+        -- may have configured only a local/custom provider. Either way,
+        -- exit the screen.
         -- If the active provider's key was just removed (built-in with
         -- nothing left in api_key_map), snap prefs.provider_idx to the
         -- first usable provider before exiting. Otherwise the home
@@ -9098,9 +9249,8 @@ function Render._shared_key_screen_impl()
             for i, p in ipairs(PROVIDERS) do
               if p.is_custom or S.api_key_map[p.id] then
                 prefs.provider_idx = i
-                reaper.SetExtState(CFG.EXT_NS, "provider_idx",
-                  tostring(prefs.provider_idx), true)
                 MODELS.refresh()
+                if Store and Store.save_config then Store.save_config() end
                 break
               end
             end
@@ -9112,9 +9262,26 @@ function Render._shared_key_screen_impl()
         api_keys.key_errors   = {}
         api_keys.key_error    = nil
         api_keys.key_focused  = false
-        api_keys.custom_edit = nil  -- next open re-reads from ExtState
+        api_keys.custom_edit = nil  -- next open re-reads current provider records
         S.api_key = S.api_key_map[PROVIDERS.active().id]
         UI.show_float_toast("Settings saved", "ok")
+      elseif is_reentry then
+        -- Settings can be saved during onboarding, but a user with no API
+        -- keys and no custom providers must stay in first-run setup. Leaving
+        -- for the main screen would show the in-memory default Claude model
+        -- even though no provider is actually usable.
+        S._settings_return_to = nil
+        api_keys.screen       = "first_run"
+        api_keys.is_reentry   = false
+        api_keys.key_bufs     = {}
+        api_keys.key_errors   = {}
+        api_keys.key_error    = nil
+        api_keys.key_focused  = false
+        api_keys.custom_edit  = nil
+        S.api_key             = nil
+        UI.show_float_toast(
+          "Settings saved. Add an API key or custom provider to continue.",
+          "ok", true)
       else
         api_keys.key_error = "Please enter at least one valid API key, or "
           .. "configure a custom LLM via Local & Custom LLMs."
@@ -9572,12 +9739,12 @@ function Render.custom_providers_screen()
           Custom.register_all()
           if active_removed then
             prefs.provider_idx = 1
-            reaper.SetExtState(CFG.EXT_NS, "provider_idx", "1", true)
             MODELS.refresh()
             S.api_key = S.api_key_map[PROVIDERS.active().id]
           elseif was_active_id and PROVIDERS._by_id[was_active_id] then
             prefs.provider_idx = PROVIDERS._by_id[was_active_id]
           end
+          if Store and Store.save_config then Store.save_config() end
         end
         api_keys.custom_providers_confirm = nil
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
@@ -11155,18 +11322,23 @@ function Render.custom_llm_screen()
         Custom.upsert_record(record)
         -- Clamp the persisted model_idx for this provider so it can never
         -- point past the (possibly-shrunk) models list. The runtime loader
-        -- (_prefs_load_idx) already clamps at read time, so this is purely
-        -- a hygiene write: it keeps reaper-extstate.ini honest about the
-        -- last-selected slot. Without it, a stale "model_idx_<id>=N" sits
-        -- around forever on disk pointing past the end of the list, which
-        -- makes the file useless as evidence when triaging "where did my
-        -- models go?" reports.
+        -- already clamps at read time; this just keeps the staged selection
+        -- evidence honest before Store.save_config writes Config.json.
         do
-          local idx_key = "model_idx_" .. edit.id
-          local cur = tonumber(reaper.GetExtState(CFG.EXT_NS, idx_key))
+          local cur
+          if Store and Store._selection_doc and Store._model_index_by_id then
+            local sel = Store._selection_doc()
+            local map = sel and sel.model_id_by_provider or nil
+            cur = Store._model_index_by_id(parsed_models,
+              map and map[edit.id] or nil)
+          end
+          cur = cur or tonumber(reaper.GetExtState(
+            CFG.EXT_NS, "model_idx_" .. edit.id))
           if cur and #parsed_models > 0 and cur > #parsed_models then
-            reaper.SetExtState(CFG.EXT_NS, idx_key,
-              tostring(#parsed_models), true)
+            cur = #parsed_models
+          end
+          if cur and Store and Store.remember_model_idx then
+            Store.remember_model_idx({ id = edit.id }, parsed_models, cur)
           end
         end
         if key_t ~= "" then
@@ -11200,11 +11372,10 @@ function Render.custom_llm_screen()
              and (not stranded.is_custom and not S.api_key_map[stranded.id])
              and PROVIDERS._by_id[edit.id] then
             prefs.provider_idx = PROVIDERS._by_id[edit.id]
-            reaper.SetExtState(CFG.EXT_NS, "provider_idx",
-              tostring(prefs.provider_idx), true)
           end
         end
         MODELS.refresh()
+        if Store and Store.save_config then Store.save_config() end
         -- Guard: if register_all somehow produced an empty PROVIDERS
         -- (no hardcoded entries AND every custom record was rejected),
         -- PROVIDERS.active() returns nil. Indexing .id on it would
@@ -13258,10 +13429,11 @@ function Render.main_window()
   -- Restore saved window geometry on first frame; use scaled defaults thereafter.
   if not S._win_pos_restored then
     S._win_pos_restored = true
-    local sx = reaper.GetExtState(CFG.EXT_NS, "win_x")
-    local sy = reaper.GetExtState(CFG.EXT_NS, "win_y")
-    local sw = reaper.GetExtState(CFG.EXT_NS, "win_w")
-    local sh = reaper.GetExtState(CFG.EXT_NS, "win_h")
+    local geom = Store and Store.window_geometry and Store.window_geometry()
+    local sx = geom and geom.x or reaper.GetExtState(CFG.EXT_NS, "win_x")
+    local sy = geom and geom.y or reaper.GetExtState(CFG.EXT_NS, "win_y")
+    local sw = geom and geom.w or reaper.GetExtState(CFG.EXT_NS, "win_w")
+    local sh = geom and geom.h or reaper.GetExtState(CFG.EXT_NS, "win_h")
     -- Coerce-with-fallback: a non-empty but non-numeric ExtState value
     -- (corrupted .ini or manual edit) makes tonumber return nil, and
     -- passing nil to SetNextWindowPos / SetNextWindowSize throws -- the
@@ -16546,7 +16718,7 @@ function Render.main_window()
       end
       if do_disable then
         prefs.auto_backup = false
-        reaper.SetExtState(CFG.EXT_NS, "auto_backup", "0", true)
+        if Store and Store.save_config then Store.save_config() end
       end
       -- Save Project: trigger native "File: Save project" (40026). If the
       -- project has never been saved, REAPER puts up the native Save-As
@@ -17333,10 +17505,10 @@ function Render.main_window()
     S._win_save_counter = (S._win_save_counter or 0) + 1
     if S._win_save_counter >= 60 and not S._suppress_geometry_save then
       S._win_save_counter = 0
-      reaper.SetExtState(CFG.EXT_NS, "win_x", tostring(math.floor(update._main_x)), true)
-      reaper.SetExtState(CFG.EXT_NS, "win_y", tostring(math.floor(update._main_y)), true)
-      reaper.SetExtState(CFG.EXT_NS, "win_w", tostring(math.floor(update._main_w)), true)
-      reaper.SetExtState(CFG.EXT_NS, "win_h", tostring(math.floor(update._main_h)), true)
+      if Store and Store.save_window_geometry then
+        Store.save_window_geometry(
+          update._main_x, update._main_y, update._main_w, update._main_h)
+      end
     end
     -- Gemini Free Tier warning popup (top-level scope so it works from any
     -- page -- tier detection typically fires while the user is still on the
@@ -17434,8 +17606,11 @@ function Render.main_window()
       local off4 = (inner_w - mark_w) * 0.5
       if off4 > 0 then SetCursorPosX(RA.ctx, gem_pad + off4) end
       if ImGui.ImGui_Button(RA.ctx, mark_label, mark_w, 0) then
-        S.gemini_paid_tier = true
-        reaper.SetExtState(CFG.EXT_NS, "gemini_paid_tier", "true", true)
+        if Store and Store.set_gemini_paid_tier then
+          Store.set_gemini_paid_tier(true)
+        else
+          S.gemini_paid_tier = true
+        end
         if PROVIDERS.active().id == "google" then MODELS.refresh() end
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
       end
@@ -17594,9 +17769,13 @@ function Render.main_window()
     local dlg_w = RA.SC(400)
     local dlg_h
     if update.state == "available" or update.state == "repair_available" then
-      dlg_h = RA.SC(180)
+      dlg_h = RA.SC(220)
+    elseif update.state == "downloading" or update.state == "rename_retry" then
+      dlg_h = RA.SC(210)
+    elseif update.state == "done" then
+      dlg_h = RA.SC(225)
     else
-      dlg_h = RA.SC(150)
+      dlg_h = update.state == "failed" and RA.SC(178) or RA.SC(150)
     end
     -- Center on the main ReaAssist window.
     if update._main_w then
@@ -17634,25 +17813,40 @@ function Render.main_window()
       dlg_title, show_close or nil, dlg_flags)
     if dlg_visible then
       if update.state == "downloading" or update.state == "rename_retry" then
-        -- Download progress view. Verb switches for repair sessions so the
-        -- user knows we're restoring missing/corrupted files, not replacing
-        -- them with a new version.
+        -- Download progress view. Mirrors the bootstrap installer's small
+        -- wordmark + discrete file-cell row so the normal updater no longer
+        -- feels like a generic system prompt.
         local dlg_cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
-        local verb = update.action_was_repair and "Restoring files"
-                                               or "Downloading update"
-        local prog_text = verb .. " (" .. update.download_idx .. "/"
-                               .. #update.download_queue .. ")..."
-        local prog_w = CalcTextSize(RA.ctx, prog_text)
-        SetCursorPosX(RA.ctx, (dlg_cw - prog_w) * 0.5)
-        Text(RA.ctx, prog_text)
+        local queue = update.download_queue or {}
+        local total = #queue
+        local idx = math_max(1, math_min(update.download_idx or 1,
+                                         math_max(total, 1)))
+        local done = math_max(0, math_min(idx - 1, total))
+        local status_text
+        if update.state == "rename_retry" then
+          status_text = "Applying update..."
+        else
+          status_text = update.action_was_repair and "Restoring files..."
+                                                or "Downloading update..."
+        end
+
+        UI.update_dialog_wordmark(dlg_cw)
         ImGui.ImGui_Spacing(RA.ctx)
-        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-        local entry = update.download_queue[update.download_idx]
+        UI.update_dialog_text_center(status_text, dlg_cw, TK.text,
+                                     nil, RA.SC(17))
+        ImGui.ImGui_Spacing(RA.ctx)
+        UI.update_dialog_progress_cells(total, done, true)
+        ImGui.ImGui_Spacing(RA.ctx)
+
+        local entry = queue[update.download_idx]
         local fname = entry and entry.filename or ""
-        local fname_w = CalcTextSize(RA.ctx, fname)
-        SetCursorPosX(RA.ctx, (dlg_cw - fname_w) * 0.5)
-        Text(RA.ctx, fname)
-        PopStyleColor(RA.ctx)
+        local count_text = (total > 0)
+          and string.format("File %d of %d", idx, total)
+          or  "Preparing file list"
+        UI.update_dialog_text_center(count_text, dlg_cw, TK.text_muted,
+                                     nil, RA.SC(12))
+        UI.update_dialog_text_center(fname, dlg_cw, TK.text_muted,
+                                     FONT.mono_reg, RA.SC(11))
       elseif update.state == "done" then
         -- Completion view. Different copy for repair sessions so "Updated to
         -- vX" does not mislead when the version did not change. When
@@ -17677,16 +17871,22 @@ function Render.main_window()
             and "Restarting to apply the new version..."
             or  "Close and reopen ReaAssist to start using the new version."
         end
-        local done_w = CalcTextSize(RA.ctx, done_text)
-        SetCursorPosX(RA.ctx, (dlg_cw - done_w) * 0.5)
-        Text(RA.ctx, done_text)
+        local cell_total = #(update.download_queue or {})
+        UI.update_dialog_wordmark(dlg_cw)
         ImGui.ImGui_Spacing(RA.ctx)
-        local inst_w = CalcTextSize(RA.ctx, inst_text)
-        SetCursorPosX(RA.ctx, (dlg_cw - inst_w) * 0.5)
+        UI.update_dialog_progress_cells(cell_total, cell_total)
+        ImGui.ImGui_Spacing(RA.ctx)
+        UI.update_dialog_text_center(done_text, dlg_cw, TK.text,
+                                     nil, RA.SC(14))
+        ImGui.ImGui_Spacing(RA.ctx)
+        local inst_w = math_min(CalcTextSize(RA.ctx, inst_text), dlg_cw)
+        UI.update_dialog_center_cursor(dlg_cw, inst_w)
+        ImGui.ImGui_PushTextWrapPos(RA.ctx, GetCursorPosX(RA.ctx) + inst_w)
         ImGui.ImGui_TextWrapped(RA.ctx, inst_text)
+        ImGui.ImGui_PopTextWrapPos(RA.ctx)
         ImGui.ImGui_Spacing(RA.ctx)
         local ok_w = RA.SC(72)
-        SetCursorPosX(RA.ctx, (dlg_cw - ok_w) * 0.5)
+        UI.update_dialog_center_cursor(dlg_cw, ok_w)
         if ImGui.ImGui_Button(RA.ctx, "OK", ok_w, 0) then
           update.show_dialog = false
         end
@@ -17726,9 +17926,14 @@ function Render.main_window()
                                                   or "sync")
                    .. " via ReaPack if the problem persists."
         end
-        local fail_w = CalcTextSize(RA.ctx, fail_text)
-        SetCursorPosX(RA.ctx, (dlg_cw - fail_w) * 0.5)
+        -- Wrapped paragraphs must start inside the content region. Centering
+        -- by the unwrapped text width can push long failures negative, which
+        -- clips the first words instead of wrapping them.
+        local fail_w = math_min(CalcTextSize(RA.ctx, fail_text), dlg_cw)
+        UI.update_dialog_center_cursor(dlg_cw, fail_w)
+        ImGui.ImGui_PushTextWrapPos(RA.ctx, GetCursorPosX(RA.ctx) + fail_w)
         ImGui.ImGui_TextWrapped(RA.ctx, fail_text)
+        ImGui.ImGui_PopTextWrapPos(RA.ctx)
         ImGui.ImGui_Spacing(RA.ctx)
         ImGui.ImGui_Spacing(RA.ctx)
         -- Two-button row: Retry (primary) | OK. Retry calls
@@ -17743,7 +17948,7 @@ function Render.main_window()
         -- the standard path.
         local btn1_w, btn2_w, gap = RA.SC(80), RA.SC(72), RA.SC(16)
         local row_w = btn1_w + gap + btn2_w
-        SetCursorPosX(RA.ctx, (dlg_cw - row_w) * 0.5)
+        UI.update_dialog_center_cursor(dlg_cw, row_w)
         UI.push_modal_primary_btn()
         if ImGui.ImGui_Button(RA.ctx, "Retry", btn1_w, 0) then
           -- Close dialog so the auto-show guard re-fires when
@@ -17764,6 +17969,8 @@ function Render.main_window()
         -- for the current session, but we want to re-prompt on the next launch
         -- if the files are still broken.
         local dlg_cw  = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+        UI.update_dialog_wordmark(dlg_cw)
+        ImGui.ImGui_Spacing(RA.ctx)
         local missing = #(update.repair_missing    or {})
         local mismatched = #(update.repair_mismatched or {})
         local total   = missing + mismatched
@@ -17774,7 +17981,7 @@ function Render.main_window()
           total == 1 and "needs" or "need",
           CFG.VERSION)
         local title_w = CalcTextSize(RA.ctx, title_text)
-        SetCursorPosX(RA.ctx, (dlg_cw - title_w) * 0.5)
+        UI.update_dialog_center_cursor(dlg_cw, title_w)
         ImGui.ImGui_TextWrapped(RA.ctx, title_text)
         ImGui.ImGui_Spacing(RA.ctx)
         -- Breakdown line (quietly styled) telling the user what was found.
@@ -17789,7 +17996,7 @@ function Render.main_window()
           detail = string.format("(%d modified or corrupted)", mismatched)
         end
         local detail_w = CalcTextSize(RA.ctx, detail)
-        SetCursorPosX(RA.ctx, (dlg_cw - detail_w) * 0.5)
+        UI.update_dialog_center_cursor(dlg_cw, detail_w)
         Text(RA.ctx, detail)
         PopStyleColor(RA.ctx)
         ImGui.ImGui_Spacing(RA.ctx)
@@ -17799,7 +18006,7 @@ function Render.main_window()
         -- to end -- no manual download or install required.
         local info_text = "Automatic repair - No manual download needed."
         local info_w = CalcTextSize(RA.ctx, info_text)
-        SetCursorPosX(RA.ctx, (dlg_cw - info_w) * 0.5)
+        UI.update_dialog_center_cursor(dlg_cw, info_w)
         Text(RA.ctx, info_text)
         ImGui.ImGui_Spacing(RA.ctx)
         ImGui.ImGui_Spacing(RA.ctx)
@@ -17811,7 +18018,7 @@ function Render.main_window()
         -- close the main ReaAssist window or quit REAPER; the next
         -- session's chat-piggyback re-surfaces the prompt.
         local btn_w = RA.SC(112)
-        SetCursorPosX(RA.ctx, (dlg_cw - btn_w) * 0.5)
+        UI.update_dialog_center_cursor(dlg_cw, btn_w)
         UI.push_modal_primary_btn()
         if ImGui.ImGui_Button(RA.ctx, "Repair Now", btn_w, 0) then
           Updater.download_start()
@@ -17820,19 +18027,21 @@ function Render.main_window()
       else
         -- Default: update available prompt (new version on server).
         local dlg_cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+        UI.update_dialog_wordmark(dlg_cw)
+        ImGui.ImGui_Spacing(RA.ctx)
         local title_text = "ReaAssist v" .. (update.remote_version or "?")
           .. " is available (you have v" .. CFG.VERSION .. ")."
         local title_w = CalcTextSize(RA.ctx, title_text)
-        SetCursorPosX(RA.ctx, (dlg_cw - title_w) * 0.5)
+        UI.update_dialog_center_cursor(dlg_cw, title_w)
         ImGui.ImGui_TextWrapped(RA.ctx, title_text)
         ImGui.ImGui_Spacing(RA.ctx)
         local desc1 = "The update is quick and applies directly."
         local desc1_w = CalcTextSize(RA.ctx, desc1)
-        SetCursorPosX(RA.ctx, (dlg_cw - desc1_w) * 0.5)
+        UI.update_dialog_center_cursor(dlg_cw, desc1_w)
         Text(RA.ctx, desc1)
         local desc2 = "(No manual download needed)"
         local desc2_w = CalcTextSize(RA.ctx, desc2)
-        SetCursorPosX(RA.ctx, (dlg_cw - desc2_w) * 0.5)
+        UI.update_dialog_center_cursor(dlg_cw, desc2_w)
         Text(RA.ctx, desc2)
         ImGui.ImGui_Spacing(RA.ctx)
         ImGui.ImGui_Spacing(RA.ctx)
@@ -17845,7 +18054,7 @@ function Render.main_window()
         -- "Update Now" at SC(88) read as tight next to the chrome).
         local btn1_w, btn2_w, gap = RA.SC(104), RA.SC(80), RA.SC(16)
         local row1_w = btn1_w + gap + btn2_w
-        SetCursorPosX(RA.ctx, (dlg_cw - row1_w) * 0.5)
+        UI.update_dialog_center_cursor(dlg_cw, row1_w)
         UI.push_modal_primary_btn()
         if ImGui.ImGui_Button(RA.ctx, "Update Now", btn1_w, 0) then
           Updater.download_start()
@@ -17855,15 +18064,16 @@ function Render.main_window()
         if ImGui.ImGui_Button(RA.ctx, "Later", btn2_w, 0) then
           update.show_dialog = false
           -- Persist a 7-day snooze so the daily auto-check does not
-          -- re-nag; check_poll() reads this key and (for piggyback
+          -- re-nag; check_poll() reads this stored value and (for piggyback
           -- checks only -- forced/manual paths bypass the snooze)
           -- pre-flips popup_opened so the auto-show guard treats the
           -- "available" state as already-shown. The fetch itself is
           -- not gated; we always need a fresh manifest to compute the
           -- local-vs-remote SHA diff.
           local snooze_until = os.time() + 7 * 24 * 3600
-          reaper.SetExtState(CFG.EXT_NS, "update_snooze",
-            tostring(snooze_until), true)
+          if Store and Store.set_update_snooze then
+            Store.set_update_snooze(snooze_until)
+          end
         end
       end
     end

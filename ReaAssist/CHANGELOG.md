@@ -1,5 +1,15 @@
 # ReaAssist - Changelog
 
+## v1.2.2 - 2026-05-15
+
+- **ReaAssist data now lives in a dedicated Data folder.** Preferences, provider records, selections, runtime state, FX cache, and debug logs are migrated out of REAPER ExtState / shipped Resources files into `Data/`, with cleanup of legacy entries after successful writes.
+
+- **Factory Reset is cleaner and more complete.** Reset now wipes the new data/config files, avoids recreating stale state during the clean-boot pass, and keeps onboarding/model-default state from leaking back in after reset.
+
+- **The updater and repair dialogs are more polished.** Update prompts, repair prompts, progress cells, completion text, wrapping, and alignment now match the installer-style presentation more closely.
+
+- **Prompt guidance is tighter for JSFX, MIDI, and Gemini failures.** JSFX memory-heavy effects get a focused DSP cookbook, MIDI bass/part derivation handles musical intent more carefully, and Gemini provider outages are reported as provider availability problems instead of user/setup failures.
+
 ## v1.2.1 - 2026-05-13
 
 - **Chat reply language is now configurable in beta.** Settings has a Chat Language selector for English, Spanish, French, German, Italian, and Portuguese; it changes assistant prose only while keeping code, diagnostics, provider/model names, REAPER API names, paths, filenames, and raw tags unchanged.

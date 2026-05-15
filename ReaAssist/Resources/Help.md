@@ -187,7 +187,7 @@ After setup, a request like "add an EQ to the vocal" can use your chosen EQ inst
 
 When you save a preferred plugin, ReaAssist scans parameter information for uncached plugins so future parameter changes can be more precise. The FX Parameter Cache stores scanned plugin data so repeated plugin work is faster and more reliable.
 
-Use Rescan after a plugin update. Use Deep scan only when a normal scan returns unclear values, which can happen with some VST3 plugins. Preferred-plugin mappings and cached parameter data live together in FX_Cache.json in the script folder.
+Use Rescan after a plugin update. Use Deep scan only when a normal scan returns unclear values, which can happen with some VST3 plugins. Preferred-plugin mappings and cached parameter data live together in Data/FX_Cache.json.
 
 ## File Attachments
 

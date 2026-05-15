@@ -1424,13 +1424,60 @@ RA.SEP = RA.IS_WINDOWS and "\\" or "/"
 local JSFX_DIR = reaper.GetResourcePath() .. RA.SEP .. "Effects" .. RA.SEP .. "ReaAssist"
 reaper.RecursiveCreateDirectory(JSFX_DIR, 0)
 
--- Resources directory: holds all .md reference files, the system prompt, the
--- bundled ReEQ source, and runtime-created files (FX cache, debug log).
--- Created on startup so the first file write never fails on a fresh install.
+-- Resources directory: holds shipped .md reference files, the system prompt,
+-- and bundled resources such as ReEQ.
+-- Created defensively so damaged/manual installs have a stable bundle folder.
 RA.RESOURCES_DIR = RA.script_path .. "Resources" .. RA.SEP
 reaper.RecursiveCreateDirectory(RA.RESOURCES_DIR, 0)
 
-RA.FX_CACHE_PATH = RA.RESOURCES_DIR .. "FX_Cache.json"
+-- Data directory: user/runtime state authored by ReaAssist. Keep this separate
+-- from shipped Resources/ files so updates and support bundles have a clear
+-- mutable-data boundary.
+RA.DATA_DIR = RA.script_path .. "Data" .. RA.SEP
+reaper.RecursiveCreateDirectory(RA.DATA_DIR, 0)
+
+RA.CONFIG_PATH    = RA.DATA_DIR .. "Config.json"
+RA.PROVIDERS_PATH = RA.DATA_DIR .. "Providers.json"
+RA.STATE_PATH     = RA.DATA_DIR .. "State.json"
+
+RA._MIGRATE_MESSAGES = {}
+
+function RA._file_exists(path)
+  if not path or path == "" then return false end
+  if reaper.file_exists then return reaper.file_exists(path) end
+  local f = io.open(path, "rb")
+  if f then f:close(); return true end
+  return false
+end
+
+function RA._migrate_runtime_file(label, legacy_path, data_path)
+  if RA._file_exists(data_path) then
+    local f = io.open(data_path, "rb")
+    if f then
+      local size = f:seek("end") or 0
+      f:close()
+      if size > 0 or not RA._file_exists(legacy_path) then return data_path end
+      os.remove(data_path)
+    else
+      return data_path
+    end
+  end
+  if not RA._file_exists(legacy_path) then return data_path end
+  local ok, err = os.rename(legacy_path, data_path)
+  if ok then return data_path end
+  RA._MIGRATE_MESSAGES[#RA._MIGRATE_MESSAGES + 1] =
+    tostring(label) .. " migration failed; using legacy path this launch: "
+    .. tostring(err)
+  return legacy_path
+end
+
+RA._LEGACY_FX_CACHE_PATH = RA.RESOURCES_DIR .. "FX_Cache.json"
+RA._LEGACY_DEBUG_LOG_PATH = RA.RESOURCES_DIR .. "Debug.log"
+
+RA.FX_CACHE_PATH = RA._migrate_runtime_file(
+  "FX cache", RA._LEGACY_FX_CACHE_PATH, RA.DATA_DIR .. "FX_Cache.json")
+RA.DEBUG_LOG_PATH = RA._migrate_runtime_file(
+  "Debug log", RA._LEGACY_DEBUG_LOG_PATH, RA.DATA_DIR .. "Debug.log")
 
 -- =============================================================================
 -- Toolbar toggle support
@@ -1456,7 +1503,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.2.1", -- public release version
+  VERSION           = "1.2.2", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -1796,6 +1843,17 @@ S = {
   attach_error_time = 0,
 }
 
+do
+  local clean_boot = reaper.GetExtState(CFG.EXT_NS, "factory_reset_clean_boot")
+  if clean_boot == "1" then
+    S._factory_reset_clean_boot = true
+    S._suppress_geometry_save = true
+    S._suppress_os_theme_cache = true
+    reaper.DeleteExtState(CFG.EXT_NS, "factory_reset_clean_boot", false)
+    reaper.DeleteExtState(CFG.EXT_NS, "factory_reset_clean_boot", true)
+  end
+end
+
 S.INSTANCE_ID = string.format("%.6f_%d", time_precise(), math.random(100000, 999999))
 do
   -- Stale lock timeout: how long before a lock from a (presumed-crashed)
@@ -1944,7 +2002,7 @@ end
 --                  valid API key is stored)
 --   nil         -- main chat UI (TOS accepted AND key present)
 --
--- TOS acceptance is persisted in ExtState as a version string. Bumping
+-- TOS acceptance is persisted in Config.json as a version string. Bumping
 -- api_keys.tos_version below will force every user to re-accept on next
 -- launch (use this only when the disclaimer text changes substantively).
 --
@@ -1994,10 +2052,22 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
 }
 
 function api_keys.tos_is_accepted()
-  return reaper.GetExtState(CFG.EXT_NS, "tos_accepted_version") == api_keys.tos_version
+  if Store and Store.tos_is_accepted then
+    return Store.tos_is_accepted(api_keys.tos_version)
+  end
+  return reaper.GetExtState(CFG.EXT_NS, "tos_accepted_version")
+    == api_keys.tos_version
 end
 function api_keys.mark_tos_accepted()
-  reaper.SetExtState(CFG.EXT_NS, "tos_accepted_version", api_keys.tos_version, true)
+  if S then
+    S._factory_reset_clean_boot = false
+    S._suppress_geometry_save = false
+    S._suppress_os_theme_cache = false
+  end
+  if Store and Store.mark_tos_accepted then
+    Store.mark_tos_accepted(api_keys.tos_version)
+    return
+  end
 end
 
 -- NOTE: api_keys.screen is assigned after PROVIDERS, key loading, and
@@ -2140,6 +2210,8 @@ update = {
   manifest        = nil,     -- parsed manifest table
   download_queue  = {},      -- list of {filename, url, sha256} to download
   download_idx    = 0,       -- index into download_queue (current file)
+  update_missing  = nil,     -- changed-file set from check-time SHA diff
+  update_mismatched = nil,   -- for version updates (avoids post-click hash stall)
   applied_files   = {},      -- list of {path=dest, bak_existed=bool} for rollback;
                              -- bak_existed=false means "fresh-install add" so rollback
                              -- must delete dest (not try to restore a nonexistent .bak)
@@ -2394,10 +2466,10 @@ end
 --      that lives here without a matching live file.
 --   2. Skip .bak files whose stem is in BAK_SWEEP_EXEMPT below: user
 --      overrides (System_Prompt_Custom.md is documented; some users
---      keep a hand-saved .bak beside it before edits) and runtime-
---      managed state (FX_Cache.json, Debug.log -- users sometimes
---      back these up before clearing). These are NEVER files the
---      updater backs up, so any .bak beside them is user-authored.
+--      keep a hand-saved .bak beside it before edits) and legacy runtime
+--      state (FX_Cache.json, Debug.log -- users sometimes back these up
+--      before clearing). Data/ is not swept here; its .bak files are
+--      store-helper recovery files, not updater leftovers.
 do
   local exempt = {
     ["System_Prompt_Custom.md"] = true,
@@ -2502,7 +2574,9 @@ reaper.atexit(function()
 end)
 
 -- =============================================================================
--- Persisted UI preferences (saved across REAPER restarts via ExtState)
+-- Persisted UI preferences. Start with legacy ExtState defaults, then
+-- Store.apply_config_preferences overlays Config.json and Store.save_config
+-- removes migrated legacy keys after the file write succeeds.
 -- =============================================================================
 -- ~= "0" pattern: default ON for a fresh install (empty ExtState returns "")
 -- == "1" pattern: default OFF for a fresh install
@@ -2578,13 +2652,14 @@ Log = {}
 -- is per-machine so neither sees the other's lock, and the synced log file
 -- could see interleaved appends. If you hit that scenario, the workaround
 -- is to disable debug logging on all but one machine.
-Log.path = RA.RESOURCES_DIR .. "Debug.log"
+Log.path = RA.DEBUG_LOG_PATH
 Log.enabled = function() return prefs.debug_logging end
 
 -- Simple append-at-bottom log (standard chronological order). On first request
 -- per session we write a header with system info at the top of the file; each
 -- subsequent event is appended.
 local function _log_write(text)
+  if S and S._factory_reset_clean_boot then return end
   local f = io.open(Log.path, "a")
   if not f then return end
   f:write(text)
@@ -3116,7 +3191,7 @@ local function _prune_log()
 end
 
 Log.request = function(provider_label, body)
-  if not prefs.debug_logging then return end
+  if not prefs.debug_logging or (S and S._factory_reset_clean_boot) then return end
   -- If the log file is missing or empty (user manually deleted it mid-session),
   -- re-arm the session header so it gets rewritten at the top of the new file.
   do
@@ -3147,7 +3222,7 @@ Log.request = function(provider_label, body)
 end
 
 Log.response = function(body, elapsed)
-  if not prefs.debug_logging then return end
+  if not prefs.debug_logging or (S and S._factory_reset_clean_boot) then return end
   local ts = os.date("%Y-%m-%d %H:%M:%S")
   local elapsed_str = elapsed and string.format(", %.2fs", elapsed) or ""
   local num = Log._current_turn_num or "?"
@@ -3166,7 +3241,7 @@ end
 -- / clear / prune resets it, at which point the next chain event re-emits
 -- the full type list as a fresh baseline. Other tags log normally.
 Log.line = function(tag, msg)
-  if not prefs.debug_logging then return end
+  if not prefs.debug_logging or (S and S._factory_reset_clean_boot) then return end
   msg = tostring(msg)
   local ts = os.date("%H:%M:%S")
   if tag == "CHAIN" then
@@ -3179,11 +3254,18 @@ Log.line = function(tag, msg)
   _log_write("[" .. ts .. "] [" .. tag .. "] " .. msg .. "\n")
 end
 
+if RA._MIGRATE_MESSAGES then
+  for _, msg in ipairs(RA._MIGRATE_MESSAGES) do
+    Log.line("MIGRATE", msg)
+  end
+  RA._MIGRATE_MESSAGES = nil
+end
+
 -- Exchange-summary block: mirrors the details bubble (Model, Context, Tokens,
 -- Cache, Estimated cost, Response time, FX Cache) so the log captures the same
 -- info the user sees on hover. Written after each completed turn.
 Log.exchange_summary = function(dmsg)
-  if not prefs.debug_logging or not dmsg then return end
+  if not prefs.debug_logging or (S and S._factory_reset_clean_boot) or not dmsg then return end
   local ts = os.date("%Y-%m-%d %H:%M:%S")
   local num = Log._current_turn_num or "?"
   local L = {}
@@ -3322,7 +3404,7 @@ local function _build_sysinfo()
 end
 
 Log.session_header = function()
-  if not prefs.debug_logging then return end
+  if not prefs.debug_logging or (S and S._factory_reset_clean_boot) then return end
   Log._session_header_written = true
   -- Fresh log file (or first write since module load) means no prior
   -- requests for back-references to point at -- start the dedupe windows
@@ -3631,8 +3713,10 @@ function PROVIDERS.load_thinking_idx(p, m)
   if not p or not p.thinking_levels then return 0 end
   local saved
   if m and m.id then
-    saved = tonumber(reaper.GetExtState(
-      CFG.EXT_NS, "thinking_idx_" .. p.id .. "_" .. m.id))
+    saved = (Store and Store.config_thinking_idx
+              and Store.config_thinking_idx(p, m))
+      or tonumber(reaper.GetExtState(
+        CFG.EXT_NS, "thinking_idx_" .. p.id .. "_" .. m.id))
   end
   local tdefault = (m and m.default_thinking_idx)
                     or p.default_thinking_idx or 1
@@ -3643,15 +3727,9 @@ end
 
 function PROVIDERS.save_thinking_idx(p, m, idx)
   if not p or not p.thinking_levels then return end
-  if m and m.id then
-    reaper.SetExtState(
-      CFG.EXT_NS, "thinking_idx_" .. p.id .. "_" .. m.id,
-      tostring(idx), true)
-  else
-    -- Custom providers mid-edit can briefly land here with no usable
-    -- model id; fall back to the legacy slot so the value still persists.
-    reaper.SetExtState(
-      CFG.EXT_NS, "thinking_idx_" .. p.id, tostring(idx), true)
+  if Store and Store.remember_thinking_idx then
+    Store.remember_thinking_idx(p, m, idx)
+    if Store.save_config then Store.save_config() end
   end
 end
 
@@ -3662,7 +3740,1674 @@ end
 -- providers. Works with truly local servers (Ollama, LM Studio, llama.cpp,
 -- vLLM, text-generation-webui) and online services that speak the OpenAI wire
 -- format (OpenRouter, Groq, Together AI, Mistral, Fireworks, etc.).
--- Configured via the Custom Providers list page, persisted to ExtState.
+-- Configured via the Custom Providers list page, persisted to Data/Providers.json.
+JSON = { NULL = {}, EMPTY_ARRAY = {} }
+
+Store = {}
+
+function Store._log(tag, msg)
+  if Log and Log.line then Log.line(tag, msg) end
+end
+
+function Store._notify_user_once(key, text, kind, sticky)
+  if not key or key == "" then return end
+  Store._notified = Store._notified or {}
+  if Store._notified[key] then return end
+  Store._notified[key] = true
+  if UI and UI.show_float_toast then
+    UI.show_float_toast(text, kind or "err", sticky == true)
+  else
+    Store._pending_toast = {
+      text = text,
+      kind = kind or "err",
+      sticky = sticky == true,
+    }
+  end
+end
+
+function Store.flush_user_notice()
+  local tip = Store._pending_toast
+  if not tip or not (UI and UI.show_float_toast) then return end
+  Store._pending_toast = nil
+  UI.show_float_toast(tip.text, tip.kind, tip.sticky)
+end
+
+function Store._notify_write_failure(label, err)
+  Store._log("STORE", tostring(label or "data") .. " save failed: "
+    .. tostring(err or "unknown error"))
+  Store._notify_user_once("write_failure",
+    "Could not save ReaAssist data. Check Data folder permissions.",
+    "err", true)
+end
+
+function Store._read_text_file(path)
+  if not path or path == "" then return nil end
+  local ok_f, f = pcall(io.open, path, "r")
+  if not ok_f or not f then return nil end
+  local raw = f:read("*a")
+  f:close()
+  return raw
+end
+
+function Store.read_json(path, default_value, schema_version)
+  local ok_f, f = pcall(io.open, path, "r")
+  if not ok_f or not f then return default_value, "missing" end
+  local raw = f:read("*a")
+  f:close()
+  if not raw or raw == "" then return default_value, "empty" end
+  local data, err = JSON.decode(raw)
+  if not data then
+    Store._log("STORE", "JSON decode failed for " .. tostring(path)
+      .. ": " .. tostring(err))
+    return default_value, err or "decode failed"
+  end
+  if type(data) ~= "table" then return default_value, "not an object" end
+  if schema_version and data.schema_version ~= schema_version then
+    Store._log("STORE", "schema mismatch for " .. tostring(path)
+      .. " (file=" .. tostring(data.schema_version)
+      .. ", expected=" .. tostring(schema_version) .. ")")
+    return default_value, "schema mismatch"
+  end
+  return data, nil
+end
+
+function Store.write_json_atomic(path, value, skip_unchanged)
+  if not path or path == "" then return "Missing JSON path." end
+  local json_str, err = JSON.encode(value, "  ")
+  if not json_str then return "JSON encode failed: " .. tostring(err) end
+  local payload = json_str .. "\n"
+  if skip_unchanged and Store._read_text_file(path) == payload then
+    return nil, true
+  end
+
+  local tmp_path = path .. ".tmp"
+  local ok_f, f = pcall(io.open, tmp_path, "w")
+  if not ok_f or not f then return "Failed to open " .. tmp_path end
+
+  local ok_w, w_err = pcall(function() f:write(payload) end)
+  local ok_c, c_ok, c_err = pcall(function() return f:close() end)
+  if not ok_w or not ok_c or c_ok == nil then
+    os.remove(tmp_path)
+    return "Failed writing " .. tmp_path .. ": "
+      .. tostring(w_err or c_err or c_ok or "close failed")
+  end
+
+  local bak_path = path .. ".bak"
+  os.remove(bak_path)
+  local had_existing = os.rename(path, bak_path)
+  local ok_r, ren_err = os.rename(tmp_path, path)
+  if not ok_r then
+    os.remove(tmp_path)
+    if had_existing then os.rename(bak_path, path) end
+    return "Failed renaming temp JSON: " .. tostring(ren_err)
+  end
+  if had_existing then os.remove(bak_path) end
+  return nil, false
+end
+
+function Store.json_array(list)
+  if type(list) ~= "table" or #list == 0 then return JSON.EMPTY_ARRAY end
+  return list
+end
+
+function Store._json_string(value)
+  if value == nil or value == JSON.NULL then return "" end
+  return tostring(value):match("^%s*(.-)%s*$") or ""
+end
+
+function Store._extra_body_object(raw, label)
+  if raw == nil or raw == JSON.NULL then return {} end
+  if type(raw) == "table" and raw ~= JSON.NULL then return raw end
+  raw = Store._json_string(raw)
+  if raw == "" then return {} end
+  local obj, err = JSON.decode(raw)
+  if err or type(obj) ~= "table" or obj == JSON.NULL then
+    Store._log("PROVIDERS", "dropping invalid extra_body for "
+      .. tostring(label or "custom provider") .. ": " .. tostring(err))
+    return {}
+  end
+  local n = 0
+  local is_array = true
+  for k in pairs(obj) do
+    n = n + 1
+    if type(k) ~= "number" then is_array = false end
+  end
+  if n > 0 and is_array then
+    Store._log("PROVIDERS", "dropping array extra_body for "
+      .. tostring(label or "custom provider"))
+    return {}
+  end
+  return obj
+end
+
+function Store._extra_body_string(value, label)
+  if value == nil or value == JSON.NULL then return "" end
+  if type(value) == "string" then
+    value = Store._extra_body_object(value, label)
+  end
+  if type(value) ~= "table" then
+    Store._log("PROVIDERS", "dropping non-object extra_body for "
+      .. tostring(label or "custom provider"))
+    return ""
+  end
+
+  local n = 0
+  local is_array = true
+  for k in pairs(value) do
+    n = n + 1
+    if type(k) ~= "number" then is_array = false end
+  end
+  if n == 0 then return "" end
+  if is_array then
+    Store._log("PROVIDERS", "dropping array extra_body for "
+      .. tostring(label or "custom provider"))
+    return ""
+  end
+
+  local encoded, err = JSON.encode(value)
+  if not encoded or encoded == "{}" then
+    if err then
+      Store._log("PROVIDERS", "failed to encode extra_body for "
+        .. tostring(label or "custom provider") .. ": " .. tostring(err))
+    end
+    return ""
+  end
+  return encoded
+end
+
+function Store._provider_record_to_json(record)
+  local headers = {}
+  for _, h in ipairs(record.extra_headers or {}) do
+    headers[#headers+1] = h
+  end
+
+  local models = {}
+  for _, m in ipairs(record.models or {}) do
+    local notes = Store._json_string(m.notes)
+    local clean_notes, note_err = Custom.validate_notes(notes)
+    if not clean_notes then
+      Store._log("PROVIDERS", "stripping invalid notes for "
+        .. tostring(record.id or "") .. "/" .. tostring(m.id or "")
+        .. ": " .. tostring(note_err))
+      clean_notes = ""
+    end
+    local model_out = {
+      id             = m.id or "",
+      price_in       = tonumber(m.price_in) or 0,
+      price_out      = tonumber(m.price_out) or 0,
+      price_cache_r  = tonumber(m.price_cache_r) or 0,
+      context_window = tonumber(m.context_window) or CUSTOM_DEFAULT_CTX,
+      notes          = clean_notes,
+    }
+    local model_body = Store._extra_body_object(m.extra_body,
+      tostring(record.id or "") .. "/" .. tostring(m.id or ""))
+    if next(model_body) then model_out.extra_body = model_body end
+    models[#models+1] = model_out
+  end
+
+  local out = {
+    id                   = record.id or "",
+    label                = record.label or "",
+    endpoint             = record.endpoint or "",
+    timeout_secs         = tonumber(record.timeout_secs) or CUSTOM_DEFAULT_TIMEOUT,
+    connect_timeout_secs = tonumber(record.connect_timeout_secs)
+                              or Custom.DEFAULT_CONNECT,
+    allow_insecure       = record.allow_insecure and true or false,
+    model_prefix         = record.model_prefix or "",
+    extra_headers        = Store.json_array(headers),
+    models               = Store.json_array(models),
+  }
+  local provider_body = Store._extra_body_object(record.extra_body, record.id)
+  if next(provider_body) then out.extra_body = provider_body end
+  return out
+end
+
+function Store._provider_record_from_json(src, index)
+  if type(src) ~= "table" then return nil end
+  local id = Store._json_string(src.id)
+  if id == "" then
+    Store._log("PROVIDERS", "skipping Providers.json record "
+      .. tostring(index or "?") .. ": missing id")
+    return nil
+  end
+
+  local endpoint = Store._json_string(src.endpoint)
+  if not Custom.endpoint_is_safe(endpoint) then
+    Store._log("PROVIDERS", "skipping Providers.json record "
+      .. tostring(id) .. ": invalid endpoint")
+    return nil
+  end
+
+  local models = {}
+  if type(src.models) == "table" then
+    for _, m in ipairs(src.models) do
+      if type(m) == "table" then
+        local model_id = Store._json_string(m.id)
+        if model_id ~= "" then
+          local ctx = tonumber(m.context_window) or CUSTOM_DEFAULT_CTX
+          if ctx < CUSTOM_MIN_CTX then ctx = CUSTOM_MIN_CTX end
+          local notes = Store._json_string(m.notes)
+          local clean_notes, note_err = Custom.validate_notes(notes)
+          if not clean_notes then
+            Store._log("PROVIDERS", "stripping invalid notes for "
+              .. id .. "/" .. model_id .. ": " .. tostring(note_err))
+            clean_notes = ""
+          end
+          models[#models+1] = {
+            id             = model_id,
+            price_in       = tonumber(m.price_in) or 0,
+            price_out      = tonumber(m.price_out) or 0,
+            price_cache_r  = tonumber(m.price_cache_r) or 0,
+            context_window = ctx,
+            notes          = clean_notes,
+            extra_body     = Store._extra_body_string(m.extra_body,
+                               id .. "/" .. model_id),
+          }
+        end
+      end
+    end
+  end
+  if #models == 0 then
+    Store._log("PROVIDERS", "skipping Providers.json record "
+      .. tostring(id) .. ": no valid models")
+    return nil
+  end
+
+  local timeout = tonumber(src.timeout_secs) or CUSTOM_DEFAULT_TIMEOUT
+  if timeout < CUSTOM_MIN_TIMEOUT then timeout = CUSTOM_MIN_TIMEOUT end
+  if timeout > CUSTOM_MAX_TIMEOUT then timeout = CUSTOM_MAX_TIMEOUT end
+
+  local connect_t = tonumber(src.connect_timeout_secs) or Custom.DEFAULT_CONNECT
+  if connect_t < Custom.MIN_CONNECT then connect_t = Custom.MIN_CONNECT end
+  if connect_t > Custom.MAX_CONNECT then connect_t = Custom.MAX_CONNECT end
+
+  local headers = {}
+  if type(src.extra_headers) == "table" then
+    for _, h in ipairs(src.extra_headers) do
+      h = Store._json_string(h)
+      if h ~= "" and Custom.header_is_safe(h) and h:find(":", 1, true) then
+        headers[#headers+1] = h
+      end
+    end
+  end
+
+  local label = Store._json_string(src.label)
+  return {
+    id                   = id,
+    label                = (label ~= "" and label) or "Custom",
+    endpoint             = endpoint,
+    timeout_secs         = timeout,
+    connect_timeout_secs = connect_t,
+    allow_insecure       = (src.allow_insecure == true or src.allow_insecure == "1"),
+    model_prefix         = Store._json_string(src.model_prefix),
+    extra_headers        = headers,
+    extra_body           = Store._extra_body_string(src.extra_body, id),
+    models               = models,
+  }
+end
+
+function Store.load_providers()
+  local doc, err = Store.read_json(RA.PROVIDERS_PATH, nil, 1)
+  if not doc then
+    if err and err ~= "missing" and err ~= "empty" then
+      Store._quarantine_json(RA.PROVIDERS_PATH, err)
+    end
+    return nil, err or "missing"
+  end
+  if type(doc.records) ~= "table" then
+    Store._quarantine_json(RA.PROVIDERS_PATH, "records missing")
+    return nil, "records missing"
+  end
+
+  -- A valid empty records array is authoritative: it means the file says
+  -- "there are no custom providers", so we do not fall through to ExtState.
+  local records = {}
+  local saw_record = false
+  for i, src in ipairs(doc.records) do
+    saw_record = true
+    local rec = Store._provider_record_from_json(src, i)
+    if rec then records[#records+1] = rec end
+  end
+  if saw_record and #records == 0 then return nil, "no valid provider records" end
+  return records, nil
+end
+
+function Store._quarantine_json(path, reason)
+  if not path or path == "" then return nil end
+  if RA._file_exists and not RA._file_exists(path) then return nil end
+  local stamp = tostring(os.time())
+  local bak_path = path .. ".bak"
+  if RA._file_exists and RA._file_exists(bak_path) then
+    local bak_dst = bak_path .. ".corrupt." .. stamp
+    local bak_ok, bak_err = os.rename(bak_path, bak_dst)
+    if bak_ok then
+      Store._log("STORE", "preserved JSON backup as " .. tostring(bak_dst))
+    else
+      Store._log("STORE", "could not preserve JSON backup " .. tostring(bak_path)
+        .. ": " .. tostring(bak_err))
+    end
+  end
+  local dst = path .. ".corrupt." .. stamp
+  local ok, err = os.rename(path, dst)
+  if ok then
+    Store._log("STORE", "moved corrupt JSON to " .. tostring(dst)
+      .. " (" .. tostring(reason or "invalid") .. ")")
+    Store._notify_user_once("json_quarantine",
+      "A damaged ReaAssist data file was quarantined in Data.", "err", false)
+  else
+    Store._log("STORE", "could not move corrupt JSON " .. tostring(path)
+      .. ": " .. tostring(err))
+    Store._notify_user_once("json_quarantine_failed",
+      "A ReaAssist data file looks damaged. Check the Data folder.", "err", true)
+  end
+  return ok
+end
+
+function Store.delete_extstate_keys(keys)
+  for _, key in ipairs(keys or {}) do
+    if key and key ~= "" then
+      reaper.DeleteExtState(CFG.EXT_NS, key, true)
+    end
+  end
+end
+
+function Store.cleanup_config_extstate(doc)
+  local keys = {
+    "auto_run",
+    "auto_backup",
+    "show_details",
+    "debug_logging",
+    "include_api_ref",
+    "include_snapshot",
+    "update_check",
+    "typed_actions_opt_in",
+    "diag_auto_tier",
+    "ui_scale_idx",
+    "theme",
+    "chat_font_idx",
+    "reply_language_idx",
+    "cloud_request_timeout",
+    "help_font_scale",
+    "provider_id",
+    "provider_idx",
+    "win_x",
+    "win_y",
+    "win_w",
+    "win_h",
+    "tos_accepted_version",
+    "first_launch_complete",
+    "reaper_version_notice_dismissed",
+    "thinking_idx_reset_v1",
+    "model_picker_reset_v2",
+  }
+  if PROVIDERS then
+    for _, p in ipairs(PROVIDERS) do
+      if p and p.id then
+        keys[#keys+1] = "model_idx_" .. p.id
+        keys[#keys+1] = "thinking_idx_" .. p.id
+        if p.models then
+          for _, m in ipairs(p.models) do
+            if m and m.id then
+              keys[#keys+1] = "thinking_idx_" .. p.id .. "_" .. m.id
+            end
+          end
+        end
+      end
+    end
+  end
+  local sel = type(doc) == "table" and doc.selection or nil
+  local think_map = type(sel) == "table"
+    and sel.thinking_idx_by_provider_model or nil
+  if type(think_map) == "table" then
+    for key in pairs(think_map) do
+      local provider_id, model_id = tostring(key):match("^(.-)/(.*)$")
+      if provider_id and model_id then
+        keys[#keys+1] = "thinking_idx_" .. provider_id .. "_" .. model_id
+      end
+    end
+  end
+  Store.delete_extstate_keys(keys)
+end
+
+function Store.cleanup_state_extstate()
+  Store.delete_extstate_keys({
+    "update_last_check",
+    "update_snooze",
+    "os_theme_cache",
+    "os_theme_cache_ts",
+    "gemini_paid_tier",
+    "gemini_cache_name",
+    "gemini_cache_model",
+    "gemini_cache_signature",
+    "gemini_cache_expires",
+    "ceiling_next_base",
+    "ceiling_slots",
+    "diag_auto_last_ping_at",
+    "diag_auto_last_sent_at",
+  })
+end
+
+function Store.cleanup_providers_extstate(records)
+  local ids = {}
+  local seen = {}
+  local function add_id(id)
+    if type(id) == "string" and id ~= "" and not seen[id] then
+      seen[id] = true
+      ids[#ids+1] = id
+    end
+  end
+  for _, record in ipairs(records or {}) do add_id(record.id) end
+  if Custom and Custom.load_ids then
+    for _, id in ipairs(Custom.load_ids()) do add_id(id) end
+  end
+  reaper.DeleteExtState(CFG.EXT_NS, "custom_provider_ids", true)
+  for _, id in ipairs(ids) do
+    if Custom and Custom.delete_record_extstate then
+      Custom.delete_record_extstate(id, false)
+    else
+      Store.delete_extstate_keys({
+        "custom_" .. id .. "_endpoint",
+        "custom_" .. id .. "_label",
+        "custom_" .. id .. "_timeout_secs",
+        "custom_" .. id .. "_connect_timeout",
+        "custom_" .. id .. "_allow_insecure",
+        "custom_" .. id .. "_model_prefix",
+        "custom_" .. id .. "_extra_headers",
+        "custom_" .. id .. "_extra_body",
+        "custom_" .. id .. "_models",
+      })
+    end
+  end
+end
+
+function Store.seed_config_from_extstate(doc)
+  doc = type(doc) == "table" and doc or {}
+  doc.notices = type(doc.notices) == "table" and doc.notices or {}
+  local tos = reaper.GetExtState(CFG.EXT_NS, "tos_accepted_version")
+  if tos ~= "" and doc.notices.tos_accepted_version == nil then
+    doc.notices.tos_accepted_version = tos
+  end
+  if reaper.GetExtState(CFG.EXT_NS, "first_launch_complete") == "1" then
+    doc.notices.first_launch_complete = true
+  end
+  if reaper.GetExtState(CFG.EXT_NS, "reaper_version_notice_dismissed") == "true" then
+    doc.notices.reaper_version_notice_dismissed = true
+  end
+
+  doc.migrations = type(doc.migrations) == "table" and doc.migrations or {}
+  if reaper.GetExtState(CFG.EXT_NS, "thinking_idx_reset_v1") == "1" then
+    doc.migrations.thinking_idx_reset_v1 = true
+  end
+  if reaper.GetExtState(CFG.EXT_NS, "model_picker_reset_v2") == "1" then
+    doc.migrations.model_picker_reset_v2 = true
+  end
+
+  if type(doc.window) ~= "table" then
+    local x = tonumber(reaper.GetExtState(CFG.EXT_NS, "win_x"))
+    local y = tonumber(reaper.GetExtState(CFG.EXT_NS, "win_y"))
+    local w = tonumber(reaper.GetExtState(CFG.EXT_NS, "win_w"))
+    local h = tonumber(reaper.GetExtState(CFG.EXT_NS, "win_h"))
+    if x and y and w and h then
+      doc.window = { x = math_floor(x), y = math_floor(y),
+        w = math_floor(w), h = math_floor(h) }
+    end
+  end
+
+  return doc
+end
+
+function Store.config_doc()
+  if Store._config_doc then return Store._config_doc end
+  local doc, err = Store.read_json(RA.CONFIG_PATH, nil, 1)
+  if doc then
+    Store._config_doc = Store.seed_config_from_extstate(doc)
+    return Store._config_doc
+  end
+  if err and err ~= "missing" and err ~= "empty" then
+    Store._quarantine_json(RA.CONFIG_PATH, err)
+  end
+  Store._config_doc = Store.seed_config_from_extstate({ schema_version = 1 })
+  return Store._config_doc
+end
+
+function Store.config_pref_value(key)
+  local doc = Store.config_doc()
+  local p = doc and doc.preferences
+  if type(p) ~= "table" then return nil end
+  return p[key]
+end
+
+function Store.tos_is_accepted(version)
+  local doc = Store.config_doc()
+  doc.notices = type(doc.notices) == "table" and doc.notices or {}
+  local accepted = doc.notices.tos_accepted_version == version
+    or reaper.GetExtState(CFG.EXT_NS, "tos_accepted_version") == version
+  if accepted then
+    doc.notices.tos_accepted_version = version
+  end
+  return accepted
+end
+
+function Store.mark_tos_accepted(version)
+  local doc = Store.config_doc()
+  doc.notices = type(doc.notices) == "table" and doc.notices or {}
+  doc.notices.tos_accepted_version = version
+  doc.notices.first_launch_complete = true
+  return Store.save_config()
+end
+
+function Store.first_launch_complete()
+  local doc = Store.config_doc()
+  doc.notices = type(doc.notices) == "table" and doc.notices or {}
+  local complete = doc.notices.first_launch_complete == true
+    or reaper.GetExtState(CFG.EXT_NS, "first_launch_complete") == "1"
+  if complete then
+    doc.notices.first_launch_complete = true
+  end
+  return complete
+end
+
+function Store.mark_first_launch_complete()
+  local doc = Store.config_doc()
+  doc.notices = type(doc.notices) == "table" and doc.notices or {}
+  doc.notices.first_launch_complete = true
+  return Store.save_config()
+end
+
+function Store.reaper_version_notice_dismissed()
+  local doc = Store.config_doc()
+  doc.notices = type(doc.notices) == "table" and doc.notices or {}
+  local dismissed = doc.notices.reaper_version_notice_dismissed == true
+    or reaper.GetExtState(CFG.EXT_NS, "reaper_version_notice_dismissed") == "true"
+  if dismissed then
+    doc.notices.reaper_version_notice_dismissed = true
+  end
+  return dismissed
+end
+
+function Store.dismiss_reaper_version_notice()
+  local doc = Store.config_doc()
+  doc.notices = type(doc.notices) == "table" and doc.notices or {}
+  doc.notices.reaper_version_notice_dismissed = true
+  return Store.save_config()
+end
+
+function Store._pref_bool(key, fallback)
+  local v = Store.config_pref_value(key)
+  if type(v) == "boolean" then return v end
+  return fallback
+end
+
+function Store._pref_number(key, fallback, min_v, max_v)
+  local v = tonumber(Store.config_pref_value(key))
+  if not v then return fallback end
+  if min_v and v < min_v then return fallback end
+  if max_v and v > max_v then return fallback end
+  return v
+end
+
+function Store._pref_index(key, fallback, list)
+  local v = tonumber(Store.config_pref_value(key))
+  if not v then return fallback end
+  if v < 1 or v > #list then return fallback end
+  return math_floor(v)
+end
+
+function Store.current_preferences()
+  return {
+    auto_run              = prefs.auto_run and true or false,
+    auto_backup           = prefs.auto_backup and true or false,
+    show_details          = prefs.show_details and true or false,
+    debug_logging         = prefs.debug_logging and true or false,
+    include_api_ref       = prefs.include_api_ref and true or false,
+    include_snapshot      = prefs.include_snapshot and true or false,
+    update_check          = prefs.update_check and true or false,
+    diag_auto_tier        = prefs.diag_auto_tier or "off",
+    ui_scale_idx          = prefs.ui_scale_idx or 3,
+    theme                 = prefs.theme or "auto",
+    chat_font_idx         = prefs.chat_font_idx or 2,
+    reply_language_idx    = prefs.reply_language_idx or 1,
+    cloud_request_timeout = prefs.cloud_request_timeout
+                              or CFG.CLOUD_TIMEOUT_DEFAULT,
+    help_font_scale       = prefs.help_font_scale or 1.0,
+  }
+end
+
+function Store.sync_config_prefs_to_extstate()
+  Store.cleanup_config_extstate_if_persisted(Store.config_doc())
+end
+
+function Store.apply_config_preferences()
+  local doc = Store.config_doc()
+  local p = doc and doc.preferences
+  if type(p) ~= "table" then return nil end
+
+  prefs.auto_run         = Store._pref_bool("auto_run", prefs.auto_run)
+  prefs.auto_backup      = Store._pref_bool("auto_backup", prefs.auto_backup)
+  prefs.show_details     = Store._pref_bool("show_details", prefs.show_details)
+  prefs.debug_logging    = Store._pref_bool("debug_logging", prefs.debug_logging)
+  prefs.include_api_ref  = Store._pref_bool("include_api_ref", prefs.include_api_ref)
+  prefs.include_snapshot = Store._pref_bool("include_snapshot", prefs.include_snapshot)
+  prefs.update_check     = Store._pref_bool("update_check", prefs.update_check)
+
+  local tier = Store.config_pref_value("diag_auto_tier")
+  if tier == "basic" or tier == "extended" or tier == "off" then
+    prefs.diag_auto_tier = tier
+  end
+
+  prefs.ui_scale_idx = Store._pref_index(
+    "ui_scale_idx", prefs.ui_scale_idx, CFG.UI_SCALE_OPTIONS)
+  local theme = Store.config_pref_value("theme")
+  if theme == "auto" or theme == "dark" or theme == "light" then
+    prefs.theme = theme
+  end
+  prefs.chat_font_idx = Store._pref_index(
+    "chat_font_idx", prefs.chat_font_idx, CFG.CHAT_FONT_SIZES)
+  prefs.reply_language_idx = Store._pref_index(
+    "reply_language_idx", prefs.reply_language_idx, CFG.REPLY_LANGUAGE_LABELS)
+  prefs.cloud_request_timeout = math_floor(Store._pref_number(
+    "cloud_request_timeout",
+    prefs.cloud_request_timeout or CFG.CLOUD_TIMEOUT_DEFAULT,
+    CFG.CLOUD_TIMEOUT_MIN, CFG.CLOUD_TIMEOUT_MAX))
+  prefs.help_font_scale = Store._pref_number(
+    "help_font_scale", prefs.help_font_scale or 1.0, 0.8, 1.5)
+  return true
+end
+
+function Store._model_index_by_id(list, model_id)
+  if not list or not model_id or model_id == "" then return nil end
+  for i, m in ipairs(list) do
+    if m.id == model_id then return i end
+  end
+  return nil
+end
+
+function Store.config_provider_idx(fallback)
+  local doc = Store.config_doc()
+  local sel = doc and doc.selection
+  local provider_id = type(sel) == "table" and sel.provider_id or nil
+  local idx = provider_id and PROVIDERS and PROVIDERS._by_id
+    and PROVIDERS._by_id[provider_id] or nil
+  return idx or fallback
+end
+
+function Store.config_model_idx(provider, models, fallback)
+  local doc = Store.config_doc()
+  local sel = doc and doc.selection
+  local map = type(sel) == "table" and sel.model_id_by_provider or nil
+  local model_id = type(map) == "table" and provider and map[provider.id] or nil
+  return Store._model_index_by_id(models, model_id) or fallback
+end
+
+function Store.config_thinking_idx(provider, model)
+  if not provider or not model or not model.id then return nil end
+  local doc = Store.config_doc()
+  local sel = doc and doc.selection
+  local map = type(sel) == "table" and sel.thinking_idx_by_provider_model or nil
+  local key = provider.id .. "/" .. model.id
+  return type(map) == "table" and tonumber(map[key]) or nil
+end
+
+function Store._selection_doc()
+  local doc = Store.config_doc()
+  doc.selection = type(doc.selection) == "table" and doc.selection or {}
+  doc.selection.model_id_by_provider =
+    type(doc.selection.model_id_by_provider) == "table"
+    and doc.selection.model_id_by_provider or {}
+  doc.selection.thinking_idx_by_provider_model =
+    type(doc.selection.thinking_idx_by_provider_model) == "table"
+    and doc.selection.thinking_idx_by_provider_model or {}
+  return doc.selection
+end
+
+function Store.remember_model_idx(provider, models, idx)
+  if not provider or not provider.id then return end
+  idx = tonumber(idx)
+  local model = models and idx and models[idx] or nil
+  if not (model and model.id) then return end
+  local sel = Store._selection_doc()
+  sel.model_id_by_provider[provider.id] = model.id
+end
+
+function Store.remember_thinking_idx(provider, model, idx)
+  if not (provider and provider.id and model and model.id) then return end
+  idx = tonumber(idx)
+  if not idx then return end
+  local sel = Store._selection_doc()
+  sel.thinking_idx_by_provider_model[provider.id .. "/" .. model.id] = idx
+end
+
+function Store.current_selection()
+  local doc = Store.config_doc()
+  local previous = type(doc.selection) == "table" and doc.selection or {}
+  local prev_model_map = type(previous.model_id_by_provider) == "table"
+    and previous.model_id_by_provider or {}
+  local prev_think_map = type(previous.thinking_idx_by_provider_model) == "table"
+    and previous.thinking_idx_by_provider_model or {}
+  local selection = {
+    provider_id                    = nil,
+    model_id_by_provider           = {},
+    thinking_idx_by_provider_model = {},
+  }
+  local function provider_known(id)
+    return not (PROVIDERS and PROVIDERS._by_id) or PROVIDERS._by_id[id]
+  end
+  for k, v in pairs(prev_model_map) do
+    if provider_known(k) then selection.model_id_by_provider[k] = v end
+  end
+  for k, v in pairs(prev_think_map) do
+    local provider_id = tostring(k):match("^(.-)/")
+    if provider_known(provider_id) then
+      selection.thinking_idx_by_provider_model[k] = v
+    end
+  end
+  local active_provider = PROVIDERS and PROVIDERS.active and PROVIDERS.active()
+  if active_provider then selection.provider_id = active_provider.id end
+
+  if PROVIDERS then
+    for _, p in ipairs(PROVIDERS) do
+      local models = (active_provider and p.id == active_provider.id)
+        and MODELS or p.models
+      local idx
+      if active_provider and p.id == active_provider.id then
+        idx = prefs.model_idx
+      else
+        idx = Store._model_index_by_id(models, selection.model_id_by_provider[p.id])
+          or tonumber(reaper.GetExtState(CFG.EXT_NS, "model_idx_" .. p.id))
+      end
+      local m = models and idx and models[idx] or nil
+      if m and m.id then selection.model_id_by_provider[p.id] = m.id end
+
+      if p.thinking_levels and p.models then
+        for _, tm in ipairs(p.models) do
+          if tm.id then
+            local key = p.id .. "/" .. tm.id
+            local saved = tonumber(selection.thinking_idx_by_provider_model[key])
+              or tonumber(reaper.GetExtState(
+                CFG.EXT_NS, "thinking_idx_" .. p.id .. "_" .. tm.id))
+            if active_provider and p.id == active_provider.id
+               and models and models[prefs.model_idx]
+               and models[prefs.model_idx].id == tm.id
+               and prefs.thinking_idx and prefs.thinking_idx > 0 then
+              saved = prefs.thinking_idx
+            end
+            if saved then selection.thinking_idx_by_provider_model[key] = saved end
+          end
+        end
+      end
+    end
+  end
+  return selection
+end
+
+function Store.has_usable_provider()
+  if not PROVIDERS then return false end
+  for _, p in ipairs(PROVIDERS) do
+    if p and (p.is_custom or (S.api_key_map and S.api_key_map[p.id])) then
+      return true
+    end
+  end
+  return false
+end
+
+function Store.sync_config_selection_to_extstate(selection)
+  Store.cleanup_config_extstate_if_persisted(Store.config_doc())
+end
+
+function Store.migration_fired(key)
+  local doc = Store.config_doc()
+  doc.migrations = type(doc.migrations) == "table" and doc.migrations or {}
+  local fired = (doc.migrations[key] == true)
+    or (reaper.GetExtState(CFG.EXT_NS, key) == "1")
+  if fired then
+    doc.migrations[key] = true
+  end
+  return fired
+end
+
+function Store.set_migration_fired(key)
+  local doc = Store.config_doc()
+  doc.migrations = type(doc.migrations) == "table" and doc.migrations or {}
+  doc.migrations[key] = true
+  return Store.save_config()
+end
+
+function Store.clear_thinking_selections()
+  local doc = Store.config_doc()
+  doc.selection = type(doc.selection) == "table" and doc.selection or {}
+  doc.selection.thinking_idx_by_provider_model = {}
+end
+
+function Store.clear_model_picker_selections()
+  local doc = Store.config_doc()
+  doc.selection = type(doc.selection) == "table" and doc.selection or {}
+  doc.selection.model_id_by_provider = {}
+  doc.selection.thinking_idx_by_provider_model = {}
+end
+
+function Store.window_geometry()
+  local doc = Store.config_doc()
+  local w = doc and doc.window
+  if type(w) ~= "table" then return nil end
+  local x, y = tonumber(w.x), tonumber(w.y)
+  local ww, wh = tonumber(w.w), tonumber(w.h)
+  if x and y and ww and wh then
+    return { x = x, y = y, w = ww, h = wh }
+  end
+  return nil
+end
+
+function Store.save_window_geometry(x, y, w, h)
+  local doc = Store.config_doc()
+  local nx = math_floor(x)
+  local ny = math_floor(y)
+  local nw = math_floor(w)
+  local nh = math_floor(h)
+  local old = type(doc.window) == "table" and doc.window or nil
+  local same_config = old
+    and tonumber(old.x) == nx
+    and tonumber(old.y) == ny
+    and tonumber(old.w) == nw
+    and tonumber(old.h) == nh
+  if same_config then
+    Store.cleanup_config_extstate_if_persisted(doc)
+    return nil
+  end
+
+  doc.window = {
+    x = nx,
+    y = ny,
+    w = nw,
+    h = nh,
+  }
+  return Store.save_config()
+end
+
+function Store.clear_window_geometry()
+  local doc = Store.config_doc()
+  doc.window = {}
+  return Store.save_config()
+end
+
+function Store.sync_config_notices_to_extstate(doc)
+  Store.cleanup_config_extstate_if_persisted(doc or Store.config_doc())
+end
+
+function Store.cleanup_config_extstate_if_persisted(doc)
+  if RA._file_exists and RA._file_exists(RA.CONFIG_PATH) then
+    Store.cleanup_config_extstate(doc or Store.config_doc())
+  end
+end
+
+function Store.save_config()
+  local doc = Store.config_doc()
+  doc.schema_version = 1
+  doc.preferences = Store.current_preferences()
+  if Store.has_usable_provider() then
+    doc.selection = Store.current_selection()
+  else
+    doc.selection = nil
+  end
+  local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
+  if err then Store._notify_write_failure("Config.json", err) end
+  if not err then Store.cleanup_config_extstate(doc) end
+  return err
+end
+
+function Store.seed_state_from_extstate(doc)
+  doc = type(doc) == "table" and doc or {}
+
+  doc.update = type(doc.update) == "table" and doc.update or {}
+  local last_check = tonumber(reaper.GetExtState(CFG.EXT_NS, "update_last_check"))
+  if last_check and doc.update.last_check == nil then
+    doc.update.last_check = math_floor(last_check)
+  end
+  local snooze = tonumber(reaper.GetExtState(CFG.EXT_NS, "update_snooze"))
+  if snooze and doc.update.snooze == nil then
+    doc.update.snooze = math_floor(snooze)
+  end
+
+  doc.theme = type(doc.theme) == "table" and doc.theme or {}
+  local os_cache = reaper.GetExtState(CFG.EXT_NS, "os_theme_cache")
+  local os_cache_ts = tonumber(reaper.GetExtState(CFG.EXT_NS, "os_theme_cache_ts"))
+  if (os_cache == "dark" or os_cache == "light")
+     and os_cache_ts
+     and (doc.theme.os_cache == nil or doc.theme.os_cache_ts == nil) then
+    doc.theme.os_cache = os_cache
+    doc.theme.os_cache_ts = math_floor(os_cache_ts)
+  end
+
+  doc.gemini = type(doc.gemini) == "table" and doc.gemini or {}
+  local paid_tier = reaper.GetExtState(CFG.EXT_NS, "gemini_paid_tier")
+  if type(doc.gemini.paid_tier) ~= "boolean"
+     and (paid_tier == "true" or paid_tier == "false") then
+    doc.gemini.paid_tier = paid_tier == "true"
+  end
+  doc.gemini_cache = type(doc.gemini_cache) == "table" and doc.gemini_cache or {}
+  local cache_name = reaper.GetExtState(CFG.EXT_NS, "gemini_cache_name")
+  if cache_name ~= "" and (doc.gemini_cache.name == nil or doc.gemini_cache.name == "") then
+    doc.gemini_cache.name = cache_name
+    local cache_model = reaper.GetExtState(CFG.EXT_NS, "gemini_cache_model")
+    local cache_signature = reaper.GetExtState(CFG.EXT_NS, "gemini_cache_signature")
+    local cache_expires = tonumber(
+      reaper.GetExtState(CFG.EXT_NS, "gemini_cache_expires"))
+    if cache_model ~= "" then doc.gemini_cache.model = cache_model end
+    if cache_signature ~= "" then doc.gemini_cache.signature = cache_signature end
+    if cache_expires then doc.gemini_cache.expires = math_floor(cache_expires) end
+  end
+
+  doc.output_ceiling = type(doc.output_ceiling) == "table"
+    and doc.output_ceiling or {}
+  local next_base = tonumber(reaper.GetExtState(CFG.EXT_NS, "ceiling_next_base"))
+  if next_base and doc.output_ceiling.next_base == nil then
+    doc.output_ceiling.next_base = math_floor(next_base)
+  end
+  if type(doc.output_ceiling.slots) ~= "table" then
+    local raw_slots = reaper.GetExtState(CFG.EXT_NS, "ceiling_slots")
+    if raw_slots ~= "" then
+      local ok, slots = pcall(JSON.decode, raw_slots)
+      if ok and type(slots) == "table" then
+        doc.output_ceiling.slots = slots
+      end
+    end
+  end
+
+  doc.diagnostics = type(doc.diagnostics) == "table" and doc.diagnostics or {}
+  local ping = tonumber(reaper.GetExtState(CFG.EXT_NS, "diag_auto_last_ping_at"))
+  if ping and doc.diagnostics.auto_last_ping_at == nil then
+    doc.diagnostics.auto_last_ping_at = math_floor(ping)
+  end
+  local sent = tonumber(reaper.GetExtState(CFG.EXT_NS, "diag_auto_last_sent_at"))
+  if sent and doc.diagnostics.auto_last_sent_at == nil then
+    doc.diagnostics.auto_last_sent_at = math_floor(sent)
+  end
+
+  return doc
+end
+
+function Store.legacy_state_extstate_exists()
+  local keys = {
+    "update_last_check",
+    "update_snooze",
+    "os_theme_cache",
+    "os_theme_cache_ts",
+    "gemini_paid_tier",
+    "gemini_cache_name",
+    "gemini_cache_model",
+    "gemini_cache_signature",
+    "gemini_cache_expires",
+    "ceiling_next_base",
+    "ceiling_slots",
+    "diag_auto_last_ping_at",
+    "diag_auto_last_sent_at",
+  }
+  for _, key in ipairs(keys) do
+    if reaper.GetExtState(CFG.EXT_NS, key) ~= "" then return true end
+  end
+  return false
+end
+
+function Store.migrate_state_if_needed()
+  if not Store.legacy_state_extstate_exists() then return nil end
+  Store.state_doc()
+  return Store.save_state()
+end
+
+function Store.state_doc()
+  if Store._state_doc then return Store._state_doc end
+  local doc, err = Store.read_json(RA.STATE_PATH, nil, 1)
+  if doc then
+    Store._state_doc = Store.seed_state_from_extstate(doc)
+    return Store._state_doc
+  end
+  if err and err ~= "missing" and err ~= "empty" then
+    Store._quarantine_json(RA.STATE_PATH, err)
+  end
+  Store._state_doc = Store.seed_state_from_extstate({ schema_version = 1 })
+  return Store._state_doc
+end
+
+function Store.save_state()
+  local doc = Store.state_doc()
+  doc.schema_version = 1
+  local err = Store.write_json_atomic(RA.STATE_PATH, doc)
+  if err then Store._notify_write_failure("State.json", err) end
+  if not err then Store.cleanup_state_extstate() end
+  return err
+end
+
+function Store.set_update_last_check(ts)
+  local doc = Store.state_doc()
+  doc.update = type(doc.update) == "table" and doc.update or {}
+  doc.update.last_check = math_floor(tonumber(ts) or os.time())
+  return Store.save_state()
+end
+
+function Store.update_snooze()
+  local doc = Store.state_doc()
+  local update_state = doc and doc.update
+  local value = type(update_state) == "table"
+    and tonumber(update_state.snooze) or nil
+  if value then return value end
+  value = tonumber(reaper.GetExtState(CFG.EXT_NS, "update_snooze") or "")
+  if value then
+    doc.update = type(doc.update) == "table" and doc.update or {}
+    doc.update.snooze = math_floor(value)
+    Store.save_state()
+  end
+  return value
+end
+
+function Store.set_update_snooze(ts)
+  local doc = Store.state_doc()
+  doc.update = type(doc.update) == "table" and doc.update or {}
+  ts = tonumber(ts)
+  if ts then
+    doc.update.snooze = math_floor(ts)
+  else
+    doc.update.snooze = nil
+  end
+  return Store.save_state()
+end
+
+function Store.os_theme_cache()
+  local doc = Store.state_doc()
+  local theme_state = doc and doc.theme
+  local cached = type(theme_state) == "table" and theme_state.os_cache or nil
+  local cached_ts = type(theme_state) == "table"
+    and tonumber(theme_state.os_cache_ts) or nil
+  if (cached == "dark" or cached == "light") and cached_ts then
+    return cached, cached_ts
+  end
+  cached = reaper.GetExtState(CFG.EXT_NS, "os_theme_cache")
+  cached_ts = tonumber(reaper.GetExtState(CFG.EXT_NS, "os_theme_cache_ts") or "")
+  if (cached == "dark" or cached == "light") and cached_ts then
+    doc.theme = type(doc.theme) == "table" and doc.theme or {}
+    doc.theme.os_cache = cached
+    doc.theme.os_cache_ts = math_floor(cached_ts)
+    Store.save_state()
+    return cached, cached_ts
+  end
+  return nil, nil
+end
+
+function Store.set_os_theme_cache(theme, ts)
+  if theme ~= "dark" and theme ~= "light" then return nil end
+  local doc = Store.state_doc()
+  doc.theme = type(doc.theme) == "table" and doc.theme or {}
+  doc.theme.os_cache = theme
+  doc.theme.os_cache_ts = math_floor(tonumber(ts) or os.time())
+  return Store.save_state()
+end
+
+function Store.gemini_paid_tier()
+  local doc = Store.state_doc()
+  local gemini = doc and doc.gemini
+  if type(gemini) == "table" and type(gemini.paid_tier) == "boolean" then
+    return gemini.paid_tier
+  end
+  local tier_str = reaper.GetExtState(CFG.EXT_NS, "gemini_paid_tier")
+  if tier_str == "true" or tier_str == "false" then
+    doc.gemini = type(doc.gemini) == "table" and doc.gemini or {}
+    doc.gemini.paid_tier = tier_str == "true"
+    Store.save_state()
+    return doc.gemini.paid_tier
+  end
+  return nil
+end
+
+function Store.set_gemini_paid_tier(value)
+  local doc = Store.state_doc()
+  doc.gemini = type(doc.gemini) == "table" and doc.gemini or {}
+  if value == true or value == false then
+    doc.gemini.paid_tier = value
+  else
+    doc.gemini.paid_tier = nil
+  end
+  if S then S.gemini_paid_tier = doc.gemini.paid_tier end
+  return Store.save_state()
+end
+
+function Store.gemini_cache_state()
+  local doc = Store.state_doc()
+  local cache = doc and doc.gemini_cache
+  if type(cache) == "table" and type(cache.name) == "string"
+     and cache.name ~= "" then
+    return cache.name,
+      type(cache.model) == "string" and cache.model or "",
+      type(cache.signature) == "string" and cache.signature or "",
+      tonumber(cache.expires) or 0
+  end
+  return nil
+end
+
+function Store.set_gemini_cache_state(name, model, signature, expires)
+  if not name or name == "" then return Store.clear_gemini_cache_state() end
+  local doc = Store.state_doc()
+  doc.gemini_cache = type(doc.gemini_cache) == "table"
+    and doc.gemini_cache or {}
+  doc.gemini_cache.name = name
+  doc.gemini_cache.model = model or ""
+  doc.gemini_cache.signature = signature or ""
+  doc.gemini_cache.expires = math_floor(tonumber(expires) or 0)
+  return Store.save_state()
+end
+
+function Store.clear_gemini_cache_state()
+  local doc = Store.state_doc()
+  doc.gemini_cache = {}
+  return Store.save_state()
+end
+
+function Store.ceiling_output_doc()
+  local doc = Store.state_doc()
+  doc.output_ceiling = type(doc.output_ceiling) == "table"
+    and doc.output_ceiling or {}
+  return doc.output_ceiling
+end
+
+function Store.reserve_ceiling_base(start_base, stride, limit)
+  local out = Store.ceiling_output_doc()
+  local cur = tonumber(out.next_base)
+    or tonumber(reaper.GetExtState(CFG.EXT_NS, "ceiling_next_base"))
+    or start_base
+  if cur < start_base then cur = start_base end
+  if cur >= limit then return nil, "State slot allocator exhausted" end
+  out.next_base = math_floor(cur + stride)
+  local err = Store.save_state()
+  if err then
+    reaper.SetExtState(CFG.EXT_NS, "ceiling_next_base",
+      tostring(out.next_base), true)
+  end
+  return math_floor(cur)
+end
+
+function Store.ceiling_slots()
+  local out = Store.ceiling_output_doc()
+  if type(out.slots) == "table" then return out.slots end
+  local raw = reaper.GetExtState(CFG.EXT_NS, "ceiling_slots")
+  if raw ~= "" then
+    local ok, decoded = pcall(JSON.decode, raw)
+    if ok and type(decoded) == "table" then
+      out.slots = decoded
+      Store.save_state()
+      return out.slots
+    end
+  end
+  out.slots = {}
+  return out.slots
+end
+
+function Store.save_ceiling_slots(list)
+  local out = Store.ceiling_output_doc()
+  out.slots = type(list) == "table" and list or {}
+  local err = Store.save_state()
+  if err then
+    local enc = JSON.encode(out.slots)
+    if enc then reaper.SetExtState(CFG.EXT_NS, "ceiling_slots", enc, true) end
+  end
+  return err
+end
+
+function Store.set_diag_auto_last_ping_at(ts)
+  local doc = Store.state_doc()
+  doc.diagnostics = type(doc.diagnostics) == "table" and doc.diagnostics or {}
+  doc.diagnostics.auto_last_ping_at = math_floor(tonumber(ts) or os.time())
+  return Store.save_state()
+end
+
+function Store.set_diag_auto_last_sent_at(ts)
+  local doc = Store.state_doc()
+  doc.diagnostics = type(doc.diagnostics) == "table" and doc.diagnostics or {}
+  doc.diagnostics.auto_last_sent_at = math_floor(tonumber(ts) or os.time())
+  return Store.save_state()
+end
+
+function Store.providers_document(records)
+  local out = {}
+  for _, record in ipairs(records or {}) do
+    out[#out+1] = Store._provider_record_to_json(record)
+  end
+  return {
+    schema_version = 1,
+    records        = Store.json_array(out),
+  }
+end
+
+function Store.save_providers(records)
+  records = records
+    or (Custom and Custom.load_all_extstate and Custom.load_all_extstate())
+    or {}
+  local err = Store.write_json_atomic(RA.PROVIDERS_PATH,
+    Store.providers_document(records))
+  if err then Store._notify_write_failure("Providers.json", err) end
+  if not err then Store.cleanup_providers_extstate(records) end
+  return err
+end
+
+function Store.mirror_providers_if_missing()
+  if not RA.PROVIDERS_PATH or RA.PROVIDERS_PATH == "" then return nil end
+  if RA._file_exists and RA._file_exists(RA.PROVIDERS_PATH) then return nil end
+  local records = (Custom and Custom.load_all_extstate
+                    and Custom.load_all_extstate()) or {}
+  if #records == 0 then return nil end
+  return Store.save_providers(records)
+end
+
+-- =============================================================================
+-- JSON helpers
+-- =============================================================================
+-- Sanitises a Lua byte string into valid UTF-8 by replacing any invalid byte
+-- sequences with '?'. REAPER allows raw 8-bit bytes in track names, item
+-- notes, and marker labels (often a result of dragged-in corrupt audio files
+-- or weird VST presets), and the AI provider APIs reject any payload that
+-- isn't strict UTF-8 with a 400 Bad Request.
+--
+-- Validates the four legal multi-byte forms (per RFC 3629):
+--   1-byte: 0xxxxxxx
+--   2-byte: 110xxxxx 10xxxxxx              (U+0080..U+07FF)
+--   3-byte: 1110xxxx 10xxxxxx 10xxxxxx     (U+0800..U+FFFF, excluding surrogates)
+--   4-byte: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx (U+10000..U+10FFFF)
+-- Single-pass byte scan, no allocations on the happy path (string is returned
+-- unchanged when it is already valid UTF-8).
+local function sanitize_utf8(s)
+  local len = #s
+  local i = 1
+  local out = nil  -- lazily allocated only if we hit invalid bytes
+  while i <= len do
+    local b1 = str_byte(s, i)
+    local size, ok = 1, true
+    if b1 < 0x80 then
+      -- ASCII
+      size = 1
+    elseif b1 < 0xC2 then
+      -- Continuation byte or overlong 2-byte form: invalid as a leading byte
+      ok = false
+    elseif b1 < 0xE0 then
+      -- 2-byte sequence
+      size = 2
+      if i + 1 > len then ok = false
+      else
+        local b2 = str_byte(s, i + 1)
+        if b2 < 0x80 or b2 > 0xBF then ok = false end
+      end
+    elseif b1 < 0xF0 then
+      -- 3-byte sequence
+      size = 3
+      if i + 2 > len then ok = false
+      else
+        local b2 = str_byte(s, i + 1)
+        local b3 = str_byte(s, i + 2)
+        if b2 < 0x80 or b2 > 0xBF or b3 < 0x80 or b3 > 0xBF then
+          ok = false
+        elseif b1 == 0xE0 and b2 < 0xA0 then
+          ok = false  -- overlong
+        elseif b1 == 0xED and b2 > 0x9F then
+          ok = false  -- UTF-16 surrogate half
+        end
+      end
+    elseif b1 < 0xF5 then
+      -- 4-byte sequence
+      size = 4
+      if i + 3 > len then ok = false
+      else
+        local b2 = str_byte(s, i + 1)
+        local b3 = str_byte(s, i + 2)
+        local b4 = str_byte(s, i + 3)
+        if b2 < 0x80 or b2 > 0xBF
+           or b3 < 0x80 or b3 > 0xBF
+           or b4 < 0x80 or b4 > 0xBF then
+          ok = false
+        elseif b1 == 0xF0 and b2 < 0x90 then
+          ok = false  -- overlong
+        elseif b1 == 0xF4 and b2 > 0x8F then
+          ok = false  -- > U+10FFFF
+        end
+      end
+    else
+      ok = false  -- 0xF5..0xFF: never valid
+    end
+
+    if ok then
+      if out then out[#out+1] = str_sub(s, i, i + size - 1) end
+      i = i + size
+    else
+      if not out then
+        out = {}
+        if i > 1 then out[1] = str_sub(s, 1, i - 1) end
+      end
+      out[#out+1] = "?"
+      i = i + 1
+    end
+  end
+  if out then return tbl_concat(out) end
+  return s
+end
+JSON.sanitize_utf8 = sanitize_utf8
+
+-- Escapes a Lua string for safe embedding inside a JSON string value.
+-- Order matters: backslashes must be escaped first.
+-- Also escapes control characters below 0x20 (backspace, form feed,
+-- null bytes, etc.) that can appear in track names or user input and would
+-- produce invalid JSON, causing silent API call failures. Invalid UTF-8 byte
+-- sequences are replaced with '?' so the API never sees malformed payloads.
+function JSON.escape(s)
+  return sanitize_utf8(s)
+           :gsub('\\', '\\\\')
+           :gsub('"',  '\\"')
+           :gsub('\n', '\\n')
+           :gsub('\r', '\\r')
+           :gsub('\t', '\\t')
+           :gsub('[\x00-\x08\x0b\x0c\x0e-\x1f]', function(c)
+             -- Encode remaining control chars as \u00XX JSON unicode escapes.
+             return str_format('\\u%04x', str_byte(c))
+           end)
+end
+
+-- =============================================================================
+-- Minimal recursive-descent JSON decoder
+-- =============================================================================
+-- Proper parser that handles the full JSON spec: objects, arrays, strings
+-- (with all escape sequences including \uXXXX), numbers, booleans, and null.
+--
+-- The decoder returns a native Lua table/value on success, or nil + error
+-- string on malformed input. It never throws.
+--
+-- JSON null is represented by the sentinel table JSON.NULL rather than Lua nil.
+-- This prevents silent key loss when a JSON object contains {"key": null},
+-- since obj[key] = nil is a no-op in Lua. Callers should compare values
+-- against JSON.NULL when null-awareness matters.
+--
+-- Performance: single-pass, no string copying for non-string values, avoids
+-- gsub inside the hot path. Fast enough for the response sizes we handle
+-- (typically 1-20 KB).
+do
+  -- Forward declarations for mutual recursion.
+  local decode_value, decode_string, decode_number, decode_object, decode_array
+
+  -- Skip whitespace and return the next non-whitespace position.
+  local function skip_ws(s, pos)
+    return str_match(s, "^%s*()", pos)
+  end
+
+  -- Decode a JSON string starting at the opening quote.
+  -- Returns (lua_string, next_position) or (nil, error_string).
+  decode_string = function(s, pos)
+    -- pos points to the opening '"'
+    pos = pos + 1  -- skip opening quote
+    local len = #s
+    local buf = {}
+    while pos <= len do
+      local ch = str_sub(s, pos, pos)
+      if ch == '"' then
+        return tbl_concat(buf), pos + 1
+      elseif ch == '\\' then
+        pos = pos + 1
+        if pos > len then return nil, "unterminated string escape" end
+        local esc = str_sub(s, pos, pos)
+        if     esc == 'n'  then buf[#buf+1] = '\n'
+        elseif esc == 't'  then buf[#buf+1] = '\t'
+        elseif esc == 'r'  then buf[#buf+1] = '\r'
+        elseif esc == '"'  then buf[#buf+1] = '"'
+        elseif esc == '\\' then buf[#buf+1] = '\\'
+        elseif esc == '/'  then buf[#buf+1] = '/'
+        elseif esc == 'b'  then buf[#buf+1] = '\b'
+        elseif esc == 'f'  then buf[#buf+1] = '\f'
+        elseif esc == 'u'  then
+          -- \uXXXX unicode escape. Decode to UTF-8 bytes.
+          -- Handles surrogate pairs (\uD800-\uDFFF) for emoji/CJK.
+          local hex = str_sub(s, pos + 1, pos + 4)
+          local cp  = tonumber(hex, 16)
+          if not cp then
+            buf[#buf+1] = '\\u' .. hex
+          else
+            -- Surrogate pair: high surrogate followed by \uXXXX low surrogate.
+            if cp >= 0xD800 and cp <= 0xDBFF then
+              local lo_hex = str_sub(s, pos + 5, pos + 10)
+              if str_sub(lo_hex, 1, 2) == "\\u" then
+                local lo_cp = tonumber(str_sub(lo_hex, 3, 6), 16)
+                if lo_cp and lo_cp >= 0xDC00 and lo_cp <= 0xDFFF then
+                  cp = 0x10000 + (cp - 0xD800) * 0x400 + (lo_cp - 0xDC00)
+                  pos = pos + 6  -- skip the low surrogate
+                end
+              end
+            end
+            -- Encode codepoint as UTF-8.
+            if cp < 0x80 then
+              buf[#buf+1] = str_char(cp)
+            elseif cp < 0x800 then
+              buf[#buf+1] = str_char(0xC0 + math_floor(cp / 64),
+                                     0x80 + cp % 64)
+            elseif cp < 0x10000 then
+              buf[#buf+1] = str_char(0xE0 + math_floor(cp / 4096),
+                                     0x80 + math_floor(cp / 64) % 64,
+                                     0x80 + cp % 64)
+            else
+              buf[#buf+1] = str_char(0xF0 + math_floor(cp / 262144),
+                                     0x80 + math_floor(cp / 4096) % 64,
+                                     0x80 + math_floor(cp / 64) % 64,
+                                     0x80 + cp % 64)
+            end
+          end
+          pos = pos + 4
+        else
+          -- Unknown escape: preserve as-is for debugging.
+          buf[#buf+1] = '\\' .. esc
+        end
+      else
+        buf[#buf+1] = ch
+      end
+      pos = pos + 1
+    end
+    return nil, "unterminated string"
+  end
+
+  -- Decode a JSON number. Returns (number, next_position).
+  decode_number = function(s, pos)
+    local num_str = str_match(s, "^-?%d+%.?%d*[eE]?[+-]?%d*()", pos)
+    if not num_str then return nil, "invalid number" end
+    local val = tonumber(str_sub(s, pos, num_str - 1))
+    if not val then return nil, "invalid number" end
+    return val, num_str
+  end
+
+  -- Decode a JSON object. Returns (table, next_position).
+  decode_object = function(s, pos)
+    pos = pos + 1  -- skip '{'
+    local obj = {}
+    pos = skip_ws(s, pos)
+    if str_sub(s, pos, pos) == '}' then return obj, pos + 1 end
+    while true do
+      pos = skip_ws(s, pos)
+      if str_sub(s, pos, pos) ~= '"' then return nil, "expected string key" end
+      local key, next_pos = decode_string(s, pos)
+      if not key then return nil, next_pos end
+      pos = skip_ws(s, next_pos)
+      if str_sub(s, pos, pos) ~= ':' then return nil, "expected ':'" end
+      pos = skip_ws(s, pos + 1)
+      local val
+      val, pos = decode_value(s, pos)
+      if val == nil and type(pos) == "string" then return nil, pos end
+      obj[key] = val
+      pos = skip_ws(s, pos)
+      local sep = str_sub(s, pos, pos)
+      if sep == '}' then return obj, pos + 1 end
+      if sep ~= ',' then return nil, "expected ',' or '}'" end
+      pos = pos + 1
+    end
+  end
+
+  -- Decode a JSON array. Returns (table, next_position).
+  decode_array = function(s, pos)
+    pos = pos + 1  -- skip '['
+    local arr = {}
+    pos = skip_ws(s, pos)
+    if str_sub(s, pos, pos) == ']' then return arr, pos + 1 end
+    while true do
+      pos = skip_ws(s, pos)
+      local val
+      val, pos = decode_value(s, pos)
+      if val == nil and type(pos) == "string" then return nil, pos end
+      arr[#arr+1] = val
+      pos = skip_ws(s, pos)
+      local sep = str_sub(s, pos, pos)
+      if sep == ']' then return arr, pos + 1 end
+      if sep ~= ',' then return nil, "expected ',' or ']'" end
+      pos = pos + 1
+    end
+  end
+
+  -- Decode any JSON value. Top-level dispatch.
+  decode_value = function(s, pos)
+    pos = skip_ws(s, pos)
+    local ch = str_sub(s, pos, pos)
+    if ch == '"' then return decode_string(s, pos)
+    elseif ch == '{' then return decode_object(s, pos)
+    elseif ch == '[' then return decode_array(s, pos)
+    elseif ch == 't' then
+      if str_sub(s, pos, pos + 3) == "true" then return true, pos + 4 end
+      return nil, "invalid value"
+    elseif ch == 'f' then
+      if str_sub(s, pos, pos + 4) == "false" then return false, pos + 5 end
+      return nil, "invalid value"
+    elseif ch == 'n' then
+      if str_sub(s, pos, pos + 3) == "null" then return JSON.NULL, pos + 4 end
+      return nil, "invalid value"
+    elseif ch == '-' or (ch >= '0' and ch <= '9') then
+      return decode_number(s, pos)
+    else
+      return nil, "unexpected character: " .. ch
+    end
+  end
+
+  -- Public API: decode a JSON string into a Lua value.
+  -- Returns (value, nil) on success, or (nil, error_string) on failure.
+  -- Wrapped in pcall as a final safety net against any unforeseen edge case.
+  JSON.decode = function(s)
+    if type(s) ~= "string" or #s == 0 then
+      return nil, "empty or non-string input"
+    end
+    local ok, result, next_pos = pcall(decode_value, s, 1)
+    if not ok then return nil, tostring(result) end
+    if result == nil and type(next_pos) == "string" then
+      return nil, next_pos
+    end
+    return result, nil
+  end
+end
+
+-- =============================================================================
+-- Minimal recursive JSON encoder
+-- =============================================================================
+-- Encodes Lua values into compact or pretty-printed JSON strings.
+-- Handles strings, numbers, booleans, nil, JSON.NULL, and tables
+-- (auto-detects array vs object by checking sequential integer keys).
+do
+  local function is_array(t)
+    local n = #t
+    if n == 0 then
+      -- Empty table: always encode as {} (object), never [].
+      -- In this codebase empty tables are dictionaries, not empty arrays.
+      return false
+    end
+    local count = 0
+    for _ in pairs(t) do count = count + 1 end
+    return count == n
+  end
+
+  local encode_value  -- forward declaration
+
+  local function encode_string(s)
+    return '"' .. JSON.escape(s) .. '"'
+  end
+
+  local function encode_number(n)
+    if n ~= n then return '"NaN"' end             -- NaN safety
+    if n == math.huge then return '"Infinity"' end
+    if n == -math.huge then return '"-Infinity"' end
+    if math.floor(n) == n and math.abs(n) < 2^53 then
+      return str_format("%d", n)
+    end
+    return str_format("%.4f", n)
+  end
+
+  local function encode_array(t, indent, depth)
+    if #t == 0 then return "[]" end
+    local parts = {}
+    for i = 1, #t do
+      parts[i] = encode_value(t[i], indent, depth)
+    end
+    if indent then
+      local pad = string.rep(indent, depth)
+      local inner_pad = string.rep(indent, depth + 1)
+      return "[\n" .. inner_pad .. tbl_concat(parts, ",\n" .. inner_pad) .. "\n" .. pad .. "]"
+    end
+    return "[" .. tbl_concat(parts, ",") .. "]"
+  end
+
+  local function encode_object(t, indent, depth)
+    local parts = {}
+    -- Collect and sort keys for deterministic output.
+    local keys = {}
+    for k in pairs(t) do keys[#keys+1] = k end
+    table.sort(keys, function(a, b)
+      local ta, tb = type(a), type(b)
+      if ta ~= tb then return ta < tb end
+      return a < b
+    end)
+    for _, k in ipairs(keys) do
+      local ks = type(k) == "string" and encode_string(k) or ('"' .. tostring(k) .. '"')
+      local vs = encode_value(t[k], indent, depth)
+      if indent then
+        parts[#parts+1] = ks .. ": " .. vs
+      else
+        parts[#parts+1] = ks .. ":" .. vs
+      end
+    end
+    if #parts == 0 then return "{}" end
+    if indent then
+      local pad = string.rep(indent, depth)
+      local inner_pad = string.rep(indent, depth + 1)
+      return "{\n" .. inner_pad .. tbl_concat(parts, ",\n" .. inner_pad) .. "\n" .. pad .. "}"
+    end
+    return "{" .. tbl_concat(parts, ",") .. "}"
+  end
+
+  encode_value = function(v, indent, depth)
+    depth = depth or 0
+    if v == nil or v == JSON.NULL then return "null" end
+    if v == JSON.EMPTY_ARRAY then return "[]" end
+    local tv = type(v)
+    if tv == "string"  then return encode_string(v) end
+    if tv == "number"  then return encode_number(v) end
+    if tv == "boolean" then return v and "true" or "false" end
+    if tv == "table"   then
+      if is_array(v) then
+        return encode_array(v, indent, depth + 1)
+      else
+        return encode_object(v, indent, depth + 1)
+      end
+    end
+    return '"' .. tostring(v) .. '"'
+  end
+
+  -- Public API: encode a Lua value into a JSON string.
+  -- Pass indent string (e.g. "  ") for pretty-printing, or nil for compact.
+  JSON.encode = function(value, indent)
+    local ok, result = pcall(encode_value, value, indent, 0)
+    if not ok then return nil, tostring(result) end
+    return result, nil
+  end
+end
+
+-- Expose JSON to dofile'd sidecar modules (Resources/Diag.lua, future
+-- v1.1 diagnostics modules). Required because JSON is `local` to this file
+-- (forward-declared at line ~2366, populated above). Sidecar modules loaded
+-- via dofile cannot see lexical locals from the parent file; they use RA.JSON
+-- instead. Must come AFTER the do/end block above so RA.JSON points to the
+-- fully populated table.
+RA.JSON = JSON
+
 --
 -- The user can register any number of custom providers. Each record is a
 -- self-contained endpoint with its own label, URL, timeout, API key, and
@@ -3671,8 +5416,10 @@ end
 -- ReaAssist is NOT optimized for these endpoints and the cost number is an
 -- estimate only.
 --
--- Storage (ExtState, per-install). One index key plus four per-record keys,
--- keyed by a stable record id of the form "custom_<8 hex chars>":
+-- Storage (Data/Providers.json primary with one-time ExtState fallback).
+-- Legacy keys are read during upgrade, then removed after Providers.json is
+-- written successfully. The legacy shape was one index key plus per-record
+-- keys, keyed by a stable record id of the form "custom_<8 hex chars>":
 --
 --   custom_provider_ids                 -- comma-separated ordered id list
 --   custom_<id>_label                   -- friendly name shown in combo
@@ -3704,9 +5451,9 @@ end
 --
 -- The record id doubles as the provider id in the PROVIDERS table, so every
 -- existing lookup that goes through PROVIDERS.get(id) / PROVIDERS._by_id[id]
--- continues to work. Flat per-record keys (rather than a single JSON blob)
--- let this module run at script load without waiting on the JSON codec,
--- which is populated ~3.8k lines later (line ~7093).
+-- continues to work. Providers.json stores the same records as objects, with
+-- extra_body fields as JSON objects; runtime converts them back to canonical
+-- JSON strings for the existing request-building path.
 Custom = {}
 
 CUSTOM_DEFAULT_CTX          = 65536  -- per-model fallback if everything is missing
@@ -3724,11 +5471,18 @@ CUSTOM_DEFAULT_TEST_TIMEOUT = 30     -- Test Connection curl --max-time (hard-co
 Custom.DEFAULT_CONNECT = 10
 Custom.MIN_CONNECT     = 1
 Custom.MAX_CONNECT     = 60
+Custom.REASON_INVALID_ENDPOINT = "invalid endpoint"
 -- Per-model free-text label shown in the main-screen model dropdown next to
 -- the id (e.g. "kimi-k2.6 . fast" vs "kimi-k2.6 . thinking"). Capped so the
 -- dropdown stays readable and rejected at save time if it contains delimiters
 -- ("|" or "\t") that would break the models blob parser.
 Custom.MAX_NOTES_LEN   = 20
+
+function Custom.endpoint_is_safe(endpoint)
+  return type(endpoint) == "string"
+    and endpoint:match("^https?://") ~= nil
+    and endpoint:find("[\"'`%c]") == nil
+end
 
 -- Return true if s is safe to drop into an HTTP-header slot on the curl
 -- command line across both shells we target. Rejects newlines (which would
@@ -3787,8 +5541,7 @@ end
 -- cleanly; the re-encoded canonical form is what gets stored. Called from the
 -- UI save handlers for both the provider-level field and the per-model popup.
 --
--- Runs after JSON.decode is defined (line ~11711), so all call sites (Save
--- button in the custom_llm edit screen) reach it lazily at click time.
+-- JSON.decode is populated before custom providers register at startup.
 function Custom.validate_extra_body(text)
   if not text then return "", nil end
   local trimmed = text:match("^%s*(.-)%s*$") or ""
@@ -3976,7 +5729,14 @@ end
 function Custom.load_record(id)
   if not id or id == "" then return nil end
   local endpoint = reaper.GetExtState(CFG.EXT_NS, "custom_" .. id .. "_endpoint")
-  if endpoint == "" then return nil end
+  if endpoint == "" then return nil, "missing endpoint" end
+  if not Custom.endpoint_is_safe(endpoint) then
+    if Store and Store._log then
+      Store._log("PROVIDERS", "skipping ExtState provider "
+        .. tostring(id) .. ": invalid endpoint")
+    end
+    return nil, Custom.REASON_INVALID_ENDPOINT
+  end
   local label      = reaper.GetExtState(CFG.EXT_NS, "custom_" .. id .. "_label")
   -- _models is multi-line content stored encoded; see Custom._mline_*
   -- helpers above for why. Decode is a no-op on legacy single-line blobs.
@@ -4014,7 +5774,7 @@ function Custom.load_record(id)
     end
   end
   local models = parse_models_blob(models_raw)
-  if #models == 0 then return nil end
+  if #models == 0 then return nil, "missing models" end
   -- Provider-level extra_body: raw JSON string (canonicalized at save time).
   -- Trusted as-is at load; the save validator is the only gate that checks
   -- syntax, so a hand-edited ExtState with garbage JSON would flow through
@@ -4036,20 +5796,21 @@ function Custom.load_record(id)
   }
 end
 
--- Read every valid record in the order the id list specifies. Records whose
--- per-key data is missing/empty are silently skipped AND pruned from the
--- stored id list, so the list is self-healing against manual ini edits
--- (or partial factory-reset states) that leave a dangling id with no
--- backing data.
-function Custom.load_all()
+-- Read every valid ExtState record in the order the id list specifies. Records
+-- whose per-key data is missing/empty are silently skipped AND pruned from the
+-- stored id list, so the list is self-healing against manual ini edits (or
+-- partial factory-reset states) that leave a dangling id with no backing data.
+function Custom.load_all_extstate()
   local ids = Custom.load_ids()
   local records = {}
   local valid_ids = {}
   local pruned = false
   for _, id in ipairs(ids) do
-    local rec = Custom.load_record(id)
+    local rec, reason = Custom.load_record(id)
     if rec then
       records[#records+1]     = rec
+      valid_ids[#valid_ids+1] = id
+    elseif reason == Custom.REASON_INVALID_ENDPOINT then
       valid_ids[#valid_ids+1] = id
     else
       pruned = true
@@ -4057,6 +5818,25 @@ function Custom.load_all()
   end
   if pruned then Custom.save_ids(valid_ids) end
   return records
+end
+
+function Custom.load_all()
+  if Store and Store.load_providers then
+    local records, err = Store.load_providers()
+    if records then return records end
+    if err and err ~= "missing" and err ~= "empty" then
+      Store._log("PROVIDERS", "falling back to ExtState providers: "
+        .. tostring(err))
+    end
+  end
+  return Custom.load_all_extstate()
+end
+
+function Custom._mirror_providers_file()
+  if Store and Store.save_providers then
+    return Store.save_providers(Custom.load_all_extstate())
+  end
+  return nil
 end
 
 -- Persist one record's per-key data. Does NOT touch the id list -- that's
@@ -4102,23 +5882,7 @@ function Custom.save_record(record)
     Custom._mline_encode(encode_models_blob(record.models or {})), true)
 end
 
--- Save + ensure the record's id appears in the ordered id list. If the id
--- is already present, only the per-key data is rewritten (the list order
--- is preserved so the provider dropdown doesn't reshuffle on every edit).
-function Custom.upsert_record(record)
-  Custom.save_record(record)
-  local ids = Custom.load_ids()
-  for _, existing in ipairs(ids) do
-    if existing == record.id then return end
-  end
-  ids[#ids+1] = record.id
-  Custom.save_ids(ids)
-end
-
--- Delete one record: wipe its per-key ExtState, drop from the id list, clear
--- its API key. The caller is responsible for calling unregister_id if the
--- record is currently registered in PROVIDERS.
-function Custom.remove_record(id)
+function Custom.delete_record_extstate(id, include_api_key)
   reaper.DeleteExtState(CFG.EXT_NS, "custom_" .. id .. "_endpoint",        true)
   reaper.DeleteExtState(CFG.EXT_NS, "custom_" .. id .. "_label",           true)
   reaper.DeleteExtState(CFG.EXT_NS, "custom_" .. id .. "_timeout_secs",    true)
@@ -4128,12 +5892,63 @@ function Custom.remove_record(id)
   reaper.DeleteExtState(CFG.EXT_NS, "custom_" .. id .. "_extra_headers",   true)
   reaper.DeleteExtState(CFG.EXT_NS, "custom_" .. id .. "_extra_body",      true)
   reaper.DeleteExtState(CFG.EXT_NS, "custom_" .. id .. "_models",          true)
-  reaper.DeleteExtState(CFG.EXT_NS, "api_key_" .. id,                      true)
-  local ids = Custom.load_ids()
-  for i = #ids, 1, -1 do
-    if ids[i] == id then table.remove(ids, i) end
+  if include_api_key then
+    reaper.DeleteExtState(CFG.EXT_NS, "api_key_" .. id, true)
   end
-  Custom.save_ids(ids)
+end
+
+-- Save + ensure the record's id appears in the ordered id list. If the id
+-- is already present, only the per-key data is rewritten (the list order
+-- is preserved so the provider dropdown doesn't reshuffle on every edit).
+function Custom.upsert_record(record)
+  if not Store or not Store.save_providers then
+    Custom.save_record(record)
+    local ids = Custom.load_ids()
+    local found = false
+    for _, existing in ipairs(ids) do
+      if existing == record.id then found = true; break end
+    end
+    if not found then
+      ids[#ids+1] = record.id
+      Custom.save_ids(ids)
+    end
+    return
+  end
+  local records = Custom.load_all()
+  local found = false
+  for i, existing in ipairs(records) do
+    if existing.id == record.id then
+      records[i] = record
+      found = true
+      break
+    end
+  end
+  if not found then
+    records[#records+1] = record
+  end
+  Store.save_providers(records)
+end
+
+-- Delete one record: update Providers.json and clear its API key. The caller is
+-- responsible for calling unregister_id if the record is currently registered
+-- in PROVIDERS.
+function Custom.remove_record(id)
+  if not Store or not Store.save_providers then
+    Custom.delete_record_extstate(id, true)
+    local ids = Custom.load_ids()
+    for i = #ids, 1, -1 do
+      if ids[i] == id then table.remove(ids, i) end
+    end
+    Custom.save_ids(ids)
+    return
+  end
+  local records = Custom.load_all()
+  for i = #records, 1, -1 do
+    if records[i].id == id then table.remove(records, i) end
+  end
+  local err = Store.save_providers(records)
+  if not err then Custom.delete_record_extstate(id, true) end
+  return err
 end
 
 function Custom.build_provider(record)
@@ -4280,6 +6095,7 @@ end
 -- Register every persisted record at startup so prefs.provider_idx clamping
 -- below sees every custom entry as a valid index.
 Custom.register_all()
+Store.mirror_providers_if_missing()
 
 -- One-time thinking-level reset, sentinel-gated to fire exactly once per
 -- install on first launch of any release that contains this block. Wipes
@@ -4307,7 +6123,9 @@ Custom.register_all()
 -- sentinel name (thinking_idx_reset_v2, etc.) rather than editing
 -- this one.
 do
-  if reaper.GetExtState(CFG.EXT_NS, "thinking_idx_reset_v1") ~= "1" then
+  if not (S and S._factory_reset_clean_boot)
+     and not Store.migration_fired("thinking_idx_reset_v1") then
+    Store.clear_thinking_selections()
     for _, p in ipairs(PROVIDERS) do
       reaper.DeleteExtState(CFG.EXT_NS, "thinking_idx_" .. p.id, true)
       if p.models then
@@ -4319,7 +6137,7 @@ do
         end
       end
     end
-    reaper.SetExtState(CFG.EXT_NS, "thinking_idx_reset_v1", "1", true)
+    Store.set_migration_fired("thinking_idx_reset_v1")
   end
 end
 
@@ -4347,7 +6165,9 @@ end
 -- and it covers users who installed fresh post-v1 (so v1's reset
 -- ran on empty state) and then accumulated picks before v1.1.4.
 do
-  if reaper.GetExtState(CFG.EXT_NS, "model_picker_reset_v2") ~= "1" then
+  if not (S and S._factory_reset_clean_boot)
+     and not Store.migration_fired("model_picker_reset_v2") then
+    Store.clear_model_picker_selections()
     for _, p in ipairs(PROVIDERS) do
       reaper.DeleteExtState(CFG.EXT_NS, "model_idx_" .. p.id, true)
       reaper.DeleteExtState(CFG.EXT_NS, "thinking_idx_" .. p.id, true)
@@ -4360,7 +6180,7 @@ do
         end
       end
     end
-    reaper.SetExtState(CFG.EXT_NS, "model_picker_reset_v2", "1", true)
+    Store.set_migration_fired("model_picker_reset_v2")
   end
 end
 
@@ -4369,8 +6189,9 @@ end
 -- =============================================================================
 -- prefs.provider_idx selects the active AI service (1-based index into PROVIDERS).
 -- prefs.model_idx selects the model within that provider (1-based).
--- Both are persisted in ExtState. The model index is stored per-provider so
--- switching providers remembers each provider's last-used model.
+-- Both persist in Config.json. Legacy ExtState model indices are read once
+-- during upgrade so switching providers still remembers each provider's
+-- last-used model.
 --
 -- MODELS is a dynamic proxy that always reflects the active provider's model list.
 -- All existing code that reads MODELS[prefs.model_idx], MODELS.active_id(), and
@@ -4389,7 +6210,8 @@ local function _prefs_load_idx(key, default, list)
   return v
 end
 
-prefs.provider_idx = _prefs_load_idx("provider_idx", 1, PROVIDERS)
+prefs.provider_idx = Store.config_provider_idx(
+  _prefs_load_idx("provider_idx", 1, PROVIDERS))
 
 -- Load cloud_request_timeout (default CFG.CLOUD_TIMEOUT_DEFAULT = 180s). Clamp
 -- to [CLOUD_TIMEOUT_MIN, CLOUD_TIMEOUT_MAX] so a corrupt ExtState value can't
@@ -4551,7 +6373,8 @@ function MODELS.refresh()
   else
     default_idx = p.default_model_idx or #src
   end
-  prefs.model_idx = _prefs_load_idx(key, default_idx, src)
+  prefs.model_idx = Store.config_model_idx(
+    p, src, _prefs_load_idx(key, default_idx, src))
   -- Load per-(provider,model) thinking_idx via the shared helper so all
   -- the cascade rules (per-model -> model default -> provider default
   -- -> 1) live in one place.
@@ -4576,8 +6399,9 @@ function PROVIDERS.switch_to_model(provider_id, model_id)
   local old_provider_idx = prefs.provider_idx
   local p_old = PROVIDERS.active()
   if p_old then
-    reaper.SetExtState(CFG.EXT_NS, "model_idx_" .. p_old.id,
-      tostring(prefs.model_idx), true)
+    if Store and Store.remember_model_idx then
+      Store.remember_model_idx(p_old, MODELS, prefs.model_idx)
+    end
     if p_old.thinking_levels and prefs.thinking_idx > 0 then
       local old_m = MODELS[prefs.model_idx] or MODELS[1]
       PROVIDERS.save_thinking_idx(p_old, old_m, prefs.thinking_idx)
@@ -4586,7 +6410,6 @@ function PROVIDERS.switch_to_model(provider_id, model_id)
   end
 
   prefs.provider_idx = prov_idx
-  reaper.SetExtState(CFG.EXT_NS, "provider_idx", tostring(prov_idx), true)
   MODELS.refresh()
 
   local target_idx, target_model
@@ -4598,15 +6421,15 @@ function PROVIDERS.switch_to_model(provider_id, model_id)
   end
   if not target_idx then
     prefs.provider_idx = old_provider_idx
-    reaper.SetExtState(CFG.EXT_NS, "provider_idx", tostring(old_provider_idx), true)
     MODELS.refresh()
     S.api_key = S.api_key_map[PROVIDERS.active().id]
+    if Store and Store.cleanup_config_extstate then
+      Store.cleanup_config_extstate(Store.config_doc())
+    end
     return false, "That model is not available for the current account tier."
   end
 
   prefs.model_idx = target_idx
-  reaper.SetExtState(CFG.EXT_NS, "model_idx_" .. p_new.id,
-    tostring(target_idx), true)
   if p_new.thinking_levels then
     prefs.thinking_idx = PROVIDERS.load_thinking_idx(p_new, target_model)
   else
@@ -4618,6 +6441,7 @@ function PROVIDERS.switch_to_model(provider_id, model_id)
   for _, att in ipairs(S.attachments or {}) do
     att.cost = att.tokens * (target_model.price_in or 0) / 1000000
   end
+  if Store and Store.save_config then Store.save_config() end
   return true
 end
 
@@ -4655,10 +6479,7 @@ do
   -- Convenience alias: active provider's key.
   S.api_key = S.api_key_map[PROVIDERS.active().id]
   -- Load persisted Gemini tier (nil if never tested).
-  local tier_str = reaper.GetExtState(CFG.EXT_NS, "gemini_paid_tier")
-  if tier_str == "true" then S.gemini_paid_tier = true
-  elseif tier_str == "false" then S.gemini_paid_tier = false
-  end
+  S.gemini_paid_tier = Store.gemini_paid_tier()
   -- If tier is unknown but a Google key is configured, schedule an auto
   -- retest on the first loop tick. Net isn't defined yet at this point in
   -- script init, so we set a flag and let the main loop dispatch it once
@@ -5011,30 +6832,30 @@ function apply_palette(palette)
   end
 end
 -- Detect OS light/dark mode (Windows registry, macOS defaults, Linux gsettings).
--- Results are cached in ExtState for 1 hour to avoid repeated ExecProcess calls
--- on startup (PowerShell invocation alone can add 100-500ms on Windows). The
--- in-memory cache further guarantees at most one detection per session.
+-- Results are cached in State.json for 1 hour to avoid repeated ExecProcess
+-- calls on startup (PowerShell
+-- invocation alone can add 100-500ms on Windows). The in-memory cache further
+-- guarantees at most one detection per session.
 local OS_THEME_TTL = 3600  -- seconds
 local _os_theme_cache     -- in-memory cache for this session
 local function detect_os_theme()
   if _os_theme_cache then return _os_theme_cache end
-  local cached    = reaper.GetExtState(CFG.EXT_NS, "os_theme_cache")
-  local cached_ts = tonumber(reaper.GetExtState(CFG.EXT_NS, "os_theme_cache_ts") or "") or 0
+  local cached, cached_ts = Store.os_theme_cache()
+  cached_ts = tonumber(cached_ts) or 0
   local now       = os.time()
   if (cached == "dark" or cached == "light") and (now - cached_ts) < OS_THEME_TTL then
     _os_theme_cache = cached
     return cached
   end
   -- Cache miss / stale / corrupted: re-detect below and persist the result.
-  -- Skip the ExtState write when Factory Reset has set the suppress flag,
-  -- so the freshly-cleared cache keys don't reappear within seconds of
-  -- reset. The in-memory cache still updates so detection isn't repeated
-  -- until the next OS_THEME_TTL window.
+  -- Skip persistence when Factory Reset has set the suppress flag, so the
+  -- freshly-cleared state doesn't reappear within seconds of reset. The
+  -- in-memory cache still updates so detection isn't repeated until the
+  -- next OS_THEME_TTL window.
   local function _store(theme)
     _os_theme_cache = theme
     if not (S and S._suppress_os_theme_cache) then
-      reaper.SetExtState(CFG.EXT_NS, "os_theme_cache", theme, true)
-      reaper.SetExtState(CFG.EXT_NS, "os_theme_cache_ts", tostring(now), true)
+      Store.set_os_theme_cache(theme, now)
     end
     return theme
   end
@@ -5086,6 +6907,7 @@ end
 -- Load theme preference and apply the initial palette.
 prefs.theme = reaper.GetExtState(CFG.EXT_NS, "theme")
 if prefs.theme ~= "dark" and prefs.theme ~= "light" then prefs.theme = "auto" end
+Store.apply_config_preferences()
 -- Shift-Launch failsafe: if Shift is held when the script starts, reset UI
 -- scale to 100%, theme to Auto, and clear saved window geometry.
 -- Uses js_ReaScriptAPI to read the keyboard state at init time (before ImGui).
@@ -5094,15 +6916,14 @@ if reaper.JS_Mouse_GetState then
   if reaper.JS_Mouse_GetState(8) == 8 then
     prefs.ui_scale_idx = 3  -- 100%
     prefs.theme = "auto"
-    reaper.SetExtState(CFG.EXT_NS, "ui_scale_idx", "3", true)
-    reaper.SetExtState(CFG.EXT_NS, "theme", "auto", true)
-    reaper.DeleteExtState(CFG.EXT_NS, "win_x", true)
-    reaper.DeleteExtState(CFG.EXT_NS, "win_y", true)
-    reaper.DeleteExtState(CFG.EXT_NS, "win_w", true)
-    reaper.DeleteExtState(CFG.EXT_NS, "win_h", true)
+    Store.clear_window_geometry()
   end
 end
 apply_palette(PALETTES[resolve_theme(prefs.theme)])
+if not (S and S._factory_reset_clean_boot) then
+  Store.save_config()
+end
+Store.migrate_state_if_needed()
 -- =============================================================================
 
 -- =============================================================================
@@ -5354,6 +7175,7 @@ function UI.show_float_toast(text, kind, sticky)
     fade_out_s      = FADE_OUT,
   }
 end
+if Store and Store.flush_user_notice then Store.flush_user_notice() end
 
 -- =============================================================================
 -- Utility: UI.open_url
@@ -6383,7 +8205,7 @@ end
 --       B+5..B+7: reserved
 --     Global: gmem[0] = schema version, gmem[1] = "any engagement" sentinel.
 --
---   * Allocation is monotonic via ExtState (`ceiling_next_base`). Starts at
+--   * Allocation is monotonic via State.json (`ceiling_next_base`). Starts at
 --     8, increments by 8 per save. Slot 0..7 reserved for global metadata.
 --     No reuse in v1 (heartbeat/lease scheme deferred). Re-saving the same
 --     LLM-generated source ultimately writes a NEW file with a numeric
@@ -6448,9 +8270,13 @@ local function split_lines(s)
   return out
 end
 
--- Allocate a gmem base for this save. ExtState-backed, monotonic. Returns
+-- Allocate a gmem base for this save. State-backed, monotonic. Returns
 -- the base (>=8, multiple of 8) or nil + reason on failure.
 local function allocate_ceiling_slot()
+  if Store and Store.reserve_ceiling_base then
+    return Store.reserve_ceiling_base(
+      CEILING_BASE_START, CEILING_STRIDE, CEILING_BASE_LIMIT)
+  end
   local cur_str = reaper.GetExtState(CFG.EXT_NS, CEILING_NEXT_BASE)
   local cur = tonumber(cur_str)
   if not cur or cur < CEILING_BASE_START then cur = CEILING_BASE_START end
@@ -6472,13 +8298,13 @@ end
 -- The host's defer poll loop iterates this list to know which gmem slots
 -- to read when checking for engaged/muted JSFX.
 --
--- Storage: ExtState `ceiling_slots` value, JSON-encoded array. ExtState
--- has a 64KB ceiling on values; per-entry size ~150 bytes => ~400 entries
--- comfortably within budget. Allocation is monotonic so the array grows
+-- Storage: State.json `output_ceiling.slots` value, with legacy ExtState
+-- fallback for older installs. Allocation is monotonic so the array grows
 -- but never reuses slots.
 
 -- Pull the recorded slot list. Empty array if not yet written.
 function Code.ceiling_get_slots()
+  if Store and Store.ceiling_slots then return Store.ceiling_slots() end
   local raw = reaper.GetExtState(CFG.EXT_NS, CEILING_SLOTS_KEY)
   if not raw or raw == "" then return {} end
   local ok, decoded = pcall(JSON.decode, raw)
@@ -6500,8 +8326,12 @@ function Code.ceiling_record_slot(info, saved_path, desc)
     desc      = desc or "",
     alloc_ts  = os.time(),
   }
-  local enc = JSON.encode(list)
-  if enc then reaper.SetExtState(CFG.EXT_NS, CEILING_SLOTS_KEY, enc, true) end
+  if Store and Store.save_ceiling_slots then
+    Store.save_ceiling_slots(list)
+  else
+    local enc = JSON.encode(list)
+    if enc then reaper.SetExtState(CFG.EXT_NS, CEILING_SLOTS_KEY, enc, true) end
+  end
 end
 
 -- Forget the slot whose recorded file is `path`. Called when the user
@@ -6517,7 +8347,11 @@ function Code.ceiling_forget_slot_for_path(path)
     if e.file ~= path then kept[#kept + 1] = e end
   end
   if #kept ~= #list then
-    reaper.SetExtState(CFG.EXT_NS, CEILING_SLOTS_KEY, JSON.encode(kept), true)
+    if Store and Store.save_ceiling_slots then
+      Store.save_ceiling_slots(kept)
+    else
+      reaper.SetExtState(CFG.EXT_NS, CEILING_SLOTS_KEY, JSON.encode(kept), true)
+    end
   end
 end
 
@@ -6570,8 +8404,12 @@ function Code.ceiling_gc_slots()
     end
   end
   if pruned > 0 then
-    reaper.SetExtState(CFG.EXT_NS, CEILING_SLOTS_KEY,
-      JSON.encode(kept), true)
+    if Store and Store.save_ceiling_slots then
+      Store.save_ceiling_slots(kept)
+    else
+      reaper.SetExtState(CFG.EXT_NS, CEILING_SLOTS_KEY,
+        JSON.encode(kept), true)
+    end
     if Log and Log.line then
       Log.line("CEILING-GC",
         ("pruned %d stale slot(s); kept %d"):format(pruned, #kept))
@@ -7897,7 +9735,6 @@ end
 --     }
 --   }
 
-JSON = { NULL = {} }
 
 FXCache = {}
 
@@ -11949,6 +13786,7 @@ end
 --   plugin          plugin / FX add + configure workflow
 --   plugin_helpers  parameter-helper code patterns (find_param, etc.)
 --   jsfx            JSFX (EEL2) generation rules
+--   jsfx_dsp_cookbook  Delay/reverb/modulation JSFX memory recipes
 --   theme           SetThemeColor backup safety rule
 -- Each is fetched on-demand when the model emits
 -- `<context_needed>prompt_bundle:NAME</context_needed>` so the always-on
@@ -11964,6 +13802,7 @@ local PROMPT_BUNDLE_NAMES = {
   plugin         = true,
   plugin_helpers = true,
   jsfx           = true,
+  jsfx_dsp_cookbook = true,
   jsfx_pitch     = true,
   theme          = true,
 }
@@ -15094,6 +16933,27 @@ function CTX.preempt_buckets_for_prompt(user_text)
       Log.line("PREEMPT",
         "injected docs (co-pin for JSFX Lua-companion path)")
     end
+    local wants_memory_cookbook =
+         text:find("%f[%w]delay%f[%W]")
+      or text:find("%f[%w]delays%f[%W]")
+      or text:find("%f[%w]echo%f[%W]")
+      or text:find("%f[%w]reverb")
+      or text:find("%f[%w]chorus")
+      or text:find("%f[%w]flang")
+      or text:find("%f[%w]phaser")
+      or text:find("%f[%w]comb%f[%W]")
+      or text:find("%f[%w]allpass%f[%W]")
+      or text:find("%f[%w]diffus")
+      or (text:find("%f[%w]feedback%f[%W]") and text:find("%f[%w]modulat"))
+    if wants_memory_cookbook then
+      local cookbook_key = "prompt_bundle:jsfx_dsp_cookbook"
+      local cookbook_already = S.sticky_context[cookbook_key]
+      Net.copin_jsfx_family("jsfx_dsp_cookbook", injected)
+      if not cookbook_already and S.sticky_context[cookbook_key] then
+        Log.line("PREEMPT",
+          "injected " .. cookbook_key .. " (JSFX delay/reverb memory intent)")
+      end
+    end
   end
   -- Dev-only: when the FabFilter-hide flag is on, treat matching entries
   -- in preferred_types as absent so the preempt path falls through to
@@ -15506,418 +17366,7 @@ CTX.build_snapshot = function(proj, opts)
   return body
 end
 
--- =============================================================================
--- JSON helpers
--- =============================================================================
--- Sanitises a Lua byte string into valid UTF-8 by replacing any invalid byte
--- sequences with '?'. REAPER allows raw 8-bit bytes in track names, item
--- notes, and marker labels (often a result of dragged-in corrupt audio files
--- or weird VST presets), and the AI provider APIs reject any payload that
--- isn't strict UTF-8 with a 400 Bad Request.
---
--- Validates the four legal multi-byte forms (per RFC 3629):
---   1-byte: 0xxxxxxx
---   2-byte: 110xxxxx 10xxxxxx              (U+0080..U+07FF)
---   3-byte: 1110xxxx 10xxxxxx 10xxxxxx     (U+0800..U+FFFF, excluding surrogates)
---   4-byte: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx (U+10000..U+10FFFF)
--- Single-pass byte scan, no allocations on the happy path (string is returned
--- unchanged when it is already valid UTF-8).
-local function sanitize_utf8(s)
-  local len = #s
-  local i = 1
-  local out = nil  -- lazily allocated only if we hit invalid bytes
-  while i <= len do
-    local b1 = str_byte(s, i)
-    local size, ok = 1, true
-    if b1 < 0x80 then
-      -- ASCII
-      size = 1
-    elseif b1 < 0xC2 then
-      -- Continuation byte or overlong 2-byte form: invalid as a leading byte
-      ok = false
-    elseif b1 < 0xE0 then
-      -- 2-byte sequence
-      size = 2
-      if i + 1 > len then ok = false
-      else
-        local b2 = str_byte(s, i + 1)
-        if b2 < 0x80 or b2 > 0xBF then ok = false end
-      end
-    elseif b1 < 0xF0 then
-      -- 3-byte sequence
-      size = 3
-      if i + 2 > len then ok = false
-      else
-        local b2 = str_byte(s, i + 1)
-        local b3 = str_byte(s, i + 2)
-        if b2 < 0x80 or b2 > 0xBF or b3 < 0x80 or b3 > 0xBF then
-          ok = false
-        elseif b1 == 0xE0 and b2 < 0xA0 then
-          ok = false  -- overlong
-        elseif b1 == 0xED and b2 > 0x9F then
-          ok = false  -- UTF-16 surrogate half
-        end
-      end
-    elseif b1 < 0xF5 then
-      -- 4-byte sequence
-      size = 4
-      if i + 3 > len then ok = false
-      else
-        local b2 = str_byte(s, i + 1)
-        local b3 = str_byte(s, i + 2)
-        local b4 = str_byte(s, i + 3)
-        if b2 < 0x80 or b2 > 0xBF
-           or b3 < 0x80 or b3 > 0xBF
-           or b4 < 0x80 or b4 > 0xBF then
-          ok = false
-        elseif b1 == 0xF0 and b2 < 0x90 then
-          ok = false  -- overlong
-        elseif b1 == 0xF4 and b2 > 0x8F then
-          ok = false  -- > U+10FFFF
-        end
-      end
-    else
-      ok = false  -- 0xF5..0xFF: never valid
-    end
 
-    if ok then
-      if out then out[#out+1] = str_sub(s, i, i + size - 1) end
-      i = i + size
-    else
-      if not out then
-        out = {}
-        if i > 1 then out[1] = str_sub(s, 1, i - 1) end
-      end
-      out[#out+1] = "?"
-      i = i + 1
-    end
-  end
-  if out then return tbl_concat(out) end
-  return s
-end
-JSON.sanitize_utf8 = sanitize_utf8
-
--- Escapes a Lua string for safe embedding inside a JSON string value.
--- Order matters: backslashes must be escaped first.
--- Also escapes control characters below 0x20 (backspace, form feed,
--- null bytes, etc.) that can appear in track names or user input and would
--- produce invalid JSON, causing silent API call failures. Invalid UTF-8 byte
--- sequences are replaced with '?' so the API never sees malformed payloads.
-function JSON.escape(s)
-  return sanitize_utf8(s)
-           :gsub('\\', '\\\\')
-           :gsub('"',  '\\"')
-           :gsub('\n', '\\n')
-           :gsub('\r', '\\r')
-           :gsub('\t', '\\t')
-           :gsub('[\x00-\x08\x0b\x0c\x0e-\x1f]', function(c)
-             -- Encode remaining control chars as \u00XX JSON unicode escapes.
-             return str_format('\\u%04x', str_byte(c))
-           end)
-end
-
--- =============================================================================
--- Minimal recursive-descent JSON decoder
--- =============================================================================
--- Proper parser that handles the full JSON spec: objects, arrays, strings
--- (with all escape sequences including \uXXXX), numbers, booleans, and null.
---
--- The decoder returns a native Lua table/value on success, or nil + error
--- string on malformed input. It never throws.
---
--- JSON null is represented by the sentinel table JSON.NULL rather than Lua nil.
--- This prevents silent key loss when a JSON object contains {"key": null},
--- since obj[key] = nil is a no-op in Lua. Callers should compare values
--- against JSON.NULL when null-awareness matters.
---
--- Performance: single-pass, no string copying for non-string values, avoids
--- gsub inside the hot path. Fast enough for the response sizes we handle
--- (typically 1-20 KB).
-do
-  -- Forward declarations for mutual recursion.
-  local decode_value, decode_string, decode_number, decode_object, decode_array
-
-  -- Skip whitespace and return the next non-whitespace position.
-  local function skip_ws(s, pos)
-    return str_match(s, "^%s*()", pos)
-  end
-
-  -- Decode a JSON string starting at the opening quote.
-  -- Returns (lua_string, next_position) or (nil, error_string).
-  decode_string = function(s, pos)
-    -- pos points to the opening '"'
-    pos = pos + 1  -- skip opening quote
-    local len = #s
-    local buf = {}
-    while pos <= len do
-      local ch = str_sub(s, pos, pos)
-      if ch == '"' then
-        return tbl_concat(buf), pos + 1
-      elseif ch == '\\' then
-        pos = pos + 1
-        if pos > len then return nil, "unterminated string escape" end
-        local esc = str_sub(s, pos, pos)
-        if     esc == 'n'  then buf[#buf+1] = '\n'
-        elseif esc == 't'  then buf[#buf+1] = '\t'
-        elseif esc == 'r'  then buf[#buf+1] = '\r'
-        elseif esc == '"'  then buf[#buf+1] = '"'
-        elseif esc == '\\' then buf[#buf+1] = '\\'
-        elseif esc == '/'  then buf[#buf+1] = '/'
-        elseif esc == 'b'  then buf[#buf+1] = '\b'
-        elseif esc == 'f'  then buf[#buf+1] = '\f'
-        elseif esc == 'u'  then
-          -- \uXXXX unicode escape. Decode to UTF-8 bytes.
-          -- Handles surrogate pairs (\uD800-\uDFFF) for emoji/CJK.
-          local hex = str_sub(s, pos + 1, pos + 4)
-          local cp  = tonumber(hex, 16)
-          if not cp then
-            buf[#buf+1] = '\\u' .. hex
-          else
-            -- Surrogate pair: high surrogate followed by \uXXXX low surrogate.
-            if cp >= 0xD800 and cp <= 0xDBFF then
-              local lo_hex = str_sub(s, pos + 5, pos + 10)
-              if str_sub(lo_hex, 1, 2) == "\\u" then
-                local lo_cp = tonumber(str_sub(lo_hex, 3, 6), 16)
-                if lo_cp and lo_cp >= 0xDC00 and lo_cp <= 0xDFFF then
-                  cp = 0x10000 + (cp - 0xD800) * 0x400 + (lo_cp - 0xDC00)
-                  pos = pos + 6  -- skip the low surrogate
-                end
-              end
-            end
-            -- Encode codepoint as UTF-8.
-            if cp < 0x80 then
-              buf[#buf+1] = str_char(cp)
-            elseif cp < 0x800 then
-              buf[#buf+1] = str_char(0xC0 + math_floor(cp / 64),
-                                     0x80 + cp % 64)
-            elseif cp < 0x10000 then
-              buf[#buf+1] = str_char(0xE0 + math_floor(cp / 4096),
-                                     0x80 + math_floor(cp / 64) % 64,
-                                     0x80 + cp % 64)
-            else
-              buf[#buf+1] = str_char(0xF0 + math_floor(cp / 262144),
-                                     0x80 + math_floor(cp / 4096) % 64,
-                                     0x80 + math_floor(cp / 64) % 64,
-                                     0x80 + cp % 64)
-            end
-          end
-          pos = pos + 4
-        else
-          -- Unknown escape: preserve as-is for debugging.
-          buf[#buf+1] = '\\' .. esc
-        end
-      else
-        buf[#buf+1] = ch
-      end
-      pos = pos + 1
-    end
-    return nil, "unterminated string"
-  end
-
-  -- Decode a JSON number. Returns (number, next_position).
-  decode_number = function(s, pos)
-    local num_str = str_match(s, "^-?%d+%.?%d*[eE]?[+-]?%d*()", pos)
-    if not num_str then return nil, "invalid number" end
-    local val = tonumber(str_sub(s, pos, num_str - 1))
-    if not val then return nil, "invalid number" end
-    return val, num_str
-  end
-
-  -- Decode a JSON object. Returns (table, next_position).
-  decode_object = function(s, pos)
-    pos = pos + 1  -- skip '{'
-    local obj = {}
-    pos = skip_ws(s, pos)
-    if str_sub(s, pos, pos) == '}' then return obj, pos + 1 end
-    while true do
-      pos = skip_ws(s, pos)
-      if str_sub(s, pos, pos) ~= '"' then return nil, "expected string key" end
-      local key, next_pos = decode_string(s, pos)
-      if not key then return nil, next_pos end
-      pos = skip_ws(s, next_pos)
-      if str_sub(s, pos, pos) ~= ':' then return nil, "expected ':'" end
-      pos = skip_ws(s, pos + 1)
-      local val
-      val, pos = decode_value(s, pos)
-      if val == nil and type(pos) == "string" then return nil, pos end
-      obj[key] = val
-      pos = skip_ws(s, pos)
-      local sep = str_sub(s, pos, pos)
-      if sep == '}' then return obj, pos + 1 end
-      if sep ~= ',' then return nil, "expected ',' or '}'" end
-      pos = pos + 1
-    end
-  end
-
-  -- Decode a JSON array. Returns (table, next_position).
-  decode_array = function(s, pos)
-    pos = pos + 1  -- skip '['
-    local arr = {}
-    pos = skip_ws(s, pos)
-    if str_sub(s, pos, pos) == ']' then return arr, pos + 1 end
-    while true do
-      pos = skip_ws(s, pos)
-      local val
-      val, pos = decode_value(s, pos)
-      if val == nil and type(pos) == "string" then return nil, pos end
-      arr[#arr+1] = val
-      pos = skip_ws(s, pos)
-      local sep = str_sub(s, pos, pos)
-      if sep == ']' then return arr, pos + 1 end
-      if sep ~= ',' then return nil, "expected ',' or ']'" end
-      pos = pos + 1
-    end
-  end
-
-  -- Decode any JSON value. Top-level dispatch.
-  decode_value = function(s, pos)
-    pos = skip_ws(s, pos)
-    local ch = str_sub(s, pos, pos)
-    if ch == '"' then return decode_string(s, pos)
-    elseif ch == '{' then return decode_object(s, pos)
-    elseif ch == '[' then return decode_array(s, pos)
-    elseif ch == 't' then
-      if str_sub(s, pos, pos + 3) == "true" then return true, pos + 4 end
-      return nil, "invalid value"
-    elseif ch == 'f' then
-      if str_sub(s, pos, pos + 4) == "false" then return false, pos + 5 end
-      return nil, "invalid value"
-    elseif ch == 'n' then
-      if str_sub(s, pos, pos + 3) == "null" then return JSON.NULL, pos + 4 end
-      return nil, "invalid value"
-    elseif ch == '-' or (ch >= '0' and ch <= '9') then
-      return decode_number(s, pos)
-    else
-      return nil, "unexpected character: " .. ch
-    end
-  end
-
-  -- Public API: decode a JSON string into a Lua value.
-  -- Returns (value, nil) on success, or (nil, error_string) on failure.
-  -- Wrapped in pcall as a final safety net against any unforeseen edge case.
-  JSON.decode = function(s)
-    if type(s) ~= "string" or #s == 0 then
-      return nil, "empty or non-string input"
-    end
-    local ok, result, next_pos = pcall(decode_value, s, 1)
-    if not ok then return nil, tostring(result) end
-    if result == nil and type(next_pos) == "string" then
-      return nil, next_pos
-    end
-    return result, nil
-  end
-end
-
--- =============================================================================
--- Minimal recursive JSON encoder
--- =============================================================================
--- Encodes Lua values into compact or pretty-printed JSON strings.
--- Handles strings, numbers, booleans, nil, JSON.NULL, and tables
--- (auto-detects array vs object by checking sequential integer keys).
-do
-  local function is_array(t)
-    local n = #t
-    if n == 0 then
-      -- Empty table: always encode as {} (object), never [].
-      -- In this codebase empty tables are dictionaries, not empty arrays.
-      return false
-    end
-    local count = 0
-    for _ in pairs(t) do count = count + 1 end
-    return count == n
-  end
-
-  local encode_value  -- forward declaration
-
-  local function encode_string(s)
-    return '"' .. JSON.escape(s) .. '"'
-  end
-
-  local function encode_number(n)
-    if n ~= n then return '"NaN"' end             -- NaN safety
-    if n == math.huge then return '"Infinity"' end
-    if n == -math.huge then return '"-Infinity"' end
-    if math.floor(n) == n and math.abs(n) < 2^53 then
-      return str_format("%d", n)
-    end
-    return str_format("%.4f", n)
-  end
-
-  local function encode_array(t, indent, depth)
-    if #t == 0 then return "[]" end
-    local parts = {}
-    for i = 1, #t do
-      parts[i] = encode_value(t[i], indent, depth)
-    end
-    if indent then
-      local pad = string.rep(indent, depth)
-      local inner_pad = string.rep(indent, depth + 1)
-      return "[\n" .. inner_pad .. tbl_concat(parts, ",\n" .. inner_pad) .. "\n" .. pad .. "]"
-    end
-    return "[" .. tbl_concat(parts, ",") .. "]"
-  end
-
-  local function encode_object(t, indent, depth)
-    local parts = {}
-    -- Collect and sort keys for deterministic output.
-    local keys = {}
-    for k in pairs(t) do keys[#keys+1] = k end
-    table.sort(keys, function(a, b)
-      local ta, tb = type(a), type(b)
-      if ta ~= tb then return ta < tb end
-      return a < b
-    end)
-    for _, k in ipairs(keys) do
-      local ks = type(k) == "string" and encode_string(k) or ('"' .. tostring(k) .. '"')
-      local vs = encode_value(t[k], indent, depth)
-      if indent then
-        parts[#parts+1] = ks .. ": " .. vs
-      else
-        parts[#parts+1] = ks .. ":" .. vs
-      end
-    end
-    if #parts == 0 then return "{}" end
-    if indent then
-      local pad = string.rep(indent, depth)
-      local inner_pad = string.rep(indent, depth + 1)
-      return "{\n" .. inner_pad .. tbl_concat(parts, ",\n" .. inner_pad) .. "\n" .. pad .. "}"
-    end
-    return "{" .. tbl_concat(parts, ",") .. "}"
-  end
-
-  encode_value = function(v, indent, depth)
-    depth = depth or 0
-    if v == nil or v == JSON.NULL then return "null" end
-    local tv = type(v)
-    if tv == "string"  then return encode_string(v) end
-    if tv == "number"  then return encode_number(v) end
-    if tv == "boolean" then return v and "true" or "false" end
-    if tv == "table"   then
-      if is_array(v) then
-        return encode_array(v, indent, depth + 1)
-      else
-        return encode_object(v, indent, depth + 1)
-      end
-    end
-    return '"' .. tostring(v) .. '"'
-  end
-
-  -- Public API: encode a Lua value into a JSON string.
-  -- Pass indent string (e.g. "  ") for pretty-printing, or nil for compact.
-  JSON.encode = function(value, indent)
-    local ok, result = pcall(encode_value, value, indent, 0)
-    if not ok then return nil, tostring(result) end
-    return result, nil
-  end
-end
-
--- Expose JSON to dofile'd sidecar modules (Resources/Diag.lua, future
--- v1.1 diagnostics modules). Required because JSON is `local` to this file
--- (forward-declared at line ~2366, populated above). Sidecar modules loaded
--- via dofile cannot see lexical locals from the parent file; they use RA.JSON
--- instead. Must come AFTER the do/end block above so RA.JSON points to the
--- fully populated table.
-RA.JSON = JSON
 
 -- =============================================================================
 -- Auto-update module
@@ -16094,18 +17543,16 @@ RA.sha256_hex = sha256_hash
 -- chat UI, updater, or recovery flow from loading.
 RA.Local = RA.Local or {}
 do
-  local path = RA.RESOURCES_DIR .. "Local" .. RA.SEP .. "Drum_Edit.lua"
-  local ok, mod_or_err = pcall(dofile, path)
-  if ok and type(mod_or_err) == "table" then
-    RA.Local.Drum_Edit = mod_or_err
-  else
-    RA.Local.Drum_Edit = {
-      name = "Drum_Edit",
-      ready = false,
-      unavailable_reason = tostring(mod_or_err),
-    }
-    if not ok and type(Log) == "table" and type(Log.line) == "function" then
-      Log.line("LOCAL", "Drum_Edit.lua load failed: " .. tostring(mod_or_err))
+  local path = RA.RESOURCES_DIR .. "Local" .. RA.SEP .. "init.lua"
+  if RA._file_exists(path) then
+    local ok, modules = pcall(dofile, path)
+    if ok and type(modules) == "table" then
+      for name, module in pairs(modules) do
+        RA.Local[name] = module
+      end
+    elseif type(Log) == "table" and type(Log.line) == "function" then
+      Log.line("LOCAL",
+        "Optional local module loader failed; local-only features disabled.")
     end
   end
 end
@@ -16120,7 +17567,7 @@ Updater = {}
 -- Stamp a structured failure reason onto the update state so the
 -- Bootstrap repair prompt can show the user *why* the last attempt
 -- failed instead of silently re-rendering the Repair button. Also
--- emits a Log.line so Resources/Debug.log records the same
+-- emits a Log.line so the active debug log records the same
 -- detail for post-mortem.
 function Updater._set_failure(step, err)
   update.last_step  = step
@@ -16326,8 +17773,7 @@ function Updater.check_start()
   -- tmp.update_exit with the in-flight one, racing the manifest check
   -- against a download and corrupting the read.
   if Updater.is_busy() then return end
-  reaper.SetExtState(CFG.EXT_NS, "update_last_check",
-    tostring(os.time()), true)
+  Store.set_update_last_check(os.time())
   local url = CFG.UPDATE_BASE_URL .. "/" .. CFG.UPDATE_MANIFEST
   if Updater.fire_get(url, tmp.update_out, tmp.update_exit) then
     update.state = "checking"
@@ -16347,8 +17793,7 @@ function Updater.manual_check()
     return false
   end
   if Updater.is_busy() then return false end
-  reaper.SetExtState(CFG.EXT_NS, "update_last_check",
-    tostring(os.time()), true)
+  Store.set_update_last_check(os.time())
   update._manual = true
   -- Reset popup_opened so the "Update Available" dialog re-fires when
   -- this manual check finds an update. Without this, a sequence of
@@ -16427,7 +17872,7 @@ end
 -- Sets state = "verifying" so the main loop knows to pump the right tick
 -- function each frame (tick_native_sha when s.mode == "native";
 -- tick_sha_diff when s.mode == "lua" or "lua_fallback").
-function Updater.start_sha_diff(manifest, manual, forced)
+function Updater.start_sha_diff(manifest, manual, forced, purpose)
   local diff = { missing = {}, mismatched = {} }
   local to_hash = {}            -- list of { path, entry }
   local path_to_entry = {}      -- absolute path -> entry, for native parse
@@ -16469,6 +17914,7 @@ function Updater.start_sha_diff(manifest, manual, forced)
     diff          = diff,
     manual        = manual,
     forced        = forced,
+    purpose       = purpose or "repair",
     -- Higher per-frame budget when the user is actively waiting (manual
     -- check or forced repair). Background piggyback checks
     -- (manual = forced = nil/false) keep the conservative default because
@@ -16855,8 +18301,31 @@ function Updater._sha_diff_complete()
   local diff     = s.diff
   local manifest = s.manifest
   local manual   = s.manual
+  local forced   = s.forced
+  local purpose  = s.purpose or "repair"
   local elapsed  = time_precise() - (s.started_at or time_precise())
   update._sha_diff = nil
+
+  if purpose == "update" then
+    update.state             = "available"
+    update.remote_version    = manifest.version
+    update.manifest          = manifest
+    update.update_missing    = diff.missing
+    update.update_mismatched = diff.mismatched
+    Log.line("UPDATE", string.format(
+      "sha_diff complete in %.2fs: remote v%s newer than installed v%s; "
+      .. "%d file(s) differ (%d missing, %d mismatched).",
+      elapsed, tostring(manifest.version), tostring(CFG.VERSION),
+      #diff.missing + #diff.mismatched, #diff.missing, #diff.mismatched))
+    if manual then S.float_toast = nil end
+    if not forced and not manual then
+      local snooze = Store.update_snooze()
+      if snooze and os.time() < snooze then
+        update.popup_opened = true
+      end
+    end
+    return
+  end
 
   local repair_count = #diff.missing + #diff.mismatched
   if repair_count > 0 then
@@ -16979,34 +18448,16 @@ function Updater.check_poll()
   -- (which would effectively downgrade the install). Equality via the
   -- "neither newer" rule because is_newer parses numerically (so "1.0.0"
   -- and "1.0.0.0" compare equal even though string == would say false).
+  update.update_missing = nil
+  update.update_mismatched = nil
   local remote_newer = Updater.is_newer(manifest.version, CFG.VERSION)
   local remote_older = Updater.is_newer(CFG.VERSION, manifest.version)
   if remote_newer then
     -- A newer version is on the server. The update flow handles this case --
-    -- the user sees "Update Available" and the download queue is built by
-    -- comparing local SHA vs manifest SHA (Stage 3.1), so only files that
-    -- actually changed between versions get downloaded.
-    update.state = "available"
-    update.remote_version = manifest.version
-    update.manifest = manifest
-    -- Manual check -> the popup carries the visual feedback from here.
-    -- Clear the sticky "Checking..." toast so it doesn't overlap the
-    -- dialog near the bottom of the window.
-    if manual then S.float_toast = nil end
-    -- Honor the "Later" snooze for auto-fire piggyback checks only.
-    -- When active (user clicked Later within the last 7 days), we
-    -- keep state = "available" so manual paths can still surface the
-    -- update, but we pre-open popup_opened so the automatic popup
-    -- trigger in Render.main_window treats it as "already shown" and
-    -- leaves the user alone. Forced / manual paths bypass this so
-    -- explicit user action always sees the popup.
-    if not forced and not manual then
-      local snooze = tonumber(
-        reaper.GetExtState(CFG.EXT_NS, "update_snooze") or "")
-      if snooze and os.time() < snooze then
-        update.popup_opened = true
-      end
-    end
+    -- first compute the changed-file set asynchronously, then show
+    -- "Update Available". That moves the SHA work before the prompt so
+    -- clicking Update Now can immediately enter the download UI.
+    Updater.start_sha_diff(manifest, manual, forced, "update")
   elseif not remote_older then
     -- Versions match. But the local install may still have missing or
     -- corrupted files (user deleted something, disk error, partial copy).
@@ -17168,15 +18619,19 @@ end
 -- Paths the orphan-cleanup pass must never delete, even if a manifest
 -- listed them in removed_files. System_Prompt_Custom.md is the documented
 -- power-user override -- the loader prefers it over the stock prompt and
--- it's intentionally untracked so updates don't touch it. Debug.log and
--- FX_Cache.json are runtime artifacts the script itself authors. None of
--- these are ever in our manifest's files list, so they could only end up
--- on a removed_files list via a malformed or malicious manifest; this set
--- is the runtime backstop for that case.
+-- it's intentionally untracked so updates don't touch it. The Data/ entries
+-- are structurally outside the updater-owned zone, but keeping them here makes
+-- that user-state contract explicit; the legacy Resources/ entries protect
+-- users during the migration window.
 local PROTECTED_FROM_REMOVAL = {
   ["Resources/System_Prompt_Custom.md"] = true,
   ["Resources/Debug.log"]                = true,
   ["Resources/FX_Cache.json"]            = true,
+  ["Data/Config.json"]                   = true,
+  ["Data/Providers.json"]                = true,
+  ["Data/State.json"]                    = true,
+  ["Data/Debug.log"]                     = true,
+  ["Data/FX_Cache.json"]                 = true,
 }
 
 -- Predicate gating per-path orphan deletes. All four checks must hold:
@@ -17218,14 +18673,12 @@ function Updater.download_start()
   update.download_queue = {}
   update.applied_files = {}  -- track successfully written files for rollback
   update.skipped_count  = 0  -- files whose local SHA already matches manifest
-  -- When entering from repair_available, the SHA diff just finished and we
-  -- already know which files are missing or mismatched. Reuse those lists
-  -- instead of re-hashing the entire manifest synchronously, which freezes
-  -- the UI for the full hash time on slower machines (~1 MB/s pure-Lua SHA
-  -- means 5-6 MB of fonts plus two ~700 KB Lua files takes 5-7 seconds on
-  -- a commodity CPU and longer on older hardware). Trade-off: a corruption
-  -- introduced in the few seconds between the diff completing and the user
-  -- clicking Repair Now wouldn't be caught here, but the next launch's SHA
+  -- When entering from repair_available OR an update prompt produced by
+  -- the check-time SHA diff, we already know which files are missing or
+  -- mismatched. Reuse those lists instead of re-hashing the entire
+  -- manifest synchronously after the user clicks the button. Trade-off:
+  -- corruption introduced in the few seconds between the diff completing
+  -- and the click would not be caught here, but the next launch's SHA
   -- check would catch it.
   local repair_fileset = nil
   if update.action_was_repair
@@ -17234,6 +18687,14 @@ function Updater.download_start()
     repair_fileset = {}
     for _, n in ipairs(update.repair_missing)    do repair_fileset[n] = true end
     for _, n in ipairs(update.repair_mismatched) do repair_fileset[n] = true end
+  end
+  local update_fileset = nil
+  if not update.action_was_repair
+      and update.update_missing
+      and update.update_mismatched then
+    update_fileset = {}
+    for _, n in ipairs(update.update_missing)    do update_fileset[n] = true end
+    for _, n in ipairs(update.update_mismatched) do update_fileset[n] = true end
   end
   for _, entry in ipairs(update.manifest.files) do
     local filename, expected_hash
@@ -17261,6 +18722,20 @@ function Updater.download_start()
       -- Repair path: queue only files the SHA diff flagged. Everything else
       -- already matched per the diff and is safe to skip without re-hashing.
       if repair_fileset[filename] then
+        update.download_queue[#update.download_queue+1] = {
+          filename = filename,
+          url      = CFG.UPDATE_BASE_URL .. "/" .. filename,
+          sha256   = expected_hash,
+        }
+      else
+        update.skipped_count = update.skipped_count + 1
+      end
+    elseif update_fileset then
+      -- Version-bump path after check-time SHA diff: queue only files
+      -- already proven different so the Update Now click can jump
+      -- straight into the download UI instead of synchronously hashing
+      -- every manifest entry.
+      if update_fileset[filename] then
         update.download_queue[#update.download_queue+1] = {
           filename = filename,
           url      = CFG.UPDATE_BASE_URL .. "/" .. filename,
@@ -20690,7 +22165,7 @@ function Net.advance_key_test_queue(prov_id, ok, error_msg)
   -- path returns early before reaching it).
   local gres = api_keys.test_results and api_keys.test_results.google
   if gres and gres.ok and S.api_key_map.google then
-    S.gemini_paid_tier = nil
+    Store.set_gemini_paid_tier(nil)
     Net.fire_gemini_tier_test()
   end
 
@@ -20787,9 +22262,9 @@ function Net.handle_key_test(raw)
         local saved_prov = PROVIDERS[saved]
         if saved_prov and S.api_key_map[saved_prov.id] then
           prefs.provider_idx = saved
-          reaper.SetExtState(CFG.EXT_NS, "provider_idx", tostring(saved), true)
           MODELS.refresh()
           S.api_key = S.api_key_map[saved_prov.id]
+          if Store and Store.save_config then Store.save_config() end
         end
       end
       local emsg = (type(resp) == "table" and type(resp.error) == "table"
@@ -20828,9 +22303,9 @@ function Net.handle_key_test(raw)
       local saved_prov = PROVIDERS[saved]
       if saved_prov and S.api_key_map[saved_prov.id] then
         prefs.provider_idx = saved
-        reaper.SetExtState(CFG.EXT_NS, "provider_idx", tostring(saved), true)
         MODELS.refresh()
         S.api_key = S.api_key_map[saved_prov.id]
+        if Store and Store.save_config then Store.save_config() end
       end
     end
     S.status = "error"
@@ -20910,8 +22385,8 @@ function Net.handle_key_test(raw)
       local prov_idx = PROVIDERS._by_id[p.id]
       if prov_idx then
         prefs.provider_idx = prov_idx
-        reaper.SetExtState(CFG.EXT_NS, "provider_idx", tostring(prov_idx), true)
         MODELS.refresh()
+        if Store and Store.save_config then Store.save_config() end
       end
     elseif api_keys._test_orig_provider_idx then
       -- Settings re-entry: restore the active-provider snapshot taken
@@ -20927,8 +22402,8 @@ function Net.handle_key_test(raw)
       local saved_prov = PROVIDERS[saved]
       if saved_prov and S.api_key_map[saved_prov.id] then
         prefs.provider_idx = saved
-        reaper.SetExtState(CFG.EXT_NS, "provider_idx", tostring(saved), true)
         MODELS.refresh()
+        if Store and Store.save_config then Store.save_config() end
       end
     end
     S.api_key = S.api_key_map[PROVIDERS.active().id]
@@ -20960,7 +22435,7 @@ function Net.handle_key_test(raw)
   -- never fires. fire_gemini_tier_test guards against double-firing via
   -- the S.curl_pid check at its top.
   if S.api_key_map.google then
-    S.gemini_paid_tier = nil
+    Store.set_gemini_paid_tier(nil)
     Net.fire_gemini_tier_test()
   end
 end
@@ -21089,7 +22564,7 @@ end
 -- explanatory popup until detection succeeds.
 function Net.handle_gemini_tier_test(raw)
   S.gemini_tier_pending = false
-  local is_paid, is_free
+  local is_paid, is_free, provider_unavailable
   if raw and #raw > 0 then
     local ok, resp = pcall(JSON.decode, raw)
     if ok and type(resp) == "table" and resp ~= JSON.NULL then
@@ -21099,6 +22574,8 @@ function Net.handle_gemini_tier_test(raw)
         if code == 429 or code == 403
            or status == "RESOURCE_EXHAUSTED" or status == "PERMISSION_DENIED" then
           is_free = true
+        elseif code == 503 or status == "UNAVAILABLE" then
+          provider_unavailable = true
         end
       elseif type(resp.candidates) == "table" and #resp.candidates > 0 then
         is_paid = true
@@ -21107,29 +22584,28 @@ function Net.handle_gemini_tier_test(raw)
   end
   local interpretation
   if is_paid then
-    S.gemini_paid_tier = true
-    reaper.SetExtState(CFG.EXT_NS, "gemini_paid_tier", "true", true)
+    Store.set_gemini_paid_tier(true)
     interpretation = "paid"
     if UI and UI.show_float_toast then
       UI.show_float_toast("Gemini Pro available", "ok")
     end
   elseif is_free then
-    S.gemini_paid_tier = false
-    reaper.SetExtState(CFG.EXT_NS, "gemini_paid_tier", "false", true)
+    Store.set_gemini_paid_tier(false)
     S.show_gemini_free_warn = true
     interpretation = "free"
     -- Free-tier popup handles the user-facing notice; just clear the
     -- in-flight sticky toast so it doesn't sit there indefinitely.
     S.float_toast = nil
   else
-    -- Ambiguous: leave S.gemini_paid_tier and the persisted ExtState entry
+    -- Ambiguous: leave S.gemini_paid_tier and persisted State.json entry
     -- untouched so the next opportunity (app restart, Test API Keys click)
     -- can retry. Persisting `false` here would bake in a wrong answer that
     -- only manual ExtState surgery could undo.
     interpretation = "ambiguous"
     if UI and UI.show_float_toast then
-      UI.show_float_toast(
-        "Couldn't verify Gemini tier - will retry on next start", "err")
+      UI.show_float_toast(provider_unavailable
+        and "Gemini service unavailable - tier check will retry"
+        or "Couldn't verify Gemini tier - will retry on next start", "err")
     end
   end
   Log.line("TIER-TEST", string.format("interpreted as: %s (raw bytes=%d)",
@@ -21356,11 +22832,19 @@ end
 -- Net.gemini_cache_persist / restore / clear_persisted
 -- =============================================================================
 -- Survives the cache reference (name/model/expires) across script restarts via
--- ExtState. Without this, every restart re-creates a fresh cache while the
+-- State.json. Without this, every restart re-creates a fresh cache while the
 -- prior one continues billing storage server-side until its TTL expires --
 -- typically ~$0.01 per restart on Gemini Pro and a 1-3s extra cold-start.
 function Net.gemini_cache_persist()
   if not S.gemini_cache_name or S.gemini_cache_name == "" then return end
+  if Store and Store.set_gemini_cache_state then
+    local err = Store.set_gemini_cache_state(
+      S.gemini_cache_name,
+      S.gemini_cache_model or "",
+      S.gemini_cache_signature or "",
+      S.gemini_cache_expires or 0)
+    if not err then return end
+  end
   reaper.SetExtState(CFG.EXT_NS, "gemini_cache_name",
     S.gemini_cache_name, true)
   reaper.SetExtState(CFG.EXT_NS, "gemini_cache_model",
@@ -21372,6 +22856,10 @@ function Net.gemini_cache_persist()
 end
 
 function Net.gemini_cache_clear_persisted()
+  if Store and Store.clear_gemini_cache_state then
+    local err = Store.clear_gemini_cache_state()
+    if not err then return end
+  end
   reaper.DeleteExtState(CFG.EXT_NS, "gemini_cache_name",    true)
   reaper.DeleteExtState(CFG.EXT_NS, "gemini_cache_model",   true)
   reaper.DeleteExtState(CFG.EXT_NS, "gemini_cache_signature", true)
@@ -21379,12 +22867,17 @@ function Net.gemini_cache_clear_persisted()
 end
 
 function Net.gemini_cache_restore()
-  local name = reaper.GetExtState(CFG.EXT_NS, "gemini_cache_name")
+  local name, model, signature, expires
+  if Store and Store.gemini_cache_state then
+    name, model, signature, expires = Store.gemini_cache_state()
+  end
+  if not name or name == "" then
+    name = reaper.GetExtState(CFG.EXT_NS, "gemini_cache_name")
+    model = reaper.GetExtState(CFG.EXT_NS, "gemini_cache_model")
+    signature = reaper.GetExtState(CFG.EXT_NS, "gemini_cache_signature")
+    expires = tonumber(reaper.GetExtState(CFG.EXT_NS, "gemini_cache_expires")) or 0
+  end
   if not name or name == "" then return end
-  local model = reaper.GetExtState(CFG.EXT_NS, "gemini_cache_model")
-  local signature = reaper.GetExtState(CFG.EXT_NS, "gemini_cache_signature")
-  local expires_str = reaper.GetExtState(CFG.EXT_NS, "gemini_cache_expires")
-  local expires = tonumber(expires_str) or 0
   -- Discard expired caches (or those within the safety window). Server-side
   -- TTL has already collected them.
   if os.time() >= (expires - GEMINI_CACHE_SAFETY) then
@@ -21883,9 +23376,10 @@ function Net.send_to_api(user_text)
   if S.api_ref_message then ref_injected = true end
 
   -- 3a. MIDI auto-inject: if the user prompt contains the word "midi" as a
-  -- standalone token (case-insensitive), pre-load the MIDI reference into the
-  -- pinned slot. This avoids a context_needed round-trip when the prompt is
-  -- clearly MIDI-related. The model can also request it explicitly via
+  -- standalone token (case-insensitive), or common music-note terms in a
+  -- clearly musical context, pre-load the MIDI reference into the pinned slot.
+  -- This avoids a context_needed round-trip when the prompt is clearly
+  -- MIDI-related. The model can also request it explicitly via
   -- <context_needed>midi</context_needed> for prompts that imply MIDI without
   -- saying it (e.g. "transpose those notes"). Once loaded, it stays loaded
   -- for the rest of the session and is cached at the top of the prefix.
@@ -21897,6 +23391,9 @@ function Net.send_to_api(user_text)
     if lower_text == "midi" or lower_text:match("^midi[^%a]")
        or lower_text:match("[^%a]midi$") or lower_text:match("[^%a]midi[^%a]") then
       has_midi = true
+    end
+    if not has_midi then
+      has_midi = Code.prompt_has_midi_workflow_intent(lower_text)
     end
     if has_midi then
       local mref_content, mref_err = CTX.midi()
@@ -22058,11 +23555,17 @@ function Net.send_to_api(user_text)
   if not typed_action_contract
      and not typed_action_plan_prompt
      and reascript_prompt then
-    local docs_already = S.api_ref_message ~= nil
-    Net.copin_docs_core(preempted_context)
-    if not docs_already and S.api_ref_message then
+    if S.midi_ref_message
+       and Code.prompt_has_midi_workflow_intent(user_text) then
       Log.line("PREEMPT",
-        "injected docs (explicit ReaScript/Lua-script prompt)")
+        "skipped docs preempt (midi ref covers workflow)")
+    else
+      local docs_already = S.api_ref_message ~= nil
+      Net.copin_docs_core(preempted_context)
+      if not docs_already and S.api_ref_message then
+        Log.line("PREEMPT",
+          "injected docs (explicit ReaScript/Lua-script prompt)")
+      end
     end
   end
   -- Re-evaluate ref-injected flags: preempt's copin_docs_core (and the
@@ -29506,6 +31009,87 @@ function Code.prompt_has_chain_or_recipe_intent(text)
     or lo:find("%f[%w]vibe%f[%W]") ~= nil
 end
 
+function Code.prompt_has_midi_workflow_intent(text)
+  if type(text) ~= "string" or text == "" then return false end
+  local lo = text:lower()
+  local has_explicit_midi =
+       lo == "midi"
+    or lo:match("^midi[^%a]") ~= nil
+    or lo:match("[^%a]midi$") ~= nil
+    or lo:match("[^%a]midi[^%a]") ~= nil
+  if has_explicit_midi then return true end
+  local has_note_word =
+       lo:find("%f[%w]note") ~= nil
+    or lo:find("%f[%w]nota") ~= nil
+    or lo:find("%f[%w]noten") ~= nil
+    or lo:find("%f[%w]notlar") ~= nil
+  if not has_note_word then return false end
+  return lo:find("%f[%w]melod") ~= nil
+    or lo:find("%f[%w]bass%f[%W]") ~= nil
+    or lo:find("%f[%w]basso") ~= nil
+    or lo:find("%f[%w]basse") ~= nil
+    or lo:find("%f[%w]bajo") ~= nil
+    or lo:find("%f[%w]baixo") ~= nil
+    or lo:find("%f[%w]bas%f[%W]") ~= nil
+    or lo:find("%f[%w]harmony%f[%W]") ~= nil
+    or lo:find("%f[%w]harmon") ~= nil
+    or lo:find("%f[%w]countermelody%f[%W]") ~= nil
+    or lo:find("%f[%w]part") ~= nil
+end
+
+function Code.lua_uses_only_midi_ref_covered_calls(lua_code)
+  if type(lua_code) ~= "string" or lua_code == "" then return false end
+  local allowed = {
+    CountTracks = true,
+    GetTrack = true,
+    GetTrackName = true,
+    CSurf_TrackToID = true,
+    InsertTrackAtIndex = true,
+    GetSetMediaTrackInfo_String = true,
+    GetMediaTrackInfo_Value = true,
+    SetMediaTrackInfo_Value = true,
+    SetOnlyTrackSelected = true,
+    SetTrackSelected = true,
+    CountTrackMediaItems = true,
+    GetTrackMediaItem = true,
+    GetActiveTake = true,
+    GetMediaItemTake = true,
+    GetMediaItemTake_Item = true,
+    GetMediaItemInfo_Value = true,
+    SetMediaItemInfo_Value = true,
+    GetSetMediaItemTakeInfo_String = true,
+    CreateNewMIDIItemInProj = true,
+    TakeIsMIDI = true,
+    MIDI_CountEvts = true,
+    MIDI_GetNote = true,
+    MIDI_InsertNote = true,
+    MIDI_SetNote = true,
+    MIDI_DeleteNote = true,
+    MIDI_DisableSort = true,
+    MIDI_Sort = true,
+    MIDI_GetPPQPosFromProjTime = true,
+    MIDI_GetProjTimeFromPPQPos = true,
+    MIDI_GetProjQNFromPPQPos = true,
+    MIDI_GetPPQPosFromProjQN = true,
+    TimeMap2_timeToQN = true,
+    TimeMap2_QNToTime = true,
+    TimeMap2_timeToBeats = true,
+    TimeMap2_beatsToTime = true,
+    MarkTrackItemsDirty = true,
+    Undo_BeginBlock = true,
+    Undo_EndBlock = true,
+    PreventUIRefresh = true,
+    UpdateArrange = true,
+    ShowMessageBox = true,
+  }
+  local saw_call = false
+  for name in lua_code:gmatch("reaper%.([%w_]+)") do
+    saw_call = true
+    if not allowed[name] then return false end
+  end
+  return saw_call
+end
+
 function Code.prompt_is_fx_add_only(text)
   if type(text) ~= "string" or text == "" then return false end
   if Code.prompt_has_param_write_intent(text)
@@ -30563,6 +32147,7 @@ end
 --  fatal  reaper_api            `reaper.X` reference (JSFX has no reaper API)
 --  fatal  banned_braces         `{` or `}` outside header lines / strings / comments
 --  fatal  banned_else           bare `else` keyword (no else in EEL2)
+--  fatal  banned_end_statement  Lua-style standalone `end;` terminator
 --  fatal  banned_math_prefix    `math.X` (EEL2 uses bare `sin`, `cos`, ...)
 --  fatal  banned_for_loop       C-style `for(...)` (use `loop()` or `while()`)
 --  fatal  feedback_unclamped    feedback-named slider can exceed 0.85 with no
@@ -30734,7 +32319,7 @@ local BANNED_BARE = {
 }
 
 local function check_banned_syntax(tokens, header_lines, findings)
-  for _, t in ipairs(tokens) do
+  for i, t in ipairs(tokens) do
     if t.type == "other" and (t.text == "{" or t.text == "}") then
       if not header_lines[t.line] then
         add(findings, "fatal", "banned_braces", t.line,
@@ -30742,6 +32327,12 @@ local function check_banned_syntax(tokens, header_lines, findings)
       end
     elseif (t.type == "id" or t.type == "kw") and BANNED_BARE[t.text] then
       add(findings, "fatal", "banned_" .. t.text, t.line, BANNED_BARE[t.text])
+    elseif t.type == "id" and t.text == "end" then
+      local j = skip_ws(tokens, i + 1)
+      if j and tokens[j].type == "other" and tokens[j].text == ";" then
+        add(findings, "fatal", "banned_end_statement", t.line,
+            "EEL2 does not use Lua-style `end;` terminators. Function and section bodies use `( ... );`.")
+      end
     end
   end
   for _, line in ipairs(find_seq_lines(tokens, {
@@ -32112,6 +33703,36 @@ function Net.process_response_buckets(text)
     wants_fx_list = false
     fx_list_search = {}
   end
+  if S.midi_ref_message
+     and Code.prompt_has_midi_workflow_intent(S.pending_orig_prompt)
+     and (wants_docs or wants_docs_section)
+     and not wants_docs_extended
+     and #bogus_docs_sections == 0 then
+    local midi_ref_covers_sections = true
+    for _, nm in ipairs(docs_section_names) do
+      if nm ~= "items" and nm ~= "tempo" then
+        midi_ref_covers_sections = false
+        break
+      end
+    end
+    if midi_ref_covers_sections then
+      local suppressed = {}
+      if wants_docs then suppressed[#suppressed+1] = "docs" end
+      for _, nm in ipairs(docs_section_names) do
+        suppressed[#suppressed+1] = "docs:" .. nm
+      end
+      if #suppressed > 0 then
+        Log.line("DISPATCH",
+          "suppressed MIDI-covered docs request: "
+          .. tbl_concat(suppressed, ", "))
+        wants_docs = false
+        wants_docs_section = false
+        docs_section_names = {}
+        S._midi_docs_suppressed_hint = tbl_concat(suppressed, ", ")
+        wants_preempt_hint = true
+      end
+    end
+  end
 
   if wants_docs or wants_docs_extended or wants_docs_section or wants_session or wants_fx_params or wants_plugin_ref or wants_fx_list or wants_fx_chains or wants_track_flags or wants_midi or wants_recent_reaper_changes or wants_pref_plugins or wants_theme or wants_fx_inspect or wants_preempt_hint or wants_prompt_bundle or #bogus_docs_sections > 0 then
     -- Build a fresh session snapshot if requested and not already present.
@@ -32773,6 +34394,18 @@ function Net.process_response_buckets(text)
       -- generic "plugin parameter / preferred plugins" copy that doesn't
       -- match docs:* / midi / api_ref shapes.
       local reuse_hint_fired = false
+      if S._midi_docs_suppressed_hint then
+        history_content = history_content
+          .. "(NOTE: You requested <context_needed>"
+          .. S._midi_docs_suppressed_hint
+          .. "</context_needed>, but the pinned `midi` reference is the "
+          .. "intended reference for this MIDI note/item workflow. Do NOT "
+          .. "request docs, docs:items, or docs:tempo solely for MIDI item "
+          .. "or note code. Use the pinned MIDI reference plus the prompt's "
+          .. "track-creation rules and generate the code now.)\n\n"
+        S._midi_docs_suppressed_hint = nil
+        reuse_hint_fired = true
+      end
       if S._context_reuse_hint and #S._context_reuse_hint > 0 then
         local tags_str = tbl_concat(S._context_reuse_hint, ", ")
         history_content = history_content
@@ -33202,10 +34835,21 @@ function Net._handle_watchdog_timeout()
   if not S.send_time or elapsed <= poll_timeout then
     return false
   end
-  local timeout_msg =
-    "The request timed out. The server may be busy, or your internet "
-    .. "connection may have dropped.\n\n"
-    .. "Try sending your message again."
+  local timeout_msg
+  if p_active.id == "google" then
+    timeout_msg =
+      "The request timed out while waiting for Google's Gemini service. "
+      .. "Gemini may be overloaded or temporarily unavailable. If the rest "
+      .. "of your internet is working, this is a provider-side availability "
+      .. "issue, not a problem with your prompt, API key, or ReaAssist.\n\n"
+      .. "Try again in a moment. If it keeps happening, switch to a faster "
+      .. "Gemini model or another provider for this request."
+  else
+    timeout_msg =
+      "The request timed out. The server may be busy, or your internet "
+      .. "connection may have dropped.\n\n"
+      .. "Try sending your message again."
+  end
   local debug = Net._curl_failure_debug(nil, timeout_msg, "watchdog_timeout")
   debug.elapsed_s = elapsed
   debug.poll_timeout_s = poll_timeout
@@ -33221,7 +34865,7 @@ function Net._handle_watchdog_timeout()
     Log.line("TIER-TEST", "interpreted as: ambiguous (timeout; not persisted)")
     if UI and UI.show_float_toast then
       UI.show_float_toast(
-        "Couldn't verify Gemini tier - will retry on next start", "err")
+        "Gemini tier check timed out - will retry", "err")
     end
     if PROVIDERS.active().id == "google" then MODELS.refresh() end
     return true
@@ -33325,7 +34969,7 @@ function Net._handle_curl_exit_failure()
       "interpreted as: ambiguous (curl exit=%d; not persisted)", exit_code))
     if UI and UI.show_float_toast then
       UI.show_float_toast(
-        "Couldn't verify Gemini tier - will retry on next start", "err")
+        "Gemini tier check failed - will retry", "err")
     end
     if PROVIDERS.active().id == "google" then MODELS.refresh() end
     return true
@@ -33398,14 +35042,28 @@ function Net._handle_json_decode_error(raw, decode_err)
                   or raw_head:find("502 bad",   1, true)
                   or raw_head:find("503 ",      1, true)
                   or raw_head:find("504 ",      1, true)
+  local looks_5xx = raw_head:find("502", 1, true)
+                 or raw_head:find("503", 1, true)
+                 or raw_head:find("504", 1, true)
   if looks_html then
-    Log.add_error(
-      "The server returned an HTML page instead of a JSON response. This "
-      .. "usually means a proxy, firewall, or captive portal (hotel/coffee "
-      .. "shop Wi-Fi) is intercepting the request, or the API endpoint is "
-      .. "temporarily down behind a 5xx gateway error.\n\n"
-      .. "Try a different network, disable any VPN/proxy, or wait a few "
-      .. "minutes and retry.")
+    local p = PROVIDERS[S.pending_provider_idx] or PROVIDERS.active()
+    if p and p.id == "google" and looks_5xx then
+      Log.add_error(
+        "Google's Gemini service returned a 5xx provider error instead "
+        .. "of a JSON API response. This usually means Gemini is overloaded "
+        .. "or temporarily unavailable, not that your prompt, API key, or "
+        .. "ReaAssist failed.\n\n"
+        .. "Wait a moment and retry. If it keeps happening, switch to a "
+        .. "faster Gemini model or another provider for this request.")
+    else
+      Log.add_error(
+        "The server returned an HTML page instead of a JSON response. This "
+        .. "usually means a proxy, firewall, or captive portal (hotel/coffee "
+        .. "shop Wi-Fi) is intercepting the request, or the API endpoint is "
+        .. "temporarily down behind a 5xx gateway error.\n\n"
+        .. "Try a different network, disable any VPN/proxy, or wait a few "
+        .. "minutes and retry.")
+    end
   else
     Log.add_error(
       "Got an unreadable response from the server. This is usually "
@@ -33532,9 +35190,10 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth)
       S.display_messages[S.pending_display_idx].ctx_label = "provider capacity"
     end
     local recovery = Net._google_capacity_recovery(p)
-    local msg = "Google's Gemini service says this model is currently at capacity. "
-      .. "This is a provider-side availability issue, not a problem with your "
-      .. "prompt, API key, or ReaAssist.\n\n"
+    local msg = "Google's Gemini service returned 503 UNAVAILABLE: this "
+      .. "model is currently at capacity or temporarily unavailable. This is "
+      .. "a provider-side availability issue, not a problem with your prompt, "
+      .. "API key, or ReaAssist.\n\n"
       .. "ReaAssist retried with exponential backoff and Google still returned "
       .. "503 UNAVAILABLE. You can wait and retry later"
     if recovery then
@@ -33949,8 +35608,7 @@ function Net.try_finish_curl()
       local cur_model = p.models[prefs.model_idx] or MODELS[prefs.model_idx]
       if (code == 403 or code == 429 or status == "PERMISSION_DENIED"
           or status == "RESOURCE_EXHAUSTED") and cur_model and cur_model.paid_only then
-        S.gemini_paid_tier = false
-        reaper.SetExtState(CFG.EXT_NS, "gemini_paid_tier", "false", true)
+        Store.set_gemini_paid_tier(false)
         MODELS.refresh()
         if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
           S.display_messages[S.pending_display_idx].ctx_label = "api error"
@@ -35830,6 +37488,9 @@ function Net.try_finish_curl()
   local docs_available = S.api_ref_message ~= nil
     or S.docs_fetched_session
     or (S.docs_section_sent and next(S.docs_section_sent) ~= nil)
+    or (S.midi_ref_message ~= nil
+      and Code.prompt_has_midi_workflow_intent(S.pending_orig_prompt)
+      and Code.lua_uses_only_midi_ref_covered_calls(lua_code))
   if lua_code and not docs_available
      and lua_code:find("reaper%.[%w_]") then
     local ref_content, ref_err = CTX.docs()
@@ -38287,11 +39948,11 @@ if #S.bootstrap_missing > 0 then
   -- Distinguish "fresh install (stub installer just dropped ReaAssist.lua,
   -- supporting files not yet fetched)" from "existing install with corrupt
   -- or missing files." The former auto-installs without a Repair button;
-  -- the latter shows the existing repair prompt. Signal: ExtState
+  -- the latter shows the existing repair prompt. Signal: Config/ExtState
   -- `first_launch_complete` is set once UI has loaded successfully at
-  -- least once on this REAPER profile. Empty -> install mode.
+  -- least once on this REAPER profile. Missing -> install mode.
   S.bootstrap_install_mode =
-    (reaper.GetExtState(CFG.EXT_NS, "first_launch_complete") ~= "1")
+    not Store.first_launch_complete()
   Log.line("BOOTSTRAP", string.format(
     "%d critical file%s missing; entering %s mode on this launch.",
     #S.bootstrap_missing,
@@ -38310,7 +39971,7 @@ else
   if not ok_ui then
     S.bootstrap_active = true
     S.bootstrap_install_mode =
-      (reaper.GetExtState(CFG.EXT_NS, "first_launch_complete") ~= "1")
+      not Store.first_launch_complete()
     S.bootstrap_missing[#S.bootstrap_missing + 1] =
       "Resources/UI.lua (load error)"
     -- Log only; do NOT call Updater._set_failure here. Same reason as
@@ -38325,7 +39986,9 @@ else
     -- UI loaded cleanly. Mark first launch as complete so any future
     -- bootstrap fires routes through the recovery (repair) UI instead
     -- of the first-install UI.
-    reaper.SetExtState(CFG.EXT_NS, "first_launch_complete", "1", true)
+    if not (S and S._factory_reset_clean_boot) then
+      Store.mark_first_launch_complete()
+    end
   end
 end
 
@@ -38359,10 +40022,7 @@ function Loop.handle_dev_signal()
   if dev_sig == "clear_chat" then
     Net.clear_conversation()
   elseif dev_sig == "reset_window" then
-    reaper.DeleteExtState(CFG.EXT_NS, "win_x", true)
-    reaper.DeleteExtState(CFG.EXT_NS, "win_y", true)
-    reaper.DeleteExtState(CFG.EXT_NS, "win_w", true)
-    reaper.DeleteExtState(CFG.EXT_NS, "win_h", true)
+    Store.clear_window_geometry()
     S._reset_window_size = true
   elseif dev_sig == "refresh_debug_log" then
     -- Match the default-ON pattern at the prefs load site (~= "0").
@@ -38960,10 +40620,8 @@ local function loop()
     -- Save window geometry for next launch. Skipped after Factory Reset
     -- so freshly-cleared keys don't reappear before the user can verify.
     if update._main_x and not S._suppress_geometry_save then
-      reaper.SetExtState(CFG.EXT_NS, "win_x", tostring(math.floor(update._main_x)), true)
-      reaper.SetExtState(CFG.EXT_NS, "win_y", tostring(math.floor(update._main_y)), true)
-      reaper.SetExtState(CFG.EXT_NS, "win_w", tostring(math.floor(update._main_w)), true)
-      reaper.SetExtState(CFG.EXT_NS, "win_h", tostring(math.floor(update._main_h)), true)
+      Store.save_window_geometry(
+        update._main_x, update._main_y, update._main_w, update._main_h)
     end
     -- Intentional close: clean up ExtState (atexit handles crashes).
     set_toolbar(false)

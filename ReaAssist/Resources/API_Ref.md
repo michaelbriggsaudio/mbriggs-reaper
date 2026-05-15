@@ -2016,6 +2016,17 @@ To create a new MIDI item, use `reaper.CreateNewMIDIItemInProj`. Do NOT create
 a plain item with `AddMediaItemToTrack` and then call `GetActiveTake`; that item
 has no MIDI take, so note insertion silently does nothing or trips a nil check.
 
+For destination tracks in MIDI-generation scripts:
+```lua
+  local index = reaper.CountTracks(0)
+  reaper.InsertTrackAtIndex(index, true)
+  local dest = reaper.GetTrack(0, index)
+  reaper.GetSetMediaTrackInfo_String(dest, "P_NAME", "Bass", true)
+```
+Default to appending the destination track unless the user explicitly asks for a
+position. When iterating source items, use `reaper.CountTrackMediaItems(track)`;
+do NOT invent `GetTrackNumMediaItems`.
+
 ## VALUE RANGES (memorize these)
 
 ```
@@ -2080,6 +2091,30 @@ Musical note lengths are tempo-derived. At 128 BPM, one quarter note is
 and the user asks for quarter-note notes, each note ends at start + 0.46875,
 not at the next listed start, unless the user explicitly asks for sustained
 notes.
+
+## MUSICAL DERIVATION REQUESTS
+
+For prompts like "write a bass part from the melody notes", "make a harmony
+from this MIDI", or non-English equivalents using common music terms for
+melody, notes, bass, harmony, or part, do NOT treat "part" as "copy every
+source note unchanged except pitch". A raw octave copy is correct only when the
+user asks to copy, duplicate, double, or transpose the melody.
+
+If the source track/item or musical style is unresolved, ask one compact
+question before code. Preserve the original request in that question, e.g.
+"Which melody track should I use, and should the bass follow every note or make
+a simplified strong-beat line?"
+
+If the source is uniquely resolved and the user did not specify a style, use a
+conservative bass default: lower register, phrase boundaries preserved, rhythm
+simplified toward strong beats or longer notes, dense ornaments skipped, pitches
+clamped to a playable bass range unless the user names another range. Say the
+assumption in the one-line summary.
+
+For musical transformations, prefer project-QN math: read source note start/end
+with `MIDI_GetProjQNFromPPQPos`, transform rhythm/pitch in QN space, then insert
+into the destination take with `MIDI_GetPPQPosFromProjQN`. This preserves musical
+position across tempo maps better than seconds-based rewriting.
 
 ## BULK-OPS RULE (CRITICAL, ALWAYS APPLY)
 

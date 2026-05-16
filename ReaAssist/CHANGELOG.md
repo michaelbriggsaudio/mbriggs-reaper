@@ -1,5 +1,13 @@
 # ReaAssist - Changelog
 
+## v1.2.3 - 2026-05-15
+
+- **ReaAssist runtime scratch files now stay in the app's Data folder.** Temporary curl, update, screenshot, feedback, and diagnostics files no longer clutter the REAPER resource root.
+
+- **Recent REAPER guidance is updated for REAPER 7.73.** ReaAssist now knows about the latest grid actions, sample editing improvements, razor edit behavior, track grouping updates, and the built-in MIDI Choke Group JSFX.
+
+- **The update prompt now links to the site-hosted changelog.** The update popup includes a quieter View Changelog button that opens the new `reaassist.app/changelog/` page.
+
 ## v1.2.2 - 2026-05-15
 
 - **ReaAssist data now lives in a dedicated Data folder.** Preferences, provider records, selections, runtime state, FX cache, and debug logs are migrated out of REAPER ExtState / shipped Resources files into `Data/`, with cleanup of legacy entries after successful writes.

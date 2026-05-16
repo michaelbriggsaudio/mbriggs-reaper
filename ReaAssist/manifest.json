@@ -1,5 +1,5 @@
 {
-  "version": "1.2.2",
+  "version": "1.2.3",
   "removed_files": [
     "Resources/MIDI_Ref.md",
     "Resources/Theme_Ref.md",
@@ -8,7 +8,7 @@
   "files": [
     {
       "name": "CHANGELOG.md",
-      "sha256": "43728f7629f2ae12e6ac619c1aee4ed295b5c99152e9c7122d0a0f19510e3228"
+      "sha256": "3e30fd60c2530722e7302f48567b0a7a870c72440a47700dacf0114600624859"
     },
     {
       "name": "LICENSE.txt",
@@ -20,7 +20,7 @@
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "5b0a01bf1fc391ed65cbaabc3bccf6ab67364a6ea94a7b0cea72db1ad0b9cf0f"
+      "sha256": "ba48e020c048a3162c79c927c5e12d5031eb1140a32d68293de2ab5d3e0eccd3"
     },
     {
       "name": "Resources/API_Ref.md",
@@ -28,7 +28,7 @@
     },
     {
       "name": "Resources/Diag.lua",
-      "sha256": "722262753085914502580bbe85bfd04f448b18f88485be66fad43e14e18aa76a"
+      "sha256": "f85cbc75642d8693b6c931877fb16b82fc099fd2c06de11ace8c9f27d9c1d1dc"
     },
     {
       "name": "Resources/Help.md",
@@ -64,7 +64,7 @@
     },
     {
       "name": "Resources/Reaper_Recent_Changes.md",
-      "sha256": "62238ea440748c26e95b6136e762906894f5118e94d9ea26780c141d66318033"
+      "sha256": "ef59f0534425f496e897451245c568151f8a980364e4536ca6beb1bd1c7179db"
     },
     {
       "name": "Resources/Relaunch.lua",
@@ -76,7 +76,7 @@
     },
     {
       "name": "Resources/UI.lua",
-      "sha256": "8447b3651365d12ae04257840095656f9ecfb447b23f76be3083988d6f4d3a3e"
+      "sha256": "affebf197cb8b9d6cf101b2b8ab820c3996cd4fdb8164c1cb8b495fcdda02d70"
     },
     {
       "name": "Resources/fonts/Inter_18pt-Bold.ttf",

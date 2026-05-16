@@ -6143,6 +6143,7 @@ function Render._factory_reset_execute()
   api_keys.show_test_results = false
   api_keys.test_results = {}
   api_keys.custom_edit = nil
+  local factory_reset_data_dir_cleared = false
   do
     local function remove_family(path)
       if not path or path == "" then return end
@@ -6150,33 +6151,79 @@ function Render._factory_reset_execute()
       os.remove(path .. ".tmp")
       os.remove(path .. ".bak")
     end
-    local function remove_corrupt_artifacts(dir)
+    local function safe_data_dir(dir)
+      if not dir or dir == "" then return false end
+      if not RA.script_path or RA.script_path == "" then return false end
+      if dir:sub(1, #RA.script_path) ~= RA.script_path then return false end
+      return dir:match("[/\\]Data[/\\]$") ~= nil
+    end
+    local function shell_path_safe(path)
+      return type(path) == "string" and path ~= "" and not path:find('"', 1, true)
+    end
+    local function ps_escape(path) return tostring(path or ""):gsub("'", "''") end
+    local function sq(path) return "'" .. tostring(path or ""):gsub("'", "'\\''") .. "'" end
+    local function remove_dir(path)
+      if not path or path == "" then return end
+      path = path:gsub("[/\\]+$", "")
+      if path == "" then return end
+      if os.remove(path) == true then return end
+      if not shell_path_safe(path) then return end
+      if RA.IS_WINDOWS then
+        if type(reaper.ExecProcess) == "function" then
+          local cmd = "powershell -NoProfile -WindowStyle Hidden"
+            .. " -Command \"Remove-Item -LiteralPath '"
+            .. ps_escape(path)
+            .. "' -Recurse -Force -ErrorAction SilentlyContinue\""
+          pcall(reaper.ExecProcess, cmd, 5000)
+        end
+      else
+        os.execute("rmdir " .. sq(path) .. " >/dev/null 2>&1")
+      end
+    end
+    local function clear_tree_contents(dir)
       if not dir or dir == "" then return end
-      local victims = {}
+      local sep = (dir:sub(-1) == "/" or dir:sub(-1) == "\\") and "" or RA.SEP
+      local files = {}
       local idx = 0
       while true do
         local fn = reaper.EnumerateFiles(dir, idx)
         if not fn then break end
-        if fn:find(".corrupt.", 1, true) then
-          victims[#victims + 1] = fn
-        end
+        files[#files + 1] = fn
         idx = idx + 1
       end
-      local sep = (dir:sub(-1) == "/" or dir:sub(-1) == "\\") and "" or RA.SEP
-      for _, fn in ipairs(victims) do
+      for _, fn in ipairs(files) do
         os.remove(dir .. sep .. fn)
       end
+
+      if type(reaper.EnumerateSubdirectories) ~= "function" then return end
+      local dirs = {}
+      idx = 0
+      while true do
+        local sub = reaper.EnumerateSubdirectories(dir, idx)
+        if not sub then break end
+        dirs[#dirs + 1] = sub
+        idx = idx + 1
+      end
+      for _, sub in ipairs(dirs) do
+        local child = dir .. sep .. sub
+        clear_tree_contents(child)
+        remove_dir(child)
+      end
     end
-    remove_family(RA.CONFIG_PATH)
-    remove_family(RA.PROVIDERS_PATH)
-    remove_family(RA.STATE_PATH)
-    remove_family(RA.DATA_DIR .. "FX_Cache.json")
-    remove_family(RA.DATA_DIR .. "Debug.log")
-    remove_corrupt_artifacts(RA.DATA_DIR)
+    if safe_data_dir(RA.DATA_DIR) then
+      clear_tree_contents(RA.DATA_DIR)
+      factory_reset_data_dir_cleared = true
+    else
+      remove_family(RA.CONFIG_PATH)
+      remove_family(RA.PROVIDERS_PATH)
+      remove_family(RA.STATE_PATH)
+      remove_family(RA.DATA_DIR .. "FX_Cache.json")
+      remove_family(RA.DATA_DIR .. "Debug.log")
+      remove_family(RA.FX_CACHE_PATH)
+      remove_family(Log and Log.path)
+    end
     remove_family(RA._LEGACY_FX_CACHE_PATH)
     remove_family(RA._LEGACY_DEBUG_LOG_PATH)
-    remove_family(RA.FX_CACHE_PATH)
-    remove_family(Log and Log.path)
     if Store then
       Store._config_doc = nil
       Store._state_doc = nil
@@ -6194,6 +6241,12 @@ function Render._factory_reset_execute()
   -- is permanently suppressed. If the relauncher can't register, fall
   -- back to a clear toast so the user knows to close-and-reopen by hand.
   if not Updater.fire_relauncher_now() then
+    if factory_reset_data_dir_cleared
+       and RA.TEMP_DIR
+       and RA.TEMP_DIR ~= ""
+       and type(reaper.RecursiveCreateDirectory) == "function" then
+      pcall(reaper.RecursiveCreateDirectory, RA.TEMP_DIR, 0)
+    end
     UI.show_float_toast(
       "Reset complete. Close and reopen ReaAssist to finish.", "ok", true)
   end
@@ -17768,7 +17821,9 @@ function Render.main_window()
     -- title + a one-line sub-message.
     local dlg_w = RA.SC(400)
     local dlg_h
-    if update.state == "available" or update.state == "repair_available" then
+    if update.state == "available" then
+      dlg_h = RA.SC(252)
+    elseif update.state == "repair_available" then
       dlg_h = RA.SC(220)
     elseif update.state == "downloading" or update.state == "rename_retry" then
       dlg_h = RA.SC(210)
@@ -18045,23 +18100,22 @@ function Render.main_window()
         Text(RA.ctx, desc2)
         ImGui.ImGui_Spacing(RA.ctx)
         ImGui.ImGui_Spacing(RA.ctx)
-        -- Centered button row: Update Now (primary) + Later. Later
-        -- dismisses AND snoozes for 7 days so the daily auto-check
-        -- does not re-nag the user for a week; clicking the footer
-        -- version link or hitting Settings > Check for Updates still
-        -- bypasses the snooze for an on-demand check. Widths sized
-        -- so both labels sit with comfortable padding (previously
-        -- "Update Now" at SC(88) read as tight next to the chrome).
-        local btn1_w, btn2_w, gap = RA.SC(104), RA.SC(80), RA.SC(16)
-        local row1_w = btn1_w + gap + btn2_w
+        -- Primary decision row first; secondary release-notes action
+        -- below. Later dismisses AND snoozes for 7 days so the daily
+        -- auto-check does not re-nag the user for a week; clicking the
+        -- footer version link or hitting Settings > Check for Updates
+        -- still bypasses the snooze for an on-demand check.
+        local update_w, later_w, changelog_w, changelog_h, gap =
+          RA.SC(104), RA.SC(80), RA.SC(116), RA.SC(24), RA.SC(16)
+        local row1_w = update_w + gap + later_w
         UI.update_dialog_center_cursor(dlg_cw, row1_w)
         UI.push_modal_primary_btn()
-        if ImGui.ImGui_Button(RA.ctx, "Update Now", btn1_w, 0) then
+        if ImGui.ImGui_Button(RA.ctx, "Update Now", update_w, 0) then
           Updater.download_start()
         end
         UI.pop_modal_primary_btn()
         SameLine(RA.ctx, 0, gap)
-        if ImGui.ImGui_Button(RA.ctx, "Later", btn2_w, 0) then
+        if ImGui.ImGui_Button(RA.ctx, "Later", later_w, 0) then
           update.show_dialog = false
           -- Persist a 7-day snooze so the daily auto-check does not
           -- re-nag; check_poll() reads this stored value and (for piggyback
@@ -18075,6 +18129,17 @@ function Render.main_window()
             Store.set_update_snooze(snooze_until)
           end
         end
+        ImGui.ImGui_Spacing(RA.ctx)
+        ImGui.ImGui_Spacing(RA.ctx)
+        UI.update_dialog_center_cursor(dlg_cw, changelog_w)
+        PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
+        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ButtonTextAlign(), 0.5, 0.5)
+        if ImGui.ImGui_Button(RA.ctx, "View Changelog",
+            changelog_w, changelog_h) then
+          UI.open_url("https://reaassist.app/changelog/")
+        end
+        ImGui.ImGui_PopStyleVar(RA.ctx, 1)
+        PopFont(RA.ctx)
       end
     end
     -- ImGui_End is called outside the visible block per the Dear ImGui

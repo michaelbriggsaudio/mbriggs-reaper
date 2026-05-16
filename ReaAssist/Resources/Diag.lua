@@ -63,6 +63,8 @@ Diag.AUTO_CAP_BYTES             = 1024 * 1024
 Diag.AUTO_FLUSH_INTERVAL_S      = 60
 Diag.AUTO_SEND_IDLE_S           = 60
 Diag.AUTO_RECENT_TURN_LIMIT     = 80
+Diag.LEGACY_STORAGE_CLEANUP_DELAY_S = 3
+Diag.LEGACY_STORAGE_CLEANUP_VERSION = 6
 Diag.PRICE_TABLE_VERSION        = "2026-05-09"
 
 Diag.PROVIDER_VOCABULARY     = { "anthropic", "openai", "google", "custom", "unknown" }
@@ -1734,15 +1736,41 @@ local function _owner_token(raw)
   return raw
 end
 
-local function _tmp_dir()
+local function _sep()
+  return (type(RA) == "table" and type(RA.SEP) == "string") and RA.SEP or "/"
+end
+
+local function _ensure_dir(dir)
+  if type(dir) == "string" and dir ~= ""
+     and type(reaper) == "table"
+     and type(reaper.RecursiveCreateDirectory) == "function" then
+    pcall(reaper.RecursiveCreateDirectory, dir, 0)
+  end
+  return dir
+end
+
+local function _data_diag_dir(kind)
+  local sep = _sep()
+  if type(RA) == "table" and type(RA.DATA_DIR) == "string" and RA.DATA_DIR ~= "" then
+    local base = RA.DATA_DIR
+    if not base:match("[/\\]$") then base = base .. sep end
+    return _ensure_dir(base .. "Diag" .. sep .. kind .. sep)
+  end
+  return "/tmp/"
+end
+
+local function _legacy_resource_dir()
   if type(reaper) == "table" and type(reaper.GetResourcePath) == "function" then
     local rp = reaper.GetResourcePath()
     if type(rp) == "string" and rp ~= "" then
-      local sep = (type(RA) == "table" and type(RA.SEP) == "string") and RA.SEP or "/"
-      return rp .. sep
+      return rp .. _sep()
     end
   end
-  return "/tmp/"
+  return nil
+end
+
+local function _tmp_dir()
+  return _data_diag_dir("Feedback")
 end
 
 local function _tmp_path(suffix)
@@ -1750,6 +1778,14 @@ local function _tmp_path(suffix)
 end
 
 local function _path_safe(p) return type(p) == "string" and not p:find('"', 1, true) end
+
+local function _path_exists(p)
+  if type(p) ~= "string" or p == "" then return false end
+  p = p:gsub("[/\\]+$", "")
+  if p == "" then return false end
+  local ok, _, code = os.rename(p, p)
+  return ok == true or code == 13
+end
 
 local function _ps_escape(s) return s:gsub("'", "''") end
 local function _sq(p) return "'" .. p:gsub("'", "'\\''") .. "'" end
@@ -1910,22 +1946,11 @@ local auto_state = {
 }
 
 local function _auto_dir()
-  local sep = (type(RA) == "table" and type(RA.SEP) == "string") and RA.SEP or "/"
-  if type(reaper) == "table" and type(reaper.GetResourcePath) == "function" then
-    local rp = reaper.GetResourcePath()
-    if type(rp) == "string" and rp ~= "" then
-      return rp .. sep .. "ReaAssist_AutoDiag" .. sep
-    end
-  end
-  return _tmp_dir() .. "ReaAssist_AutoDiag" .. sep
+  return _data_diag_dir("Auto")
 end
 
 local function _ensure_auto_dir()
-  local dir = _auto_dir()
-  if type(reaper) == "table" and type(reaper.RecursiveCreateDirectory) == "function" then
-    pcall(reaper.RecursiveCreateDirectory, dir, 0)
-  end
-  return dir
+  return _ensure_dir(_auto_dir())
 end
 
 local function _auto_pending_path(owner)
@@ -2091,6 +2116,242 @@ local function _list_auto_files()
   return out
 end
 
+local storage_prepared = false
+local legacy_storage_prepared = false
+local legacy_cleanup_attempts = 0
+local legacy_cleanup_last_attempt_at = 0
+
+local function _legacy_auto_dir()
+  local root = _legacy_resource_dir()
+  if not root then return nil end
+  return root .. "ReaAssist_AutoDiag" .. _sep()
+end
+
+local function _remove_dir_if_empty(dir)
+  if not dir or type(reaper) ~= "table" or type(reaper.EnumerateFiles) ~= "function" then
+    return
+  end
+  local path = dir:gsub("[/\\]+$", "")
+  if path == "" or not _path_exists(path) then return end
+  local has_subdir = type(reaper.EnumerateSubdirectories) == "function"
+    and reaper.EnumerateSubdirectories(dir, 0) ~= nil
+  if reaper.EnumerateFiles(dir, 0) == nil and not has_subdir then
+    if os.remove(path) == true then return end
+    if not _path_safe(path) then return end
+    if _detect_os() == "win" then
+      if type(reaper) == "table" and type(reaper.ExecProcess) == "function" then
+        local ps_path = _ps_escape(path)
+        local cmd = "powershell -NoProfile -WindowStyle Hidden"
+          .. " -Command \"Remove-Item -LiteralPath '"
+          .. ps_path
+          .. "' -Force -ErrorAction SilentlyContinue\""
+        pcall(reaper.ExecProcess, cmd, 2000)
+      end
+    else
+      os.execute("rmdir " .. _sq(path) .. " >/dev/null 2>&1")
+    end
+  end
+end
+
+local function _dir_exists(dir)
+  if type(dir) ~= "string" or dir == "" then return false end
+  local path = dir:gsub("[/\\]+$", "")
+  if _path_exists(path) then return true end
+  if type(reaper) ~= "table"
+     or type(reaper.EnumerateSubdirectories) ~= "function" then
+    return false
+  end
+  local parent, leaf = path:match("^(.*)[/\\]([^/\\]+)$")
+  if not parent or parent == "" or not leaf or leaf == "" then return false end
+  if not parent:match("[/\\]$") then parent = parent .. _sep() end
+  local want = (_detect_os() == "win") and leaf:lower() or leaf
+  local i = 0
+  while true do
+    local sub = reaper.EnumerateSubdirectories(parent, i)
+    if not sub then break end
+    local got = (_detect_os() == "win") and sub:lower() or sub
+    if got == want then return true end
+    i = i + 1
+  end
+  return false
+end
+
+local function _temp_file_name(name, include_core_temp)
+  if type(name) ~= "string" then return false end
+  if name:match("^reaassist_fb_body_")
+     or name:match("^reaassist_fb_resp_")
+     or name:match("^reaassist_fb_status_")
+     or name:match("^reaassist_fb_exit_") then
+    return true
+  end
+  return include_core_temp and (
+    name:match("^reaassist_.+%.txt$")
+    or name:match("^reaassist_.+%.json$")
+    or name:match("^reaassist_.+%.ps1$")
+    or name:match("^reaassist_.+%.png$")) or false
+end
+
+local function _cleanup_temp_files_in(dir, include_core_temp)
+  if not dir or type(reaper) ~= "table" or type(reaper.EnumerateFiles) ~= "function" then
+    return
+  end
+  local names = {}
+  local i = 0
+  while true do
+    local name = reaper.EnumerateFiles(dir, i)
+    if not name then break end
+    if _temp_file_name(name, include_core_temp) then
+      names[#names + 1] = name
+    end
+    i = i + 1
+  end
+  for _, name in ipairs(names) do
+    os.remove(dir .. name)
+  end
+end
+
+local function _has_temp_files_in(dir, include_core_temp)
+  if not dir or type(reaper) ~= "table" or type(reaper.EnumerateFiles) ~= "function" then
+    return false
+  end
+  local i = 0
+  while true do
+    local name = reaper.EnumerateFiles(dir, i)
+    if not name then break end
+    if _temp_file_name(name, include_core_temp) then
+      return true
+    end
+    i = i + 1
+  end
+  return false
+end
+
+local function _cleanup_stale_feedback_files()
+  _cleanup_temp_files_in(_tmp_dir(), false)
+end
+
+local function _cleanup_legacy_root_files()
+  _cleanup_temp_files_in(_legacy_resource_dir(), true)
+end
+
+local function _legacy_cleanup_owner()
+  return _owner_token(_legacy_resource_dir() or "unknown")
+end
+
+local function _legacy_cleanup_extstate_key()
+  return "diag_legacy_storage_cleanup_version_" .. _legacy_cleanup_owner()
+end
+
+local function _legacy_cleanup_done()
+  local want = tonumber(Diag.LEGACY_STORAGE_CLEANUP_VERSION) or 1
+  if type(reaper) == "table" and type(reaper.GetExtState) == "function" then
+    if tonumber(reaper.GetExtState(EXT_NS,
+      _legacy_cleanup_extstate_key()) or "") == want then
+      return true
+    end
+  end
+  if type(Store) == "table" and type(Store.state_doc) == "function" then
+    local ok, doc = pcall(Store.state_doc)
+    local d = ok and type(doc) == "table" and doc.diagnostics or nil
+    local roots = type(d) == "table" and d.legacy_storage_cleanup_roots or nil
+    if type(d) == "table"
+       and type(roots) == "table"
+       and tonumber(roots[_legacy_cleanup_owner()]) == want then
+      return true
+    end
+  end
+  return false
+end
+
+local function _mark_legacy_cleanup_done()
+  local version = tonumber(Diag.LEGACY_STORAGE_CLEANUP_VERSION) or 1
+  local owner = _legacy_cleanup_owner()
+  if type(Store) == "table"
+     and type(Store.state_doc) == "function"
+     and type(Store.save_state) == "function" then
+    local ok, doc = pcall(Store.state_doc)
+    if ok and type(doc) == "table" then
+      doc.diagnostics = type(doc.diagnostics) == "table" and doc.diagnostics or {}
+      doc.diagnostics.legacy_storage_cleanup_roots =
+        type(doc.diagnostics.legacy_storage_cleanup_roots) == "table"
+        and doc.diagnostics.legacy_storage_cleanup_roots or {}
+      doc.diagnostics.legacy_storage_cleanup_roots[owner] = version
+      pcall(Store.save_state)
+    end
+  end
+  if type(reaper) == "table" and type(reaper.SetExtState) == "function" then
+    reaper.SetExtState(EXT_NS, _legacy_cleanup_extstate_key(),
+      tostring(version), true)
+  end
+end
+
+local function _migrate_legacy_auto_files()
+  local src = _legacy_auto_dir()
+  if not src or type(reaper) ~= "table" or type(reaper.EnumerateFiles) ~= "function" then
+    return
+  end
+  local names = {}
+  local i = 0
+  while true do
+    local name = reaper.EnumerateFiles(src, i)
+    if not name then break end
+    if name:match("^diag_auto_pending%.(.+)%.json$")
+       or name:match("^diag_auto_sending%.(.+)%.([A-Za-z0-9_-]+)%.json$") then
+      names[#names + 1] = name
+    end
+    i = i + 1
+  end
+
+  if #names == 0 then
+    _remove_dir_if_empty(src)
+    return
+  end
+
+  local dst = _ensure_auto_dir()
+  for _, name in ipairs(names) do
+    local old_path = src .. name
+    local new_path = dst .. name
+    local existing = io.open(new_path, "rb")
+    if existing then
+      existing:close()
+      os.remove(old_path)
+    else
+      os.rename(old_path, new_path)
+    end
+  end
+  _remove_dir_if_empty(src)
+end
+
+local function _legacy_storage_clean()
+  local legacy_auto = _legacy_auto_dir()
+  _remove_dir_if_empty(legacy_auto)
+  return not _has_temp_files_in(_legacy_resource_dir(), true)
+     and not _dir_exists(legacy_auto)
+end
+
+local function _prepare_diag_storage()
+  if storage_prepared then return end
+  storage_prepared = true
+  _cleanup_stale_feedback_files()
+end
+
+local function _prepare_legacy_diag_storage(now)
+  if legacy_storage_prepared then return end
+  local cleanup_done = _legacy_cleanup_done()
+  now = tonumber(now) or os.time()
+  if now - (legacy_cleanup_last_attempt_at or 0) < 1 then return end
+  legacy_cleanup_last_attempt_at = now
+  legacy_cleanup_attempts = legacy_cleanup_attempts + 1
+  _cleanup_legacy_root_files()
+  _migrate_legacy_auto_files()
+  if _legacy_storage_clean() then
+    if not cleanup_done then _mark_legacy_cleanup_done() end
+    legacy_storage_prepared = true
+  elseif legacy_cleanup_attempts >= 3 then
+    legacy_storage_prepared = true
+  end
+end
+
 _dispatch_ready = function()
   if not _tos_accepted() then return false end
   if type(S) == "table" then
@@ -2191,6 +2452,11 @@ local function _auto_tick()
     auto_state.initialized = true
     auto_state.last_scan_at = 0
     auto_state.last_flush_at = 0
+    _prepare_diag_storage()
+  end
+  if not legacy_storage_prepared
+     and now - launch_started_at >= Diag.LEGACY_STORAGE_CLEANUP_DELAY_S then
+    _prepare_legacy_diag_storage(now)
   end
   if now - (auto_state.last_scan_at or 0) >= 10 then
     auto_state.last_scan_at = now

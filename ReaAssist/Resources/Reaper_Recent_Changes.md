@@ -7,6 +7,21 @@ model training cutoffs. This is not the full changelog.
 If a user asks outside this slice, do not invent details. Say the installed
 REAPER changelog is authoritative, or ask for the relevant changelog lines.
 
+## REAPER 7.73 - May 2026
+
+- Actions: REAPER added main Action List commands to move selected media items
+  and envelope points left or right to the grid. For MIDI, the MIDI editor also
+  added actions to move/resize notes and move CC events left/right to grid.
+- Razor edits: Preferences can now choose whether creating a razor edit clears
+  or preserves existing media item/envelope selection, right-click no longer
+  clears razor edits, and the minimum razor edit length is much smaller.
+- Sample editing: sample edit actions now include setting samples to a straight
+  line or interpolated curve, support razor edit bounds, and can auto-activate
+  sample edits when zoomed in far enough.
+- Track grouping: REAPER can automatically group folder/child tracks or folder
+  sibling tracks, and grouped razor edits can include hidden tracks.
+- JSFX: REAPER added a built-in MIDI Choke Group processor.
+
 ## REAPER 7.72 - May 2026
 
 - Render: WAV and WavPack renders can optionally embed hidden regions/markers.

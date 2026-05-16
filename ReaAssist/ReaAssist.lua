@@ -1435,6 +1435,8 @@ reaper.RecursiveCreateDirectory(RA.RESOURCES_DIR, 0)
 -- mutable-data boundary.
 RA.DATA_DIR = RA.script_path .. "Data" .. RA.SEP
 reaper.RecursiveCreateDirectory(RA.DATA_DIR, 0)
+RA.TEMP_DIR = RA.DATA_DIR .. "Temp" .. RA.SEP
+reaper.RecursiveCreateDirectory(RA.TEMP_DIR, 0)
 
 RA.CONFIG_PATH    = RA.DATA_DIR .. "Config.json"
 RA.PROVIDERS_PATH = RA.DATA_DIR .. "Providers.json"
@@ -1503,7 +1505,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.2.2", -- public release version
+  VERSION           = "1.2.3", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -2342,14 +2344,13 @@ ImGui.ImGui_Attach(RA.ctx, RA.prompt_charfilter)
 -- below). bold_font and code_font are cross-file and live on RA
 -- (RA.bold_font, RA.code_font). No forward declaration is needed.
 
--- Tmp file paths for curl I/O. Files are written to the REAPER resource
--- root (e.g. %AppData%\REAPER on Windows) rather than the script's own
--- directory, keeping them out of the source folder regardless of ReaPack
--- install depth. The resource root is guaranteed writable on all platforms.
+-- Tmp file paths for curl/update/screenshot I/O. Files live under ReaAssist's
+-- own Data/Temp directory so the REAPER resource root never accumulates
+-- visible ReaAssist scratch artifacts.
 -- CMD_ID suffix makes filenames unique per script instance.
 local tmp = {}
 do
-  local tmp_dir    = reaper.GetResourcePath() .. RA.SEP
+  local tmp_dir    = RA.TEMP_DIR
   local tmp_suffix = tostring(CMD_ID or 0)
   tmp.out    = tmp_dir .. "reaassist_resp_"       .. tmp_suffix .. ".json"
   tmp.body   = tmp_dir .. "reaassist_body_"       .. tmp_suffix .. ".json"
@@ -2419,16 +2420,15 @@ os.remove(tmp.clipboard)
 -- bootstrap -> auto-update -> relauncher restart cycle, the initial install
 -- can leave behind temp files keyed to a CMD_ID that subsequent normal
 -- launches never see again (most visibly the SHA-verify trio
--- reaassist_shain_/_shaout_/_shaexit_<id>.txt that users notice in
--- /Library/Application Support/REAPER on macOS). Sweep the resource path
--- for any reaassist_* leftovers regardless of suffix. Safe because the
+-- reaassist_shain_/_shaout_/_shaexit_<id>.txt). Sweep Data/Temp for any
+-- reaassist_* leftovers regardless of suffix. Safe because the
 -- single-instance handshake guarantees no other live ReaAssist owns
--- these files; safe even if a sibling install exists in another path
--- because both share one resource directory and only one can run at a
--- time. Pattern is anchored to known temp extensions so we never touch
+-- these files. Pattern is anchored to known temp extensions so we never touch
 -- user-authored files that happen to start with "reaassist_".
 do
-  local sweep_dir = reaper.GetResourcePath()
+  local sweep_dir = RA.TEMP_DIR
+  local sweep_sep = (sweep_dir:sub(-1) == "/" or sweep_dir:sub(-1) == "\\")
+    and "" or RA.SEP
   -- Collect first, remove second: EnumerateFiles is index-based, so
   -- os.remove mid-iteration would shift later entries down by one and
   -- we would skip every other match.
@@ -2446,7 +2446,7 @@ do
     idx = idx + 1
   end
   for _, fn in ipairs(victims) do
-    os.remove(sweep_dir .. RA.SEP .. fn)
+    os.remove(sweep_dir .. sweep_sep .. fn)
   end
 end
 
@@ -16736,6 +16736,8 @@ function CTX.preempt_buckets_for_prompt(user_text)
       "new in reaper", "what's new", "whats new",
       "reaper 7.65", "reaper 7.66", "reaper 7.67", "reaper 7.68",
       "reaper 7.69", "reaper 7.70", "reaper 7.71", "reaper 7.72",
+      "reaper 7.73", "left/right to grid", "envelope points",
+      "midi choke", "choke group", "track grouping", "grouped razor",
       "sample edit", "sample editing", "sample edit envelope",
       "set sample values to zero", "render hidden marker",
       "render hidden region", "hidden marker", "hidden region",

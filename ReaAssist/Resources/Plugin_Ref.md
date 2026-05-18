@@ -3135,6 +3135,45 @@ current context (the cached `[norm:]` then reflects this exact install).
 
 ### COMMON RECIPES
 
+### TRACK-TYPE STARTER EQS
+
+Use these only for open-ended requests such as "apply generic EQ settings",
+"general EQ for each track type", or "type-appropriate EQ". They are conservative
+starting points, not mix decisions. For multi-track generic EQ, use one
+named-field table and one loop. If any row uses Slope, include the
+`set_param_display` helper definition from `prompt_bundle:plugin_helpers`.
+
+```lua
+local proq4_track_type_starters = {
+  vox = {
+    { band = 1, freq = 0.297, shape = 0.222, slope = 24 },              -- HPF 100 Hz
+    { band = 2, freq = 0.444, shape = 0.0,   gain = 0.45,  q = 0.5 },   -- -3 dB at ~370 Hz
+    { band = 3, freq = 0.777, shape = 0.333, gain = 0.533, q = 0.4 },   -- +2 dB high shelf at 5 kHz
+  },
+  guitar = {
+    { band = 1, freq = 0.320, shape = 0.222, slope = 24 },              -- HPF 120 Hz
+    { band = 2, freq = 0.417, shape = 0.0,   gain = 0.467, q = 0.5 },   -- -2 dB at 250 Hz
+    { band = 3, freq = 0.749, shape = 0.333, gain = 0.517, q = 0.4 },   -- +1 dB high shelf at 4 kHz
+  },
+  kick = {
+    { band = 1, freq = 0.266, shape = 0.0, gain = 0.55,  q = 0.5 },     -- +3 dB at 80 Hz
+    { band = 2, freq = 0.444, shape = 0.0, gain = 0.433, q = 0.5 },     -- -4 dB at ~370 Hz
+    { band = 3, freq = 0.749, shape = 0.0, gain = 0.55,  q = 0.5 },     -- +3 dB at 4 kHz
+  },
+}
+
+local proq4_track_type_aliases = {
+  vocal = "vox",
+  vocals = "vox",
+  kick_drum = "kick",
+}
+```
+
+When the track name has a clear alias, map it before lookup: "vox" and
+"vocal" use the same starter; "kick drum" uses `kick`. If no starter matches,
+use the closest conservative recipe from the user's named source type or ask
+one short question.
+
 **"HPF at 80 Hz, 24 dB/oct (standard low-cut for non-bass tracks):"**
 
 ```lua

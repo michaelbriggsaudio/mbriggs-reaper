@@ -14099,13 +14099,14 @@ function Render.main_window()
 
     local scroll_to_msg_y = nil  -- captured Y for smooth-scroll target
     for i, msg in ipairs(S.display_messages) do
-      -- Extra gap between turns (larger than default Spacing).
-      ImGui.ImGui_SetCursorPosY(RA.ctx, ImGui.ImGui_GetCursorPosY(RA.ctx) + BUBBLE_GAP)
+      if not msg.hidden then
+        -- Extra gap between turns (larger than default Spacing).
+        ImGui.ImGui_SetCursorPosY(RA.ctx, ImGui.ImGui_GetCursorPosY(RA.ctx) + BUBBLE_GAP)
 
-      -- Capture scroll target position (content Y, not screen Y).
-      if S.scroll_to_msg and i == S.scroll_to_msg then
-        scroll_to_msg_y = ImGui.ImGui_GetCursorPosY(RA.ctx) - BUBBLE_GAP
-      end
+        -- Capture scroll target position (content Y, not screen Y).
+        if S.scroll_to_msg and i == S.scroll_to_msg then
+          scroll_to_msg_y = ImGui.ImGui_GetCursorPosY(RA.ctx) - BUBBLE_GAP
+        end
 
       if msg.role == "user" then
         -- User bubble: right-aligned, auto-sized to content up to USER_MAX_W.
@@ -14872,6 +14873,59 @@ function Render.main_window()
           UI.selectable_text(msg.content, "##amsg_" .. i, content_w, COL.CHAT_TEXT)
         end
 
+        if msg.local_answer
+           and msg.local_retry_available ~= false
+           and not msg.local_llm_requested
+           and msg.llm_retry_prompt
+           and msg.llm_retry_prompt ~= "" then
+          Dummy(RA.ctx, 1, RA.SC(6))
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+          Text(RA.ctx, "ReaAssist local free reply.")
+          PopStyleColor(RA.ctx)
+          local can_ask_provider = (S.status == "idle" or S.status == "error")
+          local active_provider = PROVIDERS and PROVIDERS.active
+            and PROVIDERS.active() or nil
+          local ask_provider = active_provider
+            and tostring(active_provider.label or active_provider.id or "")
+            or ""
+          ask_provider = ask_provider:gsub("%s+", " "):gsub("#", "")
+          ask_provider = ask_provider:match("^%s*(.-)%s*$") or ""
+          if ask_provider == "" then ask_provider = "the provider" end
+          local ask_label = "Ask " .. ask_provider .. " instead."
+          local link_w = CalcTextSize(RA.ctx, ask_label)
+          local link_col = UI.lerp_u32(COL.LINK, TK.text_muted, 0.42)
+          local disabled_link_col = (TK.text_muted & 0xFFFFFF00) | 0x70
+          local draw_link_col = can_ask_provider and link_col
+            or disabled_link_col
+          local link_sx, link_sy = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        0x00000000)
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), 0x00000000)
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  0x00000000)
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          draw_link_col)
+          PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 0)
+          PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(), 0, 0)
+          if ImGui.ImGui_BeginDisabled then ImGui.ImGui_BeginDisabled(RA.ctx, not can_ask_provider) end
+          if ImGui.ImGui_Button(RA.ctx, ask_label .. "##local_llm_" .. i, link_w, 0)
+             and can_ask_provider then
+            msg.local_llm_requested = true
+            msg.local_retry_available = false
+            if Net and Net.ask_model_instead then
+              Net.ask_model_instead(msg.llm_retry_prompt)
+            end
+          end
+          if ImGui.ImGui_EndDisabled then ImGui.ImGui_EndDisabled(RA.ctx) end
+          ImGui.ImGui_PopStyleVar(RA.ctx, 2)
+          PopStyleColor(RA.ctx, 4)
+          local dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+          local ul_y = link_sy + ImGui.ImGui_GetTextLineHeight(RA.ctx) - 1
+          ImGui.ImGui_DrawList_AddLine(dl, link_sx, ul_y,
+            link_sx + link_w, ul_y, draw_link_col, 1)
+          if can_ask_provider and ImGui.ImGui_IsItemHovered(RA.ctx) then
+            ImGui.ImGui_SetMouseCursor(RA.ctx, ImGui.ImGui_MouseCursor_Hand())
+          end
+          UI.tooltip("Send the same prompt to the selected provider.")
+        end
+
         -- Clickable URL link (rendered as a colored text button).
         if msg.link_url then
           PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), COL.LINK)
@@ -15228,7 +15282,10 @@ function Render.main_window()
               msg._lua_artifact_src = msg.code_block
             end
             lua_artifact = msg.lua_artifact
-            run_blocked = lua_artifact and not lua_artifact.runnable or false
+            run_blocked = lua_artifact
+              and (not lua_artifact.runnable
+                or lua_artifact.manual_run_only == true)
+              or false
           end
 
           -- Risky-code warning. Scan BEFORE rendering buttons so the warning
@@ -15306,6 +15363,8 @@ function Render.main_window()
                 else
                   S.status = "running"
                   local ok = Code.run(msg.code_block)
+                  Code.apply_run_result_to_message(msg, ok, "lua",
+                    msg.code_block, false)
                   if i == #S.display_messages then S.pending_code = nil end
                   S.status = ok and "idle" or "error"
                   S.refocus_prompt = true
@@ -15313,13 +15372,17 @@ function Render.main_window()
               else
                 S.status = "running"
                 local ok = Code.run(msg.code_block)
+                Code.apply_run_result_to_message(msg, ok, "lua",
+                  msg.code_block, false)
                 if i == #S.display_messages then S.pending_code = nil end
                 S.status = ok and "idle" or "error"
                 S.refocus_prompt = true
               end
             end
             UI.tooltip(run_blocked
-              and "This block is a fragment or patch, not a runnable script"
+              and (lua_artifact and lua_artifact.manual_run_only
+                and "Install/run this from its REAPER toolbar action context"
+                or "This block is a fragment or patch, not a runnable script")
               or "Execute this code in REAPER")
             PopStyleColor(RA.ctx, 4)  -- Run: Button/Hovered/Active/Text
 
@@ -15839,6 +15902,7 @@ function Render.main_window()
         ImGui.ImGui_Unindent(RA.ctx, BUBBLE_IND)
       end
 
+      end -- visible message
     end
 
     -- Status indicators: shown below the last user bubble in the assistant
@@ -16819,6 +16883,8 @@ function Render.main_window()
         end
         S.status = "running"
         local ok = Code.run(S.backup_warn_code)
+        Code.apply_run_result_to_message(S.display_messages[S.backup_warn_idx],
+          ok, "lua", S.backup_warn_code, false)
         if S.backup_warn_idx == #S.display_messages then S.pending_code = nil end
         S.status = ok and "idle" or "error"
         S.backup_warn_code = nil
@@ -17383,6 +17449,8 @@ function Render.main_window()
           else
             S.status = "running"
             local ok = Code.run(S.risky_warn_code)
+            Code.apply_run_result_to_message(S.display_messages[S.risky_warn_idx],
+              ok, "lua", S.risky_warn_code, false)
             if S.risky_warn_idx == #S.display_messages then S.pending_code = nil end
             S.status = ok and "idle" or "error"
             S.risky_warn_code   = nil
@@ -17393,6 +17461,8 @@ function Render.main_window()
         else
           S.status = "running"
           local ok = Code.run(S.risky_warn_code)
+          Code.apply_run_result_to_message(S.display_messages[S.risky_warn_idx],
+            ok, "lua", S.risky_warn_code, false)
           if S.risky_warn_idx == #S.display_messages then S.pending_code = nil end
           S.status = ok and "idle" or "error"
           S.risky_warn_code   = nil

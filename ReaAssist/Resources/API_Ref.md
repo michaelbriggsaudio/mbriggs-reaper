@@ -160,6 +160,9 @@ end
 loop()
 
 -- Single-instance guard via ExtState:
+-- Use for persistent helper/watch scripts only. Do NOT use this as the
+-- click-to-toggle path for toolbar buttons whose lit state mirrors project
+-- or track state; see the toolbar toggle rule below.
 local EXT_NS = "my_script"
 if reaper.GetExtState(EXT_NS, "running") ~= "" then
   reaper.SetExtState(EXT_NS, "request_close", "1", false)
@@ -225,6 +228,17 @@ local ts, te = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
   I_HEIGHTOVERRIDE, B_SHOWINMIXER, B_SHOWINTCP, B_MAINSEND,
   IP_TRACKNUMBER (read-only: 1-based, -1=master), P_PARTRACK (read-only).
 
+I_RECINPUT for MIDI record input is bit-packed:
+`4096 + (physical_input_index * 32) + channel`, where channel `0` means all
+MIDI channels and `1..16` mean only that channel. The physical input index is
+from `GetMIDIInputName`; physical input `63` means all MIDI devices, and `62`
+means the virtual MIDI keyboard. A single track input can select one physical
+MIDI device or all devices. It cannot represent "all MIDI devices except X".
+Do not invent `P_MIDI_MAP`, comma-separated device maps, or `4096 + 256` for
+record-input filtering. For an all-except-device workflow, create helper input
+tracks for the allowed devices and route their MIDI to the target track, or ask
+the user to set the exclusion manually in REAPER.
+
 I_FOLDERDEPTH is a folder-depth delta: 1 starts a folder, 0 keeps the current
 depth, -1 closes one folder after this track, and lower negative values close
 multiple nested folders.
@@ -234,12 +248,15 @@ I_FREEMODE is the track lane/free-position mode: 1 = free item positioning,
 as fixed-lane state and call `reaper.UpdateTimeline()` after changing it.
 
 Toolbar toggle actions: do not use "script is running" as the lit toolbar
-state when the requested state is project/track state. For project-state
-buttons, keep any watcher/defer loop alive for observation only, derive the
-button state from live REAPER data (for example `I_FREEMODE == 2` on the
-primary selected track), and toggle the selected track(s) on each toolbar
-invocation. Capture the action ids once and refresh the toolbar after every
-state change:
+state when the requested state is project/track state. Do not make the same
+toolbar action both a long-lived watcher and the click-to-toggle mutator; a
+second click can re-enter the action while the watcher is still alive and
+create double-click/stale-state behavior. Prefer a one-shot toolbar action:
+derive the button state from live REAPER data (for example `I_FREEMODE == 2`
+on the primary selected track), toggle the selected track(s), refresh the
+toolbar, and exit. If a watcher/defer loop is truly needed, keep it
+observational only or use a separate action/clear handoff. Capture the action
+ids once and refresh the toolbar after every state change:
 ```lua
 local _, _, section_id, command_id = reaper.get_action_context()
 
@@ -1683,6 +1700,8 @@ reaper.SetTrackSendInfo_Value(src, 0, sidx, "I_DSTCHAN", 2)    -- to ch3+4 on de
 
 `boolean reaper.SetTempoTimeSigMarker(ReaProject proj, integer ptidx, number timepos, integer measurepos, number beatpos, number bpm, integer timesig_num, integer timesig_denom, boolean lineartempochange)`
   Set a tempo marker. ptidx=-1 to add new.
+  Use either `timepos` with `measurepos=-1, beatpos=-1`, or use
+  `measurepos/beatpos` with `timepos=-1`; do not mix both forms.
 
 `integer reaper.FindTempoTimeSigMarker(ReaProject proj, number time)`
   Find tempo marker at or before a time position.
@@ -1712,6 +1731,57 @@ reaper.SetTrackSendInfo_Value(src, 0, sidx, "I_DSTCHAN", 2)    -- to ch3+4 on de
 
 `number reaper.TimeMap_GetDividedBpmAtTime(number time)`
   Get BPM at a specific time position (envelope-aware).
+
+### MOVE A BAR LINE TO THE EDIT CURSOR
+
+Use this when the user says they tabbed to a transient and wants the nearest
+bar 1 / downbeat / measure line moved onto that transient. This is a tempo-map
+edit: change the tempo of the preceding span so the target measure reaches the
+edit cursor. Do not call `SetTempoTimeSigMarker` with both a target `timepos`
+and `measurepos/beatpos`; REAPER treats those as separate modes.
+
+```lua
+local cursor = reaper.GetCursorPosition()
+local beat, measure, cml, _, cdenom = reaper.TimeMap2_timeToBeats(0, cursor)
+if type(cml) ~= "number" or cml <= 0 then cml = 4 end
+if type(cdenom) ~= "number" or cdenom <= 0 then cdenom = 4 end
+if beat >= (cml / 2) then measure = measure + 1 end
+
+local bar_time = reaper.TimeMap2_beatsToTime(0, 0, measure)
+local target_qn = reaper.TimeMap2_timeToQN(0, bar_time)
+local ref_time = 0
+local ref_qn = reaper.TimeMap2_timeToQN(0, ref_time)
+
+local has_inner_marker = false
+for i = 0, reaper.CountTempoTimeSigMarkers(0) - 1 do
+  local ok, marker_time = reaper.GetTempoTimeSigMarker(0, i)
+  if ok and marker_time > ref_time and marker_time < cursor then
+    has_inner_marker = true
+    break
+  end
+end
+
+if has_inner_marker then
+  reaper.ShowMessageBox("Tempo markers already exist in the retimed span. Review the tempo map before changing it.", "ReaAssist", 0)
+  return
+end
+
+if cursor > ref_time and target_qn > ref_qn then
+  local bpm = (target_qn - ref_qn) * 60 / (cursor - ref_time)
+  local marker_idx = reaper.FindTempoTimeSigMarker(0, ref_time)
+  if marker_idx < 0 then marker_idx = -1 end
+  reaper.SetTempoTimeSigMarker(0, marker_idx, ref_time, -1, -1, bpm, cml, cdenom, false)
+end
+```
+
+Pitfall: do NOT compute
+`bar_start = reaper.TimeMap2_beatsToTime(0, 0, measure)` and then call
+`SetTempoTimeSigMarker(0, -1, bar_start, -1, -1, bpm, -1, -1, false)` for
+this workflow. That inserts a marker at the bar's existing position; it does
+not move the bar/beat line onto the cursor or transient. The `measurepos=-1,
+beatpos=-1` form is valid only when the user wants a new tempo marker at a
+free time position without moving a particular bar/beat. For existing tempo
+changes inside the retimed span, ask before changing the map.
 
 ```lua
 -- Pattern: move edit cursor to bar 5, beat 1
@@ -2374,6 +2444,11 @@ typical user requests.
 - Pitch / velocity out of range. Clamp to 0..127; MIDI_InsertNote silently fails or wraps.
 - Velocity 0 = note off in the MIDI spec. Use 1 as the practical minimum.
 - Calling MIDI functions on a non-MIDI take. Check `reaper.TakeIsMIDI(take)` first when the source is uncertain.
+- Chord/arpeggio pitch tables must be one row per chord. Good:
+  `local chords = { {48,51,55}, {53,56,60} }`. Bad:
+  `local chords = { {{48,51,55}, {53,56,60}} }`; then `chord[i]` is
+  another table, and `MIDI_InsertNote(..., pitch, ...)` fails because pitch
+  must be a number.
 - Creating a note target with `AddMediaItemToTrack`. That is a plain media item,
   not a MIDI item. Use `CreateNewMIDIItemInProj` whenever the script must create
   a new item that receives MIDI notes or CCs.

@@ -1,5 +1,15 @@
 # ReaAssist - Changelog
 
+## v1.2.4 - 2026-05-18
+
+- **Generated scripts are safer around MIDI, tempo, and automation edge cases.** ReaAssist now catches more bad MIDI input filters, MIDI pitch tables, item labels, tempo-marker alignment mistakes, panner/LFO ambiguity, and unsafe pan automation before code can run.
+
+- **Follow-up questions are lighter and cleaner.** Simple explanation-only follow-ups avoid pulling in heavy project snapshots and pinned reference context, reducing unnecessary prompt weight while preserving the actual conversation.
+
+- **Diagnostics and feedback evidence are more useful.** Reports now carry clearer execution, validation, model, and auto-run context so failed or inert responses are easier to understand from the exported evidence.
+
+- **Model guidance is stricter for common failure patterns.** Lower-tier and mid-tier models get tighter guardrails for stock plugins, third-party parameter guesses, toolbar actions, MIDI generation, and existing-FX edits.
+
 ## v1.2.3 - 2026-05-15
 
 - **ReaAssist runtime scratch files now stay in the app's Data folder.** Temporary curl, update, screenshot, feedback, and diagnostics files no longer clutter the REAPER resource root.

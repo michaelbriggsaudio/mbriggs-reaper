@@ -459,6 +459,171 @@ local function _redact_payload_value(v, depth)
   return tostring(v)
 end
 
+local function _safe_turn_provider_id(raw)
+  if type(raw) ~= "string" or raw == "" then return "unknown" end
+  local id = raw:lower()
+  if id == "gemini" then return "google" end
+  if id == "anthropic" or id == "openai" or id == "google" then return id end
+  return "custom"
+end
+
+local function _safe_turn_model_id(raw, provider_id)
+  if type(raw) ~= "string" or raw == "" then return nil end
+  if provider_id == "custom" then return "custom" end
+  return raw
+end
+
+function Diag.normalize_error_kind(raw, debug)
+  local kind = type(raw) == "string" and raw or nil
+  if (kind == nil or kind == "") and type(debug) == "table" then
+    kind = debug.normalized_error_kind or debug.failure_kind
+        or debug.effective_type or debug.error_type
+  elseif (kind == nil or kind == "") and type(debug) == "string" then
+    kind = debug
+  end
+  if kind == nil or kind == "" then return nil end
+  local k = tostring(kind):lower()
+  k = k:gsub("%s+", "_")
+  if k == "model_no_usable_answer" or k == "model_empty_response"
+     or k == "empty_response" or k == "no_usable_answer"
+     or k == "content_filter" or k == "refusal"
+     or k == "model_refusal" or k == "token_limit" then
+    return "model_no_usable_answer"
+  end
+  if k == "provider_auth_error" or k == "authentication_error"
+     or k == "invalid_api_key" or k == "unauthenticated"
+     or k == "permission_error" or k == "permission_denied"
+     or k == "401" or k == "403" then
+    return "provider_auth_error"
+  end
+  if k == "insufficient_quota" or k == "credit_balance_error"
+     or k == "resource_exhausted_billing" or k:find("quota", 1, true)
+     or k:find("credit", 1, true) or k:find("billing", 1, true) then
+    return "insufficient_quota"
+  end
+  if k == "provider_throttle" or k == "rate_limit_error"
+     or k == "rate_limit_exceeded" or k == "resource_exhausted"
+     or k == "429" then
+    return "provider_throttle"
+  end
+  if k == "provider_capacity" or k == "overloaded_error"
+     or k == "overloaded" or k == "server_error"
+     or k == "unavailable" or k == "500" or k == "502"
+     or k == "503" or k == "504" or k == "529" then
+    return "provider_capacity"
+  end
+  if k == "provider_api_error" or k == "api_error" then
+    return "provider_api_error"
+  end
+  if k == "local_answer_available" or k == "local_call_unnecessary"
+     or k == "local_provider_bypass_missed"
+     or k == "provider_call_unnecessary" then
+    return "local_answer_available_but_not_used"
+  end
+  if k == "request_timeout" or k == "transport_timeout"
+     or k == "timeout" then
+    return "watchdog_timeout"
+  end
+  if k == "curl_exit" or k == "watchdog_timeout"
+     or k == "json_decode_error" or k == "runtime_error"
+     or k == "validated_inert"
+     or k == "local_answer_available_but_not_used" then
+    return k
+  end
+  if k == "blocked_fragment" or k == "blocked_action_context"
+     or k == "validator_blocked"
+     or k:find("validator", 1, true) then
+    return "validator_blocked"
+  end
+  if k:find("runtime", 1, true) or k:find("compile", 1, true) then
+    return "runtime_error"
+  end
+  return k:gsub("[^a-z0-9_]+", "_")
+end
+
+local function _normalize_error_kind(raw, debug)
+  return Diag.normalize_error_kind(raw, debug)
+end
+
+local function _code_hash(code)
+  if type(code) ~= "string" or code == "" then return nil end
+  if type(Diag.content_hash) ~= "function" then return nil end
+  return Diag.content_hash(code)
+end
+
+local function _turn_generated_code(msg, redact_content)
+  local code = type(msg.generated_code) == "table" and msg.generated_code.content
+            or msg.code_block
+  if type(code) ~= "string" or code == "" then
+    if type(msg.generated_code) == "table" then
+      return _redact_payload_value(msg.generated_code)
+    end
+    return nil
+  end
+  local code_type = msg.code_type
+               or (type(msg.generated_code) == "table" and msg.generated_code.code_type)
+               or "lua"
+  local measured_code = redact_content and Diag.redact(code) or code
+  local out = {
+    code_type = tostring(code_type or "lua"),
+    byte_count = #measured_code,
+    content_hash = _code_hash(measured_code),
+    content_hash_scope = redact_content and "redacted" or "raw",
+    content_field = (type(msg.generated_code) == "table"
+      and msg.generated_code.content_field)
+      or (code_type == "typed_actions" and "typed_action_plan" or "code_block"),
+  }
+  if code_type == "typed_actions" then
+    out.artifact_name = "typed_action_plan.json"
+  elseif code_type == "jsfx" then
+    out.artifact_name = "generated_code.jsfx"
+  else
+    out.artifact_name = "generated_code.lua"
+  end
+  return out
+end
+
+local function _turn_run_result(msg, err_kind, redact_content)
+  local explicit = type(msg.run_result) == "table"
+  local out = explicit and _redact_payload_value(msg.run_result) or {}
+  if type(out) ~= "table" then out = {} end
+  local has = explicit
+  local function put(key, value, stringify)
+    if value == nil or out[key] ~= nil then return end
+    if stringify then value = tostring(value or "") end
+    out[key] = value
+    has = true
+  end
+  put("code_type", msg.code_type, true)
+  put("auto_ran", msg.auto_ran)
+  put("run_status", msg.run_status, true)
+  put("validation_status", msg.validation_status, true)
+  put("validation_block_kind", msg.validation_block_kind, true)
+  put("auto_run_block_reason", msg.auto_run_block_reason, true)
+  put("assistant_response_status", msg.assistant_response_status, true)
+  if msg.code_block_present ~= nil and out.code_block_present == nil then
+    out.code_block_present = msg.code_block_present == true
+    has = true
+  elseif msg.code_block_present == nil and msg.code_block then
+    put("code_block_present", true)
+  end
+  out.error_debug = nil
+  put("error_kind", err_kind, true)
+  put("observable_change_status", msg.observable_change_status, true)
+  if msg.change_evidence ~= nil and out.change_evidence == nil then
+    out.change_evidence = _redact_payload_value(msg.change_evidence)
+    has = true
+  end
+  if msg.runtime_error ~= nil and out.runtime_error == nil then
+    out.runtime_error = redact_content
+      and _redact_payload_value(msg.runtime_error)
+      or tostring(msg.runtime_error or "")
+    has = true
+  end
+  if not has then return nil end
+  return out
+end
+
 local function _turn_to_table(msg, redact_content)
   if type(msg) ~= "table" then return { role = "?", content = "" } end
   local t = { role = msg.role }
@@ -466,11 +631,36 @@ local function _turn_to_table(msg, redact_content)
   if msg.ts          then t.ts          = msg.ts end
   if msg.intent_tag  then t.intent_tag  = msg.intent_tag end
   if msg.docs_retry  ~= nil then t.docs_retry = msg.docs_retry end
+  if msg.ctx_label   ~= nil then t.ctx_label   = tostring(msg.ctx_label or "") end
   if msg.role == "assistant" then
+    local provider_id = _safe_turn_provider_id(msg.provider_id)
+    if msg.provider_id ~= nil then t.provider_id = provider_id end
+    if msg.model_id then t.model_id = _safe_turn_model_id(msg.model_id, provider_id) end
+    if msg.thinking_label ~= nil then
+      t.thinking_label = tostring(msg.thinking_label or "")
+    elseif msg.thinking_level ~= nil then
+      t.thinking_label = tostring(msg.thinking_level or "")
+    end
     if msg.model_label then t.model_label = msg.model_label end
     if msg.code_block then
       t.code_block = redact_content and Diag.redact(msg.code_block) or msg.code_block
       t.code_type  = msg.code_type
+    end
+    if msg.code_block_present ~= nil then
+      t.code_block_present = msg.code_block_present == true
+    elseif msg.code_block then
+      t.code_block_present = true
+    end
+    if msg.assistant_response_status ~= nil then
+      t.assistant_response_status = tostring(msg.assistant_response_status or "")
+    end
+    if msg.run_status       ~= nil then t.run_status       = tostring(msg.run_status or "") end
+    if msg.validation_status ~= nil then t.validation_status = tostring(msg.validation_status or "") end
+    if msg.validation_block_kind ~= nil then
+      t.validation_block_kind = tostring(msg.validation_block_kind or "")
+    end
+    if msg.auto_run_block_reason ~= nil then
+      t.auto_run_block_reason = tostring(msg.auto_run_block_reason or "")
     end
     if msg.auto_ran      ~= nil then t.auto_ran      = msg.auto_ran end
     if msg.truncated     ~= nil then t.truncated     = msg.truncated end
@@ -482,12 +672,40 @@ local function _turn_to_table(msg, redact_content)
     if msg.tok_cache_create ~= nil then t.tok_cache_create = msg.tok_cache_create end
     if msg.cost          ~= nil then t.cost          = msg.cost end
     if msg.recovery      ~= nil then t.recovery      = msg.recovery end
-    if msg.error_kind    ~= nil then t.error_kind    = msg.error_kind end
+    if msg.recovery_kind ~= nil then
+      t.recovery_kind = tostring(msg.recovery_kind or "")
+    elseif msg.recovery ~= nil then
+      t.recovery_kind = tostring(msg.recovery or "")
+    end
+    if msg.generated_code ~= nil or msg.code_block then
+      t.generated_code = _turn_generated_code(msg, redact_content)
+    end
+    if msg.local_answer  ~= nil then t.local_answer  = msg.local_answer end
+    if msg.local_answer_available ~= nil then
+      t.local_answer_available = msg.local_answer_available
+    end
+    if msg.provider_call_avoided ~= nil then
+      t.provider_call_avoided = msg.provider_call_avoided
+    end
+    if msg.local_retry_available ~= nil then
+      t.local_retry_available = msg.local_retry_available
+    end
+    if msg.local_llm_requested ~= nil then
+      t.local_llm_requested = msg.local_llm_requested
+    end
+    if msg.local_retry_escalation ~= nil then
+      t.local_retry_escalation = msg.local_retry_escalation
+    end
+    if msg.hidden ~= nil then t.hidden = msg.hidden end
+    local err_kind = _normalize_error_kind(msg.error_kind, msg.error_debug)
+    if err_kind ~= nil then t.error_kind = err_kind end
     if msg.error_debug   ~= nil then
       t.error_debug = redact_content
         and _redact_payload_value(msg.error_debug)
         or msg.error_debug
     end
+    local run_result = _turn_run_result(msg, err_kind, redact_content)
+    if run_result ~= nil then t.run_result = run_result end
   end
   return t
 end
@@ -582,6 +800,26 @@ local function _active_model_id()
   end
   local m = _active_model_entry()
   if type(m) == "table" then return m.id end
+  return nil
+end
+
+local function _active_thinking_level()
+  if type(S) == "table" and S.thinking_level ~= nil then
+    local s = tostring(S.thinking_level or "")
+    if s ~= "" then return s end
+  end
+  local p = _active_provider()
+  local idx = type(prefs) == "table" and tonumber(prefs.thinking_idx) or nil
+  if type(p) == "table" and type(p.thinking_levels) == "table"
+     and idx and idx > 0 then
+    local tl = p.thinking_levels[idx]
+    if type(tl) == "table" then
+      local v = tl.value or tl.id or tl.label
+      if v ~= nil and tostring(v or "") ~= "" then return tostring(v) end
+    elseif tl ~= nil and tostring(tl or "") ~= "" then
+      return tostring(tl)
+    end
+  end
   return nil
 end
 
@@ -1150,7 +1388,7 @@ function Diag.begin_draft(target_idx)
     model_id = S.model
   end
 
-  local thinking_level = (type(S) == "table") and S.thinking_level or nil
+  local thinking_level = _active_thinking_level()
 
   local reaper_version = "unknown"
   if type(reaper) == "table" and type(reaper.GetAppVersion) == "function" then
@@ -1209,6 +1447,7 @@ function Diag.assemble_payload(draft, comment, flags)
 
   local payload = {
     schema_version       = Diag.SCHEMA_VERSION,
+    payload_revision     = Diag.PAYLOAD_REVISION,
     event_type           = "manual",
     event_id             = draft.event_id,
     install_id           = draft.install_id,
@@ -1239,6 +1478,16 @@ function Diag.assemble_payload(draft, comment, flags)
   -- Field is omitted when nil so the JSON stays clean for old test fixtures.
   if draft._diagnostic_report then
     payload.diagnostic_report = draft._diagnostic_report
+  end
+  local target_turn = type(draft._turns) == "table"
+    and draft._turns[draft.target_message_index] or nil
+  if type(target_turn) == "table" then
+    if target_turn.error_kind ~= nil then
+      payload.target_error_kind = target_turn.error_kind
+    end
+    if target_turn.error_debug ~= nil then
+      payload.target_error_debug = target_turn.error_debug
+    end
   end
 
   local serialized = _serialize(payload)
@@ -1447,7 +1696,7 @@ function Diag.begin_bug_report_draft()
     model_id = S.model
   end
 
-  local thinking_level = (type(S) == "table") and S.thinking_level or nil
+  local thinking_level = _active_thinking_level()
 
   local reaper_version = "unknown"
   if type(reaper) == "table" and type(reaper.GetAppVersion) == "function" then
@@ -1509,6 +1758,8 @@ function Diag.begin_bug_report_draft()
     install_id               = Diag.install_id(),
     launch_id                = launch_id_value,
     launch_started_at        = launch_started_at,
+    chat_id                  = chat_id_value,
+    chat_started_at          = chat_started_at,
     app_version              = (type(CFG) == "table" and CFG.VERSION) or "unknown",
     release_channel          = _release_channel(),
     tos_version_accepted     = _tos_version_accepted(),
@@ -1557,13 +1808,16 @@ function Diag.assemble_bug_report_payload(draft, comment, name, email)
   email   = _trim_string(email,   Diag.CONTACT_EMAIL_CAP)
 
   local payload = {
-    schema_version    = Diag.SCHEMA_VERSION,
-    event_type        = "bug_report",
-    event_id          = draft.event_id,
-    install_id        = draft.install_id,
-    launch_id         = draft.launch_id,
-    launch_started_at = draft.launch_started_at,
-    drafted_at        = draft.drafted_at,
+    schema_version       = Diag.SCHEMA_VERSION,
+    payload_revision     = Diag.PAYLOAD_REVISION,
+    event_type           = "bug_report",
+    event_id             = draft.event_id,
+    install_id           = draft.install_id,
+    launch_id            = draft.launch_id,
+    launch_started_at    = draft.launch_started_at,
+    chat_id              = draft.chat_id,
+    chat_started_at      = draft.chat_started_at,
+    drafted_at           = draft.drafted_at,
     app_version          = draft.app_version,
     release_channel      = draft.release_channel or _release_channel(),
     tos_version_accepted = draft.tos_version_accepted or _tos_version_accepted(),

@@ -6,14 +6,6 @@
 
 - **Small bug fixes for CJK language setup.** Font download verification is faster in spaced install paths, and translated Terms of Use parsing is more reliable.
 
-## v1.3.1 - 2026-05-26
-
-- **ReaAssist is now fully translated and localized.** The interface, setup flow, Settings, Help content, update messages, safety dialogs, and common status text now support localized language packs. Compatible languages: English, Spanish, French, German, Italian, Portuguese, Dutch, Polish, Swedish, Czech, Romanian, Turkish, Russian, Ukrainian, Chinese (Simplified), Chinese (Traditional), Japanese, Korean, Vietnamese, and Indonesian.
-
-## v1.3.0 - 2026-05-26
-
-- **ReaAssist is now fully translated and localized.** The interface, setup flow, Settings, Help content, update messages, safety dialogs, and common status text now support localized language packs. Compatible languages: English, Spanish, French, German, Italian, Portuguese, Dutch, Polish, Swedish, Czech, Romanian, Turkish, Russian, Ukrainian, Chinese (Simplified), Chinese (Traditional), Japanese, Korean, Vietnamese, and Indonesian.
-
 ## v1.2.4 - 2026-05-18
 
 - **Generated scripts are safer around MIDI, tempo, and automation edge cases.** ReaAssist now catches more bad MIDI input filters, MIDI pitch tables, item labels, tempo-marker alignment mistakes, panner/LFO ambiguity, and unsafe pan automation before code can run.

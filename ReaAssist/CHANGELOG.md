@@ -2,7 +2,7 @@
 
 ## v1.3.2 - 2026-05-26
 
-- **ReaAssist is now fully translated and localized.** Compatible languages: English, Chinese (Simplified), Chinese (Traditional), Czech, Dutch, French, German, Indonesian, Italian, Japanese, Korean, Polish, Portuguese, Romanian, Russian, Spanish, Swedish, Turkish, Ukrainian, and Vietnamese.
+- **ReaAssist is now fully translated and localized.** The interface, setup flow, Settings, Help content, update messages, safety dialogs, and common status text now support localized language packs. Compatible languages: English, Spanish, French, German, Italian, Portuguese, Dutch, Polish, Swedish, Czech, Romanian, Turkish, Russian, Ukrainian, Chinese (Simplified), Chinese (Traditional), Japanese, Korean, Vietnamese, and Indonesian.
 
 - **Small bug fixes for CJK language setup.** Font download verification is faster in spaced install paths, and translated Terms of Use parsing is more reliable.
 

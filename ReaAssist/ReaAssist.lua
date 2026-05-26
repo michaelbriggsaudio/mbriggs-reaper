@@ -1774,7 +1774,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.3.0", -- public release version
+  VERSION           = "1.3.1", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -7043,6 +7043,18 @@ function OptionalFonts._copy_file(src, dest)
   return true
 end
 
+function OptionalFonts._native_sha_to_lua_fallback(reason)
+  local d = OptionalFonts.download
+  if not d then return end
+  d.sha_mode = "lua"
+  d.sha_send_time = nil
+  d.lua_sha_state = nil
+  if Log and Log.line then
+    Log.line("FONT", "native checksum unavailable; falling back to Lua SHA"
+      .. (reason and (": " .. tostring(reason)) or ""))
+  end
+end
+
 function OptionalFonts.fire_native_sha(path)
   os.remove(tmp.font_sha_out)
   os.remove(tmp.font_sha_exit)
@@ -7299,8 +7311,7 @@ function OptionalFonts.poll()
     if d.sha_send_time
         and (time_precise() - d.sha_send_time)
             > (CFG.UPDATE_NATIVE_SHA_TIMEOUT + 5) then
-      OptionalFonts._set_failure("verify", OptionalFonts._t(
-        "settings.font.error.checksum_timeout", nil, "Font checksum timed out."))
+      OptionalFonts._native_sha_to_lua_fallback("watchdog timeout")
       return
     end
     local entry = d.entry
@@ -7312,17 +7323,41 @@ function OptionalFonts.poll()
       local exit_code = tonumber(exit_str:match("(%d+)"))
       if not exit_code then return end
       if exit_code ~= 0 then
-        OptionalFonts._set_failure("verify", OptionalFonts._t(
-          "settings.font.error.checksum_start", nil,
-          "Font checksum could not start."))
+        OptionalFonts._native_sha_to_lua_fallback(
+          "native hasher exited " .. tostring(exit_code))
         return
       end
       local raw_hash = OptionalFonts._read_file(tmp.font_sha_out)
       actual = raw_hash and raw_hash:match("([0-9a-fA-F]+)") or nil
+      if not actual then
+        OptionalFonts._native_sha_to_lua_fallback("native output missing hash")
+        return
+      end
     else
-      local raw = OptionalFonts._read_file(d.out_path)
-      if not raw then return end
-      actual = RA and RA.sha256_hex and RA.sha256_hex(raw)
+      if not d.lua_sha_state then
+        local raw = OptionalFonts._read_file(d.out_path)
+        if not raw then return end
+        if RA and RA.sha256_create and RA.sha256_step
+            and RA.sha256_finalize then
+          d.lua_sha_state = RA.sha256_create(raw)
+        else
+          actual = RA and RA.sha256_hex and RA.sha256_hex(raw)
+        end
+      end
+      if d.lua_sha_state then
+        local tick_start = time_precise()
+        local budget = CFG.UPDATE_SHA_TIME_BUDGET_MANUAL
+          or CFG.UPDATE_SHA_TIME_BUDGET
+          or 0.005
+        local done
+        repeat
+          done = RA.sha256_step(d.lua_sha_state, 16)
+          if done then break end
+        until (time_precise() - tick_start) >= budget
+        if not done then return end
+        actual = RA.sha256_finalize(d.lua_sha_state)
+        d.lua_sha_state = nil
+      end
     end
     actual = actual and actual:lower() or nil
     if not actual then
@@ -19103,6 +19138,9 @@ end
 -- checks for the function before using and falls back to its own SHA-256
 -- if absent.
 RA.sha256_hex = sha256_hash
+RA.sha256_create = function(content) return _SHA.create(content) end
+RA.sha256_step = function(state, max_blocks) return _SHA.step(state, max_blocks) end
+RA.sha256_finalize = function(state) return _SHA.finalize(state) end
 
 -- =============================================================================
 -- Local deterministic action modules

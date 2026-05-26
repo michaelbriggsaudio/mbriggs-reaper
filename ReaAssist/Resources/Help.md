@@ -228,7 +228,7 @@ Main-screen options:
 - Auto-backup: save a project backup before running code.
 - Show details: show model name, token counts, prompt-cache hits, estimated cost, and session total.
 
-Settings includes API Keys, provider/model selection, custom provider configuration, theme selection, UI scale, Send session snapshot, Always include REAPER API reference, update checks, Preferred Plugins, FX Param Cache, Reset Window Size, and Factory Reset.
+Settings includes API Keys, provider/model selection, custom provider configuration, theme selection, UI scale, and Advanced options for session snapshots, API reference, diagnostics, cloud timeout, Preferred Plugins, update checks, FX Param Cache, Reset Window Size, and Factory Reset.
 
 Themes include Auto, Dark, and Light. Auto follows the operating system's light/dark appearance when supported.
 

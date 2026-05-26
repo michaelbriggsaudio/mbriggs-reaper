@@ -1774,7 +1774,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.3.1", -- public release version
+  VERSION           = "1.3.2", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -7131,7 +7131,7 @@ try {
     sf:close()
     local cmd_line = string.format(
       'powershell -NoProfile -ExecutionPolicy Bypass'
-      .. ' -File "%s"',
+      .. ' -File """%s"""',
       tmp.font_sha_ps)
     local ps_cmd = string.format(
       'powershell -NoProfile -WindowStyle Hidden'
@@ -20441,7 +20441,7 @@ try {
     -- capture the inner PS's exit code via cmd's %errorlevel%.
     local cmd_line = string.format(
       'powershell -NoProfile -ExecutionPolicy Bypass'
-      .. ' -File "%s"',
+      .. ' -File """%s"""',
       tmp.update_sha_ps)
 
     -- Outer PS: detach via Start-Process so ExecProcess's positive

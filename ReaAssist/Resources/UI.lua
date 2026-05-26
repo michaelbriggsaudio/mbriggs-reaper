@@ -5057,11 +5057,14 @@ local function parse_tos_blocks(raw)
     local heading_probe = classify_line
       :gsub("Á", "A"):gsub("É", "E"):gsub("Í", "I")
       :gsub("Ó", "O"):gsub("Ú", "U"):gsub("Ü", "U"):gsub("Ñ", "N")
-    -- Heading detection: the paragraph's first line is all uppercase letters,
-    -- spaces, and ampersands (matching the 3 authored headings) and no more
-    -- than 40 chars. Guards against mistaking a regular sentence that
-    -- happens to begin with an uppercase word as a heading.
-    if heading_probe:match("^[A-Z][A-Z%s&]*$") and #classify_line <= 40 then
+    -- Heading detection: English and several Latin-script translations use
+    -- all-caps headings, while CJK and other scripts use short title-cased
+    -- first lines. The TOS is authored as heading + body paragraphs, so a
+    -- short first line with following body text is a section heading.
+    if rest ~= ""
+        and ((heading_probe:match("^[A-Z][A-Z%s&]*$")
+            and #classify_line <= 40)
+          or #classify_line <= 80) then
       blocks[#blocks+1] = {
         type = "section", heading = first_line, body = rest,
       }
@@ -5083,6 +5086,13 @@ local function parse_tos_blocks(raw)
   end
   if not has_confirm and #blocks > 0 and blocks[#blocks].type == "body" then
     blocks[#blocks].type = "confirm"
+  end
+  for i, blk in ipairs(blocks) do
+    if blk.type == "confirm" then
+      local prev = blocks[i - 1]
+      if prev and prev.type == "body" then prev.type = "copyright" end
+      break
+    end
   end
   return blocks
 end

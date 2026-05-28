@@ -118,11 +118,11 @@ The assistant only knows what ReaAssist sends in text form. It does not hear, un
 
 ReaAssist supports Claude, ChatGPT, Gemini, DeepSeek, and custom OpenAI-compatible endpoints, including local servers such as LM Studio, Ollama, llama.cpp, vLLM, and similar tools.
 
-Current v1.2.0 recommendations:
+Current recommendations:
 
 - Claude: Sonnet 4.6, no thinking. All-around safe default. Pick Opus 4.7, no thinking, for highest quality at higher cost.
 - ChatGPT: GPT-5.4, no thinking. Fastest reliable combo.
-- Gemini: Flash 3, Minimal thinking. Cheapest fast option.
+- Gemini: Flash 3.5, Minimal thinking. Strong default; Flash Lite Low is the cheapest fast option.
 - DeepSeek: V4 Flash, Non-Thinking. Cheapest combo in the built-in lineup; very fast, strong cheap pick.
 
 The in-app model picker is the source of truth if this text ever differs from what you see in ReaAssist. Model availability, pricing, and names can change.

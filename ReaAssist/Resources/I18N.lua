@@ -290,11 +290,11 @@ I18N.catalogs = {
       ["mode.model_tip.gpt-5.4"] =
         "Recommended OpenAI default. Use None thinking. Reliable on simple and complex tasks.",
       ["mode.model_tip.gemini-3.1-flash-lite"] =
-        "Cheapest Gemini. Use Low thinking. Stable fallback when Pro 3.1 Preview is at capacity.",
-      ["mode.model_tip.gemini-3-flash-preview"] =
-        "Cheap Gemini preview. Use Minimal thinking. Usually fast, but preview latency can spike; Flash Lite Low is steadier.",
+        "Cheapest Gemini. Use Low thinking. Budget pick; Flash 3.5 Minimal is stronger for scripts and edits.",
+      ["mode.model_tip.gemini-3.5-flash"] =
+        "Recommended Gemini default. Use Minimal thinking. Fast, strong, and bench-backed; try Low only if Minimal struggles.",
       ["mode.model_tip.gemini-3.1-pro-preview"] =
-        "Premium Gemini preview. Use Medium thinking. Capacity has been unreliable; Flash 3 is safer.",
+        "Premium Gemini preview. Use Medium thinking. Capacity has been unreliable; Flash 3.5 Minimal is safer for coding.",
       ["mode.model_tip.deepseek-v4-flash"] =
         "Cheapest combo in the lineup. Use Non-Thinking. Strong cheap pick.",
       ["mode.combo_hint.anthropic.claude-haiku-4-5.none"] =
@@ -350,21 +350,21 @@ I18N.catalogs = {
       ["mode.combo_hint.google.gemini-3.1-flash-lite.LOW"] =
         "Recommended Level | Simple and complex | Cheap | Fast",
       ["mode.combo_hint.google.gemini-3.1-flash-lite.MEDIUM"] =
-        "Simple and complex | Cheap | Slow | Flash 3 Minimal is usually better value",
+        "Simple and complex | Cheap | Slow | Flash 3.5 Minimal is usually better value",
       ["mode.combo_hint.google.gemini-3.1-flash-lite.HIGH"] =
-        "Avoid complex prompts | Cheap | Very slow | Runtime-error risk; pick Flash Lite Low or Flash 3 Minimal",
-      ["mode.combo_hint.google.gemini-3-flash-preview.MINIMAL"] =
-        "Recommended Level | Simple and complex | Cheap | Usually fast, but preview latency can spike | Flash Lite Low is steadier",
-      ["mode.combo_hint.google.gemini-3-flash-preview.LOW"] =
-        "Simple and complex | Cheap | Usually fast | Adds reasoning over Minimal, but Flash Lite Low is steadier",
-      ["mode.combo_hint.google.gemini-3-flash-preview.MEDIUM"] =
-        "Simple and complex | Cheap | Moderate speed | Use Flash Lite Low if preview latency spikes",
-      ["mode.combo_hint.google.gemini-3-flash-preview.HIGH"] =
-        "Simple and complex | Cheap | Moderate speed | Try Minimal or Flash Lite Low first",
+        "Avoid complex prompts | Cheap | Very slow | Runtime-error risk; pick Flash Lite Low or Flash 3.5 Minimal",
+      ["mode.combo_hint.google.gemini-3.5-flash.MINIMAL"] =
+        "Recommended Level | Simple and common scripts | Fastest Flash 3.5 | Lowest cost",
+      ["mode.combo_hint.google.gemini-3.5-flash.LOW"] =
+        "Use if Minimal struggles | More thinking tokens | Slower | No bench win over Minimal",
+      ["mode.combo_hint.google.gemini-3.5-flash.MEDIUM"] =
+        "Complex code/debugging only | Higher cost | Much slower | Try Minimal first, then Low",
+      ["mode.combo_hint.google.gemini-3.5-flash.HIGH"] =
+        "Hard reasoning only | Highest Flash cost | Slowest | Avoid for routine ReaAssist work",
       ["mode.combo_hint.google.gemini-3.1-pro-preview.LOW"] =
-        "Not recommended | Capacity-prone preview | Mid-cost | Underuses Pro -- use Flash 3 if 503s appear",
+        "Not recommended | Capacity-prone preview | Mid-cost | Underuses Pro -- use Flash 3.5 if 503s appear",
       ["mode.combo_hint.google.gemini-3.1-pro-preview.MEDIUM"] =
-        "Model default | Best Gemini quality when available | Capacity-prone preview | Use Flash 3 if 503s appear",
+        "Model default | Premium reasoning when available | Capacity-prone preview | Use Flash 3.5 for coding",
       ["mode.combo_hint.google.gemini-3.1-pro-preview.HIGH"] =
         "Not recommended | Capacity-prone preview | Mid-cost | Marginal lift over Medium",
       ["mode.combo_hint.deepseek.deepseek-v4-flash.disabled"] =
@@ -616,7 +616,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Re-send the last prompt with the current settings.",
       ["message.switch_to"] = "Switch to {label}",
       ["message.switch_resend.tooltip"] =
-        "Switch Gemini to Flash 3 and resend the original message.",
+        "Switch Gemini to Flash 3.5 and resend the original message.",
       ["message.resend_failed"] = "Could not resend message",
       ["message.switch_failed"] = "Could not switch models",
       ["message.return_home"] = "Return to home screen",
@@ -1016,6 +1016,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Got an unreadable response from the server. This is usually a temporary glitch.\n\nTechnical detail: {detail}\n\nPlease try again.",
       ["response.unexpected"] =
         "Got an unexpected response from the server. This is likely a temporary issue.\n\nPlease try again.",
+      ["response.custom_unexpected_shape"] =
+        "The custom provider returned JSON, but not in the OpenAI-compatible chat-completions shape ReaAssist expected. Check that this provider points to a chat-completions endpoint for the selected model, then try again.\n\nDetails were saved to the debug log.",
       ["response.gemini_cache_expired"] =
         "The Gemini context cache expired between sends. Please send your message again; a fresh cache will be created automatically.",
       ["response.gemini_paid_required"] =
@@ -1027,7 +1029,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["response.openai_throttle_exhausted"] =
         "OpenAI is throttling this request because the account/model token-per-minute limit is temporarily saturated. This is a provider-side throughput limit, not a Lua or prompt failure.\n\nReaAssist retried with exponential backoff and OpenAI still returned a rate-limit error. Wait a minute and retry, or switch to a smaller model for this request.",
       ["response.google_503_recovery"] =
-        "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can wait and retry later, or switch to Flash 3 and resend the same message.",
+        "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can wait and retry later, or switch to Flash 3.5 and resend the same message.",
       ["response.google_503"] =
         "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can wait and retry later.",
       ["response.api_key_invalid"] =
@@ -1196,7 +1198,13 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.lang.updated_toast"] = "{language} translations updated.",
       ["settings.lang.failed"] =
         "Could not download {language}. ReaAssist will stay in {current}.",
+      ["settings.lang.failed_detail"] =
+        "Could not download {language}. ReaAssist will stay in {current}. {detail}",
       ["settings.lang.index_failed"] = "Could not check language packs.",
+      ["settings.lang.index_failed_detail"] =
+        "Could not check language packs. {detail}",
+      ["settings.lang.copy_details"] = "Copy details",
+      ["settings.lang.details_copied"] = "Language download details copied.",
       ["settings.lang.retry_suffix"] = "Retry",
       ["settings.lang.finish_download_first"] =
         "Finish the language pack download first",
@@ -1207,6 +1215,9 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.font.installing"] = "Installing font...",
       ["settings.font.installed"] = "Font installed.",
       ["settings.font.ready_toast"] = "{language} font installed",
+      ["settings.font.system_fallback"] = "Using system font.",
+      ["settings.font.system_fallback_toast"] =
+        "Using a system font for {language}",
       ["settings.font.body"] =
         "{language} needs a {size} font download so chat text renders correctly.",
       ["settings.font.failed"] = "Font download failed.",
@@ -1218,6 +1229,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "No optional font is needed for this language.",
       ["settings.font.error.already_running"] =
         "A language font download is already running.",
+      ["settings.font.copy_details"] = "Copy details",
+      ["settings.font.details_copied"] = "Font download details copied.",
       ["settings.font.error.update_busy"] =
         "Finish the current update check before downloading a font.",
       ["settings.font.error.launch"] = "Font download could not start.",

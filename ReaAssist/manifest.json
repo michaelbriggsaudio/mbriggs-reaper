@@ -1,5 +1,5 @@
 {
-  "version": "1.3.2",
+  "version": "1.3.3",
   "removed_files": [
     "Resources/MIDI_Ref.md",
     "Resources/Theme_Ref.md",
@@ -8,7 +8,7 @@
   "files": [
     {
       "name": "CHANGELOG.md",
-      "sha256": "c83c09e65d978859eed92f0a7883c02d7352fe67ce2b024dfdd7dbedefd45454"
+      "sha256": "300f3a3cfb6a5f035e2b83079036ffc52dfa19c2764fdbc46c44c2a601351972"
     },
     {
       "name": "LICENSE.txt",
@@ -20,7 +20,7 @@
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "b51f44bec8fad791d5e5309db4d10022d35f87c11a2e5fd68fcf7fbd25822c68"
+      "sha256": "20e73678ed15ace91af207a450966668b73d2542d2a603ba27ccd0360f7f33a7"
     },
     {
       "name": "Resources/API_Ref.md",
@@ -28,15 +28,15 @@
     },
     {
       "name": "Resources/Diag.lua",
-      "sha256": "c592ce917feb84a81cce2d5a84b488f91ff8b9232e225d5967197a9bd761679e"
+      "sha256": "557993ed5ff9110750ef07a2cd252f8bbc32872322eab722b14e28cd612a63f9"
     },
     {
       "name": "Resources/Help.md",
-      "sha256": "fe98115eb5062a904570412f538d4acf8ab5fa570c52d6f303461b5e3f6835e3"
+      "sha256": "161297a4fe089c082bae866b465dea63298d4341fed7c95a61287762099d55ea"
     },
     {
       "name": "Resources/I18N.lua",
-      "sha256": "f294e5f2d830b2bf498ab2d5e6668bab8057d1f5e153ee88f5cdc5e4a8b32fe0"
+      "sha256": "58b1b71b1ca69c8b32c722929c2b5708a94028abfbf54938be9b14d5a9c7a781"
     },
     {
       "name": "Resources/Plugin_Ref.md",
@@ -80,7 +80,7 @@
     },
     {
       "name": "Resources/UI.lua",
-      "sha256": "5c7f7d04a04bfa0c02e666428ca7556a712de83aac6d02ad4a61cf3499db7f2a"
+      "sha256": "aad7c8f954b12ad7264c85ca936683384b6ad019a425c395dc94febbe9d254c2"
     },
     {
       "name": "Resources/fonts/Inter_18pt-Bold.ttf",

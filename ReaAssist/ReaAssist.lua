@@ -1774,7 +1774,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.3.2", -- public release version
+  VERSION           = "1.3.3", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -1798,7 +1798,7 @@ CFG = {
   MAX_API_REF_BYTES = 512 * 1024, -- reject API ref files larger than 512 KB
   POLL_THROTTLE     = 0.1,       -- min interval between poll-loop file checks
   MAX_RETRIES       = 3,         -- max auto-retries on transient overload failures
-  GEMINI_OVERLOAD_MAX_RETRIES = 1, -- fail fast on Gemini 503 high-demand windows; offer Flash 3 recovery instead of long hidden waits
+  GEMINI_OVERLOAD_MAX_RETRIES = 1, -- fail fast on Gemini 503 high-demand windows; offer Flash 3.5 recovery instead of long hidden waits
   OPENAI_THROTTLE_MAX_RETRIES = 4, -- OpenAI TPM/rate-limit throttles are often sub-minute token-bucket recoveries
   RETRY_DELAY_BASE  = 2,         -- base seconds for exponential backoff
   RETRY_JITTER_SECS = 1,         -- random retry jitter to avoid synchronized retry spikes
@@ -2108,6 +2108,7 @@ S = {
   gemini_cache_signature = nil, -- source fingerprint for system prompt + api_ref
   gemini_cache_expires  = 0,   -- os.time() epoch seconds when cache expires
   gemini_cache_creating   = false, -- true while a cache-create curl is in flight
+  gemini_cache_create_aborted = false, -- true when an in-flight create was invalidated
   gemini_cache_started_at = 0,     -- time_precise() when cache-create curl launched (watchdog)
   gemini_cache_last_state = nil,   -- request-time cache diagnostics for bench/details
   gemini_cache_last_used  = false, -- true when the last Gemini body used cachedContent
@@ -2788,6 +2789,7 @@ do
   -- can run concurrently with a user send without trampling response files.
   tmp.cache_body = tmp_dir .. "reaassist_cbody_" .. tmp_suffix .. ".json"
   tmp.cache_out  = tmp_dir .. "reaassist_cresp_" .. tmp_suffix .. ".json"
+  tmp.cache_err  = tmp_dir .. "reaassist_cerr_"  .. tmp_suffix .. ".txt"
   tmp.cache_exit = tmp_dir .. "reaassist_cexit_" .. tmp_suffix .. ".txt"
   -- Pid file: holds the OS PID of the in-flight curl process so Cancel can
   -- kill it via taskkill/kill rather than just orphaning it.
@@ -2795,6 +2797,10 @@ do
   -- Gemini side-path auth file. Separate from tmp.auth so cache-create can run
   -- concurrently with a main API request without trampling the auth header file.
   tmp.gemini_auth = tmp_dir .. "reaassist_gauth_" .. tmp_suffix .. ".txt"
+  tmp.cache_auth = tmp_dir .. "reaassist_cauth_" .. tmp_suffix .. ".txt"
+  tmp.cache_delete_auth = tmp_dir .. "reaassist_cdelauth_" .. tmp_suffix .. ".txt"
+  tmp.cache_renew_auth = tmp_dir .. "reaassist_crenewauth_" .. tmp_suffix .. ".txt"
+  tmp.cache_renew_body = tmp_dir .. "reaassist_crenewbody_" .. tmp_suffix .. ".json"
   -- Auto-update I/O. Separate from the main pipeline so the update check
   -- runs independently without trampling API request/response files.
   tmp.update_out  = tmp_dir .. "reaassist_update_"     .. tmp_suffix .. ".txt"
@@ -2825,6 +2831,9 @@ end
 -- persist on disk. Doing this at startup is the only safe net.
 os.remove(tmp.auth)
 os.remove(tmp.gemini_auth)
+os.remove(tmp.cache_auth)
+os.remove(tmp.cache_delete_auth)
+os.remove(tmp.cache_renew_auth)
 os.remove(tmp.pid)
 os.remove(tmp.out)
 os.remove(tmp.body)
@@ -2833,7 +2842,9 @@ os.remove(tmp.err)
 os.remove(tmp.exit)
 os.remove(tmp.cache_body)
 os.remove(tmp.cache_out)
+os.remove(tmp.cache_err)
 os.remove(tmp.cache_exit)
+os.remove(tmp.cache_renew_body)
 os.remove(tmp.update_out)
 os.remove(tmp.update_exit)
 os.remove(tmp.update_sha_in)
@@ -2988,10 +2999,15 @@ reaper.atexit(function()
   os.remove(tmp.err)
   os.remove(tmp.auth)
   os.remove(tmp.gemini_auth)
+  os.remove(tmp.cache_auth)
+  os.remove(tmp.cache_delete_auth)
+  os.remove(tmp.cache_renew_auth)
   os.remove(tmp.exit)
   os.remove(tmp.cache_body)
   os.remove(tmp.cache_out)
+  os.remove(tmp.cache_err)
   os.remove(tmp.cache_exit)
+  os.remove(tmp.cache_renew_body)
   os.remove(tmp.pid)
   os.remove(tmp.update_out)
   os.remove(tmp.update_exit)
@@ -4052,18 +4068,19 @@ PROVIDERS = {
     -- token input window.
     -- default_thinking_idx (per-model override): Flash Lite defaults
     -- to Low (2) -- Flash Lite at Minimal misses on complex routing
-    -- while Low handles both simple and complex reliably. Flash 3
-    -- defaults to Minimal (1) -- it is the fastest combo in the
-    -- lineup and passes cleanly at Minimal, so paying for thinking
-    -- is a poor trade. Pro 3.1 inherits the provider Medium default.
+    -- while Low handles both simple and complex reliably. Flash 3.5
+    -- defaults to Minimal (1): local ReaAssist probes showed Minimal
+    -- matching or beating Low for common requests while staying faster
+    -- and avoiding billed thinking tokens. Pro 3.1 inherits the provider
+    -- Medium default.
     -- Pro is "Medium if exposed, but not recommended" -- the long-
     -- context surcharge tier + the cost of every Pro turn make it
     -- the wrong daily-driver pick.
     models = {
       { label = "Flash Lite 3.1", chip_label = "FLASH LITE", id = "gemini-3.1-flash-lite",
         price_in = 0.25,  price_out = 1.50, price_cache_r = 0.025, is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 2 },
-      { label = "Flash 3",        chip_label = "FLASH",      id = "gemini-3-flash-preview",
-        price_in = 0.50,  price_out = 3.00, price_cache_r = 0.05,  is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 1 },
+      { label = "Flash 3.5",      chip_label = "FLASH",      id = "gemini-3.5-flash",
+        price_in = 1.50,  price_out = 9.00, price_cache_r = 0.15,  is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 1 },
       { label = "Pro 3.1",        chip_label = "PRO",        id = "gemini-3.1-pro-preview",
         price_in = 2.00,  price_out = 12.00, price_cache_r = 0.20, paid_only = true,   max_output = 65536, context_window = 1048576 },
     },
@@ -4574,6 +4591,8 @@ function Store.cleanup_config_extstate(doc)
     "reaper_version_notice_dismissed",
     "thinking_idx_reset_v1",
     "model_picker_reset_v2",
+    "google_flash_35_model_v1",
+    "google_flash_35_minimal_default_v1",
     "update_check_default_on_v1",
   }
   if PROVIDERS then
@@ -6621,7 +6640,7 @@ end
 --   openai.default_model_idx: mini (2) -> full GPT-5.4 (3);
 --   gpt-5.4-nano default thinking: Low -> None;
 --   gemini-3.1-flash-lite default thinking: Minimal -> Low;
---   gemini-3-flash-preview default thinking: Low -> Minimal.
+--   retired Gemini Flash preview default thinking: Low -> Minimal.
 -- Without this, users who'd already picked a model/thinking combo
 -- before v1.1.4 would silently keep it and never see the new
 -- recommendations -- the picker badge would still mark the recommended
@@ -6652,6 +6671,68 @@ do
       end
     end
     Store.set_migration_fired("model_picker_reset_v2")
+  end
+end
+
+-- One-time Gemini model-id migration. Gemini 3 Flash Preview is retired in
+-- favor of Gemini 3.5 Flash, so users who saved the old model id should land
+-- on the new GA Flash row instead of falling through an unknown-model default.
+-- Write the targeted selection patch directly instead of calling
+-- Store.save_config() here; provider/model prefs are not fully populated until
+-- MODELS.refresh below, and save_config would rebuild selection too early.
+-- Drop the retired per-model thinking key so the new row loads its own
+-- default rather than inheriting a preference tuned for the preview model.
+do
+  if not (S and S._factory_reset_clean_boot)
+     and not Store.migration_fired("google_flash_35_model_v1") then
+    local doc = Store.config_doc()
+    doc.selection = type(doc.selection) == "table" and doc.selection or {}
+    doc.selection.model_id_by_provider =
+      type(doc.selection.model_id_by_provider) == "table"
+      and doc.selection.model_id_by_provider or {}
+    doc.selection.thinking_idx_by_provider_model =
+      type(doc.selection.thinking_idx_by_provider_model) == "table"
+      and doc.selection.thinking_idx_by_provider_model or {}
+    if doc.selection.model_id_by_provider.google
+       == "gemini-3-flash-preview" then
+      doc.selection.model_id_by_provider.google = "gemini-3.5-flash"
+    end
+    doc.selection.thinking_idx_by_provider_model[
+      "google/gemini-3-flash-preview"] = nil
+    reaper.DeleteExtState(CFG.EXT_NS,
+      "thinking_idx_google_gemini-3-flash-preview", true)
+    doc.migrations = type(doc.migrations) == "table" and doc.migrations or {}
+    doc.migrations.google_flash_35_model_v1 = true
+    local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
+    if err then
+      Store._notify_write_failure("Config.json", err)
+    end
+  end
+end
+
+-- One-time Gemini 3.5 Flash thinking migration. The launch default was Low,
+-- but follow-up ReaAssist probes showed Minimal is the better practical default
+-- for common requests: similar quality, lower latency, and no billed thinking
+-- tokens. Clear only this model's saved thinking pick so existing Flash 3.5
+-- users land on the new model default; other Gemini model choices are preserved.
+do
+  if not (S and S._factory_reset_clean_boot)
+     and not Store.migration_fired("google_flash_35_minimal_default_v1") then
+    local doc = Store.config_doc()
+    doc.selection = type(doc.selection) == "table" and doc.selection or {}
+    doc.selection.thinking_idx_by_provider_model =
+      type(doc.selection.thinking_idx_by_provider_model) == "table"
+      and doc.selection.thinking_idx_by_provider_model or {}
+    doc.selection.thinking_idx_by_provider_model[
+      "google/gemini-3.5-flash"] = nil
+    reaper.DeleteExtState(CFG.EXT_NS,
+      "thinking_idx_google_gemini-3.5-flash", true)
+    doc.migrations = type(doc.migrations) == "table" and doc.migrations or {}
+    doc.migrations.google_flash_35_minimal_default_v1 = true
+    local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
+    if err then
+      Store._notify_write_failure("Config.json", err)
+    end
   end
 end
 
@@ -6766,6 +6847,20 @@ OptionalFonts = {
       sha256 = "faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9",
       bytes = 8331336,
       size_label = "7.95 MB",
+      system_windows = { "msyh.ttc", "simsun.ttc", "simhei.ttf", "Deng.ttf" },
+      system_macos = {
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+      },
+      system_linux_paths = {
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+      },
+      system_fontconfig = { "sans:lang=zh-cn", "Noto Sans CJK SC" },
     },
     ["zh-Hant"] = {
       key = "zh_tc",
@@ -6776,6 +6871,20 @@ OptionalFonts = {
       sha256 = "5bab0cb3c1cf89dde07c4a95a4054b195afbcfe784d69d75c340780712237537",
       bytes = 5683368,
       size_label = "5.42 MB",
+      system_windows = { "msjh.ttc", "mingliu.ttc", "msjhbd.ttc" },
+      system_macos = {
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+      },
+      system_linux_paths = {
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+      },
+      system_fontconfig = { "sans:lang=zh-tw", "Noto Sans CJK TC" },
     },
     ["ja"] = {
       key = "ja",
@@ -6786,6 +6895,19 @@ OptionalFonts = {
       sha256 = "dff723ba59d57d136764a04b9b2d03205544f7cd785a711442d6d2d085ac5073",
       bytes = 4533028,
       size_label = "4.32 MB",
+      system_windows = {
+        "YuGothR.ttc", "YuGothM.ttc", "meiryo.ttc", "msgothic.ttc",
+      },
+      system_macos = {
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+      },
+      system_linux_paths = {
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+      },
+      system_fontconfig = { "sans:lang=ja", "Noto Sans CJK JP" },
     },
     ["ko"] = {
       key = "ko",
@@ -6796,6 +6918,17 @@ OptionalFonts = {
       sha256 = "69975a0ac8472717870aefeab0a4d52739308d90856b9955313b2ad5e0148d68",
       bytes = 4644748,
       size_label = "4.43 MB",
+      system_windows = { "malgun.ttf", "malgunbd.ttf" },
+      system_macos = {
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+        "/System/Library/Fonts/AppleGothic.ttf",
+      },
+      system_linux_paths = {
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+      },
+      system_fontconfig = { "sans:lang=ko", "Noto Sans CJK KR" },
     },
   },
   download = { state = "idle" },
@@ -6845,6 +6978,95 @@ function OptionalFonts._file_exists(path)
   return false
 end
 
+function OptionalFonts._load_font_path(entry, path, source)
+  if not entry then return false, "Missing optional font metadata." end
+  if not path or path == "" then return false, "Font path is missing." end
+  local f = io.open(path, "rb")
+  if not f then return false, "Font file is missing." end
+  f:close()
+  local font = ImGui.ImGui_CreateFontFromFile(path, 0, 0)
+  if not font then return false, "Font file could not be loaded." end
+  ImGui.ImGui_Attach(RA.ctx, font)
+  entry.font = font
+  entry.font_path = path
+  entry.font_source = source or "download"
+  if source == "system" then
+    entry.system_font_path = path
+  else
+    entry._file_present = true
+  end
+  return true
+end
+
+function OptionalFonts._fontconfig_match(pattern)
+  if not (io and io.popen and Shell and Shell.sh_quote) then return nil end
+  pattern = tostring(pattern or "")
+  if pattern == "" then return nil end
+  local cmd = "fc-match -f '%{file}\\n' " .. Shell.sh_quote(pattern)
+    .. " 2>/dev/null"
+  local pipe = io.popen(cmd, "r")
+  if not pipe then return nil end
+  local raw = pipe:read("*a") or ""
+  pipe:close()
+  local path = raw:gsub("\r", ""):match("([^\n]+)")
+  if path and path ~= "" then return path end
+  return nil
+end
+
+function OptionalFonts._system_font_paths(entry)
+  local out, seen = {}, {}
+  local function add(path)
+    path = tostring(path or "")
+    if path ~= "" and not seen[path] then
+      out[#out + 1] = path
+      seen[path] = true
+    end
+  end
+
+  if RA and RA.IS_WINDOWS then
+    local root = os.getenv("WINDIR") or os.getenv("SystemRoot")
+      or "C:\\Windows"
+    local fonts_dir = root .. "\\Fonts\\"
+    for _, name in ipairs(entry.system_windows or {}) do
+      add(fonts_dir .. tostring(name or ""))
+    end
+  elseif RA and RA.IS_MACOS then
+    for _, path in ipairs(entry.system_macos or {}) do add(path) end
+  else
+    for _, pattern in ipairs(entry.system_fontconfig or {}) do
+      add(OptionalFonts._fontconfig_match(pattern))
+    end
+    for _, path in ipairs(entry.system_linux_paths or {}) do add(path) end
+  end
+  return out
+end
+
+function OptionalFonts.load_system_entry(entry)
+  if not entry then return false, "Missing optional font metadata." end
+  if entry.font then return true end
+  if entry._system_probe_done then
+    return false, entry._system_probe_error or "No compatible system font found."
+  end
+  entry._system_probe_done = true
+  local last_err = nil
+  for _, path in ipairs(OptionalFonts._system_font_paths(entry)) do
+    if OptionalFonts._file_exists(path) then
+      local ok, err = OptionalFonts._load_font_path(entry, path, "system")
+      if ok then
+        if Log and Log.line then
+          Log.line("FONT", "using system font for " .. tostring(entry.code)
+            .. ": " .. tostring(path))
+        end
+        entry._system_probe_error = nil
+        return true
+      end
+      last_err = err
+    end
+  end
+  entry._system_probe_error = last_err or "No compatible system font found."
+  return false, entry._system_probe_error
+end
+
 function OptionalFonts.ensure_dir()
   if I18N and I18N.ensure_cache_dir then
     return I18N.ensure_cache_dir("fonts")
@@ -6862,30 +7084,33 @@ function OptionalFonts.load_entry(entry)
   if not entry then return false, "Missing optional font metadata." end
   if entry.font then return true end
   local path = OptionalFonts.path_for(entry)
-  local f = io.open(path, "rb")
-  if not f then
+  if not OptionalFonts._file_exists(path) then
     entry.font = nil
     entry._file_present = false
     return false, "Font file is missing."
   end
-  f:close()
-  local font = ImGui.ImGui_CreateFontFromFile(path, 0, 0)
-  if not font then
+  local ok, err = OptionalFonts._load_font_path(entry, path, "download")
+  if not ok then
     entry.font = nil
-    return false, "Font file could not be loaded."
+    return false, err
   end
-  ImGui.ImGui_Attach(RA.ctx, font)
-  entry.font = font
-  entry.font_path = path
-  entry._file_present = true
   return true
+end
+
+function OptionalFonts.load_available_entry(entry)
+  if not entry then return false, "Missing optional font metadata." end
+  if entry.font then return true end
+  if OptionalFonts.file_exists(entry) then
+    local ok = OptionalFonts.load_entry(entry)
+    if ok then return true end
+  end
+  return false, "Font file is missing."
 end
 
 function OptionalFonts.is_ready_for_language_idx(idx)
   local entry = OptionalFonts.entry_for_language_idx(idx)
   if not entry then return true end
-  if not OptionalFonts.file_exists(entry) then return false end
-  local ok = OptionalFonts.load_entry(entry)
+  local ok = OptionalFonts.load_available_entry(entry)
   return ok == true
 end
 
@@ -6898,8 +7123,8 @@ end
 function OptionalFonts.active_font()
   local entry = OptionalFonts.entry_for_language_idx(prefs.reply_language_idx or 1)
   if entry and entry.font then return entry.font end
-  if entry and OptionalFonts.file_exists(entry) then
-    local ok = OptionalFonts.load_entry(entry)
+  if entry then
+    local ok = OptionalFonts.load_available_entry(entry)
     if ok and entry.font then return entry.font end
   end
   return FONT.inter_reg
@@ -6908,8 +7133,8 @@ end
 function OptionalFonts.active_font_key()
   local entry = OptionalFonts.entry_for_language_idx(prefs.reply_language_idx or 1)
   if entry and entry.font then return entry.key end
-  if entry and OptionalFonts.file_exists(entry) then
-    local ok = OptionalFonts.load_entry(entry)
+  if entry then
+    local ok = OptionalFonts.load_available_entry(entry)
     if ok and entry.font then return entry.key end
   end
   return "inter"
@@ -6939,9 +7164,8 @@ function OptionalFonts.apply_current_ui_font()
   if entry then
     if entry.font then
       font = entry.font
-    elseif OptionalFonts._ui_font_missing_key ~= entry.key
-        and OptionalFonts.file_exists(entry) then
-      local ok = OptionalFonts.load_entry(entry)
+    elseif OptionalFonts._ui_font_missing_key ~= entry.key then
+      local ok = OptionalFonts.load_available_entry(entry)
       if ok and entry.font then font = entry.font end
     end
   end
@@ -6999,12 +7223,100 @@ function OptionalFonts._set_failure(step, err)
   d.last_error = tostring(err or OptionalFonts._t(
     "settings.font.error.unknown", nil, "Unknown font download error."))
   d.done = 0
+  d.last_detail = {
+    code = d.entry and d.entry.code or "",
+    step = tostring(step or ""),
+    error = d.last_error,
+    url = tostring(d.request_url or d.url or (d.entry and d.entry.url) or ""),
+    url_cache_bust = tostring(d.request_url_with_cache_bust or ""),
+    curl_exit = d.curl_exit_code,
+    expected_bytes = d.entry and d.entry.bytes or nil,
+    actual_bytes = d.actual_bytes or OptionalFonts._file_size(d.out_path),
+    sha256 = d.entry and d.entry.sha256 or nil,
+    sha_mode = d.sha_mode,
+  }
   OptionalFonts.download = d
   if Log and Log.line then
     Log.line("FONT", string.format("fail [%s]: %s",
       tostring(step), tostring(d.last_error)))
   end
   OptionalFonts._cleanup_tmp_paths(d)
+end
+
+function OptionalFonts._use_system_fallback_after_failure(step, err)
+  local d = OptionalFonts.download or {}
+  local entry = d.entry
+  if not entry then return false end
+  local ok, system_err = OptionalFonts.load_system_entry(entry)
+  if not ok then
+    d.system_fallback_error = system_err
+    return false
+  end
+  d.state = "done"
+  d.done = 1
+  d.last_step = step
+  d.last_error = tostring(err or "")
+  d.system_fallback_used = true
+  d.system_font_path = entry.system_font_path
+  d.status_text = OptionalFonts._t("settings.font.system_fallback", nil,
+    "Using system font.")
+  d.last_detail = {
+    code = entry.code or "",
+    step = tostring(step or ""),
+    error = d.last_error,
+    url = tostring(d.request_url or d.url or entry.url or ""),
+    url_cache_bust = tostring(d.request_url_with_cache_bust or ""),
+    curl_exit = d.curl_exit_code,
+    expected_bytes = entry.bytes,
+    actual_bytes = d.actual_bytes or OptionalFonts._file_size(d.out_path),
+    sha256 = entry.sha256,
+    sha_mode = d.sha_mode,
+    system_fallback_used = true,
+    system_font_path = entry.system_font_path,
+  }
+  OptionalFonts.download = d
+  if Log and Log.line then
+    Log.line("FONT", "preferred font failed; using system font for "
+      .. tostring(entry.code) .. ": " .. tostring(entry.system_font_path)
+      .. " after " .. tostring(step))
+  end
+  OptionalFonts._cleanup_tmp_paths(d)
+  return true
+end
+
+function OptionalFonts._fail_or_use_system_fallback(step, err)
+  if OptionalFonts._use_system_fallback_after_failure(step, err) then
+    return true
+  end
+  OptionalFonts._set_failure(step, err)
+  return false
+end
+
+function OptionalFonts.diagnostic_text(d)
+  d = type(d) == "table" and d or OptionalFonts.download or {}
+  local detail = type(d.last_detail) == "table" and d.last_detail or {}
+  local lines = {
+    "ReaAssist font download diagnostic",
+    "version=" .. tostring(CFG and CFG.VERSION or ""),
+    "os=" .. tostring(reaper and reaper.GetOS and reaper.GetOS() or ""),
+    "utc=" .. tostring(os.date and os.date("!%Y-%m-%dT%H:%M:%SZ") or ""),
+    "code=" .. tostring(detail.code or (d.entry and d.entry.code) or ""),
+    "step=" .. tostring(detail.step or d.last_step or ""),
+    "error=" .. tostring(detail.error or d.last_error or ""),
+    "url=" .. tostring(detail.url or d.request_url or ""),
+    "url_cache_bust=" .. tostring(detail.url_cache_bust
+      or d.request_url_with_cache_bust or ""),
+    "curl_exit=" .. tostring(detail.curl_exit or d.curl_exit_code or ""),
+    "expected_bytes=" .. tostring(detail.expected_bytes or ""),
+    "actual_bytes=" .. tostring(detail.actual_bytes or ""),
+    "sha256=" .. tostring(detail.sha256 or ""),
+    "sha_mode=" .. tostring(detail.sha_mode or d.sha_mode or ""),
+    "system_fallback_used=" .. tostring(detail.system_fallback_used
+      or d.system_fallback_used or ""),
+    "system_font_path=" .. tostring(detail.system_font_path
+      or d.system_font_path or ""),
+  }
+  return table.concat(lines, "\n")
 end
 
 function OptionalFonts._read_file(path)
@@ -7191,6 +7503,7 @@ function OptionalFonts.start_download(language_idx)
     state = "downloading",
     language_idx = language_idx,
     entry = entry,
+    url = entry.url,
     out_path = out_path,
     exit_path = exit_path,
     done = 0,
@@ -7201,8 +7514,10 @@ function OptionalFonts.start_download(language_idx)
   local ok = RA.fire_get_to(entry.url, out_path, exit_path,
     CFG.FONT_DOWNLOAD_TIMEOUT, OptionalFonts.download, "FONT")
   if not ok then
-    OptionalFonts._set_failure("launch", OptionalFonts._t(
-      "settings.font.error.launch", nil, "Font download could not start."))
+    if OptionalFonts._fail_or_use_system_fallback("launch", OptionalFonts._t(
+        "settings.font.error.launch", nil, "Font download could not start.")) then
+      return true, "ready"
+    end
     return false, OptionalFonts.download.last_error
   end
   return true
@@ -7225,7 +7540,7 @@ function OptionalFonts._install_verified_download()
   if not ok_stage then
     local ok_copy, copy_err = OptionalFonts._copy_file(d.out_path, tmp_path)
     if not ok_copy then
-      OptionalFonts._set_failure("stage", OptionalFonts._t(
+      OptionalFonts._fail_or_use_system_fallback("stage", OptionalFonts._t(
         "settings.font.error.stage",
         { error = tostring(copy_err or stage_err) },
         string.format("Could not stage downloaded font: %s",
@@ -7248,7 +7563,7 @@ function OptionalFonts._install_verified_download()
   entry.font = nil
   local ok_load, load_err = OptionalFonts.load_entry(entry)
   if not ok_load then
-    OptionalFonts._set_failure("load", load_err)
+    OptionalFonts._fail_or_use_system_fallback("load", load_err)
     return
   end
   d.state = "done"
@@ -7265,12 +7580,12 @@ function OptionalFonts.poll()
   end
   if d.state == "downloading" then
     if not d.send_time then
-      OptionalFonts._set_failure("download", OptionalFonts._t(
+      OptionalFonts._fail_or_use_system_fallback("download", OptionalFonts._t(
         "settings.font.error.download_missing", nil, "Download did not launch."))
       return
     end
     if (time_precise() - d.send_time) > (CFG.FONT_DOWNLOAD_TIMEOUT + 10) then
-      OptionalFonts._set_failure("download", OptionalFonts._t(
+      OptionalFonts._fail_or_use_system_fallback("download", OptionalFonts._t(
         "settings.font.error.download_timeout", nil, "Font download timed out."))
       return
     end
@@ -7279,8 +7594,9 @@ function OptionalFonts.poll()
     local exit_str = ef:read("*a"); ef:close()
     local exit_code = tonumber(exit_str:match("(%d+)"))
     if not exit_code then return end
+    d.curl_exit_code = exit_code
     if exit_code ~= 0 then
-      OptionalFonts._set_failure("download", OptionalFonts._t(
+      OptionalFonts._fail_or_use_system_fallback("download", OptionalFonts._t(
         "settings.font.error.download_failed", nil, "Font download failed."))
       return
     end
@@ -7289,14 +7605,15 @@ function OptionalFonts.poll()
     d.status_text = OptionalFonts._t("settings.font.verifying", nil,
       "Verifying font...")
     local size = OptionalFonts._file_size(d.out_path)
+    d.actual_bytes = size
     local entry = d.entry
     if not size or size == 0 then
-      OptionalFonts._set_failure("verify", OptionalFonts._t(
+      OptionalFonts._fail_or_use_system_fallback("verify", OptionalFonts._t(
         "settings.font.error.empty", nil, "Downloaded font file is empty."))
       return
     end
     if entry.bytes and size ~= entry.bytes then
-      OptionalFonts._set_failure("verify", OptionalFonts._t(
+      OptionalFonts._fail_or_use_system_fallback("verify", OptionalFonts._t(
         "settings.font.error.size_mismatch",
         { actual = size, expected = entry.bytes },
         string.format("Downloaded font size was %d bytes, expected %d.",
@@ -7361,13 +7678,13 @@ function OptionalFonts.poll()
     end
     actual = actual and actual:lower() or nil
     if not actual then
-      OptionalFonts._set_failure("verify", OptionalFonts._t(
+      OptionalFonts._fail_or_use_system_fallback("verify", OptionalFonts._t(
         "settings.font.error.checksum_start", nil,
         "Font checksum could not start."))
       return
     end
     if actual ~= entry.sha256 then
-      OptionalFonts._set_failure("verify", OptionalFonts._t(
+      OptionalFonts._fail_or_use_system_fallback("verify", OptionalFonts._t(
         "settings.font.error.checksum_mismatch", nil,
         "Downloaded font checksum did not match."))
       return
@@ -7386,7 +7703,7 @@ function OptionalFonts.poll()
       if entry then entry.font = nil end
       local ok_load, load_err = OptionalFonts.load_entry(entry)
       if not ok_load then
-        OptionalFonts._set_failure("load", load_err)
+        OptionalFonts._fail_or_use_system_fallback("load", load_err)
         return
       end
       d.state = "done"
@@ -7398,7 +7715,7 @@ function OptionalFonts.poll()
     end
     if d.rename_started_at
         and (time_precise() - d.rename_started_at) > 5 then
-      OptionalFonts._set_failure("install", OptionalFonts._t(
+      OptionalFonts._fail_or_use_system_fallback("install", OptionalFonts._t(
         "settings.font.error.install_move", nil,
         "Could not move the downloaded font into Data/Lang/fonts."))
     end
@@ -8174,9 +8491,9 @@ UI.MODEL_TIPS = {
   ["gpt-5.4-nano"]                   = "Cheapest GPT. Use None thinking. Simple tasks only -- pick full GPT-5.4 for complex.",
   ["gpt-5.4-mini"]                   = "Cheap GPT. Use Low thinking. Simple tasks only -- pick full GPT-5.4 for complex.",
   ["gpt-5.4"]                        = "Recommended OpenAI default. Use None thinking. Reliable on simple and complex tasks.",
-  ["gemini-3.1-flash-lite"]          = "Cheapest Gemini. Use Low thinking. Stable fallback when Pro 3.1 Preview is at capacity.",
-  ["gemini-3-flash-preview"]         = "Cheap Gemini preview. Use Minimal thinking. Usually fast, but preview latency can spike; Flash Lite Low is steadier.",
-  ["gemini-3.1-pro-preview"]         = "Premium Gemini preview. Use Medium thinking. Capacity has been unreliable; Flash 3 is safer.",
+  ["gemini-3.1-flash-lite"]          = "Cheapest Gemini. Use Low thinking. Budget pick; Flash 3.5 Minimal is stronger for scripts and edits.",
+  ["gemini-3.5-flash"]               = "Recommended Gemini default. Use Minimal thinking. Fast, strong, and bench-backed; try Low only if Minimal struggles.",
+  ["gemini-3.1-pro-preview"]         = "Premium Gemini preview. Use Medium thinking. Capacity has been unreliable; Flash 3.5 Minimal is safer for coding.",
   ["deepseek-v4-flash"]              = "Cheapest combo in the lineup. Use Non-Thinking. Strong cheap pick.",
 }
 
@@ -8251,18 +8568,18 @@ UI.COMBO_HINTS = {
     ["gemini-3.1-flash-lite"] = {
       MINIMAL = "Simple tasks only | Cheap | Fast | Low is more reliable on complex routing",
       LOW     = "Recommended Level | Simple and complex | Cheap | Fast",
-      MEDIUM  = "Simple and complex | Cheap | Slow | Flash 3 Minimal is usually better value",
-      HIGH    = "Avoid complex prompts | Cheap | Very slow | Runtime-error risk; pick Flash Lite Low or Flash 3 Minimal",
+      MEDIUM  = "Simple and complex | Cheap | Slow | Flash 3.5 Minimal is usually better value",
+      HIGH    = "Avoid complex prompts | Cheap | Very slow | Runtime-error risk; pick Flash Lite Low or Flash 3.5 Minimal",
     },
-    ["gemini-3-flash-preview"] = {
-      MINIMAL = "Recommended Level | Simple and complex | Cheap | Usually fast, but preview latency can spike | Flash Lite Low is steadier",
-      LOW     = "Simple and complex | Cheap | Usually fast | Adds reasoning over Minimal, but Flash Lite Low is steadier",
-      MEDIUM  = "Simple and complex | Cheap | Moderate speed | Use Flash Lite Low if preview latency spikes",
-      HIGH    = "Simple and complex | Cheap | Moderate speed | Try Minimal or Flash Lite Low first",
+    ["gemini-3.5-flash"] = {
+      MINIMAL = "Recommended Level | Simple and common scripts | Fastest Flash 3.5 | Lowest cost",
+      LOW     = "Use if Minimal struggles | More thinking tokens | Slower | No bench win over Minimal",
+      MEDIUM  = "Complex code/debugging only | Higher cost | Much slower | Try Minimal first, then Low",
+      HIGH    = "Hard reasoning only | Highest Flash cost | Slowest | Avoid for routine ReaAssist work",
     },
     ["gemini-3.1-pro-preview"] = {
-      LOW     = "Not recommended | Capacity-prone preview | Mid-cost | Underuses Pro -- use Flash 3 if 503s appear",
-      MEDIUM  = "Model default | Best Gemini quality when available | Capacity-prone preview | Use Flash 3 if 503s appear",
+      LOW     = "Not recommended | Capacity-prone preview | Mid-cost | Underuses Pro -- use Flash 3.5 if 503s appear",
+      MEDIUM  = "Model default | Premium reasoning when available | Capacity-prone preview | Use Flash 3.5 for coding",
       HIGH    = "Not recommended | Capacity-prone preview | Mid-cost | Marginal lift over Medium",
     },
   },
@@ -10842,9 +11159,10 @@ function Diag.build_report(opts)
   end
   parts[#parts + 1] = ""
 
-  -- Recent errors
+  -- Recent Lua/runtime errors. Provider/request errors are stored on chat
+  -- messages and appear in the Recent Chat section below.
   if #Diag.errors > 0 then
-    parts[#parts + 1] = "--- Recent Errors (" .. #Diag.errors .. ") ---"
+    parts[#parts + 1] = "--- Recent Lua/Runtime Errors (" .. #Diag.errors .. ") ---"
     for i, e in ipairs(Diag.errors) do
       parts[#parts + 1] = ""
       parts[#parts + 1] = "[" .. i .. "] " .. e.time
@@ -10857,7 +11175,11 @@ function Diag.build_report(opts)
       end
     end
   else
-    parts[#parts + 1] = "--- No recent errors ---"
+    parts[#parts + 1] = "--- No recent Lua/runtime errors ---"
+    if S.status == "error" then
+      parts[#parts + 1] =
+        "Current chat status is error; see Recent Chat below for provider/request details."
+    end
   end
   parts[#parts + 1] = ""
 
@@ -10888,7 +11210,14 @@ function Diag.build_report(opts)
         details[#details + 1] = "cache_create: " .. m.tok_cache_create
       end
       if m.cost and m.cost > 0 then
-        details[#details + 1] = str_format("cost: $%.4f", m.cost)
+        if m.free_tier and MODELS and MODELS.format_cost then
+          details[#details + 1] = "cost: Free Tier (would have been ~"
+            .. MODELS.format_cost(m.cost) .. ")"
+        elseif MODELS and MODELS.format_cost then
+          details[#details + 1] = "cost: " .. MODELS.format_cost(m.cost)
+        else
+          details[#details + 1] = str_format("cost: $%.4f", m.cost)
+        end
       end
       if m.fx_cache_label then
         details[#details + 1] = "fx_cache: " .. m.fx_cache_label
@@ -13393,6 +13722,64 @@ function CTX.local_installed_plugin_answer(user_text)
     end
   end
   return tbl_concat(lines, "\n")
+end
+
+function CTX.local_jsfx_capability_overview_answer(user_text)
+  local raw = tostring(user_text or "")
+  local lt = raw:lower()
+  lt = lt:gsub("^%s*no%s+code%s+this%s+time:%s*", "")
+  if lt:match("^%s*$") or lt:find("\n", 1, true) then return nil end
+  if #raw > 520 then return nil end
+
+  local mentions_jsfx = lt:find("%f[%w]jsfx%f[%W]") ~= nil
+    or lt:find("%f[%w]eel2?%f[%W]") ~= nil
+    or lt:find("%f[%w]custom%s+audio%s+plugins?%f[%W]") ~= nil
+    or lt:find("%f[%w]custom%s+plugins?%f[%W]") ~= nil
+  if not mentions_jsfx then return nil end
+
+  local overview_cue =
+       lt:find("what%s+kinds?", 1, false) ~= nil
+    or lt:find("what%s+types?", 1, false) ~= nil
+    or lt:find("which%s+kinds?", 1, false) ~= nil
+    or lt:find("which%s+types?", 1, false) ~= nil
+    or lt:find("%f[%w]overview%f[%W]") ~= nil
+    or lt:find("%f[%w]summari[sz]e%f[%W]") ~= nil
+    or lt:find("how%s+the%s+process%s+works", 1, false) ~= nil
+    or lt:find("how%s+it%s+works", 1, false) ~= nil
+  if not overview_cue then return nil end
+
+  local authoring_start =
+       lt:find("^%s*please%s+write%f[%W]") ~= nil
+    or lt:find("^%s*please%s+build%f[%W]") ~= nil
+    or lt:find("^%s*please%s+make%f[%W]") ~= nil
+    or lt:find("^%s*please%s+create%f[%W]") ~= nil
+    or lt:find("^%s*please%s+generate%f[%W]") ~= nil
+    or lt:find("^%s*write%f[%W]") ~= nil
+    or lt:find("^%s*build%f[%W]") ~= nil
+    or lt:find("^%s*make%f[%W]") ~= nil
+    or lt:find("^%s*create%f[%W]") ~= nil
+    or lt:find("^%s*generate%f[%W]") ~= nil
+  local authoring_request =
+       lt:find("%f[%w]write%s+me%s+a%f[%W]") ~= nil
+    or lt:find("%f[%w]build%s+me%s+a%f[%W]") ~= nil
+    or lt:find("%f[%w]make%s+me%s+a%f[%W]") ~= nil
+    or lt:find("%f[%w]create%s+me%s+a%f[%W]") ~= nil
+    or lt:find("%f[%w]generate%s+me%s+a%f[%W]") ~= nil
+    or lt:find("%f[%w]write%s+a%s+jsfx%f[%W]") ~= nil
+    or lt:find("%f[%w]build%s+a%s+jsfx%f[%W]") ~= nil
+    or lt:find("%f[%w]make%s+a%s+jsfx%f[%W]") ~= nil
+    or lt:find("%f[%w]create%s+a%s+jsfx%f[%W]") ~= nil
+    or lt:find("%f[%w]generate%s+a%s+jsfx%f[%W]") ~= nil
+    or lt:find("%f[%w]code%s+a%s+jsfx%f[%W]") ~= nil
+  if authoring_start or authoring_request then return nil end
+
+  return "I can build JSFX for EQ and filters, dynamics, saturation, "
+    .. "delay/reverb/modulation, pitch and time effects, meters, gain/routing "
+    .. "utilities, and creative sound-design tools.\n\n"
+    .. "Tell me the sound and controls you want; I generate the JSFX code, "
+    .. "ReaAssist saves it as an effect, then adds it to the selected track or "
+    .. "gives you the exact load step. For risky DSP, I include safety limits "
+    .. "and ask a quick follow-up if the design is underspecified."
 end
 
 function CTX.local_read_answer(user_text, proj)
@@ -19225,6 +19612,7 @@ end
 -- Returns true if launched, false if URL is empty or launch fails.
 function RA.fire_get_to(url, out_path, exit_path, timeout, send_state, log_tag)
   if not url or url == "" then return false end
+  if send_state then send_state.request_url = tostring(url or "") end
   os.remove(out_path)
   os.remove(exit_path)
   -- Cache-busting: append a unix-time query parameter to the URL.
@@ -19252,6 +19640,7 @@ function RA.fire_get_to(url, out_path, exit_path, timeout, send_state, log_tag)
   local ms = math.floor((time_precise() % 1) * 1000)
   url = url .. sep .. "_=" .. tostring(os.time())
                   .. string.format("%03d", ms)
+  if send_state then send_state.request_url_with_cache_bust = url end
   timeout = timeout or CFG.UPDATE_CURL_TIMEOUT
   log_tag = log_tag or "NET"
   if RA.IS_WINDOWS then
@@ -19468,6 +19857,111 @@ function LangPacks._safe_url(url)
   return url
 end
 
+function LangPacks._file_size(path)
+  local f = path and io.open(path, "rb") or nil
+  if not f then return nil end
+  local size = f:seek("end")
+  f:close()
+  return size
+end
+
+function LangPacks._kind_label(d, step)
+  d = type(d) == "table" and d or {}
+  local kind = tostring(d.kind or d.pending_kind or "")
+  local state = tostring(d.last_state or d.state or "")
+  step = tostring(step or "")
+  if kind == "index" or state == "index_downloading"
+      or step == "index" or step == "index_launch" then
+    return "language index"
+  elseif kind == "help" or state == "help_downloading"
+      or step:match("^help") then
+    return "help pack"
+  end
+  return "language pack"
+end
+
+function LangPacks._cap(text)
+  return (tostring(text or ""):gsub("^%l", string.upper))
+end
+
+function LangPacks._friendly_failure(step, err, d)
+  step = tostring(step or "")
+  err = tostring(err or "Language pack download failed.")
+  local kind = LangPacks._kind_label(d, step)
+  local exit_code = d and d.curl_exit_code
+  if step == "download" then
+    if exit_code then
+      return string.format("%s download failed (curl exit %s).",
+        LangPacks._cap(kind), tostring(exit_code))
+    end
+    if err:find("timed out", 1, true) then
+      return string.format("%s download timed out after %d seconds.",
+        LangPacks._cap(kind),
+        (CFG and CFG.LANG_DOWNLOAD_TIMEOUT or 30))
+    end
+    return string.format("%s download failed.", LangPacks._cap(kind))
+  elseif step == "index" then
+    return "Language index downloaded but could not be read: " .. err
+  elseif step == "metadata" then
+    return "Language pack metadata is unavailable or incompatible: " .. err
+  elseif step == "verify" or step == "help_verify" then
+    return "Downloaded " .. kind .. " failed verification: " .. err
+  elseif step == "validate" or step == "help_validate" then
+    return "Downloaded " .. kind .. " could not be parsed: " .. err
+  elseif step == "install" or step == "help_install" then
+    return "Downloaded " .. kind .. " could not be installed: " .. err
+  elseif step:find("launch", 1, true) then
+    return LangPacks._cap(kind) .. " download could not start."
+  end
+  return err
+end
+
+function LangPacks._failure_detail(d, step, err, extra)
+  d = type(d) == "table" and d or {}
+  local detail = {
+    code = tostring(d.last_code or d.code or d.pending_code or ""),
+    state = tostring(d.last_state or d.state or ""),
+    kind = LangPacks._kind_label(d, step),
+    step = tostring(step or ""),
+    error = tostring(err or ""),
+    url = tostring(d.request_url or d.url or ""),
+    url_cache_bust = tostring(d.request_url_with_cache_bust or ""),
+    curl_exit = d.curl_exit_code,
+    expected_bytes = d.entry and d.entry.bytes or nil,
+    actual_bytes = d.actual_bytes or LangPacks._file_size(d.out_path),
+    sha256 = d.entry and d.entry.sha256 or nil,
+  }
+  if type(extra) == "table" then
+    for k, v in pairs(extra) do detail[k] = v end
+  end
+  return detail
+end
+
+function LangPacks.diagnostic_text(d)
+  d = type(d) == "table" and d or LangPacks.download or {}
+  local detail = type(d.last_detail) == "table" and d.last_detail or {}
+  local lines = {
+    "ReaAssist language download diagnostic",
+    "version=" .. tostring(CFG and CFG.VERSION or ""),
+    "os=" .. tostring(reaper and reaper.GetOS and reaper.GetOS() or ""),
+    "utc=" .. tostring(os.date and os.date("!%Y-%m-%dT%H:%M:%SZ") or ""),
+    "code=" .. tostring(detail.code or d.last_code or d.code or d.pending_code or ""),
+    "kind=" .. tostring(detail.kind or ""),
+    "state=" .. tostring(detail.state or d.state or ""),
+    "step=" .. tostring(detail.step or d.last_step or ""),
+    "error=" .. tostring(detail.error or d.last_raw_error or d.last_error or ""),
+    "display_error=" .. tostring(d.last_error or ""),
+    "url=" .. tostring(detail.url or d.request_url or ""),
+    "url_cache_bust=" .. tostring(detail.url_cache_bust
+      or d.request_url_with_cache_bust or ""),
+    "curl_exit=" .. tostring(detail.curl_exit or d.curl_exit_code or ""),
+    "expected_bytes=" .. tostring(detail.expected_bytes or ""),
+    "actual_bytes=" .. tostring(detail.actual_bytes or ""),
+    "sha256=" .. tostring(detail.sha256 or ""),
+  }
+  return table.concat(lines, "\n")
+end
+
 function LangPacks._sha_ok(raw, expected)
   expected = tostring(expected or ""):lower()
   if not expected:match("^[0-9a-f]+$") or #expected ~= 64 then return false end
@@ -19612,24 +20106,41 @@ function LangPacks._failure_is_quiet_refresh(code)
   return I18N and I18N.catalog_available and I18N.catalog_available(code)
 end
 
-function LangPacks._set_failure(code, step, err)
+function LangPacks._set_failure(code, step, err, detail)
   local d = LangPacks.download or {}
+  local previous_state = d.state
+  d.last_state = previous_state
   d.state = "failed"
   d.last_code = code or d.code or d.pending_code
   d.last_step = step
-  d.last_error = tostring(err or "Language pack download failed.")
+  d.last_raw_error = tostring(err or "Language pack download failed.")
+  d.last_detail = LangPacks._failure_detail(d, step, d.last_raw_error, detail)
+  d.last_error = LangPacks._friendly_failure(step, d.last_raw_error, d)
   d.quiet_refresh = LangPacks._failure_is_quiet_refresh(d.last_code) or nil
-  LangPacks.download = d
-  if d.last_code and UI and UI.show_float_toast and not d.quiet_refresh then
-    UI.show_float_toast(LangPacks._t("settings.lang.failed", {
+  if d.last_code then
+    d.status_text = LangPacks._t("settings.lang.failed_detail", {
       language = LangPacks._display_language(d.last_code),
       current = LangPacks._display_language(I18N and I18N.lang_code
         and I18N.lang_code() or "en"),
-    }, "Language pack download failed."))
+      detail = d.last_error,
+    }, "Language pack download failed. " .. d.last_error)
+  else
+    d.status_text = LangPacks._t("settings.lang.index_failed_detail", {
+      detail = d.last_error,
+    }, "Could not check language packs. " .. d.last_error)
+  end
+  LangPacks.download = d
+  if d.last_code and UI and UI.show_float_toast and not d.quiet_refresh then
+    UI.show_float_toast(d.status_text)
   end
   if Log and Log.line then
-    Log.line("LANG", string.format("fail [%s/%s]: %s",
-      tostring(d.last_code), tostring(step), tostring(d.last_error)))
+    local det = d.last_detail or {}
+    Log.line("LANG", string.format(
+      "fail [%s/%s/%s]: %s url=%s curl=%s bytes=%s/%s",
+      tostring(d.last_code), tostring(previous_state), tostring(step),
+      tostring(d.last_error), tostring(det.url or ""),
+      tostring(det.curl_exit or ""), tostring(det.actual_bytes or ""),
+      tostring(det.expected_bytes or "")))
   end
   LangPacks._cleanup_tmp_paths(d)
 end
@@ -19664,6 +20175,7 @@ function LangPacks.start_index_download(pending_code, force, pending_refresh,
   local exit_path = LangPacks._tmp_path("index", ".exit")
   LangPacks.download = {
     state = "index_downloading",
+    kind = "index",
     pending_code = pending_code,
     pending_refresh = pending_refresh and true or nil,
     pending_kind = pending_kind,
@@ -19674,6 +20186,7 @@ function LangPacks.start_index_download(pending_code, force, pending_refresh,
   }
   local url = (I18N and I18N.INDEX_URL)
     or "https://reaassist.app/lang/v1/index.json"
+  LangPacks.download.url = url
   local ok = RA.fire_get_to(url, out_path, exit_path,
     CFG.LANG_DOWNLOAD_TIMEOUT, LangPacks.download, "LANG")
   if not ok then
@@ -19803,6 +20316,7 @@ function LangPacks.start_language_download(code, force)
   local language = LangPacks._display_language(code)
   LangPacks.download = {
     state = "ui_downloading",
+    kind = "ui",
     code = code,
     entry = entry,
     is_refresh = force and true or nil,
@@ -19812,6 +20326,7 @@ function LangPacks.start_language_download(code, force)
       language = language,
     }, "Downloading language pack..."),
   }
+  LangPacks.download.url = entry.url
   if UI and UI.show_float_toast then
     UI.show_float_toast(LangPacks.download.status_text)
   end
@@ -19849,6 +20364,7 @@ function LangPacks.start_help_download(code, force)
   local language = LangPacks._display_language(code)
   LangPacks.download = {
     state = "help_downloading",
+    kind = "help",
     code = code,
     entry = entry,
     is_refresh = force and true or nil,
@@ -19858,6 +20374,7 @@ function LangPacks.start_help_download(code, force)
       language = language,
     }, "Downloading help pack..."),
   }
+  LangPacks.download.url = entry.url
   if UI and UI.show_float_toast then
     UI.show_float_toast(LangPacks.download.status_text)
   end
@@ -19883,23 +20400,28 @@ function LangPacks._finish_ui_download()
   local d = LangPacks.download or {}
   local entry = d.entry or {}
   local raw = LangPacks._read_file(d.out_path)
+  d.actual_bytes = raw and #raw or LangPacks._file_size(d.out_path)
   if not raw or raw == "" then
-    LangPacks._set_failure(d.code, "verify", "Downloaded pack was empty.")
+    LangPacks._set_failure(d.code, "verify", "Downloaded pack was empty.",
+      { actual_bytes = d.actual_bytes or 0 })
     return
   end
   if #raw > (I18N.MAX_UI_PACK_BYTES or (512 * 1024)) then
-    LangPacks._set_failure(d.code, "verify", "Downloaded pack was too large.")
+    LangPacks._set_failure(d.code, "verify", "Downloaded pack was too large.",
+      { actual_bytes = #raw })
     return
   end
   if entry.bytes and #raw ~= tonumber(entry.bytes) then
     LangPacks._set_failure(d.code, "verify",
       string.format("Downloaded pack size was %d bytes, expected %d.",
-        #raw, tonumber(entry.bytes) or 0))
+        #raw, tonumber(entry.bytes) or 0),
+      { actual_bytes = #raw, expected_bytes = tonumber(entry.bytes) or 0 })
     return
   end
   if not LangPacks._sha_ok(raw, entry.sha256) then
     LangPacks._set_failure(d.code, "verify",
-      "Downloaded pack checksum did not match.")
+      "Downloaded pack checksum did not match.",
+      { actual_bytes = #raw })
     return
   end
   local catalog, parse_err = I18N.parse_ui_pack_json(raw, d.code)
@@ -19936,23 +20458,28 @@ function LangPacks._finish_help_download()
   local d = LangPacks.download or {}
   local entry = d.entry or {}
   local raw = LangPacks._read_file(d.out_path)
+  d.actual_bytes = raw and #raw or LangPacks._file_size(d.out_path)
   if not raw or raw == "" then
-    LangPacks._set_failure(d.code, "help_verify", "Downloaded help pack was empty.")
+    LangPacks._set_failure(d.code, "help_verify",
+      "Downloaded help pack was empty.", { actual_bytes = d.actual_bytes or 0 })
     return
   end
   if #raw > (I18N.MAX_HELP_PACK_BYTES or (512 * 1024)) then
-    LangPacks._set_failure(d.code, "help_verify", "Downloaded help pack was too large.")
+    LangPacks._set_failure(d.code, "help_verify",
+      "Downloaded help pack was too large.", { actual_bytes = #raw })
     return
   end
   if entry.bytes and #raw ~= tonumber(entry.bytes) then
     LangPacks._set_failure(d.code, "help_verify",
       string.format("Downloaded help pack size was %d bytes, expected %d.",
-        #raw, tonumber(entry.bytes) or 0))
+        #raw, tonumber(entry.bytes) or 0),
+      { actual_bytes = #raw, expected_bytes = tonumber(entry.bytes) or 0 })
     return
   end
   if not LangPacks._sha_ok(raw, entry.sha256) then
     LangPacks._set_failure(d.code, "help_verify",
-      "Downloaded help pack checksum did not match.")
+      "Downloaded help pack checksum did not match.",
+      { actual_bytes = #raw })
     return
   end
   local body, parse_err = I18N.parse_help_pack(raw, d.code)
@@ -19996,7 +20523,8 @@ function LangPacks.poll()
   end
   if (time_precise() - d.send_time) > (CFG.LANG_DOWNLOAD_TIMEOUT + 10) then
     LangPacks._set_failure(d.code or d.pending_code, "download",
-      "Language pack download timed out.")
+      "Language pack download timed out.",
+      { timeout_seconds = CFG.LANG_DOWNLOAD_TIMEOUT })
     return
   end
   local ef = io.open(d.exit_path, "r")
@@ -20004,16 +20532,19 @@ function LangPacks.poll()
   local exit_str = ef:read("*a"); ef:close()
   local exit_code = tonumber(exit_str:match("(%d+)"))
   if not exit_code then return end
+  d.curl_exit_code = exit_code
   if exit_code ~= 0 then
     LangPacks._set_failure(d.code or d.pending_code, "download",
-      "Language pack download failed.")
+      "Language pack download failed.", { curl_exit = exit_code })
     return
   end
   if d.state == "index_downloading" then
     local raw = LangPacks._read_file(d.out_path)
+    d.actual_bytes = raw and #raw or LangPacks._file_size(d.out_path)
     local ok, err = LangPacks._store_index(raw)
     if not ok then
-      LangPacks._set_failure(d.pending_code, "index", err or "invalid_index")
+      LangPacks._set_failure(d.pending_code, "index", err or "invalid_index",
+        { actual_bytes = d.actual_bytes or 0 })
       return
     end
     local pending_code = d.pending_code
@@ -21987,6 +22518,25 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
       },
     },
   },
+  google = {
+    ["gemini-3.1-flash-lite"] = {
+      key = "flash_lite_practical_free_tier_actions",
+      prompt = [[
+- For ordinary action requests like create, add, make, put, set up, route, or select in REAPER, return a runnable fenced ```lua script. Do not answer with only a prose question, summary, or `<context_needed>` when a practical default exists.
+- For short MIDI idea, beat, pattern, chord, or pad requests, create a new appropriately named MIDI track and item by default. Do not ask which track, instrument, or sample library to use unless the user explicitly says to use existing media or selected items.
+- When the user asks for a drum beat or drum MIDI idea, create a track with a name containing "Drum" and add a small MIDI item using common GM pitches such as kick 36 and snare 38.
+- When the user asks for intro, verse, chorus, bridge, or other song sections in time chunks, create timeline regions or markers. Do not create empty tracks or media items for sections unless the user explicitly asks for section tracks or items.
+- For cue/routing setup requests that name source parts like vocal, guitar, or keys, ensure those named source tracks exist before creating sends. If the current session does not already contain a named source track, create it; do not silently skip a requested source because it is missing.
+- For cue/headphone/monitor buses that should be separate from the main mix, set the cue bus track's own `B_MAINSEND` to `0` with `reaper.SetMediaTrackInfo_Value(cue_bus_track, "B_MAINSEND", 0)`. Disabling master send only on the source tracks is incomplete; the cue bus itself must not feed the master.
+- When the user asks for tracks going into a bus or return, create explicit sends with `reaper.CreateTrackSend(source_track, bus_or_return_track)`. Folder depth alone is not bus routing.
+- Avoid plugin helper functions unless helper definitions are pinned and truly needed for a requested display-unit value. For simple/basic EQ/compressor/limiter tasks, add the resolved preferred plugin and use direct verified normalized values only when configuring is clearly requested; never invent or rewrite bundled helper bodies.
+]],
+      validators = {
+        action_requires_lua = true,
+        bus_routing_requires_sends = true,
+      },
+    },
+  },
   deepseek = {
     ["deepseek-v4-flash"] = {
       key = "deepseek_exact_reaper_global",
@@ -23835,6 +24385,17 @@ function Net.try_local_read_answer(user_text, attachments, probe_turn)
   })
 end
 
+function Net.try_local_jsfx_capability_overview(user_text, attachments, probe_turn)
+  if attachments then return false end
+  if Code.history_has_prior_assistant(S.history) then return false end
+  if not CTX or not CTX.local_jsfx_capability_overview_answer then return false end
+  local answer = CTX.local_jsfx_capability_overview_answer(user_text)
+  if not answer then return false end
+  return Net._emit_local_answer(user_text, answer, probe_turn, {
+    ctx_label = "local_jsfx_overview",
+  })
+end
+
 function Net._emit_local_answer(user_text, answer, probe_turn, opts)
   opts = opts or {}
   S.history[#S.history + 1] = {
@@ -25461,14 +26022,14 @@ function Net.fire_gemini_cache_delete(cache_name)
   local google_key = S.api_key_map and S.api_key_map.google
   if not google_key then return end
   -- Write key to temp file so it stays off the command line.
-  if not Code.safe_write(tmp.gemini_auth, "x-goog-api-key: " .. google_key) then return end
+  if not Code.safe_write(tmp.cache_delete_auth, "x-goog-api-key: " .. google_key) then return end
   local url = str_format(
     "https://generativelanguage.googleapis.com/v1beta/%s",
     cache_name)
   if RA.IS_WINDOWS then
     local cmd_line = str_format(
       'curl -s -X DELETE -H @"""%s""" %s & del """%s"""',
-      tmp.gemini_auth, url, tmp.gemini_auth)
+      tmp.cache_delete_auth, url, tmp.cache_delete_auth)
     local ps_cmd = str_format(
       'powershell -NoProfile -WindowStyle Hidden'
       .. ' -Command "Start-Process cmd -ArgumentList \'/c %s\''
@@ -25479,7 +26040,7 @@ function Net.fire_gemini_cache_delete(cache_name)
     local function sq(path) return "'" .. path:gsub("'", "'\\''") .. "'" end
     os.execute(str_format(
       '(curl -s -X DELETE -H @%s %s > /dev/null 2>&1 ; rm -f %s) &',
-      sq(tmp.gemini_auth), url, sq(tmp.gemini_auth)))
+      sq(tmp.cache_delete_auth), url, sq(tmp.cache_delete_auth)))
   end
 end
 
@@ -25502,14 +26063,17 @@ end)
 -- stops accruing storage charges. Safe to call when no cache exists.
 function Net.gemini_cache_invalidate()
   local old_name = S.gemini_cache_name
+  local had_create = S.gemini_cache_creating == true
   S.gemini_cache_name    = nil
-  S.gemini_cache_model   = nil
-  S.gemini_cache_signature = nil
   S.gemini_cache_expires = 0
-  -- A create in-flight will land with a name we no longer want; mark the
-  -- flight as aborted so the poll path discards the response.
-  if S.gemini_cache_creating then
-    S.gemini_cache_creating = false
+  -- A cache-create curl cannot be cancelled after launch. Keep it marked as
+  -- creating so a new create cannot reuse the same output files before the old
+  -- response lands; the poll path will discard and delete any returned name.
+  if had_create then
+    S.gemini_cache_create_aborted = true
+  else
+    S.gemini_cache_model   = nil
+    S.gemini_cache_signature = nil
   end
   Net.gemini_cache_clear_persisted()
   if old_name then
@@ -25635,8 +26199,10 @@ function Net.fire_gemini_cache_create()
     return
   end
 
-  -- Write auth header to temp file (keeps key off command line).
-  if not Code.safe_write(tmp.gemini_auth, "x-goog-api-key: " .. google_key) then
+  -- Write auth header to temp file (keeps key off command line). This path
+  -- intentionally uses a cache-create-specific auth file because cache DELETE
+  -- and normal Gemini side requests can overlap with this background curl.
+  if not Code.safe_write(tmp.cache_auth, "x-goog-api-key: " .. google_key) then
     S.gemini_cache_last_create_reason = "auth_write_failed"
     return
   end
@@ -25645,17 +26211,20 @@ function Net.fire_gemini_cache_create()
 
   os.remove(tmp.cache_exit)
   Code.safe_write(tmp.cache_out, "")
+  Code.safe_write(tmp.cache_err, "")
 
   if RA.IS_WINDOWS then
     local cmd_line = str_format(
-      'curl -s --connect-timeout 10 --max-time 30'
+      'curl -sS --connect-timeout 10 --max-time 30'
       .. ' -X POST %s'
       .. ' -H """content-type: application/json"""'
       .. ' -H @"""%s"""'
       .. ' -d @"""%s""" -o """%s"""'
-      .. ' & del """%s""" & echo %%errorlevel%% > """%s"""',
-      url, tmp.gemini_auth, tmp.cache_body, tmp.cache_out,
-      tmp.gemini_auth, tmp.cache_exit)
+      .. ' 2> """%s"""'
+      .. ' & call echo ^%%errorlevel^%% > """%s"""'
+      .. ' & del """%s"""',
+      url, tmp.cache_auth, tmp.cache_body, tmp.cache_out,
+      tmp.cache_err, tmp.cache_exit, tmp.cache_auth)
     local ps_cmd = str_format(
       'powershell -NoProfile -WindowStyle Hidden'
       .. ' -Command "Start-Process cmd -ArgumentList \'/c %s\''
@@ -25665,14 +26234,14 @@ function Net.fire_gemini_cache_create()
   else
     local function sq(path) return "'" .. path:gsub("'", "'\\''") .. "'" end
     local unix_curl = str_format(
-      '(curl -s --connect-timeout 10 --max-time 30'
+      '(curl -sS --connect-timeout 10 --max-time 30'
       .. ' -X POST %s'
       .. ' -H "content-type: application/json"'
       .. ' -H @%s'
-      .. ' -d @%s -o %s ; rm -f %s ; echo $? > %s) &',
-      url, sq(tmp.gemini_auth),
-      sq(tmp.cache_body), sq(tmp.cache_out),
-      sq(tmp.gemini_auth), sq(tmp.cache_exit))
+      .. ' -d @%s -o %s 2> %s ; rc=$? ; rm -f %s ; echo $rc > %s) &',
+      url, sq(tmp.cache_auth),
+      sq(tmp.cache_body), sq(tmp.cache_out), sq(tmp.cache_err),
+      sq(tmp.cache_auth), sq(tmp.cache_exit))
     os.execute(unix_curl)
   end
 
@@ -25742,9 +26311,9 @@ function Net.fire_gemini_cache_renew()
   if not cache_name or cache_name == "" then return end
   local google_key = S.api_key_map and S.api_key_map.google
   if not google_key then return end
-  if not Code.safe_write(tmp.gemini_auth, "x-goog-api-key: " .. google_key) then return end
+  if not Code.safe_write(tmp.cache_renew_auth, "x-goog-api-key: " .. google_key) then return end
   local body = str_format('{"ttl":"%ds"}', GEMINI_CACHE_TTL_SECS)
-  if not Code.safe_write(tmp.cache_body, body) then return end
+  if not Code.safe_write(tmp.cache_renew_body, body) then return end
   local url = str_format(
     "https://generativelanguage.googleapis.com/v1beta/%s",
     cache_name)
@@ -25755,8 +26324,8 @@ function Net.fire_gemini_cache_renew()
       .. ' -H @"""%s"""'
       .. ' -d @"""%s""" -o NUL'
       .. ' & del """%s""" & del """%s"""',
-      url, tmp.gemini_auth, tmp.cache_body,
-      tmp.gemini_auth, tmp.cache_body)
+      url, tmp.cache_renew_auth, tmp.cache_renew_body,
+      tmp.cache_renew_auth, tmp.cache_renew_body)
     local ps_cmd = str_format(
       'powershell -NoProfile -WindowStyle Hidden'
       .. ' -Command "Start-Process cmd -ArgumentList \'/c %s\''
@@ -25768,8 +26337,8 @@ function Net.fire_gemini_cache_renew()
     os.execute(str_format(
       '(curl -s -X PATCH -H "content-type: application/json"'
       .. ' -H @%s -d @%s %s > /dev/null 2>&1 ; rm -f %s %s) &',
-      sq(tmp.gemini_auth), sq(tmp.cache_body), url,
-      sq(tmp.gemini_auth), sq(tmp.cache_body)))
+      sq(tmp.cache_renew_auth), sq(tmp.cache_renew_body), url,
+      sq(tmp.cache_renew_auth), sq(tmp.cache_renew_body)))
   end
   -- Optimistically bump local expiry. If the PATCH fails server-side, the
   -- next send hits 404 and Net.gemini_cache_invalidate clears state cleanly.
@@ -25796,6 +26365,7 @@ function Net.try_finish_gemini_cache_create()
   local started = S.gemini_cache_started_at or 0
   if started > 0 and (reaper.time_precise() - started) > 45 then
     S.gemini_cache_creating = false
+    S.gemini_cache_create_aborted = false
     S.gemini_cache_model    = nil
     S.gemini_cache_signature = nil
     S.gemini_cache_last_create_reason = "watchdog_timeout"
@@ -25815,10 +26385,14 @@ function Net.try_finish_gemini_cache_create()
       local exit_str = ef:read("*a"); ef:close()
       local exit_code = tonumber(exit_str:match("(%d+)"))
       if exit_code and exit_code ~= 0 then
+        local aborted = S.gemini_cache_create_aborted == true
         S.gemini_cache_creating = false
+        S.gemini_cache_create_aborted = false
         S.gemini_cache_model    = nil
         S.gemini_cache_signature = nil
-        S.gemini_cache_last_create_reason = "curl_exit_" .. tostring(exit_code)
+        S.gemini_cache_last_create_reason = aborted
+          and "aborted"
+          or ("curl_exit_" .. tostring(exit_code))
         os.remove(tmp.cache_exit)
         return
       elseif exit_code == 0 then
@@ -25828,21 +26402,34 @@ function Net.try_finish_gemini_cache_create()
     end
   end
 
-  -- Response body. If curl hasn't exited yet, bail out partial -- we only
-  -- commit to parsing once we know the write is complete.
+  -- Response body. If curl hasn't exited yet, bail out rather than trying to
+  -- infer completeness from the partially written output file. A partial body
+  -- can temporarily look JSON-ish and still decode as non-JSON, which would
+  -- discard an otherwise healthy in-flight cache create.
+  if not curl_done then return end
+
   local ok_f, f = pcall(io.open, tmp.cache_out, "r")
   if not ok_f or not f then return end
   local raw = f:read("*a"); f:close()
-  if not curl_done then
-    if #raw < 10 then return end
-    local last_char = raw:match("(%S)%s*$")
-    if last_char ~= "}" then return end
-  end
 
+  local aborted = S.gemini_cache_create_aborted == true
   S.gemini_cache_creating = false
+  S.gemini_cache_create_aborted = false
   Code.safe_write(tmp.cache_out, "")
 
   local resp = JSON.decode(raw)
+  if aborted then
+    if type(resp) == "table"
+        and type(resp.name) == "string"
+        and resp.name ~= "" then
+      Net.fire_gemini_cache_delete(resp.name)
+    end
+    S.gemini_cache_model = nil
+    S.gemini_cache_signature = nil
+    S.gemini_cache_last_create_reason = "aborted"
+    return
+  end
+
   if type(resp) ~= "table" then
     -- Non-JSON response (e.g. proxy HTML); caching stays unusable this turn
     -- but the "creating" flag is already cleared so future sends can retry.
@@ -26043,6 +26630,11 @@ function Net.send_to_api(user_text)
   S.pending_project = reaper.EnumProjects(-1)
   local skip_local_answer = S.skip_local_answer_once
   S.skip_local_answer_once = nil
+  if not skip_local_answer
+      and Net.try_local_jsfx_capability_overview(user_text, msg_attachments,
+        probe_turn) then
+    return true
+  end
   if not skip_local_answer and Net.try_local_read_answer(user_text, msg_attachments, probe_turn) then
     return true
   end
@@ -30124,7 +30716,7 @@ local _TYPED_ACTION_MODEL_PROFILES = {
     ["claude-haiku-4-5"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
   },
   google = {
-    ["gemini-3-flash-preview"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
+    ["gemini-3.5-flash"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
     ["gemini-3.1-flash-lite"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
   },
 }
@@ -32258,7 +32850,7 @@ end -- close typed action validator scope
 -- Validating against the live table flags exactly the calls that would
 -- fail at runtime on this machine.
 --
--- Common failure mode caught: weaker models (Gemini Flash 3, Kimi k2.6,
+-- Common failure mode caught: weaker models (Gemini Flash 3.5, Kimi k2.6,
 -- smaller Claude variants) sometimes emit plausible-sounding but
 -- non-existent names like "GetProjectMarkerByIndex" (real function is
 -- "EnumProjectMarkers") even when docs is pinned. The runtime sandbox
@@ -34264,8 +34856,8 @@ function Code.find_track_creation_index_misuse(lua_code, user_text, snapshot)
       loop_last = len_var and table_lengths[len_var] or nil
     end
     if not loop_var then
-      local len_var
-      loop_var, _, len_var = line:match(
+      local ignored, len_var
+      loop_var, ignored, len_var = line:match(
         "^%s*for%s+([%a_][%w_]*)%s*,%s*([%a_][%w_]*)%s+in%s+ipairs%s*%(%s*([%a_][%w_]*)%s*%)%s*do%s*$")
       loop_first = loop_var and 1 or nil
       loop_last = len_var and table_lengths[len_var] or nil
@@ -39525,7 +40117,7 @@ function Net.process_response_buckets(text)
   -- response so far is just the context_needed tag, not code -- but we
   -- don't fetch anything new. The reinforcement hint tells the model the
   -- data is already available and nudges it to write code. Weak models
-  -- (GPT-5 mini, Flash 3) hit this path routinely after preempt injection.
+  -- (GPT-5 mini, Flash 3.5) hit this path routinely after preempt injection.
   local wants_preempt_hint = false
   local wants_prompt_bundle = false
   local pref_plugin_types = {}  -- type keys for preferred_plugins scoped bucket
@@ -41404,6 +41996,66 @@ function Net._schedule_transient_json_retry(raw, debug)
   return true
 end
 
+function Net._response_shape_summary(value)
+  local tv = type(value)
+  if tv ~= "table" then return tv end
+  if JSON and value == JSON.NULL then return "null" end
+  local parts, count = {}, 0
+  for k, v in pairs(value) do
+    count = count + 1
+    if count > 16 then
+      parts[#parts + 1] = "..."
+      break
+    end
+    parts[#parts + 1] = tostring(k) .. ":" .. type(v)
+  end
+  table.sort(parts)
+  return "{" .. tbl_concat(parts, ", ") .. "}"
+end
+
+function Net._handle_unexpected_response_shape(raw, resp, p, expected_shape)
+  Code.safe_write(tmp.log, raw)
+  if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
+    S.display_messages[S.pending_display_idx].ctx_label = "error"
+  end
+
+  local debug = Net._curl_failure_debug(nil, "Unexpected response shape",
+    "unexpected_response_shape")
+  debug.expected_shape = expected_shape
+  debug.response_bytes = #raw
+  debug.response_head = Net._debug_scrub(raw:sub(1, 2048))
+  debug.response_shape = Net._response_shape_summary(resp)
+  if type(resp) == "table" and type(resp.choices) == "table" then
+    debug.choices_count = #resp.choices
+    if type(resp.choices[1]) == "table" then
+      debug.first_choice_shape = Net._response_shape_summary(resp.choices[1])
+      if type(resp.choices[1].message) == "table" then
+        debug.first_message_shape =
+          Net._response_shape_summary(resp.choices[1].message)
+      end
+    end
+  end
+  local kind = Net.normalize_error_kind("unexpected_response_shape",
+    "unexpected_response_shape")
+  debug.normalized_error_kind = kind
+  local extra = { error_kind = kind, error_debug = debug }
+  if p and p.is_custom then
+    local fallback =
+      "The custom provider returned JSON, but not in the OpenAI-compatible "
+      .. "chat-completions shape ReaAssist expected. Check that this provider "
+      .. "points to a chat-completions endpoint for the selected model, then "
+      .. "try again.\n\nDetails were saved to the debug log."
+    Log.add_error((RA and RA.t and RA.t(
+      "response.custom_unexpected_shape", nil, fallback)) or fallback,
+      nil, nil, nil, extra)
+  else
+    Log.add_error(RA.t("response.unexpected", nil,
+      "Got an unexpected response from the server. This is likely a "
+        .. "temporary issue.\n\nPlease try again."),
+      nil, nil, nil, extra)
+  end
+end
+
 -- JSON decode failed. Log raw body, tag the display entry, and show an
 -- error. If the response looks like HTML, surface the proxy/captive-portal
 -- explanation instead of a generic "unreadable JSON" message.
@@ -41535,10 +42187,10 @@ end
 function Net._google_capacity_recovery(p)
   if not p or p.id ~= "google" or not S.pending_orig_prompt then return nil end
   local current_model = p.models and p.models[S.pending_model_idx or prefs.model_idx] or nil
-  if current_model and current_model.id == "gemini-3-flash-preview" then return nil end
+  if current_model and current_model.id == "gemini-3.5-flash" then return nil end
   local fallback
   for _, m in ipairs(p.models or {}) do
-    if m.id == "gemini-3-flash-preview" then fallback = m; break end
+    if m.id == "gemini-3.5-flash" then fallback = m; break end
   end
   if not fallback then return nil end
   return {
@@ -41546,7 +42198,7 @@ function Net._google_capacity_recovery(p)
     model_id = current_model and current_model.id or nil,
     fallback_provider_id = "google",
     fallback_model_id = fallback.id,
-    fallback_label = fallback.label or "Flash 3",
+    fallback_label = fallback.label or "Flash 3.5",
     recovery_prompt = S.pending_orig_prompt,
     recovery_attachments = S.pending_attachments,
   }
@@ -41692,7 +42344,7 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth)
     local msg
     if recovery then
       msg = RA.t("response.google_503_recovery", nil,
-        "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can wait and retry later, or switch to Flash 3 and resend the same message.")
+        "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can wait and retry later, or switch to Flash 3.5 and resend the same message.")
     else
       msg = RA.t("response.google_503", nil,
         "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can wait and retry later.")
@@ -42064,13 +42716,8 @@ function Net.try_finish_curl()
     -- Validate structure: {"choices":[{"message":{"content":"..."}}]}
     if type(resp.choices) ~= "table" or #resp.choices == 0
        or type(resp.choices[1].message) ~= "table" then
-      Code.safe_write(tmp.log, raw)
-      if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-        S.display_messages[S.pending_display_idx].ctx_label = "error"
-      end
-      Log.add_error(RA.t("response.unexpected", nil,
-        "Got an unexpected response from the server. This is likely a "
-          .. "temporary issue.\n\nPlease try again."))
+      Net._handle_unexpected_response_shape(raw, resp, p,
+        "choices[1].message.content")
       return
     end
     local choice  = resp.choices[1]

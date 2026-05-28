@@ -1,5 +1,15 @@
 # ReaAssist - Changelog
 
+## v1.3.3 - 2026-05-27
+
+- **Gemini Flash has been updated to Flash 3.5.** ReaAssist now uses Gemini 3.5 Flash, migrates saved Flash preview selections to the new model, refreshes pricing/diagnostics, and defaults Flash 3.5 to Minimal thinking for faster, lower-cost scripting and editing.
+
+- **Gemini and custom-provider failures are clearer.** Gemini cache creation races are handled more safely, capacity recovery points to Flash 3.5, free-tier cost wording is clearer, and malformed OpenAI-compatible custom-provider responses now get a more actionable debug message.
+
+- **Language download and CJK font recovery are more robust.** Failed language and font downloads now expose copyable diagnostics, and CJK language setup can fall back to an installed system font when the optional font download is unavailable.
+
+- **JSFX overview prompts answer locally.** ReaAssist can answer high-level JSFX capability questions without spending a model call or pulling extra context.
+
 ## v1.3.2 - 2026-05-26
 
 - **ReaAssist is now fully translated and localized.** The interface, setup flow, Settings, Help content, update messages, safety dialogs, and common status text now support localized language packs. Compatible languages: English, Spanish, French, German, Italian, Portuguese, Dutch, Polish, Swedish, Czech, Romanian, Turkish, Russian, Ukrainian, Chinese (Simplified), Chinese (Traditional), Japanese, Korean, Vietnamese, and Indonesian.
@@ -80,7 +90,7 @@
 - **New default model + thinking picks** for built-in providers, based on bench testing of multi-step REAPER scripting tasks:
   - Anthropic: Sonnet 4.6 (no thinking) remains the recommended Claude default; Haiku 4.5 default thinking moves Low to High (the only Haiku combo that handles complex routing reliably).
   - OpenAI: full GPT-5.4 (no thinking) replaces mini as the recommended OpenAI default; nano default thinking moves Low to None.
-  - Gemini: Flash Lite default thinking moves Minimal to Low; Flash 3 default thinking moves Low to Minimal (fastest combo in the lineup).
+  - Gemini: Flash Lite default thinking moves Minimal to Low; Flash 3.5 default thinking moves Low to Minimal (fastest combo in the lineup).
 
 - **Help page Quick model guide** added under Providers & Models with the recommended pick per provider. Help page renderer now handles markdown tables and `###` sub-headings, so the existing Stock Fallbacks table and the new Quick model guide render properly instead of as raw markdown.
 

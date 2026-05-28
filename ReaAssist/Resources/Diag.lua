@@ -65,7 +65,7 @@ Diag.AUTO_SEND_IDLE_S           = 60
 Diag.AUTO_RECENT_TURN_LIMIT     = 80
 Diag.LEGACY_STORAGE_CLEANUP_DELAY_S = 3
 Diag.LEGACY_STORAGE_CLEANUP_VERSION = 6
-Diag.PRICE_TABLE_VERSION        = "2026-05-09"
+Diag.PRICE_TABLE_VERSION        = "2026-05-27"
 
 Diag.PROVIDER_VOCABULARY     = { "anthropic", "openai", "google", "custom", "unknown" }
 Diag.MODEL_TIER_VOCABULARY   = { "fast", "balanced", "smart", "custom", "unknown" }
@@ -96,7 +96,7 @@ Diag.MODEL_TIER_MAP = {
   ["gemini-2.5-flash"]   = "fast",
   ["gemini-2.5-pro"]     = "smart",
   ["gemini-3.1-flash-lite"] = "fast",
-  ["gemini-3-flash-preview"] = "fast",
+  ["gemini-3.5-flash"]   = "fast",
   ["gemini-3.1-pro-preview"] = "smart",
   ["deepseek-v4-flash"]  = "fast",
 }

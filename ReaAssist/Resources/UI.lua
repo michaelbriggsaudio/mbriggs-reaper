@@ -904,7 +904,10 @@ function UI.cjk_fallback_font()
       or OptionalFonts.entry_for_language_idx(idx)
     if entry then
       if entry.font then return entry.font end
-      if OptionalFonts.file_exists and OptionalFonts.file_exists(entry) then
+      if OptionalFonts.load_available_entry then
+        local ok = OptionalFonts.load_available_entry(entry)
+        if ok and entry.font then return entry.font end
+      elseif OptionalFonts.file_exists and OptionalFonts.file_exists(entry) then
         local ok = OptionalFonts.load_entry and OptionalFonts.load_entry(entry)
         if ok and entry.font then return entry.font end
       end
@@ -976,7 +979,10 @@ function UI.cjk_font_for_text(text)
       and OptionalFonts.entry_for_language_code(code)
     if entry then
       if entry.font then return entry.font end
-      if OptionalFonts.file_exists and OptionalFonts.file_exists(entry) then
+      if OptionalFonts.load_available_entry then
+        local loaded = OptionalFonts.load_available_entry(entry)
+        if loaded and entry.font then return entry.font end
+      elseif OptionalFonts.file_exists and OptionalFonts.file_exists(entry) then
         local loaded = OptionalFonts.load_entry and OptionalFonts.load_entry(entry)
         if loaded and entry.font then return entry.font end
       end
@@ -1077,7 +1083,8 @@ function UI.maybe_prompt_missing_active_language_font()
   local entry = OptionalFonts.entry_for_language_idx
     and OptionalFonts.entry_for_language_idx(idx)
   if not entry then return end
-  if entry.font or OptionalFonts.file_exists(entry) then return end
+  if OptionalFonts.is_ready_for_language_idx
+      and OptionalFonts.is_ready_for_language_idx(idx) then return end
   if api_keys.missing_reply_language_font_idx == idx then return end
   api_keys.missing_reply_language_font_idx = idx
   api_keys.pending_reply_language_idx = idx
@@ -1130,6 +1137,9 @@ function UI.render_font_download_popup()
   if not busy and error_text then
     text_lines = text_lines + 1 + wrapped_line_count(error_text,
       RA.SC(12), RA.SC(360))
+    if failed and OptionalFonts.diagnostic_text then
+      text_lines = text_lines + 2
+    end
   end
   local pop_w = RA.SC(430)
   local pop_h = math_max(RA.SC(250),
@@ -1158,9 +1168,15 @@ function UI.render_font_download_popup()
       OptionalFonts.download = { state = "idle" }
       if S.wrap_cache then S.wrap_cache = {} end
       if UI.show_float_toast then
-        UI.show_float_toast(font_t("settings.font.ready_toast", {
+        local toast_key = entry.font_source == "system"
+          and "settings.font.system_fallback_toast"
+          or "settings.font.ready_toast"
+        local toast_fallback = entry.font_source == "system"
+          and ("Using a system font for " .. entry.label)
+          or (entry.label .. " font installed")
+        UI.show_float_toast(font_t(toast_key, {
           language = entry.label,
-        }, entry.label .. " font installed"), "ok")
+        }, toast_fallback), "ok")
       end
       ImGui.ImGui_CloseCurrentPopup(RA.ctx)
       ImGui.ImGui_EndPopup(RA.ctx)
@@ -1192,6 +1208,24 @@ function UI.render_font_download_popup()
         UI.update_dialog_text_center_wrapped(
           error_text,
           cw, TK.red, nil, RA.SC(12), cw - RA.SC(36))
+        if failed and OptionalFonts.diagnostic_text then
+          ImGui.ImGui_Spacing(RA.ctx)
+          local copy_label = font_t("settings.font.copy_details", nil,
+            "Copy details")
+          local copy_w = math_max(RA.SC(96),
+            CalcTextSize(RA.ctx, copy_label) + RA.SC(22))
+          SetCursorPosX(RA.ctx,
+            GetCursorPosX(RA.ctx) + math_floor((cw - copy_w) * 0.5))
+          if ImGui.ImGui_Button(RA.ctx,
+              copy_label .. "##font_download_details", copy_w, 0) then
+            ImGui.ImGui_SetClipboardText(RA.ctx,
+              OptionalFonts.diagnostic_text(d))
+            if UI.show_float_toast then
+              UI.show_float_toast(font_t("settings.font.details_copied", nil,
+                "Font download details copied."), "ok")
+            end
+          end
+        end
       end
     end
 
@@ -1246,6 +1280,65 @@ function UI.render_font_download_popup()
     ImGui.ImGui_EndPopup(RA.ctx)
   end
   UI.pop_modal_style()
+end
+
+function UI.render_language_download_status(lang_download, id_suffix)
+  lang_download = type(lang_download) == "table" and lang_download or nil
+  if not lang_download
+      or not (lang_download.state == "index_downloading"
+        or lang_download.state == "ui_downloading"
+        or lang_download.state == "failed") then
+    return false
+  end
+  local status_text = lang_download.status_text
+  local status_color = TK.text_muted
+  if lang_download.state == "index_downloading" then
+    status_text = UI.t("settings.lang.checking", nil,
+      "Checking languages...")
+  elseif lang_download.state == "failed" then
+    if lang_download.quiet_refresh then return false end
+    status_color = TK.red
+    if not status_text or status_text == "" then
+      if lang_download.last_code then
+        status_text = UI.t("settings.lang.failed_detail", {
+          language = (LangPacks and LangPacks._display_language
+            and LangPacks._display_language(lang_download.last_code)) or "",
+          current = (LangPacks and LangPacks._display_language
+            and LangPacks._display_language(I18N and I18N.lang_code
+              and I18N.lang_code() or "en")) or "English",
+          detail = lang_download.last_error or "",
+        }, lang_download.last_error or "Language pack download failed.")
+      else
+        status_text = UI.t("settings.lang.index_failed_detail", {
+          detail = lang_download.last_error or "",
+        }, lang_download.last_error or "Could not check language packs.")
+      end
+    end
+  end
+  if status_text and status_text ~= "" then
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), status_color)
+    ImGui.ImGui_PushTextWrapPos(RA.ctx,
+      GetCursorPosX(RA.ctx) + ImGui.ImGui_GetContentRegionAvail(RA.ctx))
+    ImGui.ImGui_TextWrapped(RA.ctx, status_text)
+    ImGui.ImGui_PopTextWrapPos(RA.ctx)
+    PopStyleColor(RA.ctx)
+  end
+  if lang_download.state == "failed"
+      and LangPacks and LangPacks.diagnostic_text then
+    local copy_label = UI.t("settings.lang.copy_details", nil, "Copy details")
+    local copy_w = math_max(RA.SC(96), CalcTextSize(RA.ctx, copy_label) + RA.SC(22))
+    if ImGui.ImGui_Button(RA.ctx,
+        copy_label .. "##lang_download_details_" .. tostring(id_suffix or ""),
+        copy_w, 0) then
+      ImGui.ImGui_SetClipboardText(RA.ctx,
+        LangPacks.diagnostic_text(lang_download))
+      if UI.show_float_toast then
+        UI.show_float_toast(UI.t("settings.lang.details_copied", nil,
+          "Language download details copied."), "ok")
+      end
+    end
+  end
+  return true
 end
 
 -- Destructive modal button (Run Anyway / Clear Cache / Factory Reset /
@@ -5174,39 +5267,7 @@ local function render_tos_language_picker(inner_w)
     end
   end
 
-  local lang_download = LangPacks and LangPacks.download or nil
-  if lang_download
-      and (lang_download.state == "index_downloading"
-        or lang_download.state == "ui_downloading"
-        or lang_download.state == "failed") then
-    local status_text = lang_download.status_text
-    local status_color = TK.text_muted
-    if lang_download.state == "index_downloading" then
-      status_text = UI.t("settings.lang.checking", nil,
-        "Checking languages...")
-    elseif lang_download.state == "failed" then
-      if lang_download.quiet_refresh then
-        status_text = nil
-      else
-        status_color = TK.red
-        if lang_download.last_code then
-          status_text = UI.t("settings.lang.failed", {
-            language = (LangPacks and LangPacks._display_language
-              and LangPacks._display_language(lang_download.last_code)) or "",
-            current = (LangPacks and LangPacks._display_language
-              and LangPacks._display_language(I18N and I18N.lang_code
-                and I18N.lang_code() or "en")) or "English",
-          }, lang_download.last_error or "Language pack download failed.")
-        else
-          status_text = UI.t("settings.lang.index_failed", nil,
-            "Could not check language packs.")
-        end
-      end
-    end
-    if status_text and status_text ~= "" then
-      ImGui.ImGui_TextColored(RA.ctx, status_color, status_text)
-    end
-  end
+  UI.render_language_download_status(LangPacks and LangPacks.download, "tos")
 
   local font_busy = OptionalFonts and OptionalFonts.is_busy
     and OptionalFonts.is_busy()
@@ -9847,39 +9908,8 @@ function Render._shared_key_screen_impl()
       end
     end
     ImGui.ImGui_SetCursorPos(RA.ctx, row_sx, row_sy + RA.SC(36))
-    local lang_download = LangPacks and LangPacks.download or nil
-    if lang_download
-        and (lang_download.state == "index_downloading"
-          or lang_download.state == "ui_downloading"
-          or lang_download.state == "failed") then
-      local status_text = lang_download.status_text
-      local status_color = TK.text_muted
-      if lang_download.state == "index_downloading" then
-        status_text = UI.t("settings.lang.checking", nil,
-          "Checking languages...")
-      elseif lang_download.state == "failed" then
-        if lang_download.quiet_refresh then
-          status_text = nil
-        else
-          status_color = TK.red
-          if lang_download.last_code then
-            status_text = UI.t("settings.lang.failed", {
-              language = (LangPacks and LangPacks._display_language
-                and LangPacks._display_language(lang_download.last_code)) or "",
-              current = (LangPacks and LangPacks._display_language
-                and LangPacks._display_language(I18N and I18N.lang_code
-                  and I18N.lang_code() or "en")) or "English",
-            }, lang_download.last_error or "Language pack download failed.")
-          else
-            status_text = UI.t("settings.lang.index_failed", nil,
-              "Could not check language packs.")
-          end
-        end
-      end
-      if status_text and status_text ~= "" then
-        ImGui.ImGui_TextColored(RA.ctx, status_color, status_text)
-      end
-    end
+    UI.render_language_download_status(LangPacks and LangPacks.download,
+      "settings")
   end
   Dummy(RA.ctx, 1, RA.SC(6))
 
@@ -17075,8 +17105,8 @@ function Render.main_window()
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.accent_text)
             PushFont(RA.ctx, FONT.mono_med, RA.SC(11))
             local label = UI.t("message.switch_to", {
-              label = msg.fallback_label or "Flash 3",
-            }, "Switch to " .. (msg.fallback_label or "Flash 3"))
+              label = msg.fallback_label or "Flash 3.5",
+            }, "Switch to " .. (msg.fallback_label or "Flash 3.5"))
               .. "##google_capacity_" .. i
             if ImGui.ImGui_Button(RA.ctx, label, 0, 0) then
               local ok, err = PROVIDERS.switch_to_model(
@@ -17097,7 +17127,7 @@ function Render.main_window()
               end
             end
             UI.tooltip(UI.t("message.switch_resend.tooltip", nil,
-              "Switch Gemini to Flash 3 and resend the original message."))
+              "Switch Gemini to Flash 3.5 and resend the original message."))
             PopFont(RA.ctx)
             PopStyleColor(RA.ctx, 5)
             ImGui.ImGui_PopStyleVar(RA.ctx, 3)

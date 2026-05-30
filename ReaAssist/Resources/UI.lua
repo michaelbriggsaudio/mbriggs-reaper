@@ -424,13 +424,13 @@ end
 -- =============================================================================
 -- Styled tooltip: shows a tooltip with dark theme colors when the previous
 -- item is hovered. Call immediately after the widget.
--- V5 tooltip: 300ms hover delay, 300ms fade-in on first show, 300ms fade-out
+-- V5 tooltip: 500ms hover delay, 300ms fade-in on first show, 300ms fade-out
 -- when hover leaves. Keeps a single active-tip entry in S._tip so both timers
 -- survive across frames. Call `UI.tooltip_v5(text)` immediately after the
 -- widget whose hover should trigger it, then call `UI.tooltip_render_v5()`
 -- once per frame AFTER every possible tooltip_v5 call -- typically near the
 -- end of the main loop so the tooltip paints above all other windows.
-UI.TIP_DELAY_S  = 0.3
+UI.TIP_DELAY_S  = 0.5
 UI.TIP_FADE_S   = 0.3
 function UI.tooltip_v5(text)
   -- AllowWhenDisabled so disabled items (e.g. paid-only models for free-tier
@@ -525,40 +525,7 @@ function UI.tooltip_render_v5()
 end
 
 function UI.tooltip(text)
-  local hover_flags = ImGui.ImGui_HoveredFlags_DelayNormal()
-                    | ImGui.ImGui_HoveredFlags_NoSharedDelay()
-  if ImGui.ImGui_IsItemHovered(RA.ctx, hover_flags) then
-    -- V5 palette tokens so this standard tooltip matches
-    -- UI.tooltip_v5 exactly -- same bg/text/border on every screen
-    -- regardless of which tooltip variant fires. Legacy COL.*
-    -- values rendered a different tone (blue-ish gray) that read
-    -- inconsistent vs the v5 tooltip's TK.card white/dark-navy.
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_PopupBg(), TK.card)
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),    TK.text)
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),  TK.border_str)
-    -- V5 global tooltip styling: SC(11)/SC(9) inner padding, SC(5)
-    -- rounded corners, 1px border, Inter Regular SC(12) font. Push
-    -- BOTH WindowRounding and PopupRounding because BeginTooltip's
-    -- rounding comes from the Window* variant, not Popup*, in most
-    -- ImGui builds; pushing both covers the binding regardless.
-    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(),    RA.SC(11), RA.SC(9))
-    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowRounding(),   RA.SC(5))
-    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_PopupRounding(),    RA.SC(5))
-    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowBorderSize(), 1)
-    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_PopupBorderSize(),  1)
-    ImGui.ImGui_BeginTooltip(RA.ctx)
-    PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
-    -- Max tooltip width: wrap long descriptions at SC(500) so the
-    -- tooltip window auto-sizes to at most that width instead of
-    -- ballooning horizontally to the full message.
-    ImGui.ImGui_PushTextWrapPos(RA.ctx, RA.SC(500))
-    Text(RA.ctx, text)
-    ImGui.ImGui_PopTextWrapPos(RA.ctx)
-    PopFont(RA.ctx)
-    ImGui.ImGui_EndTooltip(RA.ctx)
-    ImGui.ImGui_PopStyleVar(RA.ctx, 5)
-    PopStyleColor(RA.ctx, 3)
-  end
+  UI.tooltip_v5(text)
 end
 
 -- Draw a subtle focus ring around the last widget if it is active (focused).
@@ -2962,8 +2929,8 @@ function UI.mode_model_row_v5()
   ImGui.ImGui_EndDisabled(RA.ctx)
   cursor_x = px2 + ROW_GAP
 
-  -- ---- Options popup: backup/details --------------------------------------
-  -- Long backup/details labels do not belong in this already-dense mode row.
+  -- ---- Options popup: backup/details/custom instructions ------------------
+  -- Long option labels do not belong in this already-dense mode row.
   -- Keep the row stable with a localized Options chip, and put the translated
   -- toggles in a small native popup. BeginPopup has no title/header and closes
   -- automatically when the user clicks outside.
@@ -2973,15 +2940,23 @@ function UI.mode_model_row_v5()
   local details_label = UI.t("mode.details", nil, "details")
   local details_tip = UI.t("mode.details.tooltip", nil,
     "Details: show model, token count, and cost under each message.")
+  local custom_label = UI.t("mode.custom_instr", nil, "custom instr")
+  local custom_tip = UI.t("mode.custom_instr.tooltip", nil,
+    "Custom Instructions: include your local preferences with each request.")
+  local custom_edit_tip = UI.t("mode.custom_instr.edit.tooltip", nil,
+    "Edit Custom Instructions.")
   local on_label = UI.t("mode.on", nil, "on")
   local off_label = UI.t("mode.off", nil, "off")
+  local edit_label = UI.t("mode.edit_short", nil, "edit")
   local options_label = UI.t("mode.options", nil, "Options")
   local options_chip = options_label:upper()
   local opt_x1, opt_clicked = draw_chip(options_chip, "##mm_options_btn",
     not req_live,
     backup_label .. ": " .. (prefs.auto_backup and on_label or off_label)
       .. "\n" .. details_label .. ": "
-      .. (prefs.show_details and on_label or off_label))
+      .. (prefs.show_details and on_label or off_label)
+      .. "\n" .. custom_label .. ": "
+      .. (prefs.custom_instructions_enabled and on_label or off_label))
   if opt_clicked then ImGui.ImGui_OpenPopup(RA.ctx, "##mm_options_popup") end
 
   ImGui.ImGui_SetNextWindowPos(RA.ctx, opt_x1, y2 + RA.SC(2))
@@ -2993,33 +2968,40 @@ function UI.mode_model_row_v5()
     end
     local label_w = RA.SC(0)
     PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
-    label_w = math_max(mono_text_w(backup_label), mono_text_w(details_label))
+    label_w = math_max(mono_text_w(backup_label), mono_text_w(details_label),
+      mono_text_w(custom_label))
     local off_w = mono_text_w(off_label)
     local on_w = mono_text_w(on_label)
+    local edit_w_text = mono_text_w(edit_label)
     PopFont(RA.ctx)
-    local seg_w = math_max(RA.SC(36), off_w + RA.SC(14), on_w + RA.SC(14))
-    local seg_gap = RA.SC(4)
+    local side_pad = RA.SC(8)
+    local label_gap = RA.SC(9)
+    local seg_w = math_max(RA.SC(34), off_w + RA.SC(10), on_w + RA.SC(10))
+    local seg_gap = RA.SC(3)
+    local edit_w = math_max(RA.SC(34), edit_w_text + RA.SC(10))
     local row_w = math_max(RA.SC(156),
-      RA.SC(10) + label_w + RA.SC(14) + seg_w * 2 + seg_gap + RA.SC(10))
+      side_pad + label_w + label_gap + seg_w * 2 + seg_gap
+        + edit_w + seg_gap + side_pad)
     local option_row_h = RA.SC(26)
-    local function option_row(id, label, on, tooltip_text)
+    local function option_row(id, label, on, tooltip_text, show_edit,
+                              edit_tooltip_text)
       local start_x, start_y = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
       local row_dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
       local label_y = start_y + math_floor((option_row_h - MONO_SIZE) * 0.5)
       PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
-      ImGui.ImGui_DrawList_AddText(row_dl, start_x + RA.SC(10), label_y,
+      ImGui.ImGui_DrawList_AddText(row_dl, start_x + side_pad, label_y,
         TK.text, label)
       PopFont(RA.ctx)
-      local seg_x = start_x + RA.SC(10) + label_w + RA.SC(14)
+      local seg_x = start_x + side_pad + label_w + label_gap
       local seg_y = start_y + RA.SC(3)
       local seg_h = option_row_h - RA.SC(6)
-      local function segment(seg_id, seg_label, active, x)
+      local function segment(seg_id, seg_label, active, x, seg_tooltip)
         ImGui.ImGui_SetCursorScreenPos(RA.ctx, x, seg_y)
         ImGui.ImGui_BeginDisabled(RA.ctx, req_live)
         local clicked = ImGui.ImGui_InvisibleButton(RA.ctx, seg_id, seg_w, seg_h)
         local hovered = ImGui.ImGui_IsItemHovered(RA.ctx)
         ImGui.ImGui_EndDisabled(RA.ctx)
-        UI.tooltip_v5(tooltip_text)
+        UI.tooltip_v5(seg_tooltip or tooltip_text)
         ImGui.ImGui_DrawList_AddRectFilled(row_dl, x, seg_y,
           x + seg_w, seg_y + seg_h,
           active and TK.accent_ui
@@ -3039,10 +3021,34 @@ function UI.mode_model_row_v5()
       local off_clicked = segment(id .. "_off", off_label, not on, seg_x)
       local on_clicked = segment(id .. "_on", on_label, on,
         seg_x + seg_w + seg_gap)
+      local edit_clicked = false
+      if show_edit then
+        local edit_x = seg_x + seg_w * 2 + seg_gap * 2
+        ImGui.ImGui_SetCursorScreenPos(RA.ctx, edit_x, seg_y)
+        ImGui.ImGui_BeginDisabled(RA.ctx, req_live)
+        edit_clicked = ImGui.ImGui_InvisibleButton(RA.ctx,
+          id .. "_edit", edit_w, seg_h)
+        local edit_hovered = ImGui.ImGui_IsItemHovered(RA.ctx)
+        ImGui.ImGui_EndDisabled(RA.ctx)
+        UI.tooltip_v5(edit_tooltip_text or tooltip_text)
+        ImGui.ImGui_DrawList_AddRectFilled(row_dl, edit_x, seg_y,
+          edit_x + edit_w, seg_y + seg_h,
+          edit_hovered and TK.card_hover or TK.card, ROUND_SEG)
+        ImGui.ImGui_DrawList_AddRect(row_dl, edit_x, seg_y,
+          edit_x + edit_w, seg_y + seg_h, TK.border, ROUND_SEG)
+        PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
+        local tw = mono_text_w(edit_label)
+        ImGui.ImGui_DrawList_AddText(row_dl,
+          edit_x + math_floor((edit_w - tw) * 0.5),
+          seg_y + math_floor((seg_h - MONO_SIZE) * 0.5),
+          edit_hovered and TK.text or TK.text_muted, edit_label)
+        PopFont(RA.ctx)
+      end
       ImGui.ImGui_SetCursorScreenPos(RA.ctx, start_x, start_y + option_row_h)
       ImGui.ImGui_Dummy(RA.ctx, row_w, 0)
       if off_clicked then return false end
       if on_clicked then return true end
+      if edit_clicked then return "edit" end
       return nil
     end
     local backup_choice = option_row("##mm_backup_opt", backup_label,
@@ -3056,6 +3062,37 @@ function UI.mode_model_row_v5()
     if details_choice ~= nil and details_choice ~= prefs.show_details then
       prefs.show_details = details_choice
       if Store and Store.save_config then Store.save_config() end
+    end
+    local custom_choice = option_row("##mm_custom_instr_opt", custom_label,
+      prefs.custom_instructions_enabled, custom_tip, true, custom_edit_tip)
+    if custom_choice == "edit" then
+      api_keys.custom_instr_return_screen = nil
+      api_keys.custom_instr_loaded = nil
+      api_keys.screen = "custom_instructions"
+      ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+    elseif custom_choice ~= nil
+        and custom_choice ~= prefs.custom_instructions_enabled then
+      local prev_enabled = prefs.custom_instructions_enabled and true or false
+      local next_enabled = custom_choice and true or false
+      local err
+      prefs.custom_instructions_enabled = next_enabled
+      if Store and Store.save_custom_instructions_enabled then
+        err = Store.save_custom_instructions_enabled(next_enabled)
+      elseif Store and Store.save_config then
+        err = Store.save_config()
+      end
+      if err then
+        prefs.custom_instructions_enabled = prev_enabled
+        if api_keys then
+          api_keys.custom_instr_enabled = prev_enabled
+          api_keys.custom_instr_saved_enabled = prev_enabled
+        end
+        if UI and UI.show_float_toast then
+          UI.show_float_toast(UI.t(
+            "settings.custom_instructions.error.save_pref", nil,
+            "Could not save the Custom Instructions toggle."), "err", true)
+        end
+      end
     end
     ImGui.ImGui_EndPopup(RA.ctx)
   end
@@ -3131,8 +3168,7 @@ function UI.mode_model_row_v5()
     end
   end
 
-  -- tooltip_render_v5() lives at the end of UI.footer_rail_v5 -- it's the
-  -- last V5 element rendered so we only call it once per frame.
+  -- tooltip_render_v5() runs once near the end of Render.main_window().
 end
 
 -- V5 Footer rail -- spans the full window width beneath the mode+model row.
@@ -3757,10 +3793,6 @@ function UI.footer_rail_v5()
     if clicked then UI.open_url("https://www.paypal.com/paypalme/civil") end
     cursor_x = x1 - GAP
   end
-
-  -- Single-frame tooltip render -- fed by tooltip_v5 calls in BOTH the
-  -- mode/model row above and the footer links just drawn.
-  UI.tooltip_render_v5()
 
   -- Restore the caller's cursor so the rail call is transparent to the
   -- surrounding layout. Without this, ImGui's CursorMaxPos climbs to
@@ -4587,8 +4619,12 @@ function UI.v5_select_row(id, label, items_str, cur_idx, tooltip, col_w, badge_t
       local margin = RA.SC(8)
       local scr_l, scr_t, scr_r, scr_b
       if reaper and reaper.my_getViewport then
+        local src_l = math_floor(chip_sx)
+        local src_t = math_floor(chip_sy)
+        local src_r = math_floor(chip_x2)
+        local src_b = math_floor(chip_y2)
         scr_l, scr_t, scr_r, scr_b = reaper.my_getViewport(
-          0, 0, 0, 0, chip_sx, chip_sy, chip_x2, chip_y2, true)
+          0, 0, 0, 0, src_l, src_t, src_r, src_b, true)
       end
       if type(scr_l) == "number" and type(scr_t) == "number"
           and type(scr_r) == "number" and type(scr_b) == "number" then
@@ -6540,6 +6576,8 @@ function Render.bug_report_screen()
 
     _bullet(UI.t("bug_report.item.diagnostic", nil,
       "Diagnostic report (app/REAPER/OS, recent errors, metrics)"))
+    _bullet(UI.t("bug_report.item.custom_instructions", nil,
+      "Custom Instructions state, plus active text if enabled"))
     if _attachment_kind == "log" then
       local size_str
       if _log_size >= 1024 * 1024 then
@@ -6836,6 +6874,8 @@ function Render.bug_report_screen()
       "What's included"), {
       UI.t("bug_report.panel.included.diagnostic", nil,
         "Diagnostic report (app/REAPER/OS, errors, metrics)"),
+      UI.t("bug_report.panel.included.custom_instructions", nil,
+        "Custom Instructions state and active text"),
       UI.t("bug_report.panel.included.attachment", nil,
         "Advanced Log or current chat (whichever is available)"),
       UI.t("bug_report.panel.included.contact", nil,
@@ -6877,6 +6917,8 @@ function Render.bug_report_screen()
         "Project, track, plugin, or file names you typed"),
       UI.t("bug_report.panel.not_redacted.chat", nil,
         "Anything else you pasted into the chat"),
+      UI.t("bug_report.panel.not_redacted.custom_instructions", nil,
+        "Custom Instructions active text"),
       UI.t("bug_report.panel.not_redacted.contact", nil,
         "Your contact name and email (so a reply works)"),
     }
@@ -7417,6 +7459,7 @@ function Render._factory_reset_execute()
   prefs.auto_run              = false
   prefs.auto_backup           = true
   prefs.show_details          = false
+  prefs.custom_instructions_enabled = false
   prefs.debug_logging         = true   -- default ON during early-release window; mirror of ReaAssist.lua prefs load site
   prefs.include_api_ref       = false
   prefs.include_snapshot      = true
@@ -7529,6 +7572,7 @@ function Render._factory_reset_execute()
       remove_family(RA.CONFIG_PATH)
       remove_family(RA.PROVIDERS_PATH)
       remove_family(RA.STATE_PATH)
+      remove_family(RA.CUSTOM_INSTRUCTIONS_PATH)
       remove_family(RA.DATA_DIR .. "FX_Cache.json")
       remove_family(RA.DATA_DIR .. "Debug.log")
       remove_family(RA.FX_CACHE_PATH)
@@ -8406,6 +8450,8 @@ function Render.feedback_modal()
       local _r1_a_header, _r1_a_items = UI.t("feedback.panel.included",
         nil, "What's included"), {
         UI.t("feedback.panel.included.chat", nil, "Chat shown above"),
+        UI.t("feedback.panel.included.custom_instructions", nil,
+          "Custom Instructions state and active text"),
         UI.t("feedback.panel.included.comment", nil,
           "Your comment and tags"),
         UI.t("feedback.panel.included.system", nil,
@@ -8444,6 +8490,8 @@ function Render.feedback_modal()
         nil, "Note"), {
         UI.t("feedback.panel.note.body", nil,
           "Chat may include project, track, plugin, or names you typed."),
+        UI.t("feedback.panel.note.custom_instructions", nil,
+          "Custom Instructions are included automatically because they can affect results."),
       }
       local _r2_h = math.max(
         _panel_h(_r2_a_header, _r2_a_items),
@@ -9008,6 +9056,639 @@ function Render.settings_screen()
   Render._shared_key_screen_impl()
 end
 
+function Render._custom_instructions_leave()
+  local ret = api_keys.custom_instr_return_screen
+  api_keys.custom_instr_loaded = nil
+  api_keys.custom_instr_buf = nil
+  api_keys.custom_instr_saved_buf = nil
+  api_keys.custom_instr_enabled = nil
+  api_keys.custom_instr_saved_enabled = nil
+  api_keys.custom_instr_status = nil
+  api_keys.custom_instr_status_kind = nil
+  api_keys.custom_instr_return_screen = nil
+  api_keys.screen = ret
+  if ret == nil then api_keys.is_reentry = false end
+end
+
+function Render.custom_instructions_screen()
+  local win_w    = ImGui.ImGui_GetWindowWidth(RA.ctx)
+  local pad_x    = ImGui.ImGui_GetStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding())
+  local sb_w     = ImGui.ImGui_GetStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ScrollbarSize())
+  local stable_w = win_w - pad_x * 2 - sb_w
+  local inner_w  = math_min(RA.SC(540), stable_w)
+  local body_indent = math_max(math_floor((stable_w - inner_w) * 0.5), 0)
+
+  if not api_keys.custom_instr_loaded then
+    local text = Store and Store.custom_instructions_text
+      and Store.custom_instructions_text() or ""
+    api_keys.custom_instr_buf = text or ""
+    api_keys.custom_instr_saved_buf = api_keys.custom_instr_buf
+    api_keys.custom_instr_enabled = prefs.custom_instructions_enabled and true or false
+    api_keys.custom_instr_saved_enabled = api_keys.custom_instr_enabled
+    api_keys.custom_instr_status = nil
+    api_keys.custom_instr_status_kind = nil
+    api_keys.custom_instr_loaded = true
+  end
+
+  local limit = CFG.CUSTOM_INSTRUCTIONS_CHAR_LIMIT or 12000
+  local buf = api_keys.custom_instr_buf or ""
+  local enabled = api_keys.custom_instr_enabled and true or false
+  local dirty = (buf ~= (api_keys.custom_instr_saved_buf or ""))
+  local over_limit = #buf > limit
+  local approx_tokens = math_floor((#buf + 3) / 4)
+
+  local function refresh_editor_state()
+    buf = api_keys.custom_instr_buf or ""
+    enabled = api_keys.custom_instr_enabled and true or false
+    dirty = (buf ~= (api_keys.custom_instr_saved_buf or ""))
+    over_limit = #buf > limit
+    approx_tokens = math_floor((#buf + 3) / 4)
+  end
+
+  local function save_enabled_immediate(new_on)
+    new_on = new_on and true or false
+    local prev = prefs.custom_instructions_enabled and true or false
+    prefs.custom_instructions_enabled = new_on
+    api_keys.custom_instr_enabled = new_on
+    if Store and Store.save_custom_instructions_enabled then
+      local err = Store.save_custom_instructions_enabled(new_on)
+      if err then
+        prefs.custom_instructions_enabled = prev
+        api_keys.custom_instr_enabled = prev
+        api_keys.custom_instr_saved_enabled = prev
+        api_keys.custom_instr_status =
+          UI.t("settings.custom_instructions.error.save_pref", nil,
+            "Could not save the Custom Instructions toggle.")
+        api_keys.custom_instr_status_kind = "err"
+        refresh_editor_state()
+        return false
+      end
+    elseif Store and Store.save_config then
+      Store.save_config()
+    end
+    api_keys.custom_instr_saved_enabled = new_on
+    api_keys.custom_instr_status = nil
+    api_keys.custom_instr_status_kind = nil
+    refresh_editor_state()
+    return true
+  end
+
+  local function save_current()
+    refresh_editor_state()
+    if over_limit then
+      api_keys.custom_instr_status = UI.t(
+        "settings.custom_instructions.error.too_large",
+        { limit = limit },
+        str_format("Keep Custom Instructions under %d characters.", limit))
+      api_keys.custom_instr_status_kind = "err"
+      return false
+    end
+    if Store and Store.custom_instructions_write then
+      local err = Store.custom_instructions_write(buf)
+      if err then
+        api_keys.custom_instr_status =
+          UI.t("settings.custom_instructions.error.save_file", nil,
+            "Could not save Custom Instructions.")
+        api_keys.custom_instr_status_kind = "err"
+        return false
+      end
+    end
+    prefs.custom_instructions_enabled = enabled
+    if Store and Store.save_custom_instructions_enabled then
+      local err = Store.save_custom_instructions_enabled(enabled)
+      if err then
+        api_keys.custom_instr_status =
+          UI.t("settings.custom_instructions.error.save_pref", nil,
+            "Could not save the Custom Instructions toggle.")
+        api_keys.custom_instr_status_kind = "err"
+        return false
+      end
+    elseif Store and Store.save_config then
+      Store.save_config()
+    end
+    api_keys.custom_instr_saved_buf = buf
+    api_keys.custom_instr_saved_enabled = enabled
+    api_keys.custom_instr_status = UI.t(
+      "settings.custom_instructions.saved", nil,
+      "Custom Instructions saved.")
+    api_keys.custom_instr_status_kind = "ok"
+    refresh_editor_state()
+    if UI and UI.show_float_toast then
+      UI.show_float_toast(api_keys.custom_instr_status, "ok")
+    end
+    return true
+  end
+
+  UI.push_settings_styles()
+  UI.hero_band_settings_v5(
+    UI.t("settings.custom_instructions.subtitle", nil,
+      "Local preferences for every request."),
+    UI.t("settings.custom_instructions.breadcrumb", nil,
+      "CUSTOM INSTRUCTIONS") .. " \xc2\xb7 v" .. CFG.VERSION)
+  Dummy(RA.ctx, 1, RA.SC(6))
+
+  local _body_avail_w = select(1, ImGui.ImGui_GetContentRegionAvail(RA.ctx))
+  local _body_avail_h = select(2, ImGui.ImGui_GetContentRegionAvail(RA.ctx))
+  local _body_h = math_max(_body_avail_h - RA.SC(8), RA.SC(1))
+  PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildBorderSize(), 0)
+  PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(),   0, 0)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarBg(),          0x00000000)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrab(),        TK.border_str)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabHovered(),
+    UI.lerp_u32(TK.border_str, TK.text, 0.30))
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
+    UI.lerp_u32(TK.border_str, TK.text, 0.55))
+  ImGui.ImGui_BeginChild(RA.ctx, "##custom_instr_body",
+    _body_avail_w, _body_h, 0)
+  ImGui.ImGui_Indent(RA.ctx, body_indent)
+  Dummy(RA.ctx, 1, RA.SC(16))
+
+  PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
+  ImGui.ImGui_PushTextWrapPos(RA.ctx, GetCursorPosX(RA.ctx) + inner_w)
+  UI.text_multiline(UI.t("settings.custom_instructions.desc", nil,
+    "Use this for stable personal preferences: preferred plugins, naming "
+    .. "habits, project conventions, and things you often have to repeat. "
+    .. "Think of it like an AGENTS.md or CLAUDE.md file for ReaAssist. "
+    .. "When enabled, this text will be sent to the model with every request."))
+  ImGui.ImGui_PopTextWrapPos(RA.ctx)
+  PopStyleColor(RA.ctx)
+  PopFont(RA.ctx)
+  Dummy(RA.ctx, 1, RA.SC(14))
+
+  local changed, new_on = UI.v5_toggle("##custom_instr_enable",
+    UI.t("settings.custom_instructions.enable", nil,
+      "Enable Custom Instructions"),
+    enabled,
+    UI.t("settings.custom_instructions.enable.tooltip", nil,
+      "When enabled, these notes are attached to each request."),
+    inner_w)
+  if changed then
+    save_enabled_immediate(new_on)
+  end
+  Dummy(RA.ctx, 1, RA.SC(14))
+
+  UI.v5_section_label(UI.t("settings.custom_instructions.section.notes", nil,
+    "NOTES"))
+  Dummy(RA.ctx, 1, RA.SC(6))
+
+  PushFont(RA.ctx, FONT.mono_reg, RA.SC(10))
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),
+    over_limit and TK.red or TK.text_muted)
+  Text(RA.ctx, str_format("%d / %d chars  ·  ~%d tokens",
+    #buf, limit, approx_tokens))
+  PopStyleColor(RA.ctx)
+  PopFont(RA.ctx)
+  Dummy(RA.ctx, 1, RA.SC(5))
+
+  local input_x, input_y = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
+  local editor_h = math_max(RA.SC(160),
+    math_min(RA.SC(210), _body_h - RA.SC(390)))
+  PushFont(RA.ctx, UI.font_for_language_text(buf) or FONT.inter_reg, RA.SC(12))
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBg(),       TK.card)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgHovered(), TK.card_hover)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgActive(),  TK.card_hover)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.text)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),        TK.border)
+  PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 1)
+  PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(),   RA.SC(6))
+  PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),    RA.SC(10), RA.SC(8))
+  local _, new_buf = ImGui.ImGui_InputTextMultiline(RA.ctx,
+    "##custom_instr_editor", buf, inner_w, editor_h, 0, nil)
+  ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+  PopStyleColor(RA.ctx, 5)
+  PopFont(RA.ctx)
+  if new_buf ~= nil and new_buf ~= buf then
+    api_keys.custom_instr_buf = new_buf
+    api_keys.custom_instr_status = nil
+    api_keys.custom_instr_status_kind = nil
+    refresh_editor_state()
+  end
+  if (api_keys.custom_instr_buf or "") == "" then
+    local dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+      ImGui.ImGui_DrawList_AddTextEx(dl, FONT.inter_reg, RA.SC(12),
+        input_x + RA.SC(10), input_y + RA.SC(8), TK.text_faint,
+      UI.t("settings.custom_instructions.placeholder", nil,
+        "Example: Work only on selected tracks or items unless I say to edit the whole project."))
+  end
+
+  if over_limit then
+    Dummy(RA.ctx, 1, RA.SC(8))
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.red)
+    UI.text_multiline(UI.t("settings.custom_instructions.limit_warning",
+      { limit = limit },
+      str_format("Too large. Keep this under %d characters.", limit)))
+    PopStyleColor(RA.ctx)
+    PopFont(RA.ctx)
+  elseif enabled and dirty then
+    Dummy(RA.ctx, 1, RA.SC(8))
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.accent)
+    UI.text_multiline(UI.t("settings.custom_instructions.unsaved_enabled", nil,
+      "Unsaved text. Save to apply it."))
+    PopStyleColor(RA.ctx)
+    PopFont(RA.ctx)
+  elseif enabled and ((api_keys.custom_instr_buf or ""):match("^%s*$")) then
+    Dummy(RA.ctx, 1, RA.SC(8))
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+    UI.text_multiline(UI.t("settings.custom_instructions.empty_enabled", nil,
+      "Enabled, but empty notes are skipped."))
+    PopStyleColor(RA.ctx)
+    PopFont(RA.ctx)
+  end
+
+  if api_keys.custom_instr_status then
+    Dummy(RA.ctx, 1, RA.SC(10))
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),
+      api_keys.custom_instr_status_kind == "err" and TK.red or TK.green)
+    UI.text_multiline(api_keys.custom_instr_status)
+    PopStyleColor(RA.ctx)
+    PopFont(RA.ctx)
+  end
+
+  local back_label = UI.t("common.back", nil, "Back")
+  local clear_label = UI.t("common.clear", nil, "Clear")
+  local save_label = UI.t("common.save", nil, "Save")
+  local save_back_label = UI.t("settings.custom_instructions.save_back", nil,
+    "Save & Back")
+  local back_clicked, clear_clicked = false, false
+  local save_clicked, save_back_clicked = false, false
+  do
+    Dummy(RA.ctx, 1, RA.SC(12))
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+    local back_w = CalcTextSize(RA.ctx, back_label) + RA.SC(40)
+    local clear_w = CalcTextSize(RA.ctx, clear_label) + RA.SC(40)
+    local save_w = CalcTextSize(RA.ctx, save_label) + RA.SC(40)
+    PopFont(RA.ctx)
+    PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
+    local save_back_w = CalcTextSize(RA.ctx, save_back_label) + RA.SC(44)
+    PopFont(RA.ctx)
+    local BTN_GAP = RA.SC(8)
+    local row_w = back_w + BTN_GAP + clear_w + BTN_GAP + save_w
+      + BTN_GAP + save_back_w
+    SetCursorPosX(RA.ctx,
+      GetCursorPosX(RA.ctx) + math_max(math_floor((inner_w - row_w) * 0.5), 0))
+
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 1)
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(),   RA.SC(5))
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),    RA.SC(14), RA.SC(6))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.text)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),        TK.border)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        TK.card)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), TK.card_hover)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  TK.card_hover)
+    back_clicked = ImGui.ImGui_Button(RA.ctx,
+      back_label .. "##custom_instr_back", back_w, 0)
+    UI.pressable()
+    SameLine(RA.ctx, 0, BTN_GAP)
+    ImGui.ImGui_BeginDisabled(RA.ctx,
+      (api_keys.custom_instr_buf or "") == "" and not enabled)
+    clear_clicked = ImGui.ImGui_Button(RA.ctx,
+      clear_label .. "##custom_instr_clear", clear_w, 0)
+    UI.pressable()
+    ImGui.ImGui_EndDisabled(RA.ctx)
+
+    SameLine(RA.ctx, 0, BTN_GAP)
+    ImGui.ImGui_BeginDisabled(RA.ctx, (not dirty) or over_limit)
+    save_clicked = ImGui.ImGui_Button(RA.ctx,
+      save_label .. "##custom_instr_save", save_w, 0)
+    UI.pressable()
+    ImGui.ImGui_EndDisabled(RA.ctx)
+    PopStyleColor(RA.ctx, 5)
+    ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+    PopFont(RA.ctx)
+
+    SameLine(RA.ctx, 0, BTN_GAP)
+    PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 0)
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(),   RA.SC(5))
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),    RA.SC(14), RA.SC(6))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.accent_text)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        TK.accent)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(),
+      UI.lerp_u32(TK.accent, 0xFFFFFFFF, 0.12))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),
+      UI.lerp_u32(TK.accent, 0x000000FF, 0.15))
+    ImGui.ImGui_BeginDisabled(RA.ctx, over_limit)
+    save_back_clicked = ImGui.ImGui_Button(RA.ctx,
+      save_back_label .. "##custom_instr_save_back", save_back_w, 0)
+      or ((not over_limit) and dirty and UI.is_save_shortcut())
+    UI.pressable()
+    ImGui.ImGui_EndDisabled(RA.ctx)
+    PopStyleColor(RA.ctx, 4)
+    ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+    PopFont(RA.ctx)
+  end
+
+  Dummy(RA.ctx, 1, RA.SC(20))
+  UI.v5_section_label(UI.t("settings.custom_instructions.section.examples", nil,
+    "EXAMPLES"))
+  Dummy(RA.ctx, 1, RA.SC(8))
+
+  local examples = {
+    {
+      title = UI.t("settings.custom_instructions.example.scope.title", nil,
+        "Edit Scope"),
+      items = {
+        UI.t("settings.custom_instructions.example.scope.body", nil,
+          "Work only on selected tracks or items unless I say to edit the whole project."),
+        UI.t("settings.custom_instructions.example.scope.body_2", nil,
+          "If nothing is selected, ask before making project-wide changes."),
+      },
+    },
+    {
+      title = UI.t("settings.custom_instructions.example.destructive.title", nil,
+        "Destructive Edits"),
+      items = {
+        UI.t("settings.custom_instructions.example.destructive.body", nil,
+          "Ask before deleting tracks, items, takes, automation, or files."),
+        UI.t("settings.custom_instructions.example.destructive.body_2", nil,
+          "Prefer muting or bypassing over removing things when either would work."),
+      },
+    },
+    {
+      title = UI.t("settings.custom_instructions.example.broad.title", nil,
+        "Broad Changes"),
+      items = {
+        UI.t("settings.custom_instructions.example.broad.body", nil,
+          "For broad edits, summarize the plan before generating code."),
+        UI.t("settings.custom_instructions.example.broad.body_2", nil,
+          "When a request affects many tracks, explain the assumptions first."),
+      },
+    },
+    {
+      title = UI.t("settings.custom_instructions.example.session.title", nil,
+        "Track Style"),
+      items = {
+        UI.t("settings.custom_instructions.example.session.body", nil,
+          "Use short track names and keep related tracks grouped and colored consistently."),
+        UI.t("settings.custom_instructions.example.session.body_2", nil,
+          "Name utility tracks clearly, like VERB BUS, DRUM PARALLEL, or PRINT."),
+      },
+    },
+    {
+      title = UI.t("settings.custom_instructions.example.routing.title", nil,
+        "Routing"),
+      items = {
+        UI.t("settings.custom_instructions.example.routing.body", nil,
+          "Preserve existing routing, sends, and receives unless I ask to rebuild them."),
+        UI.t("settings.custom_instructions.example.routing.body_2", nil,
+          "When adding sends, keep them organized and name the destination clearly."),
+      },
+    },
+    {
+      title = UI.t("settings.custom_instructions.example.reversible.title", nil,
+        "Reversibility"),
+      items = {
+        UI.t("settings.custom_instructions.example.reversible.body", nil,
+          "Prefer reversible edits, like new takes, markers, regions, or muted items."),
+        UI.t("settings.custom_instructions.example.reversible.body_2", nil,
+          "Keep originals intact when rendering, freezing, gluing, or committing edits."),
+      },
+    },
+    {
+      title = UI.t("settings.custom_instructions.example.midi.title", nil,
+        "MIDI Edits"),
+      items = {
+        UI.t("settings.custom_instructions.example.midi.body", nil,
+          "Preserve timing and note lengths unless timing is the request."),
+        UI.t("settings.custom_instructions.example.midi.body_2", nil,
+          "When editing CC data, avoid changing notes outside the selected range."),
+      },
+    },
+    {
+      title = UI.t("settings.custom_instructions.example.reply.title", nil,
+        "Replies"),
+      items = {
+        UI.t("settings.custom_instructions.example.reply.body", nil,
+          "Keep replies concise, but call out assumptions that could affect the session."),
+        UI.t("settings.custom_instructions.example.reply.body_2", nil,
+          "If a request is ambiguous, make the safest useful choice and say so."),
+      },
+    },
+  }
+  local EXAMPLE_GAP = RA.SC(8)
+  local example_card_w = math_max(RA.SC(170),
+    math_floor((inner_w - EXAMPLE_GAP) * 0.5))
+  local EXAMPLE_CARD_PAD_X = RA.SC(12)
+  local EXAMPLE_CARD_PAD_Y = RA.SC(10)
+  local EXAMPLE_COPY_W = RA.SC(24)
+  local EXAMPLE_COPY_GAP = RA.SC(10)
+  local EXAMPLE_TITLE_GAP = RA.SC(7)
+  local EXAMPLE_ITEM_GAP = RA.SC(5)
+  local EXAMPLE_ITEM_MIN_H = RA.SC(24)
+  local example_text_w = math_max(RA.SC(92),
+    example_card_w - EXAMPLE_CARD_PAD_X * 2 - EXAMPLE_COPY_W
+      - EXAMPLE_COPY_GAP)
+  local function example_card_height(title, items)
+    local total_h = EXAMPLE_CARD_PAD_Y * 2
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
+    local _, title_h = ImGui.ImGui_CalcTextSize(RA.ctx, title or "")
+    PopFont(RA.ctx)
+    total_h = total_h + title_h + EXAMPLE_TITLE_GAP
+
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+    for item_idx, text in ipairs(items or {}) do
+      local _, item_h = ImGui.ImGui_CalcTextSize(RA.ctx, text or "",
+        nil, nil, false, example_text_w)
+      total_h = total_h + math_max(item_h, EXAMPLE_ITEM_MIN_H)
+      if item_idx < #(items or {}) then
+        total_h = total_h + EXAMPLE_ITEM_GAP
+      end
+    end
+    PopFont(RA.ctx)
+    return math_max(RA.SC(148), math.ceil(total_h + RA.SC(16)))
+  end
+  local function example_card(idx, title, items, card_w, card_h)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), TK.card)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),  TK.border)
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildBorderSize(), 1)
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildRounding(),   RA.SC(6))
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(),
+      EXAMPLE_CARD_PAD_X, EXAMPLE_CARD_PAD_Y)
+    if ImGui.ImGui_BeginChild(RA.ctx, "##custom_instr_example_" .. idx,
+        card_w, card_h, ImGui.ImGui_ChildFlags_Borders(),
+        ImGui.ImGui_WindowFlags_NoScrollbar()
+          | ImGui.ImGui_WindowFlags_NoScrollWithMouse()) then
+
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
+      Text(RA.ctx, title)
+      PopStyleColor(RA.ctx)
+      PopFont(RA.ctx)
+
+      local function example_item(item_idx, text)
+        local item_x = GetCursorPosX(RA.ctx)
+        local item_y = ImGui.ImGui_GetCursorPosY(RA.ctx)
+        local avail_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+        local copy_w = EXAMPLE_COPY_W
+        local copy_gap = EXAMPLE_COPY_GAP
+        local text_w = math_max(RA.SC(92), avail_w - copy_w - copy_gap)
+
+        PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+        ImGui.ImGui_PushTextWrapPos(RA.ctx, item_x + text_w)
+        Text(RA.ctx, text)
+        ImGui.ImGui_PopTextWrapPos(RA.ctx)
+        PopStyleColor(RA.ctx)
+        PopFont(RA.ctx)
+        local text_bottom_y = ImGui.ImGui_GetCursorPosY(RA.ctx)
+
+        ImGui.ImGui_SetCursorPosY(RA.ctx, item_y)
+        SetCursorPosX(RA.ctx, item_x + text_w + copy_gap)
+        PushFont(RA.ctx, FONT.lucide, RA.SC(12))
+        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(), RA.SC(4), RA.SC(3))
+        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(), RA.SC(4))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.text_muted)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        TK.card)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), TK.card_hover)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  TK.card_hover)
+        if ImGui.ImGui_Button(RA.ctx,
+            ICON.COPY .. "##ci_ex_copy_" .. idx .. "_" .. item_idx,
+            copy_w, 0) then
+          ImGui.ImGui_SetClipboardText(RA.ctx, text)
+          if UI and UI.show_float_toast then
+            UI.show_float_toast(UI.t(
+              "settings.custom_instructions.example.copied", nil,
+              "Example copied."), "ok")
+          end
+        end
+        UI.tooltip(UI.t("settings.custom_instructions.example.copy", nil,
+          "Copy example"))
+        PopStyleColor(RA.ctx, 4)
+        ImGui.ImGui_PopStyleVar(RA.ctx, 2)
+        PopFont(RA.ctx)
+
+        SetCursorPosX(RA.ctx, item_x)
+        ImGui.ImGui_SetCursorPosY(RA.ctx,
+          math_max(text_bottom_y, item_y + RA.SC(24)))
+        Dummy(RA.ctx, 1, 0)
+      end
+
+      Dummy(RA.ctx, 1, EXAMPLE_TITLE_GAP)
+      for item_idx, text in ipairs(items or {}) do
+        example_item(item_idx, text)
+        if item_idx < #(items or {}) then
+          Dummy(RA.ctx, 1, EXAMPLE_ITEM_GAP)
+        end
+      end
+
+      ImGui.ImGui_EndChild(RA.ctx)
+    end
+    ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+    PopStyleColor(RA.ctx, 2)
+  end
+
+  for i = 1, #examples, 2 do
+    local left = examples[i]
+    local right = examples[i + 1]
+    local row_h = example_card_height(left.title, left.items)
+    if right then
+      row_h = math_max(row_h, example_card_height(right.title, right.items))
+    end
+    example_card(i, left.title, left.items, example_card_w, row_h)
+    if right then
+      SameLine(RA.ctx, 0, EXAMPLE_GAP)
+      example_card(i + 1, right.title, right.items, example_card_w, row_h)
+    end
+    if i + 1 < #examples then Dummy(RA.ctx, 1, EXAMPLE_GAP) end
+  end
+  Dummy(RA.ctx, 1, RA.SC(18))
+
+  ImGui.ImGui_Unindent(RA.ctx, body_indent)
+  ImGui.ImGui_EndChild(RA.ctx)
+  PopStyleColor(RA.ctx, 4)
+  ImGui.ImGui_PopStyleVar(RA.ctx, 2)
+
+  if clear_clicked then
+    api_keys.custom_instr_buf = ""
+    if api_keys.custom_instr_enabled then
+      save_enabled_immediate(false)
+    else
+      api_keys.custom_instr_status = nil
+      api_keys.custom_instr_status_kind = nil
+      refresh_editor_state()
+    end
+  end
+  if save_clicked then save_current() end
+  if save_back_clicked then
+    if (not dirty) or save_current() then
+      Render._custom_instructions_leave()
+    end
+  end
+  if back_clicked or UI.back_pressed() then
+    if dirty then
+      ImGui.ImGui_OpenPopup(RA.ctx,
+        UI.t("settings.unsaved.popup.title", nil, "Unsaved Changes")
+          .. "##custom_instr_unsaved")
+    else
+      Render._custom_instructions_leave()
+    end
+  end
+
+  UI.push_modal_style()
+  if ImGui.ImGui_BeginPopupModal(RA.ctx,
+      UI.t("settings.unsaved.popup.title", nil, "Unsaved Changes")
+        .. "##custom_instr_unsaved", true,
+      ImGui.ImGui_WindowFlags_NoResize()
+        | ImGui.ImGui_WindowFlags_NoScrollbar()) then
+    local cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+    ImGui.ImGui_Spacing(RA.ctx)
+    UI.update_dialog_text_center_wrapped(
+      UI.t("settings.custom_instructions.unsaved", nil,
+        "Save changes before leaving Custom Instructions?"),
+      cw, nil, nil, nil, cw - RA.SC(18))
+    ImGui.ImGui_Spacing(RA.ctx)
+    ImGui.ImGui_Spacing(RA.ctx)
+    local disc_label = UI.t("common.discard", nil, "Discard")
+    local stay_label = UI.t("common.back", nil, "Back")
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+    local us_save_w = CalcTextSize(RA.ctx, save_back_label) + RA.SC(34)
+    local us_disc_w = CalcTextSize(RA.ctx, disc_label) + RA.SC(34)
+    local us_back_w = CalcTextSize(RA.ctx, stay_label) + RA.SC(34)
+    PopFont(RA.ctx)
+    local us_gap = RA.SC(8)
+    local us_row = us_save_w + us_gap + us_disc_w + us_gap + us_back_w
+    SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx)
+      + math_max(0, math_floor((cw - us_row) * 0.5)))
+    UI.push_modal_primary_btn()
+    ImGui.ImGui_BeginDisabled(RA.ctx, over_limit)
+    if ImGui.ImGui_Button(RA.ctx,
+        save_back_label .. "##ci_us_save", us_save_w, 0) then
+      if save_current() then
+        Render._custom_instructions_leave()
+        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+      end
+    end
+    ImGui.ImGui_EndDisabled(RA.ctx)
+    UI.pop_modal_primary_btn()
+    SameLine(RA.ctx, 0, us_gap)
+    UI.push_modal_danger_btn()
+    if ImGui.ImGui_Button(RA.ctx,
+        disc_label .. "##ci_us_disc", us_disc_w, 0) then
+      Render._custom_instructions_leave()
+      ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+    end
+    UI.pop_modal_danger_btn()
+    SameLine(RA.ctx, 0, us_gap)
+    if ImGui.ImGui_Button(RA.ctx,
+        stay_label .. "##ci_us_back", us_back_w, 0) then
+      ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+    end
+    if ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
+      ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+    end
+    ImGui.ImGui_EndPopup(RA.ctx)
+  end
+  UI.pop_modal_style()
+
+  UI.pop_settings_styles()
+end
+
 local function _settings_has_usable_provider()
   if Store and Store.has_usable_provider then
     return Store.has_usable_provider()
@@ -9045,6 +9726,8 @@ local function _exit_settings_screen()
   api_keys.open_font_download_confirm  = nil
   api_keys.font_download_error         = nil
   api_keys.missing_reply_language_font_idx = nil
+  api_keys.custom_instr_loaded         = nil
+  api_keys.custom_instr_return_screen  = nil
   api_keys.section_open = nil
   -- Restore previous-screen context (if the footer gear opened Settings
   -- from Help / Bug Report / Credits, this drops the user back where
@@ -9920,7 +10603,7 @@ function Render._shared_key_screen_impl()
     local GRID_GAP = RA.SC(6)
     local row_sx   = GetCursorPosX(RA.ctx)
     local row_sy   = ImGui.ImGui_GetCursorPosY(RA.ctx)
-    local row_step = RA.SC(36)
+    local row_step = RA.SC(42)
 
     -- --- Theme ---
     local theme_names = { "auto", "dark", "light" }
@@ -10028,7 +10711,19 @@ function Render._shared_key_screen_impl()
       -- Stage on `prefs` only; Save persists, Cancel reverts.
       prefs.chat_font_idx = cf_new + 1
     end
+
+    pref_select_pos(4)
+    if UI.v5_nav_row("##pref_custom_instructions",
+        UI.t("settings.custom_instructions.label", nil, "Custom Instructions"),
+        UI.t("settings.custom_instructions.tooltip", nil,
+          "Edit local preferences that ReaAssist can include with requests."),
+        col_w) then
+      api_keys.custom_instr_return_screen = "settings"
+      api_keys.custom_instr_loaded = nil
+      api_keys.screen = "custom_instructions"
+    end
   end
+  Dummy(RA.ctx, 1, RA.SC(8))
 
   end -- PREFERENCES collapsible section
 
@@ -10347,7 +11042,11 @@ function Render._shared_key_screen_impl()
 
   -- Give the scrollable settings body enough tail space to lift the final
   -- Advanced rows clear of the pinned Cancel/Save bar at max scroll.
-  Dummy(RA.ctx, 1, is_reentry and (BODY_PINNED_RESERVE + RA.SC(10)) or RA.SC(8))
+  local tail_space = RA.SC(8)
+  if is_reentry and api_keys.section_open and api_keys.section_open.adv then
+    tail_space = BODY_PINNED_RESERVE + RA.SC(10)
+  end
+  Dummy(RA.ctx, 1, tail_space)
 
   -- Validation indicator lives inside each provider card (CONNECTED
   -- pill swaps to TESTING while that key is being tested).
@@ -12105,7 +12804,7 @@ function Render.custom_llm_screen()
     Text(RA.ctx, UI.t("settings.custom.header.model_id", nil, "MODEL IDENTIFIER"))
     UI.tooltip(UI.t("settings.custom.tip.header.model_id", nil,
       "The model name as your server expects it (e.g. qwen2.5-coder-14b, "
-      .. "kimi-k2.6, claude-opus-4-7). Open Details to set prices, context, "
+      .. "kimi-k2.6, claude-opus-4-8). Open Details to set prices, context, "
       .. "the same notes tag shown next to it, and extra JSON body fields."))
     SameLine(RA.ctx, 0, 0)
     ImGui.ImGui_SetCursorPosX(RA.ctx, hdr_x0 + id_w + row_gap)
@@ -12489,7 +13188,7 @@ function Render.custom_llm_screen()
         UI.tooltip(UI.t("settings.custom.tip.details.context_window", nil,
           "Maximum combined input + output token capacity for this "
           .. "model. The preflight check warns if a pending send would "
-          .. "overflow this window. Kimi k2.6 = 262144, Claude Opus 4.7 = "
+          .. "overflow this window. Kimi k2.6 = 262144, Claude Opus 4.8 = "
           .. "1000000, most local 8B models = 8192."))
 
         Dummy(RA.ctx, 1, RA.SC(10))
@@ -12945,6 +13644,8 @@ function Render.custom_llm_screen()
     local has_format_error = false
 
     local endpoint_t = (edit.endpoint        or ""):match("^%s*(.-)%s*$") or ""
+    endpoint_t = Custom.normalize_chat_endpoint(endpoint_t)
+    if edit.endpoint ~= endpoint_t then edit.endpoint = endpoint_t end
     local timeout_t  = (edit.timeout         or ""):match("^%s*(.-)%s*$") or ""
     local ctimeout_t = (edit.connect_timeout or ""):match("^%s*(.-)%s*$") or ""
     local label_t    = (edit.label           or ""):match("^%s*(.-)%s*$") or ""
@@ -13067,6 +13768,11 @@ function Render.custom_llm_screen()
         -- powershell + cmd quoting in Net.fire_curl.
         edit.errors.endpoint = UI.t("settings.custom.error.endpoint_chars", nil,
           "Endpoint may not contain quotes, backticks, or control characters.")
+        has_format_error = true
+      elseif not Custom.endpoint_is_chat_completions(endpoint_t) then
+        edit.errors.endpoint = UI.t(
+          "settings.custom.error.endpoint_chat_completions", nil,
+          "Use the full chat-completions URL, for example http://localhost:1234/v1/chat/completions.")
         has_format_error = true
       end
       if #parsed_models == 0 then
@@ -15399,7 +16105,7 @@ end
 -- ---------------------------------------------------------------------------
 -- Main ReaAssist ImGui window. Sets up size/pos/constraints, pushes the
 -- style stack, calls ImGui_Begin, dispatches to the currently-active
--- screen (tos/first_run/settings/preferred_plugins/fx_cache/custom_llm/
+-- screen (tos/first_run/settings/custom_instructions/preferred_plugins/fx_cache/custom_llm/
 -- custom_providers/help/bug_report/credits) or renders the chat body,
 -- balances the pushes, then renders the Update-Available / Repair
 -- dialog as a sibling window. The ::after_main_window:: boot-guard
@@ -15580,12 +16286,23 @@ function Render.main_window()
     do
       local wx, wy = ImGui.ImGui_GetWindowPos(RA.ctx)
       local cur_w, cur_h = ImGui.ImGui_GetWindowSize(RA.ctx)
-      local scr_l, scr_t, scr_r, scr_b = reaper.my_getViewport(
-        0, 0, 0, 0,
-        wx, wy, wx + cur_w, wy + cur_h,
-        true)
-      S._monitor_w = scr_r - scr_l
-      S._monitor_h = scr_b - scr_t
+      local scr_l, scr_t, scr_r, scr_b
+      if reaper and reaper.my_getViewport then
+        local src_l = math_floor(wx)
+        local src_t = math_floor(wy)
+        local src_r = math_floor(wx + cur_w)
+        local src_b = math_floor(wy + cur_h)
+        scr_l, scr_t, scr_r, scr_b = reaper.my_getViewport(
+          0, 0, 0, 0,
+          src_l, src_t, src_r, src_b,
+          true)
+      end
+      if type(scr_l) == "number" and type(scr_t) == "number"
+          and type(scr_r) == "number" and type(scr_b) == "number"
+          and scr_r > scr_l and scr_b > scr_t then
+        S._monitor_w = scr_r - scr_l
+        S._monitor_h = scr_b - scr_t
+      end
     end
 
     -- Escape on the main chat screen: open quit confirmation popup.
@@ -15687,6 +16404,8 @@ function Render.main_window()
       api_keys.saved_include_api_ref      = nil
       api_keys.saved_diag_auto_tier       = nil
       api_keys.saved_cloud_request_timeout = nil
+      api_keys.custom_instr_loaded        = nil
+      api_keys.custom_instr_return_screen = nil
       api_keys.pending_diag_auto_tier     = nil
       api_keys.open_diag_auto_confirm     = nil
       api_keys.section_open               = nil
@@ -15721,6 +16440,8 @@ function Render.main_window()
       Render.first_run_screen()
     elseif api_keys.screen == "settings" then
       Render.settings_screen()
+    elseif api_keys.screen == "custom_instructions" then
+      Render.custom_instructions_screen()
     elseif api_keys.screen == "preferred_plugins" then
       Render.preferred_plugins_screen()
     elseif api_keys.screen == "fx_cache" then
@@ -16725,7 +17446,7 @@ function Render.main_window()
 
           -- Draw a single label + value pair, then overlay an InvisibleButton
           -- on the full field rect so hovering anywhere on the row triggers
-          -- the field's tooltip via UI.tooltip_v5 (300 ms delay, consistent
+          -- the field's tooltip via UI.tooltip_v5 (500 ms delay, consistent
           -- with the rest of the V5 UI). The button is drawn LAST so its
           -- rect is the "last item" that IsItemHovered checks against.
           -- `value_color` overrides the default TK.text_muted for the value
@@ -20261,6 +20982,9 @@ function Render.main_window()
     Render._reaper_version_notice_popup()
     Render.feedback_modal()
     Render._ceiling_alert_popup()
+    -- Render after every screen/modal has had a chance to register a tooltip,
+    -- so UI.tooltip() and UI.tooltip_v5() share one consistent global path.
+    UI.tooltip_render_v5()
 
     -- Landing point for the first-frame boot guard at the top of this
     -- block. When content is skipped on frame 1, the goto above jumps

@@ -281,7 +281,7 @@ I18N.catalogs = {
         "Cheapest Claude. Use High thinking. Sonnet None is faster for complex work.",
       ["mode.model_tip.claude-sonnet-4-6"] =
         "Recommended Claude default. Use None thinking. Higher levels add latency without quality gain.",
-      ["mode.model_tip.claude-opus-4-7"] =
+      ["mode.model_tip.claude-opus-4-8"] =
         "Premium Claude. Use None thinking. Higher levels add cost without quality gain.",
       ["mode.model_tip.gpt-5.4-nano"] =
         "Cheapest GPT. Use None thinking. Simple tasks only -- pick full GPT-5.4 for complex.",
@@ -313,13 +313,13 @@ I18N.catalogs = {
         "Simple and complex | Higher cost | Very slow | Use only if None struggles",
       ["mode.combo_hint.anthropic.claude-sonnet-4-6.high"] =
         "Avoid long prompts | Higher cost | Very slow (hits timeouts) | Use None or Opus None",
-      ["mode.combo_hint.anthropic.claude-opus-4-7.none"] =
+      ["mode.combo_hint.anthropic.claude-opus-4-8.none"] =
         "Recommended Level | Simple and complex (top quality) | Most expensive | Very fast",
-      ["mode.combo_hint.anthropic.claude-opus-4-7.low"] =
+      ["mode.combo_hint.anthropic.claude-opus-4-8.low"] =
         "Simple and complex | Most expensive | Very fast | No gain over None -- use None",
-      ["mode.combo_hint.anthropic.claude-opus-4-7.medium"] =
+      ["mode.combo_hint.anthropic.claude-opus-4-8.medium"] =
         "Simple and complex | Most expensive | Very fast | No gain over None -- use None",
-      ["mode.combo_hint.anthropic.claude-opus-4-7.high"] =
+      ["mode.combo_hint.anthropic.claude-opus-4-8.high"] =
         "Simple and complex | Most expensive | Very fast | Deepest reasoning but no gain -- use None",
       ["mode.combo_hint.openai.gpt-5.4-nano.none"] =
         "Recommended Level | Simple tasks only | Cheap | Very fast | Use full GPT-5.4 None for complex edits",
@@ -1421,7 +1421,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.custom.header.model_id"] = "MODEL IDENTIFIER",
       ["settings.custom.header.notes"] = "NOTES",
       ["settings.custom.tip.header.model_id"] =
-        "The model name as your server expects it (e.g. qwen2.5-coder-14b, kimi-k2.6, claude-opus-4-7). Open Details to set prices, context, the same notes tag shown next to it, and extra JSON body fields.",
+        "The model name as your server expects it (e.g. qwen2.5-coder-14b, kimi-k2.6, claude-opus-4-8). Open Details to set prices, context, the same notes tag shown next to it, and extra JSON body fields.",
       ["settings.custom.tip.header.notes"] =
         "Optional short tag appended to the model id in the main-screen model dropdown, so rows that share an id but differ in tuning (thinking on/off, temperature, etc.) are distinguishable at a glance.",
       ["settings.custom.field.model_id_hint"] = "qwen2.5-coder-14b",
@@ -1469,7 +1469,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.custom.tip.details.price_out"] =
         "Cost per million output tokens. For reasoning models this usually includes hidden thinking tokens as part of the completion, so a long thinking pass charges at the output rate even when the visible reply is short.",
       ["settings.custom.tip.details.context_window"] =
-        "Maximum combined input + output token capacity for this model. The preflight check warns if a pending send would overflow this window. Kimi k2.6 = 262144, Claude Opus 4.7 = 1000000, most local 8B models = 8192.",
+        "Maximum combined input + output token capacity for this model. The preflight check warns if a pending send would overflow this window. Kimi k2.6 = 262144, Claude Opus 4.8 = 1000000, most local 8B models = 8192.",
       ["settings.custom.tip.details.extra_body"] =
         "A JSON object merged into the outgoing chat-completions body. Overrides any same-named keys set in the provider-level Extra Body field. Use for vendor-specific knobs that don't map to the OpenAI schema.\n\nExamples:\n  Kimi, GLM:        {\"thinking\":{\"type\":\"disabled\"}}\n  Qwen3:            {\"enable_thinking\":false}\n  OpenRouter:       {\"reasoning\":{\"effort\":\"high\"}}\n  LiteLLM-Anthropic: {\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":1024}}\n  Any OpenAI-compat: {\"temperature\":0.3,\"top_p\":0.9}\n\nMust be a valid JSON object (wrapped in {...}), not an array or scalar. Validated on Save.",
       ["settings.custom.tip.duplicate_model"] = "Duplicate this model row",
@@ -1527,6 +1527,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Endpoint must start with http:// or https://.",
       ["settings.custom.error.endpoint_chars"] =
         "Endpoint may not contain quotes, backticks, or control characters.",
+      ["settings.custom.error.endpoint_chat_completions"] =
+        "Use the full chat-completions URL, for example http://localhost:1234/v1/chat/completions.",
       ["settings.custom.error.model_required"] =
         "At least one model with a non-empty identifier is required.",
       ["settings.custom.error.model_row_required"] =
@@ -1756,6 +1758,15 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.pref.preferred_plugins.label"] = "Preferred Plugins",
       ["settings.pref.preferred_plugins.tooltip"] =
         "Set default plugins for each type (EQ, compressor, reverb, etc.)",
+      ["settings.custom_instructions.desc"] =
+        "Use this for stable personal preferences: preferred plugins, naming "
+        .. "habits, project conventions, and things you often have to repeat. "
+        .. "Think of it like an AGENTS.md or CLAUDE.md file for ReaAssist. "
+        .. "When enabled, this text will be sent to the model with every request.",
+      ["settings.custom_instructions.error.save_pref"] =
+        "Could not save the Custom Instructions toggle.",
+      ["settings.custom_instructions.unsaved_enabled"] =
+        "Unsaved text. Save to apply it.",
       ["settings.pref.check_updates.label"] = "Check for Updates",
       ["settings.pref.check_updates.tooltip"] =
         "Check now for a newer ReaAssist release or missing files",

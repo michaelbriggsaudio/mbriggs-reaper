@@ -1680,6 +1680,7 @@ RA.LANG_TMP_DIR = RA.LANG_DIR .. "tmp" .. RA.SEP
 RA.CONFIG_PATH    = RA.DATA_DIR .. "Config.json"
 RA.PROVIDERS_PATH = RA.DATA_DIR .. "Providers.json"
 RA.STATE_PATH     = RA.DATA_DIR .. "State.json"
+RA.CUSTOM_INSTRUCTIONS_PATH = RA.DATA_DIR .. "Custom_Instructions.md"
 
 function RA.early_language_code()
   if RA._early_language_code then return RA._early_language_code end
@@ -1774,7 +1775,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.3.3", -- public release version
+  VERSION           = "1.3.4", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -1796,6 +1797,8 @@ CFG = {
   WIN_W             = 600,       -- initial window width (user can resize)
   WIN_H             = 800,       -- initial window height
   MAX_API_REF_BYTES = 512 * 1024, -- reject API ref files larger than 512 KB
+  CUSTOM_INSTRUCTIONS_CHAR_LIMIT = 12000, -- editable notes cap; keeps every request's pinned prefs small
+  CUSTOM_INSTRUCTIONS_READ_LIMIT = 100000, -- external/manual file safety cap
   POLL_THROTTLE     = 0.1,       -- min interval between poll-loop file checks
   MAX_RETRIES       = 3,         -- max auto-retries on transient overload failures
   GEMINI_OVERLOAD_MAX_RETRIES = 1, -- fail fast on Gemini 503 high-demand windows; offer Flash 3.5 recovery instead of long hidden waits
@@ -2101,11 +2104,12 @@ S = {
   -- Body content lives in API_Ref.md (SECTION:theme); served via CTX.theme.
   theme_ref_message = nil,     -- pinned theme ref message, or nil
   -- Gemini explicit context cache (paid tier only, when api_ref is loaded).
-  -- Caches system_instruction + api_ref priming exchange to reduce per-turn
-  -- input token cost. Created lazily at send time; deleted on invalidation.
+  -- Caches system_instruction (including Custom Instructions when enabled) +
+  -- api_ref priming exchange to reduce per-turn input token cost. Created
+  -- lazily at send time; deleted on invalidation.
   gemini_cache_name     = nil, -- e.g. "cachedContents/abc123"
   gemini_cache_model    = nil, -- model id the cache is bound to
-  gemini_cache_signature = nil, -- source fingerprint for system prompt + api_ref
+  gemini_cache_signature = nil, -- source fingerprint for system/custom prefs + api_ref
   gemini_cache_expires  = 0,   -- os.time() epoch seconds when cache expires
   gemini_cache_creating   = false, -- true while a cache-create curl is in flight
   gemini_cache_create_aborted = false, -- true when an in-flight create was invalidated
@@ -2203,6 +2207,8 @@ S = {
   exclusive_selection_retry_used = false, -- per-turn flag -- one hidden retry for omitted "select only" writes
   bus_routing_validator_retries = 0, -- per-turn counter -- model omitted sends for requested bus/return routing
   bus_routing_retry_used = false, -- per-turn flag -- one hidden retry for missing sends to bus/return
+  sidechain_send_retry_used = false, -- per-turn flag -- one hidden retry for missing kick-to-bass sidechain send
+  podcast_bus_retry_used = false, -- per-turn flag -- one hidden retry for incomplete podcast bus routing
   track_pan_validator_retries = 0, -- per-turn counter -- model wrote send pan when asked for track pan (max 1 retry)
   track_pan_retry_used = false, -- per-turn flag -- one hidden retry for track-pan API anti-pattern
   master_send_validator_retries = 0, -- per-turn counter -- model used RemoveTrackSend for B_MAINSEND (max 1 retry)
@@ -2426,7 +2432,7 @@ end
 -- buffers/validation, and the custom LLM section state. Kept in one table
 -- to stay under Lua's per-function 200-local limit.
 api_keys = {
-  -- Current screen: "tos" / "api_key" / nil. Set below.
+  -- Current screen: "tos" / "first_run" / "settings" / subpage / nil.
   screen         = nil,
   -- Per-screen state for the API key entry screen.
   key_bufs       = {},     -- per-provider input buffers: {[1]="", [2]="", [3]=""}
@@ -3033,6 +3039,7 @@ prefs = {
   auto_run         = reaper.GetExtState(CFG.EXT_NS, "auto_run")         == "1",  -- default off
   auto_backup      = reaper.GetExtState(CFG.EXT_NS, "auto_backup")      ~= "0",  -- default on
   show_details     = reaper.GetExtState(CFG.EXT_NS, "show_details")     == "1",  -- default off
+  custom_instructions_enabled = reaper.GetExtState(CFG.EXT_NS, "custom_instructions_enabled") == "1", -- default off
   debug_logging    = reaper.GetExtState(CFG.EXT_NS, "debug_logging")    ~= "0",  -- default ON during early-release window so testers' bug reports include full traffic without manual opt-in; flip to == "1" later when bug volume settles
   include_api_ref  = reaper.GetExtState(CFG.EXT_NS, "include_api_ref")  == "1",  -- default off (prompt-bundle era; request docs on-demand)
   include_snapshot = reaper.GetExtState(CFG.EXT_NS, "include_snapshot") ~= "0", -- default on
@@ -3921,14 +3928,12 @@ PROVIDERS = {
     --     support): manual budget_tokens only.
     --   * Sonnet 4.6: both work; adaptive + effort is recommended,
     --     manual is deprecated.
-    --   * Opus 4.7: adaptive + effort REQUIRED. Sending the manual
+    --   * Opus 4.8: adaptive + effort REQUIRED. Sending the manual
     --     shape returns a 400.
-    -- "None" is the no-emit sentinel: the request goes out with no
-    -- `thinking` field. Anthropic's Messages API treats extended thinking
-    -- as opt-in across the entire Claude lineup -- omitting the field
-    -- means the model runs without reasoning blocks, regardless of model.
-    -- (Mythos Preview is the lone documented exception that auto-enables
-    -- adaptive when no thinking config is sent; we don't ship it.)
+    -- "None" is the explicit off switch: ReaAssist sends
+    -- {"thinking":{"type":"disabled"}} so Claude cannot inherit a future
+    -- adaptive-thinking default. (Mythos Preview rejects disabled thinking,
+    -- but we don't ship it.)
     -- Default idx is None to match pre-existing ReaAssist behavior. The
     -- budget_tokens stay under each model's max_output and under ~21K so
     -- non-streaming Net.fire_curl is legal.
@@ -3945,16 +3950,16 @@ PROVIDERS = {
     -- was dropped). 1h writes would be 2x but we never use them.
     -- max_output: per-model output-token ceiling (Anthropic Messages API
     -- enforces server-side; we send this as max_tokens). Sourced from
-    -- Anthropic's published model docs as of April 2026. Update when
+    -- Anthropic's published model docs as of May 2026. Update when
     -- ceilings change.
     -- context_window: per-model context size used by the preflight token
     -- gate. Haiku 4.5 stays at the 200K default (no field); Sonnet 4.6
-    -- and Opus 4.7 advertise 1M-token windows.
+    -- and Opus 4.8 advertise 1M-token windows.
     -- thinking_style: which wire-format shape this model accepts.
     --   "claude_manual"   = {"thinking":{"type":"enabled","budget_tokens":N}}
     --   "claude_adaptive" = {"thinking":{"type":"adaptive"},
     --                        "output_config":{"effort":"<level>"}}
-    -- Haiku 4.5 only accepts manual; Opus 4.7 only accepts adaptive
+    -- Haiku 4.5 only accepts manual; Opus 4.8 only accepts adaptive
     -- (manual returns 400); Sonnet 4.6 accepts both, adaptive preferred.
     --
     -- default_thinking_idx (per-model override): Haiku at None/Low
@@ -3962,7 +3967,7 @@ PROVIDERS = {
     -- retry on complex prompts, so Haiku defaults to High (4, 16K
     -- budget) -- the only Haiku combo that handles complex routing/
     -- FX work reliably at moderate latency. Sonnet and Opus inherit
-    -- the provider default of None: no thinking field on the wire,
+    -- the provider default of None: explicit disabled thinking on the wire,
     -- no extended thinking, lowest latency, and on this workflow no
     -- measured quality gain from raising thinking. Users can still
     -- pick a higher level via the chip if a particular prompt needs
@@ -3972,7 +3977,7 @@ PROVIDERS = {
         price_in = 1.00,  price_out = 5.00,  price_cache_r = 0.10, price_cache_w = 1.25, max_output = 64000,  thinking_style = "claude_manual",   default_thinking_idx = 4 },
       { label = "Sonnet 4.6", chip_label = "SONNET", id = "claude-sonnet-4-6",
         price_in = 3.00,  price_out = 15.00, price_cache_r = 0.30, price_cache_w = 3.75, max_output = 64000,  context_window = 1000000, thinking_style = "claude_adaptive" },
-      { label = "Opus 4.7",   chip_label = "OPUS",   id = "claude-opus-4-7",
+      { label = "Opus 4.8",   chip_label = "OPUS",   id = "claude-opus-4-8",
         price_in = 5.00,  price_out = 25.00, price_cache_r = 0.50, price_cache_w = 6.25, max_output = 128000, context_window = 1000000, thinking_style = "claude_adaptive" },
     },
   },
@@ -4399,7 +4404,7 @@ function Store._provider_record_to_json(record)
   local out = {
     id                   = record.id or "",
     label                = record.label or "",
-    endpoint             = record.endpoint or "",
+    endpoint             = Custom.normalize_chat_endpoint(record.endpoint or ""),
     timeout_secs         = tonumber(record.timeout_secs) or CUSTOM_DEFAULT_TIMEOUT,
     connect_timeout_secs = tonumber(record.connect_timeout_secs)
                               or Custom.DEFAULT_CONNECT,
@@ -4422,7 +4427,7 @@ function Store._provider_record_from_json(src, index)
     return nil
   end
 
-  local endpoint = Store._json_string(src.endpoint)
+  local endpoint = Custom.normalize_chat_endpoint(Store._json_string(src.endpoint))
   if not Custom.endpoint_is_safe(endpoint) then
     Store._log("PROVIDERS", "skipping Providers.json record "
       .. tostring(id) .. ": invalid endpoint")
@@ -4567,6 +4572,7 @@ function Store.cleanup_config_extstate(doc)
     "auto_run",
     "auto_backup",
     "show_details",
+    "custom_instructions_enabled",
     "debug_logging",
     "include_api_ref",
     "include_snapshot",
@@ -4591,6 +4597,7 @@ function Store.cleanup_config_extstate(doc)
     "reaper_version_notice_dismissed",
     "thinking_idx_reset_v1",
     "model_picker_reset_v2",
+    "anthropic_opus_48_model_v1",
     "google_flash_35_model_v1",
     "google_flash_35_minimal_default_v1",
     "update_check_default_on_v1",
@@ -4816,6 +4823,8 @@ function Store.current_preferences()
     auto_run              = prefs.auto_run and true or false,
     auto_backup           = prefs.auto_backup and true or false,
     show_details          = prefs.show_details and true or false,
+    custom_instructions_enabled =
+      prefs.custom_instructions_enabled and true or false,
     debug_logging         = prefs.debug_logging and true or false,
     include_api_ref       = prefs.include_api_ref and true or false,
     include_snapshot      = prefs.include_snapshot and true or false,
@@ -4845,6 +4854,9 @@ function Store.apply_config_preferences()
   prefs.auto_run         = Store._pref_bool("auto_run", prefs.auto_run)
   prefs.auto_backup      = Store._pref_bool("auto_backup", prefs.auto_backup)
   prefs.show_details     = Store._pref_bool("show_details", prefs.show_details)
+  prefs.custom_instructions_enabled =
+    Store._pref_bool("custom_instructions_enabled",
+      prefs.custom_instructions_enabled)
   prefs.debug_logging    = Store._pref_bool("debug_logging", prefs.debug_logging)
   prefs.include_api_ref  = Store._pref_bool("include_api_ref", prefs.include_api_ref)
   prefs.include_snapshot = Store._pref_bool("include_snapshot", prefs.include_snapshot)
@@ -5122,6 +5134,105 @@ function Store.save_config()
   if err then Store._notify_write_failure("Config.json", err) end
   if not err then Store.cleanup_config_extstate(doc) end
   return err
+end
+
+function Store.write_text_atomic(path, text, skip_unchanged)
+  if not path or path == "" then return "Missing text path." end
+  text = tostring(text or "")
+  if skip_unchanged and Store._read_text_file(path) == text then
+    return nil, true
+  end
+
+  local tmp_path = path .. ".tmp"
+  local ok_f, f = pcall(io.open, tmp_path, "w")
+  if not ok_f or not f then return "Failed to open " .. tmp_path end
+
+  local ok_w, w_err = pcall(function() f:write(text) end)
+  local ok_c, c_ok, c_err = pcall(function() return f:close() end)
+  if not ok_w or not ok_c or c_ok == nil then
+    os.remove(tmp_path)
+    return "Failed writing " .. tmp_path .. ": "
+      .. tostring(w_err or c_err or c_ok or "close failed")
+  end
+
+  local bak_path = path .. ".bak"
+  os.remove(bak_path)
+  local had_existing = os.rename(path, bak_path)
+  local ok_r, ren_err = os.rename(tmp_path, path)
+  if not ok_r then
+    os.remove(tmp_path)
+    if had_existing then os.rename(bak_path, path) end
+    return "Failed renaming temp text file: " .. tostring(ren_err)
+  end
+  if had_existing then os.remove(bak_path) end
+  return nil, false
+end
+
+function Store.custom_instructions_text()
+  if not RA.CUSTOM_INSTRUCTIONS_PATH then return "" end
+  local raw = Store._read_text_file(RA.CUSTOM_INSTRUCTIONS_PATH)
+  if type(raw) ~= "string" then return "" end
+  local limit = CFG.CUSTOM_INSTRUCTIONS_READ_LIMIT or 100000
+  if #raw > limit then
+    return str_sub(raw, 1, limit)
+  end
+  return raw
+end
+
+function Store.custom_instructions_write(text)
+  if type(reaper.RecursiveCreateDirectory) == "function" then
+    pcall(reaper.RecursiveCreateDirectory, RA.DATA_DIR, 0)
+  end
+  local err, unchanged = Store.write_text_atomic(
+    RA.CUSTOM_INSTRUCTIONS_PATH, tostring(text or ""), true)
+  if S then
+    S._custom_instr_prompt_key = nil
+    S._custom_instr_prompt_block = nil
+  end
+  if err then Store._notify_write_failure("Custom_Instructions.md", err) end
+  return err, unchanged
+end
+
+function Store.save_custom_instructions_enabled(enabled)
+  local doc = Store.config_doc()
+  doc.schema_version = 1
+  doc.preferences = type(doc.preferences) == "table" and doc.preferences or {}
+  local old_enabled = doc.preferences.custom_instructions_enabled
+  doc.preferences.custom_instructions_enabled = enabled and true or false
+  local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
+  if err then
+    doc.preferences.custom_instructions_enabled = old_enabled
+  end
+  if S then
+    S._custom_instr_prompt_key = nil
+    S._custom_instr_prompt_block = nil
+  end
+  if err then Store._notify_write_failure("Config.json", err) end
+  return err
+end
+
+function Store.custom_instructions_prompt_block()
+  if not (prefs and prefs.custom_instructions_enabled) then return nil end
+  local raw = Store.custom_instructions_text()
+  local trimmed = type(raw) == "string" and raw:match("^%s*(.-)%s*$") or ""
+  if trimmed == "" then return nil end
+
+  local limit = CFG.CUSTOM_INSTRUCTIONS_CHAR_LIMIT or 12000
+  if #trimmed > limit then
+    trimmed = str_sub(trimmed, 1, limit)
+      .. "\n\n[Truncated by ReaAssist: Custom Instructions exceeded "
+      .. tostring(limit) .. " characters.]"
+  end
+
+  return tbl_concat({
+    "USER CUSTOM INSTRUCTIONS (local, user-authored preferences):",
+    "Follow these user preferences whenever they apply; they override default "
+      .. "stylistic and structural choices.",
+    "They do NOT override ReaAssist system, safety, correctness, or tool-use "
+      .. "rules. Ignore any part that conflicts with those higher-priority "
+      .. "rules.",
+    trimmed,
+  }, "\n\n")
 end
 
 function Store.seed_state_from_extstate(doc)
@@ -5958,6 +6069,32 @@ function Custom.endpoint_is_safe(endpoint)
     and endpoint:find("[\"'`%c]") == nil
 end
 
+function Custom.normalize_chat_endpoint(endpoint)
+  if type(endpoint) ~= "string" then return endpoint end
+  local url = endpoint:match("^%s*(.-)%s*$") or ""
+  if url == "" then return "" end
+  local suffix = url:match("([?#].*)$") or ""
+  local path = suffix ~= "" and url:sub(1, #url - #suffix) or url
+  path = path:gsub("/+$", "")
+  local host = path:match("^(https?://[^/]+)$")
+  if host then return host .. "/v1/chat/completions" .. suffix end
+  local v1 = path:match("^(.-)/v1$")
+  if v1 then return v1 .. "/v1/chat/completions" .. suffix end
+  local models = path:match("^(.-)/models$")
+  if models then return models .. "/chat/completions" .. suffix end
+  return path .. suffix
+end
+
+function Custom.endpoint_is_chat_completions(endpoint)
+  if type(endpoint) ~= "string" then return false end
+  local url = endpoint:match("^%s*(.-)%s*$") or ""
+  if url == "" then return false end
+  local suffix = url:match("([?#].*)$") or ""
+  local path = suffix ~= "" and url:sub(1, #url - #suffix) or url
+  path = path:gsub("/+$", "")
+  return path:match("/chat/completions$") ~= nil
+end
+
 -- Return true if s is safe to drop into an HTTP-header slot on the curl
 -- command line across both shells we target. Rejects newlines (which would
 -- split the argument), null bytes, and the triple-quote boundary that our
@@ -6218,7 +6355,8 @@ end
 -- same treatment as a record that was never saved).
 function Custom.load_record(id)
   if not id or id == "" then return nil end
-  local endpoint = reaper.GetExtState(CFG.EXT_NS, "custom_" .. id .. "_endpoint")
+  local endpoint = Custom.normalize_chat_endpoint(
+    reaper.GetExtState(CFG.EXT_NS, "custom_" .. id .. "_endpoint"))
   if endpoint == "" then return nil, "missing endpoint" end
   if not Custom.endpoint_is_safe(endpoint) then
     if Store and Store._log then
@@ -6335,7 +6473,7 @@ end
 function Custom.save_record(record)
   local id = record.id
   reaper.SetExtState(CFG.EXT_NS, "custom_" .. id .. "_endpoint",
-    record.endpoint or "", true)
+    Custom.normalize_chat_endpoint(record.endpoint or ""), true)
   reaper.SetExtState(CFG.EXT_NS, "custom_" .. id .. "_label",
     record.label or "", true)
   reaper.SetExtState(CFG.EXT_NS, "custom_" .. id .. "_timeout_secs",
@@ -6499,7 +6637,7 @@ function Custom.build_provider(record)
   return {
     id                = record.id,
     label             = record.label or "Custom",
-    endpoint          = record.endpoint,
+    endpoint          = Custom.normalize_chat_endpoint(record.endpoint),
     auth_style        = "header",
     auth_header       = "Authorization",
     auth_prefix       = "Bearer ",
@@ -6671,6 +6809,53 @@ do
       end
     end
     Store.set_migration_fired("model_picker_reset_v2")
+  end
+end
+
+-- One-time Anthropic model-id migration. Opus 4.8 replaces Opus 4.7 at the
+-- same price tier and context window, so users who explicitly saved Opus 4.7
+-- should stay on the Opus row instead of falling back to the Claude default.
+-- Preserve any per-model thinking preference because the wire shape and
+-- practical recommendation remain the same.
+do
+  if not (S and S._factory_reset_clean_boot)
+     and not Store.migration_fired("anthropic_opus_48_model_v1") then
+    local doc = Store.config_doc()
+    doc.selection = type(doc.selection) == "table" and doc.selection or {}
+    doc.selection.model_id_by_provider =
+      type(doc.selection.model_id_by_provider) == "table"
+      and doc.selection.model_id_by_provider or {}
+    doc.selection.thinking_idx_by_provider_model =
+      type(doc.selection.thinking_idx_by_provider_model) == "table"
+      and doc.selection.thinking_idx_by_provider_model or {}
+    if doc.selection.model_id_by_provider.anthropic == "claude-opus-4-7" then
+      doc.selection.model_id_by_provider.anthropic = "claude-opus-4-8"
+    end
+    local old_key = "anthropic/claude-opus-4-7"
+    local new_key = "anthropic/claude-opus-4-8"
+    if doc.selection.thinking_idx_by_provider_model[new_key] == nil then
+      doc.selection.thinking_idx_by_provider_model[new_key] =
+        doc.selection.thinking_idx_by_provider_model[old_key]
+        or tonumber(reaper.GetExtState(CFG.EXT_NS,
+          "thinking_idx_anthropic_claude-opus-4-7"))
+    end
+    doc.selection.thinking_idx_by_provider_model[old_key] = nil
+    local old_ext = reaper.GetExtState(
+      CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-4-7")
+    if old_ext ~= ""
+       and reaper.GetExtState(
+         CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-4-8") == "" then
+      reaper.SetExtState(
+        CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-4-8", old_ext, true)
+    end
+    reaper.DeleteExtState(
+      CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-4-7", true)
+    doc.migrations = type(doc.migrations) == "table" and doc.migrations or {}
+    doc.migrations.anthropic_opus_48_model_v1 = true
+    local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
+    if err then
+      Store._notify_write_failure("Config.json", err)
+    end
   end
 end
 
@@ -8487,7 +8672,7 @@ UI = {}
 UI.MODEL_TIPS = {
   ["claude-haiku-4-5"]               = "Cheapest Claude. Use High thinking. Sonnet None is faster for complex work.",
   ["claude-sonnet-4-6"]              = "Recommended Claude default. Use None thinking. Higher levels add latency without quality gain.",
-  ["claude-opus-4-7"]                = "Premium Claude. Use None thinking. Higher levels add cost without quality gain.",
+  ["claude-opus-4-8"]                = "Premium Claude. Use None thinking. Higher levels add cost without quality gain.",
   ["gpt-5.4-nano"]                   = "Cheapest GPT. Use None thinking. Simple tasks only -- pick full GPT-5.4 for complex.",
   ["gpt-5.4-mini"]                   = "Cheap GPT. Use Low thinking. Simple tasks only -- pick full GPT-5.4 for complex.",
   ["gpt-5.4"]                        = "Recommended OpenAI default. Use None thinking. Reliable on simple and complex tasks.",
@@ -8537,7 +8722,7 @@ UI.COMBO_HINTS = {
       medium = "Simple and complex | Higher cost | Very slow | Use only if None struggles",
       high   = "Avoid long prompts | Higher cost | Very slow (hits timeouts) | Use None or Opus None",
     },
-    ["claude-opus-4-7"] = {
+    ["claude-opus-4-8"] = {
       none   = "Recommended Level | Simple and complex (top quality) | Most expensive | Very fast",
       low    = "Simple and complex | Most expensive | Very fast | No gain over None -- use None",
       medium = "Simple and complex | Most expensive | Very fast | No gain over None -- use None",
@@ -22152,6 +22337,20 @@ end
 
 Net = {}
 
+function Net.custom_instructions_prompt_block_for_request()
+  local request_key = S and S.probe_turn or nil
+  if request_key and S._custom_instr_prompt_key == request_key then
+    return S._custom_instr_prompt_block
+  end
+  local blob = Store and Store.custom_instructions_prompt_block
+    and Store.custom_instructions_prompt_block() or nil
+  if request_key then
+    S._custom_instr_prompt_key = request_key
+    S._custom_instr_prompt_block = blob
+  end
+  return blob
+end
+
 -- =============================================================================
 -- Custom-LLM connection test helpers
 -- =============================================================================
@@ -22247,6 +22446,8 @@ function CTX.custom_llm_start_conn_test()
   local has_format_error = false
 
   local endpoint_t  = (edit.endpoint        or ""):match("^%s*(.-)%s*$") or ""
+  endpoint_t = Custom.normalize_chat_endpoint(endpoint_t)
+  if edit.endpoint ~= endpoint_t then edit.endpoint = endpoint_t end
   local timeout_t   = (edit.timeout         or ""):match("^%s*(.-)%s*$") or ""
   local ctimeout_t  = (edit.connect_timeout or ""):match("^%s*(.-)%s*$") or ""
   local label_t     = (edit.label           or ""):match("^%s*(.-)%s*$") or ""
@@ -22268,6 +22469,11 @@ function CTX.custom_llm_start_conn_test()
     -- powershell + cmd quoting in Net.fire_curl.
     edit.errors.endpoint = Custom.t("settings.custom.error.endpoint_chars", nil,
       "Endpoint may not contain quotes, backticks, or control characters.")
+    has_format_error = true
+  elseif not Custom.endpoint_is_chat_completions(endpoint_t) then
+    edit.errors.endpoint = Custom.t(
+      "settings.custom.error.endpoint_chat_completions", nil,
+      "Use the full chat-completions URL, for example http://localhost:1234/v1/chat/completions.")
     has_format_error = true
   end
 
@@ -22494,6 +22700,26 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
     },
   },
   anthropic = {
+    ["*"] = {
+      key = "anthropic_practical_reascript_defaults",
+      prompt = [[
+- For ordinary safe ReaScript action/setup requests, return a runnable fenced ```lua script using practical defaults. Do not answer with only a prose setup question when the user names the tracks, sources, bus, return, MIDI idea, tempo, or setup goal.
+- In an empty project, when the user names instrument/source parts for a setup, create those named tracks instead of asking whether they already exist.
+- When the user asks for tracks going into a bus or return, create explicit sends with `reaper.CreateTrackSend(source_track, bus_or_return_track)` from every named non-destination source to the bus/return unless the user explicitly excludes a source. Folder depth alone is not bus routing.
+- For cue/headphone/monitor buses that should be separate from or away from the main mix, set the cue bus track's own `B_MAINSEND` to `0` with `reaper.SetMediaTrackInfo_Value(cue_bus_track, "B_MAINSEND", 0)`.
+- For named effect returns such as plate/reverb/delay returns, name the destination track with the requested effect word, for example "Plate Verb" for a plate reverb return, add the requested/resolved effect there, and route each named source to that return.
+- For setup wording like "host, guest, music, and a bus", create the bus and route every named non-bus source track to it unless the user explicitly says a source should remain direct. Do not reinterpret that as a dialogue-only bus when Music is named; Music is a named source.
+- For short MIDI ideas, beats, patterns, chords, or pads, create one appropriately named MIDI track and one MIDI item unless the user asks for separate tracks or separate items. Put multiple drums or chords into that one item; for a drum idea, name the track with "Drum" and include common GM kick/snare notes.
+- For kick/bass ducking or sidechain ducking, use the standard sidechain-compressor default: create missing Kick and Bass tracks, set Bass to four channels, add the pinned/preferred compressor to Bass if available or ReaComp if no compressor reference is pinned, and create a Kick-to-Bass send feeding the sidechain channels. Do not ask whether to create the tracks or which ducking method to use.
+- Keep plugin scripts direct and small. For simple/basic/add-only plugin chains, add the requested/resolved plugins and avoid display-unit helper functions unless helper definitions are pinned and must be copied exactly.
+]],
+      validators = {
+        action_requires_lua = true,
+        bus_routing_requires_sends = true,
+        podcast_bus_routes_all_sources = true,
+        sidechain_ducking_requires_send = true,
+      },
+    },
     ["claude-haiku-4-5"] = {
       key = "haiku_practical_track_templates",
       prompt = [[
@@ -22501,6 +22727,8 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
 - For simple folder/template setup requests, treat plural category words like "guitars", "vocals", "keys", or "drums" as one category track named by that word unless the user gives a count or names separate parts. Do not ask how many tracks to create for those ordinary categories.
 - For folder setup, create only the requested folder/category tracks. Do not add extra lead/rhythm/helper tracks unless the user explicitly asks for them.
 - Treat aliases like "comp" or "compression" as compressor requests. If `pref:` or `plugin_ref:` context is already pinned for the needed plugin type, use it and write the script; do not emit another `resolve:` request for that same type.
+- For simple vocal chain requests, add the EQ and compressor in order and stop there unless the user asks for exact settings. Do not define `set_param_display`, use parameter helper functions, or defer parameter-setting code for a simple chain.
+- For kick/bass ducking, the Kick-to-Bass send is mandatory. Create the send before any deferred compressor parameter setup, even if you also add/configure Pro-C or ReaComp.
 - Keep plugin code direct and small. Avoid helper functions unless helper definitions are pinned and the user requested a display-unit value that cannot be set from verified normalized reference values.
 ]],
       validators = {
@@ -22512,8 +22740,19 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
       prompt = [[
 - When the user asks for tracks going into a bus or return, create explicit sends with `reaper.CreateTrackSend(source_track, bus_or_return_track)`. Folder depth alone is not bus routing and should not be used as a substitute unless the user explicitly asks for folders.
 - Treat "basic EQ" by itself as add-only. Add the resolved EQ plugin to the requested/selected track(s), check each AddByName result, and stop there unless the user gives a tonal goal, explicit settings, or asks for starter/generic EQ settings. Do not use track-type starter EQ recipes, call `TrackFX_SetParam*`, or call/rewrite plugin helper functions for add-only/basic EQ tasks.
+- For podcast setup wording like "host, guest, music, and a bus", Music is also a source. Route Host, Guest, and Music to the bus unless the user explicitly says Music should stay direct.
 ]],
       validators = {
+        bus_routing_requires_sends = true,
+      },
+    },
+    ["claude-opus-4-8"] = {
+      key = "opus_practical_setup_defaults",
+      prompt = [[
+- For folder setup such as "put drums, bass, and guitar inside a band folder", create the folder/category track plus the named child tracks. Close the folder on the last child track, not on the following outside track.
+]],
+      validators = {
+        action_requires_lua = true,
         bus_routing_requires_sends = true,
       },
     },
@@ -22564,8 +22803,35 @@ function Code.model_guidance_profile(provider_id, model_id)
     and Code.MODEL_GUIDANCE_BY_MODEL[tostring(provider_id or "")]
   if type(by_provider) ~= "table" then return nil end
   local exact = by_provider[tostring(model_id or "")]
+  local shared = by_provider["*"]
+  if exact ~= nil and shared ~= nil then
+    local shared_prompt = type(shared) == "table" and shared.prompt or shared
+    local exact_prompt = type(exact) == "table" and exact.prompt or exact
+    local merged_prompt = ""
+    if type(shared_prompt) == "string" then
+      merged_prompt = shared_prompt
+    end
+    if type(exact_prompt) == "string" then
+      merged_prompt = merged_prompt ~= "" and (merged_prompt .. "\n" .. exact_prompt)
+        or exact_prompt
+    end
+    local validators = {}
+    if type(shared) == "table" and type(shared.validators) == "table" then
+      for key, value in pairs(shared.validators) do validators[key] = value end
+    end
+    if type(exact) == "table" and type(exact.validators) == "table" then
+      for key, value in pairs(exact.validators) do validators[key] = value end
+    end
+    return {
+      key = tostring((type(shared) == "table" and shared.key) or "shared")
+        .. "+"
+        .. tostring((type(exact) == "table" and exact.key) or "exact"),
+      prompt = merged_prompt,
+      validators = validators,
+    }
+  end
   if exact ~= nil then return exact end
-  return by_provider["*"]
+  return shared
 end
 
 function Code.model_guidance_text(provider_id, model_id)
@@ -22587,8 +22853,9 @@ function Code.model_validator_enabled(provider_id, model_id, validator_key)
   return validators[tostring(validator_key or "")] == true
 end
 
--- Return the SYSTEM_PROMPT string, optionally with a per-TEST-SESSION stamp
--- appended as a hidden comment when prefs.test_force_cold_cache is on.
+-- Return the SYSTEM_PROMPT string plus request-stable system-level additions,
+-- optionally with a per-TEST-SESSION stamp appended as a hidden comment when
+-- prefs.test_force_cold_cache is on.
 --
 -- The stamp is minted ONCE when the toggle transitions off -> on (held in
 -- S.cold_cache_stamp) and reused on every subsequent send until the toggle
@@ -22602,6 +22869,10 @@ end
 -- mints a new stamp.
 function Net.system_prompt_text()
   local text = SYSTEM_PROMPT
+  local custom_blob = Net.custom_instructions_prompt_block_for_request()
+  if custom_blob then
+    text = text .. "\n\n" .. custom_blob
+  end
   local lang = (I18N and I18N.prompt_language_name and I18N.prompt_language_name())
     or (CFG.prompt_language_name_for_idx
       and CFG.prompt_language_name_for_idx(prefs.reply_language_idx or 1))
@@ -22900,11 +23171,10 @@ function Net.copin_docs_core(out_list)
 end
 
 -- Returns two text blobs, stable + growing, emitted in sticky_context_order.
---   stable : prompt_bundle:* payloads. Effectively never change once pinned
---            (a bundle is a chunk of system-prompt content for a task type,
---            not a per-plugin reference). Placed in a dedicated Anthropic
---            cache block so its cache rung stays hot across ref-addition
---            turns.
+--   stable : prompt_bundle:* payloads and request-scoped Custom Instructions.
+--            These effectively never change once pinned during a request.
+--            Placed in a dedicated Anthropic cache block so this rung stays
+--            hot across ref-addition turns.
 --   growing: everything else (plugin_ref, pref, preferred_plugins,
 --            fx_params, fx_inspect, docs_extended). Grows as new plugins
 --            are referenced; its cache rung invalidates when a new ref is
@@ -23284,7 +23554,7 @@ function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
   -- separate user/ack pairs. Saves ~16-24 tokens per turn in ack overhead
   -- and reduces alignment churn for downstream caches when refs come in.
   -- Anthropic 4-breakpoint allocation:
-  --   slot 1: system                                   (always)
+  --   slot 1: system + custom instructions             (always)
   --   slot 2: end of static_blob + sticky_stable       (when sticky_stable
   --                                                     present; static_blob
   --                                                     piggybacks on this rung)
@@ -23438,9 +23708,9 @@ function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
   -- Extended thinking. Anthropic's API treats `thinking` as opt-in for
   -- every Claude model: when the field is absent, the model runs in
   -- non-thinking mode regardless of which 4.x variant is active. The
-  -- "None" dropdown entry maps to that no-emit case. When a non-None
-  -- level is picked, the wire shape depends on the active model's
-  -- thinking_style: Haiku 4.5 takes manual budget_tokens; Opus 4.7
+  -- "None" dropdown entry maps to an explicit disabled-thinking request.
+  -- When a non-None level is picked, the wire shape depends on the active model's
+  -- thinking_style: Haiku 4.5 takes manual budget_tokens; Opus 4.8
   -- requires adaptive + an effort knob (manual returns 400); Sonnet 4.6
   -- accepts either, adaptive preferred. S.thinking_override_idx (when
   -- set) wins over prefs.thinking_idx so the length-retry path can force
@@ -23452,8 +23722,10 @@ function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
      and p_active.thinking_levels then
     local tl = p_active.thinking_levels[effective_thinking_idx]
     local style = active_m and active_m.thinking_style
-    if tl and tl.value ~= "none" then
-      if style == "claude_adaptive" and tl.effort then
+    if tl then
+      if tl.value == "none" then
+        thinking_field = ',"thinking":{"type":"disabled"}'
+      elseif style == "claude_adaptive" and tl.effort then
         thinking_field = str_format(
           ',"thinking":{"type":"adaptive"},"output_config":{"effort":"%s"}',
           tl.effort)
@@ -23735,8 +24007,9 @@ end
 -- Attachments: images and PDFs as inlineData parts, text files inline.
 --
 -- If a Gemini explicit context cache is active and valid for the current
--- model, the cached content (system_instruction + api_ref priming) is
--- referenced via cachedContent and omitted from the live request body.
+-- model, the cached content (system_instruction including Custom Instructions
+-- + api_ref priming) is referenced via cachedContent and omitted from the live
+-- request body.
 function Net.build_body_google(msgs, snapshot, msg_attachments)
   local msg_parts = {}
   local answer_only_context = Net.answer_only_context_enabled()
@@ -23753,9 +24026,9 @@ function Net.build_body_google(msgs, snapshot, msg_attachments)
   -- Bundle the long-lived static refs (api_ref + midi_ref + theme_ref) into
   -- ONE pinned user+model exchange instead of three. Fewer turns inside
   -- contents[] is cleaner for Gemini's implicit prefix caching to align on.
-  -- When the explicit context cache is active, it already covers api_ref +
-  -- system_instruction, so we omit api_ref from the bundle in that case to
-  -- avoid double-sending it.
+  -- When the explicit context cache is active, it already covers
+  -- system_instruction (including Custom Instructions when enabled) + api_ref,
+  -- so we omit api_ref from the bundle in that case to avoid double-sending it.
   local static_parts = {}
   if not answer_only_context and S.api_ref_message and not use_cache then
     static_parts[#static_parts+1] = S.api_ref_message
@@ -24322,7 +24595,7 @@ function Net._call_cap_message()
   end
   local hint
   if pid == "anthropic" and tag("haiku") then
-    hint = "Try Sonnet 4.6 or Opus 4.7 for this request."
+    hint = "Try Sonnet 4.6 or Opus 4.8 for this request."
   elseif pid == "google" and (tag("flash") or tag("nano")) then
     hint = "Try Gemini 3.1 Pro for this request."
   elseif pid == "openai" and tag("mini") then
@@ -26155,9 +26428,9 @@ end
 -- exit code to tmp.cache_exit. The main loop polls completion via
 -- Net.try_finish_gemini_cache_create.
 --
--- Body contains: model id, systemInstruction, contents (the api_ref priming
--- exchange), and a TTL. Minimum token counts are naturally met since the api
--- ref alone is ~8k tokens.
+-- Body contains: model id, systemInstruction (including Custom Instructions
+-- when enabled), contents (the api_ref priming exchange), and a TTL. Minimum
+-- token counts are naturally met since the api ref alone is ~8k tokens.
 function Net.fire_gemini_cache_create()
   if S.gemini_cache_creating then
     S.gemini_cache_last_create_reason = "already_creating"
@@ -26182,7 +26455,8 @@ function Net.fire_gemini_cache_create()
   local source_signature = Net.gemini_cache_source_signature(S.api_ref_message)
 
   -- Build the create body: system_instruction + the same user/model priming
-  -- exchange we'd otherwise inline into every request.
+  -- exchange we'd otherwise inline into every request. Custom Instructions
+  -- are already folded into Net.system_prompt_text().
   local body = str_format(
     '{"model":"models/%s",'
     .. '"systemInstruction":{"parts":[{"text":"%s"}]},'
@@ -26496,6 +26770,8 @@ function Net.send_to_api(user_text)
   end
   local probe_turn = Probe.start_turn(user_text)
   S.probe_turn = probe_turn
+  S._custom_instr_prompt_key = nil
+  S._custom_instr_prompt_block = nil
   -- Phase 1 instrumentation: preempt phase covers all per-turn setup
   -- before the first body build (state resets, snapshot capture,
   -- ref/midi/theme auto-injection, sticky eviction, preempt bucket
@@ -26562,6 +26838,8 @@ function Net.send_to_api(user_text)
   S.exclusive_selection_retry_used = false
   S.bus_routing_validator_retries = 0
   S.bus_routing_retry_used = false
+  S.sidechain_send_retry_used = false
+  S.podcast_bus_retry_used = false
   S.track_pan_validator_retries = 0
   S.track_pan_retry_used = false
   S.master_send_validator_retries = 0
@@ -27005,6 +27283,7 @@ function Net.send_to_api(user_text)
 
   -- Collect sticky labels for the Show Details display (the content itself
   -- is emitted downstream by build_body_*).
+  local custom_instr_blob = Net.custom_instructions_prompt_block_for_request()
   local sticky_labels = {}
   if not answer_only_followup then
     for key, _ in pairs(S.sticky_context) do
@@ -27023,6 +27302,7 @@ function Net.send_to_api(user_text)
   if ref_injected   then ctx_parts[#ctx_parts+1] = "api_ref" end
   if midi_injected  then ctx_parts[#ctx_parts+1] = "midi"    end
   if theme_injected then ctx_parts[#ctx_parts+1] = "theme"   end
+  if custom_instr_blob then ctx_parts[#ctx_parts+1] = "custom_instr" end
   if typed_action_contract then ctx_parts[#ctx_parts+1] = "typed_actions" end
   if msg_attachments then
     for _, a in ipairs(msg_attachments) do ctx_parts[#ctx_parts+1] = a.name end
@@ -27120,7 +27400,15 @@ function Net.send_to_api(user_text)
   -- inside Net.build_body itself).
   do
     local sys = Net.system_prompt_text()
-    if sys then Probe.add_bytes(probe_turn, "system_prompt", #sys) end
+    if sys then
+      local sys_bytes = #sys
+      if custom_instr_blob then
+        sys_bytes = math_max(0, sys_bytes - #custom_instr_blob)
+      end
+      if sys_bytes > 0 then
+        Probe.add_bytes(probe_turn, "system_prompt", sys_bytes)
+      end
+    end
     local static_total = 0
     if not answer_only_followup and S.api_ref_message then
       static_total = static_total + #S.api_ref_message
@@ -27132,6 +27420,9 @@ function Net.send_to_api(user_text)
       static_total = static_total + #S.theme_ref_message
     end
     if static_total > 0 then Probe.add_bytes(probe_turn, "static_refs", static_total) end
+    if custom_instr_blob then
+      Probe.add_bytes(probe_turn, "custom_instructions", #custom_instr_blob)
+    end
     local sticky_total = 0
     if not answer_only_followup then
       for _, content in pairs(S.sticky_context or {}) do
@@ -27410,6 +27701,8 @@ function Net.clear_conversation(opts)
   S.exclusive_selection_retry_used = false
   S.bus_routing_validator_retries = 0
   S.bus_routing_retry_used = false
+  S.sidechain_send_retry_used = false
+  S.podcast_bus_retry_used = false
   S.track_pan_validator_retries = 0
   S.track_pan_retry_used = false
   S.master_send_validator_retries = 0
@@ -33970,6 +34263,164 @@ function Code.lua_satisfies_bus_or_return_send_routing(lua_code)
   return stripped:find("reaper%.CreateTrackSend%s*%(") ~= nil
 end
 
+function Code.prompt_requests_sidechain_ducking(user_text)
+  local lt = tostring(user_text or ""):lower():gsub("%s+", " ")
+  if lt == "" then return false end
+  local has_kick = lt:find("%f[%w]kick%f[%W]") ~= nil
+  local has_bass = lt:find("%f[%w]bass%f[%W]") ~= nil
+  if not (has_kick and has_bass) then return false end
+  return lt:find("%f[%w]duck%f[%W]") ~= nil
+    or lt:find("%f[%w]ducks%f[%W]") ~= nil
+    or lt:find("%f[%w]ducking%f[%W]") ~= nil
+    or lt:find("%f[%w]sidechain%f[%W]") ~= nil
+    or lt:find("%f[%w]side%-chain%f[%W]") ~= nil
+end
+
+function Code.lua_satisfies_sidechain_ducking_send(lua_code)
+  if not lua_code or lua_code == "" then return false end
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  local lowered = stripped:lower()
+  local aliases = { kick = {}, bass = {} }
+  local function add_alias(role, value)
+    value = tostring(value or ""):lower():match("^%s*(.-)%s*$")
+    if value ~= "" then aliases[role][value] = true end
+  end
+  for name in lowered:gmatch("[%a_][%w_]*") do
+    if name:find("kick", 1, true) then add_alias("kick", name) end
+    if name:find("bass", 1, true) then add_alias("bass", name) end
+  end
+  for lhs, quoted in lowered:gmatch(
+      "([%a_][%w_]*)%s*=%s*.-[\"']([^\"']+)[\"']") do
+    if quoted:find("kick", 1, true) then add_alias("kick", lhs) end
+    if quoted:find("bass", 1, true) then add_alias("bass", lhs) end
+  end
+  local function expr_matches_role(expr, role)
+    expr = tostring(expr or ""):lower()
+    if expr:find(role, 1, true) then return true end
+    for alias in pairs(aliases[role]) do
+      if #alias <= 1 then
+        for token in expr:gmatch("[%a_][%w_]*") do
+          if token == alias then return true end
+        end
+      elseif expr:find(alias, 1, true) then
+        return true
+      end
+    end
+    return false
+  end
+  for src, dst in lowered:gmatch(
+      "reaper%.createtracksend%s*%(%s*([^,%)]-)%s*,%s*([^%)]+)%)") do
+    if expr_matches_role(src, "kick") and expr_matches_role(dst, "bass") then
+      return true
+    end
+  end
+  return false
+end
+
+function Code.prompt_requests_podcast_bus_all_sources(user_text)
+  local lt = tostring(user_text or ""):lower():gsub("%s+", " ")
+  if lt == "" then return false end
+  return lt:find("%f[%w]host%f[%W]") ~= nil
+    and lt:find("%f[%w]guest%f[%W]") ~= nil
+    and lt:find("%f[%w]music%f[%W]") ~= nil
+    and lt:find("%f[%w]bus%f[%W]") ~= nil
+end
+
+function Code.lua_satisfies_podcast_bus_all_sources(lua_code)
+  if not lua_code or lua_code == "" then return false end
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  local lowered = stripped:lower()
+  local roles = { "host", "guest", "music" }
+  local aliases = { host = {}, guest = {}, music = {}, bus = {} }
+  local function add_alias(role, value)
+    value = tostring(value or ""):lower():match("^%s*(.-)%s*$")
+    if value ~= "" then aliases[role][value] = true end
+  end
+  for name in lowered:gmatch("[%a_][%w_]*") do
+    for _, role in ipairs(roles) do
+      if name:find(role, 1, true) then add_alias(role, name) end
+    end
+    if name:find("bus", 1, true) then add_alias("bus", name) end
+  end
+  for lhs, quoted in lowered:gmatch(
+      "([%a_][%w_]*)%s*=%s*.-[\"']([^\"']+)[\"']") do
+    for _, role in ipairs(roles) do
+      if quoted:find(role, 1, true) then add_alias(role, lhs) end
+    end
+    if quoted:find("bus", 1, true) then add_alias("bus", lhs) end
+  end
+  local function expr_matches_role(expr, role)
+    expr = tostring(expr or ""):lower()
+    if expr:find(role, 1, true) then return true end
+    for alias in pairs(aliases[role]) do
+      if #alias <= 1 then
+        for token in expr:gmatch("[%a_][%w_]*") do
+          if token == alias then return true end
+        end
+      elseif expr:find(alias, 1, true) then
+        return true
+      end
+    end
+    return false
+  end
+  local routed, dest_by_role = {}, {}
+  for _, role in ipairs(roles) do routed[role] = false end
+  for src, dst in lowered:gmatch(
+      "reaper%.createtracksend%s*%(%s*([^,%)]-)%s*,%s*([^%)]+)%)") do
+    for _, role in ipairs(roles) do
+      if expr_matches_role(src, role) then
+        routed[role] = true
+        dest_by_role[role] = tostring(dst or ""):lower():match("^%s*(.-)%s*$")
+      end
+    end
+  end
+  local all_direct = true
+  for _, role in ipairs(roles) do
+    if not routed[role] then all_direct = false end
+  end
+  if all_direct then
+    local first_dest, same_dest, has_bus_dest = nil, true, false
+    for _, role in ipairs(roles) do
+      local dst = dest_by_role[role] or ""
+      if expr_matches_role(dst, "bus") then has_bus_dest = true end
+      if first_dest == nil then
+        first_dest = dst
+      elseif dst ~= first_dest then
+        same_dest = false
+      end
+    end
+    if has_bus_dest
+        or (same_dest
+          and not expr_matches_role(first_dest, "host")
+          and not expr_matches_role(first_dest, "guest")
+          and not expr_matches_role(first_dest, "music")) then
+      return true
+    end
+  end
+  local source_table_has_all = false
+  for body in lowered:gmatch("{([^{}]*)}") do
+    local has_all = true
+    for _, role in ipairs(roles) do
+      if not expr_matches_role(body, role) then has_all = false end
+    end
+    if has_all then
+      source_table_has_all = true
+      break
+    end
+  end
+  if source_table_has_all then
+    for _, dst in lowered:gmatch(
+        "reaper%.createtracksend%s*%(%s*([^,%)]-)%s*,%s*([^%)]+)%)") do
+      if expr_matches_role(dst, "bus") then return true end
+    end
+  end
+  return false
+end
+
 function Code.prompt_requests_midi_input_device_filter(user_text)
   local lt = tostring(user_text or ""):lower():gsub("%s+", " ")
   if lt == "" then return false end
@@ -34544,6 +34995,8 @@ function Code.prompt_likely_needs_lua_action(user_text)
       or Code.prompt_requests_inferred_created_track_name(user_text)
       or (Code.prompt_requests_bus_or_return_send_routing
         and Code.prompt_requests_bus_or_return_send_routing(user_text))
+      or (Code.prompt_requests_sidechain_ducking
+        and Code.prompt_requests_sidechain_ducking(user_text))
       or (Code.prompt_requests_exclusive_track_selection
         and Code.prompt_requests_exclusive_track_selection(user_text))
       or (Code.prompt_requests_region_creation
@@ -34569,6 +35022,49 @@ function Code.prompt_likely_needs_lua_action(user_text)
   if not has_action then return false end
   for _, word in ipairs(object_words) do
     if lt:find("%f[%w]" .. word .. "%f[%W]") then return true end
+  end
+  return false
+end
+
+function Code.no_code_reply_is_clarification(reply_text)
+  local text = tostring(reply_text or "")
+  text = text:gsub("^%s+", ""):gsub("%s+$", "")
+  if text == "" or #text > 400 then return false end
+  if not text:find("%?%s*$") then return false end
+
+  local lt = text:lower():gsub("%s+", " ")
+  local markers = {
+    "what color", "which color", "what colour", "which colour",
+    "one color", "different colors", "one colour", "different colours",
+    "which track", "what track", "which tracks", "what tracks",
+    "which region", "what region", "which regions", "what regions",
+    "which marker", "what marker", "which item", "what item",
+    "which take", "what take", "which plugin", "what plugin",
+    "which fx", "what fx", "which parameter", "what parameter",
+    "which value", "what value", "what name", "which name",
+  }
+  for _, marker in ipairs(markers) do
+    if lt:find(marker, 1, true) then return true end
+  end
+
+  if lt:find(" or ", 1, true) == nil then return false end
+  local asks_for_choice =
+       lt:find("do you want", 1, true) ~= nil
+    or lt:find("should i", 1, true) ~= nil
+    or lt:find("should the", 1, true) ~= nil
+    or lt:find("should each", 1, true) ~= nil
+    or lt:find("would you like", 1, true) ~= nil
+    or lt:find("which ", 1, true) ~= nil
+    or lt:find("what ", 1, true) ~= nil
+  if not asks_for_choice then return false end
+
+  local subjects = {
+    "color", "colour", "track", "region", "marker", "item", "take",
+    "plugin", "fx", "parameter", "value", "name", "tempo", "folder",
+    "bus", "send",
+  }
+  for _, subject in ipairs(subjects) do
+    if lt:find(subject, 1, true) then return true end
   end
   return false
 end
@@ -39578,7 +40074,7 @@ local function check_parallel_comb_doubled(tokens, header_lines, has_imports, fi
 
   -- Pass 1: collect feedback-flavored temp identifiers. The model can evade
   -- a "RHS contains <term> * <id>" check by hoisting the multiplication into
-  -- a temp earlier in @sample (Opus 4.7 retry pattern: `combfb_L = fbL *
+  -- a temp earlier in @sample (Opus retry pattern: `combfb_L = fbL *
   -- fb_smooth; buf_cL0[wL0] = inL + combfb_L; buf_cL1[wL1] = inL + combfb_L;
   -- ...`). We track `id = <expr containing <id>*<id>> ;` assignments and
   -- treat any later RHS that references one of those temps as if it had a
@@ -43427,16 +43923,32 @@ function Net.try_finish_curl()
       end
     end
 
-    if not lua_code
+    local no_code_action_prompt = not lua_code
         and not jsfx_code
         and not S.no_code_action_retry_used
-        and Code.prompt_likely_needs_lua_action(S.pending_orig_prompt) then
-      local no_code_provider = PROVIDERS[S.pending_provider_idx]
-        or PROVIDERS.active() or {}
-      local no_code_model = MODELS[S.pending_model_idx or prefs.model_idx]
-        or MODELS[prefs.model_idx] or MODELS[1] or {}
-      if Code.model_validator_enabled(no_code_provider.id, no_code_model.id,
-          "action_requires_lua") then
+        and Code.prompt_likely_needs_lua_action(S.pending_orig_prompt)
+    local no_code_provider = PROVIDERS[S.pending_provider_idx]
+      or PROVIDERS.active() or {}
+    local no_code_model = MODELS[S.pending_model_idx or prefs.model_idx]
+      or MODELS[prefs.model_idx] or MODELS[1] or {}
+    local force_no_code_action_retry =
+      (Code.prompt_requests_sidechain_ducking
+        and Code.prompt_requests_sidechain_ducking(S.pending_orig_prompt)
+        and Code.model_validator_enabled(no_code_provider.id,
+          no_code_model.id, "sidechain_ducking_requires_send"))
+      or (Code.prompt_requests_podcast_bus_all_sources
+        and Code.prompt_requests_podcast_bus_all_sources(S.pending_orig_prompt)
+        and Code.model_validator_enabled(no_code_provider.id,
+          no_code_model.id, "podcast_bus_routes_all_sources"))
+    if no_code_action_prompt
+        and Code.no_code_reply_is_clarification(text)
+        and not force_no_code_action_retry then
+      Log.line("NO-CODE-ACTION-RETRY",
+        "action prompt returned clarification; not retrying")
+    elseif no_code_action_prompt then
+      if force_no_code_action_retry
+          or Code.model_validator_enabled(no_code_provider.id,
+            no_code_model.id, "action_requires_lua") then
         S.no_code_action_retry_used = true
         Probe.add_validator_retry(S.probe_turn, "empty")
         Log.line("NO-CODE-ACTION-RETRY",
@@ -44444,6 +44956,146 @@ function Net.try_finish_curl()
           .. "reaper.CreateTrackSend(...). Auto-run is blocked; review the "
           .. "routing before running manually."))
         or "The user asked for tracks going into a bus or return, but the script still does not create sends with reaper.CreateTrackSend(...). Auto-run is blocked; review the routing before running manually.")
+    end
+  end
+
+  if lua_code
+      and Code.prompt_requests_sidechain_ducking(S.pending_orig_prompt) then
+    local sidechain_provider = PROVIDERS[S.pending_provider_idx]
+      or PROVIDERS.active() or {}
+    local sidechain_model = MODELS[S.pending_model_idx or prefs.model_idx]
+      or MODELS[prefs.model_idx] or MODELS[1] or {}
+    if Code.model_validator_enabled(sidechain_provider.id,
+        sidechain_model.id, "sidechain_ducking_requires_send")
+        and not Code.lua_satisfies_sidechain_ducking_send(lua_code) then
+      if not S.sidechain_send_retry_used then
+        S.sidechain_send_retry_used = true
+        Probe.add_validator_retry(S.probe_turn, "sidechain_send")
+        Log.line("SIDECHAIN-SEND-RETRY",
+          "kick/bass ducking requested but no Kick-to-Bass CreateTrackSend found")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked "
+          .. "for kick/bass ducking. Your previous Lua did not create the "
+          .. "required Kick-to-Bass sidechain send. Regenerate the full "
+          .. "script. Create Kick and Bass tracks, set Bass to four "
+          .. "channels if needed, add the compressor to Bass, and create "
+          .. "a send with `reaper.CreateTrackSend(kick_track, bass_track)` "
+          .. "feeding the sidechain channels. Respond as if this is your "
+          .. "FIRST reply -- do NOT apologize, do NOT mention a retry.)"
+          .. "\n\nPrevious Lua to fix:\n```lua\n"
+          .. lua_code
+          .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history+1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("sidechain_send_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + sidechain_send_retry")
+              or "sidechain_send_retry"
+          end
+        end
+        if prefs.include_snapshot and not S.pending_answer_only_followup then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Net._ensure_request_start_time()
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
+            "retry.reason.after_missing_sidechain_send",
+            "after missing sidechain send"))
+            or "Auto-retry after missing sidechain send did not go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      validator_gate_hit = true
+      Log.line("SIDECHAIN-SEND-VALIDATOR",
+        "kick/bass ducking still missing CreateTrackSend after retry; auto-run blocked")
+      Log.add_error("The user asked for kick/bass ducking, but the script still does not create a Kick-to-Bass send with reaper.CreateTrackSend(...). Auto-run is blocked; review the sidechain routing before running manually.")
+    end
+  end
+
+  if lua_code
+      and Code.prompt_requests_podcast_bus_all_sources(
+        S.pending_orig_prompt) then
+    local podcast_provider = PROVIDERS[S.pending_provider_idx]
+      or PROVIDERS.active() or {}
+    local podcast_model = MODELS[S.pending_model_idx or prefs.model_idx]
+      or MODELS[prefs.model_idx] or MODELS[1] or {}
+    if Code.model_validator_enabled(podcast_provider.id,
+        podcast_model.id, "podcast_bus_routes_all_sources")
+        and not Code.lua_satisfies_podcast_bus_all_sources(lua_code) then
+      if not S.podcast_bus_retry_used then
+        S.podcast_bus_retry_used = true
+        Probe.add_validator_retry(S.probe_turn, "podcast_bus")
+        Log.line("PODCAST-BUS-RETRY",
+          "podcast bus requested but not all named sources are routed to bus")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked "
+          .. "for a podcast setup with Host, Guest, Music, and a bus. "
+          .. "Your previous Lua did not route Music to the bus, or added "
+          .. "an extra bus instead of using one bus for the named sources. "
+          .. "Regenerate the full script with exactly the requested source "
+          .. "tracks and one bus track. Create sends from Host, Guest, and "
+          .. "Music to that bus unless the user explicitly excludes Music. "
+          .. "Do not add a second/master bus. Respond as if this is your "
+          .. "FIRST reply -- do NOT apologize, do NOT mention a retry.)"
+          .. "\n\nPrevious Lua to fix:\n```lua\n"
+          .. lua_code
+          .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history+1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("podcast_bus_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + podcast_bus_retry")
+              or "podcast_bus_retry"
+          end
+        end
+        if prefs.include_snapshot and not S.pending_answer_only_followup then
+          S.pending_project  = _resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Net._ensure_request_start_time()
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
+            "retry.reason.after_incomplete_podcast_bus_routing",
+            "after incomplete podcast bus routing"))
+            or "Auto-retry after incomplete podcast bus routing did not go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      validator_gate_hit = true
+      Log.line("PODCAST-BUS-VALIDATOR",
+        "podcast bus still missing Music-to-bus routing after retry; auto-run blocked")
+      Log.add_error("The user asked for Host, Guest, Music, and a bus, but the script still does not route Music to the bus with reaper.CreateTrackSend(...). Auto-run is blocked; review the podcast bus routing before running manually.")
     end
   end
 
@@ -47765,7 +48417,12 @@ function Net.try_finish_curl()
           .. "with number`. The canonical form\n"
           .. "  vmin and vmax and vmin < vmax and (target < vmin or target > vmax)\n"
           .. "short-circuits cleanly.\n\n"
-          .. "Regenerate the FULL script. For each helper you call, paste "
+          .. "If this is a simple/basic vocal chain or add-only plugin "
+          .. "request where the user did not explicitly ask for exact "
+          .. "display-unit settings, remove the helper entirely and add "
+          .. "the requested EQ/compressor plugins without TrackFX_SetParam* "
+          .. "or deferred parameter-setting code. Otherwise, regenerate "
+          .. "the FULL script. For each helper you call, paste "
           .. "the helper's source verbatim from `prompt_bundle:plugin_helpers` "
           .. "above main(). Respond as if this is your FIRST reply -- do "
           .. "NOT apologize, do NOT mention a retry.)\n\n"
@@ -48511,8 +49168,10 @@ function Net.try_finish_curl()
       auto_run_block_reason = auto_run_block_reason or inferred_block_reason
     end
     if auto_run_block_reason == "auto_run_disabled"
+       and type(code) == "string" and code ~= ""
        and S.history[_asst_hist_idx]
-       and not S.history[_asst_hist_idx].run_status then
+       and (not S.history[_asst_hist_idx].run_status
+         or S.history[_asst_hist_idx].run_status == "no_code") then
       S.history[_asst_hist_idx].run_status = "manual_run"
       S.history[_asst_hist_idx].code_bytes = type(code) == "string" and #code or nil
       S.history[_asst_hist_idx].code_type = code_type
@@ -48669,6 +49328,12 @@ function Net.try_finish_curl()
         dmsg.generated_code = Code.generated_code_descriptor(typed_plan_text,
           "typed_actions", { content_field = "typed_action_plan" })
         if dmsg.generated_code then dmsg.generated_code.content = typed_plan_text end
+      end
+      if dmsg.auto_run_block_reason == "auto_run_disabled"
+         and dmsg.code_block_present == true
+         and (not dmsg.run_status or dmsg.run_status == "no_code") then
+        dmsg.run_status = "manual_run"
+        dmsg.validation_status = "manual_required"
       end
 
       local rr = type(S.last_run_result) == "table" and S.last_run_result or nil

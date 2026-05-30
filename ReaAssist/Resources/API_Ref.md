@@ -228,6 +228,12 @@ local ts, te = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
   I_HEIGHTOVERRIDE, B_SHOWINMIXER, B_SHOWINTCP, B_MAINSEND,
   IP_TRACKNUMBER (read-only: 1-based, -1=master), P_PARTRACK (read-only).
 
+I_SOLO is not boolean. Treat any value > 0 as "soloed" when reading UI
+state; solo-in-place and safe-solo modes can return values other than 1.
+When setting solo from a script and the user did not request a special solo
+mode, prefer value `2` (solo-in-place) rather than `1`, because it preserves
+normal routing expectations better.
+
 I_RECINPUT for MIDI record input is bit-packed:
 `4096 + (physical_input_index * 32) + channel`, where channel `0` means all
 MIDI channels and `1..16` mean only that channel. The physical input index is
@@ -276,6 +282,11 @@ end
 `boolean retval, string str reaper.GetSetMediaTrackInfo_String(MediaTrack tr, string parmname, string str, boolean setNewValue)`
   Get/set track string: P_NAME, P_ICON, P_MCP_LAYOUT, P_TCP_LAYOUT, P_EXT:xyz, GUID,
   P_RAZOREDITS (razor edit areas -- see RAZOR EDITS subsection below).
+
+Use `P_EXT:your_key` for project-bound per-track state that should travel
+with the .RPP. Item and take string APIs also support `P_EXT:your_key`. This
+is better than global ExtState for preferences or analysis markers attached to
+specific tracks/items/takes.
 
 `integer reaper.CountSelectedTracks(ReaProject proj)`
   Count selected tracks (excludes master).
@@ -465,6 +476,10 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
 `boolean retval, string name reaper.TrackFX_GetParamName(MediaTrack track, integer fx, integer param, string buf)`
   Get FX parameter name.
 
+`integer reaper.TrackFX_GetParamFromIdent(MediaTrack track, integer fx, string ident)`
+  Get an FX parameter index from an identifier. `":wet"` is the common dry/wet
+  parameter ident when the plug-in exposes REAPER's generic wet control.
+
 `string buf reaper.TrackFX_GetParamSectionName(MediaTrack track, integer fx, integer param)`
   REAPER 7.67+. Get the VST3 unit / CLAP module / parameter section name for
   a parameter when the plug-in exposes one. May return an empty string.
@@ -474,6 +489,10 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
   `out_pin_X`, `fx_type`, `fx_ident`, `fx_name`, `original_name`,
   `au_ids` (Audio Units), `param.X.automatable`, `container_count`,
   `parent_container`, and `container_item.X`. Returns false if unsupported.
+  For dry/wet preview scripts, skip virtual instruments by checking whether
+  `fx_type` ends in `i` (or the displayed name begins with VSTi/AUi/etc.), then
+  use `TrackFX_GetParamFromIdent(track, fx, ":wet")` for the remaining FX.
+  This avoids hard-bypassing `I_FXEN`, which can interrupt DSP and pop.
 
 `number reaper.TrackFX_GetParamNormalized(MediaTrack track, integer fx, integer param)`
   Get normalized parameter value (0..1).
@@ -496,11 +515,18 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
 `boolean reaper.TrackFX_CopyToTrack(MediaTrack src_track, integer src_fx, MediaTrack dest_track, integer dest_fx, boolean is_move)`
   Copy or move FX to another track.
 
+`boolean reaper.TrackFX_SetPinMappings(MediaTrack track, integer fx, integer isoutput, integer pin, integer low32bits, integer hi32bits)`
+  Set an FX input/output pin mapping. The channel bitmask for channels 1-32
+  goes in the 5th argument (`low32bits`). Pass `0` for `hi32bits` unless
+  intentionally mapping channels above 32. Swapping these silently unmaps the
+  normal channels and can produce silence.
+
 `integer reaper.TrackFX_GetInstrument(MediaTrack track)`
   Get index of first virtual instrument FX, or -1.
 
 `TrackEnvelope reaper.GetFXEnvelope(MediaTrack track, integer fxindex, integer parameterindex, boolean create)`
-  Get FX parameter envelope; create=true creates it if missing.
+  Get FX parameter envelope; create=true creates hidden/unwritten FX parameter
+  envelopes that `GetTrackEnvelopeByName` cannot see yet.
 
 `integer reaper.TrackFX_GetRecCount(MediaTrack track)`
   Count record (input) FX on a track.
@@ -914,6 +940,21 @@ Useful string keys:
 
 `reaper.BypassFxAllTracks(integer bypass)`
   -1=bypass all if not all already bypassed, otherwise unbypass all.
+
+ReaImGui extension notes (only when writing an ImGui script):
+- Do not rely on `reaper.ImGui_PushButtonRepeat`; it is absent from common
+  ReaImGui installs. For a hold-to-repeat button, use `reaper.ImGui_Button`
+  plus `reaper.ImGui_IsItemActive`; reset the repeat timer on
+  `reaper.ImGui_IsItemActivated`, then throttle subsequent fires with
+  `reaper.time_precise()` so repeat speed is not frame-rate dependent.
+- `reaper.ImGui_PushFont(ctx, font, size)` requires the size argument; pass
+  `0.0` to inherit the size used when the font was attached.
+- Give repeated visible labels unique hidden IDs with `##`, for example
+  `"S##solo"` and `"S##settings"`, so ImGui does not merge widget state.
+- For transient hotkey/hover ImGui tools, keyboard input can leak into REAPER.
+  If using `reaper.JS_VKeys_Intercept`, intercept on startup and release in
+  `reaper.atexit`; if changing SWS `alwaysallowkb`, save and restore the
+  previous value. Guard extension calls before using them.
 
 ## ACTIONS
 
@@ -1478,6 +1519,11 @@ inspect, filter, or programmatically pick which items go in which group.
 `boolean reaper.SetEnvelopePoint(TrackEnvelope envelope, integer ptidx, optional number timeIn, optional number valueIn, optional integer shapeIn, optional number tensionIn, optional boolean selectedIn, optional boolean noSortIn)`
   Set envelope point attributes.
 
+`boolean retval, string str reaper.GetEnvelopeStateChunk(TrackEnvelope env, string str, boolean isundo)`
+`boolean reaper.SetEnvelopeStateChunk(TrackEnvelope env, string str, boolean isundo)`
+  Get/set raw envelope state. Use sparingly, but it is the practical way to
+  force envelope visibility without selection-changing action macros.
+
 `boolean reaper.DeleteEnvelopePointRange(TrackEnvelope envelope, number time_start, number time_end)`
   Delete points in a time range.
 
@@ -1530,6 +1576,15 @@ local val    = 10 ^ (-6 / 20)                    -- -6 dB -> linear amplitude
 local scaled = reaper.ScaleToEnvelopeMode(mode, val)
 reaper.InsertEnvelopePoint(env, 4.0, scaled, 0, 0, false, false)
 reaper.Envelope_SortPoints(env)
+```
+
+```lua
+-- Pattern: force an envelope lane visible without running a UI action.
+local ok, chunk = reaper.GetEnvelopeStateChunk(env, "", false)
+if ok then
+  chunk = chunk:gsub("\nVIS %d", "\nVIS 1", 1)
+  reaper.SetEnvelopeStateChunk(env, chunk, false)
+end
 ```
 <!-- /SECTION:envelopes -->
 
@@ -2425,6 +2480,14 @@ typical user requests.
   reaper.MIDI_Sort(take)
   reaper.Undo_EndBlock("ReaAssist: Insert CC sweep", -1)
 ```
+
+For "scale/raise/lower CC under selected notes" requests, existing CC points
+may be absent. If no relevant CC events exist in the selected-note span, insert
+two identical CC points matching the target CC# and channel at the first
+selected note start and last selected note end to create a flat segment, then
+adjust that segment. After inserting CC events for a take, call
+`reaper.UpdateItemInProject(reaper.GetMediaItemTake_Item(take))` so REAPER
+redraws the MIDI item/lanes immediately.
 
 ### WORKFLOW 8: Create a brand-new empty MIDI item, 4 bars long
 

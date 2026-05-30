@@ -1,5 +1,5 @@
 {
-  "version": "1.3.3",
+  "version": "1.3.4",
   "removed_files": [
     "Resources/MIDI_Ref.md",
     "Resources/Theme_Ref.md",
@@ -8,7 +8,7 @@
   "files": [
     {
       "name": "CHANGELOG.md",
-      "sha256": "300f3a3cfb6a5f035e2b83079036ffc52dfa19c2764fdbc46c44c2a601351972"
+      "sha256": "fb44c5fc9d16fc880ffde936035757c25fb10636cc31b77ae827e0ab1607ba7e"
     },
     {
       "name": "LICENSE.txt",
@@ -20,23 +20,23 @@
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "20e73678ed15ace91af207a450966668b73d2542d2a603ba27ccd0360f7f33a7"
+      "sha256": "6e2f89214ef7a6b0cc76d9061de8a5b52c43ee5bac9bde456799ca51d0a6ad03"
     },
     {
       "name": "Resources/API_Ref.md",
-      "sha256": "2a1faccb8ab7ec8ceb36a7d2e20861d89b73064a4c142bcb1c83cff7783a842e"
+      "sha256": "3911d4847e9c487a9a6ccebf72756498883c26ffe61ff94d0c8ba0d987736ea3"
     },
     {
       "name": "Resources/Diag.lua",
-      "sha256": "557993ed5ff9110750ef07a2cd252f8bbc32872322eab722b14e28cd612a63f9"
+      "sha256": "4bd24860efdd74781aa638b078452cba0481a7b78abf42b40318c2de0491f426"
     },
     {
       "name": "Resources/Help.md",
-      "sha256": "161297a4fe089c082bae866b465dea63298d4341fed7c95a61287762099d55ea"
+      "sha256": "e3485aa2516094033cb75de2c87de286e51a8c970034470559b6d7699f3b9c78"
     },
     {
       "name": "Resources/I18N.lua",
-      "sha256": "58b1b71b1ca69c8b32c722929c2b5708a94028abfbf54938be9b14d5a9c7a781"
+      "sha256": "f2539c39f77a77e8b901f3a30b6f49ecc25468a76dd7897b25ef394c342519bb"
     },
     {
       "name": "Resources/Plugin_Ref.md",
@@ -44,7 +44,7 @@
     },
     {
       "name": "Resources/Prompts.md",
-      "sha256": "aa73babae52cf8df73b2b503bdc6bf0e1997f0db09d392c4aee5f10c90c529e0"
+      "sha256": "803c9b3d6ad2c09ea57b9f9e9e6d74969247d19ebc58b3b91c1693fb172f78d0"
     },
     {
       "name": "Resources/ReEQ/Dependencies/firhalfband.jsfx-inc",
@@ -80,7 +80,7 @@
     },
     {
       "name": "Resources/UI.lua",
-      "sha256": "aad7c8f954b12ad7264c85ca936683384b6ad019a425c395dc94febbe9d254c2"
+      "sha256": "df37dd42c40ead43d2db090a5118ce84983c9cd0637c49e7f621acc1a89b50dc"
     },
     {
       "name": "Resources/fonts/Inter_18pt-Bold.ttf",

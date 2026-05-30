@@ -120,7 +120,7 @@ ReaAssist supports Claude, ChatGPT, Gemini, DeepSeek, and custom OpenAI-compatib
 
 Current recommendations:
 
-- Claude: Sonnet 4.6, no thinking. All-around safe default. Pick Opus 4.7, no thinking, for highest quality at higher cost.
+- Claude: Sonnet 4.6, no thinking. All-around safe default. Pick Opus 4.8, no thinking, for highest quality at higher cost.
 - ChatGPT: GPT-5.4, no thinking. Fastest reliable combo.
 - Gemini: Flash 3.5, Minimal thinking. Strong default; Flash Lite Low is the cheapest fast option.
 - DeepSeek: V4 Flash, Non-Thinking. Cheapest combo in the built-in lineup; very fast, strong cheap pick.

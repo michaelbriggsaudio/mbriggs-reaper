@@ -653,10 +653,24 @@ Slider declaration syntax: `sliderN:default<min,max,step>Name` on its own line n
 JSFX HOST DETAILS THAT IMPROVE REAL PLUGINS:
 - Prefer named sliders for readable generated code: `slider1:gain_db=0<-24,24,0.1>Gain (dB)`, then read `gain_db` instead of `slider1`.
 - Use enum sliders for mode choices: `slider2:mode=0<0,2,1{Sine,Triangle,Square}>Waveform`.
+- Use `slider_show(slider_index, state)` when a mode exposes mutually
+  exclusive groups of advanced controls. Put the visibility update in
+  `@slider` (or `@block` only when it genuinely must be rechecked per block)
+  so the FX window stays uncluttered without losing parameters.
 - `@init` can rerun on transport start or sample-rate changes unless the JSFX deliberately opts out with `ext_noinit = 1;`; initialize state deliberately and do not assume long buffers persist across playback starts.
 - `@slider` runs after `@init` and when sliders change; compute coefficients and slider-derived values there, then consume them in `@sample`.
 - Declare helper functions before `@init`, never inside a section. When reuse is high enough to justify a helper, use syntax exactly like `function filt.tick(x) instance(y, a) local(out) ( y += a*(x-y); out = y; out; );`; `instance(...)` comes after the argument list and before `local(...)`, and there is NO `end` keyword. For simple one- or two-channel effects, straight-line state in each section is fine.
 - Do not use `import`, file I/O, shared `regXX` / `_global`, or custom `gmem` unless explicitly requested; they create collision and portability risks.
+- If custom `gmem` is explicitly requested, declare a unique namespace with
+  `options:gmem=ReaAssistYourEffectName`; never use an unnamed/shared gmem pool.
+- If declaring custom `out_pin:` lines for multi-channel pass-through, declare
+  matching `in_pin:` lines for every channel you intend to preserve. In a JSFX
+  chain, an output pin without a corresponding input pin can leave that `splN`
+  initialized as silence and erase upstream audio on that channel.
+- For control smoothing that runs per block, derive the coefficient from elapsed
+  time (`dt = samplesblock / srate`) instead of hardcoding a multiplier such as
+  `value += (target - value) * 0.1`; hardcoded multipliers change feel with
+  buffer size.
 
 SAFETY (mandatory -- blown-up track/speakers otherwise):
 - Only generate JSFX when the design is stable, bounded, and suitable for real-time use.

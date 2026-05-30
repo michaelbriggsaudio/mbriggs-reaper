@@ -1,5 +1,13 @@
 # ReaAssist - Changelog
 
+## v1.3.4 - 2026-05-29
+
+- **Custom Instructions are now available.** ReaAssist can include your saved local preferences with every request, with quick access from Settings and the Options menu. Thanks to REAPER forum user manthosdm for prompting the idea.
+
+- **Provider and model handling is sharper.** Custom OpenAI-compatible endpoints are normalized more reliably, no-code clarification turns avoid unnecessary retries, and Anthropic guidance is updated for Opus 4.8.
+
+- **Small workflow polish and fixes.** Auto-run-off JSFX results report correctly, Custom Instructions diagnostics are clearer, and the viewport probe no longer misfires during window dragging.
+
 ## v1.3.3 - 2026-05-27
 
 - **Gemini Flash has been updated to Flash 3.5.** ReaAssist now uses Gemini 3.5 Flash, migrates saved Flash preview selections to the new model, refreshes pricing/diagnostics, and defaults Flash 3.5 to Minimal thinking for faster, lower-cost scripting and editing.

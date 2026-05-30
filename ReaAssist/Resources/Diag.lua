@@ -39,7 +39,7 @@ end
 -- Constants
 -- ============================================================================
 Diag.SCHEMA_VERSION    = 2
-Diag.PAYLOAD_REVISION  = 2
+Diag.PAYLOAD_REVISION  = 3
 Diag.PAYLOAD_CAP_BYTES = 1024 * 1024     -- 1 MB server-side cap (manual feedback)
 -- Bug-report tier carries the full Advanced Log inline as a JSON string.
 -- Logs are auto-pruned to MAX_LOG_TURNS (40) at write time, but each turn can
@@ -87,6 +87,7 @@ Diag.MODEL_TIER_MAP = {
   ["claude-sonnet-4-6"]  = "balanced",
   ["claude-opus-4-5"]    = "smart",
   ["claude-opus-4-7"]    = "smart",
+  ["claude-opus-4-8"]    = "smart",
   ["gpt-5-nano"]         = "fast",
   ["gpt-5-mini"]         = "balanced",
   ["gpt-5"]              = "smart",
@@ -953,6 +954,42 @@ local function _settings_shape()
   }
 end
 
+local function _custom_instructions_context()
+  local enabled = type(prefs) == "table"
+    and prefs.custom_instructions_enabled == true
+  local out = {
+    enabled       = enabled,
+    configured    = false,
+    sent_to_model = false,
+    bytes         = 0,
+  }
+  if type(Store) ~= "table" then return out end
+
+  if type(Store.custom_instructions_text) == "function" then
+    local ok_raw, raw = pcall(Store.custom_instructions_text)
+    out.configured = ok_raw and type(raw) == "string"
+      and raw:find("%S") ~= nil
+  end
+
+  if type(Store.custom_instructions_prompt_block) ~= "function" then
+    return out
+  end
+  local ok, content = pcall(Store.custom_instructions_prompt_block)
+  if not ok or type(content) ~= "string" or content:match("^%s*$") then
+    return out
+  end
+  local redacted = Diag.redact_log(content)
+  if type(redacted) ~= "string" or redacted == "" then return out end
+  out.sent_to_model = true
+  out.content       = redacted
+  out.bytes         = #content
+  out.content_hash  = Diag.content_hash(content)
+  out.content_hash_scope = "raw_prompt_block"
+  out.redacted_bytes = #redacted
+  out.redacted      = redacted ~= content
+  return out
+end
+
 local function _metrics_summary()
   local p = _active_provider()
   local provider_id = _provider_class(p)
@@ -1408,6 +1445,7 @@ function Diag.begin_draft(target_idx)
       diagnostic_report = Diag.redact_log(rep)
     end
   end
+  local custom_instructions = _custom_instructions_context()
 
   return {
     event_id             = uuidv4(),
@@ -1431,6 +1469,7 @@ function Diag.begin_draft(target_idx)
     _turn_count_total    = total,
     _metrics             = _metrics_summary(),
     _diagnostic_report   = diagnostic_report,
+    _custom_instructions = custom_instructions,
   }
 end
 
@@ -1478,6 +1517,9 @@ function Diag.assemble_payload(draft, comment, flags)
   -- Field is omitted when nil so the JSON stays clean for old test fixtures.
   if draft._diagnostic_report then
     payload.diagnostic_report = draft._diagnostic_report
+  end
+  if type(draft._custom_instructions) == "table" then
+    payload.custom_instructions = draft._custom_instructions
   end
   local target_turn = type(draft._turns) == "table"
     and draft._turns[draft.target_message_index] or nil
@@ -1712,6 +1754,7 @@ function Diag.begin_bug_report_draft()
       diagnostic_report = Diag.redact_log(rep)
     end
   end
+  local custom_instructions = _custom_instructions_context()
 
   -- Attachment selection: log first (richer signal), chat session as fallback.
   local attachment_kind        = "none"
@@ -1776,6 +1819,7 @@ function Diag.begin_bug_report_draft()
     _debug_log_redacted_size = debug_log_redacted_size,
     _turns                   = turns,
     _turn_count_total        = turn_count_total,
+    _custom_instructions     = custom_instructions,
   }
 end
 
@@ -1848,6 +1892,9 @@ function Diag.assemble_bug_report_payload(draft, comment, name, email)
       turn_count_total = draft._turn_count_total,
       turns            = draft._turns,
     }
+  end
+  if type(draft._custom_instructions) == "table" then
+    payload.custom_instructions = draft._custom_instructions
   end
 
   local serialized = _serialize(payload)
@@ -1940,6 +1987,14 @@ function Diag.assemble_bug_report_payload(draft, comment, name, email)
   if #s > Diag.BUG_REPORT_CAP_BYTES and payload.diagnostic_report then
     payload.diagnostic_report = nil
     truncation.diagnostic_report_dropped = true
+    s = stabilize(_serialize(payload))
+  end
+
+  -- Phase 2.5: behavior-shaping context. Keep comment/contact first if a
+  -- pathological bug-report payload still exceeds the generous log cap.
+  if #s > Diag.BUG_REPORT_CAP_BYTES and payload.custom_instructions then
+    payload.custom_instructions = nil
+    truncation.custom_instructions_dropped = true
     s = stabilize(_serialize(payload))
   end
 

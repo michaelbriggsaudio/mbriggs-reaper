@@ -292,6 +292,9 @@ function Diag.redact(s)
     return #m >= 20 and "sk-***" or m
   end)
   s = s:gsub("AIza[A-Za-z0-9%-_]+", "AIza***")
+  s = s:gsub("AQ[%.A-Za-z0-9%-_]+", function(m)
+    return #m >= 20 and "AQ***" or m
+  end)
 
   -- 3. Authorization header lines (case-preserving) + standalone Bearer
   s = s:gsub("([Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]):%s*[^\n\r]+",

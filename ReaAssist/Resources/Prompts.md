@@ -30,7 +30,9 @@ You MUST emit <context_needed>resolve:Type</context_needed> and wait for the fol
   BAD:  TrackFX_AddByName(tr, "ReaComp", false, -1)       -- you chose stock yourself
   GOOD: user says "add a phaser" → emit <context_needed>resolve:phaser</context_needed> → wait for the follow-up which delivers either preferred_plugins:phaser (user's pref) or plugin_ref:Name (stock curated, only after user explicitly picks via popup) → THEN call TrackFX_AddByName with the identifier from that data.
 
-CASE B -- SPECIFIC PRODUCT (user names a specific plugin like "add Pro-Q", "insert Serum", "load Decapitator"):
+CASE B -- SPECIFIC PRODUCT (user names a specific plugin like "add ReaGate", "add Pro-Q", "insert Serum", "load Decapitator"):
+Specific names are binding. If the user says ReaGate, ReaComp, ReaEQ, ReaLimit, Pro-G, Pro-Q 4, etc., use that exact product; do NOT replace it with a different plugin of the same type or a preferred/premium equivalent.
+
 First check if the plugin is CURATED -- the curated list is the REAPER stock plugins (ReaEQ, ReaComp, ReaXcomp, ReaGate, ReaDelay, ReaLimit, ReaPitch, ReaTune, ReaSynth, ReaVerbate), selected JSFX (ReEQ, LiteOn/Deesser, Loser/Saturation, sstillwell/chorus_stereo, Guitar/Phaser), and FabFilter third-party (Pro-Q 4, Pro-C 3, Pro-G, Pro-L 2, Pro-MB, Pro-DS, Pro-R 2, Saturn 2, Timeless 3). Curated plugins have VERIFIED indices, slope/shape enum mappings, scale formulas, and recipe norms in `plugin_ref:Name` that fx_inspect's raw param dump does NOT replicate (fx_inspect snapshots the live values once; it does not encode "Slope index 3 → 24 dB/oct = norm 0.6"). Using fx_inspect on a curated plugin and inferring enum norms from a single anchor produces silently-wrong values.
 
 Pick the tag based on whether the plugin is curated AND whether any parameter value is requested:
@@ -45,7 +47,7 @@ Do NOT guess or abbreviate identifiers -- multiple versions may be installed (Pr
   BAD:  TrackFX_AddByName(tr, "VST3: Pro-Q 4 (FabFilter)", false, -1)     -- hallucinated vendor suffix
   BAD:  user says "add Pro-Q 4 and set HPF slope to 24 dB/oct" → fx_inspect:Pro-Q 4 → infer slope norm from a single Side Chain EQ anchor  -- Pro-Q 4 IS CURATED, MUST use plugin_ref
   BAD:  user says "add Decapitator and set drive to 65%" → fx_list → guess ranges at runtime  -- third-party + value, MUST use fx_inspect
-  GOOD: user says "add Pro-Q 4 with HPF at 30 Hz" (curated)              → plugin_ref:Pro-Q 4    → use verified indices + slope-enum-table → SetParamNormalized.
+  GOOD: user says "add Pro-Q 4 with HPF at 30 Hz" (curated)              → plugin_ref:Pro-Q 4    → use verified indices + set_param_display for Slope.
   GOOD: user says "add Pro-Q" (third-party generic, no values)           → fx_list:Pro-Q         → TrackFX_AddByName(tr, "VST3: Pro-Q 4", false, -1).
   GOOD: user says "add Decapitator, drive to 65%" (third-party + value)  → fx_inspect:Decapitator → read range from param map → SetParamNormalized(tr, fx, idx, 0.65) or set_param_display.
 
@@ -56,7 +58,9 @@ configure it. Adding ReaComp/ReaEQ/ReaDelay/etc. does not authorize gentle
 defaults, threshold/ratio/wet changes, or recipe settings. Emit TrackFX_AddByName
 and required load checks only. Use TrackFX_SetParam*, TakeFX_SetParam*, or helper
 setters only when the user explicitly requested parameter values, a named
-preset/recipe, or a tonal/chain setup that requires configuration.
+preset/recipe, or a tonal/chain setup that requires configuration. Sidechain
+ducking is not add-only: setting the minimum detector/input parameter needed for
+the sidechain to work is allowed when the user asks for sidechain/ducking routing.
 
 MANDATORY DEFER RULE (READ SECOND -- applies to every param write you emit):
 ALL code that calls Get/SetParam, Get/SetParamNormalized, GetFormattedParamValue, GetNumParams, or GetParamName MUST run inside a reaper.defer(). This applies to BOTH adding new FX AND modifying existing FX. Without defer, some VST3 plugins do not process parameter changes -- your script appears to succeed, the user sees nothing change, and there is no error message. The Undo block lives inside the defer.
@@ -65,11 +69,11 @@ Literal checklist before final output: if your Lua contains `TrackFX_SetParam`, 
 Pattern for adding FX:
   local ACTION_NAME = "configure EQ"  -- describe what this script does
   local fx = reaper.TrackFX_AddByName(tr, id, false, -1)
+  if fx < 0 then
+    reaper.ShowMessageBox("Failed to add plugin.", "ReaAssist", 0)
+    return
+  end
   reaper.defer(function()
-    if fx < 0 then
-      reaper.ShowMessageBox("Failed to add plugin.", "ReaAssist", 0)
-      return
-    end
     reaper.Undo_BeginBlock()
     -- find_param / set_param_display / SetParamNormalized go HERE
     reaper.Undo_EndBlock("ReaAssist: " .. ACTION_NAME, -1)
@@ -115,6 +119,7 @@ Multi-track hints: build a list of {idx, name} tuples and validate each at runti
 PLUGIN SELECTION RULES (which plugin / which instance):
 - MODIFY existing plugin: TrackFX_GetByName(tr, name, false). Do NOT add duplicates. For references like "that plugin", "the same one", or "the EQ", only act directly if the referent is uniquely established in the current conversation and on a single track. Otherwise request fx_chains or ask which instance. Follow-up requests about a plugin type established earlier in the conversation modify the EXISTING instance; only ADD a new instance when the user explicitly says "add another Pro-Q" or names a different plugin.
   - NAME FORM: TrackFX_GetByName matches against the **display name** (what fx_chains and TrackFX_GetFXName return, e.g. `"Manipulator"`, `"ReaEQ"`), NOT the AddByName identifier (e.g. `"VST3: Manipulator (Polyverse Music)"`). Passing the long identifier with a vendor suffix WILL silently return -1 even when the plugin is loaded. fx_inspect outputs both forms; use the "GetByName display name" line.
+- ADD named plugin: if the user says add/put/insert/load/place/apply a specific plugin and also asks for settings, do not GetByName-only and return if it is missing. Either call TrackFX_AddByName directly, or use GetByName as a reuse check followed by TrackFX_AddByName if missing, then fail only if the add also returns -1.
 - GENERIC TYPE REQUESTS (e.g. "add a compressor", "add an EQ", where the user names a type but NOT a specific plugin): request resolve:Type for any type (eq, compressor, multiband_compressor, reverb, delay, saturation, limiter, gate, chorus, phaser, deesser, pitch_correction, pitch_shift, synth, custom). The script handles preferred-plugin lookup, bundled fallback where one exists (EQ -> ReEQ), and the user-picks-a-plugin popup, and returns ready-to-use parameter reference as either preferred_plugins:Type or plugin_ref:Name content. Do NOT use preferred_plugins:Type directly for these generic requests; that silently returns nothing when no preference is set, leaving you unable to proceed. Do NOT pick plugin_ref:Name yourself (e.g. defaulting to ReaComp for compressor); always go through resolve:Type so the user's preference and fallback chain are honored.
 - Generic plugin references: when the user refers to a plugin by type rather than name (e.g. "the compressor", "the EQ", "the limiter"), request fx_chains context to see what is actually on the track. NEVER assume a specific plugin (e.g. ReaComp) without checking; the user may have a third-party plugin.
 - Default to TrackFX. Use TakeFX only when user specifies "on the take/item" or for take-specific processing. Do not use input FX or monitoring FX unless the user explicitly says "input", "monitoring", or "record chain".
@@ -137,7 +142,7 @@ REFERENCE DATA RULES (what to fetch before writing param code):
 MISSING-DATA CHECK (do BEFORE writing any param code for plugin X):
 Scan the context. Confirm plugin X's params are visible -- under a header that names X specifically (e.g. "PLUGIN PARAMETER REFERENCE (Pro-Q 4):" or "FX INSPECT (Pro-Q 4):") AND with parameter names that belong to X. If X is not represented in the context, STOP and emit the appropriate fetch tag (`plugin_ref:X` for curated, `fx_inspect:X` for third-party). Do NOT proceed to write code for X using a different plugin's data, even when both plugins are in the same response. Two specific anti-patterns to refuse:
 - **Cross-plugin parameter inference**: e.g. seeing Pro-C 3's "Side Chain EQ Band 1 Slope" snapshot and using its enum mapping for Pro-Q 4's main "Band 1 Slope". Different plugins' enums have different lengths and orderings. The names matching is COINCIDENCE, not equivalence.
-- **Single-anchor enum extrapolation**: seeing one enum value paired with one [norm:] (e.g. "12 dB/oct [norm: 0.1111]") and assuming the rest of the enum is uniformly spaced from that one point. Many curated plugins have NON-UNIFORM enums or version-variable counts. Use plugin_ref's full enum table or set_param_enum to land correctly. Pro-Q 4 Slope is a special case: it's not even a strict enum -- it's a numeric/typed-input param with a UI dropdown of presets whose count has varied across versions. For Pro-Q 4 Slope, use `set_param_display(tr, fx, slope_idx, 24)`, not a static norm.
+- **Single-anchor enum extrapolation**: seeing one enum value paired with one [norm:] (e.g. "12 dB/oct [norm: 0.1111]") and assuming the rest of the enum is uniformly spaced from that one point. Many curated plugins have NON-UNIFORM enums or version-variable counts. Use plugin_ref's full enum table or set_param_enum to land correctly. Pro-Q 4 Slope is a special case: it's not even a strict enum -- it's a numeric/typed-input param with a UI dropdown of presets whose count has varied across versions. For Pro-Q 4 Slope, use `set_param_display(tr, fx, slope_idx, target_db_per_oct)` (12 for default Bell boosts/cuts), not a static norm.
 
 EQ/FILTER RULE: decide which branch applies before writing any EQ code.
 - ADD-ONLY: if the user only says "add/load/insert an EQ" and does not ask for settings, tone shaping, a recipe, a track-type treatment, or generic/general EQ, ONLY add the plugin and open its UI. Do NOT configure bands.
@@ -148,6 +153,7 @@ For OPEN-ENDED SETTINGS and EXPLICIT BAND VALUES, the rule depends on whether th
 - ADDING a NEW band (fresh band that hasn't been configured this session, or freshly-added EQ instance): set ALL interlocking band params -- Shape/Type, Frequency, Gain, Q/Bandwidth, AND Slope. This is a deliberate exception to the MINIMAL-WRITE RULE: VST params initialize to host-reported normalized defaults (often 0.5), NOT the plugin's GUI defaults, so leaving Q/Slope unset on a fresh band lands them at audibly-wrong values. Use these defaults for params the user didn't name: Q: Bell=1.0, Shelf/Cut=0.71 | Slope: 12 dB/oct (unless shape has no slope). Mention the assumed values in your response.
 - MODIFYING an EXISTING band (band was already configured by a previous turn or by the user): MINIMAL-WRITE applies -- set only the params the user named THIS turn. Do NOT rewrite Q/Slope/etc. when the user is just nudging Frequency.
 - Always: pick the helper per the DECIDE FIRST checklist; do not assume a param is discrete or numeric by its name; check for an [enum:] annotation in the context data.
+- ReaEQ specific: for a fresh ReaEQ band around 300 Hz, use Band 2 params 3/4/5. Do not use Band 3 for 300 Hz, do not copy Pro-Q formulas, and do not call set_param_display for ReaEQ frequency/gain. For -3 dB on ReaEQ, use the verified normalized gain value 0.3555 from plugin_ref:ReaEQ.
 
 When using find_param for third-party EQ band parameters (stock plugins should use exact indices from plugin_ref instead; see the curated-plugins rule above), try common naming alternatives if the first attempt returns nil: Shape OR Type (for filter type), Frequency OR Freq (for frequency), Bandwidth OR Q (for Q factor). Many EQ plugins (FabFilter, TDR, etc.) prefix band parameters with the band number (e.g. "1 Frequency", "2 Shape"). Try the numbered variant first (e.g. find_param(tr, fx, "1 Shape")), then fall back to the unnumbered name.
 
@@ -160,23 +166,28 @@ MINIMAL-WRITE RULE (read BEFORE the decision table): Set ONLY the parameters the
 
   Worked example. User says: "bell boost of 4 dB at 3 k" on Pro-Q 4 Band 1.
   Named by the user: Shape (bell), Gain (+4 dB), Frequency (3 kHz). Activation needed: Band 1 Used.
-  Unnamed (user did NOT mention): Q, Slope, Stereo Placement, Dynamic Range, Threshold, Attack, Release, etc.
+  Fresh Pro-Q 4 bell defaults to set even when unnamed: Q = 1.0, Slope = 12 dB/oct.
+  Still unnamed and not allowed: Stereo Placement, Dynamic Range, Threshold, Attack, Release, etc.
 
-  BAD (writes unnamed defaults):
+  BAD (writes unrelated unnamed defaults):
     SetParamNormalized(tr, fx, 0, 1)        -- Band 1 Used = Used (OK, activation)
     SetParamNormalized(tr, fx, 5, 0)        -- Band 1 Shape = Bell (OK, named)
     SetParamNormalized(tr, fx, 2, 0.7124)   -- Band 1 Frequency = 3 kHz (OK, named)
     SetParamNormalized(tr, fx, 3, 0.5667)   -- Band 1 Gain = +4 dB (OK, named)
-    SetParamNormalized(tr, fx, 4, 0.5)      -- Band 1 Q = 1.0 (BAD: Q not named)
-    SetParamNormalized(tr, fx, 6, 0.2)      -- Band 1 Slope = 12 dB/oct (BAD: Slope not named)
+    SetParamNormalized(tr, fx, 4, 0.5)      -- Band 1 Q = 1.0 (OK, fresh-band default)
+    set_param_display(tr, fx, 6, 12)        -- Band 1 Slope = 12 dB/oct (OK, fresh Pro-Q 4 bell default)
+    SetParamNormalized(tr, fx, 7, 0.5)      -- Band 1 Stereo Placement (BAD: unrelated)
+    SetParamNormalized(tr, fx, 9, 0.5)      -- Band 1 Dynamic Range = 0 dB (BAD: no-op/unrelated)
 
-  GOOD (writes only what the user asked for + activation):
+  GOOD (writes what the user asked for + activation + fresh-band Q/Slope defaults):
     SetParamNormalized(tr, fx, 0, 1)        -- Band 1 Used = Used (activation)
     SetParamNormalized(tr, fx, 5, 0)        -- Band 1 Shape = Bell
     SetParamNormalized(tr, fx, 2, 0.7124)   -- Band 1 Frequency = 3 kHz
     SetParamNormalized(tr, fx, 3, 0.5667)   -- Band 1 Gain = +4 dB
+    SetParamNormalized(tr, fx, 4, 0.5)      -- Band 1 Q = 1.0
+    set_param_display(tr, fx, 6, 12)        -- Band 1 Slope = 12 dB/oct
 
-  Rule of thumb: scan your draft script before finalising. For each SetParamNormalized call, ask "did the user name this parameter by name or by an equivalent phrase?" If no, and it isn't an activation exception, DELETE the line.
+  Rule of thumb: scan your draft script before finalising. For each SetParamNormalized or helper call, ask "did the user name this parameter by name or by an equivalent phrase, or is this an allowed activation/fresh-EQ interlocking default?" If no, DELETE the line.
 
   NO NO-OP / DEAD WRITES: Never write a value to a param on a band/section the user did not ask you to configure, even if the value is the plugin's default (e.g. `Band 3 Gain = 0.5` with a comment like "unused (set flat)"). That line does nothing audible and just clutters the script. If a band is unused, do not emit ANY SetParam/SetParamNormalized call for it. The same applies to any other param whose write is deliberately a no-op: just drop it.
 
@@ -198,7 +209,7 @@ PARAMETER-WRITING TRIAGE (read this BEFORE writing any param Set/Get code):
 2. Curated plugin AND your target value is a numeric display target NOT exactly covered by a verified anchor (e.g. user wants "Release 247 ms" but reference only anchors common values), OR the parameter's reference section is labeled non-linear / variable-count / typed-input:
    → Use `set_param_display(tr, fx, idx, 247)`. Request `<context_needed>prompt_bundle:plugin_helpers</context_needed>` if not pinned, AND include the helper definition in your script.
    NON-LINEAR CURVES: if the reference section for the param is labeled "non-linear" (e.g. Pro-C 3 RELEASE ANCHORS, Pro-C 3 ATTACK ANCHORS), treat ANY numeric target as not-exactly-covered -- even a target that looks close to an anchor. The whole point of the non-linear label is that nearby norm values do NOT correspond to nearby displayed values. Do NOT linearly interpolate between anchors under any circumstances; do NOT round a target to "close enough" to an anchor and use the anchor's norm. OBSERVED FAILURE 1: user asked for "Release 247 ms" on Pro-C 3. Anchors are 200ms=~0.38 and 500ms=~0.48. Linear interpolation gave ~0.383 with comment "Release: ~247 ms" -- actual display at 0.383 is 182 ms (off by 65 ms / 27%). OBSERVED FAILURE 2: user asked for "Release 80 ms" on Pro-C 3. Model picked the 50 ms anchor's norm 0.18 as "close enough" -- actual display at 0.18 is 47 ms (off by 33 ms / 41%). Both failures came from treating a non-linear curve as locally linear near the target. ALWAYS use set_param_display for non-anchor targets on non-linear params; the binary search lands on the correct displayed value regardless of curve shape.
-   TYPED-INPUT / VERSION-VARIABLE PARAMS: some "enums" are actually numeric params with a UI dropdown of preset values, and accept arbitrary typed input (Pro-Q 4 Slope is the canonical example -- the enum count has varied across versions and users can type non-preset values like "27 dB/oct"). The reference flags these as "numeric / typed-input" or "variable-count enum". For these, the static `[norm:]` is unverified across installs -- a hard-coded value can land on a different displayed setting on a different user's machine. Use `set_param_display(tr, fx, idx, 24)` with the numeric target. Direct-norm is ONLY safe for these params when `fx_params:Plugin` for THIS instance is pinned in the current context.
+   TYPED-INPUT / VERSION-VARIABLE PARAMS: some "enums" are actually numeric params with a UI dropdown of preset values, and accept arbitrary typed input (Pro-Q 4 Slope is the canonical example -- the enum count has varied across versions and users can type non-preset values like "27 dB/oct"). The reference flags these as "numeric / typed-input" or "variable-count enum". For these, the static `[norm:]` is unverified across installs -- a hard-coded value can land on a different displayed setting on a different user's machine. Use `set_param_display(tr, fx, idx, target_db_per_oct)` with the numeric target. For fresh Pro-Q 4 Bell boosts/cuts, that target is 12 unless the user specified otherwise. Direct-norm is ONLY safe for these params when `fx_params:Plugin` for THIS instance is pinned in the current context.
 
 3. Third-party plugin (no `plugin_ref` entry) OR user asks for a specific value on any param without a verified anchor:
    → Request `<context_needed>prompt_bundle:plugin_helpers</context_needed>` if not pinned, then use `find_param` / `set_param_display` / `set_param_enum` / `set_param_enum_paced` per the DECIDE FIRST flowchart in that bundle. Include the helper definitions in your script.
@@ -207,7 +218,7 @@ PARAMETER-WRITING TRIAGE (read this BEFORE writing any param Set/Get code):
    → Use `fx_params:Name` data directly. No helpers needed; no script needed.
 
 CRITICAL RULES (apply regardless of which path):
-  - Helpers (`find_param`, `set_param_display`, `set_param_enum`, `set_param_enum_paced`) are LOCAL FUNCTIONS, not REAPER built-ins. If you call any of them, you MUST include the function definition in the same script. Calling these names without an in-script definition crashes at runtime with `attempt to call a nil value`. The definitions live in `prompt_bundle:plugin_helpers`; request that bundle when needed and copy the source verbatim.
+  - Helpers (`find_param`, `set_param_display`, `set_param_enum`, `set_param_enum_paced`) are LOCAL FUNCTIONS, not REAPER built-ins. If you call any of them, you MUST include the function definition in the same script before the call. Do not assume the prompt bundle made helper names globally available. Calling these names without an in-script definition crashes at runtime with `attempt to call a nil value`. The definitions live in `prompt_bundle:plugin_helpers`; request that bundle when needed and copy the source verbatim.
   - All param Get/Set MUST be inside `reaper.defer(function() ... end)` per the MANDATORY DEFER RULE above. This applies to direct `SetParamNormalized` calls AND to helper-wrapped calls.
   - Only include helper definitions you actually call. Do not paste set_param_enum_paced if your script only uses set_param_display.
   - RECORDING SAFETY: avoid parameter-probing helpers (`set_param_display`, `set_param_enum`, `set_param_enum_paced`) during recording, automation write/touch, or other time-sensitive operations -- the ~30-probe sweep can cause audible glitches or breaks the take. If the user asks for live parameter changes in that context, warn first or stick to direct `SetParamNormalized` with known values (paths 1 and 2 above).
@@ -231,7 +242,7 @@ USE NAMED FIELDS, NOT POSITIONAL ARRAYS. Per-band rows often have different opti
       reaper.TrackFX_SetParamNormalized(tr, fx, 0, 1.0)        -- Band 1 Used
       reaper.TrackFX_SetParamNormalized(tr, fx, 2, 0.137)      -- 30 Hz
       reaper.TrackFX_SetParamNormalized(tr, fx, 5, 0.222)      -- Low Cut
-      reaper.TrackFX_SetParamNormalized(tr, fx, 6, 0.2)        -- 12 dB/oct
+      set_param_display(tr, fx, 6, 12)                         -- 12 dB/oct
       -- ... another 10 lines for bands 2/3/4
     end
     do  -- SNARE EQ ... another 14 lines
@@ -242,27 +253,30 @@ USE NAMED FIELDS, NOT POSITIONAL ARRAYS. Per-band rows often have different opti
     -- Comment claims one schema, rows actually have varied column counts
     -- => band[3] sometimes is shape, sometimes nil -- crash on SetParamNormalized
     local eq_configs = {
-      { 1, 0.137, nil,   0.222, 0.2  },                      -- 5 cols (HPF)
-      { 2, 0.836, 0.55,  0.5,   0.333, nil  },               -- 6 cols (Bell+slope)
+      { 1, 0.137, nil,   0.222, 12   },                      -- 5 cols (HPF)
+      { 2, 0.836, 0.55,  0.5,   0.333, 12   },               -- 6 cols (Bell+slope)
       ...
     }
 
   GOOD (one table + one loop, NAMED FIELDS, nil-skipping wrapper):
     -- Per-band table: every field is named; missing fields are absent.
-    -- Wrapper: skip the SetParamNormalized call when val is nil.
+    -- Wrappers: skip missing fields; use display targets for Pro-Q 4 Slope.
     local function setp(tr, fx, idx, val)
       if val ~= nil then reaper.TrackFX_SetParamNormalized(tr, fx, idx, val) end
+    end
+    local function setslope(tr, fx, idx, val)
+      if val ~= nil then set_param_display(tr, fx, idx, val) end
     end
 
     local eq_configs = {
       [1] = { -- Kick In
-        { band = 1, freq = 0.137, shape = 0.222, slope = 0.2 },  -- HPF
-        { band = 2, freq = 0.439, shape = 0.0,   gain = 0.45, q = 0.5 },  -- Bell cut
-        { band = 3, freq = 0.749, shape = 0.0,   gain = 0.55, q = 0.5 },  -- Bell boost
+        { band = 1, freq = 0.137, shape = 0.222, slope = 12 },  -- HPF
+        { band = 2, freq = 0.439, shape = 0.0,   gain = 0.45, q = 0.5, slope = 12 },  -- Bell cut
+        { band = 3, freq = 0.749, shape = 0.0,   gain = 0.55, q = 0.5, slope = 12 },  -- Bell boost
       },
       [2] = { -- Kick Out
-        { band = 1, freq = 0.201, shape = 0.222, slope = 0.2 },
-        { band = 2, freq = 0.713, shape = 0.0,   gain = 0.55, q = 0.5 },
+        { band = 1, freq = 0.201, shape = 0.222, slope = 12 },
+        { band = 2, freq = 0.713, shape = 0.0,   gain = 0.55, q = 0.5, slope = 12 },
       },
       -- ...one entry per track
     }
@@ -274,10 +288,10 @@ USE NAMED FIELDS, NOT POSITIONAL ARRAYS. Per-band rows often have different opti
           local base = (b.band - 1) * 23
           setp(tr, fx, base + 0, 1.0)        -- Used: In Use (always)
           setp(tr, fx, base + 2, b.freq)     -- Frequency
-          setp(tr, fx, base + 3, b.gain)     -- Gain (skipped on cuts)
+          setp(tr, fx, base + 3, b.gain)     -- Gain (skipped where absent)
           setp(tr, fx, base + 4, b.q)        -- Q (skipped where unspecified)
           setp(tr, fx, base + 5, b.shape)    -- Shape
-          setp(tr, fx, base + 6, b.slope)    -- Slope (skipped on bells)
+          setslope(tr, fx, base + 6, b.slope) -- Slope display target; Pro-Q 4 bells default to 12 dB/oct
         end
       end
     end
@@ -636,7 +650,11 @@ API DISPLAY RANGE MISMATCH: some VST3 plugins report display values via the API 
 <!-- /SECTION:plugin_helpers -->
 
 <!-- SECTION:jsfx -->
-JSFX: Use ```jsfx fence. First line must be desc:. JSFX is EEL2-based with NO reaper.* API access. Use only standard JSFX variables/functions (spl0, spl1, slider1, @init, @slider, @sample, @gfx). Use srate for time-based math. Don't assume stereo; check num_ch if processing beyond spl0/spl1.
+JSFX: Use one fenced ```jsfx block. The opening fence must be exactly three backticks immediately followed by jsfx on the same line: ```jsfx. Put the closing fence on its own line after the final JSFX statement. First line inside the fence must be desc:. JSFX is EEL2-based with NO `reaper` identifier and NO ReaScript API access. Use only standard JSFX variables/functions (spl0, spl1, slider1, @init, @slider, @sample, @gfx, srate, tempo). Never return Lua/ReaScript for a request that says to create/write/return JSFX. Do not declare `options:gmem=`, do not read/write `gmem[]`, and do not add your own safety/output ceiling slider; ReaAssist injects that safety layer after validation. For tempo sync, use the JSFX host variable `tempo`; never call `reaper.Master_GetTempo()` or probe for a `reaper` object. Section names are singular: write `@sample`, never `@samples`; write `@slider`, never `@sliders`. Use srate for time-based math. Don't assume stereo; check num_ch if processing beyond spl0/spl1.
+For JSFX, preserve user-named DSP concepts as readable lowercase identifiers or short comments: `mid`, `side`, `attack`, `sustain`, `feedback`, `mono_bass`, `buffer`, `allpass`, `comb`, `width`, `grain`, `freeze`, `jitter`, etc. If the user explicitly names one of those concepts, the literal word should appear in the JSFX as an identifier or short comment. For mid/side processors, use literal variables named `mid` and `side`, not only `M`/`S` or single-letter aliases. Do not abbreviate every concept to single letters such as `m`, `s`, `a`, or `d`; generated DSP should remain auditable.
+
+Keep generated JSFX compact and complete. Do not include exploratory comments, abandoned alternate designs, or "actually, let's..." reasoning inside code. For complex requests, choose a simpler stable topology that fits in one complete fence instead of attempting a long academic implementation that may be truncated.
+Do not write `math.` anywhere in JSFX code or comments; EEL2 uses bare functions such as `sin`, `cos`, `pow`, `exp`, `min`, `max`, and `abs`.
 
 EEL2 SYNTAX (CRITICAL -- not C, not Lua; getting this wrong fails to compile with cryptic errors like `'if' undefined`):
 - NO `if`/`else` statements, NO `{ }` blocks, NO `do/end`. Group statements with `( ... )`.
@@ -688,6 +706,9 @@ SAFETY (mandatory -- blown-up track/speakers otherwise):
   Saturators INSIDE feedback loops are still required where a feedback path could grow unbounded (e.g., on a shimmer's pitched signal before it feeds back into a comb buffer; on a comb's tap before re-entering its own delay). That's part of the feedback-clamp safety, applied where the signal is about to be written back into its own delay -- not on the final output.
   The ONLY exception: the user explicitly asked for clipping, limiting, distortion, saturation, or hard-knee compression as the effect's PURPOSE ("a soft clipper", "a tape saturator", "a brickwall limiter"). In those cases the output stage IS the saturator and you write it. Vague tone-shaping language ("warmer", "pushed", "tighter") does NOT count as an explicit request.
 - State initialization: every state variable that persists across samples (delay buffer base pointers, filter coefficients computed from sample rate, accumulators, write/read indices, smoothed slider values' previous state) MUST be initialized in `@init`. `@sample` is per-sample math only -- not a place to first-assign state. Variables that depend on slider values get computed in `@slider` (runs whenever a slider moves) and consumed in `@sample`. Failing to init in `@init` means state is read uninitialized on the first few samples after load, producing clicks, NaNs, or garbage feedback.
+- Simple LFOs do not need lookup tables. For tremolo, autopan, vibrato, chorus modulation, or waveform selection, prefer direct `sin`, `cos`, triangle, square, or ramp math in `@sample`/`@slider`. If you use any `name[index]` memory/table access, assign `name = <numeric base>` in `@init` before the first access.
+- For small option maps such as tempo divisions, waveform modes, or step lengths, avoid JSFX arrays entirely; use conditional expressions or scalar variables. If an array is truly necessary, allocate a numeric base pointer in `@init` before any `name[index]` access.
+- For multiband width/stereo utilities, prefer a compact crossover: low and high one-pole filters with mid computed as the remainder, then apply mid/side width per band. Do not attempt a full LR4 multiband implementation unless the user explicitly asks for it.
 - EEL2 memory model: `buf[i]` reads `mem[buf+i]`. When you need multiple arrays, allocate distinct non-overlapping base pointers in `@init` and use them explicitly (`buf_a = 0; buf_b = 48000; buf_c = 96000;`). Every feedback filter (comb, allpass, delay) must have its OWN dedicated buffer region with enough length for its longest delay tap. Do NOT share slots between filters.
 - Delay taps use a single `write_pos` counter that advances once per sample (with modulo against that filter's buffer length), and read at `(write_pos - tap_samps + len) % len`. Do NOT index with the sample counter plus a fixed offset -- that pattern makes multiple filters overwrite each other's slots as the counter walks through the buffer.
 - Use conservative defaults: feedback 0.3-0.7, wet/mix defaulting below 50%, resonance well below self-oscillation. A user can always dial up; they can't dial back speakers.
@@ -713,11 +734,15 @@ Use this only for generated JSFX delay, reverb, chorus, flanger, phaser, comb/al
 
 Validator-friendly JSFX memory:
 - Use explicit initialized base variables such as `bufL`, `bufR`, `comb_l1`, `ap_r2`. Read and write from the initialized base directly: `bufL[i0]`, `bufL[i1]`, `bufR[idx]`, `comb_l1[cidx]`.
+- Each memory region needs a unique non-overlapping numeric base. Never assign left/right or multiple filter bases to the same value (`delayL = 0; delayR = 0` is wrong). Allocate in sequence: `delayL = 0; delayR = delayL + delayL_len; comb_l1 = delayR + delayR_len;`.
+- Allocate memory bases in `@init` once, with fixed maximum region sizes large enough for the effect. Sliders may change tap lengths or feedback values, but should not re-base buffers in `@slider`. Never initialize many bases to `0` as placeholders and then try to repair them later.
 - Do not invent a generic `buf[]` array and do not write `buf[bufL + i0]`, `buf[bufR + idx]`, or `buf[comb_l1 + cidx]`. That pattern is blocked when `buf` is never assigned, and it is still wrong when `buf` is assigned because it sums two base addresses.
 - Avoid memory helper functions where the base pointer is only a parameter, such as `function read(base, pos) ( base[pos]; );`. Write the delay read inline at the initialized buffer variable so the validator can prove the base was assigned.
+- Keep base-variable names stable across sections. If `@init` assigns `bufferL = 0`, later reads must use `bufferL[i]` exactly, not `bufferL_base[i]`, `bufL[i]`, or a helper that hides the base name.
 - For fractional delay, compute `read_pos`, `i0`, `i1`, and `frac`; wrap both indices; then read `explicit_buffer[i0]` and `explicit_buffer[i1]` inline before interpolation.
 - Keep each circular index tied to one buffer length. Clamp lengths to at least 1 and wrap indices with simple comparisons or `%` after the length is valid.
-- For comb/allpass banks, do not create a separate generic `buf` root. If the initialized base is `combL1`, read and write `combL1[cL1_r]` and `combL1[cL1_w]`; if the base is `apR2`, use `apR2[apR2_r]` and `apR2[apR2_w]`. Example: `cL1_y = combL1[cL1_r]; combL1[cL1_w] = inputL + cL1_y * fb;`.
+- For comb/allpass banks, do not create a separate generic `buf` root. If the initialized base is `combL1`, read and write `combL1[cL1_r]` and `combL1[cL1_w]`; if the base is `allpassR2`, use `allpassR2[allpassR2_r]` and `allpassR2[allpassR2_w]`. Example: `cL1_y = combL1[cL1_r]; combL1[cL1_w] = inputL + cL1_y * fb;`.
+- When the user says allpass, buffer, grain, freeze, or width, keep that literal word visible in a variable name or short comment; do not abbreviate allpass to only `ap`.
 <!-- /SECTION:jsfx_dsp_cookbook -->
 
 <!-- SECTION:jsfx_pitch -->

@@ -2938,10 +2938,14 @@ as representative; bands 3-24 follow the same 23-param stride.
    +1) is a separate toggle that temporarily bypasses an in-use band.
 
 2. **Setting a band's `Used` to In Use creates a point at default Freq/Gain.**
-   Always follow with Frequency + Gain + Shape + Q to position it.
+   Always follow with Frequency + Gain + Shape + Q to position it. For Bell
+   boosts/cuts, also set Slope to 12 dB/oct unless the user specifies a
+   different slope.
 
 3. **Shape defaults to Bell.** For HPF / LPF, set Shape accordingly and use
-   Slope (offset +6) for the cut steepness.
+   Slope (offset +6) for the cut steepness. For Bell boost/cut bands, Slope
+   still matters: use 12 dB/oct by default to match Pro-Q 4's GUI default and
+   avoid the host/default-state 48 dB/oct behavior.
 
 4. **Dynamics per band is OFF by default via `Dynamic Range = 0 dB`.**
    To activate dynamic EQ, set offset +9 to non-0.5 (negative=downward
@@ -3088,7 +3092,7 @@ Formula: slider = shape_value / 9.
 ```
 Value  Shape         Slider target    Uses Gain?   Uses Q?   Uses Slope?
 -----  ------------  --------------   ----------   -------   -----------
-0      Bell          0.000 *          yes          yes       no
+0      Bell          0.000 *          yes          yes       yes, default 12 dB/oct for boosts/cuts
 1      Low Shelf     0.111            yes          yes       no
 2      Low Cut       0.222            no           optional  yes
 3      High Shelf    0.333            yes          yes       no
@@ -3100,12 +3104,17 @@ Value  Shape         Slider target    Uses Gain?   Uses Q?   Uses Slope?
 9      All Pass      1.000            no           yes       no
 ```
 
-### SLOPE PARAM (offset +6, cut types only)
+### SLOPE PARAM (offset +6, typed display target)
 
-Applies to Low Cut and High Cut shapes only (Shape values 2 and 4; see
-Shape enum above). Slope is **NOT** a strict enum: Pro-Q 4 exposes a dropdown
-of preset values AND accepts arbitrary typed values (e.g. "27 dB/oct").
-Treat it as a numeric display target, not a fixed enum.
+Applies to Low Cut and High Cut shapes (Shape values 2 and 4; see Shape enum
+above) and to Bell bands. For any Bell boost/cut, set Slope to **12 dB/oct**
+unless the user specifies another slope. That matches the Pro-Q 4 default and
+is preferable to leaving the fresh band at the host-reported/default-state
+value, which has produced 48 dB/oct.
+
+Slope is **NOT** a strict enum: Pro-Q 4 exposes a dropdown of preset values AND
+accepts arbitrary typed values (e.g. "27 dB/oct"). Treat it as a numeric display
+target, not a fixed enum.
 
 The dropdown presets observed on a current Pro-Q 4 install (subject to
 change across versions):
@@ -3125,6 +3134,7 @@ the 11-entry build above).
 
 ```lua
 set_param_display(tr, fx, slope_idx, 24)   -- lands on "24 dB/oct"
+set_param_display(tr, fx, slope_idx, 12)   -- Pro-Q 4 Bell boost/cut default
 set_param_display(tr, fx, slope_idx, 27)   -- lands on typed value 27
 ```
 
@@ -3147,18 +3157,18 @@ named-field table and one loop. If any row uses Slope, include the
 local proq4_track_type_starters = {
   vox = {
     { band = 1, freq = 0.297, shape = 0.222, slope = 24 },              -- HPF 100 Hz
-    { band = 2, freq = 0.444, shape = 0.0,   gain = 0.45,  q = 0.5 },   -- -3 dB at ~370 Hz
+    { band = 2, freq = 0.444, shape = 0.0,   gain = 0.45,  q = 0.5, slope = 12 }, -- -3 dB at ~370 Hz
     { band = 3, freq = 0.777, shape = 0.333, gain = 0.533, q = 0.4 },   -- +2 dB high shelf at 5 kHz
   },
   guitar = {
     { band = 1, freq = 0.320, shape = 0.222, slope = 24 },              -- HPF 120 Hz
-    { band = 2, freq = 0.417, shape = 0.0,   gain = 0.467, q = 0.5 },   -- -2 dB at 250 Hz
+    { band = 2, freq = 0.417, shape = 0.0,   gain = 0.467, q = 0.5, slope = 12 }, -- -2 dB at 250 Hz
     { band = 3, freq = 0.749, shape = 0.333, gain = 0.517, q = 0.4 },   -- +1 dB high shelf at 4 kHz
   },
   kick = {
-    { band = 1, freq = 0.266, shape = 0.0, gain = 0.55,  q = 0.5 },     -- +3 dB at 80 Hz
-    { band = 2, freq = 0.444, shape = 0.0, gain = 0.433, q = 0.5 },     -- -4 dB at ~370 Hz
-    { band = 3, freq = 0.749, shape = 0.0, gain = 0.55,  q = 0.5 },     -- +3 dB at 4 kHz
+    { band = 1, freq = 0.266, shape = 0.0, gain = 0.55,  q = 0.5, slope = 12 }, -- +3 dB at 80 Hz
+    { band = 2, freq = 0.444, shape = 0.0, gain = 0.433, q = 0.5, slope = 12 }, -- -4 dB at ~370 Hz
+    { band = 3, freq = 0.749, shape = 0.0, gain = 0.55,  q = 0.5, slope = 12 }, -- +3 dB at 4 kHz
   },
 }
 
@@ -3192,6 +3202,7 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 2, 0.444)    -- Frequency: ~370 Hz
 reaper.TrackFX_SetParamNormalized(tr, fx, 3, 0.45)     -- Gain: -3 dB
 reaper.TrackFX_SetParamNormalized(tr, fx, 4, 0.5)      -- Q: 1.0
 reaper.TrackFX_SetParamNormalized(tr, fx, 5, 0.0)      -- Shape: Bell
+set_param_display(tr, fx, 6, 12)                       -- Slope: 12 dB/oct
 ```
 
 **"Presence shelf (boost +2 dB shelf from 5 kHz up):"**
@@ -3212,6 +3223,7 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 2,  0.816)   -- Frequency: 7 kHz
 reaper.TrackFX_SetParamNormalized(tr, fx, 3,  0.5)     -- Gain: 0 dB (static)
 reaper.TrackFX_SetParamNormalized(tr, fx, 4,  0.7)     -- Q: ~4.4 (tight)
 reaper.TrackFX_SetParamNormalized(tr, fx, 5,  0.0)     -- Shape: Bell
+set_param_display(tr, fx, 6, 12)                       -- Slope: 12 dB/oct
 reaper.TrackFX_SetParamNormalized(tr, fx, 9,  0.40)    -- Dynamic Range: -6 dB (downward)
 reaper.TrackFX_SetParamNormalized(tr, fx, 10, 1.0)     -- Dynamics Enabled
 reaper.TrackFX_SetParamNormalized(tr, fx, 11, 0.0)     -- Dynamics: Auto threshold
@@ -3243,6 +3255,7 @@ reaper.defer(function()
   reaper.TrackFX_SetParamNormalized(tr, fx, 26, 0.45)
   reaper.TrackFX_SetParamNormalized(tr, fx, 27, 0.5)
   reaper.TrackFX_SetParamNormalized(tr, fx, 28, 0.0)
+  set_param_display(tr, fx, 29, 12)                      -- Slope: 12 dB/oct (typed/version-safe)
 
   -- Band 3: +2 dB high shelf at 5 kHz
   reaper.TrackFX_SetParamNormalized(tr, fx, 46, 1.0)

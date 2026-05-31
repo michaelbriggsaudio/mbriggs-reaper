@@ -1,37 +1,18 @@
 -- =============================================================================
--- UI.lua -- UI subsystem (Render namespace)
+-- UI.lua -- ReaAssist UI sidecar
 -- =============================================================================
--- This file is dofile()'d from ReaAssist.lua during startup. It populates
--- the global `Render` table (declared in ReaAssist.lua as `Render = {}`)
--- with every screen rendering function:
+-- Eager-loaded by ReaAssist.lua after startup checks and before the main defer
+-- loop. Defines the Render.* screen entry points plus shared UI.* widgets,
+-- text helpers, modal chrome, and chat rendering utilities.
 --
---   Render.tos_screen, Render.help_screen, Render.bug_report_screen,
---   Render.credits_screen, Render._factory_reset_execute,
---   Render._factory_reset_popup, Render._key_test_results_popup,
---   Render._key_validation_error_popup, Render.first_run_screen,
---   Render.settings_screen, Render._shared_key_screen_impl,
---   Render.custom_providers_screen, Render.custom_llm_screen,
---   Render.preferred_plugins_screen, Render.fx_cache_screen
---
--- Splitting the UI off gives ReaAssist.lua headroom on Lua 5.4's 200-local
--- limit per chunk. Both halves share state through plain globals and the
--- RA table. Cross-file reads in the UI file target:
---   RA.*       : ctx, SC, SEP, RESOURCES_DIR, bold_font, code_font,
---                IS_WINDOWS, IS_MACOS, FX_CACHE_PATH, sel_cb
---   namespaces : CFG, S, prefs, Log, Net, MODELS, PROVIDERS, api_keys,
---                Custom, TK, COL, UI, Theme, FONT, ICON, Attach, Code,
---                CTX, update, pref_plugins, fx_cache_ui, FXCache,
---                deep_scan, Key, Diag, PALETTES, Attribution
---   helpers    : apply_palette, resolve_theme, label_to_type_key,
---                pref_plugins_best_match, pref_plugins_rank_matches
---   constants  : PREF_PLUGIN_DEFAULTS, CUSTOM_DEFAULT_CTX,
---                CUSTOM_DEFAULT_TIMEOUT, CUSTOM_MIN_TIMEOUT,
---                CUSTOM_MAX_TIMEOUT, CUSTOM_MIN_CTX,
---                CUSTOM_DEFAULT_TEST_TIMEOUT, CUSTOM_CONN_TEST_ID
---
--- Performance aliases below mirror the ones in ReaAssist.lua. Each Lua
--- chunk has its own upvalue table, so file-scope aliases cannot cross
--- the dofile boundary and must be redeclared here.
+-- Boundary contract:
+--   - ReaAssist.lua owns persistent state, requests, update/recovery, and loop
+--     dispatch. This file should render and mutate UI state, not perform network
+--     orchestration directly except through existing Net/Diag/Updater helpers.
+--   - Cross-file state is intentionally shared through RA plus established
+--     globals such as CFG, S, prefs, UI, Render, Net, CTX, Code, and update.
+--   - File-scope performance aliases are repeated here because Lua upvalues do
+--     not cross a dofile/load boundary.
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -66,9 +47,9 @@ local str_sub      = string.sub
 local str_match    = string.match
 
 -- Forward declaration for the file-private markdown-table parser. Its
--- sole caller (UI.selectable_text) runs before the definition point
--- down below, so declare-now / define-later keeps the parser off the
--- public UI.* namespace.
+-- sole caller (UI.selectable_text) appears earlier than the parser body,
+-- so declare-now / define-later keeps the helper off the public UI.*
+-- namespace.
 local parse_md_table
 
 -- Pure helpers hoisted to file scope so the per-message render loop
@@ -174,6 +155,12 @@ local Dummy          = reaper.ImGui_Dummy
 
 local R = reaper  -- reaper.* call sites in this file (e.g. session_strip_v5)
 
+-- =============================================================================
+-- Localization and compact label helpers
+-- =============================================================================
+-- UI text goes through I18N when available and falls back to English literals.
+-- Small formatting helpers stay here so screens do not repeat language-code and
+-- combo-string plumbing.
 function UI.t(key, values, fallback)
   if I18N and I18N.t then
     local text = I18N.t(key, values)
@@ -832,6 +819,12 @@ function UI.update_dialog_progress_cells(total, done, active)
   Dummy(RA.ctx, avail_w, cell_h)
 end
 
+-- =============================================================================
+-- Language fonts and width-aware wrapping
+-- =============================================================================
+-- Chat text can mix Latin, CJK, Hangul, and kana. These helpers choose optional
+-- language fonts when needed and count wide codepoints as two wrap units so
+-- manual wrapping matches what the user actually sees.
 function UI.active_chat_font()
   if OptionalFonts and OptionalFonts.active_font then
     return OptionalFonts.active_font() or FONT.inter_reg
@@ -1347,10 +1340,6 @@ function UI.pop_card_popup_style()
   ImGui.ImGui_PopStyleVar(RA.ctx, 3)
 end
 
--- Renders the ReaAssist brand logo: "Rea" (normal) + "Assist" (bold),
--- centered, 24 px, ice blue. Matches the TOS screen header exactly so
--- onboarding screens share a consistent brand mark. `inner_w` is the
--- content column width used for horizontal centering.
 -- Blend two 0xRRGGBBAA colors linearly by t in [0,1]. Shared helper used
 -- by the wordmark gradient band renderer (and reusable elsewhere).
 function UI.lerp_u32(a, b, t)
@@ -1759,13 +1748,14 @@ function UI.hero_band_v5(phase)
       api_keys.is_reentry      = true
       api_keys.key_bufs        = {}
       api_keys.key_errors      = {}
+      api_keys.key_warnings    = {}
       api_keys.key_error       = nil
       api_keys.key_focused     = false
       api_keys.key_validating  = false
       -- Stash current Preferences values so Cancel / "unsaved" discard
       -- can revert them. Save persists + clears these; discard restores
       -- + clears. Keys get their own buffer flow above; everything
-      -- below (both main + merged-Advanced prefs) lives here.
+      -- below (main preferences plus advanced controls) lives here.
       api_keys.saved_ui_scale_idx         = prefs.ui_scale_idx
       api_keys.saved_theme                = prefs.theme
       api_keys.saved_update_check         = prefs.update_check
@@ -1895,9 +1885,9 @@ function UI.hero_band_v5(phase)
   return hero_h
 end
 
--- V5 compact hero for secondary pages (Settings, Advanced, Preferred
--- Plugins, etc). Fixed-size wordmark (no animation), a mono breadcrumb
--- on the right (e.g. "SETTINGS \xc2\xb7 v0.9.7"), and an optional
+-- V5 compact hero for secondary pages (Settings, Custom LLM, Preferred
+-- Plugins, FX Cache, etc). Fixed-size wordmark (no animation), a mono breadcrumb
+-- on the right (e.g. "SETTINGS \xc2\xb7 vX.Y.Z"), and an optional
 -- semibold subtitle below. Bleed the gradient to the window edges like
 -- the main hero. Clickable wordmark behaves as "return home".
 -- Returns the total pixel height consumed.
@@ -2527,7 +2517,7 @@ function UI.mode_model_row_v5()
   if ImGui.ImGui_BeginPopup(RA.ctx, "##mm_prov_popup") then
     -- Muted header label so the dropdown reads "this is the Provider menu"
     -- at a glance. TextDisabled inherits Col_TextDisabled = TK.text_muted
-    -- from the global style push at line 575, so it tracks the active
+    -- from push_card_popup_style's TextDisabled color, so it tracks the active
     -- theme without an extra Push/Pop pair here.
     ImGui.ImGui_TextDisabled(RA.ctx,
       UI.t("mode.provider.header", nil, "Provider:"))
@@ -3524,13 +3514,14 @@ function UI.footer_rail_v5()
         api_keys.is_reentry      = true
         api_keys.key_bufs        = {}
         api_keys.key_errors      = {}
+        api_keys.key_warnings    = {}
         api_keys.key_error       = nil
         api_keys.key_focused     = false
         api_keys.key_validating  = false
         -- Stash current Preferences values so Cancel / "unsaved" discard
         -- can revert them. Save persists + clears these; discard restores
         -- + clears. Keys get their own buffer flow above; everything
-        -- below (both main + merged-Advanced prefs) lives here.
+        -- below (main preferences plus advanced controls) lives here.
         api_keys.saved_ui_scale_idx         = prefs.ui_scale_idx
         api_keys.saved_theme                = prefs.theme
         api_keys.saved_update_check         = prefs.update_check
@@ -3742,8 +3733,8 @@ function UI.footer_rail_v5()
   end
 
   -- Copy (only on the chat screen, and only when chat has messages).
-  -- On every other screen (Settings / Advanced / Help / Credits /
-  -- Bug Report etc.) the Copy link is hidden entirely -- it's not
+  -- On every other screen (Settings and nested tools, Help, Credits,
+  -- Bug Report, etc.) the Copy link is hidden entirely -- it's not
   -- contextually meaningful when the chat isn't visible.
   if copy_visible then
     if compact_footer then
@@ -5140,7 +5131,7 @@ end
 -- ---------------------------------------------------------------------------
 
 -- =============================================================================
--- First-run screens: Render.tos_screen / Render.api_key_screen
+-- Onboarding and settings screens
 -- =============================================================================
 -- Settings screens (API Keys, Preferred Plugins) use centered Indent columns
 -- with the main window scrollbar, matching the Help screen pattern.
@@ -5501,97 +5492,84 @@ end
 -- -----------------------------------------------------------------------------
 -- Render.help_screen
 -- -----------------------------------------------------------------------------
--- Full-window help overlay with styled section headers, clickable table of
--- contents, and smooth-scroll navigation.
--- Parses Help.md into structured sections on first load.
--- HELP_SECTIONS stays local: it's a one-time markdown parse cache that
--- never needs to cross chunks or survive a session reset.
--- help_section_ys stays local: rebuilt during each help-screen render
--- and not meaningful outside that code path.
--- S.help_scroll_to / _top / _frames are transient UI state (smooth-scroll
--- progress, TOC target, auto-expiry frame counter). They live on S like
--- every other "user clicked something, persist for a few frames" state.
-local HELP_SECTIONS  -- cached parsed sections: { {title, body_lines}, ... }
-local HELP_SECTIONS_LANG
-local help_section_ys  -- maps section index -> cursor Y during render
-local help_search_buf = ""  -- Help-screen search input buffer; was previously
-                            -- written without `local` (global leak across
-                            -- the dofile chunk boundary into _G).
+-- Full-window help overlay with concise in-app guidance plus links to the
+-- online manual and feedback form.
 
 local function load_help_sections()
-  if S and S.help_sections_dirty then
-    HELP_SECTIONS = nil
-    HELP_SECTIONS_LANG = nil
-    S.help_sections_dirty = nil
-  end
   local lang = (I18N and I18N.lang_code and I18N.lang_code())
     or (CFG and CFG.current_language_code and CFG.current_language_code())
     or (prefs and prefs.language_code)
     or "en"
-  local cache_key = lang
-  local remote_raw
-  if lang ~= "en" and I18N and I18N.load_cached_help_pack then
-    remote_raw = I18N.load_cached_help_pack(lang)
-    if remote_raw then
-      cache_key = lang .. ":remote"
-      if LangPacks and LangPacks.refresh_help_if_stale then
-        LangPacks.refresh_help_if_stale(lang)
+  if lang ~= "en" and lang ~= "qps-ploc"
+      and I18N and I18N.has_key
+      and not I18N.has_key(lang, "help.intro.what")
+      and LangPacks and not (LangPacks.is_busy and LangPacks.is_busy()) then
+    local refresh_key = tostring(lang) .. ":help"
+    if S and S._help_lang_refresh_key ~= refresh_key then
+      local ok
+      if LangPacks.start_index_download then
+        ok = LangPacks.start_index_download(lang, true, true)
+      elseif I18N.remote_index and LangPacks.refresh_language_if_stale then
+        ok = LangPacks.refresh_language_if_stale(lang)
       end
-    else
-      cache_key = lang .. ":fallback"
-      if LangPacks and LangPacks.start_help_download
-          and not (LangPacks.is_busy and LangPacks.is_busy()) then
-        LangPacks.start_help_download(lang)
-      end
+      if ok then S._help_lang_refresh_key = refresh_key end
     end
   end
-  if HELP_SECTIONS and HELP_SECTIONS_LANG == cache_key then return HELP_SECTIONS end
-  local path = RA.RESOURCES_DIR .. "Help.md"
-  local f = io.open(path, "r")
-  if not f then
-    HELP_SECTIONS = {{
-      title = UI.t("help.error.title", nil, "Error"),
-      lines = {
-        UI.t("help.error.file_not_found", nil, "Help file not found."),
-        UI.t("help.error.expected", { path = path }, "Expected: " .. path),
-      },
-    }}
-    return HELP_SECTIONS
+  local function t(key, fallback) return UI.t(key, nil, fallback) end
+  local function h3(key, fallback) return "### " .. t(key, fallback) end
+  local function bullet(key, fallback)
+    return "- " .. t(key, fallback)
   end
-  local raw = remote_raw
-  if not raw then
-    raw = f:read("*a")
-    f:close()
-    local block = raw:match("<!%-%-%s*RA_HELP_LOCALE:" .. lang:gsub("([^%w%-])", "%%%1")
-      .. "%s*%-%->%s*(.-)%s*<!%-%-%s*/RA_HELP_LOCALE:" .. lang:gsub("([^%w%-])", "%%%1")
-      .. "%s*%-%->")
-    if block then
-      raw = block
-    else
-      local marker = raw:find("\n%s*<!%-%-%s*RA_HELP_LOCALE:")
-      if marker then raw = raw:sub(1, marker - 1) end
-    end
-  else
-    f:close()
-  end
-  local sections = {}
-  local cur_section
-  for line in raw:gmatch("[^\n]+") do
-    if line:match("^# ") and not line:match("^## ") then
-      -- Skip top-level title.
-    elseif line:match("^## ") then
-      local heading = line:gsub("^##%s*", "")
-      cur_section = { title = heading, lines = {} }
-      sections[#sections+1] = cur_section
-    elseif cur_section then
-      -- Strip **bold** markers for plain rendering.
-      line = line:gsub("%*%*(.-)%*%*", "%1")
-      cur_section.lines[#cur_section.lines+1] = line
-    end
-  end
-  HELP_SECTIONS = sections
-  HELP_SECTIONS_LANG = cache_key
-  return HELP_SECTIONS
+  return {{
+    title = t("help.section.essential", "Essential Guidance"),
+    lines = {
+      t("help.intro.what",
+        "ReaAssist helps with the technical side of REAPER sessions. Ask in plain English, and it can use session context to answer questions, write Lua scripts, configure plugins, build routing, create JSFX when explicitly requested, and troubleshoot results."),
+      "",
+      t("help.intro.start",
+        "Start by choosing a provider and model, then decide whether to include a session snapshot. Describe the target and action. If ReaAssist returns code, read it first, back up important projects, then use the buttons below the response to run, copy, save, edit, or undo."),
+      "",
+      t("help.intro.manual",
+        "For setup, providers, troubleshooting, privacy details, and advanced workflows, use Read Online Manual above."),
+      "",
+      h3("help.ask.title", "Ask Clearly"),
+      bullet("help.ask.target",
+        "Name the target, such as selected tracks, selected items, a track name, the time selection, or the whole project."),
+      bullet("help.ask.constraints",
+        "Include constraints like \"preserve routing,\" \"do not delete anything,\" or \"ask before broad changes.\""),
+      bullet("help.ask.report",
+        "Ask for a report when useful, such as \"tell me what changed.\""),
+      "",
+      h3("help.run.title", "Run Code Carefully"),
+      bullet("help.run.read", "Read generated Lua or JSFX before running it."),
+      bullet("help.run.backup", "Save the project or make a backup before broad edits."),
+      bullet("help.run.undo",
+        "ReaAssist uses REAPER undo blocks for runnable Lua, but Undo is not a substitute for backups."),
+      bullet("help.run.scanner",
+        "If the safety scanner asks for review, inspect the risky operation before running it."),
+      "",
+      h3("help.privacy.title", "Privacy Basics"),
+      bullet("help.privacy.audio",
+        "ReaAssist does not upload audio files or .RPP project files."),
+      bullet("help.privacy.provider",
+        "Normal chat requests go to the provider or custom model server you choose."),
+      bullet("help.privacy.request",
+        "Requests can include your typed message, relevant chat history, optional session metadata, and attached files."),
+      bullet("help.privacy.manual_reports",
+        "Manual feedback and bug reports are sent only after you preview them and press Send."),
+      bullet("help.privacy.diagnostics",
+        "Automatic diagnostics can be managed from Settings > Advanced."),
+      "",
+      h3("help.need.title", "Need Help?"),
+      bullet("help.need.symptom",
+        "Tell ReaAssist exactly what happened: wrong track, wrong plugin, script error, no visible change, or unexpected result."),
+      bullet("help.need.error", "Include the error text if REAPER shows one."),
+      bullet("help.need.feedback",
+        "Use Feedback & Report a Bug above for bugs that need maintainer attention."),
+      bullet("help.need.manual",
+        "Use Read Online Manual above for detailed setup and troubleshooting."),
+    },
+  }}
 end
 
 function Render.help_screen()
@@ -5609,7 +5587,6 @@ function Render.help_screen()
   -- main chat (default for the main-screen Help button).
   local function close_help()
     S.show_help      = false
-    help_search_buf  = ""
     -- Priority: footer-toggle breadcrumb (captured on footer Help
     -- click, knows full show_credits / show_bug / screen context) >
     -- legacy help_return_to cookie (pre-footer, screen-only cookie
@@ -5694,308 +5671,32 @@ function Render.help_screen()
 
   -- Load sections.
   local sections = load_help_sections()
-  if not help_section_ys then help_section_ys = {} end
 
-  -- ---- Search + Table of Contents ----
+  -- ---- Compact page setup ----
   local dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
-  help_search_buf = help_search_buf or ""
 
-  -- Search row: [ input ][ Clear ]  [-][+]
-  -- The Clear group + size group share the same V5 secondary button
-  -- palette (card fill / border / TK.text) and the same frame
-  -- rounding + padding push; an extra gap separates them so the
-  -- two groups read as distinct controls.
-  local CLEAR_BTN_W = RA.SC(60)
-  local SIZE_BTN_W  = RA.SC(28)
-  local BTN_GAP     = RA.SC(6)
-  local GROUP_GAP   = RA.SC(12)
-  local sz_group_w  = SIZE_BTN_W * 2 + BTN_GAP
-  local input_w     = inner_w - CLEAR_BTN_W - sz_group_w - BTN_GAP - GROUP_GAP
-  -- Input fill lifted from TK.input_bg -> TK.card. Reads a touch
-  -- brighter in dark mode (card > input_bg, which was the deepest
-  -- recessed well). On light mode it goes pure white against the
-  -- page's off-white bg -- also reads brighter.
-  PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBg(),        TK.card)
-  PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgHovered(), TK.card)
-  PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgActive(),  TK.card)
-  PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(),   RA.SC(5))
-  PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),    RA.SC(10), RA.SC(6))
-  ImGui.ImGui_SetNextItemWidth(RA.ctx, input_w)
-  local _, sub_buf = ImGui.ImGui_InputTextWithHint(
-    RA.ctx, "##help_search",
-    UI.t("help.search.placeholder", nil, "Search Help..."), help_search_buf)
-  help_search_buf = sub_buf
-  UI.focus_ring()
-  _, help_search_buf = UI.input_with_menu(RA.ctx, false, help_search_buf)
-  PopStyleColor(RA.ctx, 3)
-
-  local do_clear = false
-  -- Toned-down secondary palette for Clear / - / + : transparent fill
-  -- at rest (disappears into the page bg) + muted text + keeps the
-  -- 1px border for affordance. Hover lifts to TK.card so the button
-  -- materialises under the cursor. Previously they rendered at full
-  -- TK.card + TK.text which read too "primary" for helper controls.
-  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        0x00000000)
-  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), TK.card)
-  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  TK.card_hover)
-  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.text_muted)
-  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),        TK.border)
-  PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 1)
-
-  SameLine(RA.ctx, 0, BTN_GAP)
-  if ImGui.ImGui_Button(RA.ctx,
-      UI.t("common.clear", nil, "Clear") .. "##help_clear_btn",
-      CLEAR_BTN_W, 0) then
-    do_clear = true
-  end
-
-  -- Text-size controls. Scope: help content only (section body
-  -- paragraphs + bullets). Doesn't affect chat, settings, or chrome.
-  -- Range 0.8 -> 1.5 in 0.1 steps; persisted to Config.json.
-  SameLine(RA.ctx, 0, GROUP_GAP)
-  ImGui.ImGui_BeginDisabled(RA.ctx, prefs.help_font_scale <= 0.8 + 1e-6)
-  if ImGui.ImGui_Button(RA.ctx, "\xe2\x88\x92##help_text_dec",
-      SIZE_BTN_W, 0) then
-    prefs.help_font_scale = math.max(0.8,
-      (prefs.help_font_scale or 1.0) - 0.1)
-    if Store and Store.save_config then Store.save_config() end
-  end
-  ImGui.ImGui_EndDisabled(RA.ctx)
-  if ImGui.ImGui_IsItemHovered(RA.ctx,
-      ImGui.ImGui_HoveredFlags_AllowWhenDisabled()) then
-    UI.tooltip(UI.t("help.text_size.decrease", {
-      percent = math_floor(prefs.help_font_scale * 100 + 0.5),
-    }, string.format("Decrease text size  (%d%%)",
-      math_floor(prefs.help_font_scale * 100 + 0.5))))
-  end
-
-  SameLine(RA.ctx, 0, BTN_GAP)
-  ImGui.ImGui_BeginDisabled(RA.ctx, prefs.help_font_scale >= 1.5 - 1e-6)
-  if ImGui.ImGui_Button(RA.ctx, "+##help_text_inc",
-      SIZE_BTN_W, 0) then
-    prefs.help_font_scale = math.min(1.5,
-      (prefs.help_font_scale or 1.0) + 0.1)
-    if Store and Store.save_config then Store.save_config() end
-  end
-  ImGui.ImGui_EndDisabled(RA.ctx)
-  if ImGui.ImGui_IsItemHovered(RA.ctx,
-      ImGui.ImGui_HoveredFlags_AllowWhenDisabled()) then
-    UI.tooltip(UI.t("help.text_size.increase", {
-      percent = math_floor(prefs.help_font_scale * 100 + 0.5),
-    }, string.format("Increase text size  (%d%%)",
-      math_floor(prefs.help_font_scale * 100 + 0.5))))
-  end
-
-  ImGui.ImGui_PopStyleVar(RA.ctx)            -- FrameBorderSize
-  PopStyleColor(RA.ctx, 5)                   -- Button + Hovered + Active + Text + Border
-  ImGui.ImGui_PopStyleVar(RA.ctx, 2)         -- FrameRounding + FramePadding (shared with input)
-  Dummy(RA.ctx, 1, RA.SC(12))
-
-  -- Help text-scale driver. Section labels (CONTENTS + per-section),
-  -- the TOC font, and the body font all multiply their sizes by this
-  -- so the page scales as a unit under the - / + buttons above.
-  local _help_scale = prefs.help_font_scale or 1.0
-
-  -- Help section labels run ~2 px larger than the default v5_section_label
-  -- (scale * 1.2) and at TK.text_muted instead of TK.text_faint. They're
-  -- serving as chapter markers on a long-form content page, not thin UI
-  -- group labels on a form, so they get more presence -- brighter on
-  -- dark mode, darker on light mode, both courtesy of TK.text_muted.
-  local HELP_LBL_SCALE = _help_scale * 1.2
+  local HELP_LBL_SCALE = 1.2
   local HELP_LBL_COL   = TK.text_muted
-
-  UI.v5_section_label(UI.t("help.contents", nil, "CONTENTS"),
-    nil, nil, HELP_LBL_SCALE, HELP_LBL_COL)
-
-  -- Build filtered index list based on search query. Memoized on
-  -- (sections identity, query) so steady-state typing doesn't re-scan
-  -- the entire help body every frame -- previously this called
-  -- :lower() + :find on every body line of every section per frame
-  -- while the help screen was open.
-  local q = help_search_buf:lower()
-  local _hf = UI._help_filter_cache
-  local filtered
-  if _hf and _hf.sections == sections and _hf.q == q then
-    filtered = _hf.filtered
-  else
-    filtered = {}
-    for si, sec in ipairs(sections) do
-      local hit = (q == "")
-      if not hit and sec.title:lower():find(q, 1, true) then hit = true end
-      if not hit then
-        for _, ln in ipairs(sec.lines) do
-          if ln:lower():find(q, 1, true) then hit = true; break end
-        end
-      end
-      if hit then filtered[#filtered + 1] = si end
-    end
-    UI._help_filter_cache = { sections = sections, q = q, filtered = filtered }
-  end
-
-  if do_clear then
-    help_search_buf = ""
-  end
-
-  -- Match counter (dim) when searching.
-  if help_search_buf ~= "" then
-    PushFont(RA.ctx, nil, RA.SC(11))
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-    local count_text = (#filtered == 0)
-      and UI.t("help.matches.none", nil, "No matches")
-      or UI.t((#filtered == 1) and "help.matches.one"
-          or "help.matches.many",
-        { count = #filtered }, string.format("%d matches", #filtered))
-    local ctw = CalcTextSize(RA.ctx, count_text)
-    local cur_x = GetCursorPosX(RA.ctx)
-    SetCursorPosX(RA.ctx, cur_x + inner_w - ctw - RA.SC(2))
-    Text(RA.ctx, count_text)
-    PopStyleColor(RA.ctx)
-    PopFont(RA.ctx)
-    Dummy(RA.ctx, 1, 4)
-  end
-
-  if #filtered == 0 then
-    PushFont(RA.ctx, nil, RA.SC(12))
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-    Text(RA.ctx, UI.t("help.no_sections_match",
-      { query = help_search_buf },
-      "No sections match \"" .. help_search_buf .. "\""))
-    PopStyleColor(RA.ctx)
-    PopFont(RA.ctx)
-  else
-    PushFont(RA.ctx, nil, RA.SC(math_floor(12 * _help_scale + 0.5)))
-    local base_x = GetCursorPosX(RA.ctx)
-    local top_y  = ImGui.ImGui_GetCursorPosY(RA.ctx)
-    local col_w  = math_floor(inner_w * 0.5)
-    local half   = math.ceil(#filtered / 2)
-    local max_y  = top_y
-    for col = 0, 1 do
-      local lo = col * half + 1
-      local hi = math_min((col + 1) * half, #filtered)
-      ImGui.ImGui_SetCursorPosY(RA.ctx, top_y)
-      for i = lo, hi do
-        local si  = filtered[i]
-        local sec = sections[si]
-        SetCursorPosX(RA.ctx, base_x + col * col_w)
-        local toc_label = sec.title
-        local toc_w = CalcTextSize(RA.ctx, toc_label)
-        local toc_sx, toc_sy = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
-        ImGui.ImGui_InvisibleButton(RA.ctx, "##toc_" .. si, toc_w, ImGui.ImGui_GetTextLineHeight(RA.ctx))
-        local toc_hov = ImGui.ImGui_IsItemHovered(RA.ctx)
-        if toc_hov then
-          ImGui.ImGui_SetMouseCursor(RA.ctx, ImGui.ImGui_MouseCursor_Hand())
-        end
-        if ImGui.ImGui_IsItemClicked(RA.ctx) then
-          S.help_scroll_to = si
-          S.help_scroll_frames = nil
-        end
-        -- Rest: TK.text_muted (quiet at rest); hover: TK.accent with
-        -- underline. Inverts the old "accent at rest / brighter on
-        -- hover" so the TOC reads as a calm list the user's eye scans,
-        -- with hover as the interactive affordance.
-        local toc_col = toc_hov and TK.accent or TK.text_muted
-        ImGui.ImGui_DrawList_AddText(dl, toc_sx, toc_sy, toc_col, toc_label)
-        if toc_hov then
-          local ul_y = toc_sy + ImGui.ImGui_GetTextLineHeight(RA.ctx) - 1
-          ImGui.ImGui_DrawList_AddLine(dl, toc_sx, ul_y, toc_sx + toc_w, ul_y, toc_col, 1)
-        end
-      end
-      local cur_y = ImGui.ImGui_GetCursorPosY(RA.ctx)
-      if cur_y > max_y then max_y = cur_y end
-    end
-    ImGui.ImGui_SetCursorPosY(RA.ctx, max_y)
-    PopFont(RA.ctx)
-  end
-
-  Dummy(RA.ctx, 1, 14)
-  -- Separator line below TOC (inset). Muted TK.border so it reads as a
-  -- hairline section separator, not a divider beam.
-  local sep2_x, sep2_y = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
-  ImGui.ImGui_DrawList_AddLine(dl, sep2_x + RA.SC(40), sep2_y, sep2_x + inner_w - RA.SC(40), sep2_y, TK.border, 1)
-  Dummy(RA.ctx, 1, 14)
+  local show_section_heading = #sections > 1
+  Dummy(RA.ctx, 1, RA.SC(4))
 
   -- ---- Sections ----
-  for _, si in ipairs(filtered) do
-    local sec = sections[si]
-    -- Record section Y for scroll targeting.
-    help_section_ys[si] = ImGui.ImGui_GetCursorPosY(RA.ctx)
-
+  for si, sec in ipairs(sections) do
     -- Group the whole section so right-click anywhere in it opens the
     -- "Copy" context menu via BeginPopupContextItem on the group.
     ImGui.ImGui_BeginGroup(RA.ctx)
 
-    -- Section heading: UI.v5_section_label (mono + short accent
-    -- bar + uppercase) -- unifies the visual rhythm with CONTENTS
-    -- above. Uses the Help-specific scale + color (bigger + more
-    -- readable than the default thin UI labels on Settings).
-    UI.v5_section_label(sec.title:upper(), nil, nil,
-      HELP_LBL_SCALE, HELP_LBL_COL)
+    if show_section_heading then
+      UI.v5_section_label(sec.title:upper(), nil, nil,
+        HELP_LBL_SCALE, HELP_LBL_COL)
+    end
 
-    -- Body text. Font size is scaled by prefs.help_font_scale (0.8 ->
-    -- 1.5, driven by the - / + buttons on the search row). Scoped
-    -- here so the scale affects section body paragraphs + bullets
-    -- without bleeding into the page chrome.
-    local _help_body_sz = RA.SC(math_floor(12 * prefs.help_font_scale + 0.5))
+    local _help_body_sz = RA.SC(12)
     PushFont(RA.ctx, nil, _help_body_sz)
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
 
-    -- Manual word-wrap renderer that also paints a highlight rect behind
-    -- every match of `query` in each wrapped sub-line. Used when searching.
-    local qlower_body = (q ~= "") and q or nil
-    local qlen_body   = qlower_body and #qlower_body or 0
-    -- Search-match highlight: accent fill at ~38% alpha (0x60). Less
-    -- glaring than the previous 0x80 wash against the scaled-up body
-    -- text -- still clearly a hit marker, not a paint stripe.
-    local HL_COL      = (TK.accent & 0xFFFFFF00) | 0x60
-    local function draw_hl_wrapped(text, wrap_w)
-      local th = ImGui.ImGui_GetTextLineHeight(RA.ctx)
-      local function flush_line(buf)
-        local sx, sy = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
-        if qlower_body then
-          local lower = buf:lower()
-          local p = 1
-          while true do
-            local s = lower:find(qlower_body, p, true)
-            if not s then break end
-            local pre_w = CalcTextSize(RA.ctx, buf:sub(1, s - 1))
-            local m_w  = CalcTextSize(RA.ctx, buf:sub(s, s + qlen_body - 1))
-            ImGui.ImGui_DrawList_AddRectFilled(dl,
-              sx + pre_w - RA.SC(1), sy,
-              sx + pre_w + m_w + RA.SC(1), sy + th,
-              HL_COL, RA.SC(2))
-            p = s + qlen_body
-          end
-        end
-        Text(RA.ctx, buf)
-      end
-      -- Track a running line width incrementally instead of remeasuring
-      -- the full `cur .. " " .. word` candidate every iteration. The old
-      -- loop was O(words^2) (each CalcTextSize walks the whole growing
-      -- candidate), which produced a noticeable hitch when typing into
-      -- the search field on long help paragraphs. Now the per-iteration
-      -- work is one CalcTextSize on the new word + one add.
-      local space_w = CalcTextSize(RA.ctx, " ")
-      local cur, cur_w = "", 0
-      for word in text:gmatch("%S+") do
-        local word_w = CalcTextSize(RA.ctx, word)
-        local cand_w = (cur == "") and word_w or (cur_w + space_w + word_w)
-        if cand_w <= wrap_w then
-          cur   = (cur == "") and word or (cur .. " " .. word)
-          cur_w = cand_w
-        else
-          if cur ~= "" then flush_line(cur) end
-          cur, cur_w = word, word_w
-        end
-      end
-      if cur ~= "" then flush_line(cur) end
-    end
-
     local body_wrap_x_off = inner_w
-    -- Index-based walk (vs. ipairs) so the table branch can advance
-    -- across multiple consumed rows in one step. Adds ### sub-heading
-    -- and pipe-table support that the chat renderer (UI.selectable_text)
-    -- already had; without these, "### Foo" rendered as literal raw
-    -- text and "| col | col |" rows showed as pipe-separated lines.
+    -- Index-based walk handles spacer lines, ### sub-headings, and bullets.
     local idx = 1
     while idx <= #sec.lines do
       local raw  = sec.lines[idx]
@@ -6003,148 +5704,32 @@ function Render.help_screen()
       if line == "" then
         Dummy(RA.ctx, 1, 4)
         idx = idx + 1
-      elseif line:match("^|") then
-        -- Markdown table: gather contiguous |...| rows starting here,
-        -- then render via ImGui_BeginTable. Same column-fitting logic
-        -- the chat renderer's table branch uses (search "Render table
-        -- segment" in this file). No per-table right-click "Copy"
-        -- menu -- the section-level "Copy" via BeginPopupContextItem
-        -- on the outer group already covers it.
-        local rows, next_idx = parse_md_table(sec.lines, idx)
-        if #rows > 0 then
-          local num_cols = 0
-          for _, cells in ipairs(rows) do
-            if #cells > num_cols then num_cols = #cells end
-          end
-          if num_cols > 0 then
-            local tbl_id    = "##help_tbl_" .. si .. "_" .. idx
-            local tbl_flags = ImGui.ImGui_TableFlags_SizingFixedFit()
-                            | ImGui.ImGui_TableFlags_BordersInnerV()
-                            | ImGui.ImGui_TableFlags_PadOuterX()
-            PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_CellPadding(), 5, 2)
-            local col_px = {}
-            for c = 1, num_cols do col_px[c] = 0 end
-            for _, cells in ipairs(rows) do
-              for c = 1, num_cols do
-                local w = CalcTextSize(RA.ctx, cells[c] or "")
-                if w > col_px[c] then col_px[c] = w end
-              end
-            end
-            local pad_total = num_cols * 12
-            local budget    = body_wrap_x_off - pad_total
-            local total_w   = 0
-            for c = 1, num_cols do total_w = total_w + col_px[c] end
-            if total_w > budget and budget > 0 then
-              local fair = budget / num_cols
-              local locked, unlocked_w = 0, 0
-              local is_locked = {}
-              for c = 1, num_cols do
-                if col_px[c] <= fair then
-                  is_locked[c] = true
-                  locked = locked + col_px[c]
-                else
-                  unlocked_w = unlocked_w + col_px[c]
-                end
-              end
-              local remain = budget - locked
-              for c = 1, num_cols do
-                if not is_locked[c] then
-                  if unlocked_w > 0 then
-                    col_px[c] = math_max(40, math_floor(remain * col_px[c] / unlocked_w))
-                  else
-                    col_px[c] = math_max(40, math_floor(remain / num_cols))
-                  end
-                end
-              end
-            end
-            if ImGui.ImGui_BeginTable(RA.ctx, tbl_id, num_cols, tbl_flags, body_wrap_x_off) then
-              for c = 1, num_cols do
-                ImGui.ImGui_TableSetupColumn(RA.ctx, "##c" .. c,
-                  ImGui.ImGui_TableColumnFlags_WidthFixed(), col_px[c])
-              end
-              local start_row = 1
-              if #rows > 1 then
-                ImGui.ImGui_TableNextRow(RA.ctx)
-                for c = 1, num_cols do
-                  ImGui.ImGui_TableSetColumnIndex(RA.ctx, c - 1)
-                  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-                  ImGui.ImGui_TextWrapped(RA.ctx, rows[1][c] or "")
-                  PopStyleColor(RA.ctx)
-                end
-                start_row = 2
-              end
-              for r = start_row, #rows do
-                ImGui.ImGui_TableNextRow(RA.ctx)
-                for c = 1, num_cols do
-                  ImGui.ImGui_TableSetColumnIndex(RA.ctx, c - 1)
-                  ImGui.ImGui_TextWrapped(RA.ctx, rows[r][c] or "")
-                end
-              end
-              ImGui.ImGui_EndTable(RA.ctx)
-            end
-            ImGui.ImGui_PopStyleVar(RA.ctx)
-            Dummy(RA.ctx, 1, 4)
-          end
-        end
-        idx = next_idx
       elseif line:match("^### ") then
         -- H3 sub-heading: bold at body size + 2 SC pixels, with a
         -- small pre/post spacer. ## H2 sections still cap at the
         -- orange section label via UI.v5_section_label above; ###
         -- gives a lighter visual divider inside a section.
         local htext = line:sub(5):gsub("^%s+", "")
-        local h3_is_prompt_group = (sec.title == "Prompt Examples")
-        Dummy(RA.ctx, 1, h3_is_prompt_group and 10 or 4)
-        if h3_is_prompt_group then
-          local hx, hy = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
-          local bar_w, bar_h = RA.SC(18), RA.SC(2)
-          ImGui.ImGui_DrawList_AddRectFilled(dl,
-            hx, hy + RA.SC(2), hx + bar_w, hy + RA.SC(2) + bar_h,
-            TK.text_muted, RA.SC(1))
-          Dummy(RA.ctx, 1, RA.SC(7))
-        end
-        PushFont(RA.ctx,
-          h3_is_prompt_group and FONT.inter_reg or RA.bold_font,
-          _help_body_sz + RA.SC(2))
-        if h3_is_prompt_group then
-          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),
-            TK.text_muted)
-        end
+        Dummy(RA.ctx, 1, 4)
+        PushFont(RA.ctx, RA.bold_font, _help_body_sz + RA.SC(2))
         Text(RA.ctx, htext)
-        if h3_is_prompt_group then PopStyleColor(RA.ctx) end
         PopFont(RA.ctx)
-        Dummy(RA.ctx, 1, h3_is_prompt_group and 5 or 2)
+        Dummy(RA.ctx, 1, 2)
         idx = idx + 1
       elseif line:sub(1, 2) == "- " then
         local content = line:sub(3)
-        local prompt_examples_section =
-          sec.title == "Prompt Examples"
-          or sec.title == "Ejemplos de prompts"
-        local is_prompt_example =
-          prompt_examples_section
-          and content:sub(1, 1) == "\""
-          and content:sub(-1) == "\""
-        if is_prompt_example then
-          content = content:sub(2, -2)
-        end
         -- Bullet dot, muted. Pulled back from TK.accent to TK.text_muted
         -- so the bullet + bold lead-in combo doesn't read as a wall of
         -- blue -- the emphasis on the lead-in carries the hierarchy.
         local bx, by = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
         local th     = ImGui.ImGui_GetTextLineHeight(RA.ctx)
-        local bullet_col = is_prompt_example
-          and UI.lerp_u32(TK.accent, TK.text_muted, 0.45)
-          or TK.text_muted
         ImGui.ImGui_DrawList_AddCircleFilled(dl,
-          bx + RA.SC(5), by + th * 0.55, RA.SC(2), bullet_col)
-        local indent_px = is_prompt_example and RA.SC(16) or RA.SC(14)
+          bx + RA.SC(5), by + th * 0.55, RA.SC(2), TK.text_muted)
+        local indent_px = RA.SC(14)
         ImGui.ImGui_Indent(RA.ctx, indent_px)
         local wrap_w = body_wrap_x_off - indent_px
         local colon = line:find(":", 3, true)
-        if qlower_body then
-          -- Searching: no bold split -- render uniform content with highlights.
-          draw_hl_wrapped(content, wrap_w)
-        elseif (not is_prompt_example) and colon and (colon - 2) <= 32 then
+        if colon and (colon - 2) <= 32 then
           -- Bold "Label:" lead-in + wrapped rest (ImGui wrap).
           local lead = line:sub(3, colon)
           local rest = line:sub(colon + 1):gsub("^%s+", "")
@@ -6166,16 +5751,12 @@ function Render.help_screen()
           ImGui.ImGui_PopTextWrapPos(RA.ctx)
         end
         ImGui.ImGui_Unindent(RA.ctx, indent_px)
-        Dummy(RA.ctx, 1, is_prompt_example and 4 or 2)
+        Dummy(RA.ctx, 1, 2)
         idx = idx + 1
       else
-        if qlower_body then
-          draw_hl_wrapped(line, body_wrap_x_off)
-        else
-          ImGui.ImGui_PushTextWrapPos(RA.ctx, GetCursorPosX(RA.ctx) + body_wrap_x_off)
-          Text(RA.ctx, line)
-          ImGui.ImGui_PopTextWrapPos(RA.ctx)
-        end
+        ImGui.ImGui_PushTextWrapPos(RA.ctx, GetCursorPosX(RA.ctx) + body_wrap_x_off)
+        Text(RA.ctx, line)
+        ImGui.ImGui_PopTextWrapPos(RA.ctx)
         idx = idx + 1
       end
     end
@@ -6195,86 +5776,9 @@ function Render.help_screen()
     Dummy(RA.ctx, 1, 18)
   end
 
-  -- ---- Smooth scroll to section ----
-  -- Tick the expire counter unconditionally on the outer guard, so a
-  -- target section that gets filtered out by the search field (its Y
-  -- entry vanishes from help_section_ys) can still age out instead of
-  -- lingering until the user clears the search and inadvertently
-  -- triggers a delayed jump.
-  if S.help_scroll_to then
-    if not S.help_scroll_frames then S.help_scroll_frames = 0 end
-    S.help_scroll_frames = S.help_scroll_frames + 1
-    -- Auto-expire after 30 frames to avoid fighting user scroll.
-    if S.help_scroll_frames > 30 then
-      S.help_scroll_to = nil
-      S.help_scroll_frames = nil
-    elseif help_section_ys[S.help_scroll_to] then
-      local target_y = help_section_ys[S.help_scroll_to] - 30
-      local cur_scroll = ImGui.ImGui_GetScrollY(RA.ctx)
-      local diff = target_y - cur_scroll
-      if math_abs(diff) < 2 then
-        ImGui.ImGui_SetScrollY(RA.ctx, target_y)
-        S.help_scroll_to = nil
-        S.help_scroll_frames = nil
-      else
-        ImGui.ImGui_SetScrollY(RA.ctx, math_floor(cur_scroll + diff * 0.15))
-      end
-    end
-  end
-
-  -- Smooth scroll to top.
-  if S.help_scroll_top then
-    local cur_scroll = ImGui.ImGui_GetScrollY(RA.ctx)
-    if cur_scroll < 1 then
-      ImGui.ImGui_SetScrollY(RA.ctx, 0)
-      S.help_scroll_top = false
-    else
-      ImGui.ImGui_SetScrollY(RA.ctx, math_floor(cur_scroll * 0.8))
-    end
-  end
-
   -- No inline Close button -- Esc, MB4, footer Help-toggle, and logo
   -- click all cover navigation away (matches Credits pattern).
   Dummy(RA.ctx, 1, RA.SC(18))
-
-  -- Back-to-top arrow: bottom-right, visible when scrolled down.
-  -- win_x/win_y/win_h2 here refer to the BeginChild we're currently
-  -- rendering into -- its bottom already stops at the footer rail's
-  -- top edge, so positioning the arrow relative to the child bottom
-  -- places it just above the rail without any extra subtraction.
-  local scroll_y = ImGui.ImGui_GetScrollY(RA.ctx)
-  if scroll_y > RA.SC(100) then
-    local arrow_sz = RA.SC(20)
-    local arrow_inset_h = RA.SC(20)
-    local arrow_inset_v = RA.SC(12)
-    local tri_inset = RA.SC(2)
-    local tri_side  = RA.SC(3)
-    local win_x, win_y = ImGui.ImGui_GetWindowPos(RA.ctx)
-    local win_w2, win_h2 = ImGui.ImGui_GetWindowSize(RA.ctx)
-    local ax = win_x + win_w2 - arrow_sz - arrow_inset_h
-    local ay = win_y + win_h2 - arrow_sz - arrow_inset_v
-    -- Manual hit-test.
-    local mx, my = ImGui.ImGui_GetMousePos(RA.ctx)
-    local arrow_hov = mx >= ax and mx <= ax + arrow_sz
-                  and my >= ay and my <= ay + arrow_sz
-    if arrow_hov then
-      ImGui.ImGui_SetMouseCursor(RA.ctx, ImGui.ImGui_MouseCursor_Hand())
-      if ImGui.ImGui_IsMouseClicked(RA.ctx, 0) then
-        S.help_scroll_top = true
-        S.help_scroll_to  = nil
-      end
-    end
-    -- Muted at rest, accent on hover -- matches the v5_link_row icon
-    -- colour language on Credits (quiet at rest, sweep to accent).
-    local arrow_col = arrow_hov and TK.accent or TK.accent_ui
-    -- Draw upward arrow triangle.
-    local cx = ax + arrow_sz * 0.5
-    ImGui.ImGui_DrawList_AddTriangleFilled(dl,
-      cx, ay + tri_inset,
-      ax + tri_side, ay + arrow_sz - tri_inset,
-      ax + arrow_sz - tri_side, ay + arrow_sz - tri_inset,
-      arrow_col)
-  end
 
   if UI.back_pressed() then
     close_help()
@@ -7336,9 +6840,8 @@ function Render.credits_screen()
 end
 
 -- -----------------------------------------------------------------------------
--- Render.api_key_screen
+-- Settings support: Factory Reset and API-key popups
 -- -----------------------------------------------------------------------------
--- Full-window API key entry screen with three sections (one per provider).
 -- Render._factory_reset_popup
 -- Renders the Factory Reset confirmation modal. Sets
 -- Render._factory_reset_pending = true when the user confirms, so the
@@ -7476,7 +6979,6 @@ function Render._factory_reset_execute()
   prefs.chat_font_idx         = 2   -- Medium
   prefs.reply_language_idx    = 1   -- English
   prefs.language_code         = "en"
-  prefs.help_font_scale       = 1.0
   apply_palette(PALETTES[resolve_theme("auto")])
   S._reset_window_size = true
   Net.clear_conversation()
@@ -7485,6 +6987,7 @@ function Render._factory_reset_execute()
   S.gemini_paid_tier = nil
   api_keys.key_bufs = {}
   api_keys.key_errors = {}
+  api_keys.key_warnings = {}
   api_keys.key_error = nil
   api_keys.key_error_provider = nil
   api_keys.key_error_detail = nil
@@ -8247,7 +7750,7 @@ function Render.feedback_modal()
     -- needs Col_InputTextCursor (a separate ImGui slot) -- pushing only
     -- Col_Text leaves the caret using the global default which renders
     -- white on the light theme's pale input_bg. Same fix used by the
-    -- chat selection InputTextMultiline at line ~3528.
+    -- main chat InputTextMultiline.
     PushFont(RA.ctx, FONT.inter_reg, RA.SC(14))
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),            TK.text)
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_InputTextCursor(), TK.text)
@@ -8255,7 +7758,7 @@ function Render.feedback_modal()
     -- handler can restore it (stripped of trailing \n) when Enter fires
     -- from inside the comment box. Without this restore, the \n that
     -- ImGui already inserted on the same frame would leak into
-    -- user_comment. Mirrors the chat prompt pattern at line ~14875.
+    -- user_comment. Mirrors the main chat prompt's Enter-to-send path.
     local _fb_prev_comment = S.feedback_modal_comment or ""
     local _rv, new_comment = ImGui.ImGui_InputTextMultiline(RA.ctx,
       "##fb_comment", S.feedback_modal_comment or "",
@@ -8557,7 +8060,7 @@ function Render.feedback_modal()
     -- Enter-to-submit: fires from anywhere in the modal as long as Shift
     -- is not held. Shift+Enter inside the comment box still inserts a
     -- newline (standard chat-app convention; matches the main chat
-    -- prompt's Enter handling at line ~14875). When Enter fires from
+    -- prompt's Enter handling). When Enter fires from
     -- inside the comment box, we restore the pre-edit buffer (stripped
     -- of any trailing \n) so the newline ImGui already inserted on this
     -- frame doesn't leak into user_comment. Both Enter and Keypad-Enter
@@ -9745,6 +9248,7 @@ local function _exit_settings_screen()
   api_keys.is_reentry   = false
   api_keys.key_bufs     = {}
   api_keys.key_errors   = {}
+  api_keys.key_warnings = {}
   api_keys.key_error    = nil
   api_keys.key_focused  = false
   api_keys.custom_edit  = nil
@@ -9780,6 +9284,7 @@ function Render._shared_key_screen_impl()
       if not prov.is_custom then
         api_keys.key_bufs[i]   = api_keys.key_bufs[i]   or ""
         api_keys.key_errors[i] = api_keys.key_errors[i] or nil
+        api_keys.key_warnings[i] = api_keys.key_warnings[i] or nil
       end
     end
   end
@@ -10182,6 +9687,8 @@ function Render._shared_key_screen_impl()
             api_keys._rm_arm[i] = nil
             S.api_key_map[prov.id] = nil
             Key.clear(prov.key_extstate)
+            api_keys.key_errors[i] = nil
+            if api_keys.key_warnings then api_keys.key_warnings[i] = nil end
             if prov.id == "google" then
               if Store and Store.set_gemini_paid_tier then
                 Store.set_gemini_paid_tier(nil)
@@ -10285,20 +9792,26 @@ function Render._shared_key_screen_impl()
             api_keys._pending_focus = target
           end
         end
+      end
 
-        -- Per-field validation error (only meaningful when the input is
-        -- visible -- errors against a now-connected key are stale).
-        -- Rendered 2 px smaller than the ambient body font so the
-        -- single-line error reads as secondary detail rather than
-        -- competing with the input field's chrome.
-        if api_keys.key_errors[i] then
-          local _err_sz = math_max(ImGui.ImGui_GetFontSize(RA.ctx) - 2, 8)
-          PushFont(RA.ctx, FONT.inter_reg, _err_sz)
-          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), COL.ERROR)
-          Text(RA.ctx, api_keys.key_errors[i])
-          PopStyleColor(RA.ctx)
-          PopFont(RA.ctx)
-        end
+      -- Per-field validation error or advisory. Advisory messages can remain
+      -- visible while a plausible unknown-prefix key is being tested.
+      -- Rendered 2 px smaller than the ambient body font so the line reads
+      -- as secondary detail rather than competing with the input chrome.
+      if api_keys.key_errors[i] then
+        local _err_sz = math_max(ImGui.ImGui_GetFontSize(RA.ctx) - 2, 8)
+        PushFont(RA.ctx, FONT.inter_reg, _err_sz)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), COL.ERROR)
+        Text(RA.ctx, api_keys.key_errors[i])
+        PopStyleColor(RA.ctx)
+        PopFont(RA.ctx)
+      elseif api_keys.key_warnings and api_keys.key_warnings[i] then
+        local _warn_sz = math_max(ImGui.ImGui_GetFontSize(RA.ctx) - 2, 8)
+        PushFont(RA.ctx, FONT.inter_reg, _warn_sz)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
+        Text(RA.ctx, api_keys.key_warnings[i])
+        PopStyleColor(RA.ctx)
+        PopFont(RA.ctx)
       end
 
         ImGui.ImGui_EndChild(RA.ctx)
@@ -10381,6 +9894,7 @@ function Render._shared_key_screen_impl()
       -- test-success callback, same as for a Save-then-test flow. Any
       -- buffered key that fails format validation records an inline error
       -- and is NOT promoted.
+      api_keys.key_warnings = api_keys.key_warnings or {}
       for i, prov in ipairs(PROVIDERS) do
         if not prov.is_custom then
           local buf = (api_keys.key_bufs[i] or ""):match("^%s*(.-)%s*$") or ""
@@ -10388,8 +9902,11 @@ function Render._shared_key_screen_impl()
             local valid, reason = Key.validate_format(buf, prov)
             if valid then
               S.api_key_map[prov.id] = buf
+              api_keys.key_errors[i] = nil
+              api_keys.key_warnings[i] = reason
             else
               api_keys.key_errors[i] = reason
+              api_keys.key_warnings[i] = nil
             end
           end
         end
@@ -11242,8 +10759,8 @@ function Render._shared_key_screen_impl()
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
       end
       -- Esc inside this popup mimics the Back button -- close the popup
-      -- and stay on Settings. The outer Settings-cancel handler
-      -- (around line ~7975) is gated on `UI.back_pressed()`, which
+      -- and stay on Settings. The outer Settings-cancel handler is
+      -- gated on `UI.back_pressed()`, which
       -- returns false whenever any popup was open at frame start, so
       -- the same Esc press never bubbles into a Settings-wide Cancel
       -- (which would re-open this popup) -- no per-frame "consumed"
@@ -11291,7 +10808,8 @@ function Render._shared_key_screen_impl()
     and prefs.chat_font_idx ~= api_keys.saved_chat_font_idx
   local lang_changed    = api_keys.saved_reply_language_idx
     and prefs.reply_language_idx ~= api_keys.saved_reply_language_idx
-  -- Merged from the old Advanced page:
+  -- Advanced controls now live inside Settings, but keep their change tracking
+  -- grouped here so Save/Cancel handles the full settings surface consistently.
   local snap_changed    = api_keys.saved_include_snapshot ~= nil
     and prefs.include_snapshot ~= api_keys.saved_include_snapshot
   local ref_changed     = api_keys.saved_include_api_ref ~= nil
@@ -11640,8 +11158,10 @@ function Render._shared_key_screen_impl()
     api_keys.key_error    = nil
     local first_valid_idx  = nil
     local has_format_error = false
+    api_keys.key_warnings = api_keys.key_warnings or {}
     for i, prov in ipairs(PROVIDERS) do
       api_keys.key_errors[i] = nil
+      api_keys.key_warnings[i] = nil
       if not prov.is_custom then
         local trimmed = (api_keys.key_bufs[i] or ""):match("^%s*(.-)%s*$") or ""
         if trimmed ~= "" then
@@ -11652,6 +11172,7 @@ function Render._shared_key_screen_impl()
           else
             -- Key format is valid: store in memory (persisted after test succeeds).
             S.api_key_map[prov.id] = trimmed
+            api_keys.key_warnings[i] = reason
             if not first_valid_idx then first_valid_idx = i end
           end
         end
@@ -11704,6 +11225,7 @@ function Render._shared_key_screen_impl()
         api_keys.is_reentry   = false
         api_keys.key_bufs     = {}
         api_keys.key_errors   = {}
+        api_keys.key_warnings = {}
         api_keys.key_error    = nil
         api_keys.key_focused  = false
         api_keys.custom_edit = nil  -- next open re-reads current provider records
@@ -11720,6 +11242,7 @@ function Render._shared_key_screen_impl()
         api_keys.is_reentry   = false
         api_keys.key_bufs     = {}
         api_keys.key_errors   = {}
+        api_keys.key_warnings = {}
         api_keys.key_error    = nil
         api_keys.key_focused  = false
         api_keys.custom_edit  = nil
@@ -14552,7 +14075,7 @@ function Render.preferred_plugins_screen()
       end
       -- ImGui_End paired with Begin only on the visible path; ReaImGui
       -- auto-pops the window when Begin returns false. Same contract as
-      -- the resolve popup at line ~15432 and the main window's End at ~16387.
+      -- the resolve autocomplete popup and the main-window Begin/End path.
       ImGui.ImGui_End(RA.ctx)
     end
   end
@@ -14629,7 +14152,16 @@ function Render.preferred_plugins_screen()
         -- Commit preferred_types for just this row, without touching the
         -- others. (Other rows may still be dirty; they'll commit on Save.)
         local cache = FXCache.load()
-        cache.preferred_types[rkey] = ident
+        local canonical_ident = ident
+        if FXCache and FXCache.canonicalize_identifier then
+          canonical_ident = FXCache.canonicalize_identifier(rkey, ident)
+        end
+        if canonical_ident ~= ident then
+          Log.line("PREF", "per-row rescan canonicalized " .. rkey
+            .. " = " .. tostring(ident) .. " -> " .. tostring(canonical_ident))
+          pref_plugins.rows[rescan_idx].name = canonical_ident
+        end
+        cache.preferred_types[rkey] = canonical_ident
         local err = FXCache.save(cache)
         if err then
           UI.show_float_toast(UI.t("settings.pref_plugins.toast.save_failed",
@@ -14934,6 +14466,13 @@ end
 -- one-cycle readback lag (e.g. Soundtoys EchoBoy).
 function CTX.fx_cache_rescan_start(identifier, deep)
   local rs = fx_cache_ui.rescan
+  if RA.context_loaded and not RA.context_loaded() then
+    local msg = RA.context_unavailable_message(
+      "before rescanning FX parameters")
+    rs.status = msg
+    UI.show_float_toast(msg, "err")
+    return
+  end
   if rs.active or deep_scan.active then return end
 
   reaper.Undo_BeginBlock()
@@ -15037,6 +14576,20 @@ end
 function CTX.fx_cache_rescan_read()
   local rs = fx_cache_ui.rescan
   if not rs.active or rs.phase ~= "reading" then return end
+  if RA.context_loaded and not RA.context_loaded() then
+    if rs.track and reaper.ValidatePtr2(0, rs.track, "MediaTrack*") then
+      reaper.DeleteTrack(rs.track)
+    end
+    reaper.PreventUIRefresh(-1)
+    reaper.Undo_EndBlock("ReaAssist: rescan (context unavailable)", 0)
+    rs.active = false
+    rs.phase  = "done"
+    rs.track  = nil
+    rs.status = RA.context_unavailable_message(
+      "before rescanning FX parameters")
+    UI.show_float_toast(rs.status, "err")
+    return
+  end
 
   local tr = rs.track
   -- ValidatePtr2: stale userdata from a project switch or explicit track
@@ -15817,7 +15370,7 @@ function Render.fx_cache_screen()
   end
   UI.pop_modal_style()
 
-  -- Escape also closes the screen and returns to Advanced (same as the X
+  -- Escape also closes the screen and returns to Settings (same as the X
   -- button at top-right).
   if UI.back_pressed() then
     api_keys.screen = "settings"
@@ -16412,6 +15965,7 @@ function Render.main_window()
       api_keys.is_reentry                 = false
       api_keys.key_bufs                   = {}
       api_keys.key_errors                 = {}
+      api_keys.key_warnings               = {}
       api_keys.key_error                  = nil
       api_keys.key_focused                = false
       api_keys.custom_edit                = nil
@@ -18219,6 +17773,29 @@ function Render.main_window()
           -- string is ready when the row is drawn.
           local risk_warning = (is_lua and not run_blocked)
             and Code.scan_risky(msg.code_block) or nil
+          local auto_run_block_warning = nil
+          if is_lua and msg.auto_run_block_reason
+             and msg.auto_run_block_reason ~= "auto_run_disabled"
+             and not msg.auto_ran then
+            local reason = tostring(msg.auto_run_block_reason or "")
+            if reason == "fx_param_scope_validator" then
+              auto_run_block_warning = UI.t(
+                "auto_run.blocked.fx_param_scope", nil,
+                "Auto-run blocked: the model added plugin parameter changes even though the request only asked to add/load FX. Review the TrackFX_SetParam*/TakeFX_SetParam* lines before running manually.")
+            elseif reason == "fx_identifier_validator" then
+              auto_run_block_warning = UI.t(
+                "auto_run.blocked.fx_identifier", nil,
+                "Auto-run blocked: the script did not use the exact preferred FX identifier. Review the TrackFX_AddByName plugin names before running manually.")
+            elseif reason == "proq4_bell_slope_validator" then
+              auto_run_block_warning = UI.t(
+                "auto_run.blocked.proq4_bell_slope", nil,
+                "Auto-run blocked: Pro-Q 4 Bell boost/cut bands did not set Slope to 12 dB/oct. Review the Pro-Q 4 slope writes before running manually.")
+            else
+              auto_run_block_warning = UI.t(
+                "auto_run.blocked.validator", nil,
+                "Auto-run blocked: ReaAssist validation flagged this script. Review it before running manually.")
+            end
+          end
           if run_blocked then
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
             ImGui.ImGui_TextWrapped(RA.ctx,
@@ -18227,6 +17804,11 @@ function Render.main_window()
           elseif msg.run_blocked then
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
             ImGui.ImGui_TextWrapped(RA.ctx, msg.run_blocked)
+            PopStyleColor(RA.ctx)
+          end
+          if auto_run_block_warning then
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
+            ImGui.ImGui_TextWrapped(RA.ctx, auto_run_block_warning)
             PopStyleColor(RA.ctx)
           end
 
@@ -20120,10 +19702,8 @@ function Render.main_window()
       -- the Enter key-press frame (IsItemActive returns false), meaning a
       -- field-active-only check would miss the commit for an arrow-selected
       -- dropdown row.
-      -- Renamed from `enter_pressed` to disambiguate against the chat
-      -- prompt's enter_pressed (line ~14995): different scopes, but
-      -- both checked during a debug session creates avoidable
-      -- confusion.
+      -- Named separately from the chat prompt's enter flag; both scopes can
+      -- be inspected during the same debug session.
       local popup_enter_pressed = ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Enter())
       local has_ac_selection = (S.resolve_popup_sel or 0) > 0
         and S.resolve_popup_matches
@@ -20238,7 +19818,7 @@ function Render.main_window()
           -- auto-pops the window when Begin returns false (collapsed or
           -- fully clipped), so calling End on that path underflows the
           -- stack and trips "Calling End() too many times!". Matches the
-          -- main-window pattern at line ~16387 below.
+          -- main-window Begin/End pattern.
           ImGui.ImGui_End(RA.ctx)
         end
       end
@@ -21493,8 +21073,8 @@ function UI.strip_markdown(text)
   t = t:gsub("%*(.-)%*", "%1")
   -- Bullet-ify list markers at line starts. The leading "(\n)" / "^" capture
   -- ensures we only match list markers at the start of a line, not mid-text
-  -- where a hyphen could be part of a word or range. The bullet "*" is a
-  -- BMP character handled correctly by ImGui's default font.
+  -- where a hyphen could be part of a word or range. The bullet glyph is
+  -- a BMP character handled correctly by ImGui's default font.
   t = t:gsub("^[%-%*%+] +", "  \xE2\x80\xA2 ")
   t = t:gsub("\n[%-%*%+] +",  "\n  \xE2\x80\xA2 ")
   t = t:gsub("\0CODE(%d+)\0", function(idx)
@@ -21504,7 +21084,7 @@ function UI.strip_markdown(text)
 end
 
 -- =============================================================================
--- Utility: parse_md_table (file-private, forward-declared near top-of-file)
+-- Utility: parse_md_table (file-private, forward-declared above)
 -- =============================================================================
 -- Parses contiguous markdown table rows starting at lines[start_i].
 -- Returns a list of rows (each a list of trimmed cell strings) and the next

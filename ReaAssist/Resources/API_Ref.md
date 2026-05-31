@@ -312,7 +312,11 @@ specific tracks/items/takes.
   fetch the handle with `GetTrack(0, idx)`.
   For "create tracks" prompts, call this for each requested new track; do not
   just rename handles returned by `GetTrack` because empty projects have no
-  tracks to rename.
+  tracks to rename. For ordered layouts, append in the requested order:
+  `local idx = reaper.CountTracks(0)`, then insert at `idx`, fetch
+  `GetTrack(0, idx)`, name it, and store that handle. Do not repeatedly insert
+  at index 0 and reverse the name list; the handles and final project order can
+  diverge.
 
 `reaper.DeleteTrack(MediaTrack tr)`
   Delete a track.
@@ -581,7 +585,9 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
 
 `integer reaper.AddProjectMarker2(ReaProject proj, boolean isrgn, number pos, number rgnend, string name, integer wantidx, integer color)`
   Legacy/discouraged in REAPER 7.72+. Add marker/region with color
-  (ColorToNative(r,g,b)|0x1000000, or 0 for default).
+  (ColorToNative(r,g,b)|0x1000000, or 0 for default). The 2nd argument is the
+  region flag: use `false` for a point marker and `true` for a region. Do NOT
+  pass a marker index as the 2nd argument.
 
 `boolean reaper.DeleteProjectMarker(ReaProject proj, integer markrgnindexnumber, boolean isrgn)`
   Delete marker/region by DISPLAYED number (the 1, 2, 3... shown in REAPER), NOT the internal index.
@@ -1198,6 +1204,8 @@ TRACKS
   40001   Track: Insert new track
   40005   Track: Remove tracks
   40062   Track: Duplicate tracks
+    Use this for true track duplication. InsertTrackAtIndex creates a blank
+    track; it does not preserve FX, sends/routing, envelopes, or settings.
   40297   Track: Unselect (clear selection of) all tracks
   40296   Track: Select all tracks
 
@@ -2210,6 +2218,11 @@ start, then offset by multiples of one quarter note in PPQ:
   local ppq_st     = reaper.MIDI_GetPPQPosFromProjTime(take, item_t)
   local ppq_per_qn = reaper.MIDI_GetPPQPosFromProjTime(take, item_t + 60/bpm) - ppq_st
 ```
+
+In 4/4, user-facing beat numbers are quarter-note offsets: beat 1 = 0 QN,
+beat 2 = 1 QN, beat 3 = 2 QN, beat 4 = 3 QN; the next bar starts at +4 QN.
+Eighth notes are 0.5 QN apart, not 1 QN. Eight evenly spaced eighth notes in
+one bar start at QN offsets 0, 0.5, 1, 1.5, 2, 2.5, 3, and 3.5.
 
 Musical note lengths are tempo-derived. At 128 BPM, one quarter note is
 `60 / 128 = 0.46875` seconds. If starts are listed at 4, 5, 6, and 7 seconds

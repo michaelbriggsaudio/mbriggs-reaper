@@ -1,5 +1,13 @@
 # ReaAssist - Changelog
 
+## v1.3.5 - 2026-05-31
+
+- **Help is cleaner and stays up to date more reliably.** The in-app Help now focuses on the essential guidance you need while the full manual stays on the website, and localized Help/translation refreshes now check the latest live language-pack index before updating.
+
+- **Common generated scripts are harder to get wrong.** ReaAssist has stronger safeguards for track setup, track duplication, drum-bus routing, explicit instrument-plugin requests, and FabFilter Pro-Q 4 EQ settings, so more mistakes are caught before code can run.
+
+- **Gemini key setup is more forgiving.** New valid-looking Gemini key prefixes now get an advisory warning instead of being blocked outright, while obvious invalid keys are still rejected and diagnostics continue to redact keys safely.
+
 ## v1.3.4 - 2026-05-29
 
 - **Custom Instructions are now available.** ReaAssist can include your saved local preferences with every request, with quick access from Settings and the Options menu. Thanks to REAPER forum user manthosdm for prompting the idea.

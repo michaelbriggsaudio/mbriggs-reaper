@@ -1,6 +1,7 @@
 {
-  "version": "1.3.4",
+  "version": "1.3.5",
   "removed_files": [
+    "Resources/Help.md",
     "Resources/MIDI_Ref.md",
     "Resources/Theme_Ref.md",
     "Resources/fonts/JetBrainsMono-SemiBold.ttf"
@@ -8,7 +9,7 @@
   "files": [
     {
       "name": "CHANGELOG.md",
-      "sha256": "fb44c5fc9d16fc880ffde936035757c25fb10636cc31b77ae827e0ab1607ba7e"
+      "sha256": "5da22b02ae6998297a3f779fe10facc74bde7d50d4f6cde49f76d436e08ee913"
     },
     {
       "name": "LICENSE.txt",
@@ -20,31 +21,35 @@
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "6e2f89214ef7a6b0cc76d9061de8a5b52c43ee5bac9bde456799ca51d0a6ad03"
+      "sha256": "fee14d4dbe57f4b7e0c1dca117f24ca4169286d593e9c004f43307687478b2a0"
     },
     {
       "name": "Resources/API_Ref.md",
-      "sha256": "3911d4847e9c487a9a6ccebf72756498883c26ffe61ff94d0c8ba0d987736ea3"
+      "sha256": "a701bf7167970b576feb6a948f426b9bfe74f258e0716b4ba96e69071703cfcc"
+    },
+    {
+      "name": "Resources/CodeRuntime.lua",
+      "sha256": "64b58193972158bfaf2800ff62094e94a60d82bd1d5e3a4b043d84f98854dbdc"
+    },
+    {
+      "name": "Resources/Context.lua",
+      "sha256": "eb02b2c3bf6804d0908866158c8b37dfd0ea88aa6cde1a1ab987b2f1cd35be68"
     },
     {
       "name": "Resources/Diag.lua",
-      "sha256": "4bd24860efdd74781aa638b078452cba0481a7b78abf42b40318c2de0491f426"
-    },
-    {
-      "name": "Resources/Help.md",
-      "sha256": "e3485aa2516094033cb75de2c87de286e51a8c970034470559b6d7699f3b9c78"
+      "sha256": "ccbeb7b6409a80e7ed259ec1e1bb6a76854c56417c823321ad079957fbd623ec"
     },
     {
       "name": "Resources/I18N.lua",
-      "sha256": "f2539c39f77a77e8b901f3a30b6f49ecc25468a76dd7897b25ef394c342519bb"
+      "sha256": "16df0d3faae95882a0c0e5f17ff4e85b672f577d8c6c6990eafde9b8c7e4549c"
     },
     {
       "name": "Resources/Plugin_Ref.md",
-      "sha256": "931a5db4f2e49d8bf0cb0a48204a9d4cd365ccca63fe6f63aeb508948850a842"
+      "sha256": "1a86ce086a90ac792686968310dee2e7dc45e1260e67314b2b025050d81f860b"
     },
     {
       "name": "Resources/Prompts.md",
-      "sha256": "803c9b3d6ad2c09ea57b9f9e9e6d74969247d19ebc58b3b91c1693fb172f78d0"
+      "sha256": "948b7888c4f78e00440709c56266e499598dce6278bbb4e75298a1648730f7e9"
     },
     {
       "name": "Resources/ReEQ/Dependencies/firhalfband.jsfx-inc",
@@ -76,11 +81,11 @@
     },
     {
       "name": "Resources/System_Prompt.md",
-      "sha256": "033855f4ee9f09e2f0eefe640755e87b61e177093219c60cc04eddf3d1cb9196"
+      "sha256": "9c97cd5f4b804ed008bd14d7fac2646c195789a2faafe16bf4e5cc67f3c66ce9"
     },
     {
       "name": "Resources/UI.lua",
-      "sha256": "df37dd42c40ead43d2db090a5118ce84983c9cd0637c49e7f621acc1a89b50dc"
+      "sha256": "01a9e86def3b715b400856eeea863a764eb61d53f4b3e6770a5deb4bec142542"
     },
     {
       "name": "Resources/fonts/Inter_18pt-Bold.ttf",

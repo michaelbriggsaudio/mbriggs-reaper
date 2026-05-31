@@ -101,9 +101,6 @@ I18N.catalogs = {
       ["context.copy_selection"] = "Copy Selection",
       ["context.copy_all"] = "Copy All",
       ["context.copy_table"] = "Copy Table",
-      ["help.error.title"] = "Error",
-      ["help.error.file_not_found"] = "Help file not found.",
-      ["help.error.expected"] = "Expected: {path}",
       ["help.subtitle"] = "Guide, shortcuts, and usage tips.",
       ["help.breadcrumb"] = "HELP · v{version}",
       ["help.nav.manual"] = "Read Online Manual",
@@ -112,15 +109,47 @@ I18N.catalogs = {
       ["help.nav.feedback"] = "Feedback & Report a Bug",
       ["help.nav.feedback.tooltip"] =
         "Open the feedback / bug report form",
-      ["help.search.placeholder"] = "Search Help...",
-      ["help.text_size.decrease"] = "Decrease text size  ({percent}%)",
-      ["help.text_size.increase"] = "Increase text size  ({percent}%)",
-      ["help.contents"] = "CONTENTS",
-      ["help.matches.none"] = "No matches",
-      ["help.matches.one"] = "{count} match",
-      ["help.matches.many"] = "{count} matches",
-      ["help.no_sections_match"] =
-        "No sections match \"{query}\"",
+      ["help.section.essential"] = "Essential Guidance",
+      ["help.intro.what"] =
+        "ReaAssist helps with the technical side of REAPER sessions. Ask in plain English, and it can use session context to answer questions, write Lua scripts, configure plugins, build routing, create JSFX when explicitly requested, and troubleshoot results.",
+      ["help.intro.start"] =
+        "Start by choosing a provider and model, then decide whether to include a session snapshot. Describe the target and action. If ReaAssist returns code, read it first, back up important projects, then use the buttons below the response to run, copy, save, edit, or undo.",
+      ["help.intro.manual"] =
+        "For setup, providers, troubleshooting, privacy details, and advanced workflows, use Read Online Manual above.",
+      ["help.ask.title"] = "Ask Clearly",
+      ["help.ask.target"] =
+        "Name the target, such as selected tracks, selected items, a track name, the time selection, or the whole project.",
+      ["help.ask.constraints"] =
+        "Include constraints like \"preserve routing,\" \"do not delete anything,\" or \"ask before broad changes.\"",
+      ["help.ask.report"] =
+        "Ask for a report when useful, such as \"tell me what changed.\"",
+      ["help.run.title"] = "Run Code Carefully",
+      ["help.run.read"] = "Read generated Lua or JSFX before running it.",
+      ["help.run.backup"] =
+        "Save the project or make a backup before broad edits.",
+      ["help.run.undo"] =
+        "ReaAssist uses REAPER undo blocks for runnable Lua, but Undo is not a substitute for backups.",
+      ["help.run.scanner"] =
+        "If the safety scanner asks for review, inspect the risky operation before running it.",
+      ["help.privacy.title"] = "Privacy Basics",
+      ["help.privacy.audio"] =
+        "ReaAssist does not upload audio files or .RPP project files.",
+      ["help.privacy.provider"] =
+        "Normal chat requests go to the provider or custom model server you choose.",
+      ["help.privacy.request"] =
+        "Requests can include your typed message, relevant chat history, optional session metadata, and attached files.",
+      ["help.privacy.manual_reports"] =
+        "Manual feedback and bug reports are sent only after you preview them and press Send.",
+      ["help.privacy.diagnostics"] =
+        "Automatic diagnostics can be managed from Settings > Advanced.",
+      ["help.need.title"] = "Need Help?",
+      ["help.need.symptom"] =
+        "Tell ReaAssist exactly what happened: wrong track, wrong plugin, script error, no visible change, or unexpected result.",
+      ["help.need.error"] = "Include the error text if REAPER shows one.",
+      ["help.need.feedback"] =
+        "Use Feedback & Report a Bug above for bugs that need maintainer attention.",
+      ["help.need.manual"] =
+        "Use Read Online Manual above for detailed setup and troubleshooting.",
       ["attach.menu.attach_file"] = "Attach File",
       ["attach.menu.screenshot"] = "Screenshot",
       ["attach.menu.paste_image"] = "Paste Image",
@@ -1190,11 +1219,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.lang.download_suffix"] = "Download",
       ["settings.lang.downloading"] = "Downloading {language} language pack...",
       ["settings.lang.downloading_suffix"] = "Downloading...",
-      ["settings.lang.help_downloading"] = "Downloading {language} help pack...",
-      ["settings.lang.help_installed_toast"] = "{language} help pack installed.",
       ["settings.lang.installed_toast"] = "{language} language pack installed.",
-      ["settings.lang.help_updated_toast"] =
-        "{language} help pack updated.",
       ["settings.lang.updated_toast"] = "{language} translations updated.",
       ["settings.lang.failed"] =
         "Could not download {language}. ReaAssist will stay in {current}.",
@@ -1837,10 +1862,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
 I18N.PACK_SCHEMA = 1
 I18N.MAX_INDEX_BYTES = 128 * 1024
 I18N.MAX_UI_PACK_BYTES = 512 * 1024
-I18N.MAX_HELP_PACK_BYTES = 512 * 1024
 I18N.INDEX_URL = "https://reaassist.app/lang/v1/index.json"
 I18N._cached_pack_miss = I18N._cached_pack_miss or {}
-I18N._cached_help_miss = I18N._cached_help_miss or {}
 
 function I18N._sep()
   if RA and RA.SEP then return RA.SEP end
@@ -1857,12 +1880,6 @@ function I18N.ui_pack_dir()
   if RA and RA.LANG_UI_DIR then return RA.LANG_UI_DIR end
   local root = I18N.lang_root_dir()
   return root and (root .. "ui" .. I18N._sep()) or nil
-end
-
-function I18N.help_pack_dir()
-  if RA and RA.LANG_HELP_DIR then return RA.LANG_HELP_DIR end
-  local root = I18N.lang_root_dir()
-  return root and (root .. "help" .. I18N._sep()) or nil
 end
 
 function I18N.font_pack_dir()
@@ -1892,13 +1909,11 @@ function I18N.ensure_cache_dirs()
   if not (reaper and reaper.RecursiveCreateDirectory) then return false end
   local root = I18N.lang_root_dir()
   local ui = I18N.ui_pack_dir()
-  local help = I18N.help_pack_dir()
   local fonts = I18N.font_pack_dir()
   local tmp = I18N.tmp_pack_dir()
-  if not (root and ui and help and fonts and tmp) then return false end
+  if not (root and ui and fonts and tmp) then return false end
   reaper.RecursiveCreateDirectory(root, 0)
   reaper.RecursiveCreateDirectory(ui, 0)
-  reaper.RecursiveCreateDirectory(help, 0)
   reaper.RecursiveCreateDirectory(fonts, 0)
   reaper.RecursiveCreateDirectory(tmp, 0)
   return true
@@ -1912,8 +1927,6 @@ function I18N.ensure_cache_dir(kind)
     dir = I18N.lang_root_dir()
   elseif kind == "ui" then
     dir = I18N.ui_pack_dir()
-  elseif kind == "help" then
-    dir = I18N.help_pack_dir()
   elseif kind == "fonts" then
     dir = I18N.font_pack_dir()
   elseif kind == "tmp" then
@@ -1929,13 +1942,6 @@ function I18N.cached_ui_pack_path(code)
   local dir = I18N.ui_pack_dir()
   if not (code and dir) then return nil end
   return dir .. code .. ".v" .. tostring(I18N.PACK_SCHEMA) .. ".json"
-end
-
-function I18N.cached_help_pack_path(code)
-  code = I18N._safe_code(code)
-  local dir = I18N.help_pack_dir()
-  if not (code and dir) then return nil end
-  return dir .. code .. ".v" .. tostring(I18N.PACK_SCHEMA) .. ".md"
 end
 
 function I18N._read_file_limited(path, max_bytes)
@@ -2016,52 +2022,6 @@ function I18N._app_compatible(meta)
     end
   end
   return true
-end
-
-function I18N.parse_help_pack(raw, requested_code)
-  requested_code = I18N._safe_code(requested_code)
-  if not requested_code then return nil, "invalid_code" end
-  if type(raw) ~= "string" then return nil, "raw_not_string" end
-  if #raw > I18N.MAX_HELP_PACK_BYTES then return nil, "oversize" end
-  local header, body = raw:match("^(RA_HELP_PACK.-)\r?\n\r?\n(.*)$")
-  if not header or not body then return nil, "missing_header" end
-  local meta = {}
-  for line in header:gmatch("[^\r\n]+") do
-    if line ~= "RA_HELP_PACK" then
-      local key, value = line:match("^([%w_]+):%s*(.-)%s*$")
-      if key then meta[key] = value end
-    end
-  end
-  if tonumber(meta.schema) ~= I18N.PACK_SCHEMA then return nil, "unsupported_schema" end
-  if tostring(meta.code or "") ~= requested_code then return nil, "wrong_code" end
-  if meta.status ~= "complete" then return nil, "incomplete_pack" end
-  if not I18N._app_compatible(meta) then return nil, "app_incompatible" end
-  if not body:match("\n##%s+") and not body:match("^##%s+") then
-    return nil, "missing_sections"
-  end
-  return body, meta
-end
-
-function I18N.load_cached_help_pack(code, opts)
-  code = I18N._safe_code(code)
-  if not code or code == I18N.fallback_code then return nil, "not_remote_code" end
-  opts = type(opts) == "table" and opts or {}
-  if I18N._cached_help_miss[code] and not opts.force then
-    return nil, "cached_miss"
-  end
-  local path = I18N.cached_help_pack_path(code)
-  local raw, read_err = I18N._read_file_limited(path, I18N.MAX_HELP_PACK_BYTES)
-  if not raw then
-    I18N._cached_help_miss[code] = true
-    return nil, read_err or "read_failed"
-  end
-  local body, meta = I18N.parse_help_pack(raw, code)
-  if not body then
-    I18N._cached_help_miss[code] = true
-    return nil, meta or "invalid_help_pack"
-  end
-  I18N._cached_help_miss[code] = nil
-  return body, meta
 end
 
 function I18N.validate_ui_pack(doc, requested_code)

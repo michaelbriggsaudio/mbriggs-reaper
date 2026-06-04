@@ -27,6 +27,7 @@ In addition to cloud providers, ReaAssist supports custom provider endpoints and
 - REAPER 7.0 or later
 - ReaImGui extension (install via ReaPack from the ReaTeam Extensions repository)
 - An API key from one of the supported cloud providers (Claude, ChatGPT, Gemini, DeepSeek), or a local / custom-endpoint setup as described above
+- Screen Reader Mode additionally requires [OSARA](https://osara.reaperaccessibility.com)
 
 ## Installation
 
@@ -39,11 +40,11 @@ In addition to cloud providers, ReaAssist supports custom provider endpoints and
    https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/index.xml
    ```
 4. Open `Extensions > ReaPack > Browse packages...`, find ReaAssist, right-click and install.
-5. Run the action `Script: ReaAssist.lua` from REAPER's Action List. Recommended: bind it to a toolbar button or keyboard shortcut.
+5. Run the action `Script: ReaAssist.lua` from REAPER's Action List. Recommended: bind it to a toolbar button or keyboard shortcut. Screen reader users should run `Script: ReaAssist_Screen_Reader_Mode.lua`.
 
 ### Manual
 
-Download `ReaAssist.lua` and the `Resources/` directory into your REAPER scripts folder. Keep `Resources/` directly beside `ReaAssist.lua`; the script expects them in the same directory. Then load `ReaAssist.lua` via REAPER's Action List.
+Download `ReaAssist.lua`, `ReaAssist_Screen_Reader_Mode.lua`, and the `Resources/` directory into your REAPER scripts folder. Keep `Resources/` directly beside `ReaAssist.lua`; the script expects them in the same directory. Then load `ReaAssist.lua` via REAPER's Action List, or load `ReaAssist_Screen_Reader_Mode.lua` for the accessible screen-reader workflow.
 
 ## Author
 

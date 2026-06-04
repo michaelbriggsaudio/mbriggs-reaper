@@ -4000,6 +4000,35 @@ function UI.is_save_shortcut()
       or ImGui.ImGui_IsKeyChordPressed(RA.ctx, ImGui.ImGui_Mod_Super() | key_s)
 end
 
+function UI.is_hard_exit_shortcut()
+  local key_q = ImGui.ImGui_Key_Q()
+  if ImGui.ImGui_IsKeyChordPressed(RA.ctx, ImGui.ImGui_Mod_Ctrl() | key_q) then
+    return true
+  end
+  if ImGui.ImGui_Key_F4 and ImGui.ImGui_Mod_Alt then
+    return ImGui.ImGui_IsKeyChordPressed(RA.ctx,
+      ImGui.ImGui_Mod_Alt() | ImGui.ImGui_Key_F4())
+  end
+  return false
+end
+
+function UI.a11y_announce(key, text, opts)
+  if not (reaper and reaper.osara_outputMessage) then return end
+  text = tostring(text or "")
+  if text == "" then return end
+  key = tostring(key or text)
+  opts = opts or {}
+  local now = time_precise()
+  if key == UI._a11y_last_key and text == UI._a11y_last_text then return end
+  if not opts.critical and UI._a11y_last_at and now - UI._a11y_last_at < 0.5 then
+    return
+  end
+  UI._a11y_last_key = key
+  UI._a11y_last_text = text
+  UI._a11y_last_at = now
+  pcall(reaper.osara_outputMessage, text)
+end
+
 -- "Pressable" feedback for the preceding ImGui_Button. Adds a 2 px inset
 -- top shadow when the button is held, giving a subtle tactile "sink"
 -- beyond ImGui's built-in ButtonActive color swap. Leak past rounded
@@ -5564,6 +5593,10 @@ local function load_help_sections()
       bullet("help.need.symptom",
         "Tell ReaAssist exactly what happened: wrong track, wrong plugin, script error, no visible change, or unexpected result."),
       bullet("help.need.error", "Include the error text if REAPER shows one."),
+      bullet("help.need.close",
+        "If ReaAssist ever traps focus, press Ctrl+Q to close it. On Windows, Alt+F4 also closes the window."),
+      bullet("help.need.screen_reader",
+        "Screen reader users can run the REAPER action ReaAssist_Screen_Reader_Mode.lua for the native text-first workflow."),
       bullet("help.need.feedback",
         "Use Feedback & Report a Bug above for bugs that need maintainer attention."),
       bullet("help.need.manual",
@@ -6527,7 +6560,8 @@ function Render.bug_report_screen()
             UI.t("bug_report.debug.save_dialog_title", nil,
               "Save ReaAssist Debug Log"),
             default_dir, default_name,
-            "Log files (.log)\0*.log\0Text files (.txt)\0*.txt\0All files\0*.*\0")
+            "Log files (.log)\0*.log\0Text files (.txt)\0*.txt\0All files\0*.*\0",
+            false)
           if ret == 1 and path and path ~= "" then
             if not path:match("%.log$") and not path:match("%.txt$") then
               path = path .. ".log"
@@ -6678,8 +6712,8 @@ function Render.credits_screen()
   ImGui.ImGui_Indent(RA.ctx, indent)
   Dummy(RA.ctx, 1, RA.SC(10))
 
-  -- Credits body. ABOUT + SUPPORT are prose containers (TK.card); LINKS
-  -- + CONTACT are tables of labelled link rows via UI.v5_link_row --
+  -- Credits body. ABOUT + DEPENDENCIES are prose containers (TK.card);
+  -- LINKS + CONTACT are tables of labelled link rows via UI.v5_link_row --
   -- same pill chrome as the Preferred Plugins button on Settings, but
   -- with an external-link diagonal arrow instead of the `>` chevron.
 
@@ -6697,6 +6731,15 @@ function Render.credits_screen()
     ImGui.ImGui_PopStyleVar(RA.ctx, 3)
     PopStyleColor(RA.ctx, 2)
   end
+
+  local visual_dependencies = {
+    {"credits.dependency.sws",
+      "SWS/S&M Extension by Tim Payne, Jeffos, and contributors."},
+    {"credits.dependency.js_reascriptapi",
+      "js_ReaScriptAPI by Julian Sader."},
+    {"credits.dependency.reaimgui",
+      "ReaImGui by Christian Fillion (cfillion)."},
+  }
 
 
   -- ---- ABOUT ---------------------------------------------------------
@@ -6724,6 +6767,25 @@ function Render.credits_screen()
         .. "technical side of your productions and improve your workflow. "
         .. "This is purely a workflow assistant and is not designed or "
         .. "intended to be used for any type of generative creative content."))
+    ImGui.ImGui_PopTextWrapPos(RA.ctx)
+    PopFont(RA.ctx)
+    PopStyleColor(RA.ctx)
+    ImGui.ImGui_EndChild(RA.ctx)
+  end
+  _pop_card_chrome()
+  Dummy(RA.ctx, 1, RA.SC(5))
+
+  -- ---- DEPENDENCIES --------------------------------------------------
+  UI.v5_section_label(UI.t("credits.section.dependencies", nil,
+    "DEPENDENCIES"))
+  if _begin_card("dependencies") then
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
+    PushFont(RA.ctx, nil, RA.SC(13))
+    ImGui.ImGui_PushTextWrapPos(RA.ctx, 0)
+    for i, dep in ipairs(visual_dependencies) do
+      Text(RA.ctx, UI.t(dep[1], nil, dep[2]))
+      if i < #visual_dependencies then Dummy(RA.ctx, 1, RA.SC(4)) end
+    end
     ImGui.ImGui_PopTextWrapPos(RA.ctx)
     PopFont(RA.ctx)
     PopStyleColor(RA.ctx)
@@ -6914,202 +6976,23 @@ function Render._clear_theme_backup_extstate()
   Render._delete_extstate_section(ns)
 end
 
+function Render._ensure_factory_reset_temp_dir(factory_reset_data_dir_cleared)
+  if not (factory_reset_data_dir_cleared
+      and RA.TEMP_DIR
+      and RA.TEMP_DIR ~= ""
+      and type(reaper.RecursiveCreateDirectory) == "function") then
+    return
+  end
+  local temp_dir = tostring(RA.TEMP_DIR):gsub("[/\\]+$", "")
+  if temp_dir ~= "" then pcall(reaper.RecursiveCreateDirectory, temp_dir, 0) end
+end
+
 -- Render._factory_reset_execute
--- Shared implementation of the Factory Reset flow. Called from the
--- Settings page's ADVANCED section when the user confirms the popup.
--- Wipes every ExtState key in CFG.EXT_NS by parsing
--- reaper-extstate.ini directly -- no hand-maintained key list to fall
--- out of sync with SetExtState call sites -- then restores in-memory
--- defaults and navigates back to the TOS screen.
-function Render._factory_reset_execute()
-  -- Restore any modified theme colors before wiping state, so the user
-  -- doesn't get stuck with a modified REAPER theme and no way to revert.
-  pcall(Theme.restore_backups)
-  -- Theme backups intentionally use the public "ReaAssist" namespace so
-  -- generated one-shot scripts can cooperate with the main script. Factory
-  -- Reset still owns that data and must clear both persisted and in-session
-  -- copies after attempting the restore above.
-  pcall(Render._clear_theme_backup_extstate)
-  -- Unregister every custom provider from the in-memory PROVIDERS table.
-  pcall(Custom.unregister_all)
-  -- Gemini explicit cache: clear in-memory state, persisted ExtState
-  -- keys (gemini_cache_name/model/signature/expires), and fire server-side
-  -- DELETE.
-  pcall(Net.gemini_cache_invalidate)
-
-  -- Delete every persisted ExtState key under our private section. This wipes
-  -- API keys, feedback identity, migration sentinels, settings, and legacy
-  -- runtime state in one pass.
-  Render._delete_extstate_section(CFG.EXT_NS)
-  -- Transient session locks (persist=false -- never hit the .ini file
-  -- so the enumeration above misses them).
-  reaper.DeleteExtState(CFG.EXT_NS, "running",       false)
-  reaper.DeleteExtState(CFG.EXT_NS, "request_close", false)
-  reaper.DeleteExtState(CFG.EXT_NS, "dev_signal",    false)
-  reaper.SetExtState(CFG.EXT_NS, "factory_reset_clean_boot", "1", false)
-
-  -- Suppress writes that would otherwise repopulate the .ini/Data folder
-  -- within seconds. The transient clean-boot flag carries the same intent
-  -- across the relaunch, and is lifted only when the user accepts the TOS
-  -- or explicitly changes settings.
-  S._suppress_geometry_save  = true  -- stops periodic window geometry saves
-  S._suppress_os_theme_cache = true  -- stops detect_os_theme from re-caching
-  -- Reset every in-memory pref to its documented default. Without this,
-  -- any pref the running script later saves would re-persist its OLD
-  -- in-memory value into the just-cleared config, leaving the user with
-  -- a non-default config that "factory reset" was supposed to wipe.
-  -- Schema mirror of the prefs table at ReaAssist.lua:~2331.
-  prefs.auto_run              = false
-  prefs.auto_backup           = true
-  prefs.show_details          = false
-  prefs.custom_instructions_enabled = false
-  prefs.debug_logging         = true   -- default ON during early-release window; mirror of ReaAssist.lua prefs load site
-  prefs.include_api_ref       = false
-  prefs.include_snapshot      = true
-  prefs.update_check          = true
-  prefs.typed_actions_opt_in  = true
-  prefs.diag_auto_tier        = "basic"
-  prefs.test_force_cold_cache = false
-  prefs.cloud_request_timeout = CFG.CLOUD_TIMEOUT_DEFAULT
-  prefs.provider_idx          = 1   -- 1=Claude
-  prefs.model_idx             = 2   -- MODELS.refresh sets the real value when a provider becomes active
-  prefs.thinking_idx          = 0   -- 0 = no thinking; MODELS.refresh sets per-provider
-  prefs.ui_scale_idx          = 3   -- 100%
-  prefs.theme                 = "auto"
-  prefs.chat_font_idx         = 2   -- Medium
-  prefs.reply_language_idx    = 1   -- English
-  prefs.language_code         = "en"
-  apply_palette(PALETTES[resolve_theme("auto")])
-  S._reset_window_size = true
-  Net.clear_conversation()
-  S.api_key  = nil
-  S.api_key_map = {}
-  S.gemini_paid_tier = nil
-  api_keys.key_bufs = {}
-  api_keys.key_errors = {}
-  api_keys.key_warnings = {}
-  api_keys.key_error = nil
-  api_keys.key_error_provider = nil
-  api_keys.key_error_detail = nil
-  api_keys.key_error_hint = nil
-  api_keys.key_error_url = nil
-  api_keys.key_error_url_label = nil
-  api_keys.key_focused = false
-  api_keys.key_validating = false
-  api_keys.key_validating_idx = nil
-  api_keys.show_key_error_popup = false
-  api_keys.show_test_results = false
-  api_keys.test_results = {}
-  api_keys.custom_edit = nil
-  local factory_reset_data_dir_cleared = false
-  do
-    local function remove_family(path)
-      if not path or path == "" then return end
-      os.remove(path)
-      os.remove(path .. ".tmp")
-      os.remove(path .. ".bak")
-    end
-    local function safe_data_dir(dir)
-      if not dir or dir == "" then return false end
-      if not RA.script_path or RA.script_path == "" then return false end
-      if dir:sub(1, #RA.script_path) ~= RA.script_path then return false end
-      return dir:match("[/\\]Data[/\\]$") ~= nil
-    end
-    local function shell_path_safe(path)
-      return type(path) == "string" and path ~= "" and not path:find('"', 1, true)
-    end
-    local function ps_escape(path) return tostring(path or ""):gsub("'", "''") end
-    local function sq(path) return "'" .. tostring(path or ""):gsub("'", "'\\''") .. "'" end
-    local function remove_dir(path)
-      if not path or path == "" then return end
-      path = path:gsub("[/\\]+$", "")
-      if path == "" then return end
-      if os.remove(path) == true then return end
-      if not shell_path_safe(path) then return end
-      if RA.IS_WINDOWS then
-        if type(reaper.ExecProcess) == "function" then
-          local cmd = "powershell -NoProfile -WindowStyle Hidden"
-            .. " -Command \"Remove-Item -LiteralPath '"
-            .. ps_escape(path)
-            .. "' -Recurse -Force -ErrorAction SilentlyContinue\""
-          pcall(reaper.ExecProcess, cmd, 5000)
-        end
-      else
-        os.execute("rmdir " .. sq(path) .. " >/dev/null 2>&1")
-      end
-    end
-    local function clear_tree_contents(dir)
-      if not dir or dir == "" then return end
-      local sep = (dir:sub(-1) == "/" or dir:sub(-1) == "\\") and "" or RA.SEP
-      local files = {}
-      local idx = 0
-      while true do
-        local fn = reaper.EnumerateFiles(dir, idx)
-        if not fn then break end
-        files[#files + 1] = fn
-        idx = idx + 1
-      end
-      for _, fn in ipairs(files) do
-        os.remove(dir .. sep .. fn)
-      end
-
-      if type(reaper.EnumerateSubdirectories) ~= "function" then return end
-      local dirs = {}
-      idx = 0
-      while true do
-        local sub = reaper.EnumerateSubdirectories(dir, idx)
-        if not sub then break end
-        dirs[#dirs + 1] = sub
-        idx = idx + 1
-      end
-      for _, sub in ipairs(dirs) do
-        local child = dir .. sep .. sub
-        clear_tree_contents(child)
-        remove_dir(child)
-      end
-    end
-    if safe_data_dir(RA.DATA_DIR) then
-      clear_tree_contents(RA.DATA_DIR)
-      factory_reset_data_dir_cleared = true
-    else
-      remove_family(RA.CONFIG_PATH)
-      remove_family(RA.PROVIDERS_PATH)
-      remove_family(RA.STATE_PATH)
-      remove_family(RA.CUSTOM_INSTRUCTIONS_PATH)
-      remove_family(RA.DATA_DIR .. "FX_Cache.json")
-      remove_family(RA.DATA_DIR .. "Debug.log")
-      remove_family(RA.FX_CACHE_PATH)
-      remove_family(Log and Log.path)
-    end
-    remove_family(RA._LEGACY_FX_CACHE_PATH)
-    remove_family(RA._LEGACY_DEBUG_LOG_PATH)
-    if Store then
-      Store._config_doc = nil
-      Store._state_doc = nil
-    end
-  end
-  FXCache.invalidate()
-  api_keys.screen     = "tos"
-  api_keys.is_reentry = false
-  S.refocus_prompt = true
-  -- Auto-relaunch so the user gets a true fresh-install state. The
-  -- _suppress_* flags above are necessary mid-reset to keep the still-
-  -- running script from immediately re-saving stale geometry / theme
-  -- cache; a script restart is the cleanest way to clear them without
-  -- leaving the session in a half-functional state where window resize
-  -- is permanently suppressed. If the relauncher can't register, fall
-  -- back to a clear toast so the user knows to close-and-reopen by hand.
-  if not Updater.fire_relauncher_now() then
-    if factory_reset_data_dir_cleared
-       and RA.TEMP_DIR
-       and RA.TEMP_DIR ~= ""
-       and type(reaper.RecursiveCreateDirectory) == "function" then
-      pcall(reaper.RecursiveCreateDirectory, RA.TEMP_DIR, 0)
-    end
-    UI.show_float_toast(
-      UI.t("settings.factory_reset.complete", nil,
-        "Reset complete. Close and reopen ReaAssist to finish."), "ok", true)
-  end
+-- Visual compatibility wrapper around RA.factory_reset_execute. The shared
+-- implementation lives in ReaAssist.lua so Screen Reader Mode can reset without
+-- loading this visual UI sidecar.
+function Render._factory_reset_execute(opts)
+  return RA.factory_reset_execute(opts)
 end
 
 function Render._factory_reset_popup(ctx)
@@ -15832,6 +15715,23 @@ function Render.main_window()
     UI._popup_was_open = ImGui.ImGui_IsPopupOpen(RA.ctx, "",
       ImGui.ImGui_PopupFlags_AnyPopup())
 
+    if UI.is_hard_exit_shortcut() then
+      S.script_open = false
+      UI.a11y_announce("main_hard_exit",
+        UI.t("a11y.main.closing", nil, "Closing."),
+        { critical = true })
+      goto after_main_window
+    end
+
+    if not S._a11y_visual_warning_announced
+        and reaper.osara_outputMessage then
+      S._a11y_visual_warning_announced = true
+      UI.a11y_announce("visual_warning",
+        UI.t("a11y.screen_reader_mode.visual_warning", nil,
+          "Press Control Q to close. Use Screen Reader Mode for accessible prompts."),
+        { critical = true })
+    end
+
     -- V5 uses a flat window bg (TK.bg). The hero band paints its own gradient
     -- below the title bar, so the whole-window gradient is no longer needed.
 
@@ -17543,46 +17443,11 @@ function Render.main_window()
                   UI.t("typed_actions.undo_lua", nil,
                     "Undo and Request Lua") .. "##ta_undo_lua_" .. i,
                   0, 0) then
-                local last_user_text
-                for j = i - 1, 1, -1 do
-                  local m = S.display_messages[j]
-                  if m.role == "user" and m.content and m.content ~= "" then
-                    last_user_text = m.content
-                    break
-                  end
-                end
-                if last_user_text then
-                  reaper.Main_OnCommand(40029, 0)
-                  msg.typed_action_undo_clicked = true
-                  msg.typed_action_lua_requested = true
-                  S.refocus_prompt = true
-                  S.skip_local_answer_once = true
-                  S.suppress_user_display_once = true
-                  local lang_note = ""
-                  local reply_lang = (I18N and I18N.prompt_language_name
-                      and I18N.prompt_language_name())
-                    or (CFG.prompt_language_name_for_idx
-                      and CFG.prompt_language_name_for_idx(prefs.reply_language_idx or 1))
-                    or (CFG.REPLY_LANGUAGE_CODES
-                      and CFG.REPLY_LANGUAGE_CODES[prefs.reply_language_idx or 1])
-                    or "English"
-                  if reply_lang and reply_lang ~= "" and reply_lang ~= "English" then
-                    lang_note = "Use " .. reply_lang .. " for visible script "
-                      .. "comments, script title text, Undo_EndBlock labels, "
-                      .. "ShowMessageBox text, console/debug text, and other "
-                      .. "user-visible string literals. Keep REAPER API names, "
-                      .. "identifiers, plugin names, paths, and user-supplied "
-                      .. "filenames unchanged.\n\n"
-                  end
-                  Net.send_to_api(
-                    lang_note
-                    .. "Please give me the normal REAPER Lua/ReaScript version "
-                    .. "of this request instead of a structured edit. Return "
-                    .. "one complete runnable script inside a ```lua code "
-                    .. "fence. Do not use structured edits or typed-action "
-                    .. "JSON.\n\nOriginal request:\n" .. last_user_text)
-                else
-                  UI.show_float_toast(UI.t(
+                local ok_req, req_msg = TypedActionController
+                  and TypedActionController.request_lua_for_typed_action_message
+                  and TypedActionController.request_lua_for_typed_action_message(msg, i)
+                if not ok_req then
+                  UI.show_float_toast(req_msg or UI.t(
                     "typed_actions.no_original_prompt", nil,
                     "Could not find the original prompt"), "err")
                 end
@@ -20261,6 +20126,13 @@ function Render.main_window()
     S._quit_popup_open = false
     if ImGui.ImGui_BeginPopupModal(RA.ctx, quit_popup, true, ImGui.ImGui_WindowFlags_NoResize()) then
       S._quit_popup_open = true
+      if not S._a11y_quit_confirm_announced then
+        S._a11y_quit_confirm_announced = true
+        UI.a11y_announce("quit_confirm",
+          UI.t("a11y.quit_confirm", nil,
+            "Enter quits. Escape cancels."),
+          { critical = true })
+      end
       local qc_cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
       ImGui.ImGui_Spacing(RA.ctx)
       local qc_txt = UI.t("dialog.quit.prompt", nil, "Quit ReaAssist?")
@@ -20285,15 +20157,20 @@ function Render.main_window()
         or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Enter())
         or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_KeypadEnter()) then
         S.script_open = false
+        S._a11y_quit_confirm_announced = nil
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
       end
       UI.pop_modal_danger_btn()
       SameLine(RA.ctx, 0, qgap)
       if ImGui.ImGui_Button(RA.ctx, qcancel_label .. "##quit_cancel", qcancel_w, 0)
         or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
+        S._a11y_quit_confirm_announced = nil
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
       end
       ImGui.ImGui_EndPopup(RA.ctx)
+    end
+    if not S._quit_popup_open then
+      S._a11y_quit_confirm_announced = nil
     end
     UI.pop_modal_style()
 

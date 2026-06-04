@@ -6806,6 +6806,104 @@ function CTX.prompt_indicates_drum_edit(text)
   return false
 end
 
+CTX.TIMECODE_GENERATOR_TIME_TERMS = {
+  "%f[%w]smpte%f[%W]",
+  "%f[%w]ltc%f[%W]",
+  "%f[%w]mtc%f[%W]",
+  "time%s*code",
+  "timecode",
+  "codice%s+temporale",
+}
+
+CTX.TIMECODE_GENERATOR_READER_TERMS = {
+  "%f[%w]read%f[%W]",
+  "%f[%w]reader%f[%W]",
+  "%f[%w]meter%f[%W]",
+  "%f[%w]decode%f[%W]",
+  "%f[%w]decodes%f[%W]",
+  "%f[%w]decoding%f[%W]",
+  "%f[%w]decoder%f[%W]",
+  "%f[%w]sync",
+  "%f[%w]synchron",
+  "%f[%w]receive",
+  "%f[%w]incoming%f[%W]",
+  "%f[%w]chase%f[%W]",
+  "%f[%w]monitor",
+  "%f[%w]legg[eiou]",
+  "%f[%w]lett[oua]",
+  "%f[%w]decodific",
+  "%f[%w]misur[aeio]",
+  "%f[%w]sincron[io]",
+  "%f[%w]ricev[eiou]",
+}
+
+CTX.TIMECODE_GENERATOR_NOUN_TERMS = {
+  "%f[%w]generator%f[%W]",
+  "%f[%w]generators%f[%W]",
+  "%f[%w]generatore%f[%W]",
+  "%f[%w]generatori%f[%W]",
+  "%f[%w]source%f[%W]",
+  "%f[%w]sorgente%f[%W]",
+}
+
+CTX.TIMECODE_GENERATOR_VERB_TERMS = {
+  "%f[%w]generate%f[%W]",
+  "%f[%w]generates%f[%W]",
+  "%f[%w]generating%f[%W]",
+  "%f[%w]generare%f[%W]",
+  "%f[%w]genera%f[%W]",
+  "%f[%w]generi%f[%W]",
+}
+
+CTX.TIMECODE_GENERATOR_CREATE_TERMS = {
+  "%f[%w]add%f[%W]",
+  "%f[%w]create%f[%W]",
+  "%f[%w]insert%f[%W]",
+  "%f[%w]put%f[%W]",
+  "%f[%w]place%f[%W]",
+  "%f[%w]setup%f[%W]",
+  "set%s+up",
+  "%f[%w]inserisci%f[%W]",
+  "%f[%w]inserire%f[%W]",
+  "%f[%w]aggiungi%f[%W]",
+  "%f[%w]aggiungere%f[%W]",
+  "%f[%w]crea%f[%W]",
+  "%f[%w]creare%f[%W]",
+}
+
+function CTX.prompt_indicates_timecode_generator(text)
+  if type(text) ~= "string" or text == "" then return false end
+  local t = text:lower()
+  local has_timecode = false
+  for _, pat in ipairs(CTX.TIMECODE_GENERATOR_TIME_TERMS) do
+    if t:find(pat) then
+      has_timecode = true
+      break
+    end
+  end
+  if not has_timecode then return false end
+
+  local reader_intent = false
+  for _, pat in ipairs(CTX.TIMECODE_GENERATOR_READER_TERMS) do
+    if t:find(pat) then
+      reader_intent = true
+      break
+    end
+  end
+
+  for _, pat in ipairs(CTX.TIMECODE_GENERATOR_VERB_TERMS) do
+    if t:find(pat) then return true end
+  end
+  for _, pat in ipairs(CTX.TIMECODE_GENERATOR_NOUN_TERMS) do
+    if t:find(pat) then return not reader_intent end
+  end
+  if reader_intent then return false end
+  for _, pat in ipairs(CTX.TIMECODE_GENERATOR_CREATE_TERMS) do
+    if t:find(pat) then return true end
+  end
+  return false
+end
+
 if REQUIRE_SWS_EXTENSION and not SupportExtFlag("optoutsws") then
   -- SWS docs are advertised only when the rollout flag is enabled. The
   -- loader accepts docs:sws either way, but normal releases should not
@@ -7043,6 +7141,8 @@ function CTX.preempt_buckets_for_prompt(user_text)
   -- the model writes EEL2, not reaper.* TrackFX_AddByName, and the docs
   -- gate is the safety net if it does choose to add a Lua companion.
   local jsfx_intent = _prompt_indicates_jsfx(user_text)
+  local timecode_generator_intent =
+    CTX.prompt_indicates_timecode_generator(user_text)
   local stock_fx_constraint = CTX.prompt_has_explicit_stock_fx_constraint(user_text)
   local forbids_fx_addition =
     type(Code) == "table"
@@ -7242,7 +7342,54 @@ function CTX.preempt_buckets_for_prompt(user_text)
       end
     end
   end
+  if timecode_generator_intent then
+    local docs_already = S.api_ref_message ~= nil
+    Net.copin_docs_core(injected)
+    if not docs_already and S.api_ref_message then
+      Log.line("PREEMPT",
+        "injected docs (native timecode-generator workflow)")
+    end
+    if not S.sticky_context["docs_extended"]
+       and not S.docs_extended_already_sent then
+      S.docs_extended_already_sent = true
+      local ext_content, ext_err = CTX.docs_extended()
+      if ext_content then
+        Net.sticky_set("docs_extended", ext_content)
+        injected[#injected+1] = "docs_extended"
+        Log.line("PREEMPT",
+          "injected docs_extended (native timecode-generator workflow)")
+      else
+        Log.line("PREEMPT",
+          "wanted to inject docs_extended for native timecode generator "
+          .. "but loader failed: " .. (ext_err or "?"))
+      end
+    end
+    local section = "routing"
+    local sticky_key = "docs:" .. section
+    if not S.sticky_context[sticky_key]
+       and not S.docs_section_sent[section] then
+      local sec_content, sec_err = CTX.docs_section(section)
+      if sec_content then
+        Net.sticky_set(sticky_key, sec_content)
+        S.docs_section_sent[section] = true
+        injected[#injected+1] = sticky_key
+        Log.line("PREEMPT",
+          "injected " .. sticky_key
+          .. " (native timecode-generator output routing)")
+      else
+        Log.line("PREEMPT",
+          "wanted to inject " .. sticky_key
+          .. " for native timecode generator but loader failed: "
+          .. (sec_err or "?"))
+      end
+    end
+  end
   if forbids_fx_addition and not jsfx_intent then
+    return injected
+  end
+  if timecode_generator_intent and not jsfx_intent then
+    Log.line("PREEMPT",
+      "skipped plugin_ref/pref keyword loop (native timecode-generator workflow)")
     return injected
   end
   -- JSFX effect-family bundles (jsfx_pitch, jsfx_reverb, ...). Each match

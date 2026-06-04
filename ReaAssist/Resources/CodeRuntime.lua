@@ -619,6 +619,40 @@ function Code._typed_action_send_intent_text(user_text)
   return text
 end
 
+function Code.typed_action_user_requests_hardware_output(user_text)
+  local lt = Code._typed_action_user_request_text(user_text):lower()
+    :gsub("[%c]+", " ")
+    :gsub("%s+", " ")
+  if lt == "" then return false end
+
+  if lt:find("hardware output", 1, true)
+      or lt:find("hardware outputs", 1, true)
+      or lt:find("hardware out", 1, true)
+      or lt:find("physical output", 1, true)
+      or lt:find("physical outputs", 1, true) then
+    return true
+  end
+
+  for _, pat in ipairs({
+    "%f[%w]output%s*%d",
+    "%f[%w]outputs%s*%d",
+    "%f[%w]out%s*%d",
+    "%f[%w]outs%s*%d",
+    "%f[%w]uscita%s*%d",
+    "%f[%w]uscite%s*%d",
+    "%d%s*/%s*%d%s+output%f[%W]",
+    "%d%s*/%s*%d%s+outputs%f[%W]",
+    "%d%s*/%s*%d%s+out%f[%W]",
+    "%d%s*/%s*%d%s+outs%f[%W]",
+    "%d%s*/%s*%d%s+uscita%f[%W]",
+    "%d%s*/%s*%d%s+uscite%f[%W]",
+  }) do
+    if lt:find(pat) then return true end
+  end
+
+  return false
+end
+
 function Code.typed_action_user_requests_track_creation(user_text)
   local u = Code._typed_action_user_request_text(user_text):lower()
   local mentions_existing_targets =
@@ -1236,25 +1270,28 @@ function Code.repair_typed_actions_plan(plan, opts)
 
   local function repair_reference_state(actions)
     local refs, non_resolve = {}, false
+    local function add_ref(ref)
+      if _typed_action_is_nonempty_string(ref) then refs[ref] = true end
+    end
     for _, action in ipairs(actions) do
       if type(action) ~= "table" then return nil, nil end
       if action.op == "track.set" then
-        refs[action.track] = true
+        add_ref(action.track)
         non_resolve = true
       elseif action.op == "track.folder" then
-        refs[action.parent] = true
+        add_ref(action.parent)
         non_resolve = true
         if type(action.children) == "table" then
           for _, child in ipairs(action.children) do
-            refs[child] = true
+            add_ref(child)
           end
         end
       elseif action.op == "fx.add_stock" then
-        refs[action.track] = true
+        add_ref(action.track)
         non_resolve = true
       elseif action.op == "send.create" then
-        refs[action["from"]] = true
-        refs[action.to] = true
+        add_ref(action["from"])
+        add_ref(action.to)
         non_resolve = true
       elseif action.op and action.op ~= "track.resolve" then
         non_resolve = true
@@ -3886,6 +3923,16 @@ function Code.typed_actions_prompt_contract(user_text, opts)
       and (has_word_phrase("reaper") or has_word_phrase("lua")))
   if explicit_lua_request then
     return nil, "explicit_lua_request"
+  end
+
+  if CTX and type(CTX.prompt_indicates_timecode_generator) == "function"
+      and CTX.prompt_indicates_timecode_generator(user_text) then
+    return nil, "unsupported_timecode_generator"
+  end
+
+  if type(Code.typed_action_user_requests_hardware_output) == "function"
+      and Code.typed_action_user_requests_hardware_output(user_text) then
+    return nil, "unsupported_hardware_output"
   end
 
   local has_pan_lfo =
@@ -6727,6 +6774,377 @@ function Code.find_untracked_createtracksend_results(lua_code)
     return tostring(a.source) < tostring(b.source)
   end)
   return violations
+end
+
+function Code.find_hardware_send_category_misuse(lua_code)
+  if not lua_code or lua_code == "" then return nil end
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+
+  local function trim(v)
+    return tostring(v or ""):match("^%s*(.-)%s*$") or ""
+  end
+
+  local function normalize_arg(v)
+    return trim(v):gsub("%s+", "")
+  end
+
+  local function parse_args(open_pos)
+    local args, field = {}, {}
+    local depth = 1
+    local i = open_pos + 1
+    local in_str = nil
+    while i <= #stripped do
+      local c = stripped:sub(i, i)
+      if in_str then
+        field[#field + 1] = c
+        if c == "\\" then
+          i = i + 1
+          if i <= #stripped then field[#field + 1] = stripped:sub(i, i) end
+        elseif c == in_str then
+          in_str = nil
+        end
+      else
+        if c == '"' or c == "'" then
+          in_str = c
+          field[#field + 1] = c
+        elseif c == "(" or c == "[" or c == "{" then
+          depth = depth + 1
+          field[#field + 1] = c
+        elseif c == ")" or c == "]" or c == "}" then
+          depth = depth - 1
+          if depth == 0 then
+            args[#args + 1] = trim(table.concat(field))
+            return args
+          end
+          field[#field + 1] = c
+        elseif c == "," and depth == 1 then
+          args[#args + 1] = trim(table.concat(field))
+          field = {}
+        else
+          field[#field + 1] = c
+        end
+      end
+      i = i + 1
+    end
+    return nil
+  end
+
+  local hardware_send_vars = {}
+  local pos = 1
+  while true do
+    local s, open_pos = stripped:find("reaper%.CreateTrackSend%s*%(", pos)
+    if not s then break end
+    local line_start = stripped:sub(1, s):match(".*()\n")
+    line_start = line_start and (line_start + 1) or 1
+    local prefix = stripped:sub(line_start, s - 1)
+    local args = parse_args(open_pos)
+    local lhs = prefix:match("^%s*local%s+(.+)%s*=%s*$")
+      or prefix:match("^%s*(.-)%s*=%s*$")
+    if args and args[1] and normalize_arg(args[2]):lower() == "nil" then
+      local var = lhs and lhs:match("^%s*([%a_][%w_]*)%s*$")
+      if var then
+        hardware_send_vars[var] = {
+          source = normalize_arg(args[1]),
+          raw_source = args[1],
+          create_line = line_for_pos(s),
+        }
+      end
+    end
+    pos = open_pos + 1
+  end
+
+  local findings, seen = {}, {}
+  pos = 1
+  while true do
+    local s, open_pos = stripped:find("reaper%.SetTrackSendInfo_Value%s*%(", pos)
+    if not s then break end
+    local args = parse_args(open_pos)
+    local category = args and normalize_arg(args[2]) or ""
+    local sendidx = args and normalize_arg(args[3]) or ""
+    local hw = hardware_send_vars[sendidx]
+    if category == "0" and hw then
+      local key = sendidx
+      if not seen[key] then
+        seen[key] = true
+        findings[#findings + 1] = {
+          kind = "hardware_category",
+          source = hw.raw_source,
+          sendidx = sendidx,
+          create_line = hw.create_line,
+          set_line = line_for_pos(s),
+        }
+      end
+    end
+    pos = open_pos + 1
+  end
+
+  if #findings == 0 then return nil end
+  return findings
+end
+
+function Code.find_timecode_generator_workflow_misuse(lua_code, user_prompt)
+  if not lua_code or lua_code == "" then return nil end
+  if not (CTX and type(CTX.prompt_indicates_timecode_generator) == "function"
+      and CTX.prompt_indicates_timecode_generator(user_prompt)) then
+    return nil
+  end
+
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+
+  local function trim(v)
+    return tostring(v or ""):match("^%s*(.-)%s*$") or ""
+  end
+
+  local function normalize_arg(v)
+    return trim(v):gsub("%s+", "")
+  end
+
+  local function parse_args(open_pos)
+    local args, field = {}, {}
+    local depth = 1
+    local i = open_pos + 1
+    local in_str = nil
+    while i <= #stripped do
+      local c = stripped:sub(i, i)
+      if in_str then
+        field[#field + 1] = c
+        if c == "\\" then
+          i = i + 1
+          if i <= #stripped then field[#field + 1] = stripped:sub(i, i) end
+        elseif c == in_str then
+          in_str = nil
+        end
+      else
+        if c == '"' or c == "'" then
+          in_str = c
+          field[#field + 1] = c
+        elseif c == "(" or c == "[" or c == "{" then
+          depth = depth + 1
+          field[#field + 1] = c
+        elseif c == ")" or c == "]" or c == "}" then
+          depth = depth - 1
+          if depth == 0 then
+            args[#args + 1] = trim(table.concat(field))
+            return args
+          end
+          field[#field + 1] = c
+        elseif c == "," and depth == 1 then
+          args[#args + 1] = trim(table.concat(field))
+          field = {}
+        else
+          field[#field + 1] = c
+        end
+      end
+      i = i + 1
+    end
+    return nil
+  end
+
+  local function action_lookup_words(condition)
+    condition = tostring(condition or ""):lower()
+    return {
+      generator = condition:find("generator", 1, true) ~= nil,
+      timecode = condition:find("timecode", 1, true) ~= nil
+        or condition:find("time code", 1, true) ~= nil,
+      smpte = condition:find("smpte", 1, true) ~= nil,
+      ltc = condition:find("%f[%w]ltc%f[%W]") ~= nil,
+      mtc = condition:find("%f[%w]mtc%f[%W]") ~= nil,
+      has_or = condition:find("%f[%w]or%f[%W]") ~= nil,
+    }
+  end
+
+  local function has_broad_action_lookup_condition()
+    local pos = 1
+    while true do
+      local s, e, cond = stripped:find("%f[%w]if%s+(.-)%s+then%f[%W]", pos)
+      if not s then break end
+      local words = action_lookup_words(cond)
+      if words.generator then
+        if words.timecode and not (words.smpte or words.ltc or words.mtc) then
+          return true
+        end
+        if words.smpte and not (words.timecode or words.ltc or words.mtc) then
+          return true
+        end
+        if words.ltc and not (words.timecode or words.smpte or words.mtc) then
+          return true
+        end
+        if words.mtc and not (words.timecode or words.smpte or words.ltc) then
+          return true
+        end
+      end
+      pos = e + 1
+    end
+
+    local compact = stripped:lower():gsub("%s+", "")
+    for _, pair in ipairs({
+      { "timecode", "generator" },
+      { "generator", "timecode" },
+      { "smpte", "generator" },
+      { "generator", "smpte" },
+      { "ltc", "generator" },
+      { "generator", "ltc" },
+      { "mtc", "generator" },
+      { "generator", "mtc" },
+    }) do
+      local a, b = pair[1], pair[2]
+      if compact:find('{"' .. a .. '","' .. b .. '"', 1, true)
+          or compact:find("{'" .. a .. "','" .. b .. "'", 1, true) then
+        return true
+      end
+    end
+
+    return false
+  end
+
+  local function overconstrained_action_lookup()
+    if not stripped:find("reaper%.kbd_enumerateActions%s*%(") then
+      return nil
+    end
+
+    local has_broad_lookup = has_broad_action_lookup_condition()
+    local first_strict = nil
+    local pos = 1
+    while true do
+      local s, e, cond = stripped:find("%f[%w]if%s+(.-)%s+then%f[%W]", pos)
+      if not s then break end
+      local words = action_lookup_words(cond)
+      local requires_specific_family =
+        (words.smpte or words.ltc or words.mtc) and words.timecode
+      if words.generator and requires_specific_family and not words.has_or then
+        first_strict = first_strict or s
+      end
+      pos = e + 1
+    end
+
+    if first_strict and not has_broad_lookup then
+      return {
+        kind = "overconstrained_action_lookup",
+        line = line_for_pos(first_strict),
+      }
+    end
+    return nil
+  end
+
+  local function has_generated_item_track_detection(after_pos)
+    local tail = stripped:sub(after_pos or 1)
+    if tail:find("reaper%.GetMediaItemTrack%s*%(")
+        or tail:find("reaper%.GetMediaItem_Track%s*%(") then
+      return true
+    end
+    return false
+  end
+
+  local function has_generated_item_move(after_pos)
+    local tail = stripped:sub(after_pos or 1)
+    return tail:find("reaper%.MoveMediaItemToTrack%s*%(") ~= nil
+  end
+
+  local findings = {}
+  local lookup_bad = overconstrained_action_lookup()
+  if lookup_bad then findings[#findings + 1] = lookup_bad end
+  local first_action = nil
+  local action_pos = 1
+  while true do
+    local s, open_pos = stripped:find("reaper%.Main_OnCommand%s*%(", action_pos)
+    if not s then break end
+    local args = parse_args(open_pos)
+    if normalize_arg(args and args[1]) ~= "40297" then
+      first_action = s
+      break
+    end
+    action_pos = open_pos + 1
+  end
+  local first_hw_send = nil
+  local send_pos = 1
+  while true do
+    local s, open_pos = stripped:find("reaper%.CreateTrackSend%s*%(", send_pos)
+    if not s then break end
+    local args = parse_args(open_pos)
+    if normalize_arg(args and args[2]):lower() == "nil" then
+      first_hw_send = s
+      break
+    end
+    send_pos = open_pos + 1
+  end
+  if first_action
+      and stripped:find("reaper%.InsertTrackAtIndex%s*%(")
+      and type(Code.lua_satisfies_exclusive_track_selection) == "function"
+      and not Code.lua_satisfies_exclusive_track_selection(lua_code) then
+    findings[#findings + 1] = {
+      kind = "missing_exclusive_selection",
+      line = line_for_pos(first_action),
+    }
+  end
+  if first_action and first_hw_send and first_hw_send < first_action then
+    findings[#findings + 1] = {
+      kind = "route_before_action",
+      line = line_for_pos(first_hw_send),
+    }
+  end
+  local first_insert = first_action
+    and stripped:find("reaper%.InsertTrackAtIndex%s*%(") or nil
+  local precreated_track = first_insert and first_insert < first_action
+  if precreated_track then
+    findings[#findings + 1] = {
+      kind = "precreated_track_before_timecode_action",
+      line = line_for_pos(first_insert),
+    }
+  end
+  if first_action and first_hw_send and first_hw_send > first_action then
+    local detects_item_track = has_generated_item_track_detection(first_action)
+    local moves_item = has_generated_item_move(first_action)
+    if precreated_track then
+      if not (detects_item_track or moves_item) then
+        findings[#findings + 1] = {
+          kind = "missing_generated_item_track_detection",
+          line = line_for_pos(first_hw_send),
+        }
+      elseif not moves_item then
+        findings[#findings + 1] = {
+          kind = "precreated_track_without_item_move",
+          line = line_for_pos(first_hw_send),
+        }
+      end
+    elseif not detects_item_track then
+      findings[#findings + 1] = {
+        kind = "missing_generated_item_track_detection",
+        line = line_for_pos(first_hw_send),
+      }
+    end
+  end
+
+  local category_bad = Code.find_hardware_send_category_misuse(lua_code)
+  if category_bad then
+    for _, finding in ipairs(category_bad) do
+      findings[#findings + 1] = finding
+    end
+  end
+
+  if #findings == 0 then return nil end
+  table.sort(findings, function(a, b)
+    local la = a.line or a.set_line or a.create_line or 0
+    local lb = b.line or b.set_line or b.create_line or 0
+    if la ~= lb then return la < lb end
+    return tostring(a.kind) < tostring(b.kind)
+  end)
+  return findings
 end
 
 -- =============================================================================
@@ -9644,6 +10062,146 @@ function Code.find_stock_fx_substitutions(lua_code, user_prompt)
     return tostring(a.substitute) < tostring(b.substitute)
   end)
   return violations
+end
+
+-- =============================================================================
+-- Code.find_timecode_generator_fx_misuse
+-- =============================================================================
+-- SMPTE/LTC/MTC generation is a native REAPER action/item workflow, not a
+-- plugin family. Catch scripts that try to satisfy generator requests by
+-- loading timecode-looking FX names, while leaving legitimate reader/meter
+-- prompts alone.
+function Code.find_timecode_generator_fx_misuse(lua_code, user_prompt)
+  if not lua_code or lua_code == "" then return nil end
+  if not (CTX and CTX.prompt_indicates_timecode_generator
+      and CTX.prompt_indicates_timecode_generator(user_prompt)) then
+    return nil
+  end
+  local stripped = lua_code:gsub("%-%-%[%[.-%]%]", "")
+  stripped = stripped:gsub("%-%-[^\n]*", "")
+
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+
+  local function parse_args(open_pos)
+    local args, field = {}, {}
+    local depth = 1
+    local i = open_pos + 1
+    local in_str = nil
+    while i <= #stripped do
+      local c = stripped:sub(i, i)
+      if in_str then
+        field[#field + 1] = c
+        if c == "\\" then
+          i = i + 1
+          if i <= #stripped then field[#field + 1] = stripped:sub(i, i) end
+        elseif c == in_str then
+          in_str = nil
+        end
+      else
+        if c == '"' or c == "'" then
+          in_str = c
+          field[#field + 1] = c
+        elseif c == "(" or c == "[" or c == "{" then
+          depth = depth + 1
+          field[#field + 1] = c
+        elseif c == ")" or c == "]" or c == "}" then
+          depth = depth - 1
+          if depth == 0 then
+            args[#args + 1] = table.concat(field):match("^%s*(.-)%s*$") or ""
+            return args
+          end
+          field[#field + 1] = c
+        elseif c == "," and depth == 1 then
+          args[#args + 1] = table.concat(field):match("^%s*(.-)%s*$") or ""
+          field = {}
+        else
+          field[#field + 1] = c
+        end
+      end
+      i = i + 1
+    end
+    return nil
+  end
+
+  local function string_literal_value(v)
+    v = tostring(v or ""):match("^%s*(.-)%s*$") or ""
+    local q = v:sub(1, 1)
+    if q ~= '"' and q ~= "'" then return nil end
+    local out = {}
+    local i = 2
+    while i <= #v do
+      local c = v:sub(i, i)
+      if c == "\\" then
+        i = i + 1
+        if i <= #v then out[#out + 1] = v:sub(i, i) end
+      elseif c == q then
+        return table.concat(out)
+      else
+        out[#out + 1] = c
+      end
+      i = i + 1
+    end
+    return nil
+  end
+
+  local string_vars = {}
+  for name, expr in stripped:gmatch("local%s+([%a_][%w_]*)%s*=%s*([\"'][^\n]-[\"'])") do
+    local value = string_literal_value(expr)
+    if value and value ~= "" then string_vars[name] = value end
+  end
+
+  local function plugin_looks_like_timecode_fx(plugin)
+    local p = tostring(plugin or ""):lower()
+    if p:find("%f[%w]smpte%f[%W]") then return true end
+    if p:find("%f[%w]ltc%f[%W]") then return true end
+    if p:find("%f[%w]mtc%f[%W]") then return true end
+    if p:find("timecode", 1, true) then return true end
+    if p:find("time code", 1, true) then return true end
+    if p:find("ltc%-generator") then return true end
+    if p:find("reader/generator", 1, true) then return true end
+    return false
+  end
+
+  local findings, seen = {}, {}
+  for _, fn in ipairs({ "TrackFX_AddByName", "TakeFX_AddByName" }) do
+    local pos = 1
+    while true do
+      local s, open_pos = stripped:find("reaper%." .. fn .. "%s*%(", pos)
+      if not s then break end
+      local args = parse_args(open_pos)
+      local plugin = args and string_literal_value(args[2])
+      if (not plugin or plugin == "") and args then
+        local var_name = tostring(args[2] or ""):match("^%s*([%a_][%w_]*)%s*$")
+        if var_name then plugin = string_vars[var_name] end
+      end
+      if plugin and plugin_looks_like_timecode_fx(plugin) then
+        local line = line_for_pos(s)
+        local key = fn .. ":" .. plugin:lower() .. ":" .. tostring(line)
+        if not seen[key] then
+          seen[key] = true
+          findings[#findings + 1] = {
+            line = line,
+            fn = fn,
+            plugin = plugin,
+            reason = "timecode_generator_as_fx",
+          }
+        end
+      end
+      pos = open_pos + 1
+    end
+  end
+
+  if #findings == 0 then return nil end
+  table.sort(findings, function(a, b)
+    if a.line ~= b.line then return a.line < b.line end
+    if a.fn ~= b.fn then return a.fn < b.fn end
+    return tostring(a.plugin) < tostring(b.plugin)
+  end)
+  return findings
 end
 
 -- =============================================================================
@@ -12726,7 +13284,7 @@ function Code.typed_actions_display_text(plan_text, action_results)
       local r = results[tostring(action.op) .. "|" .. tostring(action.id)]
       local name = display_track_name((r and r.name) or action.name, action)
         or tostring(action.id)
-      if r and r.created == true then
+      if action.op == "track.create" or (r and r.created == true) then
         created_tracks[#created_tracks + 1] = name
       elseif r and r.created == false then
         existing_tracks[#existing_tracks + 1] = name

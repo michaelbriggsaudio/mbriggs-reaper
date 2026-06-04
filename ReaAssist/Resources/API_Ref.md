@@ -1016,6 +1016,68 @@ Dynamic Split / transient-detection actions found by action-list text. Do not
 substitute a simple Lua energy-threshold detector unless the user explicitly
 asks for a custom approximation; it tends to add markers on decays and bleed.
 
+### SMPTE/LTC/MTC TIMECODE GENERATOR
+
+SMPTE/LTC/MTC timecode generation is native REAPER action/item work, not an FX
+plugin or synth. Do not call `TrackFX_AddByName` / `TakeFX_AddByName` for names
+like "SMPTE LTC Reader/Generator", "JS: ltc-generator", or "timecode
+generator". Use action-list lookup instead of guessing a numeric action ID.
+Do not require `timecode`, `generator`, and `smpte`/`ltc`/`mtc` all in one
+action-name match; REAPER action text varies. Use broad fallback pairs.
+
+```lua
+local function find_main_action_by_words(required)
+  local section = reaper.SectionFromUniqueID(0)
+  for i = 0, 100000 do
+    local cmd, action_name = reaper.kbd_enumerateActions(section, i)
+    if not cmd or cmd == 0 then break end
+    local text = (reaper.kbd_getTextFromCmd(cmd, section) or action_name or ""):lower()
+    local ok = true
+    for _, word in ipairs(required) do
+      if not text:find(word, 1, true) then
+        ok = false
+        break
+      end
+    end
+    if ok then return cmd, text end
+  end
+  return 0, nil
+end
+
+local cmd = find_main_action_by_words({ "timecode", "generator" })
+if cmd == 0 then cmd = find_main_action_by_words({ "smpte", "generator" }) end
+if cmd == 0 then cmd = find_main_action_by_words({ "ltc", "generator" }) end
+if cmd == 0 then cmd = find_main_action_by_words({ "mtc", "generator" }) end
+if cmd ~= 0 then
+  -- Do not create a helper target track first for standalone insert requests.
+  -- Let the native action create/choose the generator item track, then detect,
+  -- rename, and route that actual track.
+  reaper.Main_OnCommand(cmd, 0)
+else
+  reaper.ShowMessageBox("Could not find REAPER's timecode generator action.",
+    "ReaAssist", 0)
+end
+```
+
+If the user asks for only outputs/channels 3+4, action insertion alone is not
+enough. Route the generator track explicitly. Request/use `docs:routing` for
+the hardware-send pattern: `CreateTrackSend(track, nil)`, verify the returned
+send index is `>= 0`, then set send attributes with category `1` because this
+is a hardware output, not a normal track send. Use `I_SRCCHAN = 0`,
+`I_DSTCHAN = 2` for stereo hardware outputs 3+4, and disable `B_MAINSEND` when
+the request excludes the master/main outputs. Setting `I_NCHAN = 4` only
+changes internal track channels; it does not send audio to hardware outputs
+3/4. Do not route or pre-create a helper target track before running the
+timecode action for a standalone insert request; the native action can create or
+choose a separate generator item track, leaving the helper blank. After running
+the action, detect the actual track containing the generated timecode item (for
+example with `GetSelectedMediaItem` followed by `GetMediaItemTrack` or
+`GetMediaItem_Track`, or a before/after item-count fallback that still resolves
+the new MediaItem with one of those calls), optionally rename that track, and
+route that same track. Do not identify the item by source filename, and do not
+fall back to a pre-created track if detection fails; show an error and return
+before routing.
+
 ### DRUM EDIT / QUANTIZE WORKFLOW
 
 Drum timing edits are phase-critical. For multi-mic drums, derive timing from
@@ -1691,6 +1753,9 @@ end)
   Create a send to desttrIn (nil=hardware output). Returns new send index.
   The first valid send index is 0. Only -1 means failure; do not treat 0 as
   false/failure when setting send attributes.
+  If `desttrIn` is nil, the created send is a hardware output. Use category
+  `1` in `SetTrackSendInfo_Value` / `GetTrackSendInfo_Value` for that returned
+  index. Category `0` is only for normal track-to-track sends.
 
 `boolean reaper.RemoveTrackSend(MediaTrack tr, integer category, integer sendidx)`
   Remove send (0), receive (-1), or hardware output (1).
@@ -1746,6 +1811,13 @@ if not src or not dst then return end
 local sidx = reaper.CreateTrackSend(src, dst)
 reaper.SetTrackSendInfo_Value(src, 0, sidx, "I_SRCCHAN", 0)    -- stereo from ch1+2
 reaper.SetTrackSendInfo_Value(src, 0, sidx, "I_DSTCHAN", 2)    -- to ch3+4 on dest
+
+-- Pattern: send selected track directly to hardware outputs 3+4
+local hwidx = reaper.CreateTrackSend(src, nil)
+if hwidx < 0 then return end
+reaper.SetTrackSendInfo_Value(src, 1, hwidx, "I_SRCCHAN", 0)   -- stereo from ch1+2
+reaper.SetTrackSendInfo_Value(src, 1, hwidx, "I_DSTCHAN", 2)   -- hardware outs 3+4
+reaper.SetMediaTrackInfo_Value(src, "B_MAINSEND", 0)           -- no master/main
 ```
 <!-- /SECTION:routing -->
 

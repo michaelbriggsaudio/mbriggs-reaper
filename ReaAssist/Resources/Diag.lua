@@ -684,6 +684,13 @@ local function _turn_to_table(msg, redact_content)
     if msg.generated_code ~= nil or msg.code_block then
       t.generated_code = _turn_generated_code(msg, redact_content)
     end
+    if msg.typed_action_summary ~= nil then
+      local typed_action_summary = tostring(msg.typed_action_summary or "")
+      if typed_action_summary ~= "" then
+        t.typed_action_summary = redact_content
+          and Diag.redact(typed_action_summary) or typed_action_summary
+      end
+    end
     if msg.local_answer  ~= nil then t.local_answer  = msg.local_answer end
     if msg.local_answer_available ~= nil then
       t.local_answer_available = msg.local_answer_available

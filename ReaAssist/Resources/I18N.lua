@@ -86,6 +86,17 @@ I18N.catalogs = {
         "Michael Briggs is an award-winning audio engineer and producer based in Denton, Texas, available for production, mixing, recording, and mastering. He has worked with over 400 artists on more than 3,000 songs across just about every genre. Voted Best Producer and Best Audio Engineer in North Texas.",
       ["credits.about.reaassist"] =
         "ReaAssist was designed to give you modern tools that aid the technical side of your productions and improve your workflow. This is purely a workflow assistant and is not designed or intended to be used for any type of generative creative content.",
+      ["credits.section.dependencies"] = "DEPENDENCIES",
+      ["credits.dependency.sws"] =
+        "SWS/S&M Extension by Tim Payne, Jeffos, and contributors.",
+      ["credits.dependency.js_reascriptapi"] =
+        "js_ReaScriptAPI by Julian Sader.",
+      ["credits.dependency.reaimgui"] =
+        "ReaImGui by Christian Fillion (cfillion).",
+      ["credits.dependency.osara"] =
+        "OSARA by James Teh and contributors.",
+      ["credits.dependency.reagirl"] =
+        "ReaGirl by Meo-Ada Mespotine.",
       ["credits.section.links"] = "LINKS",
       ["credits.link.production"] = "Production / mixing / recording site",
       ["credits.link.mastering"] = "Mastering site",
@@ -101,6 +112,7 @@ I18N.catalogs = {
       ["context.copy_selection"] = "Copy Selection",
       ["context.copy_all"] = "Copy All",
       ["context.copy_table"] = "Copy Table",
+      ["help.title"] = "Help",
       ["help.subtitle"] = "Guide, shortcuts, and usage tips.",
       ["help.breadcrumb"] = "HELP · v{version}",
       ["help.nav.manual"] = "Read Online Manual",
@@ -146,6 +158,10 @@ I18N.catalogs = {
       ["help.need.symptom"] =
         "Tell ReaAssist exactly what happened: wrong track, wrong plugin, script error, no visible change, or unexpected result.",
       ["help.need.error"] = "Include the error text if REAPER shows one.",
+      ["help.need.close"] =
+        "If ReaAssist ever traps focus, press F4 or Ctrl+Q to close it. On Windows, Alt+F4 also closes the window.",
+      ["help.need.screen_reader"] =
+        "Screen reader users can run the REAPER action ReaAssist_Screen_Reader_Mode.lua for the native text-first workflow.",
       ["help.need.feedback"] =
         "Use Feedback & Report a Bug above for bugs that need maintainer attention.",
       ["help.need.manual"] =
@@ -478,6 +494,62 @@ I18N.catalogs = {
       ["feedback.status.sending"] = "Sending...",
       ["feedback.status.send_failed"] = "Send failed: {error}",
       ["feedback.toast.sent"] = "Feedback sent. Thanks!",
+      ["a11y.sr.feedback_title"] = "Response Feedback",
+      ["a11y.sr.feedback_title.meaning"] =
+        "Accessible feedback for the latest ReaAssist response.",
+      ["a11y.sr.feedback_unavailable"] =
+        "Feedback is not available in this build.",
+      ["a11y.sr.feedback_no_response"] =
+        "There is no response to send feedback about.",
+      ["a11y.sr.feedback_prompt.meaning"] =
+        "Feedback controls for the latest ReaAssist response.",
+      ["a11y.sr.feedback_helpful.meaning"] =
+        "Opens accessible feedback for this response with Helpful selected.",
+      ["a11y.sr.feedback_not_helpful.meaning"] =
+        "Opens accessible feedback for this response with Not helpful selected.",
+      ["a11y.sr.feedback_opened"] =
+        "Feedback opened. Review the details, then send when ready.",
+      ["a11y.sr.feedback_sentiment_none"] = "No rating selected",
+      ["a11y.sr.feedback_sentiment_changed"] =
+        "Feedback rating changed to {sentiment}.",
+      ["a11y.sr.feedback_reason_changed"] =
+        "Feedback reason updated.",
+      ["a11y.sr.feedback_summary"] =
+        "Feedback for the latest response. Selected rating: {sentiment}.",
+      ["a11y.sr.feedback_summary.meaning"] =
+        "Current feedback rating and target response.",
+      ["a11y.sr.feedback_helpful_select.meaning"] =
+        "Marks this response as helpful.",
+      ["a11y.sr.feedback_not_helpful_select.meaning"] =
+        "Marks this response as not helpful.",
+      ["a11y.sr.feedback_what_wrong.meaning"] =
+        "Optional reasons for a not helpful response.",
+      ["a11y.sr.feedback_wrong_result.meaning"] =
+        "Adds the wrong result reason to the feedback.",
+      ["a11y.sr.feedback_wrong_plugin.meaning"] =
+        "Adds the wrong plugin reason to the feedback.",
+      ["a11y.sr.feedback_didnt_follow.meaning"] =
+        "Adds the did not follow request reason to the feedback.",
+      ["a11y.sr.feedback_too_slow.meaning"] =
+        "Adds the too slow reason to the feedback.",
+      ["a11y.sr.feedback_comment_preview"] = "Comment: {text}",
+      ["a11y.sr.feedback_comment_preview.meaning"] =
+        "Preview of the optional feedback comment.",
+      ["a11y.sr.feedback_comment_empty"] = "empty",
+      ["a11y.sr.feedback_edit_comment"] = "Comment",
+      ["a11y.sr.feedback_edit_comment.meaning"] =
+        "Opens a text entry popup for optional feedback details.",
+      ["a11y.sr.feedback_comment_dialog_title"] = "Response Feedback",
+      ["a11y.sr.feedback_comment_dialog_caption"] = "Feedback comment",
+      ["a11y.sr.feedback_comment_updated"] =
+        "Feedback comment updated.",
+      ["a11y.sr.feedback_comment_cancelled"] =
+        "Feedback comment unchanged.",
+      ["a11y.sr.feedback_comment_dialog_unavailable"] =
+        "Feedback comment dialog is not available.",
+      ["a11y.sr.feedback_send"] = "Send Feedback",
+      ["a11y.sr.feedback_send.meaning"] =
+        "Sends this feedback to the ReaAssist maintainer.",
       ["bug_report.subtitle"] = "Send feedback or report an issue.",
       ["bug_report.breadcrumb"] = "FEEDBACK · v{version}",
       ["bug_report.intro"] =
@@ -510,6 +582,7 @@ I18N.catalogs = {
       ["bug_report.status.send_failed"] = "Send failed: {error}",
       ["bug_report.toast.sent"] = "Bug report sent. Thanks!",
       ["bug_report.preview"] = "Preview report",
+      ["bug_report.send"] = "Send Report",
       ["bug_report.privacy"] = "Details & privacy",
       ["bug_report.panel.included"] = "What's included",
       ["bug_report.panel.included.diagnostic"] =
@@ -716,7 +789,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["code.project_not_saved"] = "Project not saved",
       ["code.risky.run_will_confirm"] =
         "Run will ask for confirmation",
-      ["jsfx.add_selected"] = "Add To Selected Track(s)",
+      ["jsfx.add_selected"] = "Add JSFX to Selected Track(s)",
       ["jsfx.add.tooltip"] = "Save JSFX and add it to all selected tracks",
       ["jsfx.undo.tooltip"] = "Undo adding the JSFX to tracks (Ctrl+Z)",
       ["jsfx.copy.tooltip"] = "Copy JSFX code to clipboard",
@@ -800,6 +873,1608 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Install failed: {error}",
       ["dialog.quit.title"] = "Quit ReaAssist",
       ["dialog.quit.prompt"] = "Quit ReaAssist?",
+      ["a11y.screen_reader_mode.visual_warning"] =
+        "ReaAssist opened. This visual interface is not fully screen-reader accessible yet. Press Control Q to close.",
+      ["a11y.main.closing"] = "Closing ReaAssist.",
+      ["a11y.quit_confirm"] =
+        "Quit ReaAssist? Press Enter to quit, Escape to cancel.",
+      ["a11y.sr.title"] = "ReaAssist Screen Reader Mode",
+      ["a11y.sr.tos_prompt"] =
+        "Before using ReaAssist, you must accept the Terms of Use. Choose Yes to agree and continue, or No to close.",
+      ["a11y.sr.tos_title.meaning"] =
+        "Accessible Terms of Use screen for ReaAssist.",
+      ["a11y.sr.tos_intro"] =
+        "Read the Terms of Use. Choose I Agree to continue, or Close to exit.",
+      ["a11y.sr.tos_intro.meaning"] =
+        "Instructions for accepting or declining the Terms of Use.",
+      ["a11y.sr.tos_accept.meaning"] =
+        "Accepts the Terms of Use and opens ReaAssist Screen Reader Mode.",
+      ["a11y.sr.tos_close.meaning"] =
+        "Closes ReaAssist without accepting the Terms of Use.",
+      ["a11y.sr.tos_body.meaning"] = "Terms of Use text.",
+      ["a11y.sr.tos_opened"] =
+        "Terms of Use opened. Choose I Agree to continue, or Close to exit.",
+      ["a11y.sr.tos_accepted"] = "Terms accepted.",
+      ["a11y.sr.tos_declined"] =
+        "Terms were not accepted. Closing ReaAssist Screen Reader Mode.",
+      ["a11y.sr.copy_terms"] = "Copy Terms",
+      ["a11y.sr.copy_terms.meaning"] =
+        "Copies the Terms of Use text to the clipboard.",
+      ["a11y.sr.terms_copied"] = "Terms copied to clipboard.",
+      ["a11y.sr.tos_status"] = "Terms are waiting for your choice.",
+      ["a11y.sr.tos_status.meaning"] =
+        "Current Terms screen status.",
+      ["a11y.sr.empty_prompt"] =
+        "No prompt was entered. Type a prompt before sending.",
+      ["a11y.sr.sending"] = "Sending request.",
+      ["a11y.sr.response_ready"] = "Response received.",
+      ["a11y.sr.no_response"] =
+        "ReaAssist finished, but no readable response was found. Check the ReaAssist debug log or try again.",
+      ["a11y.sr.response_no_prose_has_code"] =
+        "This response contains generated code but no separate prose response. Use Read or Save Code to review the generated code.",
+      ["a11y.sr.response_no_prose_has_action_plan"] =
+        "This response contains edit details but no separate prose response. Use Review Edit Details to review them, or Undo and Request Lua to get a reusable script.",
+      ["a11y.sr.response_no_prose_open_code"] =
+        "This response contains generated code but no separate prose response. Opening generated code.",
+      ["a11y.sr.opened"] =
+        "ReaAssist Screen Reader Mode opened. Press F2 for a new prompt, F1 for shortcuts, or Tab to move through controls.",
+      ["a11y.sr.waiting"] = "Waiting for response.",
+      ["a11y.sr.thinking_title"] = "Thinking",
+      ["a11y.sr.thinking_title.meaning"] =
+        "Waiting screen while ReaAssist is generating a response.",
+      ["a11y.sr.thinking_wait"] =
+        "Thinking. Please wait. Responses can take up to a minute.",
+      ["a11y.sr.thinking_wait.meaning"] =
+        "Tells the user that ReaAssist is waiting for the model response.",
+      ["a11y.sr.request_still_working"] =
+        "Still working, {seconds} seconds.",
+      ["a11y.sr.on"] = "on",
+      ["a11y.sr.off"] = "off",
+      ["a11y.sr.request_label"] = "Request",
+      ["a11y.sr.edit_prompt"] = "Edit Prompt",
+      ["a11y.sr.edit_prompt_title"] = "Edit Prompt",
+      ["a11y.sr.prompt_field"] = "Prompt",
+      ["a11y.sr.prompt_empty_preview"] =
+        "Prompt: no prompt entered. Type in the Prompt field to enter a request.",
+      ["a11y.sr.prompt_preview"] = "Prompt: {prompt}",
+      ["a11y.sr.copy_response"] = "Copy Response",
+      ["a11y.sr.read_code"] = "Read or Save Code",
+      ["a11y.sr.read_jsfx"] = "Read or Save JSFX",
+      ["a11y.sr.read_action_plan"] = "Review Edit Details",
+      ["a11y.sr.undo_edit"] = "Undo Edit",
+      ["a11y.sr.undo_run"] = "Undo Run",
+      ["a11y.sr.undo_jsfx"] = "Undo JSFX Add",
+      ["a11y.sr.copy_code"] = "Copy Code",
+      ["a11y.sr.copy_jsfx"] = "Copy JSFX",
+      ["a11y.sr.copy_action_plan"] = "Copy Edit Details",
+      ["a11y.sr.save_code"] = "Save Code",
+      ["a11y.sr.save_jsfx"] = "Save JSFX",
+      ["a11y.sr.save_action_plan"] = "Save Edit Details",
+      ["a11y.sr.auto_run"] = "Auto-run generated actions",
+      ["a11y.sr.auto_backup"] = "Auto-backup session",
+      ["a11y.sr.settings"] = "Settings",
+      ["a11y.sr.response_title"] = "ReaAssist Response",
+      ["a11y.sr.code_title"] = "ReaAssist {type}",
+      ["a11y.sr.generated_code"] = "generated code",
+      ["a11y.sr.response_placeholder"] =
+        "Assistant responses will appear here after you send a request.",
+      ["a11y.sr.reader_panel"] =
+        "Screen Reader: Use Tab and Shift Tab to move through controls. Press F1 for shortcuts.",
+      ["a11y.sr.close_hint"] =
+        "Press F4, Control Q, Alt F4, Escape twice, or the Close button to close.",
+      ["a11y.sr.escape_again"] =
+        "Press Escape again to close Screen Reader Mode.",
+      ["a11y.sr.shortcuts_title"] = "Keyboard Shortcuts",
+      ["a11y.sr.shortcuts_intro"] =
+        "These work while the Screen Reader Mode window has focus.",
+      ["a11y.sr.help_intro_start"] =
+        "Choose a provider and model, then type a prompt or press F2 for the fastest prompt dialog. Responses are read automatically when possible. If ReaAssist returns Lua or JSFX, review the summary first, then use Run Code for Lua, Add JSFX to Selected Tracks for JSFX, Read or Save, Copy Response, or Undo when those controls are available.",
+      ["a11y.sr.help_privacy_diagnostics"] =
+        "Automatic diagnostics can be managed from Settings.",
+      ["a11y.sr.shortcut_f1"] = "F1: Help and keyboard shortcuts.",
+      ["a11y.sr.shortcut_f2"] = "F2: New prompt dialog.",
+      ["a11y.sr.new_prompt"] = "New Prompt",
+      ["a11y.sr.new_prompt.meaning"] =
+        "Opens a new prompt dialog. OK sends the prompt immediately.",
+      ["a11y.sr.new_prompt_ready"] =
+        "New prompt ready. Press Enter on Prompt to type, then use Send.",
+      ["a11y.sr.new_prompt_dialog_title"] = "New Prompt",
+      ["a11y.sr.new_prompt_dialog_caption"] = "Prompt. OK sends",
+      ["a11y.sr.new_prompt_cancelled"] = "New prompt cancelled.",
+      ["a11y.sr.new_prompt_blank"] =
+        "No prompt entered. Press Enter on Prompt to type, then use Send.",
+      ["a11y.sr.shortcut_f3"] = "F3: Settings.",
+      ["a11y.sr.shortcut_f4"] = "F4: Close Screen Reader Mode.",
+      ["a11y.sr.shortcut_f5"] = "F5: Send from main, Prompt & Chat, or Attachments.",
+      ["a11y.sr.shortcut_f6"] =
+        "F6: Read or save generated Lua, JSFX, or edit details.",
+      ["a11y.sr.shortcut_f7"] =
+        "F7: Undo the last run or structured edit.",
+      ["a11y.sr.shortcut_f8"] =
+        "F8: Run generated Lua or add JSFX to selected tracks.",
+      ["a11y.sr.shortcut_f9"] =
+        "F9: Back to the previous screen.",
+      ["a11y.sr.screen_reader_tips_title"] = "Screen Reader Tips",
+      ["a11y.sr.shortcut_reread_focus"] =
+        "Shift Up Arrow: re-read the focused control.",
+      ["a11y.sr.shortcut_read_window"] =
+        "Shift T: read the current window context.",
+      ["a11y.sr.shortcut_waiting"] =
+        "A request is already running. Wait for it to finish or use Cancel Request.",
+      ["a11y.sr.shortcut_run_unavailable"] =
+        "No runnable generated Lua or JSFX add action is available here.",
+      ["a11y.sr.shortcut_confirm_required"] =
+        "Use the visible confirmation button to run this code.",
+      ["a11y.sr.shortcut_send_unavailable"] =
+        "F5 sends from prompt screens.",
+      ["a11y.sr.shortcut_no_code"] =
+        "No generated code or edit details are available.",
+      ["a11y.sr.shortcut_no_undo"] =
+        "There is no completed action to undo.",
+      ["a11y.sr.shortcut_back_unavailable"] =
+        "Already on the main screen.",
+      ["a11y.sr.shortcut_terms_required"] =
+        "Accept or decline the terms before using Screen Reader Mode shortcuts.",
+      ["a11y.sr.title.meaning"] =
+        "Title for the ReaAssist screen reader mode window.",
+      ["a11y.sr.page_status_ready"] = "Ready.",
+      ["a11y.sr.status.meaning"] =
+        "Current page status or last action result.",
+      ["a11y.sr.provider"] = "Provider",
+      ["a11y.sr.provider.meaning"] =
+        "Chooses which provider ReaAssist will use for the next request.",
+      ["a11y.sr.model"] = "Model",
+      ["a11y.sr.model.meaning"] =
+        "Chooses which model ReaAssist will use for the next request.",
+      ["a11y.sr.thinking"] = "Thinking",
+      ["a11y.sr.thinking.meaning"] =
+        "Chooses the thinking level for the next request.",
+      ["a11y.sr.auto_run.meaning"] =
+        "When checked, validated generated actions can run automatically.",
+      ["a11y.sr.auto_backup.meaning"] =
+        "When checked, ReaAssist saves a project backup before Auto-run changes the session.",
+      ["a11y.sr.mode_summary.meaning"] =
+        "Current Ask or Auto-run mode summary.",
+      ["a11y.sr.edit_prompt.meaning"] =
+        "Opens the accessible prompt editor for the next ReaAssist request.",
+      ["a11y.sr.prompt_preview.meaning"] =
+        "Preview of the prompt that will be sent.",
+      ["a11y.sr.send_state.meaning"] =
+        "Explains whether the prompt can be sent.",
+      ["a11y.sr.send_state_ready"] =
+        "Ready. Press Enter on Prompt, then OK, to send.",
+      ["a11y.sr.send_state_prompt"] =
+        "Enter a prompt first.",
+      ["a11y.sr.send_state_provider"] =
+        "Selected provider needs setup before sending.",
+      ["a11y.sr.send_state_waiting"] =
+        "A request is already running.",
+      ["a11y.sr.send_state_attachments"] =
+        "Attachments are still encoding.",
+      ["a11y.sr.response_state_empty"] =
+        "No response yet. Send a request to get a response.",
+      ["a11y.sr.response_state_waiting"] =
+        "Waiting for response. ReaAssist is still working.",
+      ["a11y.sr.response_state_ready"] =
+        "Response ready.",
+      ["a11y.sr.response_state_ready_code"] =
+        "Response ready. Generated code is available; use Read or Save Code, or Run Code after reviewing it.",
+      ["a11y.sr.response_state_ready_jsfx"] =
+        "Response ready. Generated JSFX is available; use Read or Save JSFX, or Add JSFX to Selected Tracks after reviewing it.",
+      ["a11y.sr.response_state_ready_jsfx_status"] =
+        "Response ready. {status}",
+      ["a11y.sr.response_state_ready_code_ran"] =
+        "Response ready. Auto-run has already run the generated code successfully. Use Read or Save Code to review it.",
+      ["a11y.sr.response_state_ready_code_ran_manual"] =
+        "Response ready. Generated code ran successfully. Use Undo Run if you need to revert it, or Read or Save Code to review it.",
+      ["a11y.sr.response_state_ready_jsfx_added"] =
+        "Response ready. JSFX has been added to the selected tracks. Use Undo Run if you need to revert it, or Read or Save JSFX to review it.",
+      ["a11y.sr.response_state_ready_action_ran"] =
+        "Response ready. Auto-run has already run the structured edit successfully. Use Review Edit Details to review it, or Undo and Request Lua to ask for a reusable script.",
+      ["a11y.sr.response_state_ready_action_ran_manual"] =
+        "Response ready. The structured edit ran successfully. Use Undo Edit if you need to revert it, or Undo and Request Lua to ask for a reusable script.",
+      ["a11y.sr.response_state.meaning"] =
+        "Explains whether ReaAssist is waiting or a response is ready.",
+      ["a11y.sr.request.meaning"] =
+        "Prompt text for the next ReaAssist request.",
+      ["a11y.sr.send.meaning"] =
+        "Sends the current request to ReaAssist.",
+      ["a11y.sr.copy_response.meaning"] =
+        "Copies the latest response to the clipboard.",
+      ["a11y.sr.read_code.meaning"] =
+        "Opens generated code preview with copy and save controls.",
+      ["a11y.sr.read_jsfx.meaning"] =
+        "Opens generated JSFX preview with copy, save, and add-to-selected-tracks controls.",
+      ["a11y.sr.read_action_plan.meaning"] =
+        "Opens the edit details preview with copy and save controls.",
+      ["a11y.sr.undo_edit.meaning"] =
+        "Sends REAPER Undo for the structured edit that just ran.",
+      ["a11y.sr.undo_edit_done"] = "Undo sent.",
+      ["a11y.sr.undo_edit_unavailable"] =
+        "There is no structured edit to undo.",
+      ["a11y.sr.request_lua_sent"] =
+        "Requesting Lua/ReaScript version.",
+      ["a11y.sr.request_lua_unavailable"] =
+        "Could not request the Lua/ReaScript version.",
+      ["a11y.sr.undo_run.meaning"] =
+        "Sends REAPER Undo for the generated code that just ran.",
+      ["a11y.sr.undo_run_done"] = "Undo sent.",
+      ["a11y.sr.undo_run_unavailable"] =
+        "There is no completed action to undo.",
+      ["a11y.sr.undo_jsfx.meaning"] =
+        "Sends REAPER Undo for adding the JSFX to selected tracks.",
+      ["a11y.sr.jsfx_undo_done"] =
+        "Undo sent. JSFX add was reverted.",
+      ["a11y.sr.copy_code.meaning"] =
+        "Copies generated code from the latest response when code is available.",
+      ["a11y.sr.copy_jsfx.meaning"] =
+        "Copies generated JSFX from the latest response.",
+      ["a11y.sr.copy_action_plan.meaning"] =
+        "Copies the edit details to the clipboard.",
+      ["a11y.sr.save_code.meaning"] =
+        "Saves generated Lua scripts to REAPER's Scripts/ReaAssist folder and adds them to the Actions list, or saves JSFX code to REAPER's Effects folder.",
+      ["a11y.sr.save_jsfx.meaning"] =
+        "Saves generated JSFX to REAPER's Effects/ReaAssist folder.",
+      ["a11y.sr.save_action_plan.meaning"] =
+        "Saves the edit details to the ReaAssist temp folder.",
+      ["a11y.sr.response.meaning"] =
+        "Preview of the latest assistant response.",
+      ["a11y.sr.reader_panel.meaning"] =
+        "Screen reader status and navigation hints.",
+      ["a11y.sr.close_hint.meaning"] =
+        "Keyboard shortcuts for closing Screen Reader Mode.",
+      ["a11y.sr.settings.meaning"] =
+        "Opens accessible settings.",
+      ["a11y.sr.api_keys"] = "API Keys",
+      ["a11y.sr.api_keys.meaning"] =
+        "Opens accessible API key setup and testing.",
+      ["a11y.sr.custom_providers.meaning"] =
+        "Opens accessible local and custom provider management.",
+      ["a11y.sr.custom_instructions.meaning"] =
+        "Opens accessible controls for custom instructions.",
+      ["a11y.sr.help.meaning"] =
+        "Opens accessible help and usage guidance.",
+      ["a11y.sr.close.meaning"] =
+        "Closes ReaAssist Screen Reader Mode.",
+      ["a11y.sr.footer.meaning"] = "Footer branding for ReaAssist.",
+      ["a11y.sr.window.meaning"] =
+        "Accessible ReaAssist window for screen-reader users.",
+      ["a11y.sr.needs_setup_suffix"] = "needs setup",
+      ["a11y.sr.paid_tier_suffix"] = "paid tier required",
+      ["a11y.sr.unavailable_suffix"] = "unavailable",
+      ["a11y.sr.no_providers"] = "No providers available",
+      ["a11y.sr.no_models"] = "No models available",
+      ["a11y.sr.thinking_default"] = "Default",
+      ["a11y.sr.invalid_provider"] = "That provider cannot be selected.",
+      ["a11y.sr.invalid_model"] = "That model cannot be selected.",
+      ["a11y.sr.invalid_thinking"] =
+        "That thinking level cannot be selected.",
+      ["a11y.sr.provider_changed"] = "Provider changed.",
+      ["a11y.sr.model_changed"] = "Model changed.",
+      ["a11y.sr.thinking_changed"] = "Thinking level changed.",
+      ["a11y.sr.prompt_updated"] =
+        "Prompt updated. Press Send when ready.",
+      ["a11y.sr.prompt_edit_cancelled"] =
+        "Prompt edit cancelled.",
+      ["a11y.sr.mode_ask"] =
+        "Mode: Ask. ReaAssist will not run generated actions automatically.",
+      ["a11y.sr.mode_auto_run"] =
+        "Mode: Auto-run generated actions. Auto-backup is {backup}.",
+      ["a11y.sr.auto_run_on"] =
+        "Auto-run is on. Generated actions can run automatically after validation.",
+      ["a11y.sr.auto_run_off"] =
+        "Auto-run is off. Generated actions will wait for review.",
+      ["a11y.sr.auto_backup_on"] = "Auto-backup is on.",
+      ["a11y.sr.auto_backup_off"] = "Auto-backup is off.",
+      ["a11y.sr.code_available"] =
+        "{type} is available. Use the reader controls to review, copy, or save it.",
+      ["a11y.sr.run_status"] = "Run status: {status}.",
+      ["a11y.sr.run_status.blocked"] = "Code was blocked for safety",
+      ["a11y.sr.run_status.blocked_action_context"] =
+        "Code needs manual review before running",
+      ["a11y.sr.run_status.blocked_fragment"] =
+        "Code fragment needs manual review",
+      ["a11y.sr.run_status.blocked_sandbox_api"] =
+        "Code uses a blocked API",
+      ["a11y.sr.run_status.errored"] = "Code run failed",
+      ["a11y.sr.run_status.local_answer"] = "Answered locally",
+      ["a11y.sr.run_status.manual_run"] = "Code is ready for manual review",
+      ["a11y.sr.run_status.no_code"] = "No runnable code found",
+      ["a11y.sr.run_status.no_usable_answer"] = "No usable answer was found",
+      ["a11y.sr.run_status.pending"] = "Code is waiting to run",
+      ["a11y.sr.run_status.provider_failed"] = "Provider request failed",
+      ["a11y.sr.run_status.ran_ok"] = "Code ran successfully",
+      ["a11y.sr.run_status.request_error"] = "Request failed",
+      ["a11y.sr.run_status.truncated"] = "Response was truncated",
+      ["a11y.sr.auto_run_blocked"] =
+        "Auto-run did not run automatically: {reason}.",
+      ["a11y.sr.auto_run_blocked.meaning"] =
+        "Explains why Auto-run did not run automatically.",
+      ["a11y.sr.auto_run_blocked_backup_failed"] =
+        "Auto-run was blocked because ReaAssist could not create a safety backup.",
+      ["a11y.sr.auto_run_blocked_sandbox"] =
+        "Auto-run blocked: generated code uses a restricted Lua API. Review it before running manually.",
+      ["a11y.sr.auto_run_blocked_non_runnable"] =
+        "Auto-run was blocked because the generated Lua was not runnable. Review or regenerate it before running manually.",
+      ["a11y.sr.auto_run_blocked_manual_only"] =
+        "Auto-run was blocked because this generated code requires manual review before running.",
+      ["a11y.sr.reagirl_downloading"] =
+        "Downloading accessible UI library.",
+      ["a11y.sr.reagirl_download_still_running"] =
+        "Still downloading accessible UI library.",
+      ["a11y.sr.reagirl_download_ready"] =
+        "Accessible UI library installed. Opening Screen Reader Mode.",
+      ["a11y.sr.reagirl_download_failed"] =
+        "Could not download the accessible UI library from reaassist.app.\n\nError: {error}\n\nSource:\n{url}",
+      ["a11y.sr.reagirl_download_error.timeout"] =
+        "The download timed out. Check your internet connection and try again.",
+      ["a11y.sr.reagirl_download_error.curl_exit"] =
+        "The download command failed with curl exit {code}. Check your internet connection or security software and try again.",
+      ["a11y.sr.reagirl_download_error.size_mismatch"] =
+        "The downloaded accessible UI library had an unexpected size. Try again in a moment.",
+      ["a11y.sr.reagirl_download_error.sha_mismatch"] =
+        "The downloaded accessible UI library did not pass the integrity check. Try again in a moment.",
+      ["a11y.sr.reagirl_download_error.api_missing"] =
+        "The downloaded file did not contain the expected accessible UI library API. Try again in a moment.",
+      ["a11y.sr.reagirl_download_error.sha_unavailable"] =
+        "ReaAssist could not verify the accessible UI library download. Restart REAPER and try again.",
+      ["a11y.sr.reagirl_download_error.read_failed"] =
+        "ReaAssist could not read the downloaded accessible UI library: {error}",
+      ["a11y.sr.reagirl_download_error.install_failed"] =
+        "The file downloaded, but ReaAssist could not save it in Data\\Vendor. Check folder permissions and try again.",
+      ["a11y.sr.reagirl_download_error.start_failed"] =
+        "The download could not start. Check your internet connection or security software and try again.",
+      ["a11y.sr.reagirl_download_error.unknown"] =
+        "The download failed: {error}",
+      ["a11y.sr.startup_failure_note_saved"] =
+        "Details saved to the ReaAssist Temp folder.",
+      ["a11y.sr.startup_failure_note_failed"] =
+        "ReaAssist could not save a text copy of this failure.",
+      ["a11y.sr.request_already_running"] =
+        "A request is already running.",
+      ["a11y.sr.cancel_request"] = "Cancel Request",
+      ["a11y.sr.cancel_request.meaning"] =
+        "Stops the current ReaAssist request when one is running.",
+      ["a11y.sr.request_cancelled"] = "Request cancelled.",
+      ["a11y.sr.no_request_to_cancel"] =
+        "There is no active request to cancel.",
+      ["a11y.sr.clear_chat"] = "Clear Chat",
+      ["a11y.sr.clear_chat.meaning"] =
+        "Clears the current ReaAssist conversation after confirmation.",
+      ["a11y.sr.clear_confirm_title"] = "Clear Chat?",
+      ["a11y.sr.clear_confirm_title.meaning"] =
+        "Confirmation before clearing the current conversation.",
+      ["a11y.sr.clear_confirm_body"] =
+        "Clear the current conversation? This removes the visible chat and resets the running chat totals.",
+      ["a11y.sr.clear_confirm_body.meaning"] =
+        "Explains what clearing the current conversation does.",
+      ["a11y.sr.clear_confirm_opened"] =
+        "Clear chat confirmation opened. Choose Clear Chat to confirm, or F9 to go back.",
+      ["a11y.sr.conversation_cleared"] = "Conversation cleared.",
+      ["a11y.sr.clear_cancelled"] = "Clear cancelled.",
+      ["a11y.sr.clear_failed"] = "Could not clear the conversation.",
+      ["a11y.sr.clear_blocked_active"] =
+        "Cancel or finish the active request before clearing the chat.",
+      ["a11y.sr.no_chat_to_clear"] =
+        "There is no conversation to clear.",
+      ["a11y.sr.provider_not_configured_short"] =
+        "The selected provider needs setup before sending.",
+      ["a11y.sr.provider_not_configured"] =
+        "The selected provider needs an API key before ReaAssist can send.",
+      ["a11y.sr.send_failed"] = "Could not send request: {error}",
+      ["a11y.sr.response_copied"] = "Response copied to clipboard.",
+      ["a11y.sr.copy_failed"] = "Could not copy the response.",
+      ["a11y.sr.response_saved"] = "Response saved to {path}.",
+      ["a11y.sr.response_saved_short"] = "Response saved.",
+      ["a11y.sr.save_failed"] = "Could not save the response.",
+      ["a11y.sr.code_copied"] =
+        "Generated code copied to clipboard.",
+      ["a11y.sr.jsfx_copied"] =
+        "JSFX copied to clipboard.",
+      ["a11y.sr.action_plan_copied"] =
+        "Edit details copied to clipboard.",
+      ["a11y.sr.code_saved"] =
+        "Generated code saved to {path}.",
+      ["a11y.sr.code_saved_short"] =
+        "Generated code saved.",
+      ["a11y.sr.jsfx_saved_short"] =
+        "JSFX saved.",
+      ["a11y.sr.code_saved_actions"] =
+        "Generated code saved to {path} and added to the REAPER Actions list as {name}.",
+      ["a11y.sr.code_saved_actions_short"] =
+        "Saved to Actions list as {name}.",
+      ["a11y.sr.code_saved_actions_failed"] =
+        "Generated code saved to {path} as {name}, but ReaAssist could not add it to the REAPER Actions list.",
+      ["a11y.sr.code_saved_actions_failed_short"] =
+        "Saved as {name}, but not added to Actions.",
+      ["a11y.sr.code_saved_title"] = "Code Saved",
+      ["a11y.sr.code_saved_actions_alert"] =
+        "Saved and added to REAPER Actions.\n\nAction: {name}\nFile: {path}",
+      ["a11y.sr.code_saved_actions_failed_alert"] =
+        "Saved, but could not add to REAPER Actions.\n\nAction: {name}\nFile: {path}\n\n{error}",
+      ["a11y.sr.code_save_failed"] =
+        "Could not save the generated code.",
+      ["a11y.sr.action_plan_saved"] =
+        "Edit details saved to {path}.",
+      ["a11y.sr.action_plan_saved_short"] =
+        "Edit details saved.",
+      ["a11y.sr.action_plan_save_failed"] =
+        "Could not save the edit details.",
+      ["a11y.sr.no_code_to_copy"] =
+        "There is no generated code to copy.",
+      ["a11y.sr.no_code_to_run"] =
+        "There is no runnable generated code.",
+      ["a11y.sr.add_jsfx.meaning"] =
+        "Saves the JSFX and adds it to all selected tracks.",
+      ["a11y.sr.add_jsfx_no_tracks"] =
+        "Select one or more tracks in REAPER first, then add the JSFX.",
+      ["a11y.sr.add_jsfx_failed"] =
+        "JSFX was saved, but REAPER did not add it to the selected tracks.",
+      ["a11y.sr.run_code"] = "Run Code",
+      ["a11y.sr.run_code.meaning"] =
+        "Runs the generated Lua code after ReaAssist checks it.",
+      ["a11y.sr.run_code_lua_only"] =
+        "Only Lua code can be run directly from Screen Reader Mode.",
+      ["a11y.sr.run_code_blocked"] =
+        "This generated code cannot be run directly.",
+      ["a11y.sr.run_code_risky"] =
+        "This generated code needs confirmation before it runs.",
+      ["a11y.sr.run_code_backup_unsaved"] =
+        "Auto-backup is on, but the project has not been saved.",
+      ["a11y.sr.run_code_backup_failed"] =
+        "Safety backup failed: {error}",
+      ["a11y.sr.run_code_ok"] = "Generated code ran.",
+      ["a11y.sr.run_code_failed"] =
+        "Generated code failed. Check the response and debug log.",
+      ["a11y.sr.run_code_cancelled"] = "Run cancelled.",
+      ["a11y.sr.run_confirm_title"] = "Run Generated Code?",
+      ["a11y.sr.run_confirm_title.meaning"] =
+        "Confirmation before running generated code.",
+      ["a11y.sr.run_confirm_body"] =
+        "Review the generated code before running it.",
+      ["a11y.sr.run_confirm_body.meaning"] =
+        "Explains why confirmation is needed before running generated code.",
+      ["a11y.sr.run_confirm_review"] =
+        "Use Back to Code to review the code first. Continue only if you trust the generated action.",
+      ["a11y.sr.run_confirm_review.meaning"] =
+        "Safety reminder for generated-code execution.",
+      ["a11y.sr.run_without_backup"] = "Run Without Backup",
+      ["a11y.sr.run_anyway"] = "Run Anyway",
+      ["a11y.sr.run_anyway.meaning"] =
+        "Runs the generated code after this confirmation.",
+      ["a11y.sr.back_to_code"] = "Back to Code",
+      ["a11y.sr.back_to_code.meaning"] =
+        "Returns to the generated code view without running it.",
+      ["a11y.sr.back_to_saved_code.meaning"] =
+        "Returns to the generated code view without adding the saved script to Actions.",
+      ["a11y.sr.run_confirm_opened"] =
+        "Run confirmation opened. Press F8 to run anyway, or F9 to go back to code.",
+      ["a11y.sr.add_actions_title"] = "Add to Actions?",
+      ["a11y.sr.add_actions_title.meaning"] =
+        "Confirmation after saving a generated Lua script.",
+      ["a11y.sr.add_actions_body"] =
+        "Generated Lua script saved. Add it to REAPER's Actions list so it can be run later?",
+      ["a11y.sr.add_actions_body.meaning"] =
+        "Asks whether to register the saved Lua script in the REAPER Actions list.",
+      ["a11y.sr.add_actions_path"] = "Saved file: {path}",
+      ["a11y.sr.add_actions_path.meaning"] =
+        "Path of the saved Lua script.",
+      ["a11y.sr.add_actions"] = "Add to Actions",
+      ["a11y.sr.add_actions.meaning"] =
+        "Adds the saved Lua script to REAPER's Actions list.",
+      ["a11y.sr.skip_add_actions.meaning"] =
+        "Leaves the script saved without adding it to REAPER's Actions list.",
+      ["a11y.sr.code_saved_add_actions"] =
+        "Generated code saved. Choose Add to Actions if you want this script in REAPER's Actions list.",
+      ["a11y.sr.add_actions_opened"] =
+        "Add to Actions confirmation opened. Choose Add to Actions, Skip, or F9 to go back to code.",
+      ["a11y.sr.add_actions_done"] =
+        "Script added to the REAPER Actions list.",
+      ["a11y.sr.add_actions_skipped"] =
+        "Saved script was not added to the Actions list.",
+      ["a11y.sr.add_actions_failed"] =
+        "Could not add the script to the REAPER Actions list.",
+      ["a11y.sr.add_actions_unavailable"] =
+        "REAPER's add-to-Actions function is not available.",
+      ["a11y.sr.response_reader_title"] = "Full Response",
+      ["a11y.sr.response_notes_reader_title"] =
+        "Full Response Notes",
+      ["a11y.sr.code_reader_title"] = "Generated Code Preview",
+      ["a11y.sr.reader_title.meaning"] =
+        "Readable view of the latest ReaAssist output.",
+      ["a11y.sr.response_body"] = "Response",
+      ["a11y.sr.response_body.meaning"] =
+        "Full text of the latest ReaAssist response.",
+      ["a11y.sr.response_notes_body"] = "Response notes",
+      ["a11y.sr.response_notes_body.meaning"] =
+        "Non-code notes from the latest ReaAssist response.",
+      ["a11y.sr.code_body"] = "Generated code preview",
+      ["a11y.sr.code_body.meaning"] =
+        "Preview of generated code from the latest ReaAssist response.",
+      ["a11y.sr.action_plan_body"] = "Edit details",
+      ["a11y.sr.action_plan_body.meaning"] =
+        "Preview of the edit details from the latest ReaAssist response.",
+      ["a11y.sr.reader_preview_line.meaning"] =
+        "Preview line {number}.",
+      ["a11y.sr.response_preview_line.meaning"] =
+        "Response line {number}.",
+      ["a11y.sr.response_preview_shortened"] =
+        "Preview shortened. Use Read Full Response for the full text.",
+      ["a11y.sr.read_full_response"] = "Read Full Response",
+      ["a11y.sr.read_full_response.meaning"] =
+        "Opens a full response window and reads the full response.",
+      ["a11y.sr.reader_preview_shortened"] =
+        "Preview shortened. Use Copy for the full text.",
+      ["a11y.sr.reader_preview_shortened_code"] =
+        "Preview shortened. Use Copy or Save for the full text.",
+      ["a11y.sr.reader_preview_shortened_response"] =
+        "Preview shortened. Use Read Full Response for the full text.",
+      ["a11y.sr.code_preview_note"] =
+        "Code preview shortened. Showing first {shown} of {total} nonblank lines. Use Copy or Save for the full code.",
+      ["a11y.sr.code_preview_note.meaning"] =
+        "Explains how much generated code is visible in the preview.",
+      ["a11y.sr.back_to_response_ready"] = "Back to Response",
+      ["a11y.sr.back_to_response_ready.meaning"] =
+        "Returns to the response screen with run, undo, and review controls.",
+      ["a11y.sr.reader_empty"] = "There is nothing to read.",
+      ["a11y.sr.reader_speaking"] = "Reading content.",
+      ["a11y.sr.speak_response"] = "Speak Response",
+      ["a11y.sr.speak_response.meaning"] =
+        "Reads the latest response through the screen reader.",
+      ["a11y.sr.speak_code"] = "Speak Code",
+      ["a11y.sr.speak_code.meaning"] =
+        "Reads the generated code through the screen reader.",
+      ["a11y.sr.speak_action_plan"] = "Speak Edit Details",
+      ["a11y.sr.speak_action_plan.meaning"] =
+        "Reads the edit details through the screen reader.",
+      ["a11y.sr.response_reader_opened"] =
+        "Full response opened. Reading response.",
+      ["a11y.sr.code_reader_opened"] =
+        "Generated code view opened. Use F8 to run code when available, or F9 to go back.",
+      ["a11y.sr.jsfx_reader_opened"] =
+        "Generated JSFX view opened. Use F8 to add it to selected tracks, or F9 to go back.",
+      ["a11y.sr.copy_chat"] = "Copy Chat",
+      ["a11y.sr.copy_chat.meaning"] =
+        "Copies the full chat transcript to the clipboard.",
+      ["a11y.sr.save_chat"] = "Save Chat",
+      ["a11y.sr.save_chat.meaning"] =
+        "Saves the full chat transcript to the ReaAssist temp folder.",
+      ["a11y.sr.no_chat_to_copy"] =
+        "There is no chat to copy.",
+      ["a11y.sr.no_chat_to_save"] =
+        "There is no chat to save.",
+      ["a11y.sr.chat_saved"] =
+        "Chat log saved to {path}.",
+      ["a11y.sr.chat_saved_short"] =
+        "Chat log saved.",
+      ["a11y.sr.chat_save_failed"] =
+        "Could not save the chat log.",
+      ["a11y.sr.help_opened"] =
+        "Help opened. Use Tab to move by section, or F9 to go back.",
+      ["a11y.sr.help_title.meaning"] =
+        "Accessible help and usage guidance for ReaAssist.",
+      ["a11y.sr.manual.meaning"] =
+        "Opens the online ReaAssist manual in your browser.",
+      ["a11y.sr.manual_opened"] =
+        "Opening the ReaAssist manual.",
+      ["a11y.sr.manual_open_failed"] =
+        "Could not open the ReaAssist manual.",
+      ["a11y.sr.help_report.meaning"] =
+        "Opens the accessible report issue screen.",
+      ["a11y.sr.copy_help"] = "Copy Help",
+      ["a11y.sr.copy_help.meaning"] =
+        "Copies the accessible help text to the clipboard.",
+      ["a11y.sr.help_copied"] =
+        "Help text copied to clipboard.",
+      ["a11y.sr.help_body.meaning"] =
+        "Concise help text for using ReaAssist.",
+      ["a11y.sr.help_body_section.meaning"] =
+        "Help section {number}.",
+      ["a11y.sr.open_url_failed"] =
+        "Could not open the link.",
+      ["a11y.sr.link_opened"] =
+        "Opening link.",
+      ["a11y.sr.email_opened"] =
+        "Opening email link.",
+      ["a11y.sr.donate_opened"] =
+        "Opening donation page.",
+      ["a11y.sr.donate.meaning"] =
+        "Opens the donation page for supporting ReaAssist.",
+      ["a11y.sr.credits.meaning"] =
+        "Opens accessible credits and support links.",
+      ["a11y.sr.credits_opened"] =
+        "Credits opened. Use Tab for links, or F9 to go back.",
+      ["a11y.sr.credits_title.meaning"] =
+        "Accessible credits and support links for ReaAssist.",
+      ["a11y.sr.credits_production.meaning"] =
+        "Opens Michael Briggs audio production site.",
+      ["a11y.sr.credits_mastering.meaning"] =
+        "Opens Michael Briggs Mastering site.",
+      ["a11y.sr.credits_reaassist.meaning"] =
+        "Opens the ReaAssist project site.",
+      ["a11y.sr.credits_sample.meaning"] =
+        "Submit a free mastering sample request.",
+      ["a11y.sr.credits_email_direct"] = "Email Michael",
+      ["a11y.sr.credits_email_direct.meaning"] =
+        "Email Michael directly.",
+      ["a11y.sr.credits_email_support"] = "Email Support",
+      ["a11y.sr.credits_email_support.meaning"] =
+        "Email the ReaAssist support address.",
+      ["a11y.sr.copy_credits"] = "Copy Credits",
+      ["a11y.sr.copy_credits.meaning"] =
+        "Copies the credits text to the clipboard.",
+      ["a11y.sr.credits_copied"] =
+        "Credits copied to clipboard.",
+      ["a11y.sr.credits_body.meaning"] =
+        "Credits and support information for ReaAssist.",
+      ["a11y.sr.settings_title"] =
+        "ReaAssist Screen Reader Settings",
+      ["a11y.sr.settings_title.meaning"] =
+        "Settings for ReaAssist Screen Reader Mode.",
+      ["a11y.sr.api_keys_title"] = "ReaAssist API Keys",
+      ["a11y.sr.api_keys_title.meaning"] =
+        "API key setup for ReaAssist Screen Reader Mode.",
+      ["a11y.sr.custom_providers_title.meaning"] =
+        "Accessible local and custom provider management.",
+      ["a11y.sr.custom_providers_summary.meaning"] =
+        "Summary of saved local and custom providers.",
+      ["a11y.sr.custom_providers_empty"] =
+        "No local or custom providers are saved.",
+      ["a11y.sr.custom_providers_more"] =
+        ", plus {count} more",
+      ["a11y.sr.custom_providers_summary"] =
+        "{count} custom provider(s): {providers}{more}.",
+      ["a11y.sr.custom_providers_note"] =
+        "Edit JSON, save it, then Load Edit File. Save provider keys from API Keys.",
+      ["a11y.sr.custom_providers_note.meaning"] =
+        "Explains the accessible custom providers workflow.",
+      ["a11y.sr.custom_providers_open_file"] =
+        "Open Edit File",
+      ["a11y.sr.custom_providers_open_file.meaning"] =
+        "Opens editable custom provider JSON in the system text editor.",
+      ["a11y.sr.custom_providers_load_file"] =
+        "Load Edit File",
+      ["a11y.sr.custom_providers_load_file.meaning"] =
+        "Validates and saves the custom providers JSON edit file.",
+      ["a11y.sr.custom_providers_copy"] =
+        "Copy JSON",
+      ["a11y.sr.custom_providers_copy.meaning"] =
+        "Copies the saved custom providers JSON to the clipboard.",
+      ["a11y.sr.custom_provider_template"] =
+        "Copy Template",
+      ["a11y.sr.custom_provider_template.meaning"] =
+        "Copies a starter custom provider JSON document to the clipboard.",
+      ["a11y.sr.custom_providers_open_source"] =
+        "Open Providers.json",
+      ["a11y.sr.custom_providers_open_source.meaning"] =
+        "Opens the saved Providers.json source file when it exists.",
+      ["a11y.sr.custom_providers_api_keys.meaning"] =
+        "Opens API key setup. Select a loaded custom provider there to save its key.",
+      ["a11y.sr.custom_providers_json_failed"] =
+        "Could not build provider JSON: {error}",
+      ["a11y.sr.custom_providers_file_opened"] =
+        "Custom providers file opened: {path}",
+      ["a11y.sr.custom_providers_file_open_failed"] =
+        "Could not open custom providers file: {path}",
+      ["a11y.sr.custom_providers_copied"] =
+        "Custom providers JSON copied to clipboard.",
+      ["a11y.sr.custom_provider_template_copied"] =
+        "Custom provider template copied to clipboard.",
+      ["a11y.sr.custom_providers_file_read_failed"] =
+        "Could not read custom providers file: {error}",
+      ["a11y.sr.custom_providers_invalid_json"] =
+        "Custom providers JSON is invalid: {error}",
+      ["a11y.sr.custom_providers_no_valid_records"] =
+        "No valid provider records were found in the file.",
+      ["a11y.sr.custom_providers_save_failed"] =
+        "Could not save custom providers: {error}",
+      ["a11y.sr.custom_providers_loaded"] =
+        "Loaded {count} custom provider(s).",
+      ["a11y.sr.custom_providers_source_opened"] =
+        "Providers JSON opened: {path}",
+      ["a11y.sr.custom_providers_source_missing"] =
+        "Providers.json does not exist yet. Use Open Edit File to create one.",
+      ["a11y.sr.custom_instructions_title"] =
+        "ReaAssist Custom Instructions",
+      ["a11y.sr.custom_instructions_title.meaning"] =
+        "Custom instructions settings for ReaAssist Screen Reader Mode.",
+      ["a11y.sr.custom_instructions_summary"] =
+        "Custom instructions {enabled}. {chars} characters saved.",
+      ["a11y.sr.custom_instructions_summary.meaning"] =
+        "Shows whether custom instructions are enabled and how much text is saved.",
+      ["a11y.sr.custom_instructions_enabled.meaning"] =
+        "Include these saved preferences with each request.",
+      ["a11y.sr.custom_instructions_enabled_changed"] =
+        "Custom instructions are now {value}.",
+      ["a11y.sr.open_custom_instructions_file"] =
+        "Edit Instructions File",
+      ["a11y.sr.open_custom_instructions_file.meaning"] =
+        "Opens the custom instructions Markdown file in the system text editor.",
+      ["a11y.sr.copy_custom_instructions"] =
+        "Copy Instructions",
+      ["a11y.sr.copy_custom_instructions.meaning"] =
+        "Copies the saved custom instructions text to the clipboard.",
+      ["a11y.sr.reload_custom_instructions"] = "Refresh Summary",
+      ["a11y.sr.reload_custom_instructions.meaning"] =
+        "Reloads the saved custom instructions file and updates this summary.",
+      ["a11y.sr.custom_instructions_reloaded"] =
+        "Custom instructions summary refreshed from disk.",
+      ["a11y.sr.copy_custom_instructions_example"] = "Copy Example",
+      ["a11y.sr.copy_custom_instructions_example.meaning"] =
+        "Copies starter custom instructions examples to the clipboard.",
+      ["a11y.sr.custom_instructions_example_copied"] =
+        "Custom instructions example copied to clipboard.",
+      ["a11y.sr.custom_instructions_example.scope"] =
+        "Work only on selected tracks or items unless I say to edit the whole project.",
+      ["a11y.sr.custom_instructions_example.destructive"] =
+        "Ask before deleting tracks, items, takes, markers, regions, or FX.",
+      ["a11y.sr.custom_instructions_example.routing"] =
+        "Preserve existing routing, sends, receives, and folder structure unless I explicitly ask to change them.",
+      ["a11y.sr.custom_instructions_example.reversible"] =
+        "Prefer reversible REAPER actions and create clear undo points for session changes.",
+      ["a11y.sr.custom_instructions_note"] =
+        "The file uses Markdown. Save it in your text editor, then return to ReaAssist.",
+      ["a11y.sr.custom_instructions_note.meaning"] =
+        "Explains how custom instructions are edited.",
+      ["a11y.sr.custom_instructions_path_missing"] =
+        "Custom instructions file path is not available.",
+      ["a11y.sr.custom_instructions_opened"] =
+        "Opened custom instructions file: {path}",
+      ["a11y.sr.custom_instructions_open_failed"] =
+        "Could not open custom instructions file: {path}",
+      ["a11y.sr.custom_instructions_copied"] =
+        "Custom instructions copied to clipboard.",
+      ["a11y.sr.custom_instructions_empty"] =
+        "No custom instructions are saved yet.",
+      ["a11y.sr.pref_plugins.meaning"] =
+        "Opens accessible preferred plugin mappings.",
+      ["a11y.sr.pref_plugins_title"] =
+        "ReaAssist Preferred Plugins",
+      ["a11y.sr.pref_plugins_title.meaning"] =
+        "Accessible preferred plugin mappings for ReaAssist Screen Reader Mode.",
+      ["a11y.sr.pref_plugins_summary.meaning"] =
+        "Summary of saved preferred plugin mappings.",
+      ["a11y.sr.pref_plugins_summary_empty"] =
+        "No preferred plugins are saved. {empty} plugin types are available.",
+      ["a11y.sr.pref_plugins_summary"] =
+        "{count} preferred plugin(s) saved. Use Copy Mappings for the full list.",
+      ["a11y.sr.pref_plugins_more"] =
+        "plus {count} more",
+      ["a11y.sr.pref_plugins_no_types"] =
+        "No plugin types",
+      ["a11y.sr.pref_plugin_type"] =
+        "Plugin Type",
+      ["a11y.sr.pref_plugin_type.meaning"] =
+        "Chooses which preferred plugin type to edit.",
+      ["a11y.sr.pref_plugins_selected.meaning"] =
+        "Current plugin and aliases for the selected type.",
+      ["a11y.sr.pref_plugins_selected_empty"] =
+        "Selected row is empty.",
+      ["a11y.sr.pref_plugins_no_plugin"] =
+        "no plugin selected",
+      ["a11y.sr.pref_plugins_no_aliases"] =
+        "no aliases",
+      ["a11y.sr.pref_plugins_selected"] =
+        "{type}: {plugin}. Aliases: {aliases}.",
+      ["a11y.sr.pref_plugins_note"] =
+        "Copy a plugin name from REAPER's FX Browser, then paste it for the selected type. Use the edit file for bulk changes or custom types.",
+      ["a11y.sr.pref_plugins_note.meaning"] =
+        "Explains the accessible preferred plugins workflow.",
+      ["a11y.sr.pref_plugins_type_changed"] =
+        "Preferred plugin type changed.",
+      ["a11y.sr.pref_plugins_plugin_changed"] =
+        "Preferred plugin updated. Save when ready.",
+      ["a11y.sr.pref_plugins_aliases_changed"] =
+        "Preferred plugin aliases updated. Save when ready.",
+      ["a11y.sr.pref_plugins_plugin_cleared"] =
+        "Preferred plugin cleared for the selected type. Save when ready.",
+      ["a11y.sr.pref_plugins_paste_plugin"] =
+        "Paste Plugin",
+      ["a11y.sr.pref_plugins_paste_plugin.meaning"] =
+        "Sets the selected type's plugin from clipboard text.",
+      ["a11y.sr.pref_plugins_paste_aliases"] =
+        "Paste Aliases",
+      ["a11y.sr.pref_plugins_paste_aliases.meaning"] =
+        "Sets aliases for the selected type from clipboard text.",
+      ["a11y.sr.pref_plugins_clear_selected"] =
+        "Clear Selected",
+      ["a11y.sr.pref_plugins_clear_selected.meaning"] =
+        "Clears the plugin name for the selected type.",
+      ["a11y.sr.pref_plugins_open_file"] =
+        "Open Edit File",
+      ["a11y.sr.pref_plugins_open_file.meaning"] =
+        "Opens the preferred plugins table in your system text editor.",
+      ["a11y.sr.pref_plugins_load_file"] =
+        "Load Edit File",
+      ["a11y.sr.pref_plugins_load_file.meaning"] =
+        "Loads the preferred plugins table from the edit file.",
+      ["a11y.sr.pref_plugins_copy"] =
+        "Copy Mappings",
+      ["a11y.sr.pref_plugins_copy.meaning"] =
+        "Copies the preferred plugin mappings table to the clipboard.",
+      ["a11y.sr.pref_plugins_file_opened"] =
+        "Preferred plugins file opened: {path}",
+      ["a11y.sr.pref_plugins_file_open_failed"] =
+        "Could not open preferred plugins file: {path}",
+      ["a11y.sr.pref_plugins_file_read_failed"] =
+        "Could not read preferred plugins file: {error}",
+      ["a11y.sr.pref_plugins_file_loaded"] =
+        "Preferred plugins loaded from file. Save when ready.",
+      ["a11y.sr.pref_plugins_copied"] =
+        "Preferred plugins copied to clipboard.",
+      ["a11y.sr.pref_plugins_unavailable"] =
+        "Preferred plugin saving is not available in this build.",
+      ["a11y.sr.pref_plugins_save"] =
+        "Save Mappings",
+      ["a11y.sr.pref_plugins_save.meaning"] =
+        "Saves preferred plugin mappings.",
+      ["a11y.sr.pref_plugins_save_scan"] =
+        "Save and Scan Plugins",
+      ["a11y.sr.pref_plugins_save_scan.meaning"] =
+        "Saves mappings and scans new preferred plugins for parameter names.",
+      ["a11y.sr.pref_plugins_rescan_all"] =
+        "Rescan All Plugins",
+      ["a11y.sr.pref_plugins_rescan_all.meaning"] =
+        "Rescans all preferred plugins.",
+      ["a11y.sr.pref_plugins_clear_all"] =
+        "Clear All Mappings",
+      ["a11y.sr.pref_plugins_clear_all.meaning"] =
+        "Clears all preferred plugin mappings.",
+      ["a11y.sr.pref_plugins_clear_title"] =
+        "Clear Preferred Plugin Mappings?",
+      ["a11y.sr.pref_plugins_clear_title.meaning"] =
+        "Confirmation before clearing preferred plugin mappings.",
+      ["a11y.sr.pref_plugins_clear_body.meaning"] =
+        "Explains what clearing preferred plugins does.",
+      ["a11y.sr.pref_plugins_clear_opened"] =
+        "Clear preferred plugin mappings confirmation opened. Choose Clear All Mappings to confirm, or F9 to go back.",
+      ["a11y.sr.back_to_pref_plugins"] =
+        "Back to Preferred Plugins",
+      ["a11y.sr.back_to_pref_plugins.meaning"] =
+        "Returns to the preferred plugins screen.",
+      ["a11y.sr.pref_plugins_scan_idle"] =
+        "No scan is running.",
+      ["a11y.sr.pref_plugins_scan_status.meaning"] =
+        "Status of preferred plugin parameter scans.",
+      ["a11y.sr.pref_plugins_scan_done"] =
+        "Preferred plugin scan finished.",
+      ["a11y.sr.fx_cache.meaning"] =
+        "Opens accessible FX parameter cache controls.",
+      ["a11y.sr.fx_cache"] =
+        "FX Cache",
+      ["a11y.sr.fx_cache_title"] =
+        "ReaAssist FX Parameter Cache",
+      ["a11y.sr.fx_cache_title.meaning"] =
+        "Accessible FX parameter cache controls for ReaAssist Screen Reader Mode.",
+      ["a11y.sr.fx_cache_remove_title"] =
+        "Remove Cached Plugin?",
+      ["a11y.sr.fx_cache_remove_title.meaning"] =
+        "Confirmation before removing one plugin from the parameter cache.",
+      ["a11y.sr.fx_cache_summary.meaning"] =
+        "Summary of scanned plugin cache entries and built-in references.",
+      ["a11y.sr.fx_cache_empty"] =
+        "No plugins are cached yet.",
+      ["a11y.sr.fx_cache_summary"] =
+        "{scanned} scanned plugin(s), {curated} built-in reference(s).",
+      ["a11y.sr.fx_cache_no_scanned"] =
+        "No scanned plugins",
+      ["a11y.sr.fx_cache_plugin"] =
+        "Cached Plugin",
+      ["a11y.sr.fx_cache_plugin.meaning"] =
+        "Chooses the scanned plugin cache entry to manage.",
+      ["a11y.sr.fx_cache_selected.meaning"] =
+        "Parameter count and deep-scan status for the selected cached plugin.",
+      ["a11y.sr.fx_cache_selected_empty"] =
+        "No scanned plugin is selected.",
+      ["a11y.sr.fx_cache_selected_needs_deep"] =
+        "{plugin}: {count} parameters. Deep scan recommended.",
+      ["a11y.sr.fx_cache_selected"] =
+        "{plugin}: {count} parameters cached.",
+      ["a11y.sr.fx_cache_note"] =
+        "Rescan after plugin updates. Use Deep Scan only when recommended.",
+      ["a11y.sr.fx_cache_note.meaning"] =
+        "Explains when to use FX parameter cache actions.",
+      ["a11y.sr.fx_cache_rescan"] =
+        "Rescan Selected",
+      ["a11y.sr.fx_cache_rescan.meaning"] =
+        "Quickly rescans the selected plugin's parameters.",
+      ["a11y.sr.fx_cache_deep"] =
+        "Deep Scan",
+      ["a11y.sr.fx_cache_deep.meaning"] =
+        "Runs a slower deep scan for plugins that need delayed parameter reads.",
+      ["a11y.sr.fx_cache_remove"] =
+        "Remove Selected",
+      ["a11y.sr.fx_cache_remove.meaning"] =
+        "Removes the selected plugin from the parameter cache after confirmation.",
+      ["a11y.sr.fx_cache_copy"] =
+        "Copy Cache List",
+      ["a11y.sr.fx_cache_copy.meaning"] =
+        "Copies a readable list of cached plugins and built-in references.",
+      ["a11y.sr.fx_cache_open_file"] =
+        "Open Cache File",
+      ["a11y.sr.fx_cache_open_file.meaning"] =
+        "Opens a readable cache summary in the system text editor.",
+      ["a11y.sr.fx_cache_rescan_all"] =
+        "Rescan All Plugins",
+      ["a11y.sr.fx_cache_rescan_all.meaning"] =
+        "Starts a confirmed sequential rescan of every scanned plugin.",
+      ["a11y.sr.fx_cache_clear_all"] =
+        "Clear Cache",
+      ["a11y.sr.fx_cache_clear_all.meaning"] =
+        "Clears every scanned plugin cache entry after confirmation.",
+      ["a11y.sr.fx_cache_cancel"] =
+        "Cancel Scan",
+      ["a11y.sr.fx_cache_cancel.meaning"] =
+        "Cancels a batch rescan after the current plugin, or cancels a deep scan.",
+      ["a11y.sr.fx_cache_scan_status.meaning"] =
+        "Current FX parameter cache scan status.",
+      ["a11y.sr.fx_cache_scan_idle"] =
+        "No FX cache scan is running.",
+      ["a11y.sr.fx_cache_selected_changed"] =
+        "Cached plugin selected.",
+      ["a11y.sr.fx_cache_copied"] =
+        "FX parameter cache list copied to clipboard.",
+      ["a11y.sr.fx_cache_file_opened"] =
+        "FX parameter cache file opened: {path}",
+      ["a11y.sr.fx_cache_file_open_failed"] =
+        "Could not open FX parameter cache file: {path}",
+      ["a11y.sr.fx_cache_busy"] =
+        "Finish the current FX cache operation first.",
+      ["a11y.sr.fx_cache_none_selected"] =
+        "No cached plugin is selected.",
+      ["a11y.sr.fx_cache_unavailable"] =
+        "FX parameter cache controls are not available in this build.",
+      ["a11y.sr.fx_cache_deep_started"] =
+        "Deep scan started: {plugin}",
+      ["a11y.sr.fx_cache_rescan_started"] =
+        "Rescan started: {plugin}",
+      ["a11y.sr.fx_cache_removed"] =
+        "Removed cached plugin: {plugin}",
+      ["a11y.sr.fx_cache_remove_failed"] =
+        "Could not remove cached plugin: {error}",
+      ["a11y.sr.fx_cache_rescan_all_started"] =
+        "Rescan all started for {count} plugin(s).",
+      ["a11y.sr.fx_cache_cancelled"] =
+        "FX cache operation cancelled.",
+      ["a11y.sr.fx_cache_clear_failed"] =
+        "Could not clear FX parameter cache: {error}",
+      ["a11y.sr.fx_cache_clear_title.meaning"] =
+        "Confirmation before clearing scanned plugin parameter cache entries.",
+      ["a11y.sr.fx_cache_clear_body.meaning"] =
+        "Explains what clearing the FX parameter cache does.",
+      ["a11y.sr.fx_cache_remove_body"] =
+        "Remove cached parameter data for {plugin}?",
+      ["a11y.sr.fx_cache_remove_body.meaning"] =
+        "Explains which cached plugin entry will be removed.",
+      ["a11y.sr.fx_cache_rescan_all_title.meaning"] =
+        "Confirmation before rescanning every scanned plugin cache entry.",
+      ["a11y.sr.fx_cache_rescan_all_body.meaning"] =
+        "Explains the batch rescan operation.",
+      ["a11y.sr.fx_cache_rescan_all_note.meaning"] =
+        "Explains that batch rescans can be cancelled.",
+      ["a11y.sr.fx_cache_rescan_all_progress"] =
+        "Rescanning {done} of {total}.",
+      ["a11y.sr.fx_cache_deep_progress"] =
+        "Deep scanning {plugin}: {done} of {total}.",
+      ["a11y.sr.cancel.meaning"] =
+        "Cancels this action and returns to the previous screen.",
+      ["a11y.sr.api_key_saved_status"] =
+        "{provider} API key is saved.",
+      ["a11y.sr.api_key_missing_status"] =
+        "{provider} API key is not saved.",
+      ["a11y.sr.api_key_status.meaning"] =
+        "Tells whether the selected provider has a saved API key.",
+      ["a11y.sr.api_key_input"] = "New API Key",
+      ["a11y.sr.api_key_input.meaning"] =
+        "Paste a new API key for the selected provider. Press OK to save and test it.",
+      ["a11y.sr.save_key"] = "Save Key",
+      ["a11y.sr.save_key.meaning"] =
+        "Saves the pasted key for the selected provider.",
+      ["a11y.sr.test_key"] = "Test Key",
+      ["a11y.sr.test_key.meaning"] =
+        "Sends a minimal provider request to test the saved API key.",
+      ["a11y.sr.clear_key"] = "Clear Key",
+      ["a11y.sr.clear_key.meaning"] =
+        "Removes the saved API key for the selected provider.",
+      ["a11y.sr.open_key_page"] = "Open Key Page",
+      ["a11y.sr.open_key_page.meaning"] =
+        "Opens the selected provider's API key page in your browser.",
+      ["a11y.sr.api_key_note"] =
+        "Saved keys are stored in REAPER's persistent settings for this install.",
+      ["a11y.sr.api_key_note.meaning"] =
+        "Explains where API keys are stored.",
+      ["a11y.sr.api_key_no_provider"] =
+        "No provider is selected.",
+      ["a11y.sr.api_key_empty"] = "Enter an API key first.",
+      ["a11y.sr.api_key_has_spaces"] =
+        "API keys cannot contain spaces or line breaks.",
+      ["a11y.sr.api_key_too_short"] =
+        "That {provider} key looks too short.",
+      ["a11y.sr.api_key_wrong_provider"] =
+        "That key looks like it belongs to a different provider.",
+      ["a11y.sr.api_key_unknown_prefix"] =
+        "That key does not match the expected {provider} key format.",
+      ["a11y.sr.api_key_saved"] = "API key saved.",
+      ["a11y.sr.api_key_save_failed"] =
+        "API key could not be saved.",
+      ["a11y.sr.api_key_cleared"] = "API key cleared.",
+      ["a11y.sr.api_key_missing_for_test"] =
+        "Save an API key before testing it.",
+      ["a11y.sr.api_key_testing"] = "Testing API key.",
+      ["a11y.sr.api_key_test_passed"] = "API key test passed.",
+      ["a11y.sr.api_key_test_failed"] =
+        "API key test failed. Check the key and try again.",
+      ["a11y.sr.api_key_console_opened"] =
+        "Opening provider API key page.",
+      ["a11y.sr.api_key_console_missing"] =
+        "No API key page is available for this provider.",
+      ["a11y.sr.back_to_settings"] = "Back to Settings",
+      ["a11y.sr.back_to_settings.meaning"] =
+        "Returns to the settings screen.",
+      ["a11y.sr.visual_switch_title"] =
+        "Open Visual Interface?",
+      ["a11y.sr.visual_switch_title.meaning"] =
+        "Confirmation before opening ReaAssist's visual interface.",
+      ["a11y.sr.visual_switch_body"] =
+        "This turns off the Screen Reader Mode default and reopens ReaAssist in the visual interface. Screen Reader Mode will remain available as its own REAPER action.",
+      ["a11y.sr.visual_switch_body.meaning"] =
+        "Explains that the normal ReaAssist action will open the visual interface after confirmation.",
+      ["a11y.sr.visual_switch_confirm.meaning"] =
+        "Turns off the Screen Reader Mode default and opens the visual ReaAssist interface.",
+      ["a11y.sr.visual_switch_confirm_opened"] =
+        "Visual interface confirmation opened. Choose Open Visual Interface Now, or F9 to go back.",
+      ["a11y.sr.visual_switch_starting"] =
+        "Switching to the visual ReaAssist interface.",
+      ["a11y.sr.visual_switch_manual"] =
+        "Screen Reader Mode default is off. Close this window and run ReaAssist to open the visual interface.",
+      ["a11y.sr.visual_switch_cancelled"] =
+        "Visual interface switch cancelled.",
+      ["a11y.sr.settings_save_failed"] =
+        "Settings could not be saved: {error}",
+      ["a11y.sr.settings_summary_snapshot"] =
+        "Snapshot {value}.",
+      ["a11y.sr.settings_summary_api_ref"] =
+        "API ref {value}.",
+      ["a11y.sr.settings_summary_details"] =
+        "Details {value}.",
+      ["a11y.sr.settings_summary_debug"] =
+        "Log {value}.",
+      ["a11y.sr.settings_summary_updates"] =
+        "Update checks {value}.",
+      ["a11y.sr.settings_summary_concise_hints"] =
+        "Concise hints {value}.",
+      ["a11y.sr.settings_summary_prefer_sr"] =
+        "Screen Reader default {value}.",
+      ["a11y.sr.settings_summary_language"] =
+        "Language {value}.",
+      ["a11y.sr.settings_summary_text_size"] =
+        "Accessible size {value}.",
+      ["a11y.sr.settings_summary_contrast"] =
+        "Contrast {value}.",
+      ["a11y.sr.settings_summary_timeout"] =
+        "Timeout {value}s.",
+      ["a11y.sr.settings_summary_diag"] =
+        "Diagnostics {value}.",
+      ["a11y.sr.settings_summary.meaning"] =
+        "Readable summary of the current settings.",
+      ["a11y.sr.update_status.meaning"] =
+        "Current update check, update, or repair status.",
+      ["a11y.sr.update_status.idle"] =
+        "No update check is running.",
+      ["a11y.sr.update_status.checking"] =
+        "Checking for updates.",
+      ["a11y.sr.update_status.available"] =
+        "Update available: v{version}.",
+      ["a11y.sr.update_status.repair_available"] =
+        "Repair available: {count} file(s) need repair.",
+      ["a11y.sr.update_status.applying"] =
+        "Applying update or repair: {done} of {total}.",
+      ["a11y.sr.update_status.repaired"] =
+        "Repair complete. {count} file(s) restored.",
+      ["a11y.sr.update_status.updated"] =
+        "Updated to v{version}.",
+      ["a11y.sr.update_status.failed"] =
+        "Update failed at {step}: {error}",
+      ["a11y.sr.update_status.up_to_date"] =
+        "ReaAssist is up to date at v{version}.",
+      ["a11y.sr.update_prompt.update_title"] =
+        "Update Available",
+      ["a11y.sr.update_prompt.repair_title"] =
+        "Repair ReaAssist Files",
+      ["a11y.sr.update_prompt.update_body"] =
+        "ReaAssist v{remote} is available. The update is quick and applies directly. No manual download is needed.",
+      ["a11y.sr.update_prompt.repair_body"] =
+        "ReaAssist found {count} file(s) that need repair. Repair now to restore the required files.",
+      ["a11y.sr.update_prompt.title.meaning"] =
+        "Accessible prompt for applying a ReaAssist update or repair.",
+      ["a11y.sr.update_prompt.body.meaning"] =
+        "Explains why ReaAssist is asking to update or repair now.",
+      ["a11y.sr.update_prompt.apply.meaning"] =
+        "Applies the available ReaAssist update or file repair now.",
+      ["a11y.sr.update_prompt.later.meaning"] =
+        "Postpones this update reminder.",
+      ["a11y.sr.update_prompt.changelog.meaning"] =
+        "Opens the ReaAssist changelog in your browser.",
+      ["a11y.sr.update_prompt.repair_opened"] =
+        "ReaAssist files need repair. Choose Repair Now.",
+      ["a11y.sr.update_prompt.update_opened"] =
+        "ReaAssist update available. Choose Update Now, Later, or View Changelog.",
+      ["a11y.sr.update_prompt.later_status"] =
+        "Update reminder postponed.",
+      ["a11y.sr.check_updates"] = "Check Updates",
+      ["a11y.sr.check_updates.meaning"] =
+        "Checks for ReaAssist updates and install repairs.",
+      ["a11y.sr.apply_update"] = "Apply Update or Repair",
+      ["a11y.sr.apply_update.meaning"] =
+        "Applies the available ReaAssist update or file repair.",
+      ["a11y.sr.update_check_started"] =
+        "Checking for updates.",
+      ["a11y.sr.update_check_failed"] =
+        "Update check could not start.",
+      ["a11y.sr.update_apply_started"] =
+        "Applying update or repair.",
+      ["a11y.sr.update_apply_failed"] =
+        "Update or repair could not start.",
+      ["a11y.sr.update_unavailable"] =
+        "Update checking is not available in this build.",
+      ["a11y.sr.update_nothing_to_apply"] =
+        "No update or repair is ready to apply.",
+      ["a11y.sr.reset_window.meaning"] =
+        "Reset Screen Reader Mode and visual ReaAssist windows to their default size and clear saved position.",
+      ["a11y.sr.reset_window_done"] =
+        "Window sizes reset.",
+      ["a11y.sr.reset_window_failed"] =
+        "Could not reset the window size.",
+      ["a11y.sr.factory_reset.meaning"] =
+        "Clear all keys, preferences, and settings to start fresh.",
+      ["a11y.sr.factory_reset_blocked_active"] =
+        "Cancel or finish the active request before factory reset.",
+      ["a11y.sr.factory_reset_unavailable"] =
+        "Factory reset is not available in this build.",
+      ["a11y.sr.factory_reset_failed"] =
+        "Factory reset could not be completed.",
+      ["a11y.sr.factory_reset_done"] =
+        "Factory reset complete. ReaAssist Screen Reader Mode is ready for first setup.",
+      ["a11y.sr.factory_reset_cancelled"] =
+        "Factory reset cancelled.",
+      ["a11y.sr.factory_reset_title.meaning"] =
+        "Confirmation before deleting ReaAssist data.",
+      ["a11y.sr.factory_reset_body"] =
+        "Deletes ReaAssist data. This cannot be undone.",
+      ["a11y.sr.factory_reset_body.meaning"] =
+        "This deletes settings, API keys, custom providers, custom instructions, cached data, diagnostics, and saved window position. This cannot be undone.",
+      ["a11y.sr.factory_reset_confirm.meaning"] =
+        "Deletes ReaAssist data after confirmation.",
+      ["a11y.sr.factory_reset_confirm_opened"] =
+        "Factory reset confirmation opened. Choose Factory Reset only if you want to delete ReaAssist data, or F9 to go back.",
+      ["a11y.sr.include_snapshot"] =
+        "Include session snapshot",
+      ["a11y.sr.include_snapshot.meaning"] =
+        "Includes track, project, and relevant session context with requests.",
+      ["a11y.sr.include_snapshot_changed"] =
+        "Include session snapshot is now {value}.",
+      ["a11y.sr.include_api_ref"] =
+        "Include REAPER API reference",
+      ["a11y.sr.include_api_ref.meaning"] =
+        "Includes additional REAPER API reference context with requests.",
+      ["a11y.sr.include_api_ref_changed"] =
+        "Include REAPER API reference is now {value}.",
+      ["a11y.sr.show_details"] =
+        "Show response details",
+      ["a11y.sr.show_details.meaning"] =
+        "Shows model, token count, time, and cost details when available.",
+      ["a11y.sr.show_details_changed"] =
+        "Show response details is now {value}.",
+      ["a11y.sr.debug_logging"] =
+        "Enable advanced log",
+      ["a11y.sr.debug_logging.meaning"] =
+        "Writes detailed request and diagnostic logs for troubleshooting.",
+      ["a11y.sr.debug_logging_changed"] =
+        "Advanced log is now {value}.",
+      ["a11y.sr.update_check.meaning"] =
+        "Automatically checks for ReaAssist updates when REAPER starts.",
+      ["a11y.sr.update_check_changed"] =
+        "Check for updates on startup is now {value}.",
+      ["a11y.sr.concise_hints"] =
+        "Concise focus hints",
+      ["a11y.sr.concise_hints.meaning"] =
+        "Shortens repeated focus descriptions in Screen Reader Mode.",
+      ["a11y.sr.concise_hints_changed"] =
+        "Concise focus hints are now {value}.",
+      ["a11y.sr.concise_hint.button"] =
+        "Activates this command.",
+      ["a11y.sr.concise_hint.checkbox"] =
+        "Toggles this option.",
+      ["a11y.sr.concise_hint.menu"] =
+        "Choose an option.",
+      ["a11y.sr.concise_hint.edit"] =
+        "Enter text.",
+      ["a11y.sr.concise_hint.slider"] =
+        "Adjust value.",
+      ["a11y.sr.concise_hint.tabs"] =
+        "Choose a tab.",
+      ["a11y.sr.concise_hint.list"] =
+        "Choose an item.",
+      ["a11y.sr.concise_hint.textbox"] =
+        "Text area.",
+      ["a11y.sr.prompt_editor_title"] = "Prompt & Chat Tools",
+      ["a11y.sr.prompt_editor_title.meaning"] =
+        "Accessible prompt and chat tools for ReaAssist Screen Reader Mode.",
+      ["a11y.sr.prompt_tools"] = "Prompt & Chat",
+      ["a11y.sr.prompt_tools.meaning"] =
+        "Opens clipboard, draft-file, and chat tools.",
+      ["a11y.sr.example_prompts"] = "Example Prompts",
+      ["a11y.sr.example_prompts.meaning"] =
+        "Opens optional starter prompts on a separate screen.",
+      ["a11y.sr.example_prompts_title"] = "Example Prompts",
+      ["a11y.sr.example_prompts_title.meaning"] =
+        "Example prompts for ReaAssist Screen Reader Mode.",
+      ["a11y.sr.example_prompts_note"] =
+        "Choose an example to load it as the current prompt, then send from the main screen.",
+      ["a11y.sr.example_prompts_note.meaning"] =
+        "Explains how example prompts work.",
+      ["a11y.sr.response_ready_title"] = "Response",
+      ["a11y.sr.response_ready_title.meaning"] =
+        "Latest ReaAssist response and available actions.",
+      ["a11y.sr.response_ready_body"] =
+        "The response has arrived, but no readable response text was found.",
+      ["a11y.sr.response_ready_body_action"] =
+        "Review the edit details before running it.",
+      ["a11y.sr.response_ready_body_code"] =
+        "Review generated code before running.",
+      ["a11y.sr.response_ready_body_jsfx"] =
+        "The response includes generated JSFX. Read it first, then add it to selected tracks if it matches your request.",
+      ["a11y.sr.response_notes_below"] =
+        "Response notes are below the action buttons.",
+      ["a11y.sr.response_notes_below.meaning"] =
+        "Tells the user where secondary response notes appear on the page.",
+      ["a11y.sr.response_notes_after_actions_hint_v2"] =
+        "Available actions are listed first.",
+      ["a11y.sr.response_notes_after_actions_hint_v2.meaning"] =
+        "Tells the user that primary response actions come before secondary notes.",
+      ["a11y.sr.response_ready_body_code_ran"] =
+        "Auto-run has already run the generated code successfully.",
+      ["a11y.sr.response_ready_body_code_ran_manual"] =
+        "Generated code ran successfully.",
+      ["a11y.sr.response_ready_body_jsfx_added"] =
+        "JSFX has been added to the selected tracks.",
+      ["a11y.sr.response_ready_body_action_ran"] =
+        "Auto-run has already run the structured edit successfully.",
+      ["a11y.sr.response_ready_body_action_ran_manual"] =
+        "The structured edit ran successfully.",
+      ["a11y.sr.response_ready_body_action_undone"] =
+        "Undo has been sent for this structured edit.",
+      ["a11y.sr.response_ready_body_code_undone"] =
+        "Undo has been sent for the generated code run.",
+      ["a11y.sr.response_ready_body_jsfx_undone"] =
+        "Undo has been sent for the JSFX add.",
+      ["a11y.sr.apply_action_plan"] = "Run Edit",
+      ["a11y.sr.apply_action_plan.meaning"] =
+        "Runs the validated edit after ReaAssist checks it.",
+      ["a11y.sr.apply_action_plan_unavailable"] =
+        "There is no validated edit to run.",
+      ["a11y.sr.apply_action_plan_done"] =
+        "Structured edit ran.",
+      ["a11y.sr.apply_action_plan_failed"] =
+        "Structured edit could not run.",
+      ["a11y.sr.apply_action_plan_already_applied"] =
+        "This structured edit has already been run.",
+      ["a11y.sr.apply_action_plan_pending"] =
+        "Structured edit is running.",
+      ["a11y.sr.apply_without_backup"] =
+        "Run Edit Without Backup",
+      ["a11y.sr.apply_confirm_review"] =
+        "Use Back to Edit Details to review first. Continue only if you trust the structured edit.",
+      ["a11y.sr.back_to_plan"] = "Back to Edit Details",
+      ["a11y.sr.back_to_plan.meaning"] =
+        "Returns to the edit details without running the edit.",
+      ["a11y.sr.screen_reader_summary.meaning"] =
+        "Short summary of the latest response for screen-reader users.",
+      ["a11y.sr.jsfx_summary"] =
+        "JSFX effect: {name}.",
+      ["a11y.sr.typed_action_summary.meaning"] =
+        "Summary of the structured edit that ran.",
+      ["a11y.sr.response_ready_body.meaning"] =
+        "Explains the response choices.",
+      ["a11y.sr.prompt_input"] = "Prompt",
+      ["a11y.sr.prompt_input.meaning"] =
+        "Type a short prompt here. Press Enter to open ReaGirl's accessible input dialog. In that dialog, OK sends the prompt from the main screen. Use Prompt & Chat for long or multiline prompts.",
+      ["a11y.sr.prompt_input_tools.meaning"] =
+        "Type or paste a prompt here. Press Enter to edit it in ReaGirl's accessible input dialog. In that dialog, OK updates the prompt on this screen. Use Send when ready.",
+      ["a11y.sr.prompt_input_empty"] =
+        "Type a request for ReaAssist",
+      ["a11y.sr.prompt_editor_preview.meaning"] =
+        "Preview of the prompt that will be sent.",
+      ["a11y.sr.prompt_editor_body.meaning"] =
+        "Readable prompt text that will be sent.",
+      ["a11y.sr.prompt_body_empty"] =
+        "No prompt entered.",
+      ["a11y.sr.prompt_body_long"] =
+        "Long prompt loaded ({chars} characters). Use Copy Prompt or Save Prompt to review the full text.",
+      ["a11y.sr.prompt_editor_note"] =
+        "Use the prompt box for quick prompts, or open the draft file in your text editor for longer prompts.",
+      ["a11y.sr.prompt_editor_note.meaning"] =
+        "Explains the accessible prompt editing options.",
+      ["a11y.sr.starter_prompts"] = "Starter prompts",
+      ["a11y.sr.starter_prompts.meaning"] =
+        "Suggested prompts matching the main ReaAssist welcome cards.",
+      ["a11y.sr.starter_prompt.meaning"] =
+        "Loads the {title} starter prompt.",
+      ["a11y.sr.starter_prompt_loaded_named"] =
+        "Starter prompt loaded: {title}.",
+      ["a11y.sr.starter_prompt_missing"] =
+        "Starter prompt is not available.",
+      ["a11y.sr.paste_prompt"] = "Paste Prompt",
+      ["a11y.sr.paste_prompt.meaning"] =
+        "Replaces the prompt with text from the clipboard.",
+      ["a11y.sr.append_prompt"] = "Append Clipboard",
+      ["a11y.sr.append_prompt.meaning"] =
+        "Adds clipboard text to the end of the current prompt.",
+      ["a11y.sr.clear_prompt"] = "Clear Prompt",
+      ["a11y.sr.clear_prompt.meaning"] =
+        "Clears the current prompt.",
+      ["a11y.sr.copy_prompt"] = "Copy Prompt",
+      ["a11y.sr.copy_prompt.meaning"] =
+        "Copies the current prompt to the clipboard.",
+      ["a11y.sr.save_prompt"] = "Save Prompt",
+      ["a11y.sr.save_prompt.meaning"] =
+        "Saves the current prompt to the ReaAssist temp folder.",
+      ["a11y.sr.open_prompt_draft"] = "Open Draft File",
+      ["a11y.sr.open_prompt_draft.meaning"] =
+        "Opens a prompt draft text file in your system text editor.",
+      ["a11y.sr.load_prompt_draft"] = "Load Draft File",
+      ["a11y.sr.load_prompt_draft.meaning"] =
+        "Loads the saved draft file as the current prompt.",
+      ["a11y.sr.clipboard_unavailable"] =
+        "Clipboard access is not available.",
+      ["a11y.sr.clipboard_empty"] = "Clipboard is empty.",
+      ["a11y.sr.prompt_pasted"] = "Prompt pasted from clipboard.",
+      ["a11y.sr.prompt_appended"] =
+        "Clipboard text appended to prompt.",
+      ["a11y.sr.prompt_draft_opened"] =
+        "Prompt draft opened: {path}",
+      ["a11y.sr.prompt_draft_open_failed"] =
+        "Could not open prompt draft: {path}",
+      ["a11y.sr.prompt_draft_read_failed"] =
+        "Could not read prompt draft: {error}",
+      ["a11y.sr.prompt_draft_loaded"] =
+        "Prompt loaded from draft file.",
+      ["a11y.sr.prompt_cleared"] = "Prompt cleared.",
+      ["a11y.sr.no_prompt_to_copy"] =
+        "There is no prompt to copy.",
+      ["a11y.sr.no_prompt_to_save"] =
+        "There is no prompt to save.",
+      ["a11y.sr.prompt_copied"] =
+        "Prompt copied to clipboard.",
+      ["a11y.sr.prompt_copy_failed"] =
+        "Could not copy the prompt.",
+      ["a11y.sr.prompt_saved"] =
+        "Prompt saved to {path}.",
+      ["a11y.sr.prompt_saved_short"] =
+        "Prompt saved.",
+      ["a11y.sr.prompt_save_failed"] =
+        "Could not save the prompt.",
+      ["a11y.sr.attachments"] = "Attachments",
+      ["a11y.sr.attachments.meaning"] =
+        "Opens accessible attachment controls.",
+      ["a11y.sr.attachments_title"] = "ReaAssist Attachments",
+      ["a11y.sr.attachments_title.meaning"] =
+        "Accessible attachment controls for ReaAssist Screen Reader Mode.",
+      ["a11y.sr.attachments_none"] =
+        "No attachments queued.",
+      ["a11y.sr.attachments_more"] = "plus {count} more",
+      ["a11y.sr.attachments_summary"] =
+        "{count} attachment(s): {names}",
+      ["a11y.sr.attachments_summary.meaning"] =
+        "Summary of the current attachment queue.",
+      ["a11y.sr.attachments_note"] =
+        "Copy a file path in Explorer, then choose Add File Path. Attachments are sent with the next request only.",
+      ["a11y.sr.attachments_note.meaning"] =
+        "Explains how accessible attachments work.",
+      ["a11y.sr.add_attachment_path"] = "Add File Path",
+      ["a11y.sr.add_attachment_path.meaning"] =
+        "Adds the file path currently copied to the clipboard.",
+      ["a11y.sr.add_clipboard_image"] = "Add Clipboard Image",
+      ["a11y.sr.add_clipboard_image.meaning"] =
+        "Adds an image from the clipboard when one is available.",
+      ["a11y.sr.add_screenshot.meaning"] =
+        "Takes a screenshot and attaches it to the next request.",
+      ["a11y.sr.remove_last_attachment"] = "Remove Last",
+      ["a11y.sr.remove_last_attachment.meaning"] =
+        "Removes the most recently added attachment.",
+      ["a11y.sr.clear_attachments"] = "Clear Attachments",
+      ["a11y.sr.clear_attachments.meaning"] =
+        "Removes all queued attachments.",
+      ["a11y.sr.attachment_path_empty"] =
+        "Copy a file path to the clipboard first.",
+      ["a11y.sr.attachment_add_failed"] =
+        "Could not add attachment.",
+      ["a11y.sr.attachment_clipboard_failed"] =
+        "Could not add a clipboard image.",
+      ["a11y.sr.attachment_screenshot_failed"] =
+        "Could not take a screenshot.",
+      ["a11y.sr.attachment_added"] = "Attachment added.",
+      ["a11y.sr.attachment_removed"] =
+        "Last attachment removed.",
+      ["a11y.sr.attachments_cleared"] =
+        "Attachments cleared.",
+      ["a11y.sr.report_issue"] = "Report Issue",
+      ["a11y.sr.report_issue.meaning"] =
+        "Opens accessible issue reporting.",
+      ["a11y.sr.report_issue_title"] = "Report Issue",
+      ["a11y.sr.report_issue_title.meaning"] =
+        "Accessible issue reporting for ReaAssist Screen Reader Mode.",
+      ["a11y.sr.report_note"] =
+        "Paste a short description, or open the description file in your text editor. Copy Preview copies the exact redacted JSON that will be sent.",
+      ["a11y.sr.report_note.meaning"] =
+        "Explains how accessible issue reporting works.",
+      ["a11y.sr.report_summary.meaning"] =
+        "Summarizes the report description, contact info, and diagnostic attachment.",
+      ["a11y.sr.report_summary_empty"] =
+        "Report description is empty. {contact} {attachment}",
+      ["a11y.sr.report_summary"] =
+        "Report description has {chars} characters. {contact} {attachment}",
+      ["a11y.sr.report_contact_saved"] =
+        "Contact email saved.",
+      ["a11y.sr.report_contact_empty"] =
+        "No contact email saved.",
+      ["a11y.sr.report_attachment_none"] =
+        "Diagnostic report only.",
+      ["a11y.sr.report_attachment_log"] =
+        "Advanced Log will be attached.",
+      ["a11y.sr.report_attachment_chat"] =
+        "Current chat will be attached.",
+      ["a11y.sr.report_comment_preview"] =
+        "Description: {text}",
+      ["a11y.sr.report_comment_preview.meaning"] =
+        "Preview of the issue description.",
+      ["a11y.sr.report_comment_empty"] = "empty",
+      ["a11y.sr.report_paste_description"] =
+        "Paste Description",
+      ["a11y.sr.report_paste_description.meaning"] =
+        "Replaces the report description with text from the clipboard.",
+      ["a11y.sr.report_append_description"] =
+        "Append Clipboard",
+      ["a11y.sr.report_append_description.meaning"] =
+        "Adds clipboard text to the report description.",
+      ["a11y.sr.report_clear_description"] =
+        "Clear Description",
+      ["a11y.sr.report_clear_description.meaning"] =
+        "Clears the report description.",
+      ["a11y.sr.report_open_description_file"] =
+        "Open Description File",
+      ["a11y.sr.report_open_description_file.meaning"] =
+        "Opens the issue description file in your system text editor.",
+      ["a11y.sr.report_load_description_file"] =
+        "Load Description File",
+      ["a11y.sr.report_load_description_file.meaning"] =
+        "Loads the saved issue description file.",
+      ["a11y.sr.report_comment_pasted"] =
+        "Report description pasted from clipboard.",
+      ["a11y.sr.report_comment_appended"] =
+        "Clipboard text appended to report description.",
+      ["a11y.sr.report_comment_opened"] =
+        "Report description file opened: {path}",
+      ["a11y.sr.report_comment_open_failed"] =
+        "Could not open report description file: {path}",
+      ["a11y.sr.report_comment_read_failed"] =
+        "Could not read report description: {error}",
+      ["a11y.sr.report_comment_loaded"] =
+        "Report description loaded from file.",
+      ["a11y.sr.report_comment_cleared"] =
+        "Report description cleared.",
+      ["a11y.sr.report_contact_preview"] =
+        "Contact: {name}, {email}",
+      ["a11y.sr.report_contact_preview.meaning"] =
+        "Optional contact name and email for a reply.",
+      ["a11y.sr.report_contact_no_name"] = "no name",
+      ["a11y.sr.report_contact_no_email"] = "no email",
+      ["a11y.sr.report_paste_contact"] = "Paste Contact",
+      ["a11y.sr.report_paste_contact.meaning"] =
+        "Reads a contact name and email from the clipboard.",
+      ["a11y.sr.report_open_contact_file"] =
+        "Open Contact File",
+      ["a11y.sr.report_open_contact_file.meaning"] =
+        "Opens the optional contact file in your text editor.",
+      ["a11y.sr.report_load_contact_file"] =
+        "Load Contact File",
+      ["a11y.sr.report_load_contact_file.meaning"] =
+        "Loads optional contact details from the contact file.",
+      ["a11y.sr.report_clear_contact"] =
+        "Clear Contact",
+      ["a11y.sr.report_clear_contact.meaning"] =
+        "Clears the optional contact name and email.",
+      ["a11y.sr.report_contact_empty_clipboard"] =
+        "Clipboard does not contain a name or email.",
+      ["a11y.sr.report_contact_pasted"] =
+        "Report contact pasted.",
+      ["a11y.sr.report_contact_opened"] =
+        "Report contact file opened: {path}",
+      ["a11y.sr.report_contact_open_failed"] =
+        "Could not open report contact file: {path}",
+      ["a11y.sr.report_contact_read_failed"] =
+        "Could not read report contact: {error}",
+      ["a11y.sr.report_contact_loaded"] =
+        "Report contact loaded from file.",
+      ["a11y.sr.report_contact_cleared"] =
+        "Report contact cleared.",
+      ["a11y.sr.report_copy_preview"] =
+        "Copy Preview",
+      ["a11y.sr.report_copy_preview.meaning"] =
+        "Copies the exact redacted report JSON to the clipboard.",
+      ["a11y.sr.report_save_preview"] =
+        "Save Preview",
+      ["a11y.sr.report_save_preview.meaning"] =
+        "Saves the exact redacted report JSON to the temp folder.",
+      ["a11y.sr.report_send.meaning"] =
+        "Sends the issue report to the ReaAssist maintainer.",
+      ["a11y.sr.report_preview_copied"] =
+        "Report preview copied to clipboard.",
+      ["a11y.sr.report_preview_saved"] =
+        "Report preview saved to {path}.",
+      ["a11y.sr.report_preview_saved_short"] =
+        "Report preview saved.",
+      ["a11y.sr.report_comment_required"] =
+        "Enter a report description before sending.",
+      ["a11y.sr.report_unavailable"] =
+        "Issue reporting is not available in this build.",
+      ["a11y.sr.language_changed"] = "Language changed.",
+      ["a11y.sr.language_screen_reader_note"] =
+        "Be sure to set your screen reader software to this same language.",
+      ["a11y.sr.language_screen_reader_note.meaning"] =
+        "Reminder to match the screen reader voice or language with the selected ReaAssist language.",
+      ["a11y.sr.language_download_started"] =
+        "Downloading language pack. ReaAssist will switch languages when it is ready.",
+      ["a11y.sr.language_download_waiting"] =
+        "Language pack is still downloading.",
+      ["a11y.sr.language_download_failed"] =
+        "Language pack download failed. {error}",
+      ["a11y.sr.language_unavailable"] =
+        "That language is not available yet.",
+      ["a11y.sr.prefer_screen_reader"] =
+        "Always open ReaAssist in Screen Reader Mode",
+      ["a11y.sr.prefer_screen_reader.meaning"] =
+        "When enabled, launching the normal ReaAssist action hands off to this accessible interface.",
+      ["a11y.sr.prefer_sr_on"] =
+        "ReaAssist will open in Screen Reader Mode from now on.",
+      ["a11y.sr.prefer_sr_off"] =
+        "ReaAssist will open its visual interface from now on. Screen Reader Mode is still available as its own action.",
+      ["a11y.sr.open_visual_now"] =
+        "Open Visual Interface Now",
+      ["a11y.sr.open_visual_now.meaning"] =
+        "Turns off the Screen Reader Mode default and reopens ReaAssist in its visual interface.",
+      ["a11y.sr.text_size"] = "Accessible Size",
+      ["a11y.sr.text_size.meaning"] =
+        "Changes text size and spacing in Screen Reader Mode.",
+      ["a11y.sr.text_size.1"] = "Default",
+      ["a11y.sr.text_size.2"] = "Large",
+      ["a11y.sr.text_size.3"] = "Extra Large",
+      ["a11y.sr.text_size.4"] = "Huge",
+      ["a11y.sr.text_size_changed"] =
+        "Accessible size changed to {value}.",
+      ["a11y.sr.contrast"] = "Contrast",
+      ["a11y.sr.contrast.meaning"] =
+        "Chooses the visual contrast for Screen Reader Mode.",
+      ["a11y.sr.contrast_auto"] = "Default",
+      ["a11y.sr.contrast_dark"] = "Dark",
+      ["a11y.sr.contrast_light"] = "Light",
+      ["a11y.sr.contrast_changed"] = "Contrast changed.",
+      ["a11y.sr.cloud_timeout"] = "Cloud Timeout",
+      ["a11y.sr.cloud_timeout.meaning"] =
+        "How long ReaAssist waits before timing out a cloud-provider request.",
+      ["a11y.sr.timeout_changed"] =
+        "Cloud timeout changed to {value} seconds.",
+      ["a11y.sr.seconds_value"] = "{value} seconds",
+      ["a11y.sr.diagnostics_off"] = "Off",
+      ["a11y.sr.diagnostics_tier_changed"] =
+        "Automatic diagnostics changed to {value}.",
+      ["a11y.sr.back_to_main"] = "Back to Main",
+      ["a11y.sr.back_to_main.meaning"] =
+        "Returns to the main ReaAssist screen.",
+      ["a11y.sr.reagirl_missing"] =
+        "ReaAssist Screen Reader Mode could not load the accessible UI library. Error: {error}",
+      ["a11y.sr.window_failed"] =
+        "Could not open the accessible ReaAssist window.",
       ["dialog.gemini.title"] = "Gemini Free Tier",
       ["dialog.gemini.headline"] = "Free Tier Detected",
       ["dialog.gemini.body1"] =
@@ -831,6 +2506,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "The request timed out while waiting for Google's Gemini service. Gemini may be overloaded or temporarily unavailable. If the rest of your internet is working, this is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nTry again in a moment. If it keeps happening, switch to a faster Gemini model or another provider for this request.",
       ["network.timeout.generic"] =
         "The request timed out. The server may be busy, or your internet connection may have dropped.\n\nTry sending your message again.",
+      ["network.launch_failed"] =
+        "ReaAssist could not start the network request. Please try sending again.",
       ["network.key_test.timeout_short"] =
         "The server took too long to respond.",
       ["network.key_test.timeout_detail"] =
@@ -947,8 +2624,12 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "for MediaItem item-label misuse",
       ["retry.reason.for_ignored_createtracksend_result"] =
         "for ignored CreateTrackSend result",
+      ["retry.reason.for_timecode_generator_workflow_repair"] =
+        "for native timecode generator workflow repair",
       ["retry.reason.for_stock_plugin_substitution"] =
         "for stock plugin substitution",
+      ["retry.reason.for_timecode_generator_fx_repair"] =
+        "for native timecode generator repair",
       ["retry.reason.for_exact_fx_identifier_repair"] =
         "for exact FX identifier repair",
       ["retry.reason.for_unchecked_addbyname_result"] =
@@ -1013,8 +2694,12 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "The script tries to label MediaItems with P_NAME. Auto-run is blocked because MediaItem string params accept only P_NOTES/P_EXT/GUID; visible arrange labels live on the take. Use AddTakeToMediaItem or CreateNewMIDIItemInProj, then call GetSetMediaItemTakeInfo_String(take, \"P_NAME\", label, true).",
       ["validator.send_index_blocked"] =
         "The model created sends with unsafe CreateTrackSend return-value handling, even after a retry: {details}. Auto-run is blocked; review and edit the code before clicking Run manually.",
+      ["validator.timecode_generator_workflow_blocked"] =
+        "The model still did not safely find, insert, or bind the native timecode generator item to the routed hardware-output track, even after a retry: {details}. Auto-run is blocked; review the generated action lookup, track selection, and hardware output send category before running manually.",
       ["validator.stock_fx_substitution_blocked"] =
         "The model substituted third-party or JSFX plugin(s) for explicitly requested stock Cockos plugin(s), even after a retry: {plugins}. Auto-run is blocked; review and edit the code before clicking Run manually.",
+      ["validator.timecode_generator_fx_blocked"] =
+        "The model tried to insert/generate SMPTE/LTC/MTC timecode as an FX plugin, even after a retry: {plugins}. Auto-run is blocked; use REAPER's native timecode generator action/item workflow and route outputs explicitly.",
       ["validator.fx_identifier_drift_blocked"] =
         "The model stripped exact preferred plugin identifier(s), even after a retry: {plugins}. Auto-run is blocked; review and edit the code before clicking Run manually.",
       ["validator.fx_addbyname_unchecked_blocked"] =
@@ -1783,6 +3468,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.pref.preferred_plugins.label"] = "Preferred Plugins",
       ["settings.pref.preferred_plugins.tooltip"] =
         "Set default plugins for each type (EQ, compressor, reverb, etc.)",
+      ["settings.custom_instructions.label"] = "Custom Instructions",
+      ["settings.custom_instructions.enable"] = "Use custom instructions",
+      ["settings.custom_instructions.enable.tooltip"] =
+        "Include saved custom instructions with each request.",
       ["settings.custom_instructions.desc"] =
         "Use this for stable personal preferences: preferred plugins, naming "
         .. "habits, project conventions, and things you often have to repeat. "

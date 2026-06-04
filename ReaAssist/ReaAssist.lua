@@ -278,6 +278,16 @@ function Deps.check_sws_status()
   return "ok", ver
 end
 
+function Deps.prefer_screen_reader_enabled()
+  return reaper.GetExtState
+     and reaper.GetExtState("reaassist", "prefer_screen_reader") == "1"
+end
+
+function Deps.screen_reader_intent()
+  if rawget(_G, "REAASSIST_SCREEN_READER_MODE") == true then return true end
+  return Deps.prefer_screen_reader_enabled()
+end
+
 -- Build the install queue for the current platform. Order: ReaImGui
 -- first (UI dependency, blocks anything from rendering), SWS second
 -- when REQUIRE_SWS_EXTENSION is enabled (expanded script API surface),
@@ -291,22 +301,24 @@ end
 -- on linux-arm64): the script still works on those platforms via the
 -- existing fallback paths (GetUserInputs save, no-op attach), so we
 -- silently drop the unsupported dep rather than block the install flow.
-function Deps.build_queue(platform)
+function Deps.build_queue(platform, screen_reader_intent)
   local queue = {}
   local user_plugins = reaper.GetResourcePath() .. "/UserPlugins/"
 
-  local imgui_status, imgui_ver = Deps.check_imgui_status()
-  if imgui_status ~= "ok" then
-    local entry = Deps.REAIMGUI.assets[platform]
-    if entry then
-      queue[#queue + 1] = {
-        dep           = Deps.REAIMGUI,
-        kind          = imgui_status,             -- "missing" or "too_old"
-        installed_ver = imgui_ver,
-        asset         = entry[1],
-        expected_sha  = entry[2],
-        dest_path     = user_plugins .. entry[1],
-      }
+  if not screen_reader_intent then
+    local imgui_status, imgui_ver = Deps.check_imgui_status()
+    if imgui_status ~= "ok" then
+      local entry = Deps.REAIMGUI.assets[platform]
+      if entry then
+        queue[#queue + 1] = {
+          dep           = Deps.REAIMGUI,
+          kind          = imgui_status,             -- "missing" or "too_old"
+          installed_ver = imgui_ver,
+          asset         = entry[1],
+          expected_sha  = entry[2],
+          dest_path     = user_plugins .. entry[1],
+        }
+      end
     end
   end
 
@@ -429,6 +441,30 @@ InstallerGfx.STRINGS = {
     ["common.retry"] = "Reintentar",
     ["common.dependency"] = "dependencia",
     ["common.unknown"] = "desconocido",
+    ["common.and"] = "y",
+    ["common.list_separator"] = ", ",
+    ["common.list_final_separator"] = " y ",
+    ["a11y.button.install"] = "Botón Instalar.",
+    ["a11y.button.quit"] = "Botón Salir.",
+    ["a11y.button.retry"] = "Botón Reintentar.",
+    ["a11y.button.close"] = "Botón Cerrar.",
+    ["a11y.disclose.single"] =
+      "ReaAssist necesita instalar o actualizar {name}. Pulsa Enter para instalar. Pulsa Escape para salir. Pulsa Tab para cambiar de botón.",
+    ["a11y.disclose.multi"] =
+      "ReaAssist necesita instalar o actualizar {count} dependencias. Pulsa Enter para instalar. Pulsa Escape para salir. Pulsa Tab para cambiar de botón.",
+    ["a11y.running"] = "{name}: {status}",
+    ["a11y.running.escape"] =
+      "La instalación ya está en curso. Espera a que termine.",
+    ["a11y.done"] =
+      "Instalación completada: {list}. Cierra y vuelve a abrir REAPER. Luego abre la lista de acciones y ejecuta ReaAssist. Pulsa Enter o Escape para cerrar este instalador.",
+    ["a11y.error"] =
+      "La instalación falló para {name} durante {step}. {error} Pulsa Escape para cerrar. Pulsa Tab para elegir Reintentar o Cerrar, y luego Enter.",
+    ["a11y.step.setup"] = "la preparación",
+    ["a11y.step.download"] = "la descarga",
+    ["a11y.step.verify"] = "la verificación",
+    ["a11y.step.install"] = "la instalación",
+    ["a11y.step.timeout"] = "el tiempo de espera",
+    ["a11y.step.unknown"] = "un paso desconocido",
     ["window.install_dependencies"] = "Instalar dependencias",
     ["window.install_dep"] = "Instalar {name}",
     ["window.update_dep"] = "Actualizar {name}",
@@ -545,6 +581,257 @@ function InstallerGfx.t(key, values, fallback)
   return text
 end
 
+function InstallerGfx.script_dir()
+  if InstallerGfx._script_dir then return InstallerGfx._script_dir end
+  local src = (debug and debug.getinfo and debug.getinfo(1, "S").source) or ""
+  InstallerGfx._script_dir = src:match("^@(.+[\\/])") or ""
+  return InstallerGfx._script_dir
+end
+
+function InstallerGfx.sep()
+  return ((reaper.GetOS() or ""):match("^Win")) and "\\" or "/"
+end
+
+function InstallerGfx.write_status_transcript(text)
+  local line = tostring(text or "")
+  if line == "" then return end
+  local sep = InstallerGfx.sep()
+  local paths = {}
+  local base = InstallerGfx.script_dir()
+  if base ~= "" then
+    local temp_dir = base .. "Data" .. sep .. "Temp" .. sep
+    if reaper.RecursiveCreateDirectory then
+      pcall(reaper.RecursiveCreateDirectory, temp_dir, 0)
+    end
+    paths[#paths + 1] = temp_dir .. "accessibility-status.txt"
+  end
+  if reaper.GetResourcePath then
+    paths[#paths + 1] = reaper.GetResourcePath() .. sep
+      .. "ReaAssist-accessibility-status.txt"
+  end
+  for _, path in ipairs(paths) do
+    local f = io.open(path, "a")
+    if f then
+      f:write(os.date("%Y-%m-%d %H:%M:%S"), "  ", line, "\n")
+      f:close()
+      return
+    end
+  end
+end
+
+function InstallerGfx.announce(key, text, opts)
+  text = tostring(text or "")
+  if text == "" then return end
+  key = tostring(key or text)
+  opts = opts or {}
+  local now = reaper.time_precise()
+  if key == InstallerGfx._last_a11y_key
+      and text == InstallerGfx._last_a11y_text then
+    return
+  end
+  if not opts.critical
+      and InstallerGfx._last_a11y_at
+      and now - InstallerGfx._last_a11y_at < 0.5 then
+    return
+  end
+  InstallerGfx._last_a11y_key = key
+  InstallerGfx._last_a11y_text = text
+  InstallerGfx._last_a11y_at = now
+  InstallerGfx.write_status_transcript(text)
+  if reaper.osara_outputMessage then
+    pcall(reaper.osara_outputMessage, text)
+  end
+end
+
+function InstallerGfx.dependency_list()
+  local names = {}
+  for _, item in ipairs(InstallerGfx.queue or {}) do
+    names[#names + 1] = item.dep.name .. " " .. item.dep.pinned_version
+  end
+  if #names == 0 then return "" end
+  if #names == 1 then return names[1] end
+  local and_word = InstallerGfx.t("common.and", nil, "and")
+  if #names == 2 then return names[1] .. " " .. and_word .. " " .. names[2] end
+  local head = {}
+  for i = 1, #names - 1 do head[#head + 1] = names[i] end
+  return table.concat(head, InstallerGfx.t("common.list_separator", nil, ", "))
+    .. InstallerGfx.t("common.list_final_separator", nil, ", and ")
+    .. names[#names]
+end
+
+function InstallerGfx.step_label(step)
+  step = tostring(step or "unknown")
+  if step == "" then step = "unknown" end
+  local fallback = ({
+    setup = "setup",
+    download = "download",
+    verify = "verification",
+    install = "installation",
+    timeout = "timeout",
+    unknown = "unknown step",
+  })[step] or step
+  return InstallerGfx.t("a11y.step." .. step, nil, fallback)
+end
+
+function InstallerGfx.current_accessibility_message()
+  local state = InstallerGfx.state
+  local item = InstallerGfx.current()
+  local dep_name = item and item.dep.name
+    or InstallerGfx.t("common.dependency", nil, "dependency")
+  if state == "disclose" then
+    if InstallerGfx.queue and #InstallerGfx.queue > 1 then
+      return "disclose:" .. tostring(#InstallerGfx.queue),
+        InstallerGfx.t("a11y.disclose.multi", {
+          count = #InstallerGfx.queue,
+        }, "ReaAssist needs to install or update "
+          .. tostring(#InstallerGfx.queue)
+          .. " dependencies. Press Enter to install. Press Escape to quit. Press Tab to switch buttons."),
+        true
+    end
+    return "disclose:" .. dep_name,
+      InstallerGfx.t("a11y.disclose.single", { name = dep_name },
+        "ReaAssist needs to install or update " .. dep_name
+          .. ". Press Enter to install. Press Escape to quit. Press Tab to switch buttons."),
+      true
+  elseif state == "done" then
+    return "done", InstallerGfx.t("a11y.done", {
+      list = InstallerGfx.dependency_list(),
+    }, InstallerGfx.dependency_list()
+      .. " installed. Close and reopen REAPER. Then open the Action List and run ReaAssist. Press Enter or Escape to close this installer."),
+      true
+  elseif state == "error" then
+    local step_label = InstallerGfx.step_label(InstallerGfx.error_step)
+    return "error:" .. tostring(InstallerGfx.error_step) .. ":"
+      .. tostring(InstallerGfx.error_msg),
+      InstallerGfx.t("a11y.error", {
+        name = dep_name,
+        step = step_label,
+        error = InstallerGfx.error_msg or "",
+      }, "Installation failed for " .. dep_name .. " during "
+        .. step_label .. ". "
+        .. tostring(InstallerGfx.error_msg or "")
+        .. " Press Escape to close. Press Tab to choose Retry or Close, then Enter."),
+      true
+  elseif state == "init" or state == "starting" or state == "running"
+      or state == "downloading" or state == "verifying"
+      or state == "installing" then
+    local status = InstallerGfx.status
+    if status == "" then
+      status = InstallerGfx.t("status.preparing", nil, "Preparing...")
+    end
+    return "running:" .. tostring(InstallerGfx.queue_idx) .. ":"
+      .. tostring(state) .. ":" .. tostring(status),
+      InstallerGfx.t("a11y.running", {
+        name = dep_name,
+        status = status,
+      }, dep_name .. ": " .. status),
+      false
+  end
+end
+
+function InstallerGfx.announce_current_state()
+  if InstallerGfx._skip_state_announce_once then
+    InstallerGfx._skip_state_announce_once = nil
+    return
+  end
+  local key, text, critical = InstallerGfx.current_accessibility_message()
+  if text then InstallerGfx.announce(key, text, { critical = critical }) end
+end
+
+function InstallerGfx.announce_focus()
+  local action = InstallerGfx.focus_action
+  if not action or action == "" then return end
+  local key = "a11y.button." .. action
+  local fallback = ({
+    install = "Install button.",
+    quit = "Quit button.",
+    retry = "Retry button.",
+    close = "Close button.",
+  })[action]
+  if fallback then
+    InstallerGfx.announce("focus:" .. action,
+      InstallerGfx.t(key, nil, fallback), { critical = true })
+  end
+end
+
+function InstallerGfx.set_focus(action)
+  if InstallerGfx.focus_action == action then return end
+  InstallerGfx.focus_action = action
+  InstallerGfx._skip_state_announce_once = true
+  InstallerGfx.announce_focus()
+end
+
+function InstallerGfx.begin_install()
+  InstallerGfx.state        = "init"
+  InstallerGfx._frame_count = 0
+  InstallerGfx.status       = InstallerGfx.t("status.preparing", nil,
+    "Preparing...")
+  InstallerGfx.focus_action = nil
+  InstallerGfx._last_a11y_at = nil
+end
+
+function InstallerGfx.retry_install()
+  InstallerGfx.state         = "init"
+  InstallerGfx._frame_count  = 0
+  InstallerGfx.error_msg     = nil
+  InstallerGfx.error_step    = nil
+  InstallerGfx.status        = InstallerGfx.t("status.preparing", nil,
+    "Preparing...")
+  InstallerGfx.focus_action  = nil
+  InstallerGfx._last_a11y_at = nil
+end
+
+function InstallerGfx.handle_key(char)
+  if char == 0 then return end
+  local is_enter = char == 13 or char == 10
+  local is_escape = char == 27
+  local is_tab = char == 9
+
+  if InstallerGfx.state == "disclose" then
+    if is_enter then
+      if InstallerGfx.focus_action == "quit" then
+        gfx.quit()
+        return true
+      else
+        InstallerGfx.begin_install()
+      end
+    elseif is_escape then
+      gfx.quit()
+      return true
+    elseif is_tab then
+      InstallerGfx.set_focus(
+        InstallerGfx.focus_action == "install" and "quit" or "install")
+    end
+  elseif InstallerGfx.state == "done" then
+    if is_enter or is_escape then
+      gfx.quit()
+      return true
+    end
+  elseif InstallerGfx.state == "error" then
+    if is_escape then
+      gfx.quit()
+      return true
+    elseif is_tab then
+      InstallerGfx.set_focus(
+        InstallerGfx.focus_action == "retry" and "close" or "retry")
+    elseif is_enter then
+      if InstallerGfx.focus_action == "retry" then
+        InstallerGfx.retry_install()
+      else
+        gfx.quit()
+        return true
+      end
+    end
+  elseif is_escape then
+    InstallerGfx.announce("running_escape",
+      InstallerGfx.t("a11y.running.escape", nil,
+        "Installation is already running. Please wait for it to finish."),
+      { critical = true })
+    InstallerGfx._skip_state_announce_once = true
+  end
+  return false
+end
+
 -- Helper: current queue item (the one being installed right now).
 function InstallerGfx.current()
   if not InstallerGfx.queue then return nil end
@@ -625,7 +912,7 @@ function InstallerGfx.draw_indeterminate_bar(x, y, w, h)
   gfx.rect(x, y, w, h, 0)
 end
 
-function InstallerGfx.button(x, y, w, h, label, is_primary)
+function InstallerGfx.button(x, y, w, h, label, is_primary, focused)
   local mx, my = gfx.mouse_x, gfx.mouse_y
   local hovered = mx >= x and mx < x + w and my >= y and my < y + h
   local now_down = (gfx.mouse_cap & 1) == 1
@@ -639,8 +926,11 @@ function InstallerGfx.button(x, y, w, h, label, is_primary)
   end
   gfx.rect(x, y, w, h, 1)
   -- Border
-  InstallerGfx.color(InstallerGfx.C_BORDER)
+  InstallerGfx.color(focused and InstallerGfx.C_ACCENT or InstallerGfx.C_BORDER)
   gfx.rect(x, y, w, h, 0)
+  if focused then
+    gfx.rect(x + 2, y + 2, w - 4, h - 4, 0)
+  end
   -- Label
   InstallerGfx.color(InstallerGfx.C_TEXT)
   gfx.setfont(2)
@@ -694,6 +984,10 @@ function InstallerGfx.start(queue)
   end
   InstallerGfx.queue     = queue
   InstallerGfx.queue_idx = 1
+  InstallerGfx.focus_action = "install"
+  InstallerGfx._last_a11y_key = nil
+  InstallerGfx._last_a11y_text = nil
+  InstallerGfx._last_a11y_at = nil
   -- Start on the disclosure screen so the user can read what's about to
   -- be installed (third-party binaries, sources, licenses, destinations)
   -- before we touch UserPlugins/. Click Install to proceed.
@@ -730,6 +1024,7 @@ function InstallerGfx.tick()
   -- Window closed by user (Esc / X button) -> abort
   local char = gfx.getchar()
   if char < 0 then return end
+  if InstallerGfx.handle_key(char) then return end
 
   InstallerGfx._frame_count = InstallerGfx._frame_count + 1
 
@@ -777,6 +1072,7 @@ function InstallerGfx.tick()
   end
 
   InstallerGfx._last_mouse_cap = gfx.mouse_cap
+  InstallerGfx.announce_current_state()
   reaper.defer(InstallerGfx.tick)
 end
 
@@ -848,12 +1144,13 @@ function InstallerGfx.render_disclose()
   local total_w = btn_w * 2 + gap
   local btn_x = math.floor((gfx.w - total_w) / 2)
   if InstallerGfx.button(btn_x, btn_y, btn_w, btn_h,
-      InstallerGfx.t("common.install", nil, "Install"), true) then
-    InstallerGfx.state        = "init"
-    InstallerGfx._frame_count = 0
+      InstallerGfx.t("common.install", nil, "Install"), true,
+      InstallerGfx.focus_action == "install") then
+    InstallerGfx.begin_install()
   end
   if InstallerGfx.button(btn_x + btn_w + gap, btn_y, btn_w, btn_h,
-      InstallerGfx.t("common.quit", nil, "Quit"), false) then
+      InstallerGfx.t("common.quit", nil, "Quit"), false,
+      InstallerGfx.focus_action == "quit") then
     gfx.quit()
   end
 end
@@ -1044,7 +1341,8 @@ function InstallerGfx.render_done()
   local btn_x = math.floor((gfx.w - btn_w) / 2)
   local btn_y = gfx.h - 70
   if InstallerGfx.button(btn_x, btn_y, btn_w, btn_h,
-      InstallerGfx.t("common.close", nil, "Close"), true) then
+      InstallerGfx.t("common.close", nil, "Close"), true,
+      InstallerGfx.focus_action == "close") then
     gfx.quit()
   end
 end
@@ -1079,14 +1377,13 @@ function InstallerGfx.render_error()
   local total_w = btn_w * 2 + gap
   local btn_x = math.floor((gfx.w - total_w) / 2)
   if InstallerGfx.button(btn_x, btn_y, btn_w, btn_h,
-      InstallerGfx.t("common.retry", nil, "Retry"), true) then
-    InstallerGfx.state         = "init"
-    InstallerGfx._frame_count  = 0
-    InstallerGfx.error_msg     = nil
-    InstallerGfx.error_step    = nil
+      InstallerGfx.t("common.retry", nil, "Retry"), true,
+      InstallerGfx.focus_action == "retry") then
+    InstallerGfx.retry_install()
   end
   if InstallerGfx.button(btn_x + btn_w + gap, btn_y, btn_w, btn_h,
-      InstallerGfx.t("common.close", nil, "Close"), false) then
+      InstallerGfx.t("common.close", nil, "Close"), false,
+      InstallerGfx.focus_action == "close") then
     gfx.quit()
   end
 end
@@ -1095,6 +1392,7 @@ function InstallerGfx.fail(step, msg)
   InstallerGfx.state      = "error"
   InstallerGfx.error_step = step
   InstallerGfx.error_msg  = msg
+  InstallerGfx.focus_action = "close"
   -- Best-effort cleanup of any pipeline files this run produced. Each
   -- field is only set after spawn_pipeline got far enough to create
   -- the file; absent paths just no-op via os.remove. Uses the run-
@@ -1407,6 +1705,7 @@ function InstallerGfx.poll_pipeline()
     else
       InstallerGfx.state  = "done"
       InstallerGfx.status = InstallerGfx.t("status.done", nil, "Done.")
+      InstallerGfx.focus_action = "close"
     end
     return
   end
@@ -1445,7 +1744,17 @@ end
 -- script execution here. The script will resume normal startup after the
 -- user restarts REAPER with the new extension(s) loaded.
 local _platform = Deps.detect_platform()
-local _queue    = _platform and Deps.build_queue(_platform) or {}
+local _sr_intent = Deps.screen_reader_intent()
+-- Reserved for future/local native setup-only flows. The current Screen
+-- Reader wrapper no longer sets this; keep the branch explicit so a future
+-- caller can intentionally skip the dependency UI after cleanup.
+if rawget(_G, "REAASSIST_SCREEN_READER_SETUP_ONLY") == true then
+  Deps.cleanup_stale_backups(_platform)
+  REAASSIST_SCREEN_READER_SETUP_ONLY = nil
+  REAASSIST_SCREEN_READER_MODE = nil
+  return
+end
+local _queue    = _platform and Deps.build_queue(_platform, _sr_intent) or {}
 if #_queue > 0 then
   InstallerGfx.start(_queue)
   return
@@ -1455,7 +1764,7 @@ end
 -- assets, not an empty platform), but guard the case where GetOS is
 -- something neither Win/OSX/macOS-arm64/Other.
 if not _platform
-   and (Deps.check_imgui_status() ~= "ok"
+   and ((not _sr_intent and Deps.check_imgui_status() ~= "ok")
         or Deps.check_jsapi_status() ~= "ok"
         or (REQUIRE_SWS_EXTENSION and Deps.check_sws_status() ~= "ok")) then
   InstallerGfx.start({})  -- triggers the unsupported-platform message
@@ -1585,11 +1894,20 @@ do
     if n == 0 then break end
   end
   local fn = asp:match("[^\\/]+$") or ""
-  if not fn:lower():find("reaassist") then
+  RA.launch_screen_reader_mode =
+    rawget(_G, "REAASSIST_SCREEN_READER_MODE") == true
+    or fn:lower():find("screenreader", 1, true) ~= nil
+    or fn:lower():find("screen_reader", 1, true) ~= nil
+    or fn:lower():find("screen reader", 1, true) ~= nil
+  REAASSIST_SCREEN_READER_MODE = nil
+  if not RA.launch_screen_reader_mode
+      and not fn:lower():find("reaassist") then
+    local early_t = type(RA.early_t) == "function" and RA.early_t
+      or function(en) return en end
     reaper.ShowMessageBox(
-      RA.early_t("This script has been modified and cannot run.",
+      early_t("This script has been modified and cannot run.",
         "Este script fue modificado y no se puede ejecutar."),
-      RA.early_t("Error", "Error"), 0)
+      early_t("Error", "Error"), 0)
     return
   end
 end
@@ -1626,6 +1944,27 @@ do
     RA.script_path .. "Resources" .. sep .. ".." .. sep
       .. "Resources" .. sep .. "Relaunch.lua",
     true)
+  reaper.AddRemoveReaScript(false, 0,
+    RA.script_path .. "Resources" .. sep .. ".." .. sep
+      .. "ReaAssist_ScreenReaderMode.lua",
+    true)
+  reaper.AddRemoveReaScript(false, 0,
+    RA.script_path .. "ReaAssist_ScreenReaderMode.lua",
+    true)
+  reaper.AddRemoveReaScript(false, 0,
+    RA.script_path .. "Resources" .. sep .. ".." .. sep
+      .. "ReaAssist - Screen Reader Mode.lua",
+    true)
+  reaper.AddRemoveReaScript(false, 0,
+    RA.script_path .. "ReaAssist - Screen Reader Mode.lua",
+    true)
+  -- These transitional companion filenames are intentionally retired.
+  -- Remove them on startup so installs settle back to the single shipped
+  -- screen-reader entry point; do not reuse these exact paths later.
+  pcall(os.remove, RA.script_path .. "ReaAssist_ScreenReaderMode.lua")
+  pcall(os.remove, RA.script_path .. "ReaAssist - Screen Reader Mode.lua")
+  pcall(os.remove, RA.script_path .. "Resources" .. sep
+    .. "ScreenReaderMode.lua")
 
   RELAUNCHER_PATH = RA.script_path .. "Resources" .. sep
                  .. "Relaunch.lua"
@@ -1653,6 +1992,9 @@ RA.SEP = RA.IS_WINDOWS and "\\" or "/"
 -- Created on startup so auto-saved JSFX effects have a consistent home.
 local JSFX_DIR = reaper.GetResourcePath() .. RA.SEP .. "Effects" .. RA.SEP .. "ReaAssist"
 reaper.RecursiveCreateDirectory(JSFX_DIR, 0)
+RA.SCRIPT_SAVE_DIR =
+  reaper.GetResourcePath() .. RA.SEP .. "Scripts" .. RA.SEP .. "ReaAssist"
+reaper.RecursiveCreateDirectory(RA.SCRIPT_SAVE_DIR, 0)
 
 -- Resources directory: shipped sidecars, prompts/reference files, fonts, and
 -- bundled assets such as ReEQ.
@@ -1717,6 +2059,17 @@ function RA._file_exists(path)
   return false
 end
 
+function RA.register_companion_actions()
+  if not reaper.AddRemoveReaScript then return end
+  local sr_path = RA.script_path .. "ReaAssist_Screen_Reader_Mode.lua"
+  if RA._file_exists(sr_path) then
+    local ok, cmd = pcall(reaper.AddRemoveReaScript, true, 0, sr_path, true)
+    if ok then RA.screen_reader_action_cmd = cmd end
+  end
+end
+
+RA.register_companion_actions()
+
 function RA._migrate_runtime_file(label, legacy_path, data_path)
   if RA._file_exists(data_path) then
     local f = io.open(data_path, "rb")
@@ -1770,7 +2123,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.3.5", -- public release version
+  VERSION           = "1.4.0", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -1786,6 +2139,10 @@ CFG = {
   -- details card has always had (was a fixed SC(11) against chat 12).
   DETAILS_FONT_SIZES = { 9, 11, 13 },
   CHAT_FONT_LABELS   = { "Small", "Medium", "Large" },
+  SCREEN_READER_TEXT_SIZE_LABELS =
+    { "Default", "Large", "Extra Large", "Huge" },
+  SCREEN_READER_TEXT_FONT_SIZES = { 15, 18, 22, 26 },
+  SCREEN_READER_TEXT_SIZE_FACTORS = { 1.0, 1.2, 1.45, 1.7 },
   MAX_HISTORY_TURNS = 6,         -- sliding window size (keep even)
   MAX_DISPLAY_MSGS  = 120,       -- soft cap on display_messages; oldest pruned
   MAX_CACHED_PARAMS = 80,        -- per-plugin cap in scan_fx_params / scan_fx_params_deep_body / _estimate_deep_probes (cache file size + LLM context budget)
@@ -1808,10 +2165,10 @@ CFG = {
                                  -- the aggregate backstop. Per-provider tuning
                                  -- is intentionally not exposed in v1.
   -- Auto-update / repair / bootstrap URL. Points at the raw GitHub base
-  -- for the release tag or test branch. Current setting is the `test`
-  -- branch for pre-release smoke testing; switch to a pinned tag like
-  -- `v1.0.0` before public release so rolling heads cannot mutate under
-  -- users mid-session. The manifest file at UPDATE_BASE_URL/UPDATE_MANIFEST
+  -- for the public release channel. Dev smoke tests can redirect or disable
+  -- this through the guarded test-only update override below; normal user
+  -- installs ignore those ExtState values. The manifest file at
+  -- UPDATE_BASE_URL/UPDATE_MANIFEST
   -- lists the target version and every updatable file with its SHA-256,
   -- used by three flows:
   --   1. Update flow:  server version > CFG.VERSION -> prompt & download
@@ -1864,6 +2221,143 @@ CFG = {
   _PRODUCT          = "ReaAssist",  -- product identity token
 }
 if CFG.EXT_NS ~= CFG._PRODUCT:lower() then return end
+
+function RA.trim_update_override_value(value)
+  return tostring(value or ""):match("^%s*(.-)%s*$") or ""
+end
+
+function RA.encode_update_override_url_path(url)
+  return tostring(url or ""):gsub("([^%w%-%._~:/%%])", function(ch)
+    return string.format("%%%02X", string.byte(ch))
+  end)
+end
+
+function RA.normalize_update_override_base_url(value)
+  local url = RA.trim_update_override_value(value)
+  if url:match("^%a:[/\\]") then
+    url = "file:///" .. url:gsub("\\", "/")
+  end
+  url = url:gsub("\\", "/"):gsub("/+$", "")
+  return RA.encode_update_override_url_path(url)
+end
+
+function RA.update_override_host(url)
+  local host = tostring(url or ""):lower():match("^https?://([^/%?%#]+)")
+  host = tostring(host or ""):gsub(":%d+$", "")
+  host = host:gsub("^%[", ""):gsub("%]$", "")
+  return host
+end
+
+function RA.test_update_override_allowed()
+  local resource = reaper.GetResourcePath and reaper.GetResourcePath() or ""
+  local normalized = tostring(resource or ""):gsub("\\", "/")
+    :gsub("/+$", ""):lower()
+  if normalized == "c:/reaper - accessibility test"
+      or normalized == "c:/reaper - test" then
+    return true, "test_profile"
+  end
+  local flag_path = RA.script_path .. "Dev" .. RA.SEP .. "Smoke" .. RA.SEP
+    .. "allow_update_override.flag"
+  if RA._file_exists(flag_path) then return true, "sentinel" end
+  return false, "not_test_profile"
+end
+
+function RA.update_override_base_url_allowed(url)
+  local lower = tostring(url or ""):lower()
+  if lower:match("^file:///") then return true end
+  local host = RA.update_override_host(lower)
+  if host == "localhost" or host == "127.0.0.1" or host == "::1" then
+    return true
+  end
+  if lower:match("^https://raw%.githubusercontent%.com/michaelbriggsaudio/mbriggs%-reaper/")
+      or lower == "https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper" then
+    return true
+  end
+  if lower == "https://reaassist.app"
+      or lower:match("^https://reaassist%.app/")
+      or lower == "https://www.reaassist.app"
+      or lower:match("^https://www%.reaassist%.app/") then
+    return true
+  end
+  return false
+end
+
+function RA.safe_update_manifest_name(name)
+  name = RA.trim_update_override_value(name)
+  if name == "" then return CFG.UPDATE_MANIFEST end
+  if name:find("[/\\]") or name:find("%.%.", 1, true) then return nil end
+  if not name:match("^[%w%._%-]+%.json$") then return nil end
+  return name
+end
+
+function RA.apply_test_update_override()
+  if not (reaper.GetExtState and CFG and CFG.EXT_NS) then return end
+  local mode = RA.trim_update_override_value(
+    reaper.GetExtState(CFG.EXT_NS, "dev_update_override_mode")):lower()
+  if mode == "" or mode == "off" then return end
+
+  local allowed, reason = RA.test_update_override_allowed()
+  if not allowed then
+    RA.update_override_status = {
+      active = false,
+      ignored = true,
+      reason = reason or "not_allowed",
+      mode = mode,
+    }
+    return
+  end
+
+  if mode == "disabled" or mode == "disable" then
+    CFG.UPDATE_BASE_URL = ""
+    CFG.UPDATE_OVERRIDE_MODE = "disabled"
+    RA.update_override_status = {
+      active = true,
+      mode = "disabled",
+      reason = reason,
+    }
+    return
+  end
+
+  if mode ~= "source" then
+    RA.update_override_status = {
+      active = false,
+      ignored = true,
+      reason = "unknown_mode",
+      mode = mode,
+    }
+    return
+  end
+
+  local base_url = RA.normalize_update_override_base_url(
+    reaper.GetExtState(CFG.EXT_NS, "dev_update_override_base_url"))
+  local manifest = RA.safe_update_manifest_name(
+    reaper.GetExtState(CFG.EXT_NS, "dev_update_override_manifest"))
+  if base_url == "" or not manifest
+      or not RA.update_override_base_url_allowed(base_url) then
+    RA.update_override_status = {
+      active = false,
+      ignored = true,
+      reason = "invalid_source",
+      mode = mode,
+      base_url = base_url,
+    }
+    return
+  end
+
+  CFG.UPDATE_BASE_URL = base_url
+  CFG.UPDATE_MANIFEST = manifest
+  CFG.UPDATE_OVERRIDE_MODE = "source"
+  CFG.UPDATE_OVERRIDE_BASE_URL = base_url
+  RA.update_override_status = {
+    active = true,
+    mode = "source",
+    reason = reason,
+    base_url = base_url,
+    manifest = manifest,
+  }
+end
+
+RA.apply_test_update_override()
 
 CFG.LANGUAGES = {
   { code = "en", prompt_name = "English", label_en = "English",
@@ -1993,6 +2487,11 @@ end
 
 CFG.rebuild_language_views()
 
+function RA.prefer_screen_reader_enabled()
+  return reaper.GetExtState
+    and reaper.GetExtState(CFG.EXT_NS, "prefer_screen_reader") == "1"
+end
+
 S = {
   -- Set dynamically below
   INSTANCE_ID       = nil,
@@ -2031,6 +2530,9 @@ S = {
   logo_alpha        = 0,       -- 0..1 alpha for bottom-right mini logo fade
   _top_logo_visible = true,    -- true until welcome screen scrolls away
   script_open       = true,    -- false triggers shutdown in loop()
+  screen_reader_mode = RA.launch_screen_reader_mode == true,
+  screen_reader_startup_intent = RA.launch_screen_reader_mode == true
+    or RA.prefer_screen_reader_enabled(),
   -- Session start timestamp. Captured once at script load for the
   -- Feedback diagnostic report's "Session uptime" line -- helps
   -- triage bugs where staleness / memory growth after long runs
@@ -2167,7 +2669,9 @@ S = {
   drum_marker_sync_validator_retries = 0, -- per-turn counter -- model set drum stretch markers without range normalization (max 1 retry)
   arity_validator_retries  = 0,    -- per-turn counter -- model emitted reaper.* call with wrong fixed arg count (max 1 retry)
   sendidx_validator_retries = 0,   -- per-turn counter -- model ignored CreateTrackSend result and used literal send slots (max 1 retry)
+  timecode_workflow_validator_retries = 0, -- per-turn counter -- model routed the wrong native timecode track/send (max 1 retry)
   stockfx_validator_retries = 0,   -- per-turn counter -- model substituted third-party FX for explicitly requested stock FX (max 1 retry)
+  timecodefx_validator_retries = 0, -- per-turn counter -- model tried to load SMPTE/LTC/MTC generator as an FX plugin (max 1 retry)
   fxident_validator_retries = 0,   -- per-turn counter -- model stripped exact preferred AddByName identifier prefix/vendor (max 1 retry)
   typed_action_format_validator_retries = 0, -- per-turn counter -- model emitted typed-action JSON under wrong fence label (max 1 retry)
   typed_action_schema_validator_retries = 0, -- per-turn counter -- model emitted malformed/invalid typed-action JSON (max 1 retry)
@@ -2273,6 +2777,9 @@ S = {
   attach_error_time = 0,
 }
 
+S.section_id = SECTION_ID
+S.cmd_id = CMD_ID
+
 do
   local clean_boot = reaper.GetExtState(CFG.EXT_NS, "factory_reset_clean_boot")
   if clean_boot == "1" then
@@ -2282,6 +2789,14 @@ do
     reaper.DeleteExtState(CFG.EXT_NS, "factory_reset_clean_boot", false)
     reaper.DeleteExtState(CFG.EXT_NS, "factory_reset_clean_boot", true)
   end
+end
+
+if S.screen_reader_startup_intent
+   and not S.screen_reader_mode
+   and RA.screen_reader_action_cmd
+   and RA.screen_reader_action_cmd ~= 0 then
+  reaper.Main_OnCommand(RA.screen_reader_action_cmd, 0)
+  return
 end
 
 S.INSTANCE_ID = string.format("%.6f_%d", time_precise(), math.random(100000, 999999))
@@ -2718,6 +3233,7 @@ update = {
 -- =============================================================================
 -- ImGui context, fonts, and atexit cleanup
 -- =============================================================================
+if not S.screen_reader_startup_intent then
 RA.ctx = ImGui.ImGui_CreateContext(CFG._PRODUCT .. " v" .. CFG.VERSION)
 
 -- Freshly-installed-ReaImGui preflight. After the gfx installer drops a
@@ -2824,6 +3340,11 @@ RA.prompt_charfilter = ImGui.ImGui_CreateFunctionFromEEL([[
   EventChar == 10 && discard_newline ? EventChar = 0;
 ]])
 ImGui.ImGui_Attach(RA.ctx, RA.prompt_charfilter)
+else
+  function RA.imgui_in_frame_context_ok()
+    return false
+  end
+end
 
 -- V5 font atlas declared below, after RA.SC() is defined (sizes are scaled
 -- by the user's UI Scale preference).
@@ -3101,6 +3622,9 @@ prefs = {
   include_api_ref  = reaper.GetExtState(CFG.EXT_NS, "include_api_ref")  == "1",  -- default off (prompt-bundle era; request docs on-demand)
   include_snapshot = reaper.GetExtState(CFG.EXT_NS, "include_snapshot") ~= "0", -- default on
   update_check     = reaper.GetExtState(CFG.EXT_NS, "update_check")    ~= "0", -- default on
+  screen_reader_concise_hints = reaper.GetExtState(CFG.EXT_NS, "screen_reader_concise_hints") == "1", -- default off
+  screen_reader_text_size_idx = 1, -- Screen Reader Mode visual size; separate from main UI scale/chat font
+  screen_reader_contrast = "auto", -- "auto", "dark", or "light" for ReaGirl SR windows
   typed_actions_opt_in = true, -- built in; exact-fit structured track edits
   diag_auto_tier   = reaper.GetExtState(CFG.EXT_NS, "diag_auto_tier"),
   provider_idx     = 1,  -- set below from ExtState (1=Claude, 2=ChatGPT, 3=Gemini)
@@ -3773,6 +4297,23 @@ if RA._MIGRATE_MESSAGES then
     Log.line("MIGRATE", msg)
   end
   RA._MIGRATE_MESSAGES = nil
+end
+
+if RA.update_override_status then
+  if RA.update_override_status.active then
+    Log.line("UPDATE-OVERRIDE", string.format(
+      "active mode=%s base=%s manifest=%s reason=%s",
+      tostring(RA.update_override_status.mode or ""),
+      tostring(RA.update_override_status.base_url or ""),
+      tostring(RA.update_override_status.manifest or ""),
+      tostring(RA.update_override_status.reason or "")))
+  elseif RA.update_override_status.ignored then
+    Log.line("UPDATE-OVERRIDE", string.format(
+      "ignored mode=%s reason=%s base=%s",
+      tostring(RA.update_override_status.mode or ""),
+      tostring(RA.update_override_status.reason or ""),
+      tostring(RA.update_override_status.base_url or "")))
+  end
 end
 
 -- Exchange-summary block: mirrors the details bubble (Model, Context, Tokens,
@@ -4640,6 +5181,9 @@ function Store.cleanup_config_extstate(doc)
     "include_api_ref",
     "include_snapshot",
     "update_check",
+    "screen_reader_concise_hints",
+    "screen_reader_text_size_idx",
+    "screen_reader_contrast",
     "typed_actions_opt_in",
     "diag_auto_tier",
     "ui_scale_idx",
@@ -4891,6 +5435,10 @@ function Store.current_preferences()
     include_api_ref       = prefs.include_api_ref and true or false,
     include_snapshot      = prefs.include_snapshot and true or false,
     update_check          = prefs.update_check and true or false,
+    screen_reader_concise_hints =
+      prefs.screen_reader_concise_hints and true or false,
+    screen_reader_text_size_idx = prefs.screen_reader_text_size_idx or 1,
+    screen_reader_contrast = prefs.screen_reader_contrast or "auto",
     diag_auto_tier        = prefs.diag_auto_tier or "off",
     ui_scale_idx          = prefs.ui_scale_idx or 3,
     theme                 = prefs.theme or "auto",
@@ -4922,6 +5470,17 @@ function Store.apply_config_preferences()
   prefs.include_api_ref  = Store._pref_bool("include_api_ref", prefs.include_api_ref)
   prefs.include_snapshot = Store._pref_bool("include_snapshot", prefs.include_snapshot)
   prefs.update_check     = Store._pref_bool("update_check", prefs.update_check)
+  prefs.screen_reader_concise_hints =
+    Store._pref_bool("screen_reader_concise_hints",
+      prefs.screen_reader_concise_hints)
+  prefs.screen_reader_text_size_idx = Store._pref_index(
+    "screen_reader_text_size_idx", prefs.screen_reader_text_size_idx,
+    CFG.SCREEN_READER_TEXT_SIZE_LABELS)
+  local sr_contrast = Store.config_pref_value("screen_reader_contrast")
+  if sr_contrast == "auto" or sr_contrast == "dark"
+      or sr_contrast == "light" then
+    prefs.screen_reader_contrast = sr_contrast
+  end
 
   local tier = Store.config_pref_value("diag_auto_tier")
   if tier == "basic" or tier == "extended" or tier == "off" then
@@ -5084,11 +5643,53 @@ end
 function Store.has_usable_provider()
   if not PROVIDERS then return false end
   for _, p in ipairs(PROVIDERS) do
-    if p and (p.is_custom or (S.api_key_map and S.api_key_map[p.id])) then
+    if Store.provider_has_usable_credentials(p) then
       return true
     end
   end
   return false
+end
+
+function Store.provider_has_usable_credentials(p)
+  if not p then return false end
+  if p.is_custom then return true end
+  local key = S.api_key_map and S.api_key_map[p.id] or nil
+  return type(key) == "string" and key ~= ""
+end
+
+function Store.first_usable_provider_idx()
+  if not PROVIDERS then return nil end
+  for i, p in ipairs(PROVIDERS) do
+    if Store.provider_has_usable_credentials(p) then
+      return i, p
+    end
+  end
+  return nil
+end
+
+function Store.ensure_usable_provider_selection(reason)
+  if not PROVIDERS then return false end
+  local active = PROVIDERS.active and PROVIDERS.active() or nil
+  if Store.provider_has_usable_credentials(active) then
+    S.api_key = S.api_key_map and S.api_key_map[active.id] or nil
+    return false
+  end
+
+  local fallback_idx, fallback = Store.first_usable_provider_idx()
+  if not fallback_idx then
+    S.api_key = nil
+    return false
+  end
+
+  local previous_id = active and active.id or "none"
+  prefs.provider_idx = fallback_idx
+  if MODELS and MODELS.refresh then MODELS.refresh() end
+  S.api_key = S.api_key_map and S.api_key_map[fallback.id] or nil
+  Store._log("Provider", string.format(
+    "Switched active provider from %s to %s because %s.",
+    previous_id, fallback.id,
+    reason or "the saved provider has no usable credentials"))
+  return true
 end
 
 function Store.sync_config_selection_to_extstate(selection)
@@ -7045,11 +7646,13 @@ FONT_FILES = {
   -- codepoints; see the ICON table below. Ship as Resources/fonts/lucide.ttf.
   lucide      = "lucide.ttf",
 }
+FONT = {}
 -- Missing-file tolerance: early Stage 3.3 check logic downstream needs the
 -- atlas build to survive a broken Resources/fonts directory. If the file is
 -- missing, return nil instead of crashing -- the bootstrap pre-loop guard
 -- (further down this file) detects the same missing fonts and routes into
 -- recovery mode before any rendering code would deref the nil handle.
+if not S.screen_reader_startup_intent then
 local function _mkfont(rel)
   local path = FONTS_DIR .. rel
   local probe = io.open(path, "r")
@@ -7059,7 +7662,6 @@ local function _mkfont(rel)
   if f then ImGui.ImGui_Attach(RA.ctx, f) end
   return f
 end
-FONT = {}
 FONT.inter_reg   = _mkfont(FONT_FILES.inter_reg)
 FONT.inter_light = _mkfont(FONT_FILES.inter_light)
 FONT.inter_semi  = _mkfont(FONT_FILES.inter_semi)
@@ -7069,6 +7671,7 @@ FONT.mono_med    = _mkfont(FONT_FILES.mono_med)
 FONT.lucide      = _mkfont(FONT_FILES.lucide)
 RA.bold_font = FONT.inter_bold
 RA.code_font = FONT.mono_reg
+end
 
 -- Optional language fonts are downloaded on demand into Data/Lang/fonts. Keep them
 -- out of FONT_FILES so bootstrap/manifest integrity never treats rare CJK
@@ -8177,6 +8780,8 @@ do
   S.api_key = S.api_key_map[PROVIDERS.active().id]
   -- Load persisted Gemini tier (nil if never tested).
   S.gemini_paid_tier = Store.gemini_paid_tier()
+  Store.ensure_usable_provider_selection(
+    "the saved provider has no usable credentials")
   -- If tier is unknown but a Google key is configured, schedule an auto
   -- retest on the first loop tick. Net isn't defined yet at this point in
   -- script init, so we set a flag and let the main loop dispatch it once
@@ -8206,12 +8811,7 @@ MODELS.refresh()
 -- The visibility scan lives inside a do-block so its locals don't count
 -- against the main chunk's 200-local limit (already very near the cap).
 do
-  local has_usable = false
-  for _, p in ipairs(PROVIDERS) do
-    if p.is_custom or S.api_key_map[p.id] then
-      has_usable = true; break
-    end
-  end
+  local has_usable = Store.has_usable_provider()
   if not api_keys.tos_is_accepted() then
     api_keys.screen = "tos"
   elseif not has_usable then
@@ -8922,6 +9522,7 @@ if Store and Store.flush_user_notice then Store.flush_user_notice() end
 -- (available when the SWS extension is installed), then falls back to
 -- platform-native commands.
 function UI.open_url(url)
+  url = tostring(url or "")
   -- Only allow http(s) / mailto: / tel: URLs. Reject file://, javascript:,
   -- data:, and other schemes that could execute local code or inject
   -- content. mailto: + tel: are safe schemes handled by the OS shell
@@ -8930,22 +9531,26 @@ function UI.open_url(url)
   if not (url:match("^https?://")
        or url:match("^mailto:")
        or url:match("^tel:")) then
-    return
+    return false
   end
   if reaper.CF_ShellExecute then
-    reaper.CF_ShellExecute(url)
+    local ok, result = pcall(reaper.CF_ShellExecute, url)
+    return ok and result ~= false
   else
     -- Sanitise: strip any characters that could enable shell injection.
     -- Excluded: $, (, ), %, `, ", \, ', and non-printable chars.
     -- $() = command substitution on Unix; %VAR% = expansion on Windows;
     -- backtick/backslash/quotes could break quoting boundaries.
     local safe = url:gsub("[^%w%-%.%_%~%:%/%?%#%[%]%@%!%&%*%+%,%;%=%{%}]", "")
+    if safe == "" then return false end
+    local result, _, code
     if RA.IS_WINDOWS then
-      os.execute('start "" "' .. safe .. '"')
+      result, _, code = os.execute('start "" "' .. safe .. '"')
     else
       -- Single quotes disable all shell interpretation (no $(), no \, no `).
-      os.execute("open '" .. safe .. "' 2>/dev/null || xdg-open '" .. safe .. "' &")
+      result, _, code = os.execute("open '" .. safe .. "' 2>/dev/null || xdg-open '" .. safe .. "' &")
     end
+    return result == true or result == 0 or code == 0
   end
 end
 
@@ -9902,8 +10507,8 @@ end
 -- =============================================================================
 -- Suggests a .lua filename from code content without an API call.
 -- Strategy (in priority order):
---   1. First line if it is a comment: "-- My Script" -> "My Script.lua"
---   2. Undo_EndBlock label: "ReaAssist: Create 20 tracks" -> "Create 20 tracks.lua"
+--   1. Undo_EndBlock label: "ReaAssist: Create 20 tracks" -> "Create 20 tracks.lua"
+--   2. First useful comment: "-- My Script" -> "My Script.lua"
 --   3. First function name: "local function do_thing()" -> "do_thing.lua"
 --   4. Fallback: "reaassist_script.lua"
 -- Result is safe for all OSes: filesystem-unsafe chars stripped,
@@ -9934,19 +10539,31 @@ local function sanitize_filename(s, fallback)
 end
 
 function Code.derive_filename(code)
-  -- 1. First line comment.
-  local first_line = code:match("^%-%-+%s*(.-)%s*[\r\n]")
-  if first_line and first_line ~= "" and not first_line:match("^!") then
-    return sanitize_filename(first_line, "reaassist_script") .. ".lua"
-  end
-
-  -- 2. Undo_EndBlock label: e.g. Undo_EndBlock("ReaAssist: Create 20 tracks", -1)
+  -- 1. Undo_EndBlock label: e.g. Undo_EndBlock("ReaAssist: Create 20 tracks", -1)
   --    Strip a leading "ReaAssist: " prefix if present so the filename is clean.
   local undo_label = code:match("Undo_EndBlock%s*%(%s*\"(.-)\"%s*,")
                   or code:match("Undo_EndBlock%s*%(%s*'(.-)'%s*,")
   if undo_label and undo_label ~= "" then
     undo_label = undo_label:gsub("^ReaAssist:%s*", "")
     return sanitize_filename(undo_label, "reaassist_script") .. ".lua"
+  end
+
+  -- 2. First useful comment.
+  local function internal_comment(text)
+    local lower = tostring(text or ""):lower()
+    lower = lower:gsub("^%s+", ""):gsub("%s+$", "")
+    return lower:match("^helper:") ~= nil
+      or lower:find("plugin_ref", 1, true) ~= nil
+      or lower:find("binary search", 1, true) ~= nil
+      or lower:match("^band%s*%d") ~= nil
+  end
+  for raw in (tostring(code or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+      .. "\n"):gmatch("([^\n]*)\n") do
+    local comment = raw:match("^%s*%-%-+%s*(.-)%s*$")
+    if comment and comment ~= "" and not comment:match("^!")
+        and not internal_comment(comment) then
+      return sanitize_filename(comment, "reaassist_script") .. ".lua"
+    end
   end
 
   -- 3. First function name (covers local function and bare function forms).
@@ -10634,6 +11251,40 @@ function Code.auto_save_jsfx(code)
   return nil
 end
 
+function Code.auto_save_lua(code)
+  code = tostring(code or "")
+  if code == "" then return nil end
+
+  local base_name = Code.derive_filename(code)
+  if not base_name:lower():match("%.lua$") then base_name = base_name .. ".lua" end
+  reaper.RecursiveCreateDirectory(RA.SCRIPT_SAVE_DIR, 0)
+
+  local name = base_name
+  local stem = base_name:match("^(.+)%.lua$") or base_name
+  local dest = RA.SCRIPT_SAVE_DIR .. RA.SEP .. name
+  local n = 1
+  local f = io.open(dest, "r")
+  while f do
+    f:close()
+    n = n + 1
+    local suffix = " " .. tostring(n)
+    local numbered_stem = stem
+    if #numbered_stem + #suffix > 60 then
+      numbered_stem = numbered_stem:sub(1, 60 - #suffix)
+        :gsub("[%. ]+$", "")
+      if numbered_stem == "" then numbered_stem = "reaassist_script" end
+    end
+    name = numbered_stem .. suffix .. ".lua"
+    dest = RA.SCRIPT_SAVE_DIR .. RA.SEP .. name
+    f = io.open(dest, "r")
+  end
+
+  if Code.safe_write(dest, code) then
+    return dest, "Script: ReaAssist/" .. name, name
+  end
+  return nil
+end
+
 -- =============================================================================
 -- ReEQ bundled-install support
 -- =============================================================================
@@ -11037,9 +11688,26 @@ end
 -- Returns the saved path on success, or nil on cancellation/error.
 function Code._save_generated(code, suggested_name, opts)
   local dest_path
-  if reaper.JS_Dialog_BrowseForSaveFile then
-    local ret, path = reaper.JS_Dialog_BrowseForSaveFile(
+  local save_dialog = reaper.ReaAssist_Native_JS_Dialog_BrowseForSaveFile
+    or reaper.JS_Dialog_BrowseForSaveFile
+  if S and S.screen_reader_mode then
+    save_dialog = nil
+  end
+  if save_dialog then
+    local ok, ret, path = pcall(save_dialog,
       opts.dialog_title, opts.base_dir, suggested_name, opts.filter)
+    if not ok then
+      local first_err = ret
+      ok, ret, path = pcall(save_dialog, opts.dialog_title, opts.base_dir,
+        suggested_name, opts.filter, false)
+      if not ok and Log and Log.line then
+        Log.line("SAVE", "save dialog failed: " .. tostring(first_err)
+          .. "; retry failed: " .. tostring(ret))
+      end
+    end
+    if not ok then
+      return nil
+    end
     if ret ~= 1 or not path or path == "" then return nil end
     -- Lower-case the path before matching ext_pattern. Filesystems on
     -- Windows / macOS preserve the typed case, so a user who picks
@@ -12396,6 +13064,17 @@ end
 -- lowercase `update`.
 Updater = {}
 
+function Updater.url_encode_path(path)
+  return tostring(path or ""):gsub("([^%w%-%._~/])", function(ch)
+    return string.format("%%%02X", string.byte(ch))
+  end)
+end
+
+function Updater.url_for(filename)
+  local base = tostring(CFG.UPDATE_BASE_URL or ""):gsub("/+$", "")
+  return base .. "/" .. Updater.url_encode_path(filename)
+end
+
 -- Stamp a structured failure reason onto the update state so the
 -- Bootstrap repair prompt can show the user *why* the last attempt
 -- failed instead of silently re-rendering the Repair button. Also
@@ -13350,7 +14029,7 @@ function Updater.force_reinstall()
   update.repair_missing    = nil
   update.repair_mismatched = nil
   update.action_was_repair = nil
-  local url = CFG.UPDATE_BASE_URL .. "/" .. CFG.UPDATE_MANIFEST
+  local url = Updater.url_for(CFG.UPDATE_MANIFEST)
   if Updater.fire_get(url, tmp.update_out, tmp.update_exit) then
     update.state = "checking"
     return true
@@ -13383,7 +14062,7 @@ function Updater.check_start()
   if Updater.font_download_busy() then return end
   if Updater.language_download_busy() then return end
   Store.set_update_last_check(os.time())
-  local url = CFG.UPDATE_BASE_URL .. "/" .. CFG.UPDATE_MANIFEST
+  local url = Updater.url_for(CFG.UPDATE_MANIFEST)
   if Updater.fire_get(url, tmp.update_out, tmp.update_exit) then
     update.state = "checking"
   end
@@ -13430,7 +14109,7 @@ function Updater.manual_check()
   -- error -> replaced with a specific error toast).
   UI.show_float_toast(RA.t("update.toast.checking", nil,
     "Checking for updates..."), "ok", true)
-  local url = CFG.UPDATE_BASE_URL .. "/" .. CFG.UPDATE_MANIFEST
+  local url = Updater.url_for(CFG.UPDATE_MANIFEST)
   if Updater.fire_get(url, tmp.update_out, tmp.update_exit) then
     update.state = "checking"
     return true
@@ -14181,12 +14860,12 @@ end
 -- ".." or hidden ("."-prefixed) path segments are rejected.
 function Updater.is_safe_filename(name)
   if type(name) ~= "string" or name == "" then return false end
-  -- Strict allowlist: only ASCII alphanumerics, underscore, hyphen, dot,
-  -- and forward slash. Blocks shell-sensitive characters (spaces, $, `,
-  -- &, ?, #, ;, parens, quotes, etc.) before they ever reach a curl
-  -- command line or a local path. The remaining checks below run after
-  -- the allowlist as defense-in-depth.
-  if not name:match("^[A-Za-z0-9_./%-]+$") then return false end
+  -- Strict allowlist: only ASCII alphanumerics, spaces, underscore,
+  -- hyphen, dot, and forward slash. Blocks shell-sensitive characters
+  -- ($, `, &, ?, #, ;, parens, quotes, etc.) before they ever reach a
+  -- curl command line or a local path. The remaining checks below run
+  -- after the allowlist as defense-in-depth.
+  if not name:match("^[A-Za-z0-9_./ %-]+$") then return false end
   -- Reject backslashes, leading /, drive letters (absolute paths).
   if name:match("^/") or name:match("^%a:") then return false end
   if name:find("\\", 1, true) then return false end
@@ -14194,6 +14873,7 @@ function Updater.is_safe_filename(name)
   for segment in (name .. "/"):gmatch("([^/]*)/") do
     if segment == "" or segment == "." or segment == ".." then return false end
     if segment:sub(1, 1) == "." then return false end  -- hidden dotfiles/dirs
+    if segment:sub(1, 1) == " " or segment:sub(-1) == " " then return false end
   end
   -- The final segment is the filename itself.
   local base_name = name:match("([^/]+)$") or name
@@ -14284,12 +14964,18 @@ local PROTECTED_FROM_REMOVAL = {
   ["Data/FX_Cache.json"]                 = true,
 }
 
+local REMOVABLE_TOP_LEVEL_COMPANIONS = {
+  ["ReaAssist - Screen Reader Mode.lua"] = true,
+  ["ReaAssist_ScreenReaderMode.lua"]     = true,
+}
+
 -- Predicate gating per-path orphan deletes. All four checks must hold:
 --   1. is_safe_filename: path-traversal, absolute paths, backslashes,
 --      hidden segments, and non-allowlisted extensions all rejected here.
---   2. Inside ReaAssist's install zone: ReaAssist.lua, the three top-level
---      docs, or anything under Resources/. Anything else is out of scope
---      for the package and never something we shipped.
+--   2. Inside ReaAssist's install zone: ReaAssist.lua, known retired
+--      top-level companion scripts, the three top-level docs, or anything
+--      under Resources/. Anything else is out of scope for the package and
+--      never something we shipped.
 --   3. Not in PROTECTED_FROM_REMOVAL: user-override + runtime artifacts.
 --   4. Not also in the current manifest's files list: defensive double-
 --      lock against an inconsistent manifest where a path appears in both
@@ -14301,6 +14987,7 @@ function Updater.should_remove_orphan(name, current_files)
   if current_files and current_files[name] then return false end
   local owned =
        name == "ReaAssist.lua"
+    or REMOVABLE_TOP_LEVEL_COMPANIONS[name] == true
     or name == "CHANGELOG.md"
     or name == "LICENSE.txt"
     or name == "README.md"
@@ -14318,13 +15005,17 @@ function Updater.download_start()
   if (update.state ~= "available" and update.state ~= "repair_available")
       or not update.manifest then return end
   if Updater.font_download_busy() then
-    UI.show_float_toast(RA.t("settings.font.finish_download_first", nil,
-      "Finish the font download first"), "err")
+    if UI and UI.show_float_toast then
+      UI.show_float_toast(RA.t("settings.font.finish_download_first", nil,
+        "Finish the font download first"), "err")
+    end
     return
   end
   if Updater.language_download_busy() then
-    UI.show_float_toast(RA.t("settings.lang.finish_download_first", nil,
-      "Finish the language pack download first"), "err")
+    if UI and UI.show_float_toast then
+      UI.show_float_toast(RA.t("settings.lang.finish_download_first", nil,
+        "Finish the language pack download first"), "err")
+    end
     return
   end
   -- Remember which trigger started the session so the "done" view can
@@ -14384,7 +15075,7 @@ function Updater.download_start()
       if repair_fileset[filename] then
         update.download_queue[#update.download_queue+1] = {
           filename = filename,
-          url      = CFG.UPDATE_BASE_URL .. "/" .. filename,
+          url      = Updater.url_for(filename),
           sha256   = expected_hash,
         }
       else
@@ -14398,7 +15089,7 @@ function Updater.download_start()
       if update_fileset[filename] then
         update.download_queue[#update.download_queue+1] = {
           filename = filename,
-          url      = CFG.UPDATE_BASE_URL .. "/" .. filename,
+          url      = Updater.url_for(filename),
           sha256   = expected_hash,
         }
       else
@@ -14417,7 +15108,7 @@ function Updater.download_start()
       else
         update.download_queue[#update.download_queue+1] = {
           filename = filename,
-          url      = CFG.UPDATE_BASE_URL .. "/" .. filename,
+          url      = Updater.url_for(filename),
           sha256   = expected_hash,
         }
       end
@@ -14435,8 +15126,10 @@ function Updater.download_start()
       .. "nothing to download.", update.skipped_count))
     update.show_dialog = false
     update.state       = "idle"
-    UI.show_float_toast(RA.t("update.toast.up_to_date", nil,
-      "Already up to date"), "ok")
+    if UI and UI.show_float_toast then
+      UI.show_float_toast(RA.t("update.toast.up_to_date", nil,
+        "Already up to date"), "ok")
+    end
     return
   end
   Log.line("UPDATE", string.format(
@@ -14679,7 +15372,9 @@ function Updater.try_auto_restart()
   if not update.restart_after or update.restart_fired then return end
   if time_precise() < update.restart_after then return end
   update.restart_fired = true
-  return Updater.fire_relauncher_now()
+  local ok = Updater.fire_relauncher_now()
+  if not ok then update.restart_after = nil end
+  return ok
 end
 
 -- Shared helper: fires the relauncher script in its own Lua state, then
@@ -14690,6 +15385,7 @@ end
 -- Returns true on success, false if the relauncher couldn't be
 -- registered (caller can fall back to a "close and reopen" prompt).
 function Updater.fire_relauncher_now()
+  if not RA._file_exists(RELAUNCHER_PATH) then return false end
   -- Lazy-register the relauncher action right before firing it. Keeps
   -- the Actions list uncluttered for sessions where no auto-restart
   -- ever happens. AddRemoveReaScript is synchronous and the returned
@@ -18364,10 +19060,10 @@ function Net.handle_key_test(raw)
         local saved = api_keys._test_orig_provider_idx
         api_keys._test_orig_provider_idx = nil
         local saved_prov = PROVIDERS[saved]
-        if saved_prov and S.api_key_map[saved_prov.id] then
+        if saved_prov and Store.provider_has_usable_credentials(saved_prov) then
           prefs.provider_idx = saved
           MODELS.refresh()
-          S.api_key = S.api_key_map[saved_prov.id]
+          S.api_key = S.api_key_map and S.api_key_map[saved_prov.id] or nil
           if Store and Store.save_config then Store.save_config() end
         end
       end
@@ -18409,10 +19105,10 @@ function Net.handle_key_test(raw)
       local saved = api_keys._test_orig_provider_idx
       api_keys._test_orig_provider_idx = nil
       local saved_prov = PROVIDERS[saved]
-      if saved_prov and S.api_key_map[saved_prov.id] then
+      if saved_prov and Store.provider_has_usable_credentials(saved_prov) then
         prefs.provider_idx = saved
         MODELS.refresh()
-        S.api_key = S.api_key_map[saved_prov.id]
+        S.api_key = S.api_key_map and S.api_key_map[saved_prov.id] or nil
         if Store and Store.save_config then Store.save_config() end
       end
     end
@@ -18519,7 +19215,7 @@ function Net.handle_key_test(raw)
       local saved = api_keys._test_orig_provider_idx
       api_keys._test_orig_provider_idx = nil
       local saved_prov = PROVIDERS[saved]
-      if saved_prov and S.api_key_map[saved_prov.id] then
+      if saved_prov and Store.provider_has_usable_credentials(saved_prov) then
         prefs.provider_idx = saved
         MODELS.refresh()
         if Store and Store.save_config then Store.save_config() end
@@ -19409,7 +20105,9 @@ function Net.send_to_api(user_text)
   S.drum_marker_sync_validator_retries = 0
   S.arity_validator_retries = 0
   S.sendidx_validator_retries = 0
+  S.timecode_workflow_validator_retries = 0
   S.stockfx_validator_retries = 0
+  S.timecodefx_validator_retries = 0
   S.fxident_validator_retries = 0
   S.typed_action_format_validator_retries = 0
   S.typed_action_schema_validator_retries = 0
@@ -19480,6 +20178,8 @@ function Net.send_to_api(user_text)
   S.api_calls_this_turn    = 0   -- aggregate cap counter (see CFG.MAX_CALLS_PER_TURN)
   S.thinking_override_idx  = nil
   S._context_reuse_hint    = nil
+  S._irrelevant_context_hint = nil
+  S._timecode_context_hint = nil
   S._mixed_output_hint     = nil
   S._fx_inspect_dropped    = nil
   S.fx_list_already_sent   = false
@@ -19700,14 +20400,18 @@ function Net.send_to_api(user_text)
       active_model and active_model.id or nil)
   local typed_action_response_format =
     active_provider.id == "openai"
+  local typed_action_plan_prompt =
+    CTX.prompt_indicates_typed_action_plan(user_text)
+  local screen_reader_typed_action_review =
+    S.screen_reader_mode == true
   local typed_action_contract =
-    (prefs.auto_run and typed_action_backup_ready)
+    ((prefs.auto_run and typed_action_backup_ready)
+      or typed_action_plan_prompt
+      or screen_reader_typed_action_review)
     and Code.typed_actions_prompt_contract(user_text, {
       response_format = typed_action_response_format,
       profile = typed_action_profile,
     }) or nil
-  local typed_action_plan_prompt =
-    CTX.prompt_indicates_typed_action_plan(user_text)
   local reascript_prompt = false
   do
     local lt = user_text:lower()
@@ -19870,6 +20574,34 @@ function Net.send_to_api(user_text)
       .. history_text
   end
 
+  local screen_reader_summary_requested =
+    S.screen_reader_mode and not typed_action_contract
+  if screen_reader_summary_requested then
+    history_text = "(INTERNAL SCREEN READER OUTPUT NOTE -- DO NOT MENTION "
+      .. "THIS: Include one short plain-language summary line for the "
+      .. "accessible UI in this exact XML-like form: "
+      .. "<screen_reader_summary>Summary here.</screen_reader_summary>. "
+      .. "Keep it under 16 words. If you generate runnable code, summarize "
+      .. "what the code is for; do not claim it already ran. The user is "
+      .. "using Screen Reader Mode and may be using a screen reader. Keep "
+      .. "visible replies brief and plain: one or two short paragraphs, or "
+      .. "at most three short bullets. Avoid Markdown formatting, headings, "
+      .. "and long capability lists unless the user specifically asks. If "
+      .. "you generate code, still include the complete runnable code block "
+      .. "and keep surrounding prose short. Do not say Lua, JSFX, or action "
+      .. "plans auto-run in Screen Reader Mode. Screen Reader Mode presents "
+      .. "explicit Read or Save Code, Read or Save JSFX, or Read or Save "
+      .. "Edit Details before Run Code, Add JSFX, or Run Edit buttons unless "
+      .. "Auto-run is enabled. If asked to explain the safest Screen Reader "
+      .. "Mode workflow, name those real controls, say to read/review first, "
+      .. "then use Run Code, Add JSFX, or Run Edit only if it matches the "
+      .. "request. Undo appears only after a run, add, or apply succeeds. Do "
+      .. "not invent UI details such as a Save to file button, a scrollable "
+      .. "text area label, a script-name label, or guaranteed ReaAssist "
+      .. "comments in all code.)\n\n"
+      .. history_text
+  end
+
   if not typed_action_contract
      and type(preempted_context) == "table"
      and #preempted_context > 0 then
@@ -19919,6 +20651,9 @@ function Net.send_to_api(user_text)
     ctx_parts[#ctx_parts+1] = "refs/snapshot suppressed"
   elseif prefs.include_snapshot and not S.pending_answer_only_followup then
     ctx_parts[#ctx_parts+1] = "snapshot"
+  end
+  if screen_reader_summary_requested then
+    ctx_parts[#ctx_parts+1] = "screen_reader"
   end
   if ref_injected   then ctx_parts[#ctx_parts+1] = "api_ref" end
   if midi_injected  then ctx_parts[#ctx_parts+1] = "midi"    end
@@ -20286,7 +21021,9 @@ function Net.clear_conversation(opts)
   S.drum_marker_sync_validator_retries = 0
   S.arity_validator_retries    = 0
   S.sendidx_validator_retries  = 0
+  S.timecode_workflow_validator_retries = 0
   S.stockfx_validator_retries  = 0
+  S.timecodefx_validator_retries = 0
   S.fxident_validator_retries  = 0
   S.typed_action_format_validator_retries = 0
   S.typed_action_schema_validator_retries = 0
@@ -20357,6 +21094,8 @@ function Net.clear_conversation(opts)
   S.api_calls_this_turn        = 0
   S.thinking_override_idx      = nil
   S._context_reuse_hint        = nil
+  S._irrelevant_context_hint   = nil
+  S._timecode_context_hint     = nil
   S._mixed_output_hint         = nil
   S._fx_inspect_dropped        = nil
   -- Defensive clear of fx_inspect -> fx_params handoff state (also reset per
@@ -20947,8 +21686,19 @@ function Net.process_response_buckets(text)
   for tok in bucket_str:gmatch("[^,]+") do
     raw_tokens[#raw_tokens+1] = tok:match("^%s*(.-)%s*$")
   end
+  local prompt_l = tostring(S.pending_orig_prompt or ""):lower()
+  local timecode_context_intent =
+    CTX and CTX.prompt_indicates_timecode_generator
+    and CTX.prompt_indicates_timecode_generator(prompt_l)
+  local function add_timecode_context_hint(tok)
+    if not timecode_context_intent then return end
+    S._timecode_context_hint = S._timecode_context_hint or {}
+    S._timecode_context_hint[#S._timecode_context_hint+1] = tok
+  end
   local function prompt_likely_reaper_action()
-    local prompt_l = tostring(S.pending_orig_prompt or ""):lower()
+    if timecode_context_intent then
+      return true
+    end
     return prompt_l:find("%f[%w]create")
         or prompt_l:find("%f[%w]make")
         or prompt_l:find("%f[%w]build")
@@ -20963,8 +21713,10 @@ function Net.process_response_buckets(text)
   -- project-layout requests such as "nested session outline". Real FX/plugin
   -- prompts keep the bundle; the normal dispatcher below still handles them.
   do
-    local prompt_l = tostring(S.pending_orig_prompt or ""):lower()
     local function prompt_mentions_plugin_surface()
+      if timecode_context_intent then
+        return false
+      end
       if prompt_l:find("trackfx", 1, true)
          or prompt_l:find("takefx", 1, true)
          or prompt_l:find("plugin", 1, true)
@@ -21010,15 +21762,78 @@ function Net.process_response_buckets(text)
         Log.line("DISPATCH",
           "dropped irrelevant prompt bundle request: "
           .. tbl_concat(dropped, ", "))
+        for _, dropped_tok in ipairs(dropped) do
+          add_timecode_context_hint(dropped_tok)
+        end
         raw_tokens = kept
-        if #raw_tokens == 0
-           and prompt_likely_reaper_action()
-           and not (S.api_ref_message or S.docs_already_sent) then
-          raw_tokens[#raw_tokens+1] = "docs"
-          Log.line("DISPATCH",
-            "irrelevant-only prompt bundle request on action prompt; fetching docs instead")
+        if #raw_tokens == 0 then
+          if has_final_payload then
+            Log.line("DISPATCH",
+              "irrelevant-only prompt bundle request accompanied by final payload; continuing final response")
+            return false
+          elseif prompt_likely_reaper_action() then
+            if not (S.api_ref_message or S.docs_already_sent) then
+              raw_tokens[#raw_tokens+1] = "docs"
+              Log.line("DISPATCH",
+                "irrelevant-only prompt bundle request on action prompt; fetching docs instead")
+            else
+              wants_preempt_hint = true
+              S._irrelevant_context_hint = S._irrelevant_context_hint or {}
+              for _, dropped_tok in ipairs(dropped) do
+                S._irrelevant_context_hint[#S._irrelevant_context_hint+1] =
+                  dropped_tok
+              end
+              Log.line("DISPATCH",
+                "irrelevant-only prompt bundle request on action prompt with docs already pinned; nudging model")
+            end
+          end
         end
       end
+    end
+  end
+
+  if timecode_context_intent then
+    local kept, suppressed = {}, {}
+    for _, tok in ipairs(raw_tokens) do
+      local kw, payload = tok:match("^([^:]+):?(.*)$")
+      kw = kw and kw:match("^%s*(.-)%s*$"):lower() or ""
+      payload = payload and payload:match("^%s*(.-)%s*$") or ""
+      local suppress = false
+      if kw == "docs" and payload ~= "" then
+        local canonical = CTX.docs_section_canonical(payload)
+        suppress = canonical == "items"
+          or (canonical == "routing" and S.docs_section_sent
+            and S.docs_section_sent[canonical] == true)
+      elseif kw == "session" then
+        suppress = S.pending_snapshot ~= nil
+      elseif kw == "docs" and payload == "" then
+        suppress = S.api_ref_message ~= nil or S.docs_already_sent
+      elseif kw == "docs_extended" then
+        suppress = S.docs_extended_already_sent == true
+      end
+      if suppress then
+        suppressed[#suppressed+1] = tok
+      else
+        kept[#kept+1] = tok
+      end
+    end
+    if #suppressed > 0 then
+      Log.line("DISPATCH",
+        "suppressed native timecode context request: "
+        .. tbl_concat(suppressed, ", "))
+      for _, tok in ipairs(suppressed) do
+        add_timecode_context_hint(tok)
+      end
+      if #kept == 0 then
+        if has_final_payload then
+          S._timecode_context_hint = nil
+          Log.line("DISPATCH",
+            "native timecode context request accompanied by final payload; continuing final response")
+          return false
+        end
+        wants_preempt_hint = true
+      end
+      raw_tokens = kept
     end
   end
 
@@ -22204,6 +23019,46 @@ function Net.process_response_buckets(text)
         S._midi_docs_suppressed_hint = nil
         reuse_hint_fired = true
       end
+      if S._timecode_context_hint and #S._timecode_context_hint > 0 then
+        local tags_str = tbl_concat(S._timecode_context_hint, ", ")
+        history_content = history_content
+          .. "(NOTE: You requested <context_needed>"
+          .. tags_str
+          .. "</context_needed>, but for this native SMPTE/LTC/MTC "
+          .. "timecode-generator request those tags are already covered by "
+          .. "the pinned docs/session/routing references or are not "
+          .. "applicable. Do NOT request prompt_bundle:plugin, docs:items, "
+          .. "docs:routing, session, docs, or docs_extended again for this "
+          .. "turn. Generate the runnable Lua now. Use REAPER's native "
+          .. "timecode-generator action lookup with broad fallback pairs "
+          .. "(`timecode`+`generator`, then `smpte`+`generator`, then "
+          .. "`ltc`/`mtc`+`generator`). Do not create a helper target track "
+          .. "before running the action; let the native action create or "
+          .. "choose the generator item track, then detect which track "
+          .. "actually received the generated timecode item before routing, "
+          .. "preferably using GetSelectedMediaItem followed by "
+          .. "GetMediaItemTrack/GetMediaItem_Track. Do not identify it by "
+          .. "source filename or fall back to a pre-created track if "
+          .. "detection fails. Route the final generator track to hardware "
+          .. "outputs 3/4 with "
+          .. "CreateTrackSend(track, nil), send category 1, I_DSTCHAN = 2, "
+          .. "and B_MAINSEND disabled.)\n\n"
+        S._timecode_context_hint = nil
+        reuse_hint_fired = true
+      end
+      if S._irrelevant_context_hint and #S._irrelevant_context_hint > 0 then
+        local tags_str = tbl_concat(S._irrelevant_context_hint, ", ")
+        history_content = history_content
+          .. "(NOTE: You requested <context_needed>"
+          .. tags_str
+          .. "</context_needed>, but that context is not applicable to this "
+          .. "request. This is a native REAPER workflow, not an FX/plugin "
+          .. "workflow. The relevant docs/session/routing references are "
+          .. "already pinned above. USE THEM NOW to generate runnable Lua. "
+          .. "Do NOT emit another <context_needed> tag for these tags.)\n\n"
+        S._irrelevant_context_hint = nil
+        reuse_hint_fired = true
+      end
       if S._context_reuse_hint and #S._context_reuse_hint > 0 then
         local tags_str = tbl_concat(S._context_reuse_hint, ", ")
         history_content = history_content
@@ -22716,6 +23571,45 @@ function Net._handle_watchdog_timeout()
   end
   Log.add_error(timeout_msg, nil, nil, nil,
     { error_kind = "watchdog_timeout", error_debug = debug })
+  return true
+end
+
+function Net._handle_curl_launch_failure()
+  if not S.curl_pid or S.gemini_tier_pending then return false end
+
+  if not S.send_time then
+    S.curl_pid           = nil
+    S.curl_exited_clean  = false
+    S.status             = "idle"
+    Log.line("CURL", "cleared stale in-flight request with no send timestamp")
+    return true
+  end
+
+  if (time_precise() - S.send_time) < 3.0 then return false end
+
+  local pid_file = io.open(tmp.pid, "r")
+  if pid_file then pid_file:close(); return false end
+
+  local exit_file = io.open(tmp.exit, "r")
+  if exit_file then exit_file:close(); return false end
+
+  local out_file = io.open(tmp.out, "r")
+  local out = out_file and (out_file:read("*a") or "") or ""
+  if out_file then out_file:close() end
+  if #out >= 2 then return false end
+
+  local err_file = io.open(tmp.err, "r")
+  local err = err_file and (err_file:read("*a") or "") or ""
+  if err_file then err_file:close() end
+  if #err > 0 then return false end
+
+  S.curl_pid           = nil
+  S.send_time          = nil
+  S.curl_exited_clean  = false
+  S.status             = "idle"
+  Log.line("CURL", "network request launcher did not create a pid, exit, or response file")
+  Log.add_error(RA.t("network.launch_failed", nil,
+    "ReaAssist could not start the network request. Please try sending again."))
   return true
 end
 
@@ -23435,6 +24329,8 @@ end
 
 function Net.try_finish_curl()
   if not S.curl_pid then return end
+
+  if Net._handle_curl_launch_failure() then return end
 
   if Net._handle_watchdog_timeout() then return end
 
@@ -28671,6 +29567,195 @@ function Net.try_finish_curl()
     end
   end
 
+  -- TIMECODE-WORKFLOW VALIDATOR: native timecode generator actions are
+  -- selection-sensitive, and hardware output sends use category 1. Catch the
+  -- common partial-success shape where the item lands on one track while the
+  -- script routes an empty helper track, or where category 0 leaves the
+  -- hardware send on its default output pair.
+  local timecode_workflow_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+     and not arity_gate_hit and not media_item_label_gate_hit
+     and not sendidx_gate_hit then
+    local workflow_bad = Code.find_timecode_generator_workflow_misuse(
+      lua_code, S.pending_orig_prompt or "")
+    if workflow_bad and #workflow_bad > 0 then
+      if (S.timecode_workflow_validator_retries or 0) < 1 then
+        S.timecode_workflow_validator_retries =
+          (S.timecode_workflow_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "timecode_workflow")
+        local lines = {}
+        for _, e in ipairs(workflow_bad) do
+          if e.kind == "hardware_category" then
+            lines[#lines + 1] = "  - line " .. tostring(e.set_line)
+              .. " sets hardware send `" .. tostring(e.sendidx)
+              .. "` with category 0; hardware outputs require category 1"
+          elseif e.kind == "route_before_action" then
+            lines[#lines + 1] = "  - line " .. tostring(e.line)
+              .. " routes a track before the native timecode action runs"
+          elseif e.kind == "precreated_track_before_timecode_action" then
+            lines[#lines + 1] = "  - line " .. tostring(e.line)
+              .. " creates a helper target track before the native timecode "
+              .. "action; the native action can create/use a separate item "
+              .. "track, leaving a blank extra track behind"
+          elseif e.kind == "missing_generated_item_track_detection" then
+            lines[#lines + 1] = "  - line " .. tostring(e.line)
+              .. " routes the pre-created track without first detecting which "
+              .. "track actually received the native timecode generator item"
+          elseif e.kind == "precreated_track_without_item_move" then
+            lines[#lines + 1] = "  - line " .. tostring(e.line)
+              .. " detects the generated item track but leaves the item on "
+              .. "that track instead of moving it onto the pre-created target "
+              .. "track before routing"
+          elseif e.kind == "missing_exclusive_selection" then
+            lines[#lines + 1] = "  - line " .. tostring(e.line)
+              .. " runs the native timecode action without first selecting "
+              .. "only the intended target track"
+          elseif e.kind == "overconstrained_action_lookup" then
+            lines[#lines + 1] = "  - line " .. tostring(e.line)
+              .. " requires timecode plus generator plus SMPTE/LTC/MTC in "
+              .. "one action-name match; that can miss REAPER's native "
+              .. "timecode generator action"
+          else
+            lines[#lines + 1] = "  - line "
+              .. tostring(e.line or e.set_line or "?")
+              .. ": unsafe native timecode generator workflow"
+          end
+        end
+        Log.line("TIMECODE-WORKFLOW-VALIDATOR",
+          "unsafe native timecode workflow (" .. #workflow_bad
+          .. "); retrying with track/send hint (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked for "
+          .. "a native SMPTE/LTC/MTC timecode generator routed only to "
+          .. "hardware outputs 3 and 4. Your previous reply used an unsafe "
+          .. "native workflow:\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Regenerate the FULL Lua script with these exact requirements:\n"
+          .. "1. Do NOT use TrackFX_AddByName/TakeFX_AddByName; this is not "
+          .. "an FX plugin.\n"
+          .. "2. Do NOT create a helper/target track before running the "
+          .. "native timecode-generator action. For this standalone insert "
+          .. "request, let the native action create or choose the generator "
+          .. "item track, then rename and route that actual track. A "
+          .. "pre-created helper track can be left blank.\n"
+          .. "3. Find the native action with broad fallback pairs: first "
+          .. "try an action whose text contains `timecode` and `generator`; "
+          .. "if not found, try `smpte` and `generator`; then try "
+          .. "`ltc`/`mtc` and `generator`. Do NOT require `timecode`, "
+          .. "`generator`, and `smpte`/`ltc`/`mtc` all in the same match, "
+          .. "because REAPER action names vary by install/localization.\n"
+          .. "4. Run the verified native timecode generator action, then "
+          .. "detect which track actually received the generated timecode "
+          .. "item. Prefer `local item = reaper.GetSelectedMediaItem(0, 0)` "
+          .. "immediately after Main_OnCommand, then "
+          .. "`generator_track = item and reaper.GetMediaItemTrack(item)`. "
+          .. "A before/after item-count fallback is allowed only if it "
+          .. "ultimately resolves a specific MediaItem with GetMediaItemTrack. "
+          .. "Do NOT use source filenames to identify the item, and do NOT "
+          .. "fall back to the pre-created target track unless that exact "
+          .. "track demonstrably received the new item. If you cannot detect "
+          .. "the item track, show an error and return before routing.\n"
+          .. "5. Route the detected `generator_track` and optionally rename "
+          .. "that track. Do not create, route, or leave behind a blank helper "
+          .. "target track.\n"
+          .. "6. For the hardware output send, use:\n"
+          .. "   local sidx = reaper.CreateTrackSend(generator_track, nil)\n"
+          .. "   if sidx < 0 then ... return end\n"
+          .. "   reaper.SetTrackSendInfo_Value(generator_track, 1, sidx, "
+          .. "\"I_SRCCHAN\", 0)\n"
+          .. "   reaper.SetTrackSendInfo_Value(generator_track, 1, sidx, "
+          .. "\"I_DSTCHAN\", 2)\n"
+          .. "Category 1 is required because nil destination creates a "
+          .. "hardware output. Category 0 is only for normal track-to-track "
+          .. "sends and will leave the hardware send at its default 1/2 "
+          .. "destination.\n"
+          .. "7. Disable `B_MAINSEND` on the generator track so it does not "
+          .. "also feed the master/main outputs.\n\n"
+          .. "Respond as if this is your FIRST reply -- do NOT apologize, do "
+          .. "NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history + 1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("timecode_workflow_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + timecode_workflow_retry")
+              or "timecode_workflow_retry"
+          end
+        end
+        if prefs.include_snapshot and not S.pending_answer_only_followup then
+          S.pending_project  = CTX.resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
+            "retry.reason.for_timecode_generator_workflow_repair",
+            "for native timecode generator workflow repair"))
+            or "Auto-retry for native timecode generator workflow repair did not go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      timecode_workflow_gate_hit = true
+      Log.line("TIMECODE-WORKFLOW-VALIDATOR",
+        "unsafe native timecode workflow persists after retry; auto-run blocked")
+      local user_lines = {}
+      for _, e in ipairs(workflow_bad) do
+        if e.kind == "hardware_category" then
+          user_lines[#user_lines + 1] =
+            "line " .. tostring(e.set_line)
+            .. " uses send category 0 for a hardware output"
+        elseif e.kind == "route_before_action" then
+          user_lines[#user_lines + 1] =
+            "line " .. tostring(e.line)
+            .. " routes before the native action creates/inserts the item"
+        elseif e.kind == "precreated_track_before_timecode_action" then
+          user_lines[#user_lines + 1] =
+            "line " .. tostring(e.line)
+            .. " creates a helper target track before the native timecode action"
+        elseif e.kind == "missing_generated_item_track_detection" then
+          user_lines[#user_lines + 1] =
+            "line " .. tostring(e.line)
+            .. " routes the pre-created track without detecting the generated item track"
+        elseif e.kind == "precreated_track_without_item_move" then
+          user_lines[#user_lines + 1] =
+            "line " .. tostring(e.line)
+            .. " detects the item track but does not move the generated item onto the pre-created target track before routing"
+        elseif e.kind == "missing_exclusive_selection" then
+          user_lines[#user_lines + 1] =
+            "line " .. tostring(e.line)
+            .. " runs the native action without exclusive target-track selection"
+        elseif e.kind == "overconstrained_action_lookup" then
+          user_lines[#user_lines + 1] =
+            "line " .. tostring(e.line)
+            .. " requires too many words in one timecode-generator action lookup"
+        end
+      end
+      Log.add_error((RA and RA.t and RA.t(
+        "validator.timecode_generator_workflow_blocked",
+        { details = tbl_concat(user_lines, "; ") },
+        "The model still did not safely find, insert, or bind the native timecode generator item to the routed hardware-output track, even after a retry: "
+          .. tbl_concat(user_lines, "; ")
+          .. ". Auto-run is blocked; review the generated action lookup, track selection, and hardware output send category before running manually."))
+        or ("The model still did not safely find, insert, or bind the native timecode generator item to the routed hardware-output track, even after a retry: "
+          .. tbl_concat(user_lines, "; ")
+          .. ". Auto-run is blocked; review the generated action lookup, track selection, and hardware output send category before running manually."))
+    end
+  end
+
   -- STOCK-FX VALIDATOR: When the user explicitly names a stock Cockos plugin
   -- (for example ReaEQ or ReaComp), generated code must not substitute a
   -- another stock plugin or a curated third-party/JSFX alternative. This is
@@ -28678,7 +29763,8 @@ function Net.try_finish_curl()
   -- user request and obvious AddByName substitutions.
   local stockfx_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit then
+     and not arity_gate_hit and not sendidx_gate_hit
+     and not timecode_workflow_gate_hit then
     local stockfx_bad = Code.find_stock_fx_substitutions(
       lua_code, S.pending_orig_prompt or "")
     if stockfx_bad and #stockfx_bad > 0 then
@@ -28771,6 +29857,114 @@ function Net.try_finish_curl()
     end
   end
 
+  -- TIMECODE-FX VALIDATOR: SMPTE/LTC/MTC generation is a native REAPER
+  -- action/item workflow, not an FX plugin. If the model tries to load a
+  -- timecode-looking TrackFX/TakeFX for a generator prompt, retry with native
+  -- action lookup and explicit output routing guidance before auto-run.
+  local timecodefx_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+     and not arity_gate_hit and not sendidx_gate_hit
+     and not timecode_workflow_gate_hit and not stockfx_gate_hit then
+    local timecodefx_bad = Code.find_timecode_generator_fx_misuse(
+      lua_code, S.pending_orig_prompt or "")
+    if timecodefx_bad and #timecodefx_bad > 0 then
+      if (S.timecodefx_validator_retries or 0) < 1 then
+        S.timecodefx_validator_retries =
+          (S.timecodefx_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "timecodefx")
+        local lines = {}
+        for _, e in ipairs(timecodefx_bad) do
+          lines[#lines + 1] = "  - line " .. tostring(e.line)
+            .. ": " .. tostring(e.fn) .. " tried to load `"
+            .. tostring(e.plugin) .. "` as an FX plugin"
+        end
+        Log.line("TIMECODEFX-VALIDATOR",
+          "timecode generator loaded as FX (" .. #timecodefx_bad
+          .. "); retrying with native workflow hint (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked to "
+          .. "insert/create/generate SMPTE/LTC/MTC timecode, but your "
+          .. "previous reply tried to load timecode as an FX plugin:\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "SMPTE/LTC/MTC timecode GENERATION is not a TrackFX_AddByName "
+          .. "or TakeFX_AddByName task. Do NOT call TrackFX_AddByName or "
+          .. "TakeFX_AddByName for SMPTE/LTC/MTC/timecode generator names, "
+          .. "including JS: ltc-generator or SMPTE LTC Reader/Generator.\n\n"
+          .. "Use REAPER's native action-list workflow instead: enumerate "
+          .. "Main-section actions with kbd_enumerateActions/"
+          .. "kbd_getTextFromCmd, find an action whose display text contains "
+          .. "timecode or SMPTE/LTC/MTC plus generator, and run that verified "
+          .. "command with Main_OnCommand. Do not hard-code an unverified "
+          .. "numeric action ID.\n\n"
+          .. "If the user asks for output only on channels/outputs 3 and 4, "
+          .. "explicitly route the generator track to hardware outputs 3/4: "
+          .. "create a hardware send with CreateTrackSend(track, nil), "
+          .. "check send index >= 0, then set send attributes with category "
+          .. "1 because nil destination creates a hardware output: "
+          .. "SetTrackSendInfo_Value(track, 1, sidx, \"I_SRCCHAN\", 0) and "
+          .. "SetTrackSendInfo_Value(track, 1, sidx, \"I_DSTCHAN\", 2). "
+          .. "Disable B_MAINSEND when the request excludes the master/main "
+          .. "outputs. Do not rely on I_NCHAN=4 alone; that only changes the "
+          .. "track channel count.\n\n"
+          .. "Regenerate the FULL script using the native action/item "
+          .. "workflow and preserving the requested routing. Respond as if "
+          .. "this is your FIRST reply -- do NOT apologize, do NOT mention "
+          .. "a retry.)\n\n"
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history + 1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("timecodefx_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + timecodefx_retry") or "timecodefx_retry"
+          end
+        end
+        if prefs.include_snapshot and not S.pending_answer_only_followup then
+          S.pending_project  = CTX.resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
+            "retry.reason.for_timecode_generator_fx_repair",
+            "for native timecode generator repair"))
+            or "Auto-retry for native timecode generator repair did not go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      timecodefx_gate_hit = true
+      Log.line("TIMECODEFX-VALIDATOR",
+        "timecode generator still loaded as FX after retry; auto-run blocked")
+      local user_lines = {}
+      for _, e in ipairs(timecodefx_bad) do
+        user_lines[#user_lines + 1] = tostring(e.plugin)
+          .. " via " .. tostring(e.fn)
+      end
+      Log.add_error((RA and RA.t and RA.t(
+        "validator.timecode_generator_fx_blocked",
+        { plugins = tbl_concat(user_lines, "; ") },
+        "The model tried to insert/generate SMPTE/LTC/MTC timecode as an FX plugin, even after a retry: "
+          .. tbl_concat(user_lines, "; ")
+          .. ". Auto-run is blocked; use REAPER's native timecode generator action/item workflow and route outputs explicitly."))
+        or ("The model tried to insert/generate SMPTE/LTC/MTC timecode as an FX plugin, even after a retry: "
+          .. tbl_concat(user_lines, "; ")
+          .. ". Auto-run is blocked; use REAPER's native timecode generator action/item workflow and route outputs explicitly."))
+    end
+  end
+
   -- FX-IDENT VALIDATOR: If preferred-plugin context provided an exact
   -- AddByName identifier (for example "VST3: Pro-G"), do not let hidden repair
   -- retries strip it down to a bare or vendor-suffixed guess. Bare identifiers
@@ -28779,7 +29973,8 @@ function Net.try_finish_curl()
   local fxident_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit
-     and not stockfx_gate_hit then
+     and not timecode_workflow_gate_hit
+     and not stockfx_gate_hit and not timecodefx_gate_hit then
     local fxident_bad = Code.find_preferred_fx_identifier_drift(lua_code)
     if fxident_bad and #fxident_bad > 0 then
       if (S.fxident_validator_retries or 0) < 1 then
@@ -28883,7 +30078,9 @@ function Net.try_finish_curl()
   local fxcheck_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit
-     and not stockfx_gate_hit and not fxident_gate_hit then
+     and not stockfx_gate_hit and not timecode_workflow_gate_hit
+     and not timecodefx_gate_hit
+     and not fxident_gate_hit then
     local unchecked = Code.find_unchecked_addbyname_results(lua_code)
     if unchecked and #unchecked > 0 then
       if (S.fxcheck_validator_retries or 0) < 1 then
@@ -29012,7 +30209,9 @@ function Net.try_finish_curl()
   local getbyname_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit
-     and not stockfx_gate_hit and not fxident_gate_hit
+     and not stockfx_gate_hit and not timecode_workflow_gate_hit
+     and not timecodefx_gate_hit
+     and not fxident_gate_hit
      and not fxcheck_gate_hit then
     local get_bad = Code.find_dependent_getbyname_silent_skips(lua_code)
     if get_bad and #get_bad > 0 then
@@ -29123,7 +30322,9 @@ function Net.try_finish_curl()
   local fxadd_getonly_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit
-     and not stockfx_gate_hit and not fxident_gate_hit
+     and not stockfx_gate_hit and not timecode_workflow_gate_hit
+     and not timecodefx_gate_hit
+     and not fxident_gate_hit
      and not fxcheck_gate_hit and not getbyname_gate_hit then
     local getonly_bad = Code.find_add_requested_getonly_fx_violations(
       S.pending_orig_prompt, lua_code)
@@ -29241,6 +30442,7 @@ function Net.try_finish_curl()
   end
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
+     and not timecode_workflow_gate_hit and not timecodefx_gate_hit
      and not fxcheck_gate_hit and not getbyname_gate_hit
      and not fxadd_getonly_gate_hit
      and S.fx_chains_already_sent
@@ -29356,6 +30558,7 @@ function Net.try_finish_curl()
   local defer_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
+     and not timecode_workflow_gate_hit and not timecodefx_gate_hit
      and not fxcheck_gate_hit and not getbyname_gate_hit
      and not upsert_gate_hit then
     local violations = Code.find_param_calls_outside_defer(lua_code)
@@ -29475,6 +30678,7 @@ function Net.try_finish_curl()
   local proq4_slope_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
+     and not timecode_workflow_gate_hit and not timecodefx_gate_hit
      and not fxcheck_gate_hit and not getbyname_gate_hit
      and not upsert_gate_hit and not defer_gate_hit then
     local slope_bad = Code.find_proq4_bell_slope_violations(lua_code)
@@ -29578,6 +30782,7 @@ function Net.try_finish_curl()
   local fx_param_scope_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
+     and not timecode_workflow_gate_hit and not timecodefx_gate_hit
      and not fxcheck_gate_hit and not getbyname_gate_hit
      and not upsert_gate_hit and not defer_gate_hit
      and not proq4_slope_gate_hit
@@ -29663,6 +30868,7 @@ function Net.try_finish_curl()
   local helper_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
+     and not timecode_workflow_gate_hit and not timecodefx_gate_hit
      and not fxcheck_gate_hit and not getbyname_gate_hit
      and not upsert_gate_hit and not defer_gate_hit
      and not proq4_slope_gate_hit
@@ -29777,6 +30983,7 @@ function Net.try_finish_curl()
   local helper_int_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
+     and not timecode_workflow_gate_hit and not timecodefx_gate_hit
      and not fxcheck_gate_hit and not getbyname_gate_hit
      and not upsert_gate_hit and not defer_gate_hit
      and not proq4_slope_gate_hit
@@ -29914,7 +31121,9 @@ function Net.try_finish_curl()
         or arity_gate_hit
         or media_item_label_gate_hit
         or sendidx_gate_hit
+        or timecode_workflow_gate_hit
         or stockfx_gate_hit
+        or timecodefx_gate_hit
         or fxident_gate_hit
         or fxcheck_gate_hit
         or getbyname_gate_hit
@@ -29945,7 +31154,9 @@ function Net.try_finish_curl()
     if arity_gate_hit then return "arity_validator" end
     if media_item_label_gate_hit then return "media_item_label_validator" end
     if sendidx_gate_hit then return "send_index_validator" end
+    if timecode_workflow_gate_hit then return "timecode_workflow_validator" end
     if stockfx_gate_hit then return "stock_fx_validator" end
+    if timecodefx_gate_hit then return "timecode_fx_validator" end
     if fxident_gate_hit then return "fx_identifier_validator" end
     if fxcheck_gate_hit then return "fx_check_validator" end
     if getbyname_gate_hit then return "get_by_name_validator" end
@@ -30202,7 +31413,8 @@ function Net.try_finish_curl()
       auto_ran_ok = true
       typed_action_metrics.error = nil
       if not explanation or explanation == ""
-         or explanation == "Structured edit is applying..." then
+         or explanation == "Structured edit is applying..."
+         or explanation == "Structured edit is running." then
         explanation = ""
       end
       if type(Log) == "table" and type(Log.line) == "function" then
@@ -30243,6 +31455,11 @@ function Net.try_finish_curl()
         and typed_action_metrics.error or nil
       local typed_plan_text = Code.typed_actions_artifact_text(text,
         typed_action_response_format)
+      if type(typed_plan_text) == "string" and typed_plan_text ~= ""
+         and type(Code.typed_actions_display_text) == "function" then
+        dmsg.typed_action_summary = Code.typed_actions_display_text(
+          typed_plan_text, typed_action_metrics.action_results)
+      end
       dmsg.run_result = Code.build_run_result("typed_actions", typed_plan_text,
         dmsg.run_status, dmsg.validation_status, {
           auto_ran = auto_ran_ok,
@@ -30762,6 +31979,11 @@ function Net.try_finish_curl()
         dmsg.generated_code = Code.generated_code_descriptor(typed_plan_text,
           "typed_actions", { content_field = "typed_action_plan" })
         if dmsg.generated_code then dmsg.generated_code.content = typed_plan_text end
+        if type(typed_plan_text) == "string" and typed_plan_text ~= ""
+           and type(Code.typed_actions_display_text) == "function" then
+          dmsg.typed_action_summary = Code.typed_actions_display_text(
+            typed_plan_text, typed_action_metrics.action_results)
+        end
       end
       if dmsg.auto_run_block_reason == "auto_run_disabled"
          and dmsg.code_block_present == true
@@ -30945,6 +32167,262 @@ end
 Render = {}
 
 -- =============================================================================
+-- Shared factory-reset support
+-- =============================================================================
+
+function RA.delete_extstate_section(ns)
+  if not ns or ns == "" then return 0 end
+  local ini_path = reaper.GetResourcePath() .. "/reaper-extstate.ini"
+  local f = io.open(ini_path, "r")
+  if not f then return 0 end
+  local keys = {}
+  local in_section = false
+  local line_no = 0
+  for line in f:lines() do
+    line_no = line_no + 1
+    if line_no == 1 then line = line:gsub("^\xEF\xBB\xBF", "") end
+    line = line:match("^%s*(.-)%s*$") or ""
+    if line ~= "" and not line:match("^[;#]") then
+      local sec = line:match("^%[(.-)%]$")
+      if sec then
+        in_section = (sec == ns)
+      elseif in_section then
+        local key = line:match("^([^=]+)")
+        if key then
+          key = key:match("^%s*(.-)%s*$") or ""
+          key = key:gsub("\r$", "")
+          if key ~= "" then keys[#keys + 1] = key end
+        end
+      end
+    end
+  end
+  f:close()
+  for _, k in ipairs(keys) do
+    reaper.DeleteExtState(ns, k, true)
+  end
+  return #keys
+end
+
+function RA.delete_extstate_key_all(ns, key)
+  if not ns or ns == "" or not key or key == "" then return end
+  reaper.DeleteExtState(ns, key, false)
+  reaper.DeleteExtState(ns, key, true)
+end
+
+function RA.clear_theme_backup_extstate()
+  local ns = "ReaAssist"
+  local manifest = reaper.GetExtState(ns, "ThemeBackup__KEYS")
+  if manifest ~= "" then
+    for key in manifest:gmatch("[^,]+") do
+      key = key:match("^%s*(.-)%s*$") or ""
+      if key ~= "" then
+        RA.delete_extstate_key_all(ns, "ThemeBackup_" .. key)
+      end
+    end
+  end
+  RA.delete_extstate_key_all(ns, "ThemeBackup__KEYS")
+  RA.delete_extstate_section(ns)
+end
+
+function RA.ensure_factory_reset_temp_dir(factory_reset_data_dir_cleared)
+  if not (factory_reset_data_dir_cleared
+      and RA.TEMP_DIR
+      and RA.TEMP_DIR ~= ""
+      and type(reaper.RecursiveCreateDirectory) == "function") then
+    return
+  end
+  local temp_dir = tostring(RA.TEMP_DIR):gsub("[/\\]+$", "")
+  if temp_dir ~= "" then pcall(reaper.RecursiveCreateDirectory, temp_dir, 0) end
+end
+
+function RA.factory_reset_execute(opts)
+  opts = opts or {}
+  local keep_screen_reader = opts.keep_screen_reader == true
+  pcall(Theme.restore_backups)
+  pcall(RA.clear_theme_backup_extstate)
+  pcall(Custom.unregister_all)
+  pcall(Net.gemini_cache_invalidate)
+
+  RA.delete_extstate_section(CFG.EXT_NS)
+  reaper.DeleteExtState(CFG.EXT_NS, "running",       false)
+  reaper.DeleteExtState(CFG.EXT_NS, "request_close", false)
+  reaper.DeleteExtState(CFG.EXT_NS, "dev_signal",    false)
+  reaper.SetExtState(CFG.EXT_NS, "factory_reset_clean_boot", "1", false)
+  if keep_screen_reader then
+    reaper.SetExtState(CFG.EXT_NS, "prefer_screen_reader", "1", true)
+  end
+
+  S._suppress_geometry_save  = true
+  S._suppress_os_theme_cache = true
+
+  prefs.auto_run              = false
+  prefs.auto_backup           = true
+  prefs.show_details          = false
+  prefs.custom_instructions_enabled = false
+  prefs.debug_logging         = true
+  prefs.include_api_ref       = false
+  prefs.include_snapshot      = true
+  prefs.update_check          = true
+  prefs.typed_actions_opt_in  = true
+  prefs.diag_auto_tier        = "basic"
+  prefs.test_force_cold_cache = false
+  prefs.cloud_request_timeout = CFG.CLOUD_TIMEOUT_DEFAULT
+  prefs.provider_idx          = 1
+  prefs.model_idx             = 2
+  prefs.thinking_idx          = 0
+  prefs.ui_scale_idx          = 3
+  prefs.theme                 = "auto"
+  prefs.chat_font_idx         = 2
+  prefs.reply_language_idx    = 1
+  prefs.language_code         = "en"
+  apply_palette(PALETTES[resolve_theme("auto")])
+  S._reset_window_size = true
+  Net.clear_conversation()
+  S.api_key  = nil
+  S.api_key_map = {}
+  S.gemini_paid_tier = nil
+  api_keys.key_bufs = {}
+  api_keys.key_errors = {}
+  api_keys.key_warnings = {}
+  api_keys.key_error = nil
+  api_keys.key_error_provider = nil
+  api_keys.key_error_detail = nil
+  api_keys.key_error_hint = nil
+  api_keys.key_error_url = nil
+  api_keys.key_error_url_label = nil
+  api_keys.key_focused = false
+  api_keys.key_validating = false
+  api_keys.key_validating_idx = nil
+  api_keys.show_key_error_popup = false
+  api_keys.show_test_results = false
+  api_keys.test_results = {}
+  api_keys.custom_edit = nil
+
+  local factory_reset_data_dir_cleared = false
+  do
+    local function remove_family(path)
+      if not path or path == "" then return end
+      os.remove(path)
+      os.remove(path .. ".tmp")
+      os.remove(path .. ".bak")
+    end
+    local function safe_data_dir(dir)
+      if not dir or dir == "" then return false end
+      if not RA.script_path or RA.script_path == "" then return false end
+      if dir:sub(1, #RA.script_path) ~= RA.script_path then return false end
+      return dir:match("[/\\]Data[/\\]$") ~= nil
+    end
+    local function shell_path_safe(path)
+      return type(path) == "string" and path ~= "" and not path:find('"', 1, true)
+    end
+    local function ps_escape(path) return tostring(path or ""):gsub("'", "''") end
+    local function sq(path) return "'" .. tostring(path or ""):gsub("'", "'\\''") .. "'" end
+    local function norm_dir(path)
+      return tostring(path or ""):gsub("[/\\]+$", ""):lower()
+    end
+    local function remove_dir(path)
+      if not path or path == "" then return end
+      path = path:gsub("[/\\]+$", "")
+      if path == "" then return end
+      if os.remove(path) == true then return end
+      if not shell_path_safe(path) then return end
+      if RA.IS_WINDOWS then
+        if type(reaper.ExecProcess) == "function" then
+          local cmd = "powershell -NoProfile -WindowStyle Hidden"
+            .. " -Command \"Remove-Item -LiteralPath '"
+            .. ps_escape(path)
+            .. "' -Recurse -Force -ErrorAction SilentlyContinue\""
+          pcall(reaper.ExecProcess, cmd, 5000)
+        end
+      else
+        os.execute("rmdir " .. sq(path) .. " >/dev/null 2>&1")
+      end
+    end
+    local function clear_tree_contents(dir)
+      if not dir or dir == "" then return end
+      local sep = (dir:sub(-1) == "/" or dir:sub(-1) == "\\") and "" or RA.SEP
+      local files = {}
+      local idx = 0
+      while true do
+        local fn = reaper.EnumerateFiles(dir, idx)
+        if not fn then break end
+        files[#files + 1] = fn
+        idx = idx + 1
+      end
+      for _, fn in ipairs(files) do
+        os.remove(dir .. sep .. fn)
+      end
+
+      if type(reaper.EnumerateSubdirectories) ~= "function" then return end
+      local dirs = {}
+      idx = 0
+      while true do
+        local sub = reaper.EnumerateSubdirectories(dir, idx)
+        if not sub then break end
+        dirs[#dirs + 1] = sub
+        idx = idx + 1
+      end
+      for _, sub in ipairs(dirs) do
+        local child = dir .. sep .. sub
+        clear_tree_contents(child)
+        if norm_dir(child) ~= norm_dir(RA.TEMP_DIR) then
+          remove_dir(child)
+        end
+      end
+    end
+    if safe_data_dir(RA.DATA_DIR) then
+      clear_tree_contents(RA.DATA_DIR)
+      factory_reset_data_dir_cleared = true
+    else
+      remove_family(RA.CONFIG_PATH)
+      remove_family(RA.PROVIDERS_PATH)
+      remove_family(RA.STATE_PATH)
+      remove_family(RA.CUSTOM_INSTRUCTIONS_PATH)
+      remove_family(RA.DATA_DIR .. "FX_Cache.json")
+      remove_family(RA.DATA_DIR .. "Debug.log")
+      remove_family(RA.FX_CACHE_PATH)
+      remove_family(Log and Log.path)
+    end
+    remove_family(RA._LEGACY_FX_CACHE_PATH)
+    remove_family(RA._LEGACY_DEBUG_LOG_PATH)
+    if Store then
+      Store._config_doc = nil
+      Store._state_doc = nil
+    end
+  end
+  FXCache.invalidate()
+  api_keys.screen     = "tos"
+  api_keys.is_reentry = false
+  S.refocus_prompt = true
+  if I18N and I18N.set_language_code then
+    I18N.set_language_code("en")
+  elseif I18N then
+    I18N.active_code = "en"
+  end
+
+  if S and S.screen_reader_mode then
+    RA.ensure_factory_reset_temp_dir(factory_reset_data_dir_cleared)
+    if keep_screen_reader then
+      reaper.SetExtState(CFG.EXT_NS, "prefer_screen_reader", "1", true)
+    end
+    return true
+  end
+  if not (Updater and Updater.fire_relauncher_now
+      and Updater.fire_relauncher_now()) then
+    RA.ensure_factory_reset_temp_dir(factory_reset_data_dir_cleared)
+    if UI and UI.show_float_toast then
+      UI.show_float_toast(
+        UI.t("settings.factory_reset.complete", nil,
+          "Reset complete. Close and reopen ReaAssist to finish."), "ok", true)
+    end
+  end
+  if keep_screen_reader then
+    reaper.SetExtState(CFG.EXT_NS, "prefer_screen_reader", "1", true)
+  end
+  return true
+end
+
+-- =============================================================================
 -- Probe compatibility surface
 -- =============================================================================
 -- The historical local-only Temp-Probe module is retired. Keep Probe.* as
@@ -31063,15 +32541,27 @@ end
 RA.load_i18n()
 
 do
-  -- Derive CRITICAL_FILES from FONT_FILES (the same table _mkfont calls
+  -- Derive font entries from FONT_FILES (the same table _mkfont calls
   -- consume) so the two lists cannot drift: add a font to FONT_FILES
-  -- and the bootstrap check picks it up automatically.
-  local CRITICAL_FILES = { "Resources/UI.lua" }
+  -- and the bootstrap check picks it up automatically. Keep core sidecars
+  -- explicit because bootstrap repair queues only this missing-file list.
+  local CRITICAL_FILES = {
+    "Resources/Context.lua",
+    "Resources/CodeRuntime.lua",
+  }
+  if not S.screen_reader_startup_intent then
+    CRITICAL_FILES[#CRITICAL_FILES + 1] = "Resources/UI.lua"
+  end
+  if S.screen_reader_startup_intent
+      and RA.prefer_screen_reader_enabled() then
+    CRITICAL_FILES[#CRITICAL_FILES + 1] =
+      "ReaAssist_Screen_Reader_Mode.lua"
+  end
   -- Sort font filenames so the bootstrap-missing list is presented in
   -- a stable order across launches. `pairs` order is hash-bucket-
   -- dependent; without sorting, the recovery screen's "first 6 missing"
   -- entries shuffle between launches for the same filesystem state.
-  do
+  if not S.screen_reader_startup_intent then
     local fnames = {}
     for _, fname in pairs(FONT_FILES) do fnames[#fnames + 1] = fname end
     table.sort(fnames)
@@ -31094,15 +32584,18 @@ do
   -- partial download). _mkfont returns nil in that case, so any nil FONT[key]
   -- whose file we DIDN'T already flag as missing must be corrupt. Suffix with
   -- "(load error)" to distinguish from missing in the recovery screen.
-  for key, fname in pairs(FONT_FILES) do
-    if not FONT[key] then
-      local rel = "Resources/fonts/" .. fname
-      local already_listed = false
-      for _, e in ipairs(S.bootstrap_missing) do
-        if e == rel then already_listed = true; break end
-      end
-      if not already_listed then
-        S.bootstrap_missing[#S.bootstrap_missing + 1] = rel .. " (load error)"
+  if not S.screen_reader_startup_intent then
+    for key, fname in pairs(FONT_FILES) do
+      if not FONT[key] then
+        local rel = "Resources/fonts/" .. fname
+        local already_listed = false
+        for _, e in ipairs(S.bootstrap_missing) do
+          if e == rel then already_listed = true; break end
+        end
+        if not already_listed then
+          S.bootstrap_missing[#S.bootstrap_missing + 1] =
+            rel .. " (load error)"
+        end
       end
     end
   end
@@ -31126,7 +32619,7 @@ if #S.bootstrap_missing > 0 then
   for _, rel in ipairs(S.bootstrap_missing) do
     Log.line("BOOTSTRAP", "  missing: " .. rel)
   end
-else
+elseif not S.screen_reader_startup_intent then
   -- All critical files present; dofile the UI file to populate Render.*
   -- before the main loop is registered below. Wrapped in pcall so a UI
   -- file that exists but is syntactically corrupt or throws a top-level
@@ -31603,7 +33096,7 @@ function Loop.pump_curl_or_retry()
         S.retry_max = CFG.MAX_RETRIES
       end
     end
-  elseif S.status == "waiting" or S.gemini_tier_pending then
+  elseif S.status == "waiting" or S.curl_pid or S.gemini_tier_pending then
     local now = time_precise()
     if now - S.last_poll_time >= CFG.POLL_THROTTLE then
       S.last_poll_time = now
@@ -31612,6 +33105,190 @@ function Loop.pump_curl_or_retry()
   end
 end
 
+TypedActionController = TypedActionController or {}
+
+function TypedActionController.t(key, values, fallback)
+  return RA.t(key, values, fallback)
+end
+
+function TypedActionController.trim_text(text)
+  return tostring(text or ""):match("^%s*(.-)%s*$") or ""
+end
+
+function TypedActionController.active_provider()
+  return PROVIDERS and PROVIDERS.active and PROVIDERS.active() or nil
+end
+
+function TypedActionController.active_provider_is_usable()
+  local p = TypedActionController.active_provider()
+  if not p then return false end
+  if p.is_custom then return true end
+  return S.api_key ~= nil and tostring(S.api_key) ~= ""
+end
+
+function TypedActionController.request_is_active()
+  return S.status == "waiting" or S.curl_pid ~= nil or S.retry_scheduled == true
+end
+
+function TypedActionController.message_has_typed_actions(msg)
+  return type(msg) == "table"
+    and type(msg.typed_actions) == "table"
+    and msg.typed_actions.present == true
+end
+
+function TypedActionController.generated_code_text(msg)
+  if not msg then return "" end
+  if TypedActionController.message_has_typed_actions(msg) then
+    if type(msg.generated_code) == "table"
+        and msg.generated_code.content
+        and msg.generated_code.content ~= "" then
+      return tostring(msg.generated_code.content)
+    end
+    if msg.typed_actions_artifact and msg.typed_actions_artifact ~= "" then
+      return tostring(msg.typed_actions_artifact)
+    end
+    if msg.code_block and msg.code_block ~= "" then
+      return tostring(msg.code_block)
+    end
+  end
+  if msg.code_block and msg.code_block ~= "" then
+    return tostring(msg.code_block)
+  end
+  if type(msg.generated_code) == "table"
+      and msg.generated_code.content
+      and msg.generated_code.content ~= "" then
+    return tostring(msg.generated_code.content)
+  end
+  if msg.typed_actions_artifact and msg.typed_actions_artifact ~= "" then
+    return tostring(msg.typed_actions_artifact)
+  end
+  return ""
+end
+
+function TypedActionController.generated_code_type(msg)
+  if not msg then return nil end
+  if TypedActionController.message_has_typed_actions(msg) then
+    return "typed_actions"
+  end
+  if type(msg.generated_code) == "table"
+      and msg.generated_code.content
+      and msg.generated_code.content ~= "" then
+    return msg.generated_code.code_type or msg.code_type
+  end
+  if msg.typed_actions_artifact and msg.typed_actions_artifact ~= "" then
+    return "typed_actions"
+  end
+  return msg.code_type
+end
+
+function TypedActionController.typed_action_has_results(msg)
+  if not TypedActionController.message_has_typed_actions(msg) then return false end
+  local ar = msg.typed_actions and msg.typed_actions.action_results or nil
+  return type(ar) == "table" and #ar > 0
+end
+
+function TypedActionController.message_undo_sent(msg)
+  return type(msg) == "table"
+    and (msg.screen_reader_undo_clicked == true
+      or msg.typed_action_undo_clicked == true)
+end
+
+function TypedActionController.message_can_undo_generated_action(msg)
+  if not msg or TypedActionController.message_undo_sent(msg) then return false end
+  if TypedActionController.message_has_typed_actions(msg) then
+    return msg.auto_ran == true
+      or msg.run_status == "ran_ok"
+      or TypedActionController.typed_action_has_results(msg)
+  end
+  local code = TypedActionController.generated_code_text(msg)
+  if code == "" then return false end
+  local code_type = TypedActionController.generated_code_type(msg)
+  if code_type == "lua" then
+    return msg.auto_ran == true or msg.run_status == "ran_ok"
+  end
+  return false
+end
+
+function TypedActionController.user_prompt_before_message(message_idx)
+  local start_idx = tonumber(message_idx) or #(S.display_messages or {})
+  for j = start_idx - 1, 1, -1 do
+    local m = S.display_messages and S.display_messages[j] or nil
+    if m and m.role == "user" and m.content and m.content ~= "" then
+      return tostring(m.content)
+    end
+  end
+  return nil
+end
+
+function TypedActionController.typed_action_lua_request_prompt(original_request)
+  local lang_note = ""
+  local reply_lang = (I18N and I18N.prompt_language_name
+      and I18N.prompt_language_name())
+    or (CFG.prompt_language_name_for_idx
+      and CFG.prompt_language_name_for_idx(prefs.reply_language_idx or 1))
+    or (CFG.REPLY_LANGUAGE_CODES
+      and CFG.REPLY_LANGUAGE_CODES[prefs.reply_language_idx or 1])
+    or "English"
+  if reply_lang and reply_lang ~= "" and reply_lang ~= "English" then
+    lang_note = "Use " .. reply_lang .. " for visible script comments, "
+      .. "script title text, Undo_EndBlock labels, ShowMessageBox text, "
+      .. "console/debug text, and other user-visible string literals. "
+      .. "Keep REAPER API names, identifiers, plugin names, paths, and "
+      .. "user-supplied filenames unchanged.\n\n"
+  end
+  return lang_note
+    .. "Please give me the normal REAPER Lua/ReaScript version of this "
+    .. "request instead of a structured edit. Return one complete runnable "
+    .. "script inside a ```lua code fence. Do not use structured edits or "
+    .. "typed-action JSON.\n\nOriginal request:\n"
+    .. tostring(original_request or "")
+end
+
+function TypedActionController.request_lua_for_typed_action_message(msg, message_idx)
+  if TypedActionController.request_is_active() then
+    return false, TypedActionController.t("a11y.sr.request_already_running", nil,
+      "A request is already running.")
+  end
+  if not TypedActionController.active_provider_is_usable() then
+    return false, TypedActionController.t("a11y.sr.provider_not_configured", nil,
+      "The selected provider needs an API key before ReaAssist can send.")
+  end
+  if not TypedActionController.message_has_typed_actions(msg) then
+    return false, TypedActionController.t("a11y.sr.request_lua_unavailable", nil,
+      "Could not request the Lua/ReaScript version.")
+  end
+  if not TypedActionController.message_can_undo_generated_action(msg) then
+    return false, TypedActionController.t("a11y.sr.undo_edit_unavailable", nil,
+      "There is no structured edit to undo.")
+  end
+  local original_request = TypedActionController.user_prompt_before_message(message_idx)
+  if not original_request or original_request == "" then
+    return false, TypedActionController.t("typed_actions.no_original_prompt", nil,
+      "Could not find the original prompt")
+  end
+  reaper.Main_OnCommand(40029, 0)
+  msg.screen_reader_undo_clicked = true
+  msg.typed_action_undo_clicked = true
+  msg.typed_action_lua_requested = true
+  msg.auto_ran = false
+  S.refocus_prompt = true
+  S.skip_local_answer_once = true
+  S.suppress_user_display_once = true
+  local ok, err = pcall(Net.send_to_api,
+    TypedActionController.typed_action_lua_request_prompt(original_request))
+  if not ok then
+    if Log and Log.add_error then
+      Log.add_error("Typed-action Lua request failed: " .. tostring(err))
+    end
+    return false, tostring(err or "")
+  end
+  return true, TypedActionController.t("a11y.sr.request_lua_sent", nil,
+    "Requesting Lua/ReaScript version.")
+end
+
+-- Screen Reader Mode's presentation layer lives in
+-- ReaAssist_Screen_Reader_Mode.lua. Keep ReaAssist.lua limited to shared
+-- app/controller plumbing so the normal visual app stays clean.
 local function loop()
   if CFG._PRODUCT:lower() ~= CFG.EXT_NS then return end
 
@@ -31900,6 +33577,67 @@ local function loop()
       pcall(reaper.Undo_EndBlock, "ReaAssist: scan (closed at exit)", 0)
     end
   end
+end
+
+function RA.pump_screen_reader_background()
+  Loop.handle_close_signal()
+  Loop.pump_curl_or_retry()
+  if Diag and Diag.uploader_enabled and Diag.tick then
+    Diag.tick()
+  end
+  if Attach and Attach.pump_encoding and S.attachments
+      and #S.attachments > 0 then
+    Attach.pump_encoding()
+  end
+  if CTX and CTX.pref_plugins_scan_read and pref_plugins
+      and pref_plugins.scan and pref_plugins.scan.active then
+    CTX.pref_plugins_scan_read()
+  end
+  if CTX and fx_cache_ui and fx_cache_ui.rescan
+      and fx_cache_ui.rescan.active then
+    if RA.context_loaded and RA.context_loaded()
+        and fx_cache_ui.rescan.phase == "reading" then
+      CTX.fx_cache_rescan_read()
+    elseif RA.context_loaded and not RA.context_loaded() then
+      fx_cache_ui.rescan.active = false
+      fx_cache_ui.rescan.phase = "done"
+      fx_cache_ui.rescan.status = RA.context_unavailable_message(
+        "before rescanning FX parameters")
+    end
+  end
+  if CTX and deep_scan and deep_scan.active then
+    if RA.context_loaded and RA.context_loaded() then
+      CTX.pump_deep_scan()
+    elseif CTX.cancel_deep_scan then
+      CTX.cancel_deep_scan()
+    end
+  end
+  if Updater and update then
+    if update.state == "checking" then
+      Updater.check_poll()
+    elseif update.state == "verifying" then
+      local s = update._sha_diff
+      if s and s.mode == "native" then
+        Updater.tick_native_sha()
+      else
+        Updater.tick_sha_diff()
+      end
+    elseif update.state == "downloading" then
+      Updater.download_poll()
+    elseif update.state == "rename_retry" then
+      Updater.rename_retry_poll()
+    end
+    Updater.try_auto_restart()
+  end
+  if S.gemini_auto_retest_pending and not S.curl_pid then
+    local p = PROVIDERS and PROVIDERS.active and PROVIDERS.active() or nil
+    if p and p.id == "google" then
+      S.gemini_auto_retest_pending = false
+      Net.fire_gemini_tier_test()
+    end
+  end
+  return S.status == "waiting" or S.curl_pid ~= nil
+    or S.retry_scheduled == true
 end
 
 -- =============================================================================
@@ -32547,6 +34285,98 @@ function Bootstrap.loop()
   if S.script_open then reaper.defer(Bootstrap.loop) end
 end
 
+function Bootstrap.screen_reader_loop()
+  if not S.bootstrap_install_fired then
+    S.bootstrap_install_fired = true
+    if S.bootstrap_install_mode == nil then
+      S.bootstrap_install_mode = not Store.first_launch_complete()
+    end
+    update.last_error = nil
+    update.last_step = nil
+    if not S.bootstrap_install_mode then
+      update._bootstrap_repair = true
+    end
+    if not Updater.force_reinstall() then
+      update.state = "failed"
+      update.last_error = "Could not start the ReaAssist file repair."
+    end
+  end
+
+  if update.state == "checking" then Updater.check_poll() end
+  if update.state == "verifying" then
+    local s = update._sha_diff
+    if s and s.mode == "native" then Updater.tick_native_sha()
+    else Updater.tick_sha_diff() end
+  end
+  if update.state == "downloading" then Updater.download_poll() end
+  if update.state == "rename_retry" then Updater.rename_retry_poll() end
+  if update.state == "available" or update.state == "repair_available" then
+    Updater.download_start()
+  end
+  Updater.try_auto_restart()
+
+  do
+    local key, msg
+    if update.state == "checking" or update.state == "verifying" then
+      key = update.state
+      msg = "Checking ReaAssist files for Screen Reader Mode."
+    elseif update.state == "downloading" then
+      key = "downloading"
+      msg = "Downloading ReaAssist files for Screen Reader Mode."
+    elseif update.state == "rename_retry" then
+      key = "applying"
+      msg = "Applying ReaAssist files for Screen Reader Mode."
+    elseif update.state == "done" and update.restart_after then
+      key = "restart"
+      msg = "ReaAssist files are ready. Restarting Screen Reader Mode."
+    end
+    if msg and key ~= S._screen_reader_bootstrap_progress_key
+        and reaper.osara_outputMessage then
+      S._screen_reader_bootstrap_progress_key = key
+      pcall(reaper.osara_outputMessage, msg)
+    end
+  end
+
+  if update.state == "failed" or update.last_error then
+    local msg = "ReaAssist could not repair the files needed for Screen Reader Mode.\n\n"
+      .. tostring(update.last_error or "Unknown repair error.")
+    if reaper.osara_outputMessage then
+      pcall(reaper.osara_outputMessage, msg)
+    else
+      reaper.ShowMessageBox(msg, "ReaAssist Screen Reader Mode", 0)
+    end
+    S.script_open = false
+    return
+  end
+
+  if update.state == "done" and not update.restart_after then
+    local msg =
+      "ReaAssist files were repaired. Close and reopen REAPER, then run ReaAssist again."
+    if reaper.osara_outputMessage then
+      pcall(reaper.osara_outputMessage, msg)
+    else
+      reaper.ShowMessageBox(msg, "ReaAssist Screen Reader Mode", 0)
+    end
+    S.script_open = false
+    return
+  end
+
+  if update.state == "idle" and S.bootstrap_install_fired then
+    local msg =
+      "ReaAssist Screen Reader Mode did not find any files to repair. " ..
+      "Close and reopen REAPER, then run ReaAssist again."
+    if reaper.osara_outputMessage then
+      pcall(reaper.osara_outputMessage, msg)
+    else
+      reaper.ShowMessageBox(msg, "ReaAssist Screen Reader Mode", 0)
+    end
+    S.script_open = false
+    return
+  end
+
+  if S.script_open then reaper.defer(Bootstrap.screen_reader_loop) end
+end
+
 -- =============================================================================
 -- Kick off
 -- =============================================================================
@@ -32565,7 +34395,11 @@ end
 if S.bootstrap_active then
   -- Bootstrap skips chat/network/scan init - none of it is safe before
   -- the missing files are recovered.
-  Bootstrap.loop()
+  if S.screen_reader_startup_intent then
+    Bootstrap.screen_reader_loop()
+  else
+    Bootstrap.loop()
+  end
 else
   -- Clear any stale response file from a previous run, then start the defer loop.
   Code.safe_write(tmp.out, "")
@@ -32592,5 +34426,58 @@ else
   -- launch and the check's ExecProcess cost is ~200ms (imperceptible).
   -- Users who never send a chat can trigger the check via Settings >
   -- Check for Updates, which routes to Updater.manual_check.
-  loop()
+  if S.screen_reader_mode then
+    if type(REAASSIST_SCREEN_READER_ENTRY) == "function" then
+      local ok_sr, sr_err = xpcall(REAASSIST_SCREEN_READER_ENTRY,
+        debug.traceback)
+      if not ok_sr then
+        local msg = "Could not start ReaAssist Screen Reader Mode.\n\n" ..
+          tostring(sr_err)
+        if reaper.osara_outputMessage then
+          local note_path = RA.TEMP_DIR .. "ScreenReader_Startup_Failure.txt"
+          local saved = false
+          local f = io.open(note_path, "wb")
+          if f then
+            f:write(msg)
+            saved = f:close() == true
+          end
+          local spoken = "Could not start ReaAssist Screen Reader Mode."
+          if saved then
+            spoken = spoken .. "\n\nDetails saved to the ReaAssist Temp folder."
+          else
+            spoken = spoken .. "\n\nReaAssist could not save a text copy of this failure."
+          end
+          pcall(reaper.osara_outputMessage, spoken)
+        else
+          reaper.ShowMessageBox(
+            msg,
+            "ReaAssist - Screen Reader Mode",
+            0)
+        end
+        if AppController and AppController.close_instance then
+          AppController.close_instance()
+        else
+          S.script_open = false
+        end
+      end
+    else
+      local msg =
+        "Run the ReaAssist_Screen_Reader_Mode.lua action to use the accessible workflow."
+      if reaper.osara_outputMessage then
+        pcall(reaper.osara_outputMessage, msg)
+      else
+        reaper.ShowMessageBox(
+          msg,
+          "ReaAssist - Screen Reader Mode",
+          0)
+      end
+      if AppController and AppController.close_instance then
+        AppController.close_instance()
+      else
+        S.script_open = false
+      end
+    end
+  else
+    loop()
+  end
 end

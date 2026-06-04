@@ -58,13 +58,9 @@ After installing, run the action "Script: ReaAssist.lua" from REAPER's Action Li
       </metadata>
       <version name="1.4.0" author="Michael Briggs" time="2026-06-04T01:41:32Z">
         <changelog><![CDATA[
-- Help is cleaner and stays up to date more reliably. The in-app Help now focuses on the essential guidance you need while the full manual stays on the website, and localized Help/translation refreshes now check the latest live language-pack index before updating.
+- Screen Reader Mode has been added. ReaAssist now includes ReaAssist_Screen_Reader_Mode.lua, a dedicated accessible companion action for OSARA users. It provides a keyboard-first workflow for prompt entry, chat, settings, API key setup, custom providers, attachments, feedback, issue reporting, and help. Screen Reader Mode requires OSARA, the REAPER accessibility extension; if OSARA is missing, ReaAssist shows setup instructions and opens the official OSARA download page.
 
-- Common generated scripts are harder to get wrong. ReaAssist has stronger safeguards for track setup, track duplication, drum-bus routing, explicit instrument-plugin requests, and FabFilter Pro-Q 4 EQ settings, so more mistakes are caught before code can run.
-
-- Gemini key setup is more forgiving. New valid-looking Gemini key prefixes now get an advisory warning instead of being blocked outright, while obvious invalid keys are still rejected and diagnostics continue to redact keys safely.
-
-- Screen Reader Mode is now included in normal installs. ReaPack, manual installs, and auto-updated installs include the updater-safe ReaAssist_Screen_Reader_Mode.lua companion action so OSARA users can launch the accessible workflow directly from REAPER's Action List.
+- Various bug fixes and improvements. This release also includes smaller reliability, Help, localization, provider setup, and generated-script safety improvements.
         ]]></changelog>
         <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.4.0</source>
         <source main="main" file="ReaAssist_Screen_Reader_Mode.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist_Screen_Reader_Mode.lua?v=1.4.0</source>

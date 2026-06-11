@@ -175,7 +175,7 @@ I18N.catalogs = {
       ["attach.error.screenshot_failed_popup"] =
         "Screenshot capture failed (see popup for details).",
       ["attach.error.screenshot_linux_unsupported"] =
-        "Screenshot capture is not supported on Linux.",
+        "Screenshot capture on Linux needs grim, gnome-screenshot, spectacle, scrot, or ImageMagick import.",
       ["attach.screenshot.macos_permission_popup"] =
         "Screenshot capture failed (exit {code}).\n\n" ..
         "On macOS this usually means REAPER does not have Screen Recording " ..
@@ -452,10 +452,9 @@ I18N.catalogs = {
       ["feedback.modal.subtitle"] = "Help improve ReaAssist",
       ["feedback.modal.intro"] =
         "Sends the current chat session plus your tags and comment below to help improve ReaAssist. API keys, bearer tokens, and home paths are automatically redacted before sending. Project, track, or plugin names you typed may still appear in the chat content; review the preview to verify. Audio is never sent.",
-      ["feedback.modal.bug_link.before"] = "See the ",
       ["feedback.modal.bug_link.label"] = "Bug Reports",
-      ["feedback.modal.bug_link.after"] =
-        " screen to send an advanced report with the full log.",
+      ["feedback.modal.bug_link.sentence"] =
+        "Use {link} to send an advanced report with the full log.",
       ["feedback.modal.how"] = "HOW DID IT GO?",
       ["feedback.modal.what_wrong"] = "What went wrong?",
       ["feedback.modal.tag.wrong_result"] = "Wrong result",
@@ -724,6 +723,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["message.return_home"] = "Return to home screen",
       ["typed_actions.header"] = "STRUCTURED EDIT",
       ["typed_actions.status.undo_lua"] = "UNDO + LUA",
+      ["typed_actions.status.lua_requested"] = "LUA REQUESTED",
       ["typed_actions.status.undo_sent"] = "UNDO SENT",
       ["typed_actions.status.failed"] = "FAILED",
       ["typed_actions.status.auto_ran"] = "AUTO-RAN",
@@ -742,6 +742,9 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["typed_actions.undo_lua"] = "Undo and Request Lua",
       ["typed_actions.undo_lua.tooltip"] =
         "Undo this structured edit, then ask for the Lua/ReaScript version. Auto-run still follows your current setting.",
+      ["typed_actions.request_lua"] = "Request Lua",
+      ["typed_actions.request_lua.tooltip"] =
+        "Ask for a normal Lua/ReaScript version you can review, run, or save. The structured edit will not run.",
       ["typed_actions.no_original_prompt"] =
         "Could not find the original prompt",
       ["code.run.tooltip"] = "Execute this code in REAPER",
@@ -787,8 +790,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["code.backup_unchanged.tooltip"] =
         "Project unchanged since last backup",
       ["code.project_not_saved"] = "Project not saved",
-      ["code.risky.run_will_confirm"] =
-        "Run will ask for confirmation",
+      ["code.risky.warning_with_confirmation"] =
+        "{warning}  (Run will ask for confirmation)",
       ["jsfx.add_selected"] = "Add JSFX to Selected Track(s)",
       ["jsfx.add.tooltip"] = "Save JSFX and add it to all selected tracks",
       ["jsfx.undo.tooltip"] = "Undo adding the JSFX to tracks (Ctrl+Z)",
@@ -827,6 +830,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["dialog.key_test.results"] = "Test Results:",
       ["dialog.key_test.ok"] = "OK",
       ["dialog.key_test.failed"] = "FAILED",
+      ["dialog.key_test.fix_hint"] =
+        "How to fix: double-check this key, or generate a new one:",
       ["dialog.key_validation.title"] = "Key Validation Failed",
       ["dialog.key_validation.heading"] =
         "{provider}: Validation Failed",
@@ -913,7 +918,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.response_no_prose_has_code"] =
         "This response contains generated code but no separate prose response. Use Read or Save Code to review the generated code.",
       ["a11y.sr.response_no_prose_has_action_plan"] =
-        "This response contains edit details but no separate prose response. Use Review Edit Details to review them, or Undo and Request Lua to get a reusable script.",
+        "This response contains edit details but no separate prose response. Use Review Edit Details to review them, Run Edit to apply them, or Request Lua to get a reusable script.",
       ["a11y.sr.response_no_prose_open_code"] =
         "This response contains generated code but no separate prose response. Opening generated code.",
       ["a11y.sr.opened"] =
@@ -1195,9 +1200,9 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.auto_run_blocked_sandbox"] =
         "Auto-run blocked: generated code uses a restricted Lua API. Review it before running manually.",
       ["a11y.sr.auto_run_blocked_non_runnable"] =
-        "Auto-run was blocked because the generated Lua was not runnable. Review or regenerate it before running manually.",
+        "Auto-run was blocked because the generated Lua was not runnable. Review the response or ask ReaAssist to regenerate it.",
       ["a11y.sr.auto_run_blocked_manual_only"] =
-        "Auto-run was blocked because this generated code requires manual review before running.",
+        "Auto-run was blocked because this generated code requires manual review and cannot be run directly from Screen Reader Mode.",
       ["a11y.sr.reagirl_downloading"] =
         "Downloading accessible UI library.",
       ["a11y.sr.reagirl_download_still_running"] =
@@ -1317,6 +1322,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Only Lua code can be run directly from Screen Reader Mode.",
       ["a11y.sr.run_code_blocked"] =
         "This generated code cannot be run directly.",
+      ["a11y.sr.run_code_validation_blocked"] =
+        "ReaAssist blocked this code from running because validation flagged it. Ask ReaAssist to regenerate it instead.",
+      ["a11y.sr.run_code_sandbox_blocked"] =
+        "ReaAssist blocked this code from running because it uses a restricted Lua API. Ask ReaAssist to regenerate it instead.",
       ["a11y.sr.run_code_risky"] =
         "This generated code needs confirmation before it runs.",
       ["a11y.sr.run_code_backup_unsaved"] =
@@ -2119,7 +2128,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.response_ready_body"] =
         "The response has arrived, but no readable response text was found.",
       ["a11y.sr.response_ready_body_action"] =
-        "Review the edit details before running it.",
+        "Review the edit details before running it, or request Lua if you want a script to save.",
       ["a11y.sr.response_ready_body_code"] =
         "Review generated code before running.",
       ["a11y.sr.response_ready_body_jsfx"] =
@@ -2612,8 +2621,14 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "for unverified Main_OnCommand ID(s)",
       ["retry.reason.for_tempo_marker_bar_alignment"] =
         "for tempo-marker bar alignment",
+      ["retry.reason.for_loop_time_map"] =
+        "for loop/time-selection bar-beat time map",
+      ["retry.reason.for_ruler_timebase_display"] =
+        "for ruler display timebase repair",
       ["retry.reason.for_poor_transient_stretch_marker_detector"] =
         "for poor transient stretch-marker detector",
+      ["retry.reason.for_audio_sync_item_start_alignment"] =
+        "for item-start/take-offset alignment used as audio sync",
       ["retry.reason.for_whole_item_drum_quantize"] =
         "for whole-item drum quantize",
       ["retry.reason.for_unsynchronized_drum_stretch_markers"] =
@@ -2665,25 +2680,43 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["validator.mistyped_reaper_global_blocked"] =
         "The model misspelled the REAPER API global, even after a retry: {lines}. Auto-run is blocked; review and edit the code before clicking Run manually.",
       ["validator.invalid_reaper_calls_blocked"] =
-        "The model emitted REAPER API calls that don't exist on your machine, even after a retry: {calls}. Auto-run is blocked; review and edit the code before clicking Run manually, or retry with a stronger model.",
+        "The model emitted Lua/ReaScript calls that will not run in ReaAssist, even after a retry: {calls}. Auto-run is blocked; review and edit the code before clicking Run manually, or retry with a stronger model.",
       ["validator.toolbar_action_blocked"] =
         "The model emitted a fragile toolbar/action script even after a retry: {codes}. Auto-run is blocked because this pattern can require repeated toolbar clicks or leave stale toolbar state. Review the script before saving/installing it as a REAPER action.",
       ["validator.midi_plain_item_blocked"] =
         "The script creates a plain media item with AddMediaItemToTrack but then inserts MIDI into it. Auto-run is blocked because this produces an item with no MIDI notes. Use CreateNewMIDIItemInProj for new MIDI items.",
       ["validator.midi_literal_ppq_blocked"] =
         "The script passes beat or second-looking numbers directly to MIDI_InsertNote. Auto-run is blocked because MIDI note start/end positions must be PPQ. Convert project time with MIDI_GetPPQPosFromProjTime before inserting notes.",
+      ["validator.midi_project_time_ppq_blocked"] =
+        "The script passes project-time variables directly to MIDI_InsertNote. Auto-run is blocked because MIDI note start/end positions must be PPQ. Convert project time with MIDI_GetPPQPosFromProjTime before inserting notes.",
       ["validator.midi_table_pitch_blocked"] =
         "The script passes a table as the MIDI_InsertNote pitch argument. Auto-run is blocked because note pitch must be a number from 0 to 127.",
+      ["validator.midi_kick_pitch_blocked"] =
+        "The script inserts a non-kick MIDI note for a kick-only pattern. Auto-run is blocked because the generated kick hits would be on the wrong GM drum pitch. Use MIDI pitch 36 for kick hits unless the user explicitly asks for another pitch.",
+      ["validator.midi_named_note_octave_blocked"] =
+        "The script inserts C3 octave MIDI pitches for a requested C4/E4/G4 triad. Auto-run is blocked because the generated notes would be an octave lower than requested. Use MIDI pitches 60, 64, and 67 for C4, E4, and G4 in this context.",
+      ["validator.midi_seconds_as_qn_blocked"] =
+        "The script calculates seconds from BPM, then uses those values as project QN offsets with MIDI_GetPPQPosFromProjQN. Auto-run is blocked because the generated note timing would be too early. Use QN offsets such as 0.5 per eighth note, or convert seconds with MIDI_GetPPQPosFromProjTime.",
+      ["validator.midi_eighth_spacing_blocked"] =
+        "The script advances MIDI note starts by quarter-note spacing even though the request asks for eighth-note placement. Auto-run is blocked because the timing would be wrong. Use eighth-note PPQ spacing for the note starts.",
       ["validator.midi_bad_track_arg_blocked"] =
         "The script passes a project id or boolean as the first argument to CreateNewMIDIItemInProj. Auto-run is blocked because that argument must be a MediaTrack handle.",
+      ["validator.midi_takeismidi_item_arg_blocked"] =
+        "The script calls TakeIsMIDI with a MediaItem instead of a MediaItem_Take. Auto-run is blocked because this crashes at runtime. Get the active take from the item first.",
       ["validator.midi_input_filter_blocked"] =
         "The script does not safely implement the requested MIDI input-device filter. REAPER cannot encode 'all MIDI devices except one named device' as a single track I_RECINPUT value, and the generated Lua still uses an unsupported map or only lists devices. Auto-run is blocked; use a name-matched helper-track workaround or set a single named input directly.",
       ["validator.action_id_blocked"] =
         "The model emitted unverified numeric REAPER action ID(s), even after a retry: {ids}. Main_OnCommand accepts any integer, so this can silently run the wrong action or do nothing. Auto-run is blocked; confirm the exact Action List ID or rewrite the script with direct REAPER API calls before running it.",
       ["validator.tempo_marker_alignment_blocked"] =
         "The model tried to align a bar/beat line to the cursor by inserting a tempo marker at the bar's existing position even after a retry. Auto-run is blocked; anchor the intended measure/beat at the edit cursor or transient instead.",
+      ["validator.loop_time_map_blocked"] =
+        "The model set a loop or time selection from bar/beat wording without REAPER's time-map APIs after a retry. Auto-run is blocked; convert the bar/beat positions with TimeMap2_beatsToTime before running manually.",
+      ["validator.ruler_timebase_blocked"] =
+        "The model tried to set timeline ruler display using RULER_LANE_TIMEBASE even after a retry: {details}. Auto-run is blocked; use verified ruler time-unit actions or exact action-name lookup instead.",
       ["validator.transient_detector_blocked"] =
         "The model tried to place drum-hit/transient stretch markers with a custom Lua audio-accessor detector even after a retry. That path tends to add false markers on decays and bleed. Auto-run is blocked; use REAPER's Dynamic Split / transient action, or explicitly ask for a custom threshold detector if you want that lower-quality approximation.",
+      ["validator.audio_sync_item_start_blocked"] =
+        "The model tried to answer an audio/take sync request by only aligning media-item starts or copying take source offsets even after a retry. Auto-run is blocked; ask whether the user wants start-time/offset alignment or audio/transient matching, or use a real user-provided anchor workflow.",
       ["validator.drum_whole_item_quantize_blocked"] =
         "The model tried to quantize/edit drums by moving whole media items even after a retry. That can do nothing or move the wrong musical material. Auto-run is blocked; use a shared guide-track stretch-marker timing map instead.",
       ["validator.drum_marker_sync_blocked"] =
@@ -2713,7 +2746,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["validator.fx_param_scope_blocked"] =
         "The model wrote plugin parameter changes even though the request only asked to add/load the FX. Auto-run is blocked because those extra parameter writes may change the sound beyond the user's request. Review and remove the TrackFX_SetParam*/TakeFX_SetParam* lines before running manually.",
       ["validator.missing_helper_definitions_blocked"] =
-        "The model called helper function(s) without including their definitions, even after a retry: {helpers}. These are local functions, not REAPER built-ins, so the script will crash at runtime when they are reached. Auto-run is blocked; paste the helper definitions from prompt_bundle:plugin_helpers before clicking Run, or refactor to use SetParamNormalized directly with verified values.",
+        "The model called helper/global function(s) without including their definitions, even after a retry: {helpers}. These are not REAPER built-ins, so the script will crash at runtime when they are reached. Auto-run is blocked; define each helper before its first call or replace it with direct REAPER API calls before running manually.",
       ["validator.helper_integrity_blocked"] =
         "The model rewrote bundled helper function body in a way that drops a safety guard, even after a retry: {helpers}. The corrupted helper would crash at runtime inside reaper.defer. Auto-run is blocked; review and edit the code before clicking Run manually, or paste the helper definition verbatim from prompt_bundle:plugin_helpers.",
       ["validator.jsfx_safety_blocked"] =
@@ -2780,6 +2813,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Lua compile error in generated code:\n\n{error}",
       ["code.runtime_error"] =
         "Runtime error in generated code:\n\n{error}",
+      ["code.runtime_instruction_budget_error"] =
+        "Generated Lua was stopped because it exceeded ReaAssist's instruction budget. It may contain an infinite loop or runaway iteration.\n\n{error}",
       ["attach.error.openai_pdf_unsupported"] =
         "ChatGPT does not support PDF attachments. The file name will be sent but its content cannot be read. Try Claude or Gemini for PDF support.",
       ["attach.error.max_count"] =
@@ -3440,8 +3475,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.fx_cache.toast.rescan_complete"] = "Rescan complete",
       ["settings.fx_cache.toast.rescan_all_done"] =
         "Rescanned {succeeded}/{total}.",
-      ["settings.fx_cache.toast.rescan_all_failed_suffix"] =
-        " {count} failed (missing plugins).",
+      ["settings.fx_cache.toast.rescan_all_done_with_failures"] =
+        "Rescanned {succeeded}/{total}. {count} failed (missing plugins).",
       ["settings.fx_cache.toast.rescan_cancelled"] =
         "Rescan cancelled at {done}/{total}.",
       ["settings.pref.update_check.label"] = "Check for updates on startup",
@@ -3492,12 +3527,18 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Always include REAPER API reference",
       ["settings.adv.api_ref.tooltip"] =
         "Pin the REAPER Lua API reference to every request instead of letting the model fetch it on-demand. On = zero round-trips but ~10K extra tokens every turn. Off = saves tokens on non-code turns; the model fetches docs when it needs them.",
+      ["settings.adv.compact_history.label"] =
+        "Compact long chat history",
+      ["settings.adv.compact_history.tooltip"] =
+        "Replace older successful code replies with short summaries to save tokens in long sessions. The latest reply stays verbatim, and follow-up edit requests keep the full history.",
       ["settings.adv.diagnostics.label"] = "Automatic diagnostics",
       ["settings.adv.diagnostics.off"] = "Off",
       ["settings.adv.diagnostics.basic"] = "Basic",
       ["settings.adv.diagnostics.extended"] = "Extended",
       ["settings.adv.diagnostics.tooltip"] =
         "Basic anonymous diagnostics are enabled by default and can be turned off. Extended adds redacted chat, diagnostics, and log/report detail. Sent on the next launch, never during an active request.",
+      ["settings.adv.diagnostics.default_notice"] =
+        "Basic anonymous diagnostics are on by default. You can turn them off in Settings > Advanced.",
       ["settings.adv.cloud_timeout.label"] = "Cloud Timeout",
       ["settings.adv.cloud_timeout.tooltip"] =
         "How long to wait for a Claude/ChatGPT/Gemini response before timing out. Default 180s. Reasoning models on large prompts may need 300+",
@@ -3912,6 +3953,7 @@ I18N.local_overrides.ja = {
     ["common.undo"] = "元に戻す",
     ["typed_actions.status.auto_ran"] = "自動実行済み",
     ["typed_actions.status.failed"] = "失敗",
+    ["typed_actions.status.lua_requested"] = "Lua依頼済み",
     ["typed_actions.status.undo_lua"] = "元に戻す + Lua",
     ["typed_actions.status.undo_sent"] = "元に戻しました",
     ["typed_actions.status.validated"] = "検証済み",
@@ -3920,6 +3962,9 @@ I18N.local_overrides.ja = {
     ["typed_actions.undo_lua"] = "元に戻してLuaを依頼",
     ["typed_actions.undo_lua.tooltip"] =
       "この構造化編集を元に戻してから、Lua/ReaScript版を依頼します。自動実行は現在の設定に従います。",
+    ["typed_actions.request_lua"] = "Luaを依頼",
+    ["typed_actions.request_lua.tooltip"] =
+      "確認、実行、保存できる通常のLua/ReaScript版を依頼します。構造化編集は実行されません。",
 }
 I18N.local_overrides.ko = {
     ["footer.credits.label"] = "크레딧",
@@ -3931,6 +3976,7 @@ I18N.local_overrides.ko = {
     ["common.undo"] = "실행 취소",
     ["typed_actions.status.auto_ran"] = "자동 실행됨",
     ["typed_actions.status.failed"] = "실패",
+    ["typed_actions.status.lua_requested"] = "Lua 요청됨",
     ["typed_actions.status.undo_lua"] = "실행 취소 + Lua",
     ["typed_actions.status.undo_sent"] = "실행 취소됨",
     ["typed_actions.status.validated"] = "검증됨",
@@ -3939,6 +3985,9 @@ I18N.local_overrides.ko = {
     ["typed_actions.undo_lua"] = "실행 취소 후 Lua 요청",
     ["typed_actions.undo_lua.tooltip"] =
       "이 구조화 편집을 실행 취소한 다음 Lua/ReaScript 버전을 요청합니다. 자동 실행은 현재 설정을 따릅니다.",
+    ["typed_actions.request_lua"] = "Lua 요청",
+    ["typed_actions.request_lua.tooltip"] =
+      "검토, 실행, 저장할 수 있는 일반 Lua/ReaScript 버전을 요청합니다. 구조화 편집은 실행되지 않습니다.",
 }
 I18N.local_overrides.id = {
     ["common.run"] = "Jalankan",

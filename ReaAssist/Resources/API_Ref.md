@@ -6,7 +6,7 @@
 <!-- SECTION:core -->
 # REAPER ReaScript Lua API Reference
 
-Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.72)
+Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.74)
 Lua-only. All functions called as reaper.FunctionName().
 Use proj=0 for active project. Track/item indices in the API are 0-based.
 
@@ -33,6 +33,17 @@ REAPER installs: `if reaper.FunctionName then ... else ... end`.
 - REAPER 7.72+: `ProjectMarker reaper.AddRegionOrMarker(ReaProject proj, boolean isrgn, number pos, number rgnend, string name, integer wantidx, integer color)`.
   Prefer it over AddProjectMarker/AddProjectMarker2 when you need to reference
   the created marker/region.
+- REAPER 7.74+: `integer reaper.set_config_var_string(string name, string value, integer persist)`.
+  Advanced config write helper. It changes REAPER ini/config variables in
+  memory; persist=1 writes a global preference and persist=2 writes a project
+  default when the returned type matches. Use only for explicit settings tasks.
+- REAPER 7.74+: `reaper.Main_openProject("fxoffline:C:\\path\\file.rpp")`
+  opens a project with all FX offline. `GetSetProjectInfo(0, "READONLY", 1,
+  true)` can temporarily mark the active project read-only without changing
+  filesystem attributes.
+- REAPER 7.74+: `boolean retval, string buf = reaper.TrackFX_FormatParamValueNormalized(track, fx, param, value)`
+  and the `TakeFX_` equivalent return the formatted string directly in Lua; do
+  not pass a dummy output string argument.
 - REAPER 7.70+: `boolean retval, string fn = reaper.GetUserFileName(integer mode, string caption, string initial_file_or_path, string extension_list)`.
   Native file picker modes: 0=new/save file, 1=existing/open file,
   2=multiple files, 3=directory. `extension_list` uses pipe-separated pairs
@@ -504,6 +515,11 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
 `boolean reaper.TrackFX_SetParamNormalized(MediaTrack track, integer fx, integer param, number value)`
   Set normalized parameter value (0..1).
 
+`boolean retval, string buf reaper.TrackFX_FormatParamValueNormalized(MediaTrack track, integer fx, integer param, number value)`
+  REAPER 7.74+. Format a normalized value as the FX would display it. Lua
+  returns the formatted string directly; do not pass a dummy output buffer.
+  Works only for FX that support Cockos VST extensions.
+
 `boolean reaper.TrackFX_GetOpen(MediaTrack track, integer fx)`
   Returns true if FX UI is open.
 
@@ -632,6 +648,11 @@ end
 
 `number start, number end reaper.GetSet_LoopTimeRange(boolean isSet, boolean isLoop, number start, number end, boolean allowautoseek)`
   Get or set time selection / loop range.
+`number start, number end reaper.GetSet_LoopTimeRange2(ReaProject proj, boolean isSet, boolean isLoop, number start, number end, boolean allowautoseek)`
+  Project-aware version of GetSet_LoopTimeRange. Prefer this when setting
+  loop points in the current project tab.
+  Bar/beat loop points must be converted to seconds first with the time map:
+  `local start = reaper.TimeMap2_beatsToTime(0, beat_offset, measure)`.
 
 ## UNDO
 
@@ -798,8 +819,17 @@ inserted/skipped counts.
 `reaper.Main_SaveProject(ReaProject proj, boolean forceSaveAs)`
   Save the project.
 
+`reaper.Main_openProject(string name)`
+  Open a project, prompt to save unless prefixed with `noprompt:`. Prefix with
+  `template:` to load as a template. REAPER 7.74+ supports `fxoffline:` to open
+  an `.rpp` with all FX offline. Passing an `.RTrackTemplate` adds it to the
+  existing project.
+
 `number reaper.GetSetProjectInfo(ReaProject project, string desc, number value, boolean is_set)`
   Get or set numeric project information.
+
+- `READONLY` (REAPER 7.74+): 1 if the project is opened read-only, 0 otherwise.
+  Setting it changes the temporary project state, not the filesystem attribute.
 
 RULER LANE KEYS (REAPER 7.62+ / 7.65+ / 7.71+):
 - `RULER_HEIGHT`: ruler height in pixels.
@@ -815,7 +845,8 @@ RULER LANE KEYS (REAPER 7.62+ / 7.65+ / 7.71+):
 - `RULER_LANE_DEFAULT:X`: set which lane is default for new regions/markers:
   1=regions, 2=markers, 3=both. OK to set; returned value is read-only.
 - `RULER_LANE_TIMEBASE:X`: -1=project default, 0=time,
-  1=beats (position, length, rate), 2=beats (position only).
+  1=beats (position, length, rate), 2=beats (position only). Do not use
+  `format_timestr_pos` modeoverride values here.
 - `RULER_LANE_FROM_GUID:X`: lane number with unique identifier X.
 
 `boolean retval, string valuestrNeedBig reaper.GetSetProjectInfo_String(ReaProject project, string desc, string valuestrNeedBig, boolean is_set)`
@@ -883,6 +914,13 @@ Useful string keys:
 
 `reaper.DeleteExtState(string section, string key, boolean persist)`
   Delete script data.
+
+`integer reaper.set_config_var_string(string name, string value, integer persist)`
+  REAPER 7.74+. Advanced config write helper. Returns 0 on failure, 1 for a
+  global preference, or 2 for a project setting. If `persist` is the matching
+  type (1 global preference, 2 project default), REAPER writes the value to
+  `reaper.ini`. Prefer safer project/extstate APIs unless the user explicitly
+  asks to change a REAPER preference/config variable.
 
 ## COLORS
 
@@ -1109,6 +1147,17 @@ Best default workflow:
    grid/bar value, strength/swing, or selected item vs whole selected drum
    group.
 
+For non-drum "same song" / selected-take audio sync requests, distinguish
+item-start alignment from audio-content matching. Moving a media item with
+SetMediaItemPosition or D_POSITION only aligns the item start; it does not
+compare waveforms or find a transient. Copying a take source offset with
+D_STARTOFFS / SetMediaItemTakeInfo_Value is the same class of shortcut: it
+edits the take's source offset, but it still does not discover the matching
+audio point between different source files. Unless the user explicitly asks to
+align starts or edit take start offsets, ask whether they want start-time/offset
+alignment or audio/transient matching, or use an explicit user-provided anchor
+such as edit cursor, snap offset, or existing stretch markers.
+
 Setup prompt for under-specified drum quantize:
 - Guide tracks/items: ask the user to select or name the guide tracks/items.
   Offer currently selected tracks/items only when they are a plausible small
@@ -1277,6 +1326,8 @@ TIME / VIEW
   40626   Time selection: Set end point to edit cursor
   40364   Options: Toggle metronome
   40769   View: Toggle show timeline ruler
+  40367   View: Time unit for ruler: Measures.Beats
+  42364   View: Secondary time unit for ruler: Hours:Minutes:Seconds:Frames
 
 MIDI EDITOR (use MIDIEditor_OnCommand, not Main_OnCommand, with these IDs)
   40003   Edit: Insert note at edit cursor
@@ -1704,10 +1755,13 @@ Choosing track FX vs take FX:
 `boolean reaper.TakeFX_SetParamNormalized(MediaItem_Take take, integer fx, integer param, number value)`
 `boolean retval, string name reaper.TakeFX_GetParamName(MediaItem_Take take, integer fx, integer param, string buf)`
 `string buf reaper.TakeFX_GetParamSectionName(MediaItem_Take take, integer fx, integer param)`
+`boolean retval, string buf reaper.TakeFX_FormatParamValueNormalized(MediaItem_Take take, integer fx, integer param, number value)`
 `boolean retval, string buf reaper.TakeFX_GetFormattedParamValue(MediaItem_Take take, integer fx, integer param, string buf)`
   Param read/write functions. Identical semantics to the TrackFX_* equivalents.
   REAPER 7.67+ GetParamSectionName returns the VST3 unit / CLAP module /
   parameter section name when the plug-in exposes one.
+  REAPER 7.74+ FormatParamValueNormalized returns the formatted string directly
+  in Lua; do not pass a dummy output buffer.
 
 `boolean retval, string buf reaper.TakeFX_GetNamedConfigParm(MediaItem_Take take, integer fx, string parmname)`
   Read take-FX metadata. Mirrors TrackFX_GetNamedConfigParm for take FX;
@@ -1849,6 +1903,9 @@ reaper.SetMediaTrackInfo_Value(src, "B_MAINSEND", 0)           -- no master/main
   ARG ORDER PITFALL: proj first, tpos second, measuresIn LAST and OPTIONAL.
   Common mistake: passing (proj, measure, beat) -- that's wrong, beat is the
   second arg and measure is the third.
+  For "set loop to bar 19 beat 3" with no end, use a one-beat default:
+  start = `TimeMap2_beatsToTime(0, 2, 18)`, end =
+  `TimeMap2_beatsToTime(0, 3, 18)`, then set the loop range in seconds.
 
 `number reaper.TimeMap2_timeToBeats(ReaProject proj, number tpos, optional integer measuresOutOptional, optional integer cmlOutOptional, optional number fullbeatsOutOptional, optional integer cdenomOutOptional)`
   Convert a time position in seconds to beats. Returns the beat position
@@ -2358,7 +2415,7 @@ typical user requests.
 
   Create a new empty MIDI item on track. starttime/endtime in seconds unless qnIn=true.
 
-`integer reaper.MIDI_CountEvts(MediaItem_Take take)`
+`integer retval, integer notecnt, integer ccevtcnt, integer textsyxevtcnt reaper.MIDI_CountEvts(MediaItem_Take take)`
 
   Returns retval, notes, ccs, sysex (4 values). Use this to bound iteration.
 
@@ -2429,10 +2486,10 @@ typical user requests.
 
   Snap a PPQ position to the nearest measure boundary.
 
-`number swing, number note_len_qn reaper.MIDI_GetGrid(MediaItem_Take take)`
+`number note_len_qn, number swing reaper.MIDI_GetGrid(MediaItem_Take take)`
 
-  Get the MIDI editor grid for this take. Returns swing amount (-1..1) and
-  grid resolution in QN (0.25 = 16th note, 0.5 = 8th, 1.0 = quarter).
+  Get the MIDI editor grid for this take. Returns grid resolution in QN
+  (0.25 = 16th note, 0.5 = 8th, 1.0 = quarter) and swing amount (-1..1).
   Use for snapping/quantizing to the user's chosen grid instead of hard-coding.
 
 `HWND reaper.MIDIEditor_GetActive()`
@@ -2530,7 +2587,7 @@ typical user requests.
 
 ```lua
   -- grid_qn = 0.25 for 16th notes, 0.5 for 8ths, 1.0 for quarters.
-  -- Or read the user's MIDI editor grid: local _, grid_qn = reaper.MIDI_GetGrid(take)
+  -- Or read the user's MIDI editor grid: local grid_qn = reaper.MIDI_GetGrid(take)
   -- QN-based math is tempo-map-correct without 60/bpm.
   local item = reaper.GetMediaItemTake_Item(take)
   local item_t = reaper.GetMediaItemInfo_Value(item, "D_POSITION")

@@ -7,6 +7,25 @@ model training cutoffs. This is not the full changelog.
 If a user asks outside this slice, do not invent details. Say the installed
 REAPER changelog is authoritative, or ask for the relevant changelog lines.
 
+## REAPER 7.74 - June 2026
+
+- FX: REAPER added multi-mono and multi-stereo FX containers, shows linked
+  non-primary instances as linked, and exposes parameter sections more clearly
+  in TCP controls menus.
+- Projects: projects can be opened read-only from the open dialog or file
+  attribute, and read-only projects show that state in the title bar. Scripts
+  can also open projects with FX offline via `Main_openProject("fxoffline:...")`.
+- ReaScript: REAPER added `set_config_var_string`, added a temporary
+  `GetSetProjectInfo(..., "READONLY", ...)` project state, extended
+  `Main_openProject` with the `fxoffline:` prefix, and fixed Lua
+  `TrackFX_FormatParamValueNormalized` / `TakeFX_FormatParamValueNormalized`
+  formatting and signatures.
+- Sample editing: REAPER added vertical sample-edit drawing modifiers, all-
+  channel sample edit actions, better medium-zoom display, and clearer failure
+  messages/tooltips for sample editing.
+- Render/wildcards: `$seltrack` now resolves to the first selected track, even
+  when that track is not being rendered.
+
 ## REAPER 7.73 - May 2026
 
 - Actions: REAPER added main Action List commands to move selected media items

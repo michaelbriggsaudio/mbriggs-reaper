@@ -259,14 +259,173 @@ function Diag.content_hash(s)
 end
 
 -- ============================================================================
+-- UTF-8-safe byte truncation
+-- Keeps diagnostic byte caps byte-based without cutting through multibyte
+-- codepoints. These helpers assume valid UTF-8 input, but fail closed when a
+-- budget lands on an invalid lead byte.
+-- ============================================================================
+local function _utf8_is_continuation_byte(b)
+  return b and b >= 0x80 and b <= 0xBF
+end
+
+local function _utf8_lead_len(b)
+  if not b then return 0 end
+  if b < 0x80 then return 1 end
+  if b >= 0xC2 and b <= 0xDF then return 2 end
+  if b >= 0xE0 and b <= 0xEF then return 3 end
+  if b >= 0xF0 and b <= 0xF4 then return 4 end
+  return 0
+end
+
+local function utf8_safe_prefix_bytes(text, max_bytes)
+  text = tostring(text or "")
+  max_bytes = math.floor(tonumber(max_bytes) or 0)
+  if max_bytes <= 0 then return "" end
+  if #text <= max_bytes then return text end
+
+  local start = max_bytes
+  while start > 0 and _utf8_is_continuation_byte(text:byte(start)) do
+    start = start - 1
+  end
+  if start <= 0 then return "" end
+
+  local need = _utf8_lead_len(text:byte(start))
+  if need == 0 then return text:sub(1, start - 1) end
+  if start + need - 1 <= max_bytes then return text:sub(1, max_bytes) end
+  return text:sub(1, start - 1)
+end
+
+local function utf8_safe_suffix_bytes(text, max_bytes)
+  text = tostring(text or "")
+  max_bytes = math.floor(tonumber(max_bytes) or 0)
+  if max_bytes <= 0 then return "" end
+  if #text <= max_bytes then return text end
+
+  local start = #text - max_bytes + 1
+  while start <= #text and _utf8_is_continuation_byte(text:byte(start)) do
+    start = start + 1
+  end
+  if start > #text then return "" end
+  if _utf8_lead_len(text:byte(start)) == 0 then
+    while start <= #text and _utf8_lead_len(text:byte(start)) == 0 do
+      start = start + 1
+    end
+  end
+  return text:sub(start)
+end
+
+local function utf8_truncate_with_marker(text, max_bytes, marker)
+  text = tostring(text or "")
+  max_bytes = math.floor(tonumber(max_bytes) or 0)
+  marker = tostring(marker or "")
+  if max_bytes <= 0 then return "" end
+  if #text <= max_bytes then return text end
+  if marker == "" or #marker >= max_bytes then
+    return utf8_safe_prefix_bytes(text, max_bytes)
+  end
+  return utf8_safe_prefix_bytes(text, max_bytes - #marker) .. marker
+end
+
+local function _truncate_with_byte_count_marker(text, max_bytes, marker_for_count)
+  text = tostring(text or "")
+  max_bytes = math.floor(tonumber(max_bytes) or 0)
+  if max_bytes <= 0 then return "" end
+  if #text <= max_bytes then return text end
+
+  local marker = ""
+  local prefix = utf8_safe_prefix_bytes(text, max_bytes)
+  for _ = 1, 6 do
+    local budget = max_bytes - #marker
+    if budget <= 0 then return utf8_safe_prefix_bytes(text, max_bytes) end
+    prefix = utf8_safe_prefix_bytes(text, budget)
+    local next_marker = tostring(marker_for_count(#text - #prefix) or "")
+    if next_marker == "" or #next_marker >= max_bytes then
+      return utf8_safe_prefix_bytes(text, max_bytes)
+    end
+    if next_marker == marker then break end
+    marker = next_marker
+  end
+  return utf8_truncate_with_marker(text, max_bytes, marker)
+end
+
+local function _trunc_marker(bytes)
+  return " [...truncated " .. tostring(bytes) .. " bytes...]"
+end
+
+Diag._utf8_safe_prefix_bytes = utf8_safe_prefix_bytes
+Diag._utf8_safe_suffix_bytes = utf8_safe_suffix_bytes
+Diag._utf8_truncate_with_marker = utf8_truncate_with_marker
+
+-- ============================================================================
 -- Redaction
--- Order: live S keys -> provider prefixes -> Authorization/Bearer ->
+-- Order: live S keys -> provider prefixes -> Authorization/API-key/Bearer ->
 -- home paths -> install paths in Diag report -> Log.scrub_url_secrets
 -- (Live keys must run BEFORE provider prefixes so an exact match becomes
 -- "***" rather than the generic "sk-***".)
 -- ============================================================================
 local function _esc_pat(s)
   return (s:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0"))
+end
+
+local function _path_sep(path)
+  return tostring(path or ""):find("\\", 1, true) and "\\" or "/"
+end
+
+local function _path_basename(path)
+  return tostring(path or ""):match("([^/\\]+)$") or ""
+end
+
+local function _redacted_drive_path(path)
+  path = tostring(path or "")
+  local sep = _path_sep(path)
+  local name = _path_basename(path)
+  local users_root = path:match("^([A-Za-z]:[/\\][Uu]sers)[/\\]")
+  if users_root then
+    return users_root .. sep .. "<user>"
+      .. ((name ~= "") and (sep .. name) or "")
+  end
+  return "<path>" .. ((name ~= "") and (sep .. name) or " redacted")
+end
+
+local function _redacted_unc_path(path)
+  local sep = _path_sep(path)
+  local name = _path_basename(path)
+  return "<path>" .. ((name ~= "") and (sep .. name) or " redacted")
+end
+
+local function _redacted_posix_home_path(path)
+  path = tostring(path or "")
+  local name = _path_basename(path)
+  local root = path:match("^(/Users)/") or path:match("^(/home)/")
+  if root then
+    return root .. "/<user>" .. ((name ~= "") and ("/" .. name) or "")
+  end
+  return path
+end
+
+local function _redact_file_paths(s)
+  -- Extension-anchored path patterns catch realistic log/report file paths,
+  -- including spaces, without greedily swallowing whole prose lines.
+  local drive_pat = "([A-Za-z]:[/\\][^\n\r\"'<>|]-%.[%w_%-]+)"
+  local unc_pat = "(\\\\[^\n\r\"'<>|]-%.[%w_%-]+)"
+  local users_pat = "(/Users/[^\n\r\"'<>|]-%.[%w_%-]+)"
+  local home_pat = "(/home/[^\n\r\"'<>|]-%.[%w_%-]+)"
+
+  s = s:gsub("^" .. drive_pat, function(path)
+    return _redacted_drive_path(path)
+  end)
+  s = s:gsub("([^%w])" .. drive_pat, function(prefix, path)
+    return prefix .. _redacted_drive_path(path)
+  end)
+  s = s:gsub("^" .. unc_pat, function(path)
+    return _redacted_unc_path(path)
+  end)
+  s = s:gsub("([^%w])" .. unc_pat, function(prefix, path)
+    return prefix .. _redacted_unc_path(path)
+  end)
+  s = s:gsub(users_pat, _redacted_posix_home_path)
+  s = s:gsub(home_pat, _redacted_posix_home_path)
+  return s
 end
 
 function Diag.redact(s)
@@ -296,15 +455,29 @@ function Diag.redact(s)
     return #m >= 20 and "AQ***" or m
   end)
 
-  -- 3. Authorization header lines (case-preserving) + standalone Bearer
+  -- 3. Authorization/API-key header lines (case-preserving) + standalone
+  -- Bearer tokens. The Bearer scrub intentionally accepts any non-space
+  -- token body, not only URL-safe word characters, because custom-provider
+  -- tokens can include opaque punctuation and may no longer be present in
+  -- S.api_key_map by the time a late diagnostic is redacted.
   s = s:gsub("([Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]):%s*[^\n\r]+",
              "%1: ***")
-  s = s:gsub("[Bb]earer%s+[%w%-_%.]+", "Bearer ***")
+  s = s:gsub("([Xx]%-?[Aa][Pp][Ii]%-?[Kk][Ee][Yy]):%s*[^\n\r]+",
+             "%1: ***")
+  s = s:gsub("([Aa][Pp][Ii]%-?[Kk][Ee][Yy]):%s*[^\n\r]+",
+             "%1: ***")
+  s = s:gsub("([Xx]%-[Gg][Oo][Oo][Gg]%-[Aa][Pp][Ii]%-[Kk][Ee][Yy]):%s*[^\n\r]+",
+             "%1: ***")
+  s = s:gsub("[Bb]earer%s+[^%s\n\r\"']+", "Bearer ***")
+  s = s:gsub("([?&][Aa][Pp][Ii][_%-%s]?[Kk][Ee][Yy]=)[^%s&\"']+", "%1***")
+  s = s:gsub("([?&][Kk][Ee][Yy]=)[^%s&\"']+", "%1***")
+  s = s:gsub("([?&][Tt][Oo][Kk][Ee][Nn]=)[^%s&\"']+", "%1***")
 
   -- 4. Home paths
-  s = s:gsub("([A-Za-z]:\\Users\\)[^\\%s\"']+", "%1<user>")
-  s = s:gsub("(/Users/)[^/%s\"']+",            "%1<user>")
-  s = s:gsub("(/home/)[^/%s\"']+",             "%1<user>")
+  s = _redact_file_paths(s)
+  s = s:gsub("([A-Za-z]:[/\\][Uu]sers[/\\])[^/\\%s\"']+", "%1<user>")
+  s = s:gsub("(/Users/)[^/%s\"']+", "%1<user>")
+  s = s:gsub("(/home/)[^/%s\"']+", "%1<user>")
 
   -- 5. Diagnostic-report install paths. The Diag.build_report output
   -- includes lines like:
@@ -663,6 +836,9 @@ local function _turn_to_table(msg, redact_content)
     if msg.validation_block_kind ~= nil then
       t.validation_block_kind = tostring(msg.validation_block_kind or "")
     end
+    if msg.selected_count_guard ~= nil then
+      t.selected_count_guard = _redact_payload_value(msg.selected_count_guard)
+    end
     if msg.auto_run_block_reason ~= nil then
       t.auto_run_block_reason = tostring(msg.auto_run_block_reason or "")
     end
@@ -729,12 +905,12 @@ local function _remember_turn(msg)
   auto_seen_turns[id] = true
   local copy = _turn_to_table(msg, true)
   if type(copy.content) == "string" and #copy.content > 4096 then
-    copy.content = copy.content:sub(1, 4096)
-      .. " [...truncated " .. (#copy.content - 4096) .. " bytes...]"
+    copy.content = _truncate_with_byte_count_marker(copy.content, 4096,
+      _trunc_marker)
   end
   if type(copy.code_block) == "string" and #copy.code_block > 4096 then
-    copy.code_block = copy.code_block:sub(1, 4096)
-      .. " [...truncated " .. (#copy.code_block - 4096) .. " bytes...]"
+    copy.code_block = _truncate_with_byte_count_marker(copy.code_block, 4096,
+      _trunc_marker)
   end
   auto_recent_turns[#auto_recent_turns + 1] = copy
   local limit = tonumber(Diag.AUTO_RECENT_TURN_LIMIT) or 80
@@ -1262,8 +1438,8 @@ function Diag.assemble_auto_payload(tier)
     for i = 1, #msgs do
       turns[i] = _turn_to_table(msgs[i], true)
       if type(turns[i].content) == "string" and #turns[i].content > 4096 then
-        turns[i].content = turns[i].content:sub(1, 4096)
-          .. " [...truncated " .. (#turns[i].content - 4096) .. " bytes...]"
+        turns[i].content = _truncate_with_byte_count_marker(turns[i].content,
+          4096, _trunc_marker)
       end
     end
     payload.session = {
@@ -1312,7 +1488,7 @@ function Diag.assemble_auto_payload(tier)
     local log_orig_len = #log_str
     local max_log = 256 * 1024
     if log_orig_len > max_log then
-      local tail = log_str:sub(log_orig_len - max_log + 1)
+      local tail = utf8_safe_suffix_bytes(log_str, max_log)
       local marker = tail:find("======= REQUEST #", 1, true)
       if marker and marker > 1 and marker < 8192 then
         tail = tail:sub(marker)
@@ -1490,8 +1666,8 @@ function Diag.assemble_payload(draft, comment, flags)
   -- Cap user_comment at input BEFORE redaction so the cap applies to text the
   -- user actually typed, not redaction-expanded text.
   if #comment > Diag.USER_COMMENT_CAP then
-    comment = comment:sub(1, Diag.USER_COMMENT_CAP)
-      .. " [...truncated " .. (#comment - Diag.USER_COMMENT_CAP) .. " bytes...]"
+    comment = _truncate_with_byte_count_marker(comment, Diag.USER_COMMENT_CAP,
+      _trunc_marker)
   end
 
   local payload = {
@@ -1643,8 +1819,8 @@ function Diag.assemble_payload(draft, comment, flags)
     local target = math.max(100, math.min(math.floor(sz / 2), 10 * 1024))
     local orig_content = kept[i].content or ""
     if #orig_content > target then
-      kept[i].content = orig_content:sub(1, target)
-        .. " [...truncated " .. (#orig_content - target) .. " bytes...]"
+      kept[i].content = _truncate_with_byte_count_marker(orig_content, target,
+        _trunc_marker)
     end
     s = stabilize(_serialize(payload))
   end
@@ -1677,7 +1853,8 @@ function Diag.assemble_payload(draft, comment, flags)
     local cc = payload.user_comment or ""
     local over = #s - Diag.PAYLOAD_CAP_BYTES
     if #cc > over + 200 then
-      payload.user_comment = cc:sub(1, #cc - over - 200) .. " [...overflow truncated...]"
+      payload.user_comment = utf8_truncate_with_marker(cc,
+        #cc - over - 200, " [...overflow truncated...]")
     else
       payload.user_comment = "[...overflow truncated...]"
     end
@@ -1851,12 +2028,8 @@ function Diag.assemble_bug_report_payload(draft, comment, name, email)
   -- for the marker -- generous enough for any byte-count digit width
   -- Lua can produce (16+ digits = ~42 chars).
   if #comment > Diag.USER_COMMENT_CAP then
-    local MARKER_RESERVE = 50
-    local cut_at = Diag.USER_COMMENT_CAP - MARKER_RESERVE
-    if cut_at < 0 then cut_at = 0 end
-    local trunc_count = #comment - cut_at
-    comment = comment:sub(1, cut_at)
-      .. " [...truncated " .. trunc_count .. " bytes...]"
+    comment = _truncate_with_byte_count_marker(comment, Diag.USER_COMMENT_CAP,
+      _trunc_marker)
   end
   name    = _trim_string(name,    Diag.CONTACT_NAME_CAP)
   email   = _trim_string(email,   Diag.CONTACT_EMAIL_CAP)
@@ -1942,7 +2115,7 @@ function Diag.assemble_bug_report_payload(draft, comment, name, email)
     local available     = Diag.BUG_REPORT_CAP_BYTES - 256 * 1024 - non_log_bytes
     if available < 64 * 1024 then available = 64 * 1024 end
     if log_orig_len > available then
-      local tail = log_str:sub(log_orig_len - available + 1)
+      local tail = utf8_safe_suffix_bytes(log_str, available)
       local marker = tail:find("======= REQUEST #", 1, true)
       if marker and marker > 1 and marker < 8192 then
         tail = tail:sub(marker)
@@ -1984,8 +2157,8 @@ function Diag.assemble_bug_report_payload(draft, comment, name, email)
       local target = math.max(200, math.min(math.floor(sz / 2), 64 * 1024))
       local orig = kept[i].content or ""
       if #orig > target then
-        kept[i].content = orig:sub(1, target)
-          .. " [...truncated " .. (#orig - target) .. " bytes...]"
+        kept[i].content = _truncate_with_byte_count_marker(orig, target,
+          _trunc_marker)
       end
       s = stabilize(_serialize(payload))
     end
@@ -2276,14 +2449,30 @@ local function _auto_pending_path(owner)
   return _ensure_auto_dir() .. "diag_auto_pending." .. owner .. ".json"
 end
 
+local _diag_write_failure_seen = {}
+
+local function _report_write_failure(path, err)
+  local msg = "Automatic diagnostics could not save retry data: "
+    .. tostring(err or "unknown error")
+  if type(Store) == "table" and type(Store._log) == "function" then
+    Store._log("DIAG", msg .. " (" .. tostring(path or "") .. ")")
+  end
+  local key = tostring(path or "")
+  if _diag_write_failure_seen[key] then return end
+  _diag_write_failure_seen[key] = true
+  if type(Log) == "table" and type(Log.add_error) == "function" then
+    Log.add_error(msg, nil, nil, nil, {
+      error_kind = "diag_auto_write_failed",
+      error_debug = { path = path, error = tostring(err or "") },
+    })
+  end
+end
+
 local function _atomic_write(path, data)
-  local tmp = path .. ".tmp"
-  local f = io.open(tmp, "wb")
-  if not f then return false end
-  f:write(data)
-  f:close()
-  os.remove(path)
-  return os.rename(tmp, path) == true
+  if type(Store) ~= "table" or type(Store.atomic_write_file) ~= "function" then
+    return "Store.atomic_write_file unavailable"
+  end
+  return Store.atomic_write_file(path, data, { binary = true })
 end
 
 local function _decode_json(s)
@@ -2357,7 +2546,9 @@ local function _flush_current_auto()
     payload = Diag.assemble_auto_payload(tier),
   }
   Diag.commit_install_id(wrapper.payload.install_id)
-  _write_wrapper(_auto_pending_path(_current_owner()), wrapper)
+  local path = _auto_pending_path(_current_owner())
+  local write_err = _write_wrapper(path, wrapper)
+  if write_err then _report_write_failure(path, write_err) end
 end
 
 local _dispatch_ready
@@ -2728,7 +2919,8 @@ local function _process_auto_file(file)
     os.remove(claimed)
     if os.rename(file.path, claimed) ~= true then return false end
   end
-  _write_wrapper(claimed, wrapper)
+  local write_err = _write_wrapper(claimed, wrapper)
+  if write_err then _report_write_failure(claimed, write_err) end
   local body = _serialize(wrapper.payload)
   if #body > Diag.AUTO_CAP_BYTES then
     os.remove(claimed)
@@ -2759,7 +2951,8 @@ local function _process_auto_file(file)
     wrapper.last_error = err
     wrapper.payload_finalized = true
     local pending = _auto_pending_path(file.owner)
-    _write_wrapper(pending, wrapper)
+    local pending_err = _write_wrapper(pending, wrapper)
+    if pending_err then _report_write_failure(pending, pending_err) end
     os.remove(claimed)
   end)
   return true

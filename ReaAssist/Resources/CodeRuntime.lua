@@ -606,13 +606,13 @@ function Code._typed_action_send_intent_text(user_text)
     :gsub("master parent send", "")
     :gsub("parent send", "")
   for _, pattern in ipairs({
-    "do not add[^%.\n;]-sends?[^%.\n;]*",
-    "don't add[^%.\n;]-sends?[^%.\n;]*",
-    "do not create[^%.\n;]-sends?[^%.\n;]*",
-    "don't create[^%.\n;]-sends?[^%.\n;]*",
-    "without[^%.\n;]-sends?[^%.\n;]*",
-    "no%s+other%s+sends?[^%.\n;]*",
-    "no%s+sends?[^%.\n;]*",
+    "do not add[^%.\n;:]-sends?[^%.\n;:]*",
+    "don't add[^%.\n;:]-sends?[^%.\n;:]*",
+    "do not create[^%.\n;:]-sends?[^%.\n;:]*",
+    "don't create[^%.\n;:]-sends?[^%.\n;:]*",
+    "without[^%.\n;:]-sends?[^%.\n;:]*",
+    "no%s+other%s+sends?[^%.\n;:]*",
+    "no%s+sends?[^%.\n;:]*",
   }) do
     text = text:gsub(pattern, "")
   end
@@ -659,7 +659,6 @@ function Code.typed_action_user_requests_track_creation(user_text)
     u:find("existing track", 1, true) ~= nil
     or u:find("existing tracks", 1, true) ~= nil
     or u:find("resolve the existing", 1, true) ~= nil
-  if mentions_existing_targets then return false end
   local creation_text = u
   for _, pattern in ipairs({
     "do not create[^%.\n;]*tracks?",
@@ -671,7 +670,8 @@ function Code.typed_action_user_requests_track_creation(user_text)
   }) do
     creation_text = creation_text:gsub(pattern, "")
   end
-  return u:find("blank project", 1, true) ~= nil
+  local explicit_creation =
+    u:find("blank project", 1, true) ~= nil
     or u:find("blank-project", 1, true) ~= nil
     or u:find("blank reaper project", 1, true) ~= nil
     or creation_text:match("%f[%w]create%s+[%w%-]+%s+tracks?") ~= nil
@@ -693,19 +693,28 @@ function Code.typed_action_user_requests_track_creation(user_text)
     or creation_text:find("create four tracks", 1, true) ~= nil
     or creation_text:find("create five tracks", 1, true) ~= nil
     or creation_text:find("create six tracks", 1, true) ~= nil
-    or creation_text:match("%f[%w]create[^%.\n;]-bus%f[%W]") ~= nil
-    or creation_text:match("%f[%w]create[^%.\n;]-buses%f[%W]") ~= nil
-    or creation_text:match("%f[%w]create[^%.\n;]-return%f[%W]") ~= nil
-    or creation_text:match("%f[%w]create[^%.\n;]-returns%f[%W]") ~= nil
+    or creation_text:match("%f[%w]create[^%.\n;]-bus%s+named%f[%W]") ~= nil
+    or creation_text:match("%f[%w]create[^%.\n;]-buses%s+named%f[%W]") ~= nil
+    or creation_text:match("%f[%w]create[^%.\n;]-return%s+named%f[%W]") ~= nil
+    or creation_text:match("%f[%w]create[^%.\n;]-returns%s+named%f[%W]") ~= nil
+    or creation_text:match("%f[%w]create%s+one%s+[%w%-]+%s+bus%f[%W]") ~= nil
+    or creation_text:match("%f[%w]create%s+one%s+[%w%-]+%s+return%f[%W]") ~= nil
+    or creation_text:match("%f[%w]append[^%.\n;]-bus%f[%W]") ~= nil
+    or creation_text:match("%f[%w]append[^%.\n;]-buses%f[%W]") ~= nil
+    or creation_text:match("%f[%w]append[^%.\n;]-return%f[%W]") ~= nil
+    or creation_text:match("%f[%w]append[^%.\n;]-returns%f[%W]") ~= nil
     or creation_text:match("%f[%w]set%s+up[^%.\n;]-stack%f[%W]") ~= nil
     or creation_text:match("%f[%w]setup[^%.\n;]-stack%f[%W]") ~= nil
     or creation_text:match("%f[%w]build[^%.\n;]-routing%s+plan%f[%W]") ~= nil
     or creation_text:match("%f[%w]build[^%.\n;]-routing%s+setup%f[%W]") ~= nil
     or creation_text:find("routing template", 1, true) ~= nil
+  return explicit_creation == true
+    or (mentions_existing_targets and explicit_creation == true)
 end
 
 function Code.typed_action_user_forbids_track_creation(user_text)
-  if Code.typed_action_user_requests_track_creation(user_text) then
+  if Code.typed_action_user_requests_track_creation(user_text)
+      and not Code.typed_action_user_requests_selected_target(user_text) then
     return false
   end
   local u = Code._typed_action_user_request_text(user_text):lower()
@@ -735,6 +744,23 @@ function Code.typed_action_user_requests_selected_target(user_text)
     or u:find("selected track", 1, true) ~= nil
     or u:find("selected tracks", 1, true) ~= nil
     or u:find("currently selected", 1, true) ~= nil
+end
+
+function Code.typed_action_user_mentions_existing_or_source_track(user_text)
+  local u = Code._typed_action_user_request_text(user_text):lower()
+    :gsub("[%c]+", " ")
+    :gsub("%s+", " ")
+  if u == "" then return false end
+  return u:find("existing", 1, true) ~= nil
+    or u:find("source track", 1, true) ~= nil
+    or u:find("source tracks", 1, true) ~= nil
+    or u:find("selected track", 1, true) ~= nil
+    or u:find("selected tracks", 1, true) ~= nil
+    or u:find("currently selected", 1, true) ~= nil
+    or u:find("already a track", 1, true) ~= nil
+    or u:find("already tracks", 1, true) ~= nil
+    or u:find("already have a track", 1, true) ~= nil
+    or u:find("already has a track", 1, true) ~= nil
 end
 
 function Code.typed_action_user_requests_folder(user_text)
@@ -861,10 +887,11 @@ function Code.repair_typed_actions_plan(plan, opts)
             action.index = nil
             action.selected_index = selected_indexes[1]
             repaired = true
-          elseif action.name ~= nil or action.index ~= nil
-             or action.selected_index ~= nil then
-            action.name = nil
-            action.index = nil
+          elseif action.name ~= nil or action.index ~= nil then
+            action.selected = nil
+            action.selected_index = nil
+            repaired = true
+          elseif action.selected_index ~= nil then
             action.selected_index = nil
             repaired = true
           end
@@ -1054,6 +1081,66 @@ function Code.repair_typed_actions_plan(plan, opts)
     end
     return next(found) and found or nil
   end
+  local function repair_selected_existing_track_name_set(text)
+    text = tostring(text or "")
+    local found = {}
+    local function add_fragment(fragment)
+      fragment = tostring(fragment or "")
+      fragment = fragment:gsub("%f[%a][Aa]nd%f[%A]", ",")
+      for part in fragment:gmatch("[^,]+") do
+        local name = tostring(part or "")
+          :gsub("^%s+", "")
+          :gsub("%s+$", "")
+          :gsub("^only%s+", "")
+          :gsub("^the%s+", "")
+          :gsub("^selected%s+tracks?%s+", "")
+          :gsub("^are%s+", "")
+          :gsub("^is%s+", "")
+          :gsub("%s+only$", "")
+          :gsub("%s+$", "")
+        if name ~= "" and #name <= 64 then
+          found[repair_normalized_name(name)] = name
+        end
+      end
+    end
+    for fragment in text:gmatch("[Ss]elected%s+tracks%s+are%s+([^%.\n]+)") do
+      add_fragment(fragment)
+    end
+    for fragment in text:gmatch("[Ss]elected%s+track%s+is%s+([^%.\n]+)") do
+      add_fragment(fragment)
+    end
+    return next(found) and found or nil
+  end
+  local function repair_user_mentions_existing_name(name)
+    local n = repair_normalized_name(name):gsub("[^%w]+", " ")
+      :gsub("%s+", " ")
+    if n == "" then return false end
+    return repair_user_words:find(" already a track named " .. n .. " ", 1, true) ~= nil
+      or repair_user_words:find(" already track named " .. n .. " ", 1, true) ~= nil
+      or repair_user_words:find(" existing track named " .. n .. " ", 1, true) ~= nil
+      or repair_user_words:find(" existing " .. n .. " ", 1, true) ~= nil
+      or repair_user_words:find(" selected track is " .. n .. " ", 1, true) ~= nil
+      or repair_user_words:find(" selected tracks are " .. n .. " ", 1, true) ~= nil
+  end
+  local function repair_slug_id(name)
+    local id = repair_normalized_name(name):gsub("[^%w]+", "_")
+      :gsub("^_+", ""):gsub("_+$", "")
+    if id == "" then id = "track" end
+    if id:match("^%d") then id = "track_" .. id end
+    return id
+  end
+  for _, action in ipairs(plan.actions) do
+    if type(action) == "table"
+       and (action.op == "track.ensure" or action.op == "track.create")
+       and action.index ~= nil
+       and _typed_action_is_nonempty_string(action.name)
+       and repair_user_mentions_existing_name(action.name) then
+      action.op = "track.resolve"
+      action.position = nil
+      action.select = nil
+      repaired = true
+    end
+  end
   local function repair_requested_exact_track_order(text)
     text = tostring(text or "")
     local function parse_order_fragment(fragment)
@@ -1191,6 +1278,24 @@ function Code.repair_typed_actions_plan(plan, opts)
       end
     end
   end
+  do
+    local selected_existing_names = repair_selected_existing_track_name_set(user_text)
+    if selected_existing_names then
+      for _, action in ipairs(plan.actions) do
+        if type(action) == "table"
+           and (action.op == "track.create" or action.op == "track.ensure")
+           and _typed_action_is_nonempty_string(action.name)
+           and selected_existing_names[repair_normalized_name(action.name)] then
+          action.op = "track.resolve"
+          action.position = nil
+          action.select = nil
+          action.selected = nil
+          action.selected_index = nil
+          repaired = true
+        end
+      end
+    end
+  end
 
   do
     local folder_parent_name = repair_requested_folder_parent_name(user_text)
@@ -1300,9 +1405,117 @@ function Code.repair_typed_actions_plan(plan, opts)
     return refs, non_resolve
   end
 
+  do
+    local track_ids, track_name_to_id = {}, {}
+    for _, action in ipairs(plan.actions) do
+      if type(action) == "table"
+         and (action.op == "track.create" or action.op == "track.ensure"
+           or action.op == "track.resolve")
+         and _typed_action_is_nonempty_string(action.id) then
+        track_ids[action.id] = true
+        if _typed_action_is_nonempty_string(action.name) then
+          local key = repair_normalized_name(action.name)
+          if key ~= "" and not track_name_to_id[key] then
+            track_name_to_id[key] = action.id
+          end
+        end
+      end
+    end
+
+    local inserted_resolves, inserted_resolve_names = {}, {}
+    local function unique_track_id(base)
+      local id = repair_slug_id(base)
+      local candidate, n = id, 2
+      while track_ids[candidate] do
+        candidate = id .. "_" .. tostring(n)
+        n = n + 1
+      end
+      track_ids[candidate] = true
+      return candidate
+    end
+    local function repair_ref(action, key)
+      local ref = action[key]
+      if not _typed_action_is_nonempty_string(ref) or track_ids[ref] then
+        return false
+      end
+      local name_key = repair_normalized_name(ref)
+      local existing_id = track_name_to_id[name_key]
+      if existing_id then
+        action[key] = existing_id
+        return true
+      end
+      if name_key ~= "" and ref:find("%s") and repair_user_mentions_name(ref) then
+        local id = inserted_resolves[name_key]
+        if not id then
+          id = unique_track_id(ref)
+          inserted_resolves[name_key] = id
+          inserted_resolve_names[name_key] = ref
+          track_name_to_id[name_key] = id
+        end
+        action[key] = id
+        return true
+      end
+      return false
+    end
+
+    for _, action in ipairs(plan.actions) do
+      if type(action) == "table" and action.op == "send.create" then
+        if repair_ref(action, "from") then repaired = true end
+        if repair_ref(action, "to") then repaired = true end
+      end
+    end
+    if next(inserted_resolves) then
+      local insert_at = 1
+      while insert_at <= #plan.actions do
+        local op = type(plan.actions[insert_at]) == "table"
+          and plan.actions[insert_at].op or nil
+        if op ~= "track.create" and op ~= "track.ensure"
+           and op ~= "track.resolve" then
+          break
+        end
+        insert_at = insert_at + 1
+      end
+      local prefix = {}
+      for name_key, id in pairs(inserted_resolves) do
+        prefix[#prefix + 1] = {
+          op = "track.resolve",
+          id = id,
+          name = inserted_resolve_names[name_key],
+        }
+      end
+      table.sort(prefix, function(a, b) return tostring(a.id) < tostring(b.id) end)
+      for i = #prefix, 1, -1 do
+        table.insert(plan.actions, insert_at, prefix[i])
+      end
+      repaired = true
+    end
+  end
+
   local referenced_tracks, has_non_resolve =
     repair_reference_state(plan.actions)
   if not referenced_tracks then return plan, false end
+  if has_non_resolve then
+    local out, dropped = {}, 0
+    for _, action in ipairs(plan.actions) do
+      local unnamed_unreferenced_track =
+        (action.op == "track.create" or action.op == "track.ensure")
+        and _typed_action_is_nonempty_string(action.id)
+        and not referenced_tracks[action.id]
+        and not _typed_action_is_nonempty_string(action.name)
+      if unnamed_unreferenced_track then
+        dropped = dropped + 1
+      else
+        out[#out + 1] = action
+      end
+    end
+    if dropped > 0 and #out > 0 then
+      plan.actions = out
+      repaired = true
+      referenced_tracks, has_non_resolve =
+        repair_reference_state(plan.actions)
+      if not referenced_tracks then return plan, false end
+    end
+  end
   if has_non_resolve then
     local existing_target_only =
       not Code.typed_action_user_requests_track_creation(user_text)
@@ -1557,10 +1770,15 @@ function Code.repair_typed_actions_plan(plan, opts)
   end
 
   local u = user_text:lower()
+  local preserve_mixed_existing_resolves =
+    Code.typed_action_user_requests_track_creation(user_text)
+    and (Code.typed_action_user_mentions_existing_or_source_track(user_text)
+      or Code.typed_action_user_requests_selected_target(user_text))
   if Code.typed_action_user_requests_track_creation(user_text) then
     for _, action in ipairs(plan.actions) do
       if action.op == "track.resolve"
          and _typed_action_is_nonempty_string(action.name)
+         and not preserve_mixed_existing_resolves
          and action.selected ~= true
          and action.selected_index == nil
          and action.index == nil then
@@ -3255,6 +3473,8 @@ TYPED ACTION CONTRACT (use only when the request is an exact fit):
   requests.
 - `track.resolve` only binds a target id; it does not change the track. Follow it
   with `track.set`, `track.pan_lfo`, `fx.add_stock`, or `send.create` for the requested change.
+- When the user says a named track is selected, existing, or already present,
+  resolve that track with `track.resolve`; do not recreate it with `track.create`.
 - Use `track.create` when the user asks to create, add, make, or insert new tracks. It always inserts new tracks. If the user names the new track, put that exact display name in `name`; use `"name":null` only for truly generic unnamed tracks.
 - Treat named setup/build requests for stacks, routing plans, buses, returns, and folders as new track creation unless the user says existing/ensure/if missing.
 - If a request mixes an existing selected source with a new return/bus, use `track.resolve` for the selected source and `track.create` for the new return/bus.
@@ -3282,6 +3502,9 @@ TYPED ACTION CONTRACT (use only when the request is an exact fit):
   - ReaLimit: threshold_db, ceiling_db
 - References must point to ids created by earlier `track.create`, `track.ensure`,
   `track.resolve`, `fx.add_stock`, or `send.create` actions. Do not embed Lua in JSON fields.
+- For `track`, `from`, and `to`, reference the earlier action id, never the
+  display name. If the source/destination is an existing named track, add a
+  `track.resolve` action first and use that id.
 - If the request needs MIDI, JSFX authoring, third-party plugins, items/takes, envelopes other than `track.pan_lfo`, markers, regions, colors, presets, unsupported FX, or unsupported params, ignore this contract and write normal Lua instead.
 ]]
 
@@ -3312,6 +3535,8 @@ TYPED ACTION CONTRACT (use only when the request is an exact fit):
   requests.
 - `track.resolve` only binds a target id; it does not change the track. Follow it
   with `track.set`, `track.pan_lfo`, `fx.add_stock`, or `send.create` for the requested change.
+- When the user says a named track is selected, existing, or already present,
+  resolve that track with `track.resolve`; do not recreate it with `track.create`.
 - Use `track.create` when the user asks to create, add, make, or insert new tracks. It always inserts new tracks. If the user names the new track, put that exact display name in `name`; use `"name":null` only for truly generic unnamed tracks.
 - Treat named setup/build requests for stacks, routing plans, buses, returns, and folders as new track creation unless the user says existing/ensure/if missing.
 - If a request mixes an existing selected source with a new return/bus, use `track.resolve` for the selected source and `track.create` for the new return/bus.
@@ -3332,6 +3557,9 @@ TYPED ACTION CONTRACT (use only when the request is an exact fit):
 - Every `id` must be unique across track, FX, and send actions.
 - References must point to ids created by earlier `track.create`, `track.ensure`,
   `track.resolve`, `fx.add_stock`, or `send.create` actions. Do not embed Lua in JSON fields.
+- For `track`, `from`, and `to`, reference the earlier action id, never the
+  display name. If the source/destination is an existing named track, add a
+  `track.resolve` action first and use that id.
 - If the request needs MIDI, JSFX authoring, third-party plugins, items/takes, envelopes other than `track.pan_lfo`, markers, regions, colors, presets, unsupported FX, or unsupported params, ignore this contract and write normal Lua instead.
 ]]
 
@@ -3663,12 +3891,20 @@ function Code.typed_actions_openai_response_format_field(user_text)
     or (type(S) == "table" and S.pending_orig_prompt) or "")
   local selected_indexes, selected_index_required =
     Code._typed_action_selected_indexes_from_user_text(user_text)
+  local selected_target_requested =
+    Code.typed_action_user_requests_selected_target(user_text)
+  local requests_track_creation =
+    Code.typed_action_user_requests_track_creation(user_text)
+  local mixed_existing_track_request =
+    requests_track_creation
+    and Code.typed_action_user_mentions_existing_or_source_track(user_text)
   local include_track_resolve = true
   local include_track_ensure = true
   local include_absolute_index_resolve =
     not Code._typed_action_forbids_absolute_track_index(user_text)
-  if Code.typed_action_user_requests_track_creation(user_text)
-     and not Code.typed_action_user_requests_selected_target(user_text) then
+  if requests_track_creation
+     and not selected_target_requested
+     and not mixed_existing_track_request then
     include_track_resolve = false
   elseif Code.typed_action_user_forbids_track_creation(user_text) then
     include_track_ensure = false
@@ -3677,10 +3913,10 @@ function Code.typed_actions_openai_response_format_field(user_text)
   if #selected_indexes > 0 then
     selected_index_schema = { type = "number", enum = selected_indexes }
   end
-  local include_track_create =
-    Code.typed_action_user_requests_track_creation(user_text)
+  local include_track_create = requests_track_creation
   if include_track_create then
-    if not Code.typed_action_user_requests_selected_target(user_text) then
+    if not selected_target_requested
+       and not mixed_existing_track_request then
       include_track_resolve = false
     end
   end
@@ -3845,6 +4081,43 @@ local function _typed_action_text_has_any(lt, terms)
   return false
 end
 
+function Code.selected_track_rename_numbered_range(user_text)
+  local lt = tostring(user_text or ""):lower():gsub("%s+", " ")
+  if lt == "" then return nil end
+  if lt:find("%f[%w]rename%f[%W]") == nil then return nil end
+  if not (lt:find("selected tracks", 1, true)
+      or lt:find("selected track", 1, true)) then
+    return nil
+  end
+  if _typed_action_text_has_any(lt, {
+      "item", "items", "take", "takes", "midi", "marker", "markers",
+      "region", "regions", "fx", "plugin", "plugins", "route", "routing",
+      "send", "sends",
+    }) then
+    return nil
+  end
+  if not (lt:find("sequential", 1, true)
+      or lt:find("sequence", 1, true)
+      or lt:find("numbered", 1, true)
+      or lt:find("number", 1, true)
+      or lt:find("index", 1, true)) then
+    return nil
+  end
+  local start_raw, end_raw =
+    lt:match("%f[%w]from%f[%W]%s*(%d+)%s+to%s+(%d+)")
+  if not start_raw then return nil end
+  local start_index, end_index = tonumber(start_raw), tonumber(end_raw)
+  if not start_index or not end_index then return nil end
+  if start_index % 1 ~= 0 or end_index % 1 ~= 0 then return nil end
+  local expected_count = math.abs(end_index - start_index) + 1
+  if expected_count < 1 or expected_count > 256 then return nil end
+  return {
+    start_index = start_index,
+    end_index = end_index,
+    expected_count = expected_count,
+  }
+end
+
 function Code.prompt_requests_pan_lfo_automation(user_text)
   local lt = tostring(user_text or ""):lower():gsub("%s+", " ")
   if lt == "" then return false end
@@ -3933,6 +4206,14 @@ function Code.typed_actions_prompt_contract(user_text, opts)
   if type(Code.typed_action_user_requests_hardware_output) == "function"
       and Code.typed_action_user_requests_hardware_output(user_text) then
     return nil, "unsupported_hardware_output"
+  end
+
+  if has_word_phrase("arm")
+      or has_word_phrase("armed")
+      or has_word_phrase("record arm")
+      or has_word_phrase("record armed")
+      or has_word_phrase("recording") then
+    return nil, "unsupported_record_arm"
   end
 
   local has_pan_lfo =
@@ -4076,6 +4357,7 @@ function Code.validate_typed_actions_semantics(plan, opts)
     {}, {}, {}, {}, {}, {}
   local fx_type_by_id = {}
   local folder_children_by_parent = {}
+  local send_seen_by_names = {}
   local function lower(s) return tostring(s or ""):lower() end
   local function trim(s) return tostring(s or ""):match("^%s*(.-)%s*$") end
   local function normalized_name(s)
@@ -4104,6 +4386,12 @@ function Code.validate_typed_actions_semantics(plan, opts)
   end
   local function word_text(s)
     return normalized_name(tostring(s or ""):gsub("[^%w]+", " "))
+  end
+  local function send_route_key(src_name, dst_name)
+    local src = word_text(src_name)
+    local dst = word_text(dst_name)
+    if src == "" or dst == "" then return nil end
+    return src .. "->" .. dst
   end
   local u = lower(opts.user_text)
   local u_words = word_text(opts.user_text)
@@ -4238,6 +4526,34 @@ function Code.validate_typed_actions_semantics(plan, opts)
       or send_intent_words:find(" feed ", 1, true) ~= nil
       or send_intent_words:find(" feeds ", 1, true) ~= nil
       or send_intent_words:find(" feeding ", 1, true) ~= nil)
+  local function explicit_send_required(src_name, dst_name)
+    local src = word_text(src_name)
+    local dst = word_text(dst_name)
+    if src == "" or dst == "" then return false end
+    for _, phrase in ipairs({
+      "do not send " .. src .. " to " .. dst,
+      "do not send " .. src .. " into " .. dst,
+      "don t send " .. src .. " to " .. dst,
+      "don t send " .. src .. " into " .. dst,
+      "without sending " .. src .. " to " .. dst,
+      "without sending " .. src .. " into " .. dst,
+    }) do
+      if u_words:find(phrase, 1, true) then return false end
+    end
+    for _, phrase in ipairs({
+      "send " .. src .. " to " .. dst,
+      "send " .. src .. " into " .. dst,
+      "route " .. src .. " to " .. dst,
+      "route " .. src .. " into " .. dst,
+      "feed " .. src .. " to " .. dst,
+      "feed " .. src .. " into " .. dst,
+      src .. " to " .. dst,
+      src .. " into " .. dst,
+    }) do
+      if send_intent_words:find(phrase, 1, true) then return true end
+    end
+    return false
+  end
   local track_property_text =
     Code._typed_action_track_property_intent_text(opts.user_text)
   local requests_master_send_state =
@@ -4273,6 +4589,9 @@ function Code.validate_typed_actions_semantics(plan, opts)
       or user_text_lower:find("don't create", 1, true) ~= nil)
   local selected_target_requested =
     Code.typed_action_user_requests_selected_target(opts.user_text)
+  local mixed_existing_track_request =
+    requests_track_creation
+    and Code.typed_action_user_mentions_existing_or_source_track(opts.user_text)
   local requests_folders =
     Code.typed_action_user_requests_folder(opts.user_text)
   local requests_pan_lfo =
@@ -4424,6 +4743,7 @@ function Code.validate_typed_actions_semantics(plan, opts)
       end
       if requests_track_creation
          and not selected_target_requested
+         and not mixed_existing_track_request
          and (action.selected == true
            or type(action.selected_index) == "number"
            or type(action.index) == "number") then
@@ -4503,6 +4823,8 @@ function Code.validate_typed_actions_semantics(plan, opts)
       local src_name = tracks[action["from"]] or action["from"]
       local dst_name = tracks[action.to] or action.to
       local volume_db = tonumber(action.volume_db)
+      local route_key = send_route_key(src_name, dst_name)
+      if route_key then send_seen_by_names[route_key] = true end
       if exact_send_graph_requested
          and is_aux_like_name(src_name)
          and is_bus_name(dst_name)
@@ -4598,6 +4920,27 @@ function Code.validate_typed_actions_semantics(plan, opts)
       "missing_send_actions", "$.actions",
       "User requested routing/sends; the typed-action plan must include "
         .. "send.create actions")
+  end
+  if requests_sends then
+    local checked_routes = {}
+    for src_id, src_name in pairs(tracks) do
+      for dst_id, dst_name in pairs(tracks) do
+        if src_id ~= dst_id and explicit_send_required(src_name, dst_name) then
+          local route_key = send_route_key(src_name, dst_name)
+          if route_key and not checked_routes[route_key] then
+            checked_routes[route_key] = true
+            if not send_seen_by_names[route_key] then
+              errors[#errors + 1] = _typed_action_error(
+                "missing_send_actions", "$.actions",
+                "User explicitly requested a send from "
+                  .. tostring(src_name) .. " to " .. tostring(dst_name)
+                  .. "; include one send.create action with from="
+                  .. tostring(src_id) .. " and to=" .. tostring(dst_id))
+            end
+          end
+        end
+      end
+    end
   end
   if requests_pan_lfo and (op_counts["track.pan_lfo"] or 0) == 0 then
     errors[#errors + 1] = _typed_action_error(
@@ -5771,6 +6114,51 @@ function Code.find_unknown_reaper_calls(lua_code)
   return unknown, total
 end
 
+function Code.find_unavailable_lua_library_calls(lua_code)
+  if not lua_code or lua_code == "" then return nil, 0 end
+  local stripped = tostring(lua_code):gsub("%-%-[^\n]*", "")
+  local blocked = {
+    math = {
+      pow = "Lua 5.4 has no math.pow; use the exponent operator instead, e.g. 10 ^ (db / 20).",
+    },
+  }
+  local findings, seen = {}, {}
+  local total = 0
+
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+
+  local pos = 1
+  while true do
+    local s, e, lib, name =
+      stripped:find("([%a_][%w_]*)%s*%.%s*([%a_][%w_]*)%s*%(", pos)
+    if not s then break end
+    local msg = blocked[tostring(lib or "")] and blocked[tostring(lib or "")][tostring(name or "")]
+    if msg then
+      total = total + 1
+      local call = tostring(lib) .. "." .. tostring(name)
+      if not seen[call] then
+        seen[call] = true
+        findings[#findings + 1] = {
+          call = call,
+          line = line_for_pos(s),
+          message = msg,
+        }
+      end
+    end
+    pos = e + 1
+  end
+
+  if #findings == 0 then return nil, total end
+  table.sort(findings, function(a, b)
+    return tostring(a.call) < tostring(b.call)
+  end)
+  return findings, total
+end
+
 function Code.find_mistyped_reaper_globals(lua_code)
   if not lua_code or lua_code == "" then return nil end
   local stripped = lua_code:gsub("%-%-[^\n]*", "")
@@ -5834,11 +6222,12 @@ function Code.find_unverified_main_oncommand_ids(lua_code, user_text)
     [40044] = true, [40073] = true,
 
     [40029] = true, [40030] = true, [40026] = true, [40012] = true,
-    [40061] = true, [40362] = true, [40548] = true, [40006] = true,
+    [40061] = true, [40362] = true, [40548] = true,
     [40057] = true, [40058] = true, [40698] = true, [40434] = true,
     [40033] = true, [40123] = true, [40719] = true,
 
-    [40001] = true, [40005] = true, [40062] = true, [40297] = true,
+    [40001] = true, [40005] = true, [40006] = true,
+    [40062] = true, [40297] = true,
     [40296] = true,
 
     [40020] = true, [40635] = true, [40626] = true, [40364] = true,
@@ -6047,6 +6436,75 @@ function Code.find_bad_tempo_marker_alignment_scripts(lua_code, user_text)
   return #findings > 0 and findings or nil
 end
 
+function Code.find_loop_bar_beat_without_timemap(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  local prompt = tostring(user_text or ""):lower():gsub("%s+", " ")
+  if prompt == "" then return nil end
+
+  local has_loop_intent =
+       prompt:find("%f[%w]loop%f[%W]") ~= nil
+    or prompt:find("loop range", 1, true) ~= nil
+    or prompt:find("loop points", 1, true) ~= nil
+    or prompt:find("time selection", 1, true) ~= nil
+  local has_bar_beat =
+       prompt:find("%f[%w]bar%f[%W]") ~= nil
+    or prompt:find("%f[%w]bars%f[%W]") ~= nil
+    or prompt:find("%f[%w]measure%f[%W]") ~= nil
+    or prompt:find("%f[%w]measures%f[%W]") ~= nil
+    or prompt:find("%f[%w]beat%f[%W]") ~= nil
+    or prompt:find("%f[%w]beats%f[%W]") ~= nil
+    or prompt:find("%f[%w]downbeat%f[%W]") ~= nil
+  local function phrase(...)
+    local parts = { ... }
+    local pattern = ""
+    for i = 1, #parts do
+      if i > 1 then pattern = pattern .. "%W+" end
+      pattern = pattern .. "%f[%w]" .. parts[i] .. "%f[%W]"
+    end
+    return prompt:find(pattern) ~= nil
+  end
+  local function action_loop_phrase(action)
+    return phrase(action, "loop") or phrase(action, "the", "loop")
+      or phrase(action, "loop", "points")
+      or phrase(action, "the", "loop", "points")
+  end
+  local function action_time_selection_phrase(action)
+    return phrase(action, "time", "selection")
+      or phrase(action, "the", "time", "selection")
+  end
+  local clear_only =
+       action_loop_phrase("clear")
+    or action_loop_phrase("remove")
+    or action_loop_phrase("disable")
+    or action_loop_phrase("stop")
+    or phrase("turn", "loop", "off")
+    or phrase("turn", "the", "loop", "off")
+    or phrase("turn", "off", "loop")
+    or phrase("turn", "off", "the", "loop")
+    or action_time_selection_phrase("clear")
+    or action_time_selection_phrase("remove")
+  if not (has_loop_intent and has_bar_beat) or clear_only then return nil end
+
+  local stripped = lua_code:gsub("%-%-[^\n]*", "")
+  if not stripped:find("reaper%.GetSet_LoopTimeRange", 1, false) then
+    return nil
+  end
+  -- Deliberately require TimeMap2_* for bar/beat wording. QN-only conversion
+  -- can still be fragile across non-4/4 or changing time signatures.
+  if stripped:find("reaper%.TimeMap2_", 1, false) then return nil end
+
+  local findings = {}
+  local line_no = 0
+  for raw_line in (stripped .. "\n"):gmatch("([^\n]*)\n") do
+    line_no = line_no + 1
+    for api in raw_line:gmatch("reaper%.(GetSet_LoopTimeRange2?)%s*%(") do
+      findings[#findings + 1] = { line = line_no, api = api }
+    end
+  end
+
+  return #findings > 0 and findings or nil
+end
+
 function Code.find_missing_project_tempo_set(lua_code, user_text)
   if not lua_code or lua_code == "" then return nil end
   local prompt = tostring(user_text or ""):lower():gsub("%s+", " ")
@@ -6062,6 +6520,7 @@ function Code.find_missing_project_tempo_set(lua_code, user_text)
     or prompt:match("%f[%w]tempo%s+to%s+(%d+%.?%d*)%s*bpm")
   local explicit_tempo_request = bpm ~= nil
   bpm = bpm or prompt:match("%f[%w]at%s+(%d+%.?%d*)%s*bpm%f[%W]")
+  bpm = bpm or prompt:match("%f[%d](%d+%.?%d*)%s*bpm%f[%W]")
   if not bpm then return nil end
   local beat_content_request =
        explicit_tempo_request
@@ -6137,21 +6596,132 @@ function Code.find_missing_point_markers_for_region_marker_pairs(lua_code, user_
   local function escaped_literal(s)
     return (tostring(s or ""):gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1"))
   end
-  local function has_named_call(is_region, name)
+  local function has_named_api_call(api_name, is_region, name)
     local bool = is_region and "true" or "false"
     local q = "[\"']" .. escaped_literal(name) .. "[\"']"
-    return stripped:find(
-      "reaper%.AddRegionOrMarker%s*%([^%)]-,%s*" .. bool .. "%s*,[^%)]-" .. q)
-      or stripped:find(
-        "reaper%.AddProjectMarker2?%s*%([^%)]-,%s*" .. bool .. "%s*,[^%)]-" .. q)
+    return stripped:find("reaper%." .. api_name
+      .. "%s*%([^%)]-,%s*" .. bool .. "%s*,[^%)]-" .. q)
+  end
+  local function has_named_call(is_region, name)
+    return has_named_api_call("AddRegionOrMarker", is_region, name)
+      or has_named_api_call("AddProjectMarker2", is_region, name)
+      or has_named_api_call("AddProjectMarker", is_region, name)
   end
 
   local findings = {}
+  local has_modern_region_api =
+       type(reaper) == "table"
+   and type(reaper.AddRegionOrMarker) == "function"
   for _, name in ipairs(requested) do
-    if has_named_call(true, name) and not has_named_call(false, name) then
+    local has_modern_true = has_named_api_call("AddRegionOrMarker", true, name)
+    local has_modern_false = has_named_api_call("AddRegionOrMarker", false, name)
+    if has_modern_region_api
+        and has_modern_true
+        and not has_modern_false then
+      findings[#findings + 1] = { name = name }
+    elseif has_named_call(true, name) and not has_named_call(false, name) then
       findings[#findings + 1] = { name = name }
     end
   end
+  return #findings > 0 and findings or nil
+end
+
+function Code.find_explicit_second_marker_region_misuse(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  local text = tostring(user_text or "")
+  local lower = text:lower()
+  if not (lower:find(" seconds", 1, true)
+      and (lower:find("marker", 1, true) or lower:find("region", 1, true))) then
+    return nil
+  end
+
+  local function trim(s)
+    return tostring(s or ""):match("^%s*(.-)%s*$")
+  end
+  local function clean_name(name)
+    name = trim(name)
+      :gsub("^and%s+", "")
+      :gsub("^add%s+", "")
+      :gsub("^a%s+", "")
+      :gsub("^an%s+", "")
+      :gsub("^the%s+", "")
+    return trim(name)
+  end
+  local function name_key(name)
+    return tostring(name or ""):lower():gsub("[^%w]+", "")
+  end
+  local expectations = {}
+  local function add_expectation(kind, name, start_s, end_s)
+    name = clean_name(name)
+    if name == "" or #name > 64 then return end
+    local key = kind .. ":" .. name_key(name)
+    expectations[key] = {
+      kind = kind,
+      name = name,
+      start = tonumber(start_s),
+      finish = end_s and tonumber(end_s) or nil,
+    }
+  end
+
+  for name, start_s, end_s in text:gmatch(
+      "%f[%a]a%s+([%a][%w%s%-%_']-)%s+region%s+from%s+([%d%.]+)%s+to%s+([%d%.]+)%s+seconds") do
+    add_expectation("region", name, start_s, end_s)
+  end
+  for name, start_s, end_s in text:gmatch(
+      "[Rr]egion%s+named%s+([%a][%w%s%-%_']-)%s+from%s+([%d%.]+)%s+to%s+([%d%.]+)%s+seconds") do
+    add_expectation("region", name, start_s, end_s)
+  end
+  for name, start_s in text:gmatch(
+      "%f[%a]a%s+([%a][%w%s%-%_']-)%s+marker%s+at%s+([%d%.]+)%s+seconds") do
+    add_expectation("marker", name, start_s, nil)
+  end
+  for name, start_s in text:gmatch(
+      "[Mm]arker%s+named%s+([%a][%w%s%-%_']-)%s+at%s+([%d%.]+)%s+seconds") do
+    add_expectation("marker", name, start_s, nil)
+  end
+  if not next(expectations) then return nil end
+
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  local findings = {}
+  local function close_enough(a, b)
+    a, b = tonumber(a), tonumber(b)
+    return a and b and math.abs(a - b) <= 0.05
+  end
+  local function scan_api(api)
+    for args in stripped:gmatch("reaper%." .. api .. "%s*%(([^%)]-)%)") do
+      for _, spec in ipairs({
+        { kind = "region", bool = "true" },
+        { kind = "marker", bool = "false" },
+      }) do
+        local pos_s, end_s, name = args:match("^%s*[^,]+,%s*"
+          .. spec.bool
+          .. "%s*,%s*([%-]?%d+%.?%d*)%s*,%s*([%-]?%d+%.?%d*)%s*,%s*[\"'](.-)[\"']")
+        local exp = name and expectations[spec.kind .. ":" .. name_key(name)]
+        if exp and not close_enough(pos_s, exp.start) then
+          findings[#findings + 1] = {
+            kind = spec.kind,
+            name = exp.name,
+            expected_start = exp.start,
+            actual_start = tonumber(pos_s),
+          }
+        elseif exp and spec.kind == "region"
+            and not close_enough(end_s, exp.finish) then
+          findings[#findings + 1] = {
+            kind = spec.kind,
+            name = exp.name,
+            expected_start = exp.start,
+            expected_end = exp.finish,
+            actual_start = tonumber(pos_s),
+            actual_end = tonumber(end_s),
+          }
+        end
+      end
+    end
+  end
+  scan_api("AddRegionOrMarker")
+  scan_api("AddProjectMarker2")
   return #findings > 0 and findings or nil
 end
 
@@ -6224,6 +6794,112 @@ function Code.find_audio_accessor_transient_marker_scripts(lua_code, user_text)
     local line = raw_line:gsub("%-%-[^\n]*", "")
     if line:find("reaper%.GetAudioAccessorSamples", 1, false)
        or line:find("reaper%.SetTakeStretchMarker", 1, false) then
+      findings[#findings + 1] = { line = line_no }
+    end
+  end
+  return #findings > 0 and findings or { { line = 1 } }
+end
+
+-- =============================================================================
+-- Code.find_audio_sync_item_start_alignment_scripts
+-- =============================================================================
+-- Same-song/take sync requests usually mean "match the audio/transient", not
+-- "make the item starts or take source offsets equal". Catch high-confidence
+-- cases where generated Lua silently treats audio-content sync as a plain
+-- start/offset move.
+function Code.find_audio_sync_item_start_alignment_scripts(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  local prompt = tostring(user_text or ""):lower()
+  local alignment_intent =
+       prompt:find("%f[%w]sync")
+    or prompt:find("%f[%w]synchron")
+    or prompt:find("in sync", 1, true)
+    or prompt:find("%f[%w]align")
+    or prompt:find("line up", 1, true)
+    or prompt:find("%f[%w]match")
+  if not alignment_intent then return nil end
+
+  local content_anchor =
+       prompt:find("same song", 1, true)
+    or prompt:find("same performance", 1, true)
+    or prompt:find("same recording", 1, true)
+    or prompt:find("matching audio", 1, true)
+    or prompt:find("match the audio", 1, true)
+    or prompt:find("audio content", 1, true)
+    or prompt:find("%f[%w]waveform")
+    or prompt:find("%f[%w]transient")
+    or prompt:find("take on top", 1, true)
+    or prompt:find("on top of", 1, true)
+    or prompt:find("selected takes", 1, true)
+    or prompt:find("two takes", 1, true)
+    or prompt:find("phase align", 1, true)
+    or prompt:find("phase%-align")
+  if not content_anchor then return nil end
+
+  local explicit_start_or_grid =
+       prompt:find("align starts", 1, true)
+    or prompt:find("align the starts", 1, true)
+    or prompt:find("align item starts", 1, true)
+    or prompt:find("align the item starts", 1, true)
+    or prompt:find("match starts", 1, true)
+    or prompt:find("match the starts", 1, true)
+    or prompt:find("same start", 1, true)
+    or prompt:find("start at", 1, true)
+    or prompt:find("start time", 1, true)
+    or prompt:find("start offset", 1, true)
+    or prompt:find("take start offset", 1, true)
+    or prompt:find("source offset", 1, true)
+    or prompt:find("d_startoffs", 1, true)
+    or prompt:find("slip edit", 1, true)
+    or prompt:find("slip%-edit")
+    or prompt:find("slip editing", 1, true)
+    or prompt:find("item start", 1, true)
+    or prompt:find("item starts", 1, true)
+    or prompt:find("move whole item", 1, true)
+    or prompt:find("move whole media item", 1, true)
+    or prompt:find("move item starts", 1, true)
+    or prompt:find("snap to grid", 1, true)
+    or prompt:find("sync to grid", 1, true)
+    or prompt:find("to the grid", 1, true)
+    or prompt:find("align to grid", 1, true)
+    or prompt:find("tempo grid", 1, true)
+    or prompt:find("project tempo", 1, true)
+    or prompt:find("at the cursor", 1, true)
+    or prompt:find("edit cursor", 1, true)
+    or prompt:find("cursor position", 1, true)
+    or prompt:find("bar ", 1, true)
+    or prompt:find("beat ", 1, true)
+    or prompt:find("set position", 1, true)
+    or prompt:find("exact time", 1, true)
+  if explicit_start_or_grid then return nil end
+
+  local stripped = lua_code:gsub("%-%-[^\n]*", "")
+  local writes_plain_start_or_offset =
+       stripped:find("reaper%.SetMediaItemPosition", 1, false)
+    or (stripped:find("reaper%.SetMediaItemInfo_Value", 1, false)
+        and stripped:find("[\"']D_POSITION[\"']"))
+    or (stripped:find("reaper%.SetMediaItemTakeInfo_Value", 1, false)
+        and stripped:find("[\"']D_STARTOFFS[\"']"))
+  if not writes_plain_start_or_offset then return nil end
+
+  local has_real_anchor_workflow =
+       stripped:find("reaper%.CreateTakeAudioAccessor", 1, false)
+    or stripped:find("reaper%.GetAudioAccessorSamples", 1, false)
+    or stripped:find("reaper%.SetTakeStretchMarker", 1, false)
+    or stripped:find("reaper%.GetTakeStretchMarker", 1, false)
+    or stripped:find("[\"']D_SNAPOFFSET[\"']")
+  if has_real_anchor_workflow then return nil end
+
+  local findings = {}
+  local line_no = 0
+  for raw_line in (lua_code .. "\n"):gmatch("([^\n]*)\n") do
+    line_no = line_no + 1
+    local line = raw_line:gsub("%-%-[^\n]*", "")
+    if line:find("reaper%.SetMediaItemPosition", 1, false)
+       or (line:find("reaper%.SetMediaItemInfo_Value", 1, false)
+           and line:find("[\"']D_POSITION[\"']"))
+       or (line:find("reaper%.SetMediaItemTakeInfo_Value", 1, false)
+           and line:find("[\"']D_STARTOFFS[\"']")) then
       findings[#findings + 1] = { line = line_no }
     end
   end
@@ -6371,9 +7047,30 @@ function Code.find_reaper_arity_mismatches(lua_code)
   if not lua_code or lua_code == "" then return nil end
   local stripped = lua_code:gsub("%-%-[^\n]*", "")
   local seen, mismatches = {}, {}
+  local function is_modern_marker_guarded_legacy_fallback(call_pos)
+    if type(reaper) ~= "table"
+       or type(reaper.AddRegionOrMarker) ~= "function" then
+      return false
+    end
+    local guard_s, guard_e
+    local pos = 1
+    while true do
+      local s, e = stripped:find(
+        "if%s+reaper%.AddRegionOrMarker%s+then", pos)
+      if not s or s > call_pos then break end
+      guard_s, guard_e = s, e
+      pos = e + 1
+    end
+    if not guard_s then return false end
+    local segment = stripped:sub(guard_e + 1, call_pos - 1)
+    local else_pos = segment:find("%f[%w]else%f[%W]")
+    if not else_pos then return false end
+    local end_pos = segment:find("%f[%w]end%f[%W]")
+    return not (end_pos and end_pos < else_pos)
+  end
   local pos = 1
   while true do
-    local _ms, me, name = stripped:find("reaper%.([%w_]+)%s*%(", pos)
+    local call_start, me, name = stripped:find("reaper%.([%w_]+)%s*%(", pos)
     if not me then break end
     local expected = _REAPER_FIXED_ARITY[name]
     if expected then
@@ -6412,7 +7109,11 @@ function Code.find_reaper_arity_mismatches(lua_code)
       end
       if depth == 0 then
         local got = saw_content and (args + 1) or 0
-        if got ~= expected then
+        local skip_guarded_legacy_marker =
+          name == "AddProjectMarker"
+          and got == 7
+          and is_modern_marker_guarded_legacy_fallback(call_start)
+        if got ~= expected and not skip_guarded_legacy_marker then
           local key = name .. ":" .. got
           if not seen[key] then
             seen[key] = true
@@ -6479,7 +7180,20 @@ function Code.find_addprojectmarker2_isrgn_misuse(lua_code)
       i = i + 1
     end
     local isrgn = args[2]
-    if isrgn and isrgn ~= "true" and isrgn ~= "false" then
+    local isrgn_ok = isrgn == "true" or isrgn == "false"
+    if isrgn and not isrgn_ok then
+      local normalized = isrgn:lower():gsub("^%s+", ""):gsub("%s+$", "")
+      normalized = normalized:gsub("%s+", "")
+      if normalized:match("^[%a_][%w_]*$") then
+        isrgn_ok =
+          normalized == "is_region"
+          or normalized == "isregion"
+          or normalized == "is_rgn"
+          or normalized == "isrgn"
+          or normalized == "is_region_flag"
+      end
+    end
+    if isrgn and not isrgn_ok then
       local line = 1
       for _ in stripped:sub(1, me):gmatch("\n") do line = line + 1 end
       findings[#findings + 1] = {
@@ -6641,6 +7355,16 @@ function Code.find_untracked_createtracksend_results(lua_code)
   local ignored_by_source = {}
   local assigned_sendidx = {}
   local creates_by_pair = {}
+  local function is_generic_send_helper_pair(src, dst)
+    local s = normalize_arg(src):lower()
+    local d = normalize_arg(dst):lower()
+    local generic_src = s == "src" or s == "source"
+      or s == "source_track" or s == "srctrack"
+    local generic_dst = d == "dst" or d == "dest"
+      or d == "destination" or d == "dest_track"
+      or d == "dsttrack" or d == "destination_track"
+    return generic_src and generic_dst
+  end
   local pos = 1
   while true do
     local s, open_pos = stripped:find("reaper%.CreateTrackSend%s*%(", pos)
@@ -6654,25 +7378,27 @@ function Code.find_untracked_createtracksend_results(lua_code)
     if args and args[1] and args[1] ~= "" and args[2] and args[2] ~= "" then
       local src = normalize_arg(args[1])
       local dst = normalize_arg(args[2])
-      local pair = src .. "=>" .. dst
-      creates_by_pair[pair] = creates_by_pair[pair] or {
-        source = args[1],
-        dest = args[2],
-        first_line = line_for_pos(s),
-        count = 0,
-      }
-      creates_by_pair[pair].count = creates_by_pair[pair].count + 1
-      if creates_by_pair[pair].count == 2 then
-        local key = "duplicate:" .. pair
-        if not seen[key] then
-          seen[key] = true
-          violations[#violations + 1] = {
-            kind = "duplicate",
-            source = args[1],
-            dest = args[2],
-            create_line = creates_by_pair[pair].first_line,
-            set_line = line_for_pos(s),
-          }
+      if not is_generic_send_helper_pair(args[1], args[2]) then
+        local pair = src .. "=>" .. dst
+        creates_by_pair[pair] = creates_by_pair[pair] or {
+          source = args[1],
+          dest = args[2],
+          first_line = line_for_pos(s),
+          count = 0,
+        }
+        creates_by_pair[pair].count = creates_by_pair[pair].count + 1
+        if creates_by_pair[pair].count == 2 then
+          local key = "duplicate:" .. pair
+          if not seen[key] then
+            seen[key] = true
+            violations[#violations + 1] = {
+              kind = "duplicate",
+              source = args[1],
+              dest = args[2],
+              create_line = creates_by_pair[pair].first_line,
+              set_line = line_for_pos(s),
+            }
+          end
         end
       end
     end
@@ -7147,6 +7873,157 @@ function Code.find_timecode_generator_workflow_misuse(lua_code, user_prompt)
   return findings
 end
 
+function Code.find_ruler_lane_timebase_misuse(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  if not stripped:find("RULER_LANE_TIMEBASE", 1, true) then return nil end
+
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+
+  local function trim(v)
+    return tostring(v or ""):match("^%s*(.-)%s*$") or ""
+  end
+
+  local function normalize_arg(v)
+    return trim(v):gsub("%s+", "")
+  end
+
+  local function unquote(v)
+    v = trim(v)
+    local q = v:sub(1, 1)
+    if (q == '"' or q == "'") and v:sub(-1) == q then
+      return v:sub(2, -2)
+    end
+    return nil
+  end
+
+  local function literal_number(v)
+    v = normalize_arg(v)
+    if v:match("^%-?%d+%.?%d*$") then return tonumber(v) end
+    return nil
+  end
+
+  local function parse_args(open_pos)
+    local args, field = {}, {}
+    local depth = 1
+    local i = open_pos + 1
+    local in_str = nil
+    while i <= #stripped do
+      local c = stripped:sub(i, i)
+      if in_str then
+        field[#field + 1] = c
+        if c == "\\" then
+          i = i + 1
+          if i <= #stripped then field[#field + 1] = stripped:sub(i, i) end
+        elseif c == in_str then
+          in_str = nil
+        end
+      else
+        if c == '"' or c == "'" then
+          in_str = c
+          field[#field + 1] = c
+        elseif c == "(" or c == "[" or c == "{" then
+          depth = depth + 1
+          field[#field + 1] = c
+        elseif c == ")" or c == "]" or c == "}" then
+          depth = depth - 1
+          if depth == 0 then
+            args[#args + 1] = trim(table.concat(field))
+            return args
+          end
+          field[#field + 1] = c
+        elseif c == "," and depth == 1 then
+          args[#args + 1] = trim(table.concat(field))
+          field = {}
+        else
+          field[#field + 1] = c
+        end
+      end
+      i = i + 1
+    end
+    return nil
+  end
+
+  local function prompt_is_timeline_ruler_display()
+    local text = tostring(user_text or ""):lower():gsub("%s+", " ")
+    if text == "" then return false end
+    if text:find("ruler lane", 1, true)
+       or text:find("marker lane", 1, true)
+       or text:find("region lane", 1, true) then
+      return false
+    end
+    local has_ruler = text:find("%f[%w]ruler%f[%W]") ~= nil
+    if not has_ruler then return false end
+    return text:find("%f[%w]main%f[%W]") ~= nil
+        or text:find("%f[%w]primary%f[%W]") ~= nil
+        or text:find("%f[%w]secondary%f[%W]") ~= nil
+        or text:find("time unit", 1, true) ~= nil
+        or text:find("timebase", 1, true) ~= nil
+        or text:find("time base", 1, true) ~= nil
+        or text:find("timecode", 1, true) ~= nil
+        or text:find("h:m:s:f", 1, true) ~= nil
+        or text:find("measures:beats", 1, true) ~= nil
+        or text:find("measures.beats", 1, true) ~= nil
+  end
+
+  local function has_verified_ruler_display_action()
+    return stripped:find("reaper%.Main_OnCommand%s*%(%s*40367%s*,", 1, false)
+        or stripped:find("reaper%.Main_OnCommand%s*%(%s*42364%s*,", 1, false)
+        or (stripped:find("reaper%.kbd_enumerateActions%s*%(", 1, false)
+          and stripped:lower():find("time unit for ruler", 1, true))
+  end
+
+  local calls, findings = {}, {}
+  local pos = 1
+  while true do
+    local s, open_pos = stripped:find("reaper%.GetSetProjectInfo%s*%(", pos)
+    if not s then break end
+    local args = parse_args(open_pos)
+    local key = args and unquote(args[2]) or nil
+    if key and key:match("^RULER_LANE_TIMEBASE:%d+$")
+       and normalize_arg(args[4]):lower() == "true" then
+      local call = {
+        key = key,
+        line = line_for_pos(s),
+        value = args[3],
+      }
+      calls[#calls + 1] = call
+      -- Non-literal values are intentionally allowed unless the user prompt is
+      -- asking for main/secondary timeline ruler display rather than lane data.
+      local n = literal_number(args[3])
+      if n and (n < -1 or n > 2 or n % 1 ~= 0) then
+        findings[#findings + 1] = {
+          kind = "invalid_value",
+          key = key,
+          value = args[3],
+          line = call.line,
+        }
+      end
+    end
+    pos = open_pos + 1
+  end
+
+  if #calls > 0 and #findings == 0
+     and prompt_is_timeline_ruler_display()
+     and not has_verified_ruler_display_action() then
+    local call = calls[1]
+    findings[#findings + 1] = {
+      kind = "display_domain",
+      key = call.key,
+      value = call.value,
+      line = call.line,
+    }
+  end
+
+  return #findings > 0 and findings or nil
+end
+
 -- =============================================================================
 -- Code.find_master_send_remove_misuse
 -- =============================================================================
@@ -7324,6 +8201,56 @@ function Code.find_track_pan_sent_as_send_pan(lua_code, user_text)
   return violations
 end
 
+function Code.find_track_pan_bare_handle_table_key_misuse(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  if not Code.prompt_requests_track_pan(user_text) then return nil end
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  if not stripped:find("reaper%.SetMediaTrackInfo_Value%s*%([^%)]-[\"']D_PAN[\"']") then
+    return nil
+  end
+
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+  local violations = {}
+  local pos = 1
+  while true do
+    local s, e, table_name, body = stripped:find(
+      "local%s+([%a_][%w_]*)%s*=%s*{%s*(.-)%s*}", pos)
+    if not s then break end
+    if body:find("%[%s*[%a_][%w_]*%s*%]%s*=")
+        and stripped:find(
+          "reaper%.SetMediaTrackInfo_Value%s*%([^%)]-[\"']D_PAN[\"'][^%)]-"
+          .. table_name .. "%s*%[") then
+      local bare_keys = {}
+      local bpos = 1
+      while true do
+        local bs, be, key = body:find("([%a_][%w_]*)%s*=", bpos)
+        if not bs then break end
+        local prev = body:sub(1, bs - 1):match("(%S)%s*$")
+        if prev ~= "[" then
+          bare_keys[#bare_keys + 1] = key
+        end
+        bpos = be + 1
+      end
+      if #bare_keys > 0 then
+        violations[#violations + 1] = {
+          line = line_for_pos(s),
+          table_name = table_name,
+          bare_keys = bare_keys,
+        }
+      end
+    end
+    pos = e + 1
+  end
+  if #violations == 0 then return nil end
+  return violations
+end
+
 function Code.prompt_requests_exclusive_track_selection(user_text)
   local lt = tostring(user_text or ""):lower():gsub("%s+", " ")
   if lt == "" then return false end
@@ -7422,12 +8349,21 @@ function Code.extract_sidechain_ducking_send_request(user_text)
     or lt:find("%f[%w]side%-chain%f[%W]") ~= nil
   if not has_sidechain_word then return nil end
 
+  local function clause_has_sidechain_word(clause)
+    clause = tostring(clause or "")
+    return clause:find("%f[%w]ducks%f[%W]") ~= nil
+      or clause:find("%f[%w]ducking%f[%W]") ~= nil
+      or clause:find("%f[%w]sidechain%f[%W]") ~= nil
+      or clause:find("%f[%w]side%-chain%f[%W]") ~= nil
+  end
+
   local function clean_endpoint(s)
     s = tostring(s or ""):lower()
     s = s:gsub("%s+for%s+side%-?chain.*$", "")
     s = s:gsub("%s+for%s+duck.*$", "")
     s = s:gsub("%s+feeding%s+.*$", "")
     s = s:gsub("%s+on%s+channels.*$", "")
+    s = s:gsub("%s+at%s+[%-+]?%d+%.?%d*%s*d?b.*$", "")
     s = s:gsub("^%s*the%s+", "")
     s = s:gsub("^%s*a%s+", "")
     s = s:gsub("^%s*an%s+", "")
@@ -7437,13 +8373,34 @@ function Code.extract_sidechain_ducking_send_request(user_text)
     return s:match("^%s*(.-)%s*$")
   end
 
-  local src, dst = lt:match("%f[%w]send%s+from%s+(.-)%s+to%s+([^%.;,]+)")
-  if not src then
-    src, dst = lt:match("%f[%w]route%s+(.-)%s+to%s+([^%.;,]+)")
+  local function split_sources(s)
+    local parts, seen = {}, {}
+    s = tostring(s or ""):gsub("%s+and%s+", ",")
+    for part in s:gmatch("[^,]+") do
+      part = clean_endpoint(part)
+      if part ~= "" and not seen[part] then
+        seen[part] = true
+        parts[#parts + 1] = part
+      end
+    end
+    return parts
+  end
+
+  local src, dst
+  for clause in lt:gmatch("[^%.;,]+") do
+    if clause_has_sidechain_word(clause) then
+      src, dst = clause:match("%f[%w]send%s+from%s+(.-)%s+to%s+(.+)$")
+      if not src then
+        src, dst = clause:match("%f[%w]route%s+(.-)%s+to%s+(.+)$")
+      end
+      if src and dst then break end
+    end
   end
   src, dst = clean_endpoint(src), clean_endpoint(dst)
   if src ~= "" and dst ~= "" and src ~= dst then
-    return { source = src, dest = dst }
+    local sources = split_sources(src)
+    if #sources == 0 then sources = { src } end
+    return { source = src, sources = sources, dest = dst }
   end
   return nil
 end
@@ -7470,9 +8427,17 @@ function Code.lua_satisfies_sidechain_ducking_send(lua_code, user_text)
   local lowered = stripped:lower()
   local explicit = Code.extract_sidechain_ducking_send_request
     and Code.extract_sidechain_ducking_send_request(user_text) or nil
-  local aliases = explicit
-    and { source = {}, dest = {} }
-    or { kick = {}, bass = {} }
+  local explicit_sources = nil
+  if explicit then
+    explicit_sources = type(explicit.sources) == "table"
+      and explicit.sources or { explicit.source }
+  end
+  local aliases = explicit and { dest = {} } or { kick = {}, bass = {} }
+  if explicit then
+    for i = 1, #explicit_sources do
+      aliases["source" .. tostring(i)] = {}
+    end
+  end
   local function compact(s)
     return tostring(s or ""):lower():gsub("[^%w]", "")
   end
@@ -7496,10 +8461,13 @@ function Code.lua_satisfies_sidechain_ducking_send(lua_code, user_text)
     end
   end
   if explicit then
-    add_alias("source", explicit.source)
     add_alias("dest", explicit.dest)
-    add_endpoint_variants("source", explicit.source)
     add_endpoint_variants("dest", explicit.dest)
+    for i, source in ipairs(explicit_sources) do
+      local role = "source" .. tostring(i)
+      add_alias(role, source)
+      add_endpoint_variants(role, source)
+    end
   end
   local function short_alias_matches(text_value, alias)
     local norm = "_" .. tostring(text_value or "")
@@ -7509,11 +8477,14 @@ function Code.lua_satisfies_sidechain_ducking_send(lua_code, user_text)
   local function role_for_text(text_value)
     local cv = compact(text_value)
     if explicit then
-      for alias in pairs(aliases.source) do
-        local ca = compact(alias)
-        if ca ~= "" and ((#ca <= 2 and short_alias_matches(text_value, ca))
-            or (#ca > 2 and cv:find(ca, 1, true))) then
-          return "source"
+      for i = 1, #explicit_sources do
+        local role = "source" .. tostring(i)
+        for alias in pairs(aliases[role]) do
+          local ca = compact(alias)
+          if ca ~= "" and ((#ca <= 2 and short_alias_matches(text_value, ca))
+              or (#ca > 2 and cv:find(ca, 1, true))) then
+            return role
+          end
         end
       end
       for alias in pairs(aliases.dest) do
@@ -7543,6 +8514,58 @@ function Code.lua_satisfies_sidechain_ducking_send(lua_code, user_text)
     local role = role_for_text(quoted)
     if role then add_alias(role, var) end
   end
+  local named_tables = {}
+  for table_var, body in lowered:gmatch(
+      "local%s+([%a_][%w_]*)%s*=%s*%{(.-)%}") do
+    local entries = {}
+    for quoted in tostring(body or ""):gmatch("[\"']([^\"']+)[\"']") do
+      entries[#entries + 1] = quoted
+    end
+    if #entries > 0 then named_tables[table_var] = entries end
+  end
+  for source_table, entries in pairs(named_tables) do
+    local indexed_pattern = "([%a_][%w_]*)%s*%[%s*i%s*%]%s*="
+    if lowered:find("ipairs%s*%(%s*" .. source_table .. "%s*%)")
+        or lowered:find("for%s+[%a_][%w_]*%s*=%s*1%s*,%s*#%s*"
+          .. source_table) then
+      for target_table in lowered:gmatch(indexed_pattern) do
+        for idx, quoted in ipairs(entries) do
+          local role = role_for_text(quoted)
+          if role then
+            add_alias(role, target_table .. "[" .. tostring(idx) .. "]")
+          end
+        end
+      end
+    end
+  end
+  for names_var, entries in pairs(named_tables) do
+    local direct_pat =
+      "getsetmediatrackinfo_string%s*%(%s*([%a_][%w_]*)%[%s*([%a_][%w_]*)%s*%]%s*,%s*[\"']p_name[\"']%s*,%s*"
+      .. names_var .. "%[%s*([%a_][%w_]*)%s*%]"
+    for track_table, track_idx_var, name_idx_var in lowered:gmatch(direct_pat) do
+      if track_idx_var == name_idx_var then
+        for idx, quoted in ipairs(entries) do
+          local role = role_for_text(quoted)
+          if role then
+            add_alias(role, track_table .. "[" .. tostring(idx) .. "]")
+          end
+        end
+      end
+    end
+    local offset_pat =
+      "getsetmediatrackinfo_string%s*%(%s*([%a_][%w_]*)%[%s*([%a_][%w_]*)%s*%]%s*,%s*[\"']p_name[\"']%s*,%s*"
+      .. names_var .. "%[%s*([%a_][%w_]*)%s*%+%s*1%s*%]"
+    for track_table, track_idx_var, name_idx_var in lowered:gmatch(offset_pat) do
+      if track_idx_var == name_idx_var then
+        for idx, quoted in ipairs(entries) do
+          local role = role_for_text(quoted)
+          if role then
+            add_alias(role, track_table .. "[" .. tostring(idx - 1) .. "]")
+          end
+        end
+      end
+    end
+  end
   local function expr_matches_role(expr, role)
     expr = tostring(expr or ""):lower()
     if not explicit and expr:find(role, 1, true) then return true end
@@ -7561,21 +8584,81 @@ function Code.lua_satisfies_sidechain_ducking_send(lua_code, user_text)
     end
     return false
   end
-  local send_count = 0
-  local exact_send = false
-  for src, dst in lowered:gmatch(
-      "reaper%.createtracksend%s*%(%s*([^,%)]-)%s*,%s*([^%)]+)%)") do
-    send_count = send_count + 1
-    if explicit then
-      if expr_matches_role(src, "source") and expr_matches_role(dst, "dest") then
-        exact_send = true
+  for _ = 1, 3 do
+    for lhs, rhs in lowered:gmatch(
+        "local%s+([%a_][%w_]*)%s*=%s*([^\n]+)") do
+      if explicit then
+        for i = 1, #explicit_sources do
+          local role = "source" .. tostring(i)
+          if expr_matches_role(rhs, role) then add_alias(role, lhs) end
+        end
+        if expr_matches_role(rhs, "dest") then add_alias("dest", lhs) end
+      else
+        if expr_matches_role(rhs, "kick") then add_alias("kick", lhs) end
+        if expr_matches_role(rhs, "bass") then add_alias("bass", lhs) end
       end
-    elseif expr_matches_role(src, "kick") and expr_matches_role(dst, "bass") then
-      return true
     end
   end
-  if explicit then return exact_send and send_count == 1 end
-  return false
+  local send_count = 0
+  local exact_send = false
+  local explicit_matches = {}
+  local function note_send(src, dst)
+    send_count = send_count + 1
+    if explicit then
+      for i = 1, #explicit_sources do
+        local role = "source" .. tostring(i)
+        if expr_matches_role(src, role) and expr_matches_role(dst, "dest") then
+          explicit_matches[role] = true
+        end
+      end
+    elseif expr_matches_role(src, "kick") and expr_matches_role(dst, "bass") then
+      exact_send = true
+    end
+  end
+  for src, dst in lowered:gmatch(
+      "reaper%.createtracksend%s*%(%s*([^,%)]-)%s*,%s*([^%)]+)%)") do
+    note_send(src, dst)
+  end
+  local send_helpers = {}
+  local function local_function_body(start_pos)
+    local depth = 1
+    local pos = start_pos
+    while true do
+      local s, e, word = lowered:find("([%a_][%w_]*)", pos)
+      if not s then return lowered:sub(start_pos) end
+      if word == "function" or word == "do" or word == "then" then
+        depth = depth + 1
+      elseif word == "end" then
+        depth = depth - 1
+        if depth == 0 then return lowered:sub(start_pos, s - 1) end
+      end
+      pos = e + 1
+    end
+  end
+  local helper_pos = 1
+  while true do
+    local s, e, fname = lowered:find(
+      "local%s+function%s+([%a_][%w_]*)%s*%b()%s*", helper_pos)
+    if not s then break end
+    local body = local_function_body(e + 1)
+    if body:find("reaper%.createtracksend%s*%(") then
+      send_helpers[fname] = true
+    end
+    helper_pos = e + 1
+  end
+  for fname, args in lowered:gmatch("([%a_][%w_]*)%s*%(([^%)]*)%)") do
+    if send_helpers[fname] then
+      local src, dst = tostring(args or ""):match("^%s*([^,]+)%s*,%s*([^,]+)")
+      if src and dst then note_send(src, dst) end
+    end
+  end
+  if explicit then
+    for i = 1, #explicit_sources do
+      if not explicit_matches["source" .. tostring(i)] then return false end
+    end
+    return #explicit_sources > 0
+  end
+  return exact_send
 end
 
 function Code.prompt_requests_podcast_bus_all_sources(user_text)
@@ -8099,6 +9182,136 @@ function Code.find_literal_midi_insertnote_ppq_misuse(lua_code, user_text)
   return findings
 end
 
+function Code.find_midi_insertnote_project_time_variable_misuse(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  if not Code.prompt_requests_new_midi_content(user_text) then return nil end
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  if not stripped:find("reaper%.MIDI_InsertNote%s*%(") then return nil end
+  if stripped:find("reaper%.MIDI_GetPPQPosFromProjTime%s*%(")
+     or stripped:find("reaper%.MIDI_GetPPQPosFromProjQN%s*%(") then
+    return nil
+  end
+
+  local function trim(v)
+    return tostring(v or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  end
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+  local function parse_args(open_pos)
+    local args, field = {}, {}
+    local depth = 1
+    local i = open_pos + 1
+    local in_str = nil
+    while i <= #stripped do
+      local c = stripped:sub(i, i)
+      if in_str then
+        field[#field + 1] = c
+        if c == "\\" then
+          i = i + 1
+          if i <= #stripped then field[#field + 1] = stripped:sub(i, i) end
+        elseif c == in_str then
+          in_str = nil
+        end
+      else
+        if c == '"' or c == "'" then
+          in_str = c
+          field[#field + 1] = c
+        elseif c == "(" or c == "[" or c == "{" then
+          depth = depth + 1
+          field[#field + 1] = c
+        elseif c == ")" or c == "]" or c == "}" then
+          depth = depth - 1
+          if depth == 0 then
+            args[#args + 1] = trim(table.concat(field))
+            return args
+          end
+          field[#field + 1] = c
+        elseif c == "," and depth == 1 then
+          args[#args + 1] = trim(table.concat(field))
+          field = {}
+        else
+          field[#field + 1] = c
+        end
+      end
+      i = i + 1
+    end
+    return nil
+  end
+
+  local assignments = {}
+  for line in stripped:gmatch("[^\r\n]+") do
+    local var, expr =
+      line:match("^%s*local%s+([%a_][%w_]*)%s*=%s*(.-)%s*$")
+    if not var then
+      var, expr = line:match("^%s*([%a_][%w_]*)%s*=%s*(.-)%s*$")
+    end
+    if var and expr and not expr:find("^%s*function%f[%W]") then
+      assignments[var] = trim(expr)
+    end
+  end
+
+  local function has_ppq_hint(expr)
+    local le = tostring(expr or ""):lower()
+    return le:find("ppq", 1, true) ~= nil
+      or le:find("tick", 1, true) ~= nil
+      or le:find("midi_getppq", 1, true) ~= nil
+      or le:find("%f[%w]qn%f[%W]") ~= nil
+  end
+  local function has_project_time_hint(expr)
+    local le = tostring(expr or ""):lower()
+    return le:find("time", 1, true) ~= nil
+      or le:find("sec", 1, true) ~= nil
+      or le:find("proj", 1, true) ~= nil
+      or le:find("beat", 1, true) ~= nil
+      or le:find("quarter", 1, true) ~= nil
+      or le:find("eighth", 1, true) ~= nil
+      or le:find("%f[%w]bar%f[%W]") ~= nil
+      or le:find("measure", 1, true) ~= nil
+  end
+  local function suspicious_project_time_expr(expr, seen)
+    expr = trim(expr)
+    if expr == "" or has_ppq_hint(expr) then return false end
+    local n = tonumber(expr)
+    if n then return n >= 0 and n <= 32 end
+    if has_project_time_hint(expr) then return true end
+    seen = seen or {}
+    for name in expr:gmatch("%f[%a_][%a_][%w_]*%f[^%w_]") do
+      if not seen[name] and assignments[name] then
+        seen[name] = true
+        if suspicious_project_time_expr(assignments[name], seen) then
+          return true
+        end
+      end
+    end
+    return false
+  end
+
+  local findings = {}
+  local pos = 1
+  while true do
+    local s, open_pos = stripped:find("reaper%.MIDI_InsertNote%s*%(", pos)
+    if not s then break end
+    local args = parse_args(open_pos)
+    if args and args[4] and args[5]
+        and (suspicious_project_time_expr(args[4])
+          or suspicious_project_time_expr(args[5])) then
+      findings[#findings + 1] = {
+        line = line_for_pos(s),
+        start_arg = args[4],
+        end_arg = args[5],
+      }
+    end
+    pos = open_pos + 1
+  end
+  if #findings == 0 then return nil end
+  return findings
+end
+
 function Code.find_midi_insertnote_table_pitch_misuse(lua_code, user_text)
   if not lua_code or lua_code == "" then return nil end
   if not (Code.prompt_requests_new_midi_content(user_text)
@@ -8238,6 +9451,452 @@ function Code.find_midi_insertnote_table_pitch_misuse(lua_code, user_text)
   return findings
 end
 
+function Code.find_kick_midi_wrong_pitch_misuse(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  local prompt = tostring(user_text or ""):lower()
+  if prompt == "" then return nil end
+  if not prompt:find("%f[%w]kick%f[%W]") then return nil end
+  if prompt:find("%f[%w]snare%f[%W]")
+      or prompt:find("%f[%w]hat%f[%W]")
+      or prompt:find("%f[%w]hihat%f[%W]")
+      or prompt:find("%f[%w]hi%-hat%f[%W]")
+      or prompt:find("%f[%w]tom%f[%W]")
+      or prompt:find("%f[%w]cymbal%f[%W]") then
+    return nil
+  end
+  local explicit_named_note = prompt:find("%f[%w]c%d%f[%W]") ~= nil
+  local explicit_c2_kick =
+    explicit_named_note
+    and prompt:find("%f[%w]c2%f[%W]") ~= nil
+    and (prompt:find("%f[%w]kick%s+notes?%f[%W]")
+      or prompt:find("%f[%w]kick%s+midi%f[%W]")
+      or prompt:find("%f[%w]kick%s+pattern%f[%W]")
+      or prompt:find("%f[%w]kick%s+trigger%f[%W]"))
+  if prompt:find("%f[%w]pitch%s+%d")
+      or prompt:find("%f[%w]note%s+%d")
+      or prompt:find("%f[%w]pitches%f[%W]")
+      or (explicit_named_note and not explicit_c2_kick) then
+    return nil
+  end
+  if not (prompt:find("%f[%w]midi%f[%W]")
+      or prompt:find("%f[%w]pattern%f[%W]")
+      or prompt:find("%f[%w]notes?%f[%W]")) then
+    return nil
+  end
+
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  if not stripped:find("reaper%.MIDI_InsertNote%s*%(") then return nil end
+
+  local function trim(v)
+    return tostring(v or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  end
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+  local function parse_args(open_pos)
+    local args, field = {}, {}
+    local depth = 1
+    local i = open_pos + 1
+    local in_str = nil
+    while i <= #stripped do
+      local c = stripped:sub(i, i)
+      if in_str then
+        field[#field + 1] = c
+        if c == "\\" then
+          i = i + 1
+          if i <= #stripped then field[#field + 1] = stripped:sub(i, i) end
+        elseif c == in_str then
+          in_str = nil
+        end
+      else
+        if c == '"' or c == "'" then
+          in_str = c
+          field[#field + 1] = c
+        elseif c == "(" or c == "[" or c == "{" then
+          depth = depth + 1
+          field[#field + 1] = c
+        elseif c == ")" or c == "]" or c == "}" then
+          depth = depth - 1
+          if depth == 0 then
+            args[#args + 1] = trim(table.concat(field))
+            return args
+          end
+          field[#field + 1] = c
+        elseif c == "," and depth == 1 then
+          args[#args + 1] = trim(table.concat(field))
+          field = {}
+        else
+          field[#field + 1] = c
+        end
+      end
+      i = i + 1
+    end
+    return nil
+  end
+
+  local assignments = {}
+  for line in stripped:gmatch("[^\r\n]+") do
+    local var, expr =
+      line:match("^%s*local%s+([%a_][%w_]*)%s*=%s*(.-)%s*$")
+    if not var then
+      var, expr = line:match("^%s*([%a_][%w_]*)%s*=%s*(.-)%s*$")
+    end
+    if var and expr and not expr:find("^%s*function%f[%W]") then
+      assignments[var] = trim(expr)
+    end
+  end
+
+  local function eval_num(expr, seen)
+    expr = trim(expr)
+    local n = tonumber(expr)
+    if n then return n end
+    local compact = expr:gsub("%s+", "")
+    local a, op, b = compact:match("^(%d+)([%+%-])(%d+)$")
+    if a and op and b then
+      a, b = tonumber(a), tonumber(b)
+      return op == "+" and (a + b) or (a - b)
+    end
+    a, b = compact:match("^(%d+)%*(%d+)$")
+    if a and b then return tonumber(a) * tonumber(b) end
+    if assignments[expr] and not (seen and seen[expr]) then
+      seen = seen or {}
+      seen[expr] = true
+      return eval_num(assignments[expr], seen)
+    end
+    return nil
+  end
+
+  local findings = {}
+  local pos = 1
+  while true do
+    local s, open_pos = stripped:find("reaper%.MIDI_InsertNote%s*%(", pos)
+    if not s then break end
+    local args = parse_args(open_pos)
+    local pitch = args and eval_num(args[7])
+    if pitch and pitch ~= 36 then
+      findings[#findings + 1] = {
+        line = line_for_pos(s),
+        pitch = pitch,
+        pitch_arg = args[7],
+      }
+    end
+    pos = open_pos + 1
+  end
+  if #findings == 0 then return nil end
+  return findings
+end
+
+function Code.find_midi_named_note_octave_misuse(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  local prompt = tostring(user_text or ""):lower()
+  if prompt == "" then return nil end
+  local compact_prompt = prompt:gsub("%s+", "")
+  local wants_c4_triad =
+    compact_prompt:find("c4/e4/g4", 1, true) ~= nil
+    or (prompt:find("%f[%w]c4%f[%W]")
+      and prompt:find("%f[%w]e4%f[%W]")
+      and prompt:find("%f[%w]g4%f[%W]"))
+    or (prompt:find("%f[%w]c4%f[%W]")
+      and prompt:find("%f[%w]major%s+triad%f[%W]"))
+    or (prompt:find("%f[%w]60%f[%W]")
+      and prompt:find("%f[%w]64%f[%W]")
+      and prompt:find("%f[%w]67%f[%W]"))
+  if not wants_c4_triad then return nil end
+  if not (Code.prompt_requests_new_midi_content(user_text)
+      or Code.prompt_implies_midi_generation(user_text)) then
+    return nil
+  end
+
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  if not stripped:find("reaper%.MIDI_InsertNote%s*%(") then return nil end
+
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+  local wrong, right, findings = {}, {}, {}
+  local expected_wrong = { [48] = "C4", [52] = "E4", [55] = "G4" }
+  local expected_right = { [60] = true, [64] = true, [67] = true }
+  local pos = 1
+  while true do
+    local s, e, pitch = stripped:find("%f[%w_]pitch%f[^%w_]%s*=%s*(%d+)", pos)
+    if not s then break end
+    pitch = tonumber(pitch)
+    if expected_wrong[pitch] then
+      wrong[pitch] = true
+      findings[#findings + 1] = {
+        line = line_for_pos(s),
+        pitch = pitch,
+        expected = expected_wrong[pitch],
+      }
+    elseif expected_right[pitch] then
+      right[pitch] = true
+    end
+    pos = e + 1
+  end
+
+  if not (wrong[48] and wrong[52] and wrong[55]) then return nil end
+  if right[60] and right[64] and right[67] then return nil end
+  return findings
+end
+
+function Code.find_midi_seconds_as_qn_offset_misuse(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  if not Code.prompt_requests_new_midi_content(user_text) then return nil end
+  local prompt_l = tostring(user_text or ""):lower():gsub("%s+", " ")
+  local timing_request =
+       prompt_l:find("next eighth", 1, true) ~= nil
+    or prompt_l:find("every eighth", 1, true) ~= nil
+    or prompt_l:find("eighth notes", 1, true) ~= nil
+    or prompt_l:find("eighth-note", 1, true) ~= nil
+    or prompt_l:find("8th note", 1, true) ~= nil
+    or prompt_l:find(" bpm", 1, true) ~= nil
+    or prompt_l:find("%f[%w]%d+%s*bpm%f[%W]") ~= nil
+  if not timing_request then return nil end
+
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  if not stripped:find("reaper%.MIDI_InsertNote%s*%(")
+     or not stripped:find("reaper%.MIDI_GetPPQPosFromProjQN%s*%(")
+     or not stripped:find("reaper%.TimeMap2_timeToQN%s*%(") then
+    return nil
+  end
+
+  local lines, assigns = {}, {}
+  local seconds_vars, qn_offset_vars = {}, {}
+  local line_no = 0
+  for line in (stripped .. "\n"):gmatch("([^\n]*)\n") do
+    line_no = line_no + 1
+    lines[line_no] = line
+    local var, rhs = line:match("^%s*local%s+([%a_][%w_]*)%s*=%s*(.-)%s*$")
+    if not var then
+      var, rhs = line:match("^%s*([%a_][%w_]*)%s*=%s*(.-)%s*$")
+    end
+    if var and rhs then
+      assigns[#assigns + 1] = { line = line_no, var = var, rhs = rhs }
+      local compact_rhs = rhs:gsub("%s+", "")
+      local lname = var:lower()
+      if compact_rhs:find("^60/[%a_][%w_]*$")
+          or compact_rhs:find("^60/%d+%.?%d*$") then
+        if lname:find("qn", 1, true)
+            or lname:find("quarter", 1, true)
+            or lname:find("beat", 1, true)
+            or compact_rhs:find("bpm", 1, true)
+            or compact_rhs:find("tempo", 1, true) then
+          seconds_vars[var] = line_no
+        end
+      end
+    end
+  end
+  if not next(seconds_vars) then return nil end
+
+  local changed = true
+  while changed do
+    changed = false
+    for _, assign in ipairs(assigns) do
+      local compact_rhs = assign.rhs:gsub("%s+", "")
+      local lname = assign.var:lower()
+      for svar in pairs(seconds_vars) do
+        if compact_rhs == svar .. "/2"
+            or compact_rhs:find(svar .. "/2", 1, true) then
+          if not seconds_vars[assign.var] then
+            seconds_vars[assign.var] = assign.line
+            changed = true
+          end
+        end
+      end
+      for svar in pairs(seconds_vars) do
+        if compact_rhs:find(svar, 1, true)
+            and (compact_rhs:find("%*", 1, false)
+              or compact_rhs:find("%+", 1, false)
+              or compact_rhs:find("%-", 1, false)) then
+          if lname:find("qn", 1, true)
+              or lname:find("start", 1, true)
+              or lname:find("pos", 1, true)
+              or lname:find("offset", 1, true) then
+            if not qn_offset_vars[assign.var] then
+              qn_offset_vars[assign.var] = assign.line
+              changed = true
+            end
+          end
+        end
+      end
+      for qvar in pairs(qn_offset_vars) do
+        if compact_rhs:find(qvar, 1, true) then
+          if lname:find("qn", 1, true)
+              or lname:find("start", 1, true)
+              or lname:find("pos", 1, true)
+              or lname:find("offset", 1, true)
+              or lname:find("ppq", 1, true) then
+            if not qn_offset_vars[assign.var] then
+              qn_offset_vars[assign.var] = assign.line
+              changed = true
+            end
+          end
+        end
+      end
+    end
+  end
+  if not next(qn_offset_vars) then return nil end
+
+  local findings = {}
+  for i, line in ipairs(lines) do
+    if line:find("reaper%.MIDI_GetPPQPosFromProjQN%s*%(") then
+      for qvar in pairs(qn_offset_vars) do
+        if line:find(qvar, 1, true) then
+          findings[#findings + 1] = {
+            line = i,
+            variable = qvar,
+          }
+          break
+        end
+      end
+    end
+  end
+  if #findings == 0 then return nil end
+  return findings
+end
+
+function Code.find_midi_eighth_spacing_misuse(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  if not (Code.prompt_requests_new_midi_content(user_text)
+      or Code.prompt_implies_midi_generation(user_text)) then
+    return nil
+  end
+  local prompt_l = tostring(user_text or ""):lower():gsub("%s+", " ")
+  local wants_eighth_spacing =
+       prompt_l:find("next eighth", 1, true) ~= nil
+    or prompt_l:find("every eighth", 1, true) ~= nil
+    or prompt_l:find("eighth notes", 1, true) ~= nil
+    or prompt_l:find("eighth-note", 1, true) ~= nil
+    or prompt_l:find("eighths", 1, true) ~= nil
+    or prompt_l:find("off-eighth", 1, true) ~= nil
+    or prompt_l:find("spaced as eighth", 1, true) ~= nil
+    or prompt_l:find("8th note", 1, true) ~= nil
+    or prompt_l:find("8th-note", 1, true) ~= nil
+  if not wants_eighth_spacing then return nil end
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  if not stripped:find("reaper%.MIDI_InsertNote%s*%(") then return nil end
+
+  if stripped:find("reaper%.MIDI_GetPPQPosFromProjTime%s*%(") then
+    local bpm = tonumber(prompt_l:match("(%d+%.?%d*)%s*bpm"))
+    if not bpm then
+      bpm = tonumber(stripped:match("SetCurrentBPM%s*%(%s*[^,]+,%s*(%d+%.?%d*)"))
+        or tonumber(stripped:match("local%s+bpm%s*=%s*(%d+%.?%d*)"))
+    end
+    if bpm and bpm > 0 then
+      local expected_eighth_seconds = 30 / bpm
+      local findings = {}
+      for var, body in stripped:gmatch("local%s+([%a_][%w_]*)%s*=%s*{%s*([^{}]-)%s*}") do
+        local lname = var:lower()
+        if lname:find("start", 1, true)
+           or lname:find("time", 1, true)
+           or lname:find("pos", 1, true) then
+          local nums = {}
+          for raw in body:gmatch("%f[%d%-]%-?%d+%.?%d*") do
+            nums[#nums + 1] = tonumber(raw)
+          end
+          if #nums >= 2 then
+            local step = nums[2] - nums[1]
+            if math.abs(step - 0.5) <= 0.001
+               and math.abs(step - expected_eighth_seconds) > 0.04 then
+              findings[#findings + 1] = {
+                variable = var,
+                step_seconds = step,
+                expected_seconds = expected_eighth_seconds,
+                bpm = bpm,
+              }
+            end
+          end
+        end
+      end
+      if #findings > 0 then return findings end
+    end
+  end
+
+  local quarter_vars, eighth_vars, loop_vars = {}, {}, {}
+  for var in stripped:gmatch("([%a_][%w_]*)%s*=") do
+    local lname = var:lower()
+    if lname:find("ppq", 1, true) then
+      if lname:find("qn", 1, true)
+          or lname:find("quarter", 1, true)
+          or lname == "ppq_per_beat"
+          or lname == "beat_ppq" then
+        quarter_vars[var] = true
+      end
+      if lname:find("en", 1, true)
+          or lname:find("eighth", 1, true)
+          or lname:find("eight", 1, true) then
+        eighth_vars[var] = true
+      end
+    end
+  end
+  if not next(quarter_vars) or not next(eighth_vars) then return nil end
+
+  for idx in stripped:gmatch("for%s+([%a_][%w_]*)%s*=%s*[^,%s]+%s*,") do
+    loop_vars[idx] = true
+  end
+  for idx in stripped:gmatch("for%s+([%a_][%w_]*)%s*,%s*[%a_][%w_]*%s+in%s+ipairs%s*%(") do
+    loop_vars[idx] = true
+  end
+  if not next(loop_vars) then return nil end
+
+  local function count_plain(haystack, needle)
+    local count, pos = 0, 1
+    while true do
+      local s, e = haystack:find(needle, pos, true)
+      if not s then break end
+      count = count + 1
+      pos = e + 1
+    end
+    return count
+  end
+  local eighth_var_used = false
+  for evar in pairs(eighth_vars) do
+    if count_plain(stripped, evar) >= 2 then
+      eighth_var_used = true
+      break
+    end
+  end
+  if not eighth_var_used then return nil end
+
+  local findings, line_no = {}, 0
+  for line in (stripped .. "\n"):gmatch("([^\n]*)\n") do
+    line_no = line_no + 1
+    local line_l = line:lower()
+    local looks_like_note_start =
+      line_l:find("pos", 1, true)
+      or line_l:find("start", 1, true)
+      or line:find("reaper%.MIDI_InsertNote%s*%(")
+    if looks_like_note_start then
+      for idx in pairs(loop_vars) do
+        for qvar in pairs(quarter_vars) do
+          if line:find(idx .. "%s*%*%s*" .. qvar)
+              or line:find(qvar .. "%s*%*%s*" .. idx) then
+            findings[#findings + 1] = {
+              line = line_no,
+              loop_var = idx,
+              quarter_var = qvar,
+            }
+          end
+        end
+      end
+    end
+  end
+  if #findings == 0 then return nil end
+  return findings
+end
+
 function Code.find_create_new_midi_item_bad_track_arg(lua_code, user_text)
   if not lua_code or lua_code == "" then return nil end
   if not Code.prompt_requests_new_midi_content(user_text) then return nil end
@@ -8258,6 +9917,59 @@ function Code.find_create_new_midi_item_bad_track_arg(lua_code, user_text)
     arg1 = tostring(arg1 or ""):gsub("^%s+", ""):gsub("%s+$", "")
     if arg1 == "0" or arg1 == "nil" or arg1 == "false" or arg1 == "true" then
       findings[#findings + 1] = { line = line_for_pos(s), arg = arg1 }
+    end
+    pos = e + 1
+  end
+  if #findings == 0 then return nil end
+  return findings
+end
+
+function Code.find_takeismidi_media_item_arg(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  if not Code.prompt_requests_new_midi_content(user_text) then return nil end
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  local media_item_vars = {}
+  local function remember_item_var(var)
+    var = tostring(var or ""):match("^%s*([%a_][%w_]*)%s*$")
+    if var then media_item_vars[var] = true end
+  end
+  for var in stripped:gmatch(
+      "local%s+([%a_][%w_]*)%s*=%s*reaper%.CreateNewMIDIItemInProj%s*%(") do
+    remember_item_var(var)
+  end
+  for var in stripped:gmatch(
+      "\n%s*([%a_][%w_]*)%s*=%s*reaper%.CreateNewMIDIItemInProj%s*%(") do
+    remember_item_var(var)
+  end
+  for var, callee in stripped:gmatch(
+      "local%s+([%a_][%w_]*)%s*=%s*([%a_][%w_]*)%s*%(") do
+    if tostring(callee or ""):lower():find("midiitem", 1, true) then
+      remember_item_var(var)
+    end
+  end
+  local findings = {}
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+  local pos = 1
+  while true do
+    local s, e, arg = stripped:find(
+      "reaper%.TakeIsMIDI%s*%(%s*([%a_][%w_]*)%s*%)", pos)
+    if not s then break end
+    local lower_arg = tostring(arg or ""):lower()
+    local looks_like_item =
+      media_item_vars[arg]
+      or (lower_arg:find("item", 1, true)
+        and not lower_arg:find("take", 1, true))
+    if looks_like_item then
+      findings[#findings + 1] = {
+        line = line_for_pos(s),
+        arg = arg,
+      }
     end
     pos = e + 1
   end
@@ -8361,7 +10073,6 @@ function Code.prompt_requests_track_duplication(user_text)
     "duplicate", "duplicates", "duplicated", "duplicating",
     "clone", "clones", "cloned", "cloning",
     "copy", "copies", "copied", "copying",
-    "double", "doubles", "doubled", "doubling",
   }
   local objects = {
     "track", "tracks", "bus", "buses", "folder", "folders",
@@ -8405,6 +10116,31 @@ function Code.prompt_requests_track_duplication(user_text)
       if count >= 4 then return false end
     end
     return false
+  end
+
+  local double_track_patterns = {
+    "%f[%w]double%s+the%s+([%w_]+)%f[%W]",
+    "%f[%w]double%s+this%s+([%w_]+)%f[%W]",
+    "%f[%w]double%s+that%s+([%w_]+)%f[%W]",
+    "%f[%w]double%s+my%s+([%w_]+)%f[%W]",
+    "%f[%w]double%s+the%s+selected%s+([%w_]+)%f[%W]",
+    "%f[%w]double%s+the%s+current%s+([%w_]+)%f[%W]",
+    "%f[%w]double%s+the%s+existing%s+([%w_]+)%f[%W]",
+    "%f[%w]double%s+selected%s+([%w_]+)%f[%W]",
+    "%f[%w]double%s+current%s+([%w_]+)%f[%W]",
+    "%f[%w]double%s+existing%s+([%w_]+)%f[%W]",
+    "%f[%w]doubled%s+the%s+selected%s+([%w_]+)%f[%W]",
+    "%f[%w]doubling%s+the%s+selected%s+([%w_]+)%f[%W]",
+    "%f[%w]doubled%s+the%s+([%w_]+)%f[%W]",
+    "%f[%w]doubling%s+the%s+([%w_]+)%f[%W]",
+  }
+  for _, pat in ipairs(double_track_patterns) do
+    local target = lt:match(pat)
+    if target then
+      for _, object in ipairs(objects) do
+        if target == object then return true end
+      end
+    end
   end
 
   for _, verb in ipairs(verbs) do
@@ -9023,6 +10759,7 @@ function Code.find_track_creation_index_misuse(lua_code, user_text, snapshot)
   local active_ensure_count = nil
   local ensure_counted = false
   local counttracks_vars = {}
+  local counttracks_append_vars = {}
   for line in lua_code:gmatch("[^\r\n]+") do
     line_no = line_no + 1
     local ensure_count = line:match(
@@ -9056,14 +10793,28 @@ function Code.find_track_creation_index_misuse(lua_code, user_text, snapshot)
     end
     local insert_idx =
       tonumber(line:match("reaper%.InsertTrackAtIndex%s*%(%s*(%d+)%s*,"))
+    local handled_insert = false
     if insert_idx then
       track_count = track_count + 1
-    elseif active_loop and not active_loop.counted_insert
+      handled_insert = true
+    else
+      local insert_var = line:match(
+        "reaper%.InsertTrackAtIndex%s*%(%s*([%a_][%w_]*)%s*,")
+      local known_count = insert_var and counttracks_vars[insert_var]
+      if known_count then
+        track_count = math.max(track_count, known_count + 1)
+        counttracks_append_vars[insert_var] = true
+        handled_insert = true
+      end
+    end
+    if not handled_insert
+        and active_loop and not active_loop.counted_insert
         and active_loop.first and active_loop.last
         and line:find("reaper%.InsertTrackAtIndex%s*%(%s*reaper%.CountTracks%s*%(%s*0%s*%)%s*,") then
       track_count = track_count + math.abs(active_loop.last - active_loop.first) + 1
       active_loop.counted_insert = true
-    elseif active_loop and not active_loop.counted_insert
+    elseif not handled_insert
+        and active_loop and not active_loop.counted_insert
         and active_loop.first and active_loop.last
         and (line:find("reaper%.InsertTrackAtIndex%s*%(%s*"
           .. active_loop.var .. "%s*,")
@@ -9071,13 +10822,15 @@ function Code.find_track_creation_index_misuse(lua_code, user_text, snapshot)
             .. active_loop.var .. "%s*[%+%-]%s*%d+%s*,")) then
       track_count = track_count + math.abs(active_loop.last - active_loop.first) + 1
       active_loop.counted_insert = true
-    elseif active_ensure_count and not ensure_counted
+    elseif not handled_insert
+        and active_ensure_count and not ensure_counted
         and line:find("reaper%.InsertTrackAtIndex%s*%(%s*reaper%.CountTracks%s*%(%s*0%s*%)%s*,") then
       if active_ensure_count > track_count then
         track_count = active_ensure_count
       end
       ensure_counted = true
-    elseif line:find("reaper%.InsertTrackAtIndex%s*%(%s*reaper%.CountTracks%s*%(%s*0%s*%)%s*,") then
+    elseif not handled_insert
+        and line:find("reaper%.InsertTrackAtIndex%s*%(%s*reaper%.CountTracks%s*%(%s*0%s*%)%s*,") then
       track_count = track_count + 1
     end
     local count_var = line:match(
@@ -9104,7 +10857,8 @@ function Code.find_track_creation_index_misuse(lua_code, user_text, snapshot)
     for var in line:gmatch(
         "reaper%.GetTrack%s*%(%s*0%s*,%s*([%a_][%w_]*)%s*%)") do
       local known_count = counttracks_vars[var]
-      if known_count and known_count > 0 then
+      if known_count and known_count > 0
+          and not counttracks_append_vars[var] then
         violations[#violations + 1] = {
           line = line_no,
           api_idx = var,
@@ -9302,8 +11056,16 @@ function Code.find_folder_child_boundary_misuse(lua_code, user_text)
     end
   end
 
-  local child_text, parent_text =
-    lt:match("make%s+(.+)%s+children%s+of%s+([^%.]+)")
+  local exact_child_only_prompt = false
+  local parent_text, child_text = lt:match(
+    "([%w%s%-%_']+%s+folder)%s+should%s+contain%s+([^%.%?]+)%s+only")
+  if parent_text and child_text then
+    exact_child_only_prompt = true
+  end
+  if not child_text or not parent_text then
+    child_text, parent_text =
+      lt:match("make%s+(.+)%s+children%s+of%s+([^%.]+)")
+  end
   if not child_text or not parent_text then
     parent_text, child_text = lt:match(
       "folder%s+named%s+([^%.%?]+)%s+with%s+(.+)%s+inside")
@@ -9319,6 +11081,9 @@ function Code.find_folder_child_boundary_misuse(lua_code, user_text)
   local nested_folder_prompt =
     lt:find("%f[%w]nested%f[%W]") ~= nil
     or lt:find("folder%s+containing%s+.-folder%s+with") ~= nil
+    or lt:find("folder%s+should%s+contain%s+.-folder", 1) ~= nil
+    or (select(2, lt:gsub("folder%s+should%s+contain", ""))
+      and select(2, lt:gsub("folder%s+should%s+contain", "")) > 1)
   if not child_text or not parent_text then
     parent_text, child_text = lt:match(
       "inside%s+(.+)%s+folder%s+named%s+([^%.%?]+)")
@@ -9328,7 +11093,7 @@ function Code.find_folder_child_boundary_misuse(lua_code, user_text)
       "inside%s+(.+)%s+named%s+([^%.%?]+)")
   end
   if child_text then add_children_from_text(child_text) end
-  if nested_folder_prompt then return nil end
+  if nested_folder_prompt and not exact_child_only_prompt then return nil end
   local parent_from_user_text = parent_text ~= nil and parent_text ~= ""
 
   local ref_to_name = {}
@@ -9337,6 +11102,15 @@ function Code.find_folder_child_boundary_misuse(lua_code, user_text)
   local name_to_display = {}
   local string_vars = {}
   local string_var_display = {}
+  local function remember_ref_name(ref, display_name)
+    if not ref or not display_name then return end
+    local normalized_name = norm(display_name)
+    if normalized_name == "" then return end
+    ref_to_name[ref] = normalized_name
+    ref_to_display[ref] = clean_display(display_name)
+    name_to_ref[normalized_name] = ref
+    name_to_display[normalized_name] = clean_display(display_name)
+  end
   for var, value in lua_code:gmatch(
       "local%s+([%a_][%w_]*)%s*=%s*[\"']([^\"']+)[\"']") do
     string_vars[var] = norm(value)
@@ -9393,11 +11167,7 @@ function Code.find_folder_child_boundary_misuse(lua_code, user_text)
 
   for ref, name in lua_code:gmatch(
       "reaper%.GetSetMediaTrackInfo_String%s*%(%s*([%w_%.%[%]]+)%s*,%s*[\"']P_NAME[\"']%s*,%s*[\"']([^\"']+)[\"']") do
-    local normalized_name = norm(name)
-    ref_to_name[ref] = normalized_name
-    ref_to_display[ref] = clean_display(name)
-    name_to_ref[normalized_name] = ref
-    name_to_display[normalized_name] = clean_display(name)
+    remember_ref_name(ref, name)
   end
 
   for names_var, indexed_names in pairs(table_vars) do
@@ -9478,11 +11248,19 @@ function Code.find_folder_child_boundary_misuse(lua_code, user_text)
 
   if #children == 0 then return nil end
   local last_child = children[#children]
-  if not next(ref_to_name) and #loop_child_groups == 0 then return nil end
+  local has_quoted_depth_ref =
+    lua_code:find("I_FOLDERDEPTH", 1, true)
+    and lua_code:find("%[%s*[\"'][^\"']+[\"']%s*%]") ~= nil
+  if not next(ref_to_name)
+      and #loop_child_groups == 0
+      and not has_quoted_depth_ref then
+    return nil
+  end
 
   local negative_by_name = {}
   local positive_by_ref = {}
   local zero_by_ref = {}
+  local final_depth_by_ref = {}
   local any_negative_depth = false
   local line_no = 0
   for line in lua_code:gmatch("[^\r\n]+") do
@@ -9490,21 +11268,35 @@ function Code.find_folder_child_boundary_misuse(lua_code, user_text)
     local ref, depth = line:match(
       "reaper%.SetMediaTrackInfo_Value%s*%(%s*(.-)%s*,%s*[\"']I_FOLDERDEPTH[\"']%s*,%s*(-?%d+)")
     depth = tonumber(depth)
-    if ref and depth and depth < 0 then
+    if ref and not ref_to_name[ref] then
+      local quoted_key = ref:match("%[%s*[\"']([^\"']+)[\"']%s*%]")
+      if quoted_key then remember_ref_name(ref, quoted_key) end
+    end
+    if ref and depth then
+      final_depth_by_ref[ref] = {
+        line = line_no,
+        depth = depth,
+        ref = ref,
+      }
+    end
+  end
+  for ref, info in pairs(final_depth_by_ref) do
+    local depth = info.depth
+    if depth < 0 then
       any_negative_depth = true
       local name = ref_to_name[ref]
       if name then
         negative_by_name[name] = {
-          line = line_no,
+          line = info.line,
           depth = depth,
           ref = ref,
           display = ref_to_display[ref] or name,
         }
       end
-    elseif ref and depth and depth > 0 then
-      positive_by_ref[ref] = { line = line_no, depth = depth, ref = ref }
-    elseif ref and depth and depth == 0 then
-      zero_by_ref[ref] = { line = line_no, depth = depth, ref = ref }
+    elseif depth > 0 then
+      positive_by_ref[ref] = { line = info.line, depth = depth, ref = ref }
+    elseif depth == 0 then
+      zero_by_ref[ref] = { line = info.line, depth = depth, ref = ref }
     end
   end
   local last_child_close = negative_by_name[last_child]
@@ -9564,7 +11356,10 @@ function Code.find_folder_child_boundary_misuse(lua_code, user_text)
   end
 
   for name, info in pairs(negative_by_name) do
-    if not child_set[name] then
+    if not child_set[name]
+        and not (nested_folder_prompt
+          and exact_child_only_prompt
+          and last_child_close) then
       violations[#violations + 1] = {
         line = info.line,
         name = name,
@@ -10457,6 +12252,171 @@ function Code.find_unchecked_addbyname_results(lua_code)
     return a.name < b.name
   end)
   return violations
+end
+
+function Code.find_trackfx_addbyname_recfx_misuse(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  local prompt = tostring(user_text or ""):lower():gsub("[\226\128\153']", "'")
+  if prompt:find("%f[%w]input%s+fx%f[%W]")
+      or prompt:find("%f[%w]record%s+fx%f[%W]")
+      or prompt:find("%f[%w]rec%s+fx%f[%W]")
+      or prompt:find("%f[%w]monitor%s+fx%f[%W]")
+      or prompt:find("%f[%w]input%s+effect")
+      or prompt:find("%f[%w]record%s+effect") then
+    return nil
+  end
+
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  if not stripped:find("reaper%.TrackFX_AddByName%s*%(") then return nil end
+
+  local function trim(v)
+    return tostring(v or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  end
+  local function line_for_pos(pos)
+    local line = 1
+    for _ in stripped:sub(1, pos):gmatch("\n") do line = line + 1 end
+    return line
+  end
+  local function parse_args(open_pos)
+    local args, field = {}, {}
+    local depth = 1
+    local i = open_pos + 1
+    local in_str = nil
+    while i <= #stripped do
+      local c = stripped:sub(i, i)
+      if in_str then
+        field[#field + 1] = c
+        if c == "\\" then
+          i = i + 1
+          if i <= #stripped then field[#field + 1] = stripped:sub(i, i) end
+        elseif c == in_str then
+          in_str = nil
+        end
+      else
+        if c == '"' or c == "'" then
+          in_str = c
+          field[#field + 1] = c
+        elseif c == "(" or c == "[" or c == "{" then
+          depth = depth + 1
+          field[#field + 1] = c
+        elseif c == ")" or c == "]" or c == "}" then
+          depth = depth - 1
+          if depth == 0 then
+            args[#args + 1] = trim(table.concat(field))
+            return args
+          end
+          field[#field + 1] = c
+        elseif c == "," and depth == 1 then
+          args[#args + 1] = trim(table.concat(field))
+          field = {}
+        else
+          field[#field + 1] = c
+        end
+      end
+      i = i + 1
+    end
+    return nil
+  end
+  local function split_params(src)
+    local out = {}
+    for part in tostring(src or ""):gmatch("[^,]+") do
+      local name = trim(part):match("^([%a_][%w_]*)$")
+      if name then out[#out + 1] = name end
+    end
+    return out
+  end
+  local function truthy_literal(expr)
+    local compact = trim(expr):gsub("%s+", ""):lower()
+    return compact == "true"
+  end
+  local function expr_references_param_as_recfx(expr, param)
+    local e = trim(expr)
+    if e == param then return true end
+    local escaped = param:gsub("([^%w_])", "%%%1")
+    return e:find("%f[%w_]" .. escaped .. "%f[^%w_]%s*==%s*true") ~= nil
+      or e:find("true%s*==%s*%f[%w_]" .. escaped .. "%f[^%w_]") ~= nil
+  end
+
+  local findings, seen = {}, {}
+  local function add(kind, pos, detail)
+    local key = kind .. ":" .. tostring(pos) .. ":" .. tostring(detail or "")
+    if seen[key] then return end
+    seen[key] = true
+    findings[#findings + 1] = {
+      kind = kind,
+      line = line_for_pos(pos),
+      detail = detail,
+    }
+  end
+
+  local helper_params = {}
+  local search_pos = 1
+  while true do
+    local s, e, fname, params =
+      stripped:find("local%s+function%s+([%a_][%w_]*)%s*%(([^%)]*)%)", search_pos)
+    if not s then break end
+    local body_end = stripped:find("\n%s*end%f[%W]", e + 1) or #stripped
+    local body = stripped:sub(e + 1, body_end)
+    local params_list = split_params(params)
+    local body_base = e
+    local body_pos = 1
+    while true do
+      local _, call_open = body:find("reaper%.TrackFX_AddByName%s*%(", body_pos)
+      if not call_open then break end
+      local args = parse_args(body_base + call_open)
+      local recfx_expr = args and args[3] or nil
+      if recfx_expr then
+        for idx, param in ipairs(params_list) do
+          if expr_references_param_as_recfx(recfx_expr, param) then
+            helper_params[fname] = helper_params[fname] or {}
+            helper_params[fname][idx] = param
+          end
+        end
+      end
+      body_pos = call_open + 1
+    end
+    search_pos = e + 1
+  end
+
+  local pos = 1
+  while true do
+    local s, open_pos = stripped:find("reaper%.TrackFX_AddByName%s*%(", pos)
+    if not s then break end
+    local args = parse_args(open_pos)
+    if args and args[3] and truthy_literal(args[3]) then
+      add("direct_true", s, args[3])
+    end
+    pos = open_pos + 1
+  end
+
+  for fname, param_map in pairs(helper_params) do
+    local call_pos = 1
+    while true do
+      local s, open_pos = stripped:find("%f[%w_]" .. fname .. "%s*%(", call_pos)
+      if not s then break end
+      local before = stripped:sub(math.max(1, s - 20), s - 1)
+      if not before:find("function%s+$") then
+        local args = parse_args(open_pos)
+        if args then
+          for idx, param in pairs(param_map) do
+            if args[idx] and truthy_literal(args[idx]) then
+              add("helper_true", s, fname .. "." .. param)
+            end
+          end
+        end
+      end
+      call_pos = open_pos + 1
+    end
+  end
+
+  if #findings == 0 then return nil end
+  table.sort(findings, function(a, b)
+    if a.line ~= b.line then return a.line < b.line end
+    return tostring(a.kind) < tostring(b.kind)
+  end)
+  return findings
 end
 
 -- =============================================================================
@@ -11439,14 +13399,13 @@ end
 -- =============================================================================
 -- Code.find_helper_calls_without_definition
 -- =============================================================================
--- Behavioral validator for the prompt_bundle:plugin_helpers contract.
--- Helpers (find_param, set_param_display, set_param_enum, set_param_enum_paced)
--- are LOCAL FUNCTIONS, not REAPER built-ins. The model has seen them in
--- training data and CAN write the calls from memory without including the
--- function source -- which produces a runtime `attempt to call a nil value`
--- crash on the deferred tick. The plugin_helpers bundle exists so the model
--- has the source available; this validator catches the case where the call
--- is emitted without the source.
+-- Behavioral validator for helper calls that will compile as global lookups.
+-- The main target is the prompt_bundle:plugin_helpers contract: helpers
+-- (find_param, set_param_display, set_param_enum, set_param_enum_paced) are
+-- LOCAL FUNCTIONS, not REAPER built-ins. The model can write calls from memory
+-- without including the function source, producing a runtime `attempt to call
+-- a nil value` crash. Lower-tier models also invent ad-hoc helpers such as
+-- set_vol_for_send and forget to define them. Catch both shapes before auto-run.
 --
 -- Returns a sorted, deduplicated list of helper names that are CALLED but
 -- not DEFINED in the same script, or nil if every called helper has a
@@ -11456,6 +13415,14 @@ local _HELPER_NAMES = {
   set_param_display    = true,
   set_param_enum       = true,
   set_param_enum_paced = true,
+}
+
+local _HELPER_CALL_ALLOWED_GLOBALS = {
+  assert = true, collectgarbage = true, error = true, getmetatable = true,
+  ipairs = true, next = true, pairs = true, pcall = true, print = true,
+  rawequal = true, rawget = true, rawlen = true, rawset = true,
+  select = true, setmetatable = true, tonumber = true, tostring = true,
+  type = true, xpcall = true,
 }
 
 function Code.find_helper_calls_without_definition(lua_code)
@@ -11493,7 +13460,27 @@ function Code.find_helper_calls_without_definition(lua_code)
   -- matches don't trigger out-of-order -- they compare def_pos < their
   -- own call_pos.
   local violations, seen = {}, {}
-  for name in pairs(_HELPER_NAMES) do
+  local names_to_check = {}
+  for name in pairs(_HELPER_NAMES) do names_to_check[name] = true end
+
+  local function remember_candidate(name)
+    name = tostring(name or "")
+    if name == "" or _HELPER_CALL_ALLOWED_GLOBALS[name] then return end
+    if name:find("^reaper$") or name:find("^gfx$") then return end
+    local lname = name:lower()
+    if name ~= lname then return end
+    if name:find("_", 1, true) then
+      names_to_check[name] = true
+    end
+  end
+
+  for name in stripped:gmatch("[^%w_%.]([%a_][%w_]*)%s*%(") do
+    remember_candidate(name)
+  end
+  local leading = stripped:match("^%s*([%a_][%w_]*)%s*%(")
+  remember_candidate(leading)
+
+  for name in pairs(names_to_check) do
     local def_pos = nil
     local function _take_min(pat)
       local sp = stripped:find(pat)
@@ -11892,6 +13879,52 @@ function Code.filter_broad_fx_param_readout(user_text, response_text)
   return table.concat(out, "\n"):gsub("%s+$", ""), removed
 end
 
+function Code.find_unrequested_track_deletion(lua_code, user_text)
+  if not lua_code or lua_code == "" then return nil end
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  if not (stripped:find("reaper%.DeleteTrack%s*%(")
+      or stripped:find("reaper%.Main_OnCommand%s*%(%s*40005%s*,")
+      or stripped:find("reaper%.Main_OnCommand%s*%(%s*40006%s*,")
+      or stripped:find("reaper%.Main_OnCommandEx%s*%(%s*40005%s*,")
+      or stripped:find("reaper%.Main_OnCommandEx%s*%(%s*40006%s*,")) then
+    return nil
+  end
+
+  local prompt = tostring(user_text or ""):lower():gsub("%s+", " ")
+  local forbids_deletion =
+    prompt:find("do not delete", 1, true) ~= nil
+    or prompt:find("don't delete", 1, true) ~= nil
+    or prompt:find("without deleting", 1, true) ~= nil
+    or prompt:find("do not remove", 1, true) ~= nil
+    or prompt:find("don't remove", 1, true) ~= nil
+  local requested_track_deletion =
+    prompt:find("delete[^%.;]*tracks?", 1, false) ~= nil
+    or prompt:find("remove[^%.;]*tracks?", 1, false) ~= nil
+    or prompt:find("clear[^%.;]*tracks?", 1, false) ~= nil
+    or prompt:find("wipe[^%.;]*tracks?", 1, false) ~= nil
+    or prompt:find("clear the project", 1, true) ~= nil
+    or prompt:find("empty the project", 1, true) ~= nil
+    or prompt:find("start from scratch", 1, true) ~= nil
+    or prompt:find("replace existing tracks", 1, true) ~= nil
+    or prompt:find("rebuild the project", 1, true) ~= nil
+  if requested_track_deletion and not forbids_deletion then return nil end
+
+  local findings, line_no = {}, 0
+  for line in (stripped .. "\n"):gmatch("([^\n]*)\n") do
+    line_no = line_no + 1
+    if line:find("reaper%.DeleteTrack%s*%(")
+       or line:find("reaper%.Main_OnCommand%s*%(%s*40005%s*,")
+       or line:find("reaper%.Main_OnCommand%s*%(%s*40006%s*,")
+       or line:find("reaper%.Main_OnCommandEx%s*%(%s*40005%s*,")
+       or line:find("reaper%.Main_OnCommandEx%s*%(%s*40006%s*,") then
+      findings[#findings + 1] = { line = line_no }
+    end
+  end
+  return #findings > 0 and findings or nil
+end
+
 -- =============================================================================
 -- Code.scan_risky(code) -> warning_string or nil
 -- Scans a Lua code string for calls that could have side effects beyond the
@@ -11967,6 +14000,66 @@ do
       'reaper%s*%[%s*["\']CF_ShellExecute["\']%s*%]',
       'reaper%s*%[%s*["\']BR_Win32_ShellExecute["\']%s*%]',
     }},
+    { label = "destructive project/file API (review before running)", patterns = {
+      "reaper%.Main_SaveProject%s*%(",
+      "reaper%.Main_SaveProjectEx%s*%(",
+      "reaper%.Main_openProject%s*%(",
+      'reaper%s*%[%s*["\']Main_SaveProject["\']%s*%]%s*%(',
+      'reaper%s*%[%s*["\']Main_SaveProjectEx["\']%s*%]%s*%(',
+      'reaper%s*%[%s*["\']Main_openProject["\']%s*%]%s*%(',
+    }},
+    { label = "global REAPER config mutation (review before running)", patterns = {
+      "reaper%.SNM_Set%a+ConfigVar%s*%(",
+      'reaper%s*%[%s*["\']SNM_Set%a+ConfigVar["\']%s*%]%s*%(',
+    }},
+    { label = "extension-state write (review namespace before running)", match = function(code, searchable)
+      code = tostring(code or "")
+      searchable = tostring(searchable or code)
+      local function literal_arg_after(open_end)
+        local i = open_end + 1
+        while code:sub(i, i):match("%s") do i = i + 1 end
+        local quote = code:sub(i, i)
+        if quote ~= '"' and quote ~= "'" then return nil, false end
+        local j = i + 1
+        while j <= #code do
+          local ch = code:sub(j, j)
+          if ch == "\\" then
+            j = j + 2
+          elseif ch == quote then
+            return code:sub(i + 1, j - 1), true
+          else
+            j = j + 1
+          end
+        end
+        return nil, false
+      end
+      local function scan_call_pattern(pattern)
+        local pos = 1
+        while true do
+          local _s, e = searchable:find(pattern, pos)
+          if not e then return false end
+          local ns, is_literal = literal_arg_after(e)
+          if not (is_literal and ns == "ReaAssist") then return true end
+          pos = e + 1
+        end
+      end
+      return scan_call_pattern("reaper%.SetExtState%s*%(")
+        or scan_call_pattern('reaper%s*%[%s*["\']SetExtState["\']%s*%]%s*%(')
+    end},
+    { label = "track deletion API (review before running)", patterns = {
+      "reaper%.DeleteTrack%s*%(",
+      'reaper%s*%[%s*["\']DeleteTrack["\']%s*%]%s*%(',
+    }},
+    { label = "Main_OnCommand remove tracks/items (review before running)", patterns = {
+      "reaper%.Main_OnCommand%s*%(%s*40005%s*,",
+      "reaper%.Main_OnCommand%s*%(%s*40006%s*,",
+      "reaper%.Main_OnCommandEx%s*%(%s*40005%s*,",
+      "reaper%.Main_OnCommandEx%s*%(%s*40006%s*,",
+      'reaper%s*%[%s*["\']Main_OnCommand["\']%s*%]%s*%(%s*40005%s*,',
+      'reaper%s*%[%s*["\']Main_OnCommand["\']%s*%]%s*%(%s*40006%s*,',
+      'reaper%s*%[%s*["\']Main_OnCommandEx["\']%s*%]%s*%(%s*40005%s*,',
+      'reaper%s*%[%s*["\']Main_OnCommandEx["\']%s*%]%s*%(%s*40006%s*,',
+    }},
     { label = "require (loads external modules)", patterns = {
       "require%s*%(",
       "require%s*['\"]",
@@ -11988,18 +14081,343 @@ do
       'debug%s*%[%s*["\']',
     }},
   }
+  local lua_blank_comments_and_strings
+
   function Code.scan_risky(code)
+    if type(code) ~= "string" or code == "" then return nil end
+    local searchable = lua_blank_comments_and_strings(code)
     local found = {}
     for _, entry in ipairs(RISKY_PATTERNS) do
-      for _, pat in ipairs(entry.patterns) do
-        if code:find(pat) then
+      if entry.match then
+        if entry.match(code, searchable) then
           found[#found+1] = entry.label
-          break  -- one match per label is enough
+        end
+      else
+        for _, pat in ipairs(entry.patterns) do
+          if searchable:find(pat) then
+            found[#found+1] = entry.label
+            break  -- one match per label is enough
+          end
         end
       end
     end
     if #found == 0 then return nil end
     return "Warning: " .. table.concat(found, ", ")
+  end
+
+  function Code.prompt_requests_jsfx_track_companion(user_text)
+    local s = tostring(user_text or ""):lower()
+    if s == "" then return false end
+    if not (s:find("jsfx", 1, true)
+        or s:find("reajs", 1, true)
+        or s:find("eel2", 1, true)) then
+      return false
+    end
+    if not s:find("track", 1, true) then return false end
+    if s:find("add%s+.-jsfx%s+.-track")
+        or s:find("put%s+.-jsfx%s+.-track")
+        or s:find("place%s+.-jsfx%s+.-track")
+        or s:find("insert%s+.-jsfx%s+.-track")
+        or s:find("load%s+.-jsfx%s+.-track")
+        or s:find("apply%s+.-jsfx%s+.-track")
+        or s:find("create%s+.-track%s+.-jsfx")
+        or s:find("create%s+.-jsfx%s+.-track") then
+      return true
+    end
+    return false
+  end
+
+  function Code.rewrite_lua_companion_jsfx_refs(lua_code, jsfx_code, fx_name)
+    local code = tostring(lua_code or "")
+    local replacement = tostring(fx_name or "")
+    if code == "" or replacement == "" then return lua_code, false end
+    local changed = false
+    local function esc_pat(s)
+      return tostring(s or ""):gsub("[%(%)%.%%%+%-%*%?%[%]%^%$]", "%%%0")
+    end
+    local function rep()
+      return replacement
+    end
+    local refs = {}
+    if Code.derive_filename_jsfx then
+      local derived = Code.derive_filename_jsfx(jsfx_code or "")
+      if derived and derived ~= "" then
+        refs[#refs + 1] = "ReaAssist/" .. derived
+        local shorter = derived:gsub("^ReaAssist%s+", "")
+        if shorter ~= derived and shorter ~= "" then
+          refs[#refs + 1] = "ReaAssist/" .. shorter
+        end
+      end
+    end
+    for _, ref in ipairs(refs) do
+      local n
+      code, n = code:gsub(esc_pat(ref), rep)
+      if n and n > 0 then changed = true end
+      local without_ext = ref:gsub("%.jsfx$", "")
+      if (not n or n == 0) and without_ext ~= ref then
+        code, n = code:gsub(esc_pat(without_ext), rep)
+        if n and n > 0 then changed = true end
+      end
+    end
+    local out = {}
+    local normalized = code:gsub("\r\n", "\n"):gsub("\r", "\n")
+    local had_trailing_newline = normalized:sub(-1) == "\n"
+    for line in (normalized .. "\n"):gmatch("([^\n]*)\n") do
+      local patched = line
+      if patched:find(".jsfx", 1, true) then
+        local n
+        patched, n = patched:gsub(
+          "(%f[%w_]fx_file%f[^%w_]%s*=%s*)\"[^\"]+%.jsfx\"",
+          function(prefix)
+            return prefix .. "\"" .. replacement .. "\""
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub(
+          "(%f[%w_]fx_file%f[^%w_]%s*=%s*)'[^']+%.jsfx'",
+          function(prefix)
+            return prefix .. "'" .. replacement .. "'"
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub(
+          "(%f[%w_]jsfx_file%f[^%w_]%s*=%s*)\"[^\"]+%.jsfx\"",
+          function(prefix)
+            return prefix .. "\"" .. replacement .. "\""
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub(
+          "(%f[%w_]jsfx_file%f[^%w_]%s*=%s*)'[^']+%.jsfx'",
+          function(prefix)
+            return prefix .. "'" .. replacement .. "'"
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub(
+          "(%f[%w_]fxfile%f[^%w_]%s*=%s*)\"[^\"]+%.jsfx\"",
+          function(prefix)
+            return prefix .. "\"" .. replacement .. "\""
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub(
+          "(%f[%w_]fxfile%f[^%w_]%s*=%s*)'[^']+%.jsfx'",
+          function(prefix)
+            return prefix .. "'" .. replacement .. "'"
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub(
+          "(%f[%w_]jsfxfile%f[^%w_]%s*=%s*)\"[^\"]+%.jsfx\"",
+          function(prefix)
+            return prefix .. "\"" .. replacement .. "\""
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub(
+          "(%f[%w_]jsfxfile%f[^%w_]%s*=%s*)'[^']+%.jsfx'",
+          function(prefix)
+            return prefix .. "'" .. replacement .. "'"
+          end)
+        if n and n > 0 then changed = true end
+      end
+      if patched:find("ReaAssist/", 1, true) then
+        local n
+        patched, n = patched:gsub(
+          "(%f[%w_]fx_path%f[^%w_]%s*=%s*)\"ReaAssist/[^\"\n]+\"",
+          function(prefix)
+            return prefix .. "\"" .. replacement .. "\""
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub(
+          "(%f[%w_]fx_path%f[^%w_]%s*=%s*)'ReaAssist/[^'\n]+'",
+          function(prefix)
+            return prefix .. "'" .. replacement .. "'"
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub(
+          "(%f[%w_]jsfx_path%f[^%w_]%s*=%s*)\"ReaAssist/[^\"\n]+\"",
+          function(prefix)
+            return prefix .. "\"" .. replacement .. "\""
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub(
+          "(%f[%w_]jsfx_path%f[^%w_]%s*=%s*)'ReaAssist/[^'\n]+'",
+          function(prefix)
+            return prefix .. "'" .. replacement .. "'"
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub(
+          "(%f[%w_]fxpath%f[^%w_]%s*=%s*)\"ReaAssist/[^\"\n]+\"",
+          function(prefix)
+            return prefix .. "\"" .. replacement .. "\""
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub(
+          "(%f[%w_]fxpath%f[^%w_]%s*=%s*)'ReaAssist/[^'\n]+'",
+          function(prefix)
+            return prefix .. "'" .. replacement .. "'"
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub(
+          "(%f[%w_]jsfxpath%f[^%w_]%s*=%s*)\"ReaAssist/[^\"\n]+\"",
+          function(prefix)
+            return prefix .. "\"" .. replacement .. "\""
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub(
+          "(%f[%w_]jsfxpath%f[^%w_]%s*=%s*)'ReaAssist/[^'\n]+'",
+          function(prefix)
+            return prefix .. "'" .. replacement .. "'"
+          end)
+        if n and n > 0 then changed = true end
+      end
+      if patched:find("ReaAssist/", 1, true)
+          and patched:find(".jsfx", 1, true) then
+        local n
+        patched, n = patched:gsub('"ReaAssist/"%s*%.%.%s*"[^"]+%.jsfx"',
+          function()
+            return '"' .. replacement .. '"'
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub("'ReaAssist/'%s*%.%.%s*'[^']+%.jsfx'",
+          function()
+            return "'" .. replacement .. "'"
+          end)
+        if n and n > 0 then changed = true end
+      end
+      if patched:find("TrackFX_AddByName", 1, true)
+          and patched:find("ReaAssist/", 1, true)
+          and patched:find("..", 1, true) then
+        local n
+        patched, n = patched:gsub('"ReaAssist/"%s*%.%.%s*[%w_]+',
+          function()
+            return '"' .. replacement .. '"'
+          end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub("'ReaAssist/'%s*%.%.%s*[%w_]+",
+          function()
+            return "'" .. replacement .. "'"
+          end)
+        if n and n > 0 then changed = true end
+      end
+      if patched:find("TrackFX_AddByName", 1, true) then
+        local n
+        patched, n = patched:gsub('"ReaAssist/[^"]+%.jsfx"', function()
+          return '"' .. replacement .. '"'
+        end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub("'ReaAssist/[^']+%.jsfx'", function()
+          return "'" .. replacement .. "'"
+        end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub('"ReaAssist/[^"]+"', function()
+          return '"' .. replacement .. '"'
+        end)
+        if n and n > 0 then changed = true end
+        patched, n = patched:gsub("'ReaAssist/[^']+'", function()
+          return "'" .. replacement .. "'"
+        end)
+        if n and n > 0 then changed = true end
+      end
+      out[#out + 1] = patched
+    end
+    if #out > 0 and out[#out] == "" and not had_trailing_newline then
+      out[#out] = nil
+    end
+    local joined = table.concat(out, "\n")
+    if joined:find("%f[%w_]fxFile%f[^%w_]")
+        and joined:find("%f[%w_]jsfxFile%f[^%w_]")
+        and not joined:find("local%s+jsfxFile%s*=") then
+      local n
+      joined, n = joined:gsub("%f[%w_]jsfxFile%f[^%w_]", "fxFile")
+      if n and n > 0 then changed = true end
+    end
+    if joined:find("%f[%w_]fx_fullname%f[^%w_]")
+        and joined:find("%f[%w_]jsfx_fullname%f[^%w_]")
+        and not joined:find("local%s+jsfx_fullname%s*=") then
+      local n
+      joined, n = joined:gsub("%f[%w_]jsfx_fullname%f[^%w_]",
+        "fx_fullname")
+      if n and n > 0 then changed = true end
+    end
+    return joined, changed
+  end
+
+  function lua_blank_comments_and_strings(src)
+    src = tostring(src or "")
+    local n = #src
+    if n == 0 then return "" end
+
+    local out, i = {}, 1
+    local function blank(s)
+      return (s:gsub("[^\n]", " "))
+    end
+    local function long_bracket(pos)
+      if src:sub(pos, pos) ~= "[" then return nil end
+      local j = pos + 1
+      while src:sub(j, j) == "=" do j = j + 1 end
+      if src:sub(j, j) ~= "[" then return nil end
+      return j + 1, src:sub(pos + 1, j - 1)
+    end
+    local function append_blank(a, b)
+      out[#out + 1] = blank(src:sub(a, b))
+    end
+
+    while i <= n do
+      local c = src:sub(i, i)
+      local next_c = src:sub(i + 1, i + 1)
+      if c == "-" and next_c == "-" then
+        local lb_start, lb_eq = long_bracket(i + 2)
+        if lb_start then
+          local close = "]" .. lb_eq .. "]"
+          local close_pos = src:find(close, lb_start, true)
+          local end_pos = close_pos and (close_pos + #close - 1) or n
+          append_blank(i, end_pos)
+          i = end_pos + 1
+        else
+          local eol = src:find("\n", i, true)
+          if eol then
+            append_blank(i, eol - 1)
+            out[#out + 1] = "\n"
+            i = eol + 1
+          else
+            append_blank(i, n)
+            i = n + 1
+          end
+        end
+      elseif c == '"' or c == "'" then
+        local quote, j = c, i + 1
+        local end_pos = n
+        while j <= n do
+          local ch = src:sub(j, j)
+          if ch == "\\" then
+            j = j + 2
+          elseif ch == quote then
+            end_pos = j
+            break
+          elseif ch == "\n" then
+            end_pos = j - 1
+            break
+          else
+            j = j + 1
+          end
+        end
+        append_blank(i, end_pos)
+        i = end_pos + 1
+      elseif c == "[" then
+        local lb_start, lb_eq = long_bracket(i)
+        if lb_start then
+          local close = "]" .. lb_eq .. "]"
+          local close_pos = src:find(close, lb_start, true)
+          local end_pos = close_pos and (close_pos + #close - 1) or n
+          append_blank(i, end_pos)
+          i = end_pos + 1
+        else
+          out[#out + 1] = c
+          i = i + 1
+        end
+      else
+        out[#out + 1] = c
+        i = i + 1
+      end
+    end
+
+    return table.concat(out)
   end
 
   local FORBIDDEN_SANDBOX_GLOBALS = {
@@ -12047,6 +14465,7 @@ do
 
   function Code.scan_forbidden_sandbox_globals(code)
     if type(code) ~= "string" or code == "" then return nil end
+    code = lua_blank_comments_and_strings(code)
     local found = {}
     for _, entry in ipairs(FORBIDDEN_SANDBOX_GLOBALS) do
       for _, pat in ipairs(entry.patterns) do
@@ -12522,8 +14941,10 @@ end
 -- cannot reach anything not explicitly listed. Writes go into the sandbox
 -- table itself and do not leak to script globals.
 
--- Build the sandbox once at load time. Rebuilding per-call would be wasteful
--- since the whitelist is static; only the `print` redirect needs the closure.
+-- Build only immutable scalar/function bindings once at load time. Mutable
+-- library tables and host API proxies are rebuilt per run so generated code
+-- cannot corrupt the next sandbox or reach denied host capabilities through
+-- aliases / computed keys.
 
 -- Shallow-copy a table's fields into a new table. Used to isolate sandbox
 -- copies of `string`, `math`, and `table` from the host environment so that
@@ -12533,6 +14954,59 @@ local function sandbox_lib_copy(t)
   local c = {}
   for k, v in pairs(t) do c[k] = v end
   return c
+end
+
+local CODE_SANDBOX_DENIED_REAPER_APIS = {
+  -- Shell / process launch.
+  ExecProcess = true,
+  CF_ShellExecute = true,
+  BR_Win32_ShellExecute = true,
+
+  -- Project/file replacement. ReaAssist creates its own pre-run safety backup;
+  -- generated scripts should not save/open projects or silently touch disk.
+  Main_SaveProject = true,
+  Main_SaveProjectEx = true,
+  Main_openProject = true,
+  RecursiveCreateDirectory = true,
+
+  -- File browser helpers belong to ReaAssist's explicit Save/Export flows, not
+  -- arbitrary generated code.
+  JS_Dialog_BrowseForOpenFiles = true,
+  JS_Dialog_BrowseForSaveFile = true,
+  JS_Dialog_BrowseForFolder = true,
+  ReaAssist_Native_JS_Dialog_BrowseForSaveFile = true,
+}
+
+local function sandbox_reaper_denied_reason(key)
+  if type(key) ~= "string" then return nil end
+  if CODE_SANDBOX_DENIED_REAPER_APIS[key] then return key end
+  if key:match("^BR_Win32_") then return key end
+  if key:match("^ReaPack_") then return key end
+  return nil
+end
+
+local function sandbox_api_proxy(api, overrides, label)
+  overrides = overrides or {}
+  label = label or "api"
+  return setmetatable(overrides, {
+    __index = function(_, key)
+      if label == "reaper" then
+        local denied = sandbox_reaper_denied_reason(key)
+        if denied then
+          error("reaper." .. denied
+            .. " is not available in ReaAssist's generated-code sandbox", 2)
+        end
+      end
+      return api and api[key] or nil
+    end,
+    __newindex = function(_, key)
+      error(tostring(label) .. "." .. tostring(key)
+        .. " cannot be modified in ReaAssist's generated-code sandbox", 2)
+    end,
+    __pairs = function(t)
+      return next, t, nil
+    end,
+  })
 end
 
 local CODE_SANDBOX_BASE = {
@@ -12549,14 +15023,6 @@ local CODE_SANDBOX_BASE = {
   type       = type,
   unpack     = table.unpack or unpack,
   xpcall     = xpcall,
-  -- Safe standard libraries (isolated copies -- mutations by generated code
-  -- stay inside the sandbox and cannot corrupt host-side string/math/table).
-  math       = sandbox_lib_copy(math),
-  string     = sandbox_lib_copy(string),
-  table      = sandbox_lib_copy(table),
-  -- REAPER APIs (the whole point of running generated code)
-  reaper     = reaper,
-  gfx        = gfx,
 }
 
 -- =============================================================================
@@ -13499,6 +15965,68 @@ function Code.apply_run_result_to_message(msg, ok, code_type, code, auto_ran)
     or Code.generated_code_descriptor(code or msg.code_block, code_type)
 end
 
+local CODE_RUN_INSTRUCTION_BUDGET = 25000000
+local CODE_RUN_HOOK_COUNT = 10000
+local CODE_RUN_BUDGET_TOKEN = "__reaassist_lua_instruction_budget_exceeded__"
+
+local function lua_runtime_error_strings(run_err, instruction_timeout)
+  local err_str = instruction_timeout
+    and ("Generated Lua stopped after exceeding ReaAssist's instruction "
+      .. "budget. The script may contain an infinite loop or runaway "
+      .. "iteration.")
+    or tostring(run_err)
+  local short = err_str
+  do
+    local lines, n = {}, 0
+    for line in err_str:gmatch("[^\n]+") do
+      n = n + 1
+      if n > 6 then lines[#lines+1] = "  ..."; break end
+      lines[#lines+1] = line
+    end
+    short = table.concat(lines, "\n")
+  end
+  local fallback = instruction_timeout
+    and ("Generated Lua was stopped because it exceeded ReaAssist's "
+      .. "instruction budget. It may contain an infinite loop or runaway "
+      .. "iteration.\n\n" .. short)
+    or ("Runtime error in generated code:\n\n" .. short)
+  local key = instruction_timeout
+    and "code.runtime_instruction_budget_error" or "code.runtime_error"
+  local msg = (RA and RA.t and RA.t(key, { error = short }, fallback))
+    or fallback
+  return err_str, short, msg
+end
+
+local function run_lua_chunk_with_instruction_guard(fn)
+  local traceback = debug and debug.traceback or tostring
+  if not (debug and debug.sethook and coroutine and coroutine.create
+      and coroutine.resume) then
+    local ok, err = xpcall(fn, traceback)
+    return ok, err, false, nil
+  end
+
+  local count = 0
+  local function hook()
+    count = count + CODE_RUN_HOOK_COUNT
+    if count >= CODE_RUN_INSTRUCTION_BUDGET then
+      error(CODE_RUN_BUDGET_TOKEN, 0)
+    end
+  end
+
+  local co = coroutine.create(function()
+    return xpcall(fn, traceback)
+  end)
+  debug.sethook(co, hook, "", CODE_RUN_HOOK_COUNT)
+  local resume_ok, ok, err = coroutine.resume(co)
+  debug.sethook(co)
+  if not resume_ok then
+    return false, ok, tostring(ok):find(CODE_RUN_BUDGET_TOKEN, 1, true) ~= nil,
+      count
+  end
+  local timed_out = tostring(err or ""):find(CODE_RUN_BUDGET_TOKEN, 1, true) ~= nil
+  return ok, err, timed_out, count
+end
+
 function Code.run(code)
   local artifact = Code.classify_lua_artifact(code)
   if not artifact.runnable or artifact.manual_run_only then
@@ -13568,6 +16096,10 @@ function Code.run(code)
   -- which is cleaner and stricter than retrofitting _ENV via debug.setupvalue.
   local code_env = {}
   for k, v in pairs(CODE_SANDBOX_BASE) do code_env[k] = v end
+  code_env.math = sandbox_lib_copy(math)
+  code_env.string = sandbox_lib_copy(string)
+  code_env.table = sandbox_lib_copy(table)
+  code_env.gfx = sandbox_api_proxy(gfx, nil, "gfx")
   code_env.print = function(...)
     -- Use select("#", ...) + select(i, ...) rather than {...}/#args: a table
     -- built with `{...}` has an undefined length when the varargs contain nil
@@ -13595,11 +16127,59 @@ function Code.run(code)
   -- non-empty label (typical generations are one logical operation).
   local inner_undo_label = nil
   local inner_undo_flags = -1
+  local change_count_before = Code.project_change_count()
+
+  local function record_runtime_error(run_err, instruction_timeout,
+      instruction_count, source)
+    local err_str, short, user_msg =
+      lua_runtime_error_strings(run_err, instruction_timeout)
+    local change_count_after = Code.project_change_count()
+    local err_debug = {
+      failure_kind = instruction_timeout
+        and "lua_instruction_budget_exceeded" or "runtime_error",
+      source = source or "generated_lua_runtime",
+      runtime_error = Log.scrub_url_secrets(err_str),
+      stack_excerpt = Log.scrub_url_secrets(short),
+      instruction_budget = instruction_timeout
+        and CODE_RUN_INSTRUCTION_BUDGET or nil,
+      instruction_count = instruction_count,
+      generated_code_bytes = type(code) == "string" and #code or 0,
+      project_state_change_count_before = change_count_before,
+      project_state_change_count_after = change_count_after,
+    }
+    Log.line("SCRIPT", "Runtime error: " .. err_str:gsub("\n", " \\n "))
+    Diag.add_error(err_str, nil, code)
+    Log.add_error(user_msg, nil, nil, nil,
+      { error_kind = "runtime_error", error_debug = err_debug })
+    S.last_run_error = "runtime error: " .. err_str
+    S.last_run_result = Code.build_run_result("lua", code,
+      "errored", "failed", {
+        change_count_before = change_count_before,
+        change_count_after = change_count_after,
+        error_kind = "runtime_error",
+        error_debug = err_debug,
+        runtime_error = S.last_run_error,
+      })
+  end
 
   -- Wrap `reaper` so user-facing calls (dialogs, console output) are logged
-  -- when debug logging is enabled. Every other reaper.* call falls through to
-  -- the real API via __index with zero overhead when logging is off.
-  local reaper_shim = setmetatable({
+  -- when debug logging is enabled. Every other allowed reaper.* call falls
+  -- through to the real API via __index; denied APIs are blocked even when the
+  -- code aliases `reaper` or builds a function name dynamically.
+  local reaper_shim = sandbox_api_proxy(reaper, {
+    defer = function(fn)
+      if type(fn) ~= "function" or type(reaper.defer) ~= "function" then
+        return reaper.defer(fn)
+      end
+      return reaper.defer(function()
+        local ok, run_err, instruction_timeout, instruction_count =
+          run_lua_chunk_with_instruction_guard(fn)
+        if not ok then
+          record_runtime_error(run_err, instruction_timeout, instruction_count,
+            "generated_lua_defer_callback")
+        end
+      end)
+    end,
     ShowMessageBox = function(msg, title, btn_type)
       Log.line("SCRIPT", "ShowMessageBox [" .. tostring(title) .. "]: "
         .. tostring(msg):gsub("\n", " \\n "))
@@ -13630,7 +16210,7 @@ function Code.run(code)
       end
       return 0
     end,
-  }, { __index = reaper })
+  }, "reaper")
   code_env.reaper = reaper_shim
 
   if Log.enabled() then
@@ -13640,7 +16220,6 @@ function Code.run(code)
   -- "t" enforces text-only chunks (no bytecode), and the 4th arg sets _ENV
   -- directly at compile time without needing debug.setupvalue.
   S.last_run_result = nil
-  local change_count_before = Code.project_change_count()
   local fn, compile_err = load(code, "ReaAssist", "t", code_env)
   if not fn then
     local err_str = tostring(compile_err)
@@ -13685,47 +16264,13 @@ function Code.run(code)
   -- the inner code passed to Undo_EndBlock ("ReaAssist: Create 10 tracks"
   -- etc.) is surfaced in REAPER's undo history via inner_undo_label.
   reaper.Undo_BeginBlock()
-  local ok, run_err = xpcall(fn, debug and debug.traceback or tostring)
+  local ok, run_err, instruction_timeout, instruction_count =
+    run_lua_chunk_with_instruction_guard(fn)
   reaper.Undo_EndBlock(inner_undo_label or "ReaAssist", inner_undo_flags)
   local change_count_after = Code.project_change_count()
   if not ok then
-    local err_str = tostring(run_err)
-    Log.line("SCRIPT", "Runtime error: " .. err_str:gsub("\n", " \\n "))
-    Diag.add_error(err_str, nil, code)
-    -- Trim the traceback to the first 6 lines so the chat bubble stays
-    -- compact. The full trace is still in the debug log + Diag report.
-    local short = err_str
-    do
-      local lines, n = {}, 0
-      for line in err_str:gmatch("[^\n]+") do
-        n = n + 1
-        if n > 6 then lines[#lines+1] = "  ..."; break end
-        lines[#lines+1] = line
-      end
-      short = table.concat(lines, "\n")
-    end
-    local err_debug = {
-      failure_kind = "runtime_error",
-      source = "generated_lua_runtime",
-      runtime_error = Log.scrub_url_secrets(err_str),
-      stack_excerpt = Log.scrub_url_secrets(short),
-      generated_code_bytes = type(code) == "string" and #code or 0,
-      project_state_change_count_before = change_count_before,
-      project_state_change_count_after = change_count_after,
-    }
-    local fallback = "Runtime error in generated code:\n\n" .. short
-    Log.add_error((RA and RA.t and RA.t("code.runtime_error",
-      { error = short }, fallback)) or fallback,
-      nil, nil, nil, { error_kind = "runtime_error", error_debug = err_debug })
-    S.last_run_error = "runtime error: " .. err_str
-    S.last_run_result = Code.build_run_result("lua", code,
-      "errored", "failed", {
-        change_count_before = change_count_before,
-        change_count_after = change_count_after,
-        error_kind = "runtime_error",
-        error_debug = err_debug,
-        runtime_error = S.last_run_error,
-      })
+    record_runtime_error(run_err, instruction_timeout, instruction_count,
+      "generated_lua_runtime")
     return false
   end
   Log.line("SCRIPT", "Script completed OK")
@@ -14035,7 +16580,129 @@ local function name_is_feedback(name)
   return false
 end
 
-local function check_feedback_clamp(src, sliders, findings)
+local function feedback_clamp_num_at(tokens, i)
+  local t = tokens[i]
+  if not t then return nil end
+  if t.type == "num" then return tonumber(t.text) end
+  if t.type == "other" and t.text == "." then
+    local n = tokens[i + 1]
+    if n and n.type == "num" then
+      return tonumber("0." .. tostring(n.text))
+    end
+  end
+  return nil
+end
+
+local function feedback_clamp_literal(v)
+  return v and v >= 0.84 and v <= 0.85
+end
+
+local function token_is_feedback_id(t, feedback_ids)
+  return t and t.type == "id" and feedback_ids[t.text] == true
+end
+
+local function feedback_call_span(tokens, open_i)
+  local depth = 0
+  for j = open_i, #tokens do
+    local t = tokens[j]
+    if t.type == "other" and t.text == "(" then
+      depth = depth + 1
+    elseif t.type == "other" and t.text == ")" then
+      depth = depth - 1
+      if depth == 0 then return j end
+    end
+  end
+end
+
+local function span_has_feedback_and_limit(tokens, a, b, feedback_ids, limit_ids)
+  local has_feedback, has_limit = false, false
+  for j = a, b do
+    local t = tokens[j]
+    if token_is_feedback_id(t, feedback_ids) then has_feedback = true end
+    if feedback_clamp_literal(feedback_clamp_num_at(tokens, j)) then
+      has_limit = true
+    end
+    if t and t.type == "id" and limit_ids and limit_ids[t.text] then
+      has_limit = true
+    end
+    if has_feedback and has_limit then return true end
+  end
+  return false
+end
+
+local function feedback_clamp_limit_ids(tokens)
+  local ids = {}
+  for i, t in ipairs(tokens or {}) do
+    if t.type == "id" then
+      local eq_i = skip_ws(tokens, i + 1)
+      if eq_i and tokens[eq_i].type == "other" and tokens[eq_i].text == "=" then
+        local val_i = skip_ws(tokens, eq_i + 1)
+        if val_i and feedback_clamp_literal(
+            feedback_clamp_num_at(tokens, val_i)) then
+          ids[t.text] = true
+        end
+      end
+    end
+  end
+  return ids
+end
+
+local function has_feedback_clamp(tokens, risky)
+  local feedback_ids = {}
+  for _, s in ipairs(risky) do
+    if s.index then feedback_ids["slider" .. tostring(s.index)] = true end
+  end
+  for _, t in ipairs(tokens or {}) do
+    if t.type == "id" and name_is_feedback(t.text) then
+      feedback_ids[t.text] = true
+    end
+  end
+  local limit_ids = feedback_clamp_limit_ids(tokens)
+
+  for i, t in ipairs(tokens or {}) do
+    if t.type == "id"
+       and (t.text == "min" or t.text == "max" or t.text == "clamp") then
+      local open_i = skip_ws(tokens, i + 1)
+      if open_i and tokens[open_i].type == "other"
+         and tokens[open_i].text == "(" then
+        local close_i = feedback_call_span(tokens, open_i)
+        if close_i and span_has_feedback_and_limit(tokens, open_i, close_i,
+            feedback_ids, limit_ids) then
+          return true
+        end
+      end
+    end
+  end
+
+  local line_state = {}
+  for i, t in ipairs(tokens or {}) do
+    if t.type ~= "ws" and t.type ~= "com" and t.type ~= "str" then
+      local rec = line_state[t.line]
+      if not rec then
+        rec = { feedback = false, limit = false, ternary_q = false,
+          ternary_colon = false, assign = false }
+        line_state[t.line] = rec
+      end
+      if token_is_feedback_id(t, feedback_ids) then rec.feedback = true end
+      if feedback_clamp_literal(feedback_clamp_num_at(tokens, i)) then
+        rec.limit = true
+      end
+      if t.type == "id" and limit_ids[t.text] then rec.limit = true end
+      if t.type == "other" and t.text == "?" then rec.ternary_q = true end
+      if t.type == "other" and t.text == ":" then rec.ternary_colon = true end
+      if t.type == "other" and t.text == "=" then rec.assign = true end
+    end
+  end
+  for _, rec in pairs(line_state) do
+    if rec.feedback and rec.limit and rec.ternary_q
+       and (rec.ternary_colon or rec.assign) then
+      return true
+    end
+  end
+  return false
+end
+
+local function check_feedback_clamp(tokens, sliders, findings)
   local risky = {}
   for _, s in ipairs(sliders) do
     if name_is_feedback(s.name) then
@@ -14044,8 +16711,7 @@ local function check_feedback_clamp(src, sliders, findings)
     end
   end
   if #risky == 0 then return end
-  -- Loose clamp detection: literal 0.85 or .85 anywhere in source.
-  if src:find("0?%.85") then return end
+  if has_feedback_clamp(tokens, risky) then return end
   for _, s in ipairs(risky) do
     add(findings, "fatal", "feedback_unclamped", s.line,
         ("Feedback-style slider `%s` reaches >0.85 effective coefficient with no `0.85` clamp visible. Per ReaAssist's JSFX safety rule, hard-clamp the feedback coefficient to <= 0.85.")
@@ -14790,7 +17456,7 @@ function Code.validate_jsfx(src, user_text)
   check_generated_safety_conflicts(src, tokens, sliders, findings)
   check_banned_syntax(tokens, header_lines, findings)
   check_section_markers(tokens, findings)
-  check_feedback_clamp(src, sliders, findings)
+  check_feedback_clamp(tokens, sliders, findings)
   check_memory_init(tokens, header_lines, has_imports, findings)
   check_buffer_overlap(tokens, findings)
   check_parallel_comb_doubled(tokens, header_lines, has_imports, findings)

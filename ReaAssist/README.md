@@ -9,7 +9,7 @@ ReaAssist is a session-aware workflow assistant for REAPER. Describe what you wa
 ## What it does
 
 - Reads your project state (tracks, items, FX chains, plugin parameters, transport, time selection, edit cursor, routing) so requests like "compress the vocal" act on the right target.
-- Configures plugins by name and parameter, dialing in precise dB / Hz / ms / % values. Includes verified parameter references for REAPER stock plugins (ReaEQ, ReaComp, ReaXcomp, ReaGate, etc.) and many popular third-party plugins (FabFilter Pro-Q 4, Pro-C 3, Pro-L 2, Soundtoys Decapitator, EchoBoy, etc.). Aliases auto-resolved.
+- Configures plugins by name and parameter, dialing in precise dB / Hz / ms / % values. Includes verified parameter references for REAPER stock plugins (ReaEQ, ReaComp, ReaXcomp, ReaGate, etc.) and selected third-party plugins (FabFilter Pro-Q 4, Pro-C 3, Pro-L 2, etc.), plus live parameter inspection for many other third-party plugins such as Soundtoys Decapitator and EchoBoy. Aliases auto-resolved.
 - Generates Lua scripts on demand: track and item creation, FX configuration, MIDI editing, marker and region placement, theme changes, and anything else the REAPER ReaScript API supports.
 - Writes JSFX (custom DSP code) on explicit request when stock plugins do not cover a specific need. Opt-in only; generic effect requests route through stock or third-party plugin workflows.
 - Surfaces and fixes mistakes when you tell it what went wrong.

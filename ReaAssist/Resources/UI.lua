@@ -80,6 +80,213 @@ local math_max     = math.max
 local math_abs     = math.abs
 local time_precise = reaper.time_precise
 
+local function jsfx_manual_finding_detail(findings)
+  local fatal, warn = {}, {}
+  for _, f in ipairs(findings or {}) do
+    local line = f.line and ("line " .. tostring(f.line) .. ": ") or ""
+    local text = "[" .. tostring(f.code or "jsfx") .. "] "
+      .. line .. tostring(f.message or "")
+    if f.severity == "fatal" then
+      fatal[#fatal + 1] = text
+    else
+      warn[#warn + 1] = text
+    end
+  end
+  local parts = {}
+  if #fatal > 0 then
+    parts[#parts + 1] = table.concat(fatal, "\n")
+  end
+  if #warn > 0 then
+    parts[#parts + 1] = "Advisory:\n" .. table.concat(warn, "\n")
+  end
+  return table.concat(parts, "\n\n")
+end
+
+local function jsfx_manual_ceiling_info_from_code(code)
+  code = tostring(code or "")
+  local slot = tonumber(code:match("_ra_slot%s*=%s*(%d+)%s*;"))
+  if not slot then return nil end
+  return {
+    slot_base = slot,
+    desc = code:match("^%s*desc:%s*(.-)%s*[\r\n]") or "",
+  }
+end
+
+local function jsfx_manual_record_ceiling_slot(msg, info, saved_path, code)
+  if not (msg and saved_path and Code and Code.ceiling_record_slot) then return end
+  info = info or msg.ceiling_inject_info
+    or jsfx_manual_ceiling_info_from_code(code)
+  if not (info and info.slot_base) then return end
+  msg._ceiling_recorded_paths = msg._ceiling_recorded_paths or {}
+  local key = tostring(saved_path) .. "#" .. tostring(info.slot_base)
+  if msg._ceiling_recorded_paths[key] then return end
+  Code.ceiling_record_slot(info, saved_path, info.desc)
+  msg._ceiling_recorded_paths[key] = true
+end
+
+local function jsfx_manual_validation_source(code)
+  code = tostring(code or "")
+  if not code:find("// --- ReaAssist output ceiling", 1, true) then
+    return code
+  end
+
+  local out = {}
+  local in_injected_block = false
+  for line in (code .. "\n"):gmatch("([^\n]*)\n") do
+    if line:find("// --- ReaAssist output ceiling", 1, true) then
+      in_injected_block = true
+    elseif in_injected_block then
+      if line:find("// ----------------------------------------------------------",
+          1, true) then
+        in_injected_block = false
+      end
+    else
+      local cleaned = line:gsub("%s*gmem=ReaAssist_Ceiling", "")
+      if cleaned:match("^%s*options:%s*$") then
+        cleaned = nil
+      elseif cleaned:find("Safety Output Ceiling (dBFS)", 1, true)
+          and cleaned:match("^%s*slider%d+:") then
+        cleaned = nil
+      end
+      if cleaned ~= nil then out[#out + 1] = cleaned end
+    end
+  end
+  return table.concat(out, "\n")
+end
+
+local function jsfx_manual_prepare(msg, allow_invalid)
+  local code = msg and msg.code_block
+  if type(code) ~= "string" or code == "" then
+    return nil, nil, "empty"
+  end
+  if not allow_invalid
+     and Code and Code.validate_jsfx and Code.jsfx_findings_have_gate then
+    local validation_code = jsfx_manual_validation_source(code)
+    local findings = Code.validate_jsfx(validation_code, msg.jsfx_user_text or "")
+    if findings and Code.jsfx_findings_have_gate(findings) then
+      return nil, nil, jsfx_manual_finding_detail(findings)
+    end
+  end
+  local inject_info = nil
+  if Code and Code.inject_output_ceiling then
+    local injected, info_or_reason = Code.inject_output_ceiling(code)
+    if injected then
+      code = injected
+      inject_info = info_or_reason
+    end
+  end
+  return code, inject_info, nil
+end
+
+local function jsfx_manual_open_warning(idx, action, detail)
+  S.jsfx_save_warn_idx = idx
+  S.jsfx_save_warn_action = action
+  S.jsfx_save_warn_detail = detail
+  S.open_jsfx_save_warn = true
+end
+
+local function jsfx_manual_perform_action(msg, idx, action, allow_invalid)
+  if not msg then return false end
+  if action == "add" and reaper.CountSelectedTracks(0) == 0 then
+    S.open_no_tracks_warn = true
+    return false
+  end
+
+  local prepared, inject_info, warning = jsfx_manual_prepare(msg, allow_invalid)
+  if warning == "empty" then
+    msg.jsfx_status = UI.t("jsfx.save_failed", nil, "Failed to save JSFX.")
+    return false
+  end
+  if warning and not allow_invalid then
+    jsfx_manual_open_warning(idx, action, warning)
+    return false
+  end
+  if not prepared then
+    msg.jsfx_status = UI.t("jsfx.save_failed", nil, "Failed to save JSFX.")
+    return false
+  end
+
+  if prepared ~= msg.code_block then
+    msg.code_block = prepared
+    msg.jsfx_saved_path = nil
+    msg.jsfx_saved_fx_name = nil
+    msg.ceiling_injected = true
+    msg.ceiling_inject_info = inject_info
+  end
+  inject_info = inject_info or msg.ceiling_inject_info
+
+  if action == "save" then
+    if msg.jsfx_saved_path then
+      msg.jsfx_status = UI.t("jsfx.already_saved_to", {
+        path = msg.jsfx_saved_path,
+      }, "Already saved to " .. msg.jsfx_saved_path)
+      return true
+    end
+    local saved_path, fx_name = Code.auto_save_jsfx(prepared)
+    if saved_path then
+      msg.jsfx_saved_path = saved_path
+      msg.jsfx_saved_fx_name = fx_name
+      jsfx_manual_record_ceiling_slot(msg, inject_info, saved_path, prepared)
+      msg.jsfx_status = UI.t("jsfx.saved_to", {
+        path = saved_path,
+      }, "Saved to " .. saved_path)
+      return true
+    end
+    msg.jsfx_status = UI.t("jsfx.save_failed", nil, "Failed to save JSFX.")
+    return false
+  end
+
+  if action == "save_as" then
+    local saved = Code.save_file_jsfx(prepared, Code.derive_filename_jsfx(prepared))
+    if saved then
+      jsfx_manual_record_ceiling_slot(msg, inject_info, saved, prepared)
+      msg.jsfx_status = UI.t("jsfx.saved_to", {
+        path = saved,
+      }, "Saved to " .. saved)
+      return true
+    end
+    return false
+  end
+
+  if action == "add" then
+    local fx_name = msg.jsfx_saved_fx_name
+    if not msg.jsfx_saved_path then
+      local saved_path, saved_fx_name = Code.auto_save_jsfx(prepared)
+      if saved_path then
+        msg.jsfx_saved_path = saved_path
+        msg.jsfx_saved_fx_name = saved_fx_name
+        fx_name = saved_fx_name
+        jsfx_manual_record_ceiling_slot(msg, inject_info, saved_path, prepared)
+      end
+    end
+    if msg.jsfx_saved_path and fx_name then
+      local sel_count = reaper.CountSelectedTracks(0)
+      local trs = {}
+      for t = 0, sel_count - 1 do
+        trs[#trs + 1] = reaper.GetSelectedTrack(0, t)
+      end
+      reaper.Undo_BeginBlock()
+      local added_n = 0
+      for _, tr in ipairs(trs) do
+        if tr and reaper.ValidatePtr2(0, tr, "MediaTrack*") then
+          reaper.TrackFX_AddByName(tr, fx_name, false, -1)
+          added_n = added_n + 1
+        end
+      end
+      reaper.Undo_EndBlock("ReaAssist: Add JSFX to selected tracks", -1)
+      msg.jsfx_status = UI.t("jsfx.added_to", {
+        count = added_n,
+      }, "Added to " .. added_n .. " track(s).")
+      msg.jsfx_added_to_tracks = true
+      return true
+    end
+    msg.jsfx_status = UI.t("jsfx.save_failed", nil, "Failed to save JSFX.")
+    return false
+  end
+
+  return false
+end
+
 -- Wordmark letters hoisted out of the per-frame draw loop in
 -- UI.hero_band_v5 / UI.hero_band_settings_v5. The literal `{"A","s","s",
 -- "i","s","t"}` was being allocated every frame on the home / settings
@@ -1024,15 +1231,35 @@ end
 
 function UI._utf8_safe_prefix_bytes(text, max_bytes)
   text = tostring(text or "")
-  max_bytes = math_max(1, tonumber(max_bytes) or 1)
+  max_bytes = math_floor(tonumber(max_bytes) or 0)
+  if max_bytes <= 0 then return "", text end
   if #text <= max_bytes then return text, "" end
-  local cut = max_bytes
-  while cut > 0 do
-    local b = text:byte(cut + 1)
-    if not b or b < 0x80 or b >= 0xC0 then break end
-    cut = cut - 1
+
+  local function is_continuation(b)
+    return b and b >= 0x80 and b <= 0xBF
   end
-  if cut <= 0 then cut = max_bytes end
+  local function lead_len(b)
+    if not b then return 0 end
+    if b < 0x80 then return 1 end
+    if b >= 0xC2 and b <= 0xDF then return 2 end
+    if b >= 0xE0 and b <= 0xEF then return 3 end
+    if b >= 0xF0 and b <= 0xF4 then return 4 end
+    return 0
+  end
+
+  local start = max_bytes
+  while start > 0 and is_continuation(text:byte(start)) do
+    start = start - 1
+  end
+  local cut = 0
+  if start > 0 then
+    local need = lead_len(text:byte(start))
+    if need > 0 and start + need - 1 <= max_bytes then
+      cut = max_bytes
+    else
+      cut = start - 1
+    end
+  end
   return str_sub(text, 1, cut), str_sub(text, cut + 1)
 end
 
@@ -1764,6 +1991,7 @@ function UI.hero_band_v5(phase)
       api_keys.saved_reply_language_idx   = prefs.reply_language_idx
       api_keys.saved_include_snapshot     = prefs.include_snapshot
       api_keys.saved_include_api_ref      = prefs.include_api_ref
+      api_keys.saved_compact_history      = prefs.compact_history
       api_keys.saved_diag_auto_tier       = prefs.diag_auto_tier
       api_keys.saved_cloud_request_timeout = prefs.cloud_request_timeout
       -- Section-open state (per Settings session; not persisted across
@@ -2475,7 +2703,7 @@ function UI.mode_model_row_v5()
   -- ---- Provider chip ------------------------------------------------------
   local prov_filtered = {}
   for i, p in ipairs(PROVIDERS) do
-    if p.is_custom or S.api_key_map[p.id] then
+    if Store.provider_has_usable_credentials(p) then
       -- Label Gemini as "Gemini (Free)" in the dropdown when the free-tier
       -- detector has confirmed the key is on the free plan. The chip uses a
       -- separate suffix (same condition, capitalized to match UPPER casing).
@@ -3475,7 +3703,7 @@ function UI.footer_rail_v5()
     -- they don't need the nudge when the keys UI is on-screen.
     local keys_set = 0
     for _, pk in ipairs(PROVIDERS) do
-      if pk.is_custom or S.api_key_map[pk.id] then
+      if Store.provider_has_usable_credentials(pk) then
         keys_set = keys_set + 1
       end
     end
@@ -3530,6 +3758,7 @@ function UI.footer_rail_v5()
         api_keys.saved_reply_language_idx   = prefs.reply_language_idx
         api_keys.saved_include_snapshot     = prefs.include_snapshot
         api_keys.saved_include_api_ref      = prefs.include_api_ref
+        api_keys.saved_compact_history      = prefs.compact_history
         api_keys.saved_diag_auto_tier       = prefs.diag_auto_tier
         api_keys.saved_cloud_request_timeout = prefs.cloud_request_timeout
         -- Section-open state (per Settings session; not persisted across
@@ -5200,22 +5429,38 @@ local function parse_tos_blocks(raw)
     local first_nl   = para:find("\n", 1, true)
     local first_line = first_nl and para:sub(1, first_nl-1) or para
     local rest       = first_nl and para:sub(first_nl+1) or ""
+    local marked_heading = first_line:match("^%[!!%s*")
+      and first_line:match("%s*!!%]$")
     local classify_line = first_line
       :gsub("^%[!!%s*", "")
       :gsub("%s*!!%]$", "")
     local heading_probe = classify_line
       :gsub("Á", "A"):gsub("É", "E"):gsub("Í", "I")
       :gsub("Ó", "O"):gsub("Ú", "U"):gsub("Ü", "U"):gsub("Ñ", "N")
-    -- Heading detection: English and several Latin-script translations use
-    -- all-caps headings, while CJK and other scripts use short title-cased
-    -- first lines. The TOS is authored as heading + body paragraphs, so a
-    -- short first line with following body text is a section heading.
+    local all_caps_heading = heading_probe:match("^[A-Z][A-Z%s&]*$")
+      and #classify_line <= 60
+    local has_heading_punctuation =
+      classify_line:find(".", 1, true)
+      or classify_line:find(",", 1, true)
+      or classify_line:find(":", 1, true)
+      or classify_line:find(";", 1, true)
+      or classify_line:find("!", 1, true)
+      or classify_line:find("?", 1, true)
+      or classify_line:find("。", 1, true)
+      or classify_line:find("！", 1, true)
+      or classify_line:find("？", 1, true)
+    local non_latin_or_upper_heading = not classify_line:match("%l")
+      and not has_heading_punctuation
+      and #classify_line <= 80
+    -- Heading detection: prefer explicit markers, then conservative all-caps
+    -- / non-lowercase heading lines. Do not treat every short first line as a
+    -- heading; translated body text may wrap onto multiple lines.
     if rest ~= ""
-        and ((heading_probe:match("^[A-Z][A-Z%s&]*$")
-            and #classify_line <= 40)
-          or #classify_line <= 80) then
+        and (marked_heading or all_caps_heading or non_latin_or_upper_heading) then
       blocks[#blocks+1] = {
-        type = "section", heading = first_line, body = rest,
+        type = "section",
+        heading = marked_heading and classify_line or first_line,
+        body = rest,
       }
     elseif classify_line:match("^Copyright") then
       blocks[#blocks+1] = { type = "copyright", text = para }
@@ -6528,11 +6773,7 @@ function Render.bug_report_screen()
         reaper.CF_LocateInExplorer(Log.path)
       else
         local folder = Log.path:match("^(.*)[/\\][^/\\]+$") or Log.path
-        if RA.IS_WINDOWS then
-          os.execute('start "" "' .. folder .. '"')
-        else
-          os.execute('open "' .. folder .. '" 2>/dev/null || xdg-open "' .. folder .. '" 2>/dev/null')
-        end
+        UI.open_path(folder)
       end
     end
     UI.tooltip(UI.t("bug_report.debug.open_tooltip", nil,
@@ -6998,17 +7239,25 @@ end
 function Render._factory_reset_popup(ctx)
   local popup_id = UI.t("settings.adv.factory_reset.label", nil,
     "Factory Reset") .. "##factory_reset_confirm"
-  local fr_w, fr_h = RA.SC(470), RA.SC(238)
+  local fr_w = RA.SC(470)
+  local fr_body = UI.t("settings.factory_reset.body", nil,
+    "This deletes settings, API keys, custom providers, feedback identity, "
+    .. "logs, caches, and local Data files. ReaAssist will relaunch and "
+    .. "start like a new install.")
+  local fr_body_h = UI.measure_multiline_height(fr_body, fr_w - RA.SC(42))
+  local fr_h = math_max(RA.SC(250), RA.SC(176) + fr_body_h)
   if update._main_w then
     ImGui.ImGui_SetNextWindowPos(ctx,
       update._main_x + (update._main_w - fr_w) * 0.5,
       update._main_y + (update._main_h - fr_h) * 0.5,
       ImGui.ImGui_Cond_Appearing())
   end
+  ImGui.ImGui_SetNextWindowSizeConstraints(ctx, fr_w, RA.SC(238),
+    math_max(fr_w, update._main_w and (update._main_w - RA.SC(60)) or fr_w),
+    update._main_h and math_max(fr_h, update._main_h - RA.SC(60)) or fr_h)
   ImGui.ImGui_SetNextWindowSize(ctx, fr_w, fr_h, ImGui.ImGui_Cond_Appearing())
   UI.push_modal_style()
-  if ImGui.ImGui_BeginPopupModal(ctx, popup_id, true,
-      ImGui.ImGui_WindowFlags_NoResize()) then
+  if ImGui.ImGui_BeginPopupModal(ctx, popup_id, true, 0) then
     local fr_cw = ImGui.ImGui_GetContentRegionAvail(ctx)
     ImGui.ImGui_Spacing(ctx)
     local fr_txt = UI.t("settings.factory_reset.heading", nil,
@@ -7019,16 +7268,20 @@ function Render._factory_reset_popup(ctx)
     Text(ctx, fr_txt)
     ImGui.ImGui_Spacing(ctx)
     PushStyleColor(ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-    UI.text_multiline(UI.t("settings.factory_reset.body", nil,
-      "This deletes settings, API keys, custom providers, feedback identity, "
-      .. "logs, caches, and local Data files. ReaAssist will relaunch and "
-      .. "start like a new install."))
+    UI.text_multiline(fr_body)
     PopStyleColor(ctx)
     ImGui.ImGui_Spacing(ctx)
     ImGui.ImGui_Spacing(ctx)
 
     local fr_do_reset = false
-    local fr_yes_w, fr_no_w, fr_gap = RA.SC(118), RA.SC(72), RA.SC(16)
+    local fr_yes_label = UI.t("settings.adv.factory_reset.label", nil,
+      "Factory Reset")
+    local fr_no_label = UI.t("common.cancel", nil, "Cancel")
+    local fr_yes_w = math_max(RA.SC(118),
+      CalcTextSize(ctx, fr_yes_label) + RA.SC(28))
+    local fr_no_w = math_max(RA.SC(72),
+      CalcTextSize(ctx, fr_no_label) + RA.SC(28))
+    local fr_gap = RA.SC(16)
     local fr_row = fr_yes_w + fr_gap + fr_no_w
     SetCursorPosX(ctx, GetCursorPosX(ctx)
       + math_floor((fr_cw - fr_row) * 0.5))
@@ -7036,18 +7289,13 @@ function Render._factory_reset_popup(ctx)
     -- (red fill, white text) so the commit button reads as "this will
     -- wipe your data," not "safe primary action."
     UI.push_modal_danger_btn()
-    if ImGui.ImGui_Button(ctx,
-        UI.t("settings.adv.factory_reset.label", nil, "Factory Reset"),
-        fr_yes_w, 0) then fr_do_reset = true end
+    if ImGui.ImGui_Button(ctx, fr_yes_label, fr_yes_w, 0) then
+      fr_do_reset = true
+    end
     UI.pop_modal_danger_btn()
     SameLine(ctx, 0, fr_gap)
-    if ImGui.ImGui_Button(ctx, UI.t("common.cancel", nil, "Cancel"),
-        fr_no_w, 0) then
+    if ImGui.ImGui_Button(ctx, fr_no_label, fr_no_w, 0) then
       ImGui.ImGui_CloseCurrentPopup(ctx)
-    end
-    if ImGui.ImGui_IsKeyPressed(ctx, ImGui.ImGui_Key_Enter())
-      or ImGui.ImGui_IsKeyPressed(ctx, ImGui.ImGui_Key_KeypadEnter()) then
-      fr_do_reset = true
     end
     if ImGui.ImGui_IsKeyPressed(ctx, ImGui.ImGui_Key_Escape()) then
       ImGui.ImGui_CloseCurrentPopup(ctx)
@@ -7176,24 +7424,37 @@ function Render._key_test_results_popup()
       "API Key Test Results") .. "###key_test_results")
   end
   local all_ok = true
+  local failed_count = 0
+  local failed_with_links = 0
   for _, r in pairs(api_keys.test_results) do
-    if not r.ok then all_ok = false; break end
+    if not r.ok then
+      all_ok = false
+      failed_count = failed_count + 1
+      if r.url then failed_with_links = failed_with_links + 1 end
+    end
   end
-  local res_w, res_h = RA.SC(380), all_ok and RA.SC(140) or RA.SC(220)
+  local res_w = RA.SC(420)
+  local res_h = all_ok and RA.SC(150)
+    or (RA.SC(220) + failed_count * RA.SC(42)
+      + failed_with_links * RA.SC(22))
   local result_count = 0
   for _ in pairs(api_keys.test_results) do result_count = result_count + 1 end
   if result_count > 3 then res_h = res_h + (result_count - 3) * RA.SC(22) end
   local win_x, win_y = ImGui.ImGui_GetWindowPos(RA.ctx)
   local win_w, win_h = ImGui.ImGui_GetWindowSize(RA.ctx)
+  local max_w = math_max(res_w, win_w - RA.SC(80))
+  local max_h = math_max(RA.SC(220), win_h - RA.SC(80))
+  res_h = math_min(res_h, max_h)
   ImGui.ImGui_SetNextWindowPos(RA.ctx,
     win_x + (win_w - res_w) * 0.5,
     win_y + (win_h - res_h) * 0.5,
     ImGui.ImGui_Cond_Appearing())
+  ImGui.ImGui_SetNextWindowSizeConstraints(RA.ctx,
+    RA.SC(380), all_ok and RA.SC(140) or RA.SC(220), max_w, max_h)
   ImGui.ImGui_SetNextWindowSize(RA.ctx, res_w, res_h, ImGui.ImGui_Cond_Appearing())
   UI.push_modal_style()
   if ImGui.ImGui_BeginPopupModal(RA.ctx, UI.t("dialog.key_test.title", nil,
-      "API Key Test Results") .. "###key_test_results", true,
-      ImGui.ImGui_WindowFlags_NoResize()) then
+      "API Key Test Results") .. "###key_test_results", true, 0) then
     local cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
     ImGui.ImGui_Spacing(RA.ctx)
     if all_ok then
@@ -7227,6 +7488,18 @@ function Render._key_test_results_popup()
               -- text_multiline avoids TextWrapped's window-state corruption.
               UI.text_multiline("    " .. r.error)
               PopStyleColor(RA.ctx)
+            end
+            if r.url then
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+              Text(RA.ctx, "    " .. UI.t("dialog.key_test.fix_hint", nil,
+                "How to fix: double-check this key, or generate a new one:"))
+              PopStyleColor(RA.ctx)
+              ImGui.ImGui_Indent(RA.ctx, RA.SC(18))
+              UI.inline_link_sentence("{link}", r.url_label or r.url,
+                "key_test_fix_" .. tostring(pk.id),
+                function() UI.open_url(r.url) end,
+                { text_col = TK.text_muted, link_col = COL.LINK })
+              ImGui.ImGui_Unindent(RA.ctx, RA.SC(18))
             end
           end
         end
@@ -7397,33 +7670,18 @@ function Render.feedback_modal()
     PopFont(RA.ctx)
     Dummy(RA.ctx, 1, RA.SC(4))
 
-    -- Cross-link to the full bug-report flow. Three Text calls chained via
-    -- SameLine(0, 0) so the "Bug Reports" segment is the only clickable
-    -- region (accent color + hand cursor on hover). Clicking closes the
-    -- modal and pops the user onto the Bug Report page, which has space
-    -- for an Advanced Log attachment plus name/email contact fields. Sized
-    -- at SC(11) Inter Regular so the line reads as a peer of the intro
-    -- paragraph above.
+    -- Cross-link to the full bug-report flow. The sentence is one
+    -- translatable string with a {link} placeholder, while only the
+    -- rendered link span is clickable. Clicking closes the modal and pops
+    -- the user onto the Bug Report page, which has space for an Advanced
+    -- Log attachment plus name/email contact fields.
     PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-    Text(RA.ctx, UI.t("feedback.modal.bug_link.before", nil, "See the "))
-    PopStyleColor(RA.ctx)
-    SameLine(RA.ctx, 0, 0)
-
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.accent)
-    Text(RA.ctx, UI.t("feedback.modal.bug_link.label", nil,
-      "Bug Reports"))
-    local _br_link_clicked = ImGui.ImGui_IsItemClicked(RA.ctx)
-    if ImGui.ImGui_IsItemHovered(RA.ctx) then
-      ImGui.ImGui_SetMouseCursor(RA.ctx, ImGui.ImGui_MouseCursor_Hand())
-    end
-    PopStyleColor(RA.ctx)
-    SameLine(RA.ctx, 0, 0)
-
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-    Text(RA.ctx, UI.t("feedback.modal.bug_link.after", nil,
-      " screen to send an advanced report with the full log."))
-    PopStyleColor(RA.ctx)
+    local _br_sentence = UI.t("feedback.modal.bug_link.sentence", nil,
+      "Use {link} to send an advanced report with the full log.")
+    local _br_link_clicked = UI.inline_link_sentence(_br_sentence,
+      UI.t("feedback.modal.bug_link.label", nil, "Bug Reports"),
+      "feedback_bug_reports_link", nil,
+      { text_col = TK.text_muted, link_col = TK.accent })
     PopFont(RA.ctx)
 
     if _br_link_clicked and not locked then
@@ -7907,9 +8165,16 @@ function Render.feedback_modal()
     -- 5 px margin above (was 20 px) -- tightened so the button row stays
     -- inside the modal viewport without a scrollbar at default height.
     Dummy(RA.ctx, 1, RA.SC(5))
-    local btn_w   = RA.SC(100)
+    local cancel_label = UI.t("common.cancel", nil, "Cancel")
+    local primary_label = (S.feedback_modal_state == "error")
+      and UI.t("common.try_again", nil, "Try Again")
+      or UI.t("common.send", nil, "Send")
+    local cancel_w = math_max(RA.SC(100),
+      CalcTextSize(RA.ctx, cancel_label) + RA.SC(30))
+    local primary_w = math_max(RA.SC(100),
+      CalcTextSize(RA.ctx, primary_label) + RA.SC(30))
     local btn_gap = RA.SC(8)
-    local btns_total_w = btn_w * 2 + btn_gap
+    local btns_total_w = cancel_w + primary_w + btn_gap
     local _btn_cur_x = ImGui.ImGui_GetCursorPosX(RA.ctx)
     ImGui.ImGui_SetCursorPosX(RA.ctx,
       _btn_cur_x + math_max(0, math_floor((cw - btns_total_w) * 0.5)))
@@ -7918,18 +8183,16 @@ function Render.feedback_modal()
     -- allowing Cancel mid-flight would just orphan the in-flight callback
     -- (which would later mutate cleared state). Same applies to Escape.
     _fb_begin_disabled(sending)
-    local cancel_clicked = ImGui.ImGui_Button(RA.ctx,
-      UI.t("common.cancel", nil, "Cancel"), btn_w, 0)
+    local cancel_clicked = ImGui.ImGui_Button(RA.ctx, cancel_label,
+      cancel_w, 0)
     _fb_end_disabled()
 
     ImGui.ImGui_SameLine(RA.ctx, 0, btn_gap)
 
     UI.push_modal_primary_btn()
     _fb_begin_disabled(locked)
-    local primary_label = (S.feedback_modal_state == "error")
-      and UI.t("common.try_again", nil, "Try Again")
-      or UI.t("common.send", nil, "Send")
-    local send_clicked = ImGui.ImGui_Button(RA.ctx, primary_label, btn_w, 0)
+    local send_clicked = ImGui.ImGui_Button(RA.ctx, primary_label,
+      primary_w, 0)
     _fb_end_disabled()
     UI.pop_modal_primary_btn()
 
@@ -8024,23 +8287,34 @@ function Render._key_validation_error_popup()
     ImGui.ImGui_OpenPopup(RA.ctx, UI.t("dialog.key_validation.title", nil,
       "Key Validation Failed") .. "###key_validation_failed")
   end
-  -- Base height fits the typical 3-line detail + 2-line "How to fix"
-  -- + OK button. Add SC(24) when a console-link row is also rendered.
-  -- Was SC(200) before; the OK button clipped at the bottom on the
-  -- typical ChatGPT failure-text length.
-  local kerr_w, kerr_h = RA.SC(400), RA.SC(240)
-  if api_keys.key_error_url then kerr_h = kerr_h + RA.SC(24) end
+  local kerr_w = RA.SC(420)
+  local kerr_wrap_w = kerr_w - RA.SC(48)
+  local detail_h = api_keys.key_error_detail
+    and UI.measure_multiline_height(api_keys.key_error_detail, kerr_wrap_w)
+    or 0
+  local hint_h = api_keys.key_error_hint
+    and UI.measure_multiline_height(UI.t("dialog.key_validation.how_to_fix",
+      { hint = api_keys.key_error_hint },
+      "How to fix: " .. api_keys.key_error_hint), kerr_wrap_w)
+    or 0
+  local kerr_h = math_max(RA.SC(260),
+    RA.SC(180) + detail_h + hint_h
+      + (api_keys.key_error_url and RA.SC(34) or 0))
   local win_x, win_y = ImGui.ImGui_GetWindowPos(RA.ctx)
   local win_w, win_h = ImGui.ImGui_GetWindowSize(RA.ctx)
+  local max_w = math_max(kerr_w, win_w - RA.SC(80))
+  local max_h = math_max(RA.SC(260), win_h - RA.SC(80))
+  kerr_h = math_min(kerr_h, max_h)
   ImGui.ImGui_SetNextWindowPos(RA.ctx,
     win_x + (win_w - kerr_w) * 0.5,
     win_y + (win_h - kerr_h) * 0.5,
     ImGui.ImGui_Cond_Appearing())
+  ImGui.ImGui_SetNextWindowSizeConstraints(RA.ctx,
+    RA.SC(400), RA.SC(240), max_w, max_h)
   ImGui.ImGui_SetNextWindowSize(RA.ctx, kerr_w, kerr_h, ImGui.ImGui_Cond_Appearing())
   UI.push_modal_style()
   if ImGui.ImGui_BeginPopupModal(RA.ctx, UI.t("dialog.key_validation.title",
-      nil, "Key Validation Failed") .. "###key_validation_failed", true,
-      ImGui.ImGui_WindowFlags_NoResize()) then
+      nil, "Key Validation Failed") .. "###key_validation_failed", true, 0) then
     local cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
     ImGui.ImGui_Spacing(RA.ctx)
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.red)
@@ -9104,6 +9378,7 @@ local function _exit_settings_screen()
   api_keys.saved_reply_language_idx    = nil
   api_keys.saved_include_snapshot      = nil
   api_keys.saved_include_api_ref       = nil
+  api_keys.saved_compact_history       = nil
   api_keys.saved_diag_auto_tier        = nil
   api_keys.saved_cloud_request_timeout = nil
   api_keys.pending_diag_auto_tier      = nil
@@ -10173,6 +10448,23 @@ function Render._shared_key_screen_impl()
     end
     Dummy(RA.ctx, 1, RA.SC(6))
 
+    -- Toggle: compact older successful assistant code replies in the
+    -- uncached history tail. Kept default-off until real-session
+    -- measurement says it should become the normal path.
+    do
+      local changed, new_on = UI.v5_toggle("##adv_compact_history",
+        UI.t("settings.adv.compact_history.label", nil,
+          "Compact long chat history"),
+        prefs.compact_history,
+        UI.t("settings.adv.compact_history.tooltip", nil,
+          "Replace older successful code replies with short summaries to "
+          .. "save tokens in long sessions. The latest reply stays verbatim, "
+          .. "and follow-up edit requests keep the full history."),
+        inner_w)
+      if changed then prefs.compact_history = new_on end
+    end
+    Dummy(RA.ctx, 1, RA.SC(6))
+
     -- Automatic diagnostics. Basic is default-on anonymous metrics; Extended
     -- also includes redacted chat/diagnostic detail and remains opt-in.
     do
@@ -10626,6 +10918,9 @@ function Render._shared_key_screen_impl()
         if api_keys.saved_include_api_ref ~= nil then
           prefs.include_api_ref = api_keys.saved_include_api_ref
         end
+        if api_keys.saved_compact_history ~= nil then
+          prefs.compact_history = api_keys.saved_compact_history
+        end
         if api_keys.saved_diag_auto_tier ~= nil then
           prefs.diag_auto_tier = api_keys.saved_diag_auto_tier
         end
@@ -10668,12 +10963,7 @@ function Render._shared_key_screen_impl()
 
   -- For first-run: need at least one new key. For re-entry: allow save with
   -- no new input (user may have only removed keys), or with new input.
-  local has_any_key = false
-  for _, pk in ipairs(PROVIDERS) do
-    if pk.is_custom or S.api_key_map[pk.id] then
-      has_any_key = true; break
-    end
-  end
+  local has_any_key = Store.has_usable_provider()
   -- Dirty signals across every staged setting on this screen. Each one
   -- compares prefs.* to api_keys.saved_* (the value at screen open) so
   -- the user can freely toggle back and forth without the indicator
@@ -10697,6 +10987,8 @@ function Render._shared_key_screen_impl()
     and prefs.include_snapshot ~= api_keys.saved_include_snapshot
   local ref_changed     = api_keys.saved_include_api_ref ~= nil
     and prefs.include_api_ref ~= api_keys.saved_include_api_ref
+  local compact_changed = api_keys.saved_compact_history ~= nil
+    and prefs.compact_history ~= api_keys.saved_compact_history
   local diag_changed    = api_keys.saved_diag_auto_tier ~= nil
     and prefs.diag_auto_tier ~= api_keys.saved_diag_auto_tier
   local to_changed      = api_keys.saved_cloud_request_timeout
@@ -10704,7 +10996,8 @@ function Render._shared_key_screen_impl()
 
   local any_pref_changed = scale_changed or theme_changed
     or upd_changed or bak_changed or font_changed or lang_changed
-    or snap_changed or ref_changed or diag_changed or to_changed
+    or snap_changed or ref_changed or compact_changed
+    or diag_changed or to_changed
 
   -- has_any_key flips true if any provider is usable: a built-in with
   -- a saved key in api_key_map, OR a custom provider record (the loop
@@ -11031,6 +11324,9 @@ function Render._shared_key_screen_impl()
     if api_keys.saved_include_api_ref ~= nil then
       api_keys.saved_include_api_ref = nil
     end
+    if api_keys.saved_compact_history ~= nil then
+      api_keys.saved_compact_history = nil
+    end
     if api_keys.saved_diag_auto_tier ~= nil then
       api_keys.saved_diag_auto_tier = nil
     end
@@ -11094,13 +11390,11 @@ function Render._shared_key_screen_impl()
         do
           local act = PROVIDERS.active()
           if act and not act.is_custom and not S.api_key_map[act.id] then
-            for i, p in ipairs(PROVIDERS) do
-              if p.is_custom or S.api_key_map[p.id] then
-                prefs.provider_idx = i
-                MODELS.refresh()
-                if Store and Store.save_config then Store.save_config() end
-                break
-              end
+            local usable_idx = Store.first_usable_provider_idx()
+            if usable_idx then
+              prefs.provider_idx = usable_idx
+              MODELS.refresh()
+              if Store and Store.save_config then Store.save_config() end
             end
           end
         end
@@ -14347,6 +14641,15 @@ end
 -- If `deep` is true, the param probe runs via the defer-paced coroutine,
 -- which is the only way to get accurate data from VST3 plugins with
 -- one-cycle readback lag (e.g. Soundtoys EchoBoy).
+local function fx_cache_rescan_close_undo(rs, label)
+  if rs and rs.undo_open then
+    reaper.Undo_EndBlock(label or "ReaAssist: rescan plugin", 0)
+    rs.undo_open = false
+    return true
+  end
+  return false
+end
+
 function CTX.fx_cache_rescan_start(identifier, deep)
   local rs = fx_cache_ui.rescan
   if RA.context_loaded and not RA.context_loaded() then
@@ -14359,12 +14662,13 @@ function CTX.fx_cache_rescan_start(identifier, deep)
   if rs.active or deep_scan.active then return end
 
   reaper.Undo_BeginBlock()
+  rs.undo_open = true
   reaper.PreventUIRefresh(1)
   reaper.InsertTrackAtIndex(reaper.CountTracks(0), false)
   local tr = reaper.GetTrack(0, reaper.CountTracks(0) - 1)
   if not tr then
     reaper.PreventUIRefresh(-1)
-    reaper.Undo_EndBlock("ReaAssist: rescan (failed)", 0)
+    fx_cache_rescan_close_undo(rs, "ReaAssist: rescan (failed)")
     rs.status = UI.t("settings.fx_cache.status.failed_temp_track", nil,
       "Failed to create temporary track.")
     UI.show_float_toast(UI.t("settings.fx_cache.toast.rescan_failed", nil,
@@ -14379,7 +14683,7 @@ function CTX.fx_cache_rescan_start(identifier, deep)
   if fx_idx < 0 then
     reaper.DeleteTrack(tr)
     reaper.PreventUIRefresh(-1)
-    reaper.Undo_EndBlock("ReaAssist: rescan (failed)", 0)
+    fx_cache_rescan_close_undo(rs, "ReaAssist: rescan (failed)")
     rs.status = UI.t("settings.fx_cache.status.failed_load",
       { identifier = identifier }, "Failed to load: " .. identifier)
     UI.show_float_toast(UI.t("settings.fx_cache.toast.failed_load", nil,
@@ -14387,6 +14691,9 @@ function CTX.fx_cache_rescan_start(identifier, deep)
     return
   end
   reaper.TrackFX_Show(tr, fx_idx, 2)
+  -- Do not leave this setup block open while the deferred reader or deep-scan
+  -- coroutine waits for plugin parameter initialization on later frames.
+  fx_cache_rescan_close_undo(rs, "ReaAssist: rescan plugin load")
 
   rs.active = true
   rs.phase  = "reading"
@@ -14403,7 +14710,7 @@ function CTX.fx_cache_rescan_start(identifier, deep)
   -- invoke the shallow scanner first.
   if deep then
     rs.phase = "deep"
-    CTX.start_deep_scan({
+    local started = CTX.start_deep_scan({
       tr           = tr,
       fx_idx       = fx_idx,
       identifier   = identifier,
@@ -14415,7 +14722,7 @@ function CTX.fx_cache_rescan_start(identifier, deep)
           reaper.DeleteTrack(tr)
         end
         -- PreventUIRefresh(-1) already done by scan_fx_params_deep_body.
-        reaper.Undo_EndBlock("ReaAssist: deep rescan plugin", 0)
+        fx_cache_rescan_close_undo(rs, "ReaAssist: deep rescan plugin")
         rs.active = false
         rs.phase  = "done"
         rs.track  = nil
@@ -14430,7 +14737,7 @@ function CTX.fx_cache_rescan_start(identifier, deep)
           reaper.DeleteTrack(tr)
         end
         -- PreventUIRefresh(-1) already done by scan_fx_params_deep_body.
-        reaper.Undo_EndBlock("ReaAssist: deep rescan (cancelled)", 0)
+        fx_cache_rescan_close_undo(rs, "ReaAssist: deep rescan (cancelled)")
         rs.active = false
         rs.phase  = "done"
         rs.track  = nil
@@ -14451,6 +14758,21 @@ function CTX.fx_cache_rescan_start(identifier, deep)
         end
       end,
     })
+    if not started then
+      if reaper.ValidatePtr2(0, tr, "MediaTrack*") then
+        reaper.DeleteTrack(tr)
+      end
+      reaper.PreventUIRefresh(-1)
+      fx_cache_rescan_close_undo(rs, "ReaAssist: deep rescan (start failed)")
+      rs.active = false
+      rs.phase  = "done"
+      rs.track  = nil
+      rs.deep   = false
+      rs.status = UI.t("settings.fx_cache.status.deep_failed",
+        { reason = "start failed" }, "Deep rescan failed: start failed")
+      UI.show_float_toast(UI.t("settings.fx_cache.toast.deep_failed",
+        nil, "Deep rescan failed"), "err")
+    end
   end
 end
 
@@ -14464,7 +14786,7 @@ function CTX.fx_cache_rescan_read()
       reaper.DeleteTrack(rs.track)
     end
     reaper.PreventUIRefresh(-1)
-    reaper.Undo_EndBlock("ReaAssist: rescan (context unavailable)", 0)
+    fx_cache_rescan_close_undo(rs, "ReaAssist: rescan (context unavailable)")
     rs.active = false
     rs.phase  = "done"
     rs.track  = nil
@@ -14484,13 +14806,13 @@ function CTX.fx_cache_rescan_read()
     rs.status = UI.t("settings.fx_cache.status.rescan_lost", nil,
       "Rescan failed: temp track lost.")
     reaper.PreventUIRefresh(-1)
-    reaper.Undo_EndBlock("ReaAssist: rescan (failed)", 0)
+    fx_cache_rescan_close_undo(rs, "ReaAssist: rescan (failed)")
     return
   end
 
-  -- Wrap the scan in xpcall so a thrown error doesn't skip the cleanup
-  -- below (orphaned hidden track + stuck PreventUIRefresh + unclosed Undo
-  -- block). Treat a thrown scan like the ValidatePtr2-fail path above.
+  -- Wrap the scan in xpcall so a thrown error doesn't skip the cleanup below
+  -- (orphaned hidden track + stuck PreventUIRefresh). Treat a thrown scan like
+  -- the ValidatePtr2-fail path above.
   local _ok, params_list, max_group, total_count, needs_deep_scan =
     xpcall(function()
       return CTX.scan_fx_params(tr, rs.fx_idx)
@@ -14503,7 +14825,7 @@ function CTX.fx_cache_rescan_read()
       reaper.DeleteTrack(tr)
     end
     reaper.PreventUIRefresh(-1)
-    reaper.Undo_EndBlock("ReaAssist: rescan (scan error)", 0)
+    fx_cache_rescan_close_undo(rs, "ReaAssist: rescan (scan error)")
     rs.active = false
     rs.phase  = "done"
     rs.track  = nil
@@ -14522,7 +14844,7 @@ function CTX.fx_cache_rescan_read()
 
   reaper.DeleteTrack(tr)
   reaper.PreventUIRefresh(-1)
-  reaper.Undo_EndBlock("ReaAssist: rescan plugin", 0)
+  fx_cache_rescan_close_undo(rs, "ReaAssist: rescan plugin")
 
   rs.active = false
   rs.phase  = "done"
@@ -14589,16 +14911,23 @@ function CTX.fx_cache_rescan_all_advance()
   end
   -- Queue drained: finalise.
   local succeeded = ra.total - #ra.failures
-  local msg = UI.t("settings.fx_cache.toast.rescan_all_done", {
-    succeeded = succeeded,
-    total = ra.total,
-  }, str_format("Rescanned %d/%d plugin%s.",
-    succeeded, ra.total, ra.total == 1 and "" or "s"))
+  local msg
   if #ra.failures > 0 then
-    msg = msg .. UI.t(
-      "settings.fx_cache.toast.rescan_all_failed_suffix",
-      { count = #ra.failures },
-      str_format(" %d failed (missing plugins).", #ra.failures))
+    msg = UI.t(
+      "settings.fx_cache.toast.rescan_all_done_with_failures",
+      {
+        succeeded = succeeded,
+        total = ra.total,
+        count = #ra.failures,
+      },
+      str_format("Rescanned %d/%d plugin%s. %d failed (missing plugins).",
+        succeeded, ra.total, ra.total == 1 and "" or "s", #ra.failures))
+  else
+    msg = UI.t("settings.fx_cache.toast.rescan_all_done", {
+      succeeded = succeeded,
+      total = ra.total,
+    }, str_format("Rescanned %d/%d plugin%s.",
+      succeeded, ra.total, ra.total == 1 and "" or "s"))
   end
   ra.active  = false
   ra.current = nil
@@ -15855,6 +16184,7 @@ function Render.main_window()
       api_keys.saved_reply_language_idx   = nil
       api_keys.saved_include_snapshot     = nil
       api_keys.saved_include_api_ref      = nil
+      api_keys.saved_compact_history      = nil
       api_keys.saved_diag_auto_tier       = nil
       api_keys.saved_cloud_request_timeout = nil
       api_keys.custom_instr_loaded        = nil
@@ -16257,18 +16587,35 @@ function Render.main_window()
         -- the bubble height, so the bubble stays visually clean regardless
         -- of show_details.
         local USER_MIN_W = RA.SC(40)          -- floor for tiny messages; small so short prompts hug their content instead of sitting in an over-sized bubble with asymmetric padding
-        -- Measure the message content's natural width (max line width with
-        -- no wrapping). CalcTextSize respects \n for multi-line input.
+        -- Prepare the exact text the bubble renderer will draw. Width, wrap,
+        -- height, and render must all use this same stripped text; otherwise
+        -- markdown cleanup/bullet normalization can make the measured layout
+        -- diverge from the visible lines.
+        local raw_src = msg.content or ""
+        if msg._stripped_src ~= raw_src or msg._stripped == nil then
+          msg._stripped_src = raw_src
+          msg._stripped     = UI.strip_markdown(raw_src)
+          msg._natural_content_w = nil
+          msg._bubble_w          = nil
+          msg._layout_key        = nil  -- content changed: invalidate layout cache
+        end
+        local stripped  = msg._stripped
+
+        -- Measure the rendered message content's natural width (max line
+        -- width with no wrapping). CalcTextSize respects \n for multi-line
+        -- input.
         -- Cache the result on the message itself: msg.content is immutable
         -- once added, and previously every visible user bubble re-measured
         -- it every frame plus every attachment width per attachment per
         -- frame -- an O(messages * attachments) tax for invariant data.
         -- Invalidate on font_idx change so a chat-font swap rebuilds.
         local _w_key = tostring(prefs.chat_font_idx or 2) .. ":" .. chat_font_key
-        if msg._natural_content_w == nil or msg._natural_content_w_key ~= _w_key then
+        if msg._natural_content_w == nil
+           or msg._natural_content_w_key ~= _w_key
+           or msg._natural_content_w_src ~= stripped then
           local nw = 0
-          if msg.content and msg.content ~= "" then
-            nw = CalcTextSize(RA.ctx, msg.content)
+          if stripped and stripped ~= "" then
+            nw = CalcTextSize(RA.ctx, stripped)
           end
           if msg.attach_names then
             for _, aname in ipairs(msg.attach_names) do
@@ -16285,6 +16632,7 @@ function Render.main_window()
           end
           msg._natural_content_w = nw
           msg._natural_content_w_key = _w_key
+          msg._natural_content_w_src = stripped
         end
         local natural_content_w = msg._natural_content_w
         -- NOTE: BUBBLE_IND * 3, not * 2. The bubble's rendering path
@@ -16307,10 +16655,10 @@ function Render.main_window()
         local natural_bubble_w = natural_content_w + USER_PAD_H * 2
         local bubble_w
         -- bubble_cpl: chars_per_line to use for BOTH the measurement phase
-        -- below and the render phase (passed into selectable_text). Keeping
-        -- them identical is what makes the bubble hug the wrapped content
-        -- without a right-side gap; if they differ, the render re-wraps
-        -- tighter than measured and the bubble ends up too wide.
+        -- below and the render phase. Keeping them identical is what makes
+        -- the bubble hug the wrapped content without a right-side gap; if
+        -- they differ, the render re-wraps tighter than measured and the
+        -- bubble ends up too wide.
         local bubble_cpl
         if natural_bubble_w <= USER_MAX_W then
           -- Fits on one line -- natural width hugs content exactly. No wrap
@@ -16320,9 +16668,10 @@ function Render.main_window()
           -- Content needs wrapping. Pick chars_per_line from the max width,
           -- wrap with it, measure each line's real pixel width, then size
           -- the bubble to hug the widest line. The same cpl is threaded into
-          -- selectable_text below so render == measurement.
+          -- the render layout below so render == measurement.
           local wrap_at = USER_MAX_W - USER_PAD_H * 2
-          bubble_cpl = UI.chat_units_per_line(wrap_at)
+          local bubble_cpl_guess = UI.chat_units_per_line(wrap_at)
+          bubble_cpl = bubble_cpl_guess
           -- Cache max_line_w / bubble_w on the message keyed on the inputs
           -- that affect them: bubble_cpl (which already absorbs font-size
           -- changes via avg_char_w above), chat_font_idx (paranoia for
@@ -16334,25 +16683,58 @@ function Render.main_window()
           local _font_idx  = tostring(prefs.chat_font_idx or 2) .. ":" .. chat_font_key
           local _scale_idx = prefs.ui_scale_idx or 3
           if msg._bubble_w == nil
-             or msg._bubble_w_cpl   ~= bubble_cpl
+             or msg._bubble_w_guess ~= bubble_cpl_guess
+             or msg._bubble_w_wrap_at ~= wrap_at
              or msg._bubble_w_font  ~= _font_idx
-             or msg._bubble_w_scale ~= _scale_idx then
-            local _, _, wrap_lines = UI.get_wrap_cached(msg.content, bubble_cpl)
+             or msg._bubble_w_scale ~= _scale_idx
+             or msg._bubble_w_src   ~= stripped then
+            -- The char-count wrap estimate can still produce a line that is
+            -- a few pixels wider than the capped bubble, especially with
+            -- uppercase-heavy text. Back off the wrap count on cache rebuilds
+            -- until measured pixels fit inside the cap.
+            local target_line_w = math_max(RA.SC(20), wrap_at - RA.SC(6))
+            local resolved_cpl = bubble_cpl_guess
             local max_line_w = 0
-            for i = 1, #wrap_lines do
-              local line = wrap_lines[i]
-              if #line > 0 then
-                local lw = CalcTextSize(RA.ctx, line)
-                if lw > max_line_w then max_line_w = lw end
+            local attempts = 8
+            while true do
+              local _, _, wrap_lines = UI.get_wrap_cached(stripped, resolved_cpl)
+              max_line_w = 0
+              for i = 1, #wrap_lines do
+                local line = wrap_lines[i]
+                if #line > 0 then
+                  local lw = CalcTextSize(RA.ctx, line)
+                  if lw > max_line_w then max_line_w = lw end
+                end
               end
+              if max_line_w <= target_line_w
+                 or resolved_cpl <= 20
+                 or attempts <= 0 then
+                break
+              end
+              local avg_unit_w = math_max(ImGui.ImGui_GetFontSize(RA.ctx) * 0.48, 1)
+              local step = math_max(1,
+                math_floor(((max_line_w - target_line_w) / avg_unit_w) + 0.999))
+              local next_cpl = math_max(20, resolved_cpl - step)
+              if next_cpl == resolved_cpl then break end
+              resolved_cpl = next_cpl
+              attempts = attempts - 1
+            end
+            bubble_cpl = resolved_cpl
+            local bubble_slack = RA.SC(6)
+            if natural_content_w > 0 and max_line_w <= 0 then
+              max_line_w = math_min(natural_content_w, target_line_w)
             end
             msg._bubble_w = math_max(USER_MIN_W,
                             math_min(USER_MAX_W,
-                                     max_line_w + USER_PAD_H * 2 + RA.SC(2)))
-            msg._bubble_w_cpl   = bubble_cpl
-            msg._bubble_w_font  = _font_idx
-            msg._bubble_w_scale = _scale_idx
+                                     max_line_w + USER_PAD_H * 2 + bubble_slack))
+            msg._bubble_w_cpl     = bubble_cpl
+            msg._bubble_w_guess   = bubble_cpl_guess
+            msg._bubble_w_wrap_at = wrap_at
+            msg._bubble_w_font    = _font_idx
+            msg._bubble_w_scale   = _scale_idx
+            msg._bubble_w_src     = stripped
           end
+          bubble_cpl = msg._bubble_w_cpl or bubble_cpl
           bubble_w = msg._bubble_w
         end
         local content_w = bubble_w - USER_PAD_H * 2
@@ -16367,19 +16749,6 @@ function Render.main_window()
         --   (b) Subtract 4 to account for measure's trailing-ItemSpacing
         --       assumption (line_count * (line_h + 2) + 2) that plain Text()
         --       doesn't actually emit for the final line.
-        -- Strip markdown once per frame and cache on the message; the render
-        -- block below reads the cached stripped string instead of stripping
-        -- again -- previously the stripping happened in two places at 60 fps
-        -- for every visible user message. The cache entry invalidates when
-        -- msg.content changes (edits; streaming doesn't apply to user
-        -- bubbles).
-        local raw_src = msg.content or ""
-        if msg._stripped_src ~= raw_src then
-          msg._stripped_src = raw_src
-          msg._stripped     = UI.strip_markdown(raw_src)
-          msg._layout_key   = nil  -- content changed: invalidate layout cache
-        end
-        local stripped  = msg._stripped
         -- Cache measured height + wrapped render text keyed on
         -- (stripped-identity, content_w, bubble_cpl). Scrolling a long chat
         -- re-enters this branch every frame for every visible message; the
@@ -17371,8 +17740,12 @@ function Render.main_window()
                 tostring(action_count) .. " action"
                   .. (action_count == 1 and "" or "s"))
               local status_label = msg.typed_action_lua_requested
-                and UI.t("typed_actions.status.undo_lua", nil,
-                  "UNDO + LUA")
+                and ((msg.typed_action_undo_clicked
+                  or msg.screen_reader_undo_clicked)
+                  and UI.t("typed_actions.status.undo_lua", nil,
+                    "UNDO + LUA")
+                  or UI.t("typed_actions.status.lua_requested", nil,
+                    "LUA REQUESTED"))
                 or msg.typed_action_undo_clicked
                 and UI.t("typed_actions.status.undo_sent", nil,
                   "UNDO SENT")
@@ -17414,6 +17787,93 @@ function Render.main_window()
             local can_undo = msg.auto_ran
               or msg.run_status == "ran_ok"
               or (msg.run_status == "errored" and type(ar) == "table" and #ar > 0)
+            local can_apply = type(plan_text) == "string"
+              and plan_text ~= ""
+              and msg.typed_actions.valid == true
+              and not can_undo
+              and not msg.typed_action_undo_clicked
+              and not msg.typed_action_lua_requested
+              and msg.run_status ~= "pending"
+              and not (msg.typed_actions.deferred_pending == true)
+            if can_apply then
+              ImGui.ImGui_Spacing(RA.ctx)
+              local V5_RUN_BG  = TK.accent
+              local V5_RUN_HOV = UI.lerp_u32(TK.accent, 0xFFFFFFFF, 0.12)
+              local V5_RUN_ACT = UI.lerp_u32(TK.accent, 0x000000FF, 0.10)
+              local V5_RUN_TXT = TK.accent_text
+              local V5_SEC_BG  = 0x00000000
+              local V5_SEC_HOV = (TK.card_hover & 0xFFFFFF00) | 0x80
+              local V5_SEC_ACT = TK.card_hover
+              local V5_SEC_TXT = TK.text_muted
+              PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 1)
+              PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(),   RA.SC(4))
+              PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),    RA.SC(10), RA.SC(5))
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(), TK.border)
+              PushFont(RA.ctx, FONT.mono_med, RA.SC(11))
+
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        V5_RUN_BG)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), V5_RUN_HOV)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  V5_RUN_ACT)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          V5_RUN_TXT)
+              local run_edit_label = "\xe2\x96\xb6 "
+                .. UI.t("a11y.sr.apply_action_plan", nil, "Run Edit")
+              local run_edit_w = math_min(RA.SC(126),
+                math_max(RA.SC(96), CalcTextSize(RA.ctx, run_edit_label)
+                  + RA.SC(22)))
+              if ImGui.ImGui_Button(RA.ctx,
+                  run_edit_label .. "##ta_run_" .. i, run_edit_w, 0) then
+                local ok_apply, reason, apply_msg = TypedActionController
+                  and TypedActionController.apply_typed_action_message
+                  and TypedActionController.apply_typed_action_message(msg, i)
+                if reason == "backup_unsaved" then
+                  S.backup_warn_code = nil
+                  S.backup_warn_jsfx = nil
+                  S.backup_warn_idx = nil
+                  S.backup_warn_typed_idx = i
+                  S.open_backup_warn = true
+                elseif UI.show_float_toast then
+                  UI.show_float_toast(apply_msg or (ok_apply
+                    and UI.t("a11y.sr.apply_action_plan_done", nil,
+                      "Structured edit ran.")
+                    or UI.t("a11y.sr.apply_action_plan_failed", nil,
+                      "Structured edit could not run.")),
+                    ok_apply and "ok" or "err")
+                end
+              end
+              UI.tooltip(UI.t("a11y.sr.apply_action_plan.meaning", nil,
+                "Runs the validated edit after ReaAssist checks it."))
+              PopStyleColor(RA.ctx, 4)
+
+              ImGui.ImGui_SameLine(RA.ctx, 0, RA.SC(6))
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        V5_SEC_BG)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), V5_SEC_HOV)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  V5_SEC_ACT)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          V5_SEC_TXT)
+              local request_lua_label = UI.t("typed_actions.request_lua", nil,
+                "Request Lua")
+              local request_lua_w = math_min(RA.SC(132),
+                math_max(RA.SC(104), CalcTextSize(RA.ctx, request_lua_label)
+                  + RA.SC(22)))
+              if ImGui.ImGui_Button(RA.ctx,
+                  request_lua_label .. "##ta_request_lua_" .. i,
+                  request_lua_w, 0) then
+                local ok_req, req_msg = TypedActionController
+                  and TypedActionController.request_lua_for_typed_action_message
+                  and TypedActionController.request_lua_for_typed_action_message(
+                    msg, i, { skip_undo = true })
+                if not ok_req and UI.show_float_toast then
+                  UI.show_float_toast(req_msg or UI.t(
+                    "a11y.sr.request_lua_unavailable", nil,
+                    "Could not request the Lua/ReaScript version."), "err")
+                end
+              end
+              UI.tooltip(UI.t("typed_actions.request_lua.tooltip", nil,
+                "Ask for a normal Lua/ReaScript version you can review, run, or save. The structured edit will not run."))
+              PopStyleColor(RA.ctx, 4)
+              PopFont(RA.ctx)
+              PopStyleColor(RA.ctx, 1)
+              ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+            end
             if can_undo then
               ImGui.ImGui_Spacing(RA.ctx)
               local V5_SEC_BG  = 0x00000000
@@ -17601,6 +18061,12 @@ function Render.main_window()
               msg.lua_artifact = nil
               msg._lua_artifact_src = nil
               msg.run_blocked = nil
+              if (msg.code_type or "lua") ~= "lua" then
+                msg.jsfx_saved_path = nil
+                msg.jsfx_saved_fx_name = nil
+                msg.ceiling_injected = nil
+                msg.ceiling_inject_info = nil
+              end
               -- Keep S.pending_code in sync when editing the latest block.
               if i == #S.display_messages and S.pending_code then
                 S.pending_code = new_code
@@ -17972,51 +18438,7 @@ function Render.main_window()
             if ImGui.ImGui_Button(RA.ctx,
                 jsfx_add_label .. "##jsfx_add_" .. i,
                 action_btn_w(jsfx_add_label, RA.SC(130), RA.SC(190)), 0) then
-              local sel_count = reaper.CountSelectedTracks(0)
-              if sel_count == 0 then
-                S.open_no_tracks_warn = true
-              else
-                -- Reuse already-saved path if available, otherwise save now.
-                local fx_name = msg.jsfx_saved_fx_name
-                if not msg.jsfx_saved_path then
-                  local saved_path, saved_fx_name = Code.auto_save_jsfx(msg.code_block)
-                  if saved_path then
-                    msg.jsfx_saved_path = saved_path
-                    msg.jsfx_saved_fx_name = saved_fx_name
-                    fx_name = saved_fx_name
-                  end
-                end
-                if msg.jsfx_saved_path and fx_name then
-                  -- Snapshot all selected-track pointers up front. Iterating
-                  -- with GetSelectedTrack(0, t) inside the AddByName loop
-                  -- would be vulnerable to a defer-script edit between
-                  -- iterations: a track removed mid-loop could either drop
-                  -- a slot we expected to handle or hand us a stale handle
-                  -- if REAPER recycles the underlying memory. The window
-                  -- here is sub-millisecond but other deferred scripts
-                  -- (mixer macros, control surface handlers) can land in it.
-                  local trs = {}
-                  for t = 0, sel_count - 1 do
-                    trs[#trs+1] = reaper.GetSelectedTrack(0, t)
-                  end
-                  reaper.Undo_BeginBlock()
-                  local added_n = 0
-                  for _, tr in ipairs(trs) do
-                    if tr and reaper.ValidatePtr2(0, tr, "MediaTrack*") then
-                      reaper.TrackFX_AddByName(tr, fx_name, false, -1)
-                      added_n = added_n + 1
-                    end
-                  end
-                  reaper.Undo_EndBlock("ReaAssist: Add JSFX to selected tracks", -1)
-                  msg.jsfx_status = UI.t("jsfx.added_to", {
-                    count = added_n,
-                  }, "Added to " .. added_n .. " track(s).")
-                  msg.jsfx_added_to_tracks = true
-                else
-                  msg.jsfx_status = UI.t("jsfx.save_failed", nil,
-                    "Failed to save JSFX.")
-                end
-              end
+              jsfx_manual_perform_action(msg, i, "add", false)
             end
             UI.tooltip(UI.t("jsfx.add.tooltip", nil,
               "Save JSFX and add it to all selected tracks"))
@@ -18075,23 +18497,7 @@ function Render.main_window()
             if ImGui.ImGui_Button(RA.ctx,
                 jsfx_save_label .. "##jsfx_save_" .. i,
                 action_btn_w(jsfx_save_label, RA.SC(60), RA.SC(82)), 0) then
-              if msg.jsfx_saved_path then
-                msg.jsfx_status = UI.t("jsfx.already_saved_to", {
-                  path = msg.jsfx_saved_path,
-                }, "Already saved to " .. msg.jsfx_saved_path)
-              else
-                local saved_path, fx_name = Code.auto_save_jsfx(msg.code_block)
-                if saved_path then
-                  msg.jsfx_saved_path = saved_path
-                  msg.jsfx_saved_fx_name = fx_name
-                  msg.jsfx_status = UI.t("jsfx.saved_to", {
-                    path = saved_path,
-                  }, "Saved to " .. saved_path)
-                else
-                  msg.jsfx_status = UI.t("jsfx.save_failed", nil,
-                    "Failed to save JSFX.")
-                end
-              end
+              jsfx_manual_perform_action(msg, i, "save", false)
             end
             UI.tooltip(UI.t("jsfx.save.tooltip", nil,
               "Save JSFX to Effects/ReaAssist/ folder"))
@@ -18101,12 +18507,7 @@ function Render.main_window()
             if ImGui.ImGui_Button(RA.ctx,
                 jsfx_save_as_label .. "##jsfx_saveas_" .. i,
                 action_btn_w(jsfx_save_as_label, RA.SC(70), RA.SC(92)), 0) then
-              local saved = Code.save_file_jsfx(msg.code_block, Code.derive_filename_jsfx(msg.code_block))
-              if saved then
-                msg.jsfx_status = UI.t("jsfx.saved_to", {
-                  path = saved,
-                }, "Saved to " .. saved)
-              end
+              jsfx_manual_perform_action(msg, i, "save_as", false)
             end
             UI.tooltip(UI.t("jsfx.save_as.tooltip", nil,
               "Save JSFX to a custom location (opens file browser in Effects folder)"))
@@ -18141,9 +18542,10 @@ function Render.main_window()
           -- before clicking Run, but execution is blocked until confirmed.
           if risk_warning then
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), COL.WARN)
-            ImGui.ImGui_TextWrapped(RA.ctx, risk_warning
-              .. "  (" .. UI.t("code.risky.run_will_confirm", nil,
-                "Run will ask for confirmation") .. ")")
+            ImGui.ImGui_TextWrapped(RA.ctx,
+              UI.t("code.risky.warning_with_confirmation",
+                { warning = risk_warning },
+                risk_warning .. "  (Run will ask for confirmation)"))
             PopStyleColor(RA.ctx)
           end
 
@@ -19333,6 +19735,7 @@ function Render.main_window()
         S.backup_warn_code = nil
         S.backup_warn_jsfx = nil
         S.backup_warn_idx  = nil
+        S.backup_warn_typed_idx = nil
         S.refocus_prompt   = true
       end
       if ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
@@ -19340,6 +19743,7 @@ function Render.main_window()
         S.backup_warn_code = nil
         S.backup_warn_jsfx = nil
         S.backup_warn_idx  = nil
+        S.backup_warn_typed_idx = nil
         S.refocus_prompt   = true
       end
       if do_disable then
@@ -19374,6 +19778,7 @@ function Render.main_window()
             S.backup_warn_code = nil
             S.backup_warn_jsfx = nil
             S.backup_warn_idx  = nil
+            S.backup_warn_typed_idx = nil
             S.refocus_prompt   = true
             Log.add_error(UI.t("code.backup_failed_after_save",
               { error = tostring(berr) },
@@ -19400,7 +19805,27 @@ function Render.main_window()
         S.status = ok and "idle" or "error"
         S.backup_warn_code = nil
         S.backup_warn_idx  = nil
+        S.backup_warn_typed_idx = nil
         S.refocus_prompt   = true
+      end
+      if (do_continue or do_disable or saved_now) and S.backup_warn_typed_idx then
+        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+        local typed_idx = S.backup_warn_typed_idx
+        local typed_msg = S.display_messages and S.display_messages[typed_idx] or nil
+        local ok_apply, _, apply_msg = TypedActionController
+          and TypedActionController.apply_typed_action_message
+          and TypedActionController.apply_typed_action_message(typed_msg,
+            typed_idx, { skip_backup = true })
+        if UI.show_float_toast then
+          UI.show_float_toast(apply_msg or (ok_apply
+            and UI.t("a11y.sr.apply_action_plan_done", nil,
+              "Structured edit ran.")
+            or UI.t("a11y.sr.apply_action_plan_failed", nil,
+              "Structured edit could not run.")),
+            ok_apply and "ok" or "err")
+        end
+        S.backup_warn_typed_idx = nil
+        S.refocus_prompt = true
       end
 
       ImGui.ImGui_EndPopup(RA.ctx)
@@ -19898,6 +20323,93 @@ function Render.main_window()
             "popup cancelled (no stock fallback for " .. rsv_type
             .. ") -- turn aborted")
         end
+      end
+
+      ImGui.ImGui_EndPopup(RA.ctx)
+    end
+    UI.pop_modal_style()
+
+    -- ------ JSFX save/add confirmation modal -----------------------------------
+    local jsfx_save_popup = UI.t("modal.jsfx_save.title", nil,
+      "Review Before Saving") .. "###jsfx_save_popup"
+    if S.open_jsfx_save_warn then
+      ImGui.ImGui_OpenPopup(RA.ctx, jsfx_save_popup)
+      S.open_jsfx_save_warn = false
+    end
+    local jspop_w, jspop_h = RA.SC(500), RA.SC(330)
+    local jswin_x, jswin_y = ImGui.ImGui_GetWindowPos(RA.ctx)
+    local jswin_w, jswin_h = ImGui.ImGui_GetWindowSize(RA.ctx)
+    ImGui.ImGui_SetNextWindowPos(RA.ctx,
+      jswin_x + (jswin_w - jspop_w) * 0.5,
+      jswin_y + (jswin_h - jspop_h) * 0.5,
+      ImGui.ImGui_Cond_Appearing())
+    ImGui.ImGui_SetNextWindowSize(RA.ctx, jspop_w, jspop_h,
+      ImGui.ImGui_Cond_Appearing())
+    UI.push_modal_style()
+    if ImGui.ImGui_BeginPopupModal(RA.ctx, jsfx_save_popup, true,
+        ImGui.ImGui_WindowFlags_NoResize()) then
+      ImGui.ImGui_TextWrapped(RA.ctx,
+        UI.t("modal.jsfx_save.intro", nil,
+          "This JSFX failed ReaAssist's safety/syntax validator:"))
+      ImGui.ImGui_Spacing(RA.ctx)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
+      if ImGui.ImGui_BeginChild(RA.ctx, "##jsfx_save_warn_detail",
+          0, RA.SC(110), ImGui.ImGui_ChildFlags_Borders()) then
+        UI.text_multiline(S.jsfx_save_warn_detail or "")
+        ImGui.ImGui_EndChild(RA.ctx)
+      end
+      PopStyleColor(RA.ctx)
+      ImGui.ImGui_Spacing(RA.ctx)
+      ImGui.ImGui_TextWrapped(RA.ctx,
+        UI.t("modal.jsfx_save.outro", nil,
+          "Saving or adding it can write unsafe effect code to disk or load it "
+          .. "on selected tracks. ReaAssist will still apply the output ceiling "
+          .. "first when possible."))
+      ImGui.ImGui_Spacing(RA.ctx)
+
+      local action = S.jsfx_save_warn_action or "save"
+      local do_continue = false
+      local continue_label = (action == "add")
+        and UI.t("modal.jsfx_save.add_anyway", nil, "Add Anyway")
+        or UI.t("modal.jsfx_save.save_anyway", nil, "Save Anyway")
+      local cancel_label = UI.t("common.cancel", nil, "Cancel")
+      local jsbtn1_w = math_max(RA.SC(104),
+        CalcTextSize(RA.ctx, continue_label) + RA.SC(24))
+      local jsbtn2_w = math_max(RA.SC(72),
+        CalcTextSize(RA.ctx, cancel_label) + RA.SC(24))
+      local jsgap = RA.SC(16)
+      local jsrow_w = jsbtn1_w + jsgap + jsbtn2_w
+      local jscw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+      SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx) + (jscw - jsrow_w) * 0.5)
+      UI.push_modal_danger_btn()
+      if ImGui.ImGui_Button(RA.ctx, continue_label, jsbtn1_w, 0) then
+        do_continue = true
+      end
+      UI.pop_modal_danger_btn()
+      SameLine(RA.ctx, 0, jsgap)
+      if ImGui.ImGui_Button(RA.ctx, cancel_label, jsbtn2_w, 0) then
+        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+        S.jsfx_save_warn_idx = nil
+        S.jsfx_save_warn_action = nil
+        S.jsfx_save_warn_detail = nil
+        S.refocus_prompt = true
+      end
+      if ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
+        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+        S.jsfx_save_warn_idx = nil
+        S.jsfx_save_warn_action = nil
+        S.jsfx_save_warn_detail = nil
+        S.refocus_prompt = true
+      end
+      if do_continue then
+        local idx = S.jsfx_save_warn_idx
+        local msg = idx and S.display_messages[idx] or nil
+        jsfx_manual_perform_action(msg, idx, action, true)
+        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+        S.jsfx_save_warn_idx = nil
+        S.jsfx_save_warn_action = nil
+        S.jsfx_save_warn_detail = nil
+        S.refocus_prompt = true
       end
 
       ImGui.ImGui_EndPopup(RA.ctx)
@@ -20923,6 +21435,71 @@ function UI.text_multiline(text)
     if not nl then break end
     pos = nl + 1
   end
+end
+
+function UI.measure_multiline_height(text, wrap_w)
+  local t = text or ""
+  local line_h = ImGui.ImGui_GetTextLineHeight(RA.ctx)
+  if #t == 0 then return line_h end
+  local total = 0
+  local pos = 1
+  while pos <= #t do
+    local nl   = str_find(t, "\n", pos, true)
+    local line = nl and str_sub(t, pos, nl - 1) or str_sub(t, pos)
+    local _, h = ImGui.ImGui_CalcTextSize(RA.ctx,
+      line ~= "" and line or " ", nil, nil, false, wrap_w or 0)
+    total = total + math_max(line_h, h)
+    if not nl then break end
+    pos = nl + 1
+  end
+  return total
+end
+
+function UI.inline_link_sentence(sentence, link_label, id, on_click, opts)
+  opts = opts or {}
+  local before, after = tostring(sentence or ""):match("^(.-){link}(.*)$")
+  if before == nil then before, after = tostring(sentence or ""), "" end
+  local text_col = opts.text_col or TK.text_muted
+  local link_col = opts.link_col or COL.LINK
+  local clicked = false
+  if before ~= "" then
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), text_col)
+    Text(RA.ctx, before)
+    PopStyleColor(RA.ctx)
+    SameLine(RA.ctx, 0, 0)
+  end
+
+  local label = tostring(link_label or "")
+  local link_w = CalcTextSize(RA.ctx, label)
+  local link_sx, link_sy = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        0x00000000)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), 0x00000000)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  0x00000000)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          link_col)
+  PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 0)
+  PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(), 0, 0)
+  if ImGui.ImGui_Button(RA.ctx, label .. "##" .. tostring(id or "link"),
+      link_w, 0) then
+    clicked = true
+    if on_click then on_click() end
+  end
+  ImGui.ImGui_PopStyleVar(RA.ctx, 2)
+  PopStyleColor(RA.ctx, 4)
+  if ImGui.ImGui_IsItemHovered(RA.ctx) then
+    ImGui.ImGui_SetMouseCursor(RA.ctx, ImGui.ImGui_MouseCursor_Hand())
+    local dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+    local ul_y = link_sy + ImGui.ImGui_GetTextLineHeight(RA.ctx) - 1
+    ImGui.ImGui_DrawList_AddLine(dl, link_sx, ul_y, link_sx + link_w,
+      ul_y, link_col, 1)
+  end
+
+  if after ~= "" then
+    SameLine(RA.ctx, 0, 0)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), text_col)
+    Text(RA.ctx, after)
+    PopStyleColor(RA.ctx)
+  end
+  return clicked
 end
 
 -- =============================================================================

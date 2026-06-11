@@ -442,6 +442,7 @@ InstallerGfx.STRINGS = {
     ["common.dependency"] = "dependencia",
     ["common.unknown"] = "desconocido",
     ["common.and"] = "y",
+    ["common.by"] = "por",
     ["common.list_separator"] = ", ",
     ["common.list_final_separator"] = " y ",
     ["a11y.button.install"] = "Botón Instalar.",
@@ -527,7 +528,10 @@ InstallerGfx.STRINGS = {
     ["error.title"] = "Instalación fallida",
     ["error.failed_installing"] = "Error al instalar {name} ({step})",
     ["error.timeout"] =
-      "La instalación superó 2 minutos. Revisa tu conexión e inténtalo de nuevo.",
+      "La instalación superó 2 minutos. Revisa tu conexión e inténtalo de nuevo.\n\n"
+      .. "Si es un equipo Windows administrado, una política de PowerShell "
+      .. "(como Constrained Language Mode) puede haber bloqueado el instalador. "
+      .. "Instala la dependencia manualmente o pide a TI que permita el script de ReaAssist.",
     ["error.download"] =
       "No se pudo descargar {name} desde GitHub (curl {code}).\nRevisa tu conexión e inténtalo de nuevo.",
     ["error.verify"] =
@@ -539,6 +543,1438 @@ InstallerGfx.STRINGS = {
     ["error.write_script"] = "No se pudo escribir el script de instalación.",
   },
 }
+
+InstallerGfx.STRINGS.fr = {
+  ["common.install"] = "Installer",
+  ["common.quit"] = "Quitter",
+  ["common.close"] = "Fermer",
+  ["common.retry"] = "Réessayer",
+  ["common.dependency"] = "dépendance",
+  ["common.unknown"] = "inconnu",
+  ["common.and"] = "et",
+  ["common.by"] = "par",
+  ["common.list_separator"] = ", ",
+  ["common.list_final_separator"] = " et ",
+  ["a11y.button.install"] = "Bouton Installer.",
+  ["a11y.button.quit"] = "Bouton Quitter.",
+  ["a11y.button.retry"] = "Bouton Réessayer.",
+  ["a11y.button.close"] = "Bouton Fermer.",
+  ["a11y.disclose.single"] =
+    "ReaAssist doit installer ou mettre à jour {name}. Appuyez sur Entrée pour installer, sur Échap pour quitter, ou sur Tab pour changer de bouton.",
+  ["a11y.disclose.multi"] =
+    "ReaAssist doit installer ou mettre à jour {count} dépendances. Appuyez sur Entrée pour installer, sur Échap pour quitter, ou sur Tab pour changer de bouton.",
+  ["a11y.running"] = "{name} : {status}",
+  ["a11y.running.escape"] =
+    "L'installation est déjà en cours. Attendez la fin.",
+  ["a11y.done"] =
+    "Installation terminée : {list}. Fermez puis rouvrez REAPER. Ouvrez ensuite la liste d'actions et lancez ReaAssist.",
+  ["a11y.error"] =
+    "L'installation de {name} a échoué pendant {step}. {error} Appuyez sur Échap pour fermer ou sur Tab pour choisir Réessayer ou Fermer.",
+  ["a11y.step.setup"] = "la préparation",
+  ["a11y.step.download"] = "le téléchargement",
+  ["a11y.step.verify"] = "la vérification",
+  ["a11y.step.install"] = "l'installation",
+  ["a11y.step.timeout"] = "le délai d'attente",
+  ["a11y.step.unknown"] = "une étape inconnue",
+  ["window.install_dependencies"] = "Installer les dépendances",
+  ["window.install_dep"] = "Installer {name}",
+  ["window.update_dep"] = "Mettre à jour {name}",
+  ["manual.title"] = "ReaAssist - Installation manuelle requise",
+  ["status.preparing"] = "Préparation...",
+  ["status.starting"] = "Démarrage de l'installation...",
+  ["status.downloading_installing"] =
+    "Téléchargement et installation de {name}...",
+  ["status.running"] = "Démarrage de l'installation...",
+  ["status.downloading"] = "Téléchargement depuis GitHub...",
+  ["status.verifying"] = "Vérification du checksum...",
+  ["status.installing"] = "Installation dans UserPlugins...",
+  ["status.preparing_next"] = "Préparation de la dépendance suivante...",
+  ["status.done"] = "Terminé.",
+  ["running.installing"] = "Installation de ",
+  ["running.updating"] = "Mise à jour de ",
+  ["running.update_range"] = "de {from} à {to}",
+  ["disclose.single.install_title"] = "Installer {name} ?",
+  ["disclose.single.update_title"] = "Mettre à jour {name} ?",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist a besoin de {name} pour s'ouvrir.",
+  ["disclose.single.update_subtitle"] =
+    "Votre {name} ({installed}) est trop ancien.",
+  ["disclose.row.dependency"] = "Dépendance :",
+  ["disclose.row.by"] = "Par :",
+  ["disclose.row.license"] = "Licence :",
+  ["disclose.row.source"] = "Source :",
+  ["disclose.row.install_to"] = "Installer dans :",
+  ["disclose.multi.install_title"] = "Installer les dépendances ?",
+  ["disclose.multi.update_title"] = "Mettre à jour les dépendances ?",
+  ["disclose.multi.subtitle"] =
+    "ReaAssist a besoin des extensions suivantes :",
+  ["disclose.multi.was"] = "était {version}",
+  ["disclose.multi.by_license_source"] =
+    "par {author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "Sera installé dans : REAPER UserPlugins/",
+  ["done.title.single_install"] = "Dépendance installée",
+  ["done.title.single_update"] = "Dépendance mise à jour",
+  ["done.title.multi_install"] = "Dépendances installées",
+  ["done.title.multi_update"] = "Dépendances mises à jour",
+  ["done.not_running"] = "ReaAssist n'est pas encore ouvert.",
+  ["done.step1.single"] =
+    "1.  Fermez et rouvrez REAPER pour charger la nouvelle extension.",
+  ["done.step1.multi"] =
+    "1.  Fermez et rouvrez REAPER pour charger les nouvelles extensions.",
+  ["done.step2"] =
+    "2.  Ouvrez la liste d'actions (raccourci '?').",
+  ["done.step3"] =
+    "3.  Cherchez 'ReaAssist' et lancez-le.",
+  ["error.title"] = "Échec de l'installation",
+  ["error.failed_installing"] = "Échec de l'installation de {name} ({step})",
+  ["error.timeout"] =
+    "L'installation a dépassé 2 minutes. Vérifiez votre connexion et réessayez.",
+  ["error.download"] =
+    "Impossible de télécharger {name} depuis GitHub (curl {code}).\nVérifiez votre connexion et réessayez.",
+  ["error.verify"] =
+    "Le checksum SHA-256 ne correspond pas pour {asset}.\nAttendu : {expected}...\nObtenu : {actual}...",
+  ["error.install"] = "Installation échouée : {detail}",
+  ["error.empty_queue"] = "La file d'installation était vide.",
+  ["error.unsafe_path"] =
+    "Chemin non sûr ('{char}'). Installez {name} manuellement.",
+  ["error.write_script"] =
+    "Impossible d'écrire le script d'installation.",
+}
+
+InstallerGfx.STRINGS.de = {
+  ["common.install"] = "Installieren",
+  ["common.quit"] = "Beenden",
+  ["common.close"] = "Schließen",
+  ["common.retry"] = "Erneut versuchen",
+  ["common.dependency"] = "Abhängigkeit",
+  ["common.unknown"] = "unbekannt",
+  ["common.and"] = "und",
+  ["common.by"] = "von",
+  ["common.list_separator"] = ", ",
+  ["common.list_final_separator"] = " und ",
+  ["a11y.button.install"] = "Schaltfläche Installieren.",
+  ["a11y.button.quit"] = "Schaltfläche Beenden.",
+  ["a11y.button.retry"] = "Schaltfläche Erneut versuchen.",
+  ["a11y.button.close"] = "Schaltfläche Schließen.",
+  ["a11y.disclose.single"] =
+    "ReaAssist muss {name} installieren oder aktualisieren. Drücken Sie Enter zum Installieren, Escape zum Beenden oder Tab zum Wechseln der Schaltfläche.",
+  ["a11y.disclose.multi"] =
+    "ReaAssist muss {count} Abhängigkeiten installieren oder aktualisieren. Drücken Sie Enter zum Installieren, Escape zum Beenden oder Tab zum Wechseln der Schaltfläche.",
+  ["a11y.running"] = "{name}: {status}",
+  ["a11y.running.escape"] =
+    "Die Installation läuft bereits. Bitte warten Sie bis zum Abschluss.",
+  ["a11y.done"] =
+    "Installation abgeschlossen: {list}. Schließen und öffnen Sie REAPER erneut. Öffnen Sie dann die Aktionsliste und starten Sie ReaAssist.",
+  ["a11y.error"] =
+    "Die Installation von {name} ist während {step} fehlgeschlagen. {error} Drücken Sie Escape zum Schließen oder Tab für Erneut versuchen oder Schließen.",
+  ["a11y.step.setup"] = "Vorbereitung",
+  ["a11y.step.download"] = "Download",
+  ["a11y.step.verify"] = "Prüfung",
+  ["a11y.step.install"] = "Installation",
+  ["a11y.step.timeout"] = "Zeitüberschreitung",
+  ["a11y.step.unknown"] = "unbekannter Schritt",
+  ["window.install_dependencies"] = "Abhängigkeiten installieren",
+  ["window.install_dep"] = "{name} installieren",
+  ["window.update_dep"] = "{name} aktualisieren",
+  ["manual.title"] = "ReaAssist - Manuelle Installation erforderlich",
+  ["status.preparing"] = "Vorbereitung...",
+  ["status.starting"] = "Installation wird gestartet...",
+  ["status.downloading_installing"] =
+    "{name} wird heruntergeladen und installiert...",
+  ["status.running"] = "Installation wird gestartet...",
+  ["status.downloading"] = "Download von GitHub...",
+  ["status.verifying"] = "Prüfsumme wird geprüft...",
+  ["status.installing"] = "Installation in UserPlugins...",
+  ["status.preparing_next"] = "Nächste Abhängigkeit wird vorbereitet...",
+  ["status.done"] = "Fertig.",
+  ["running.installing"] = "Installiere ",
+  ["running.updating"] = "Aktualisiere ",
+  ["running.update_range"] = "von {from} auf {to}",
+  ["disclose.single.install_title"] = "{name} installieren?",
+  ["disclose.single.update_title"] = "{name} aktualisieren?",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist benötigt {name}, um zu starten.",
+  ["disclose.single.update_subtitle"] =
+    "Ihr {name} ({installed}) ist zu alt.",
+  ["disclose.row.dependency"] = "Abhängigkeit:",
+  ["disclose.row.by"] = "Von:",
+  ["disclose.row.license"] = "Lizenz:",
+  ["disclose.row.source"] = "Quelle:",
+  ["disclose.row.install_to"] = "Installieren in:",
+  ["disclose.multi.install_title"] = "Abhängigkeiten installieren?",
+  ["disclose.multi.update_title"] = "Abhängigkeiten aktualisieren?",
+  ["disclose.multi.subtitle"] =
+    "ReaAssist benötigt die folgenden Erweiterungen:",
+  ["disclose.multi.was"] = "war {version}",
+  ["disclose.multi.by_license_source"] =
+    "von {author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "Wird installiert in: REAPER UserPlugins/",
+  ["done.title.single_install"] = "Abhängigkeit installiert",
+  ["done.title.single_update"] = "Abhängigkeit aktualisiert",
+  ["done.title.multi_install"] = "Abhängigkeiten installiert",
+  ["done.title.multi_update"] = "Abhängigkeiten aktualisiert",
+  ["done.not_running"] = "ReaAssist ist noch nicht geöffnet.",
+  ["done.step1.single"] =
+    "1.  Schließen und öffnen Sie REAPER erneut, um die neue Erweiterung zu laden.",
+  ["done.step1.multi"] =
+    "1.  Schließen und öffnen Sie REAPER erneut, um die neuen Erweiterungen zu laden.",
+  ["done.step2"] =
+    "2.  Öffnen Sie die Aktionsliste (Tastenkürzel '?').",
+  ["done.step3"] =
+    "3.  Suchen Sie nach 'ReaAssist' und starten Sie es.",
+  ["error.title"] = "Installation fehlgeschlagen",
+  ["error.failed_installing"] =
+    "Installation von {name} fehlgeschlagen ({step})",
+  ["error.timeout"] =
+    "Die Installation dauerte länger als 2 Minuten. Prüfen Sie Ihre Verbindung und versuchen Sie es erneut.",
+  ["error.download"] =
+    "{name} konnte nicht von GitHub heruntergeladen werden (curl {code}).\nPrüfen Sie Ihre Verbindung und versuchen Sie es erneut.",
+  ["error.verify"] =
+    "Die SHA-256-Prüfsumme stimmt für {asset} nicht überein.\nErwartet: {expected}...\nErhalten: {actual}...",
+  ["error.install"] = "Installation fehlgeschlagen: {detail}",
+  ["error.empty_queue"] = "Die Installationswarteschlange war leer.",
+  ["error.unsafe_path"] =
+    "Unsicherer Pfad ('{char}'). Installieren Sie {name} manuell.",
+  ["error.write_script"] =
+    "Das Installationsskript konnte nicht geschrieben werden.",
+}
+
+InstallerGfx.STRINGS.it = {
+  ["common.install"] = "Installa",
+  ["common.quit"] = "Esci",
+  ["common.close"] = "Chiudi",
+  ["common.retry"] = "Riprova",
+  ["common.dependency"] = "dipendenza",
+  ["common.unknown"] = "sconosciuto",
+  ["common.and"] = "e",
+  ["common.by"] = "di",
+  ["common.list_separator"] = ", ",
+  ["common.list_final_separator"] = " e ",
+  ["a11y.button.install"] = "Pulsante Installa.",
+  ["a11y.button.quit"] = "Pulsante Esci.",
+  ["a11y.button.retry"] = "Pulsante Riprova.",
+  ["a11y.button.close"] = "Pulsante Chiudi.",
+  ["a11y.disclose.single"] =
+    "ReaAssist deve installare o aggiornare {name}. Premi Invio per installare, Esc per uscire o Tab per cambiare pulsante.",
+  ["a11y.disclose.multi"] =
+    "ReaAssist deve installare o aggiornare {count} dipendenze. Premi Invio per installare, Esc per uscire o Tab per cambiare pulsante.",
+  ["a11y.running"] = "{name}: {status}",
+  ["a11y.running.escape"] =
+    "L'installazione è già in corso. Attendi il completamento.",
+  ["a11y.done"] =
+    "Installazione completata: {list}. Chiudi e riapri REAPER, poi apri l'elenco azioni ed esegui ReaAssist.",
+  ["a11y.error"] =
+    "Installazione di {name} non riuscita durante {step}. {error} Premi Esc per chiudere o Tab per scegliere Riprova o Chiudi.",
+  ["a11y.step.setup"] = "la preparazione",
+  ["a11y.step.download"] = "il download",
+  ["a11y.step.verify"] = "la verifica",
+  ["a11y.step.install"] = "l'installazione",
+  ["a11y.step.timeout"] = "il timeout",
+  ["a11y.step.unknown"] = "un passaggio sconosciuto",
+  ["window.install_dependencies"] = "Installa dipendenze",
+  ["window.install_dep"] = "Installa {name}",
+  ["window.update_dep"] = "Aggiorna {name}",
+  ["manual.title"] = "ReaAssist - Installazione manuale richiesta",
+  ["status.preparing"] = "Preparazione...",
+  ["status.starting"] = "Avvio installazione...",
+  ["status.downloading_installing"] = "Download e installazione di {name}...",
+  ["status.running"] = "Avvio installazione...",
+  ["status.downloading"] = "Download da GitHub...",
+  ["status.verifying"] = "Verifica checksum...",
+  ["status.installing"] = "Installazione in UserPlugins...",
+  ["status.preparing_next"] = "Preparazione della prossima dipendenza...",
+  ["status.done"] = "Fatto.",
+  ["running.installing"] = "Installazione di ",
+  ["running.updating"] = "Aggiornamento di ",
+  ["running.update_range"] = "da {from} a {to}",
+  ["disclose.single.install_title"] = "Installare {name}?",
+  ["disclose.single.update_title"] = "Aggiornare {name}?",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist richiede {name} per aprirsi.",
+  ["disclose.single.update_subtitle"] =
+    "Il tuo {name} ({installed}) è troppo vecchio.",
+  ["disclose.row.dependency"] = "Dipendenza:",
+  ["disclose.row.by"] = "Di:",
+  ["disclose.row.license"] = "Licenza:",
+  ["disclose.row.source"] = "Fonte:",
+  ["disclose.row.install_to"] = "Installa in:",
+  ["disclose.multi.install_title"] = "Installare le dipendenze?",
+  ["disclose.multi.update_title"] = "Aggiornare le dipendenze?",
+  ["disclose.multi.subtitle"] =
+    "ReaAssist richiede le seguenti estensioni:",
+  ["disclose.multi.was"] = "era {version}",
+  ["disclose.multi.by_license_source"] =
+    "di {author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "Sarà installato in: REAPER UserPlugins/",
+  ["done.title.single_install"] = "Dipendenza installata",
+  ["done.title.single_update"] = "Dipendenza aggiornata",
+  ["done.title.multi_install"] = "Dipendenze installate",
+  ["done.title.multi_update"] = "Dipendenze aggiornate",
+  ["done.not_running"] = "ReaAssist non è ancora aperto.",
+  ["done.step1.single"] =
+    "1.  Chiudi e riapri REAPER per caricare la nuova estensione.",
+  ["done.step1.multi"] =
+    "1.  Chiudi e riapri REAPER per caricare le nuove estensioni.",
+  ["done.step2"] = "2.  Apri l'elenco azioni (scorciatoia '?').",
+  ["done.step3"] = "3.  Cerca 'ReaAssist' ed eseguilo.",
+  ["error.title"] = "Installazione non riuscita",
+  ["error.failed_installing"] =
+    "Installazione di {name} non riuscita ({step})",
+  ["error.timeout"] =
+    "L'installazione ha superato 2 minuti. Controlla la connessione e riprova.",
+  ["error.download"] =
+    "Impossibile scaricare {name} da GitHub (curl {code}).\nControlla la connessione e riprova.",
+  ["error.verify"] =
+    "Il checksum SHA-256 non corrisponde per {asset}.\nPrevisto: {expected}...\nOttenuto: {actual}...",
+  ["error.install"] = "Installazione non riuscita: {detail}",
+  ["error.empty_queue"] = "La coda di installazione era vuota.",
+  ["error.unsafe_path"] =
+    "Percorso non sicuro ('{char}'). Installa {name} manualmente.",
+  ["error.write_script"] =
+    "Impossibile scrivere lo script di installazione.",
+}
+
+InstallerGfx.STRINGS.pt = {
+  ["common.install"] = "Instalar",
+  ["common.quit"] = "Sair",
+  ["common.close"] = "Fechar",
+  ["common.retry"] = "Tentar novamente",
+  ["common.dependency"] = "dependência",
+  ["common.unknown"] = "desconhecido",
+  ["common.and"] = "e",
+  ["common.by"] = "por",
+  ["common.list_separator"] = ", ",
+  ["common.list_final_separator"] = " e ",
+  ["a11y.button.install"] = "Botão Instalar.",
+  ["a11y.button.quit"] = "Botão Sair.",
+  ["a11y.button.retry"] = "Botão Tentar novamente.",
+  ["a11y.button.close"] = "Botão Fechar.",
+  ["a11y.disclose.single"] =
+    "O ReaAssist precisa instalar ou atualizar {name}. Pressione Enter para instalar, Escape para sair ou Tab para trocar de botão.",
+  ["a11y.disclose.multi"] =
+    "O ReaAssist precisa instalar ou atualizar {count} dependências. Pressione Enter para instalar, Escape para sair ou Tab para trocar de botão.",
+  ["a11y.running"] = "{name}: {status}",
+  ["a11y.running.escape"] =
+    "A instalação já está em andamento. Aguarde a conclusão.",
+  ["a11y.done"] =
+    "Instalação concluída: {list}. Feche e reabra o REAPER. Depois abra a lista de ações e execute o ReaAssist.",
+  ["a11y.error"] =
+    "A instalação de {name} falhou durante {step}. {error} Pressione Escape para fechar ou Tab para escolher Tentar novamente ou Fechar.",
+  ["a11y.step.setup"] = "a preparação",
+  ["a11y.step.download"] = "o download",
+  ["a11y.step.verify"] = "a verificação",
+  ["a11y.step.install"] = "a instalação",
+  ["a11y.step.timeout"] = "o tempo limite",
+  ["a11y.step.unknown"] = "uma etapa desconhecida",
+  ["window.install_dependencies"] = "Instalar dependências",
+  ["window.install_dep"] = "Instalar {name}",
+  ["window.update_dep"] = "Atualizar {name}",
+  ["manual.title"] = "ReaAssist - Instalação manual necessária",
+  ["status.preparing"] = "Preparando...",
+  ["status.starting"] = "Iniciando instalação...",
+  ["status.downloading_installing"] = "Baixando e instalando {name}...",
+  ["status.running"] = "Iniciando instalação...",
+  ["status.downloading"] = "Baixando do GitHub...",
+  ["status.verifying"] = "Verificando checksum...",
+  ["status.installing"] = "Instalando em UserPlugins...",
+  ["status.preparing_next"] = "Preparando a próxima dependência...",
+  ["status.done"] = "Concluído.",
+  ["running.installing"] = "Instalando ",
+  ["running.updating"] = "Atualizando ",
+  ["running.update_range"] = "de {from} para {to}",
+  ["disclose.single.install_title"] = "Instalar {name}?",
+  ["disclose.single.update_title"] = "Atualizar {name}?",
+  ["disclose.single.install_subtitle"] =
+    "O ReaAssist precisa de {name} para abrir.",
+  ["disclose.single.update_subtitle"] =
+    "Seu {name} ({installed}) é antigo demais.",
+  ["disclose.row.dependency"] = "Dependência:",
+  ["disclose.row.by"] = "Por:",
+  ["disclose.row.license"] = "Licença:",
+  ["disclose.row.source"] = "Fonte:",
+  ["disclose.row.install_to"] = "Instalar em:",
+  ["disclose.multi.install_title"] = "Instalar dependências?",
+  ["disclose.multi.update_title"] = "Atualizar dependências?",
+  ["disclose.multi.subtitle"] =
+    "O ReaAssist precisa das seguintes extensões:",
+  ["disclose.multi.was"] = "era {version}",
+  ["disclose.multi.by_license_source"] =
+    "por {author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "Será instalado em: REAPER UserPlugins/",
+  ["done.title.single_install"] = "Dependência instalada",
+  ["done.title.single_update"] = "Dependência atualizada",
+  ["done.title.multi_install"] = "Dependências instaladas",
+  ["done.title.multi_update"] = "Dependências atualizadas",
+  ["done.not_running"] = "O ReaAssist ainda não está aberto.",
+  ["done.step1.single"] =
+    "1.  Feche e reabra o REAPER para carregar a nova extensão.",
+  ["done.step1.multi"] =
+    "1.  Feche e reabra o REAPER para carregar as novas extensões.",
+  ["done.step2"] = "2.  Abra a lista de ações (atalho '?').",
+  ["done.step3"] = "3.  Procure 'ReaAssist' e execute.",
+  ["error.title"] = "Falha na instalação",
+  ["error.failed_installing"] = "Falha ao instalar {name} ({step})",
+  ["error.timeout"] =
+    "A instalação passou de 2 minutos. Verifique sua conexão e tente novamente.",
+  ["error.download"] =
+    "Não foi possível baixar {name} do GitHub (curl {code}).\nVerifique sua conexão e tente novamente.",
+  ["error.verify"] =
+    "O checksum SHA-256 não confere para {asset}.\nEsperado: {expected}...\nObtido: {actual}...",
+  ["error.install"] = "Falha na instalação: {detail}",
+  ["error.empty_queue"] = "A fila de instalação estava vazia.",
+  ["error.unsafe_path"] =
+    "Caminho inseguro ('{char}'). Instale {name} manualmente.",
+  ["error.write_script"] =
+    "Não foi possível gravar o script de instalação.",
+}
+
+InstallerGfx.STRINGS.nl = {
+  ["common.install"] = "Installeren",
+  ["common.quit"] = "Afsluiten",
+  ["common.close"] = "Sluiten",
+  ["common.retry"] = "Opnieuw proberen",
+  ["common.dependency"] = "afhankelijkheid",
+  ["common.unknown"] = "onbekend",
+  ["common.and"] = "en",
+  ["common.by"] = "door",
+  ["common.list_separator"] = ", ",
+  ["common.list_final_separator"] = " en ",
+  ["window.install_dependencies"] = "Afhankelijkheden installeren",
+  ["window.install_dep"] = "{name} installeren",
+  ["window.update_dep"] = "{name} bijwerken",
+  ["manual.title"] = "ReaAssist - Handmatige installatie vereist",
+  ["status.preparing"] = "Voorbereiden...",
+  ["status.starting"] = "Installatie starten...",
+  ["status.downloading_installing"] = "{name} downloaden en installeren...",
+  ["status.running"] = "Installatie starten...",
+  ["status.downloading"] = "Downloaden van GitHub...",
+  ["status.verifying"] = "Checksum controleren...",
+  ["status.installing"] = "Installeren in UserPlugins...",
+  ["status.preparing_next"] = "Volgende afhankelijkheid voorbereiden...",
+  ["status.done"] = "Klaar.",
+  ["running.installing"] = "Installeren ",
+  ["running.updating"] = "Bijwerken ",
+  ["running.update_range"] = "van {from} naar {to}",
+  ["disclose.single.install_title"] = "{name} installeren?",
+  ["disclose.single.update_title"] = "{name} bijwerken?",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist heeft {name} nodig om te openen.",
+  ["disclose.single.update_subtitle"] =
+    "Uw {name} ({installed}) is te oud.",
+  ["disclose.row.dependency"] = "Afhankelijkheid:",
+  ["disclose.row.by"] = "Door:",
+  ["disclose.row.license"] = "Licentie:",
+  ["disclose.row.source"] = "Bron:",
+  ["disclose.row.install_to"] = "Installeren in:",
+  ["disclose.multi.install_title"] = "Afhankelijkheden installeren?",
+  ["disclose.multi.update_title"] = "Afhankelijkheden bijwerken?",
+  ["disclose.multi.subtitle"] =
+    "ReaAssist heeft de volgende extensies nodig:",
+  ["disclose.multi.was"] = "was {version}",
+  ["disclose.multi.by_license_source"] =
+    "door {author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "Wordt geïnstalleerd in: REAPER UserPlugins/",
+  ["done.title.single_install"] = "Afhankelijkheid geïnstalleerd",
+  ["done.title.single_update"] = "Afhankelijkheid bijgewerkt",
+  ["done.title.multi_install"] = "Afhankelijkheden geïnstalleerd",
+  ["done.title.multi_update"] = "Afhankelijkheden bijgewerkt",
+  ["done.not_running"] = "ReaAssist is nog niet geopend.",
+  ["done.step1.single"] =
+    "1.  Sluit en heropen REAPER om de nieuwe extensie te laden.",
+  ["done.step1.multi"] =
+    "1.  Sluit en heropen REAPER om de nieuwe extensies te laden.",
+  ["done.step2"] = "2.  Open de actielijst (sneltoets '?').",
+  ["done.step3"] = "3.  Zoek 'ReaAssist' en voer het uit.",
+  ["error.title"] = "Installatie mislukt",
+  ["error.failed_installing"] = "Installeren van {name} mislukt ({step})",
+  ["error.timeout"] =
+    "De installatie duurde langer dan 2 minuten. Controleer uw verbinding en probeer opnieuw.",
+  ["error.download"] =
+    "{name} kon niet worden gedownload van GitHub (curl {code}).\nControleer uw verbinding en probeer opnieuw.",
+  ["error.verify"] =
+    "De SHA-256-checksum klopt niet voor {asset}.\nVerwacht: {expected}...\nGekregen: {actual}...",
+  ["error.install"] = "Installatie mislukt: {detail}",
+  ["error.empty_queue"] = "De installatiewachtrij was leeg.",
+  ["error.unsafe_path"] =
+    "Onveilig pad ('{char}'). Installeer {name} handmatig.",
+  ["error.write_script"] =
+    "Kon het installatiescript niet schrijven.",
+}
+
+InstallerGfx.STRINGS.pl = {
+  ["common.install"] = "Zainstaluj",
+  ["common.quit"] = "Zakończ",
+  ["common.close"] = "Zamknij",
+  ["common.retry"] = "Spróbuj ponownie",
+  ["common.dependency"] = "zależność",
+  ["common.unknown"] = "nieznany",
+  ["common.and"] = "i",
+  ["common.by"] = "przez",
+  ["common.list_separator"] = ", ",
+  ["common.list_final_separator"] = " i ",
+  ["window.install_dependencies"] = "Zainstaluj zależności",
+  ["window.install_dep"] = "Zainstaluj {name}",
+  ["window.update_dep"] = "Zaktualizuj {name}",
+  ["manual.title"] = "ReaAssist - Wymagana instalacja ręczna",
+  ["status.preparing"] = "Przygotowywanie...",
+  ["status.starting"] = "Uruchamianie instalacji...",
+  ["status.downloading_installing"] =
+    "Pobieranie i instalowanie {name}...",
+  ["status.running"] = "Uruchamianie instalacji...",
+  ["status.downloading"] = "Pobieranie z GitHub...",
+  ["status.verifying"] = "Sprawdzanie sumy kontrolnej...",
+  ["status.installing"] = "Instalowanie w UserPlugins...",
+  ["status.preparing_next"] = "Przygotowywanie następnej zależności...",
+  ["status.done"] = "Gotowe.",
+  ["running.installing"] = "Instalowanie ",
+  ["running.updating"] = "Aktualizowanie ",
+  ["running.update_range"] = "z {from} do {to}",
+  ["disclose.single.install_title"] = "Zainstalować {name}?",
+  ["disclose.single.update_title"] = "Zaktualizować {name}?",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist potrzebuje {name}, aby się otworzyć.",
+  ["disclose.single.update_subtitle"] =
+    "Twój {name} ({installed}) jest zbyt stary.",
+  ["disclose.row.dependency"] = "Zależność:",
+  ["disclose.row.by"] = "Autor:",
+  ["disclose.row.license"] = "Licencja:",
+  ["disclose.row.source"] = "Źródło:",
+  ["disclose.row.install_to"] = "Zainstaluj w:",
+  ["disclose.multi.install_title"] = "Zainstalować zależności?",
+  ["disclose.multi.update_title"] = "Zaktualizować zależności?",
+  ["disclose.multi.subtitle"] =
+    "ReaAssist potrzebuje następujących rozszerzeń:",
+  ["disclose.multi.was"] = "było {version}",
+  ["disclose.multi.by_license_source"] =
+    "przez {author} - {license} - {source}",
+  ["disclose.multi.install_to"] =
+    "Zostanie zainstalowane w: REAPER UserPlugins/",
+  ["done.title.single_install"] = "Zależność zainstalowana",
+  ["done.title.single_update"] = "Zależność zaktualizowana",
+  ["done.title.multi_install"] = "Zależności zainstalowane",
+  ["done.title.multi_update"] = "Zależności zaktualizowane",
+  ["done.not_running"] = "ReaAssist nie jest jeszcze otwarty.",
+  ["done.step1.single"] =
+    "1.  Zamknij i ponownie otwórz REAPER, aby wczytać nowe rozszerzenie.",
+  ["done.step1.multi"] =
+    "1.  Zamknij i ponownie otwórz REAPER, aby wczytać nowe rozszerzenia.",
+  ["done.step2"] = "2.  Otwórz listę akcji (skrót '?').",
+  ["done.step3"] = "3.  Wyszukaj 'ReaAssist' i uruchom.",
+  ["error.title"] = "Instalacja nie powiodła się",
+  ["error.failed_installing"] =
+    "Instalacja {name} nie powiodła się ({step})",
+  ["error.timeout"] =
+    "Instalacja przekroczyła 2 minuty. Sprawdź połączenie i spróbuj ponownie.",
+  ["error.download"] =
+    "Nie można pobrać {name} z GitHub (curl {code}).\nSprawdź połączenie i spróbuj ponownie.",
+  ["error.verify"] =
+    "Suma SHA-256 nie pasuje dla {asset}.\nOczekiwano: {expected}...\nOtrzymano: {actual}...",
+  ["error.install"] = "Instalacja nie powiodła się: {detail}",
+  ["error.empty_queue"] = "Kolejka instalacji była pusta.",
+  ["error.unsafe_path"] =
+    "Niebezpieczna ścieżka ('{char}'). Zainstaluj {name} ręcznie.",
+  ["error.write_script"] =
+    "Nie można zapisać skryptu instalacyjnego.",
+}
+
+InstallerGfx.STRINGS.sv = {
+  ["common.install"] = "Installera",
+  ["common.quit"] = "Avsluta",
+  ["common.close"] = "Stäng",
+  ["common.retry"] = "Försök igen",
+  ["common.dependency"] = "beroende",
+  ["common.unknown"] = "okänt",
+  ["common.and"] = "och",
+  ["common.by"] = "av",
+  ["common.list_separator"] = ", ",
+  ["common.list_final_separator"] = " och ",
+  ["window.install_dependencies"] = "Installera beroenden",
+  ["window.install_dep"] = "Installera {name}",
+  ["window.update_dep"] = "Uppdatera {name}",
+  ["manual.title"] = "ReaAssist - Manuell installation krävs",
+  ["status.preparing"] = "Förbereder...",
+  ["status.starting"] = "Startar installation...",
+  ["status.downloading_installing"] =
+    "Hämtar och installerar {name}...",
+  ["status.running"] = "Startar installation...",
+  ["status.downloading"] = "Hämtar från GitHub...",
+  ["status.verifying"] = "Verifierar checksumma...",
+  ["status.installing"] = "Installerar i UserPlugins...",
+  ["status.preparing_next"] = "Förbereder nästa beroende...",
+  ["status.done"] = "Klart.",
+  ["running.installing"] = "Installerar ",
+  ["running.updating"] = "Uppdaterar ",
+  ["running.update_range"] = "från {from} till {to}",
+  ["disclose.single.install_title"] = "Installera {name}?",
+  ["disclose.single.update_title"] = "Uppdatera {name}?",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist behöver {name} för att öppnas.",
+  ["disclose.single.update_subtitle"] =
+    "Din {name} ({installed}) är för gammal.",
+  ["disclose.row.dependency"] = "Beroende:",
+  ["disclose.row.by"] = "Av:",
+  ["disclose.row.license"] = "Licens:",
+  ["disclose.row.source"] = "Källa:",
+  ["disclose.row.install_to"] = "Installera i:",
+  ["disclose.multi.install_title"] = "Installera beroenden?",
+  ["disclose.multi.update_title"] = "Uppdatera beroenden?",
+  ["disclose.multi.subtitle"] =
+    "ReaAssist behöver följande tillägg:",
+  ["disclose.multi.was"] = "var {version}",
+  ["disclose.multi.by_license_source"] =
+    "av {author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "Installeras i: REAPER UserPlugins/",
+  ["done.title.single_install"] = "Beroende installerat",
+  ["done.title.single_update"] = "Beroende uppdaterat",
+  ["done.title.multi_install"] = "Beroenden installerade",
+  ["done.title.multi_update"] = "Beroenden uppdaterade",
+  ["done.not_running"] = "ReaAssist är inte öppet ännu.",
+  ["done.step1.single"] =
+    "1.  Stäng och öppna REAPER igen för att läsa in det nya tillägget.",
+  ["done.step1.multi"] =
+    "1.  Stäng och öppna REAPER igen för att läsa in de nya tilläggen.",
+  ["done.step2"] = "2.  Öppna åtgärdslistan (genväg '?').",
+  ["done.step3"] = "3.  Sök efter 'ReaAssist' och kör det.",
+  ["error.title"] = "Installationen misslyckades",
+  ["error.failed_installing"] =
+    "Installationen av {name} misslyckades ({step})",
+  ["error.timeout"] =
+    "Installationen tog längre än 2 minuter. Kontrollera anslutningen och försök igen.",
+  ["error.download"] =
+    "Kunde inte hämta {name} från GitHub (curl {code}).\nKontrollera anslutningen och försök igen.",
+  ["error.verify"] =
+    "SHA-256-checksumman stämmer inte för {asset}.\nFörväntat: {expected}...\nFick: {actual}...",
+  ["error.install"] = "Installationen misslyckades: {detail}",
+  ["error.empty_queue"] = "Installationskön var tom.",
+  ["error.unsafe_path"] =
+    "Osäker sökväg ('{char}'). Installera {name} manuellt.",
+  ["error.write_script"] =
+    "Kunde inte skriva installationsskriptet.",
+}
+
+InstallerGfx.STRINGS.cs = {
+  ["common.install"] = "Instalovat",
+  ["common.quit"] = "Ukončit",
+  ["common.close"] = "Zavřít",
+  ["common.retry"] = "Zkusit znovu",
+  ["common.dependency"] = "závislost",
+  ["common.unknown"] = "neznámé",
+  ["common.and"] = "a",
+  ["common.by"] = "od",
+  ["common.list_separator"] = ", ",
+  ["common.list_final_separator"] = " a ",
+  ["window.install_dependencies"] = "Instalovat závislosti",
+  ["window.install_dep"] = "Instalovat {name}",
+  ["window.update_dep"] = "Aktualizovat {name}",
+  ["manual.title"] = "ReaAssist - Je vyžadována ruční instalace",
+  ["status.preparing"] = "Příprava...",
+  ["status.starting"] = "Spouštění instalace...",
+  ["status.downloading_installing"] =
+    "Stahování a instalace {name}...",
+  ["status.running"] = "Spouštění instalace...",
+  ["status.downloading"] = "Stahování z GitHubu...",
+  ["status.verifying"] = "Ověřování kontrolního součtu...",
+  ["status.installing"] = "Instalace do UserPlugins...",
+  ["status.preparing_next"] = "Příprava další závislosti...",
+  ["status.done"] = "Hotovo.",
+  ["running.installing"] = "Instalace ",
+  ["running.updating"] = "Aktualizace ",
+  ["running.update_range"] = "z {from} na {to}",
+  ["disclose.single.install_title"] = "Instalovat {name}?",
+  ["disclose.single.update_title"] = "Aktualizovat {name}?",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist potřebuje {name}, aby se otevřel.",
+  ["disclose.single.update_subtitle"] =
+    "Vaše {name} ({installed}) je příliš stará.",
+  ["disclose.row.dependency"] = "Závislost:",
+  ["disclose.row.by"] = "Autor:",
+  ["disclose.row.license"] = "Licence:",
+  ["disclose.row.source"] = "Zdroj:",
+  ["disclose.row.install_to"] = "Instalovat do:",
+  ["disclose.multi.install_title"] = "Instalovat závislosti?",
+  ["disclose.multi.update_title"] = "Aktualizovat závislosti?",
+  ["disclose.multi.subtitle"] =
+    "ReaAssist potřebuje následující rozšíření:",
+  ["disclose.multi.was"] = "bylo {version}",
+  ["disclose.multi.by_license_source"] =
+    "od {author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "Bude nainstalováno do: REAPER UserPlugins/",
+  ["done.title.single_install"] = "Závislost nainstalována",
+  ["done.title.single_update"] = "Závislost aktualizována",
+  ["done.title.multi_install"] = "Závislosti nainstalovány",
+  ["done.title.multi_update"] = "Závislosti aktualizovány",
+  ["done.not_running"] = "ReaAssist ještě není otevřený.",
+  ["done.step1.single"] =
+    "1.  Zavřete a znovu otevřete REAPER, aby se načetlo nové rozšíření.",
+  ["done.step1.multi"] =
+    "1.  Zavřete a znovu otevřete REAPER, aby se načetla nová rozšíření.",
+  ["done.step2"] = "2.  Otevřete seznam akcí (zkratka '?').",
+  ["done.step3"] = "3.  Vyhledejte 'ReaAssist' a spusťte jej.",
+  ["error.title"] = "Instalace selhala",
+  ["error.failed_installing"] = "Instalace {name} selhala ({step})",
+  ["error.timeout"] =
+    "Instalace překročila 2 minuty. Zkontrolujte připojení a zkuste to znovu.",
+  ["error.download"] =
+    "Nepodařilo se stáhnout {name} z GitHubu (curl {code}).\nZkontrolujte připojení a zkuste to znovu.",
+  ["error.verify"] =
+    "Kontrolní součet SHA-256 pro {asset} nesouhlasí.\nOčekáváno: {expected}...\nZískáno: {actual}...",
+  ["error.install"] = "Instalace selhala: {detail}",
+  ["error.empty_queue"] = "Instalační fronta byla prázdná.",
+  ["error.unsafe_path"] =
+    "Nebezpečná cesta ('{char}'). Nainstalujte {name} ručně.",
+  ["error.write_script"] =
+    "Nepodařilo se zapsat instalační skript.",
+}
+
+InstallerGfx.STRINGS.ro = {
+  ["common.install"] = "Instalează",
+  ["common.quit"] = "Ieși",
+  ["common.close"] = "Închide",
+  ["common.retry"] = "Reîncearcă",
+  ["common.dependency"] = "dependință",
+  ["common.unknown"] = "necunoscut",
+  ["common.and"] = "și",
+  ["common.by"] = "de",
+  ["common.list_separator"] = ", ",
+  ["common.list_final_separator"] = " și ",
+  ["window.install_dependencies"] = "Instalează dependențele",
+  ["window.install_dep"] = "Instalează {name}",
+  ["window.update_dep"] = "Actualizează {name}",
+  ["manual.title"] = "ReaAssist - Instalare manuală necesară",
+  ["status.preparing"] = "Se pregătește...",
+  ["status.starting"] = "Se pornește instalarea...",
+  ["status.downloading_installing"] =
+    "Se descarcă și se instalează {name}...",
+  ["status.running"] = "Se pornește instalarea...",
+  ["status.downloading"] = "Se descarcă de pe GitHub...",
+  ["status.verifying"] = "Se verifică suma de control...",
+  ["status.installing"] = "Se instalează în UserPlugins...",
+  ["status.preparing_next"] = "Se pregătește următoarea dependență...",
+  ["status.done"] = "Gata.",
+  ["running.installing"] = "Se instalează ",
+  ["running.updating"] = "Se actualizează ",
+  ["running.update_range"] = "de la {from} la {to}",
+  ["disclose.single.install_title"] = "Instalezi {name}?",
+  ["disclose.single.update_title"] = "Actualizezi {name}?",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist are nevoie de {name} pentru a se deschide.",
+  ["disclose.single.update_subtitle"] =
+    "{name} ({installed}) este prea vechi.",
+  ["disclose.row.dependency"] = "Dependență:",
+  ["disclose.row.by"] = "De:",
+  ["disclose.row.license"] = "Licență:",
+  ["disclose.row.source"] = "Sursă:",
+  ["disclose.row.install_to"] = "Instalează în:",
+  ["disclose.multi.install_title"] = "Instalezi dependențele?",
+  ["disclose.multi.update_title"] = "Actualizezi dependențele?",
+  ["disclose.multi.subtitle"] =
+    "ReaAssist are nevoie de următoarele extensii:",
+  ["disclose.multi.was"] = "era {version}",
+  ["disclose.multi.by_license_source"] =
+    "de {author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "Se va instala în: REAPER UserPlugins/",
+  ["done.title.single_install"] = "Dependență instalată",
+  ["done.title.single_update"] = "Dependență actualizată",
+  ["done.title.multi_install"] = "Dependențe instalate",
+  ["done.title.multi_update"] = "Dependențe actualizate",
+  ["done.not_running"] = "ReaAssist nu este încă deschis.",
+  ["done.step1.single"] =
+    "1.  Închide și redeschide REAPER pentru a încărca noua extensie.",
+  ["done.step1.multi"] =
+    "1.  Închide și redeschide REAPER pentru a încărca noile extensii.",
+  ["done.step2"] = "2.  Deschide lista de acțiuni (scurtătura '?').",
+  ["done.step3"] = "3.  Caută 'ReaAssist' și rulează-l.",
+  ["error.title"] = "Instalarea a eșuat",
+  ["error.failed_installing"] = "Instalarea {name} a eșuat ({step})",
+  ["error.timeout"] =
+    "Instalarea a depășit 2 minute. Verifică conexiunea și încearcă din nou.",
+  ["error.download"] =
+    "Nu s-a putut descărca {name} de pe GitHub (curl {code}).\nVerifică conexiunea și încearcă din nou.",
+  ["error.verify"] =
+    "Suma SHA-256 nu corespunde pentru {asset}.\nAșteptat: {expected}...\nObținut: {actual}...",
+  ["error.install"] = "Instalarea a eșuat: {detail}",
+  ["error.empty_queue"] = "Coada de instalare era goală.",
+  ["error.unsafe_path"] =
+    "Cale nesigură ('{char}'). Instalează {name} manual.",
+  ["error.write_script"] =
+    "Nu s-a putut scrie scriptul de instalare.",
+}
+
+InstallerGfx.STRINGS.tr = {
+  ["common.install"] = "Yükle",
+  ["common.quit"] = "Çık",
+  ["common.close"] = "Kapat",
+  ["common.retry"] = "Yeniden dene",
+  ["common.dependency"] = "bağımlılık",
+  ["common.unknown"] = "bilinmeyen",
+  ["common.and"] = "ve",
+  ["common.by"] = "tarafından",
+  ["common.list_separator"] = ", ",
+  ["common.list_final_separator"] = " ve ",
+  ["window.install_dependencies"] = "Bağımlılıkları yükle",
+  ["window.install_dep"] = "{name} yükle",
+  ["window.update_dep"] = "{name} güncelle",
+  ["manual.title"] = "ReaAssist - Elle kurulum gerekli",
+  ["status.preparing"] = "Hazırlanıyor...",
+  ["status.starting"] = "Kurulum başlatılıyor...",
+  ["status.downloading_installing"] = "{name} indiriliyor ve yükleniyor...",
+  ["status.running"] = "Kurulum başlatılıyor...",
+  ["status.downloading"] = "GitHub'dan indiriliyor...",
+  ["status.verifying"] = "Sağlama toplamı doğrulanıyor...",
+  ["status.installing"] = "UserPlugins içine yükleniyor...",
+  ["status.preparing_next"] = "Sonraki bağımlılık hazırlanıyor...",
+  ["status.done"] = "Bitti.",
+  ["running.installing"] = "Yükleniyor ",
+  ["running.updating"] = "Güncelleniyor ",
+  ["running.update_range"] = "{from} sürümünden {to} sürümüne",
+  ["disclose.single.install_title"] = "{name} yüklensin mi?",
+  ["disclose.single.update_title"] = "{name} güncellensin mi?",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist'in açılması için {name} gerekir.",
+  ["disclose.single.update_subtitle"] =
+    "{name} ({installed}) çok eski.",
+  ["disclose.row.dependency"] = "Bağımlılık:",
+  ["disclose.row.by"] = "Yapan:",
+  ["disclose.row.license"] = "Lisans:",
+  ["disclose.row.source"] = "Kaynak:",
+  ["disclose.row.install_to"] = "Yüklenecek yer:",
+  ["disclose.multi.install_title"] = "Bağımlılıklar yüklensin mi?",
+  ["disclose.multi.update_title"] = "Bağımlılıklar güncellensin mi?",
+  ["disclose.multi.subtitle"] =
+    "ReaAssist şu eklentilere ihtiyaç duyar:",
+  ["disclose.multi.was"] = "{version} idi",
+  ["disclose.multi.by_license_source"] =
+    "{author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "Şuraya yüklenecek: REAPER UserPlugins/",
+  ["done.title.single_install"] = "Bağımlılık yüklendi",
+  ["done.title.single_update"] = "Bağımlılık güncellendi",
+  ["done.title.multi_install"] = "Bağımlılıklar yüklendi",
+  ["done.title.multi_update"] = "Bağımlılıklar güncellendi",
+  ["done.not_running"] = "ReaAssist henüz açık değil.",
+  ["done.step1.single"] =
+    "1.  Yeni eklentinin yüklenmesi için REAPER'ı kapatıp yeniden açın.",
+  ["done.step1.multi"] =
+    "1.  Yeni eklentilerin yüklenmesi için REAPER'ı kapatıp yeniden açın.",
+  ["done.step2"] = "2.  Eylem listesini açın (kısayol '?').",
+  ["done.step3"] = "3.  'ReaAssist' arayın ve çalıştırın.",
+  ["error.title"] = "Kurulum başarısız",
+  ["error.failed_installing"] = "{name} kurulumu başarısız ({step})",
+  ["error.timeout"] =
+    "Kurulum 2 dakikayı aştı. Bağlantınızı kontrol edip tekrar deneyin.",
+  ["error.download"] =
+    "{name} GitHub'dan indirilemedi (curl {code}).\nBağlantınızı kontrol edip tekrar deneyin.",
+  ["error.verify"] =
+    "{asset} için SHA-256 sağlama toplamı eşleşmiyor.\nBeklenen: {expected}...\nAlınan: {actual}...",
+  ["error.install"] = "Kurulum başarısız: {detail}",
+  ["error.empty_queue"] = "Kurulum kuyruğu boştu.",
+  ["error.unsafe_path"] =
+    "Güvenli olmayan yol ('{char}'). {name} öğesini elle yükleyin.",
+  ["error.write_script"] = "Kurulum betiği yazılamadı.",
+}
+
+InstallerGfx.STRINGS.ru = {
+  ["common.install"] = "Установить",
+  ["common.quit"] = "Выйти",
+  ["common.close"] = "Закрыть",
+  ["common.retry"] = "Повторить",
+  ["common.dependency"] = "зависимость",
+  ["common.unknown"] = "неизвестно",
+  ["common.and"] = "и",
+  ["common.by"] = "от",
+  ["common.list_separator"] = ", ",
+  ["common.list_final_separator"] = " и ",
+  ["window.install_dependencies"] = "Установить зависимости",
+  ["window.install_dep"] = "Установить {name}",
+  ["window.update_dep"] = "Обновить {name}",
+  ["manual.title"] = "ReaAssist - требуется ручная установка",
+  ["status.preparing"] = "Подготовка...",
+  ["status.starting"] = "Запуск установки...",
+  ["status.downloading_installing"] =
+    "Загрузка и установка {name}...",
+  ["status.running"] = "Запуск установки...",
+  ["status.downloading"] = "Загрузка с GitHub...",
+  ["status.verifying"] = "Проверка контрольной суммы...",
+  ["status.installing"] = "Установка в UserPlugins...",
+  ["status.preparing_next"] = "Подготовка следующей зависимости...",
+  ["status.done"] = "Готово.",
+  ["running.installing"] = "Установка ",
+  ["running.updating"] = "Обновление ",
+  ["running.update_range"] = "с {from} до {to}",
+  ["disclose.single.install_title"] = "Установить {name}?",
+  ["disclose.single.update_title"] = "Обновить {name}?",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist требуется {name} для запуска.",
+  ["disclose.single.update_subtitle"] =
+    "Ваш {name} ({installed}) слишком старый.",
+  ["disclose.row.dependency"] = "Зависимость:",
+  ["disclose.row.by"] = "Автор:",
+  ["disclose.row.license"] = "Лицензия:",
+  ["disclose.row.source"] = "Источник:",
+  ["disclose.row.install_to"] = "Установить в:",
+  ["disclose.multi.install_title"] = "Установить зависимости?",
+  ["disclose.multi.update_title"] = "Обновить зависимости?",
+  ["disclose.multi.subtitle"] =
+    "ReaAssist требуются следующие расширения:",
+  ["disclose.multi.was"] = "было {version}",
+  ["disclose.multi.by_license_source"] =
+    "{author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "Будет установлено в: REAPER UserPlugins/",
+  ["done.title.single_install"] = "Зависимость установлена",
+  ["done.title.single_update"] = "Зависимость обновлена",
+  ["done.title.multi_install"] = "Зависимости установлены",
+  ["done.title.multi_update"] = "Зависимости обновлены",
+  ["done.not_running"] = "ReaAssist еще не открыт.",
+  ["done.step1.single"] =
+    "1.  Закройте и снова откройте REAPER, чтобы загрузить новое расширение.",
+  ["done.step1.multi"] =
+    "1.  Закройте и снова откройте REAPER, чтобы загрузить новые расширения.",
+  ["done.step2"] = "2.  Откройте список действий (клавиша '?').",
+  ["done.step3"] = "3.  Найдите 'ReaAssist' и запустите его.",
+  ["error.title"] = "Сбой установки",
+  ["error.failed_installing"] = "Не удалось установить {name} ({step})",
+  ["error.timeout"] =
+    "Установка длилась более 2 минут. Проверьте подключение и повторите попытку.",
+  ["error.download"] =
+    "Не удалось скачать {name} с GitHub (curl {code}).\nПроверьте подключение и повторите попытку.",
+  ["error.verify"] =
+    "Контрольная сумма SHA-256 для {asset} не совпадает.\nОжидалось: {expected}...\nПолучено: {actual}...",
+  ["error.install"] = "Сбой установки: {detail}",
+  ["error.empty_queue"] = "Очередь установки была пуста.",
+  ["error.unsafe_path"] =
+    "Небезопасный путь ('{char}'). Установите {name} вручную.",
+  ["error.write_script"] = "Не удалось записать скрипт установки.",
+}
+
+InstallerGfx.STRINGS.uk = {
+  ["common.install"] = "Встановити",
+  ["common.quit"] = "Вийти",
+  ["common.close"] = "Закрити",
+  ["common.retry"] = "Повторити",
+  ["common.dependency"] = "залежність",
+  ["common.unknown"] = "невідомо",
+  ["common.and"] = "і",
+  ["common.by"] = "від",
+  ["common.list_separator"] = ", ",
+  ["common.list_final_separator"] = " і ",
+  ["window.install_dependencies"] = "Встановити залежності",
+  ["window.install_dep"] = "Встановити {name}",
+  ["window.update_dep"] = "Оновити {name}",
+  ["manual.title"] = "ReaAssist - потрібне ручне встановлення",
+  ["status.preparing"] = "Підготовка...",
+  ["status.starting"] = "Запуск встановлення...",
+  ["status.downloading_installing"] =
+    "Завантаження і встановлення {name}...",
+  ["status.running"] = "Запуск встановлення...",
+  ["status.downloading"] = "Завантаження з GitHub...",
+  ["status.verifying"] = "Перевірка контрольної суми...",
+  ["status.installing"] = "Встановлення в UserPlugins...",
+  ["status.preparing_next"] = "Підготовка наступної залежності...",
+  ["status.done"] = "Готово.",
+  ["running.installing"] = "Встановлення ",
+  ["running.updating"] = "Оновлення ",
+  ["running.update_range"] = "з {from} до {to}",
+  ["disclose.single.install_title"] = "Встановити {name}?",
+  ["disclose.single.update_title"] = "Оновити {name}?",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist потребує {name} для запуску.",
+  ["disclose.single.update_subtitle"] =
+    "Ваш {name} ({installed}) застарий.",
+  ["disclose.row.dependency"] = "Залежність:",
+  ["disclose.row.by"] = "Автор:",
+  ["disclose.row.license"] = "Ліцензія:",
+  ["disclose.row.source"] = "Джерело:",
+  ["disclose.row.install_to"] = "Встановити в:",
+  ["disclose.multi.install_title"] = "Встановити залежності?",
+  ["disclose.multi.update_title"] = "Оновити залежності?",
+  ["disclose.multi.subtitle"] =
+    "ReaAssist потребує такі розширення:",
+  ["disclose.multi.was"] = "було {version}",
+  ["disclose.multi.by_license_source"] =
+    "{author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "Буде встановлено в: REAPER UserPlugins/",
+  ["done.title.single_install"] = "Залежність встановлено",
+  ["done.title.single_update"] = "Залежність оновлено",
+  ["done.title.multi_install"] = "Залежності встановлено",
+  ["done.title.multi_update"] = "Залежності оновлено",
+  ["done.not_running"] = "ReaAssist ще не відкритий.",
+  ["done.step1.single"] =
+    "1.  Закрийте і знову відкрийте REAPER, щоб завантажити нове розширення.",
+  ["done.step1.multi"] =
+    "1.  Закрийте і знову відкрийте REAPER, щоб завантажити нові розширення.",
+  ["done.step2"] = "2.  Відкрийте список дій (клавіша '?').",
+  ["done.step3"] = "3.  Знайдіть 'ReaAssist' і запустіть його.",
+  ["error.title"] = "Помилка встановлення",
+  ["error.failed_installing"] = "Не вдалося встановити {name} ({step})",
+  ["error.timeout"] =
+    "Встановлення тривало понад 2 хвилини. Перевірте з'єднання і повторіть спробу.",
+  ["error.download"] =
+    "Не вдалося завантажити {name} з GitHub (curl {code}).\nПеревірте з'єднання і повторіть спробу.",
+  ["error.verify"] =
+    "Контрольна сума SHA-256 для {asset} не збігається.\nОчікувалось: {expected}...\nОтримано: {actual}...",
+  ["error.install"] = "Помилка встановлення: {detail}",
+  ["error.empty_queue"] = "Черга встановлення була порожня.",
+  ["error.unsafe_path"] =
+    "Небезпечний шлях ('{char}'). Встановіть {name} вручну.",
+  ["error.write_script"] = "Не вдалося записати скрипт встановлення.",
+}
+
+InstallerGfx.STRINGS["zh-Hans"] = {
+  ["common.install"] = "安装",
+  ["common.quit"] = "退出",
+  ["common.close"] = "关闭",
+  ["common.retry"] = "重试",
+  ["common.dependency"] = "依赖项",
+  ["common.unknown"] = "未知",
+  ["common.and"] = "和",
+  ["common.by"] = "作者",
+  ["common.list_separator"] = "、",
+  ["common.list_final_separator"] = "和",
+  ["window.install_dependencies"] = "安装依赖项",
+  ["window.install_dep"] = "安装 {name}",
+  ["window.update_dep"] = "更新 {name}",
+  ["manual.title"] = "ReaAssist - 需要手动安装",
+  ["status.preparing"] = "正在准备...",
+  ["status.starting"] = "正在启动安装...",
+  ["status.downloading_installing"] = "正在下载并安装 {name}...",
+  ["status.running"] = "正在启动安装...",
+  ["status.downloading"] = "正在从 GitHub 下载...",
+  ["status.verifying"] = "正在校验校验和...",
+  ["status.installing"] = "正在安装到 UserPlugins...",
+  ["status.preparing_next"] = "正在准备下一个依赖项...",
+  ["status.done"] = "完成。",
+  ["running.installing"] = "正在安装 ",
+  ["running.updating"] = "正在更新 ",
+  ["running.update_range"] = "从 {from} 到 {to}",
+  ["disclose.single.install_title"] = "安装 {name}？",
+  ["disclose.single.update_title"] = "更新 {name}？",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist 需要 {name} 才能打开。",
+  ["disclose.single.update_subtitle"] =
+    "您的 {name} ({installed}) 太旧。",
+  ["disclose.row.dependency"] = "依赖项：",
+  ["disclose.row.by"] = "作者：",
+  ["disclose.row.license"] = "许可证：",
+  ["disclose.row.source"] = "来源：",
+  ["disclose.row.install_to"] = "安装到：",
+  ["disclose.multi.install_title"] = "安装依赖项？",
+  ["disclose.multi.update_title"] = "更新依赖项？",
+  ["disclose.multi.subtitle"] = "ReaAssist 需要以下扩展：",
+  ["disclose.multi.was"] = "原为 {version}",
+  ["disclose.multi.by_license_source"] =
+    "{author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "将安装到：REAPER UserPlugins/",
+  ["done.title.single_install"] = "依赖项已安装",
+  ["done.title.single_update"] = "依赖项已更新",
+  ["done.title.multi_install"] = "依赖项已安装",
+  ["done.title.multi_update"] = "依赖项已更新",
+  ["done.not_running"] = "ReaAssist 尚未打开。",
+  ["done.step1.single"] = "1.  关闭并重新打开 REAPER 以加载新扩展。",
+  ["done.step1.multi"] = "1.  关闭并重新打开 REAPER 以加载新扩展。",
+  ["done.step2"] = "2.  打开动作列表（快捷键 '?'）。",
+  ["done.step3"] = "3.  搜索 'ReaAssist' 并运行。",
+  ["error.title"] = "安装失败",
+  ["error.failed_installing"] = "{name} 安装失败（{step}）",
+  ["error.timeout"] =
+    "安装超过 2 分钟。请检查连接后重试。",
+  ["error.download"] =
+    "无法从 GitHub 下载 {name}（curl {code}）。\n请检查连接后重试。",
+  ["error.verify"] =
+    "{asset} 的 SHA-256 校验和不匹配。\n预期：{expected}...\n实际：{actual}...",
+  ["error.install"] = "安装失败：{detail}",
+  ["error.empty_queue"] = "安装队列为空。",
+  ["error.unsafe_path"] =
+    "路径不安全（'{char}'）。请手动安装 {name}。",
+  ["error.write_script"] = "无法写入安装脚本。",
+}
+
+InstallerGfx.STRINGS["zh-Hant"] = {
+  ["common.install"] = "安裝",
+  ["common.quit"] = "退出",
+  ["common.close"] = "關閉",
+  ["common.retry"] = "重試",
+  ["common.dependency"] = "相依項目",
+  ["common.unknown"] = "未知",
+  ["common.and"] = "和",
+  ["common.by"] = "作者",
+  ["common.list_separator"] = "、",
+  ["common.list_final_separator"] = "和",
+  ["window.install_dependencies"] = "安裝相依項目",
+  ["window.install_dep"] = "安裝 {name}",
+  ["window.update_dep"] = "更新 {name}",
+  ["manual.title"] = "ReaAssist - 需要手動安裝",
+  ["status.preparing"] = "正在準備...",
+  ["status.starting"] = "正在啟動安裝...",
+  ["status.downloading_installing"] = "正在下載並安裝 {name}...",
+  ["status.running"] = "正在啟動安裝...",
+  ["status.downloading"] = "正在從 GitHub 下載...",
+  ["status.verifying"] = "正在驗證校驗和...",
+  ["status.installing"] = "正在安裝到 UserPlugins...",
+  ["status.preparing_next"] = "正在準備下一個相依項目...",
+  ["status.done"] = "完成。",
+  ["running.installing"] = "正在安裝 ",
+  ["running.updating"] = "正在更新 ",
+  ["running.update_range"] = "從 {from} 到 {to}",
+  ["disclose.single.install_title"] = "安裝 {name}？",
+  ["disclose.single.update_title"] = "更新 {name}？",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist 需要 {name} 才能開啟。",
+  ["disclose.single.update_subtitle"] =
+    "您的 {name} ({installed}) 太舊。",
+  ["disclose.row.dependency"] = "相依項目：",
+  ["disclose.row.by"] = "作者：",
+  ["disclose.row.license"] = "授權：",
+  ["disclose.row.source"] = "來源：",
+  ["disclose.row.install_to"] = "安裝到：",
+  ["disclose.multi.install_title"] = "安裝相依項目？",
+  ["disclose.multi.update_title"] = "更新相依項目？",
+  ["disclose.multi.subtitle"] = "ReaAssist 需要以下擴充功能：",
+  ["disclose.multi.was"] = "原為 {version}",
+  ["disclose.multi.by_license_source"] =
+    "{author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "將安裝到：REAPER UserPlugins/",
+  ["done.title.single_install"] = "相依項目已安裝",
+  ["done.title.single_update"] = "相依項目已更新",
+  ["done.title.multi_install"] = "相依項目已安裝",
+  ["done.title.multi_update"] = "相依項目已更新",
+  ["done.not_running"] = "ReaAssist 尚未開啟。",
+  ["done.step1.single"] = "1.  關閉並重新開啟 REAPER 以載入新擴充功能。",
+  ["done.step1.multi"] = "1.  關閉並重新開啟 REAPER 以載入新擴充功能。",
+  ["done.step2"] = "2.  開啟動作清單（快捷鍵 '?'）。",
+  ["done.step3"] = "3.  搜尋 'ReaAssist' 並執行。",
+  ["error.title"] = "安裝失敗",
+  ["error.failed_installing"] = "{name} 安裝失敗（{step}）",
+  ["error.timeout"] =
+    "安裝超過 2 分鐘。請檢查連線後重試。",
+  ["error.download"] =
+    "無法從 GitHub 下載 {name}（curl {code}）。\n請檢查連線後重試。",
+  ["error.verify"] =
+    "{asset} 的 SHA-256 校驗和不相符。\n預期：{expected}...\n實際：{actual}...",
+  ["error.install"] = "安裝失敗：{detail}",
+  ["error.empty_queue"] = "安裝佇列是空的。",
+  ["error.unsafe_path"] =
+    "路徑不安全（'{char}'）。請手動安裝 {name}。",
+  ["error.write_script"] = "無法寫入安裝腳本。",
+}
+
+InstallerGfx.STRINGS.ja = {
+  ["common.install"] = "インストール",
+  ["common.quit"] = "終了",
+  ["common.close"] = "閉じる",
+  ["common.retry"] = "再試行",
+  ["common.dependency"] = "依存関係",
+  ["common.unknown"] = "不明",
+  ["common.and"] = "と",
+  ["common.by"] = "作者",
+  ["common.list_separator"] = "、",
+  ["common.list_final_separator"] = "と",
+  ["window.install_dependencies"] = "依存関係をインストール",
+  ["window.install_dep"] = "{name} をインストール",
+  ["window.update_dep"] = "{name} を更新",
+  ["manual.title"] = "ReaAssist - 手動インストールが必要です",
+  ["status.preparing"] = "準備中...",
+  ["status.starting"] = "インストールを開始中...",
+  ["status.downloading_installing"] =
+    "{name} をダウンロードしてインストール中...",
+  ["status.running"] = "インストールを開始中...",
+  ["status.downloading"] = "GitHub からダウンロード中...",
+  ["status.verifying"] = "チェックサムを確認中...",
+  ["status.installing"] = "UserPlugins にインストール中...",
+  ["status.preparing_next"] = "次の依存関係を準備中...",
+  ["status.done"] = "完了。",
+  ["running.installing"] = "インストール中 ",
+  ["running.updating"] = "更新中 ",
+  ["running.update_range"] = "{from} から {to} へ",
+  ["disclose.single.install_title"] = "{name} をインストールしますか？",
+  ["disclose.single.update_title"] = "{name} を更新しますか？",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist を開くには {name} が必要です。",
+  ["disclose.single.update_subtitle"] =
+    "{name} ({installed}) が古すぎます。",
+  ["disclose.row.dependency"] = "依存関係:",
+  ["disclose.row.by"] = "作者:",
+  ["disclose.row.license"] = "ライセンス:",
+  ["disclose.row.source"] = "ソース:",
+  ["disclose.row.install_to"] = "インストール先:",
+  ["disclose.multi.install_title"] = "依存関係をインストールしますか？",
+  ["disclose.multi.update_title"] = "依存関係を更新しますか？",
+  ["disclose.multi.subtitle"] =
+    "ReaAssist には次の拡張機能が必要です:",
+  ["disclose.multi.was"] = "{version} でした",
+  ["disclose.multi.by_license_source"] =
+    "{author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "インストール先: REAPER UserPlugins/",
+  ["done.title.single_install"] = "依存関係をインストールしました",
+  ["done.title.single_update"] = "依存関係を更新しました",
+  ["done.title.multi_install"] = "依存関係をインストールしました",
+  ["done.title.multi_update"] = "依存関係を更新しました",
+  ["done.not_running"] = "ReaAssist はまだ開いていません。",
+  ["done.step1.single"] =
+    "1.  新しい拡張機能を読み込むために REAPER を閉じて開き直してください。",
+  ["done.step1.multi"] =
+    "1.  新しい拡張機能を読み込むために REAPER を閉じて開き直してください。",
+  ["done.step2"] = "2.  アクションリストを開きます（ショートカット '?'）。",
+  ["done.step3"] = "3.  'ReaAssist' を検索して実行します。",
+  ["error.title"] = "インストールに失敗しました",
+  ["error.failed_installing"] = "{name} のインストールに失敗しました ({step})",
+  ["error.timeout"] =
+    "インストールが 2 分を超えました。接続を確認して再試行してください。",
+  ["error.download"] =
+    "GitHub から {name} をダウンロードできませんでした (curl {code})。\n接続を確認して再試行してください。",
+  ["error.verify"] =
+    "{asset} の SHA-256 チェックサムが一致しません。\n期待値: {expected}...\n実際: {actual}...",
+  ["error.install"] = "インストール失敗: {detail}",
+  ["error.empty_queue"] = "インストールキューが空でした。",
+  ["error.unsafe_path"] =
+    "安全でないパスです ('{char}')。{name} を手動でインストールしてください。",
+  ["error.write_script"] = "インストールスクリプトを書き込めませんでした。",
+}
+
+InstallerGfx.STRINGS.ko = {
+  ["common.install"] = "설치",
+  ["common.quit"] = "종료",
+  ["common.close"] = "닫기",
+  ["common.retry"] = "다시 시도",
+  ["common.dependency"] = "종속 항목",
+  ["common.unknown"] = "알 수 없음",
+  ["common.and"] = "및",
+  ["common.by"] = "작성자",
+  ["common.list_separator"] = ", ",
+  ["common.list_final_separator"] = " 및 ",
+  ["window.install_dependencies"] = "종속 항목 설치",
+  ["window.install_dep"] = "{name} 설치",
+  ["window.update_dep"] = "{name} 업데이트",
+  ["manual.title"] = "ReaAssist - 수동 설치 필요",
+  ["status.preparing"] = "준비 중...",
+  ["status.starting"] = "설치 시작 중...",
+  ["status.downloading_installing"] =
+    "{name} 다운로드 및 설치 중...",
+  ["status.running"] = "설치 시작 중...",
+  ["status.downloading"] = "GitHub에서 다운로드 중...",
+  ["status.verifying"] = "체크섬 확인 중...",
+  ["status.installing"] = "UserPlugins에 설치 중...",
+  ["status.preparing_next"] = "다음 종속 항목 준비 중...",
+  ["status.done"] = "완료.",
+  ["running.installing"] = "설치 중 ",
+  ["running.updating"] = "업데이트 중 ",
+  ["running.update_range"] = "{from}에서 {to}(으)로",
+  ["disclose.single.install_title"] = "{name}을(를) 설치할까요?",
+  ["disclose.single.update_title"] = "{name}을(를) 업데이트할까요?",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist를 열려면 {name}이(가) 필요합니다.",
+  ["disclose.single.update_subtitle"] =
+    "{name} ({installed}) 버전이 너무 오래되었습니다.",
+  ["disclose.row.dependency"] = "종속 항목:",
+  ["disclose.row.by"] = "작성자:",
+  ["disclose.row.license"] = "라이선스:",
+  ["disclose.row.source"] = "소스:",
+  ["disclose.row.install_to"] = "설치 위치:",
+  ["disclose.multi.install_title"] = "종속 항목을 설치할까요?",
+  ["disclose.multi.update_title"] = "종속 항목을 업데이트할까요?",
+  ["disclose.multi.subtitle"] =
+    "ReaAssist에는 다음 확장이 필요합니다:",
+  ["disclose.multi.was"] = "{version}였음",
+  ["disclose.multi.by_license_source"] =
+    "{author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "설치 위치: REAPER UserPlugins/",
+  ["done.title.single_install"] = "종속 항목 설치됨",
+  ["done.title.single_update"] = "종속 항목 업데이트됨",
+  ["done.title.multi_install"] = "종속 항목 설치됨",
+  ["done.title.multi_update"] = "종속 항목 업데이트됨",
+  ["done.not_running"] = "ReaAssist가 아직 열려 있지 않습니다.",
+  ["done.step1.single"] =
+    "1.  새 확장을 불러오려면 REAPER를 닫고 다시 여세요.",
+  ["done.step1.multi"] =
+    "1.  새 확장을 불러오려면 REAPER를 닫고 다시 여세요.",
+  ["done.step2"] = "2.  액션 목록을 여세요(단축키 '?').",
+  ["done.step3"] = "3.  'ReaAssist'를 검색하고 실행하세요.",
+  ["error.title"] = "설치 실패",
+  ["error.failed_installing"] = "{name} 설치 실패({step})",
+  ["error.timeout"] =
+    "설치가 2분을 초과했습니다. 연결을 확인하고 다시 시도하세요.",
+  ["error.download"] =
+    "GitHub에서 {name}을(를) 다운로드할 수 없습니다(curl {code}).\n연결을 확인하고 다시 시도하세요.",
+  ["error.verify"] =
+    "{asset}의 SHA-256 체크섬이 일치하지 않습니다.\n예상: {expected}...\n실제: {actual}...",
+  ["error.install"] = "설치 실패: {detail}",
+  ["error.empty_queue"] = "설치 대기열이 비어 있었습니다.",
+  ["error.unsafe_path"] =
+    "안전하지 않은 경로('{char}'). {name}을(를) 수동으로 설치하세요.",
+  ["error.write_script"] = "설치 스크립트를 쓸 수 없습니다.",
+}
+
+InstallerGfx.STRINGS.vi = {
+  ["common.install"] = "Cài đặt",
+  ["common.quit"] = "Thoát",
+  ["common.close"] = "Đóng",
+  ["common.retry"] = "Thử lại",
+  ["common.dependency"] = "phụ thuộc",
+  ["common.unknown"] = "không rõ",
+  ["common.and"] = "và",
+  ["common.by"] = "bởi",
+  ["common.list_separator"] = ", ",
+  ["common.list_final_separator"] = " và ",
+  ["window.install_dependencies"] = "Cài đặt phụ thuộc",
+  ["window.install_dep"] = "Cài đặt {name}",
+  ["window.update_dep"] = "Cập nhật {name}",
+  ["manual.title"] = "ReaAssist - Cần cài đặt thủ công",
+  ["status.preparing"] = "Đang chuẩn bị...",
+  ["status.starting"] = "Đang bắt đầu cài đặt...",
+  ["status.downloading_installing"] = "Đang tải và cài đặt {name}...",
+  ["status.running"] = "Đang bắt đầu cài đặt...",
+  ["status.downloading"] = "Đang tải từ GitHub...",
+  ["status.verifying"] = "Đang kiểm tra checksum...",
+  ["status.installing"] = "Đang cài vào UserPlugins...",
+  ["status.preparing_next"] = "Đang chuẩn bị phụ thuộc tiếp theo...",
+  ["status.done"] = "Xong.",
+  ["running.installing"] = "Đang cài ",
+  ["running.updating"] = "Đang cập nhật ",
+  ["running.update_range"] = "từ {from} đến {to}",
+  ["disclose.single.install_title"] = "Cài đặt {name}?",
+  ["disclose.single.update_title"] = "Cập nhật {name}?",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist cần {name} để mở.",
+  ["disclose.single.update_subtitle"] =
+    "{name} ({installed}) của bạn quá cũ.",
+  ["disclose.row.dependency"] = "Phụ thuộc:",
+  ["disclose.row.by"] = "Bởi:",
+  ["disclose.row.license"] = "Giấy phép:",
+  ["disclose.row.source"] = "Nguồn:",
+  ["disclose.row.install_to"] = "Cài vào:",
+  ["disclose.multi.install_title"] = "Cài đặt phụ thuộc?",
+  ["disclose.multi.update_title"] = "Cập nhật phụ thuộc?",
+  ["disclose.multi.subtitle"] =
+    "ReaAssist cần các phần mở rộng sau:",
+  ["disclose.multi.was"] = "là {version}",
+  ["disclose.multi.by_license_source"] =
+    "bởi {author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "Sẽ cài vào: REAPER UserPlugins/",
+  ["done.title.single_install"] = "Đã cài phụ thuộc",
+  ["done.title.single_update"] = "Đã cập nhật phụ thuộc",
+  ["done.title.multi_install"] = "Đã cài phụ thuộc",
+  ["done.title.multi_update"] = "Đã cập nhật phụ thuộc",
+  ["done.not_running"] = "ReaAssist chưa được mở.",
+  ["done.step1.single"] =
+    "1.  Đóng và mở lại REAPER để tải phần mở rộng mới.",
+  ["done.step1.multi"] =
+    "1.  Đóng và mở lại REAPER để tải các phần mở rộng mới.",
+  ["done.step2"] = "2.  Mở danh sách Actions (phím tắt '?').",
+  ["done.step3"] = "3.  Tìm 'ReaAssist' và chạy.",
+  ["error.title"] = "Cài đặt thất bại",
+  ["error.failed_installing"] = "Cài đặt {name} thất bại ({step})",
+  ["error.timeout"] =
+    "Cài đặt đã quá 2 phút. Hãy kiểm tra kết nối và thử lại.",
+  ["error.download"] =
+    "Không thể tải {name} từ GitHub (curl {code}).\nHãy kiểm tra kết nối và thử lại.",
+  ["error.verify"] =
+    "Checksum SHA-256 không khớp cho {asset}.\nMong đợi: {expected}...\nNhận được: {actual}...",
+  ["error.install"] = "Cài đặt thất bại: {detail}",
+  ["error.empty_queue"] = "Hàng đợi cài đặt trống.",
+  ["error.unsafe_path"] =
+    "Đường dẫn không an toàn ('{char}'). Hãy cài {name} thủ công.",
+  ["error.write_script"] = "Không thể ghi script cài đặt.",
+}
+
+InstallerGfx.STRINGS.id = {
+  ["common.install"] = "Instal",
+  ["common.quit"] = "Keluar",
+  ["common.close"] = "Tutup",
+  ["common.retry"] = "Coba lagi",
+  ["common.dependency"] = "dependensi",
+  ["common.unknown"] = "tidak diketahui",
+  ["common.and"] = "dan",
+  ["common.by"] = "oleh",
+  ["common.list_separator"] = ", ",
+  ["common.list_final_separator"] = " dan ",
+  ["window.install_dependencies"] = "Instal dependensi",
+  ["window.install_dep"] = "Instal {name}",
+  ["window.update_dep"] = "Perbarui {name}",
+  ["manual.title"] = "ReaAssist - Instalasi manual diperlukan",
+  ["status.preparing"] = "Menyiapkan...",
+  ["status.starting"] = "Memulai instalasi...",
+  ["status.downloading_installing"] = "Mengunduh dan menginstal {name}...",
+  ["status.running"] = "Memulai instalasi...",
+  ["status.downloading"] = "Mengunduh dari GitHub...",
+  ["status.verifying"] = "Memverifikasi checksum...",
+  ["status.installing"] = "Menginstal ke UserPlugins...",
+  ["status.preparing_next"] = "Menyiapkan dependensi berikutnya...",
+  ["status.done"] = "Selesai.",
+  ["running.installing"] = "Menginstal ",
+  ["running.updating"] = "Memperbarui ",
+  ["running.update_range"] = "dari {from} ke {to}",
+  ["disclose.single.install_title"] = "Instal {name}?",
+  ["disclose.single.update_title"] = "Perbarui {name}?",
+  ["disclose.single.install_subtitle"] =
+    "ReaAssist memerlukan {name} agar dapat dibuka.",
+  ["disclose.single.update_subtitle"] =
+    "{name} Anda ({installed}) terlalu lama.",
+  ["disclose.row.dependency"] = "Dependensi:",
+  ["disclose.row.by"] = "Oleh:",
+  ["disclose.row.license"] = "Lisensi:",
+  ["disclose.row.source"] = "Sumber:",
+  ["disclose.row.install_to"] = "Instal ke:",
+  ["disclose.multi.install_title"] = "Instal dependensi?",
+  ["disclose.multi.update_title"] = "Perbarui dependensi?",
+  ["disclose.multi.subtitle"] =
+    "ReaAssist memerlukan ekstensi berikut:",
+  ["disclose.multi.was"] = "sebelumnya {version}",
+  ["disclose.multi.by_license_source"] =
+    "oleh {author} - {license} - {source}",
+  ["disclose.multi.install_to"] = "Akan diinstal ke: REAPER UserPlugins/",
+  ["done.title.single_install"] = "Dependensi terinstal",
+  ["done.title.single_update"] = "Dependensi diperbarui",
+  ["done.title.multi_install"] = "Dependensi terinstal",
+  ["done.title.multi_update"] = "Dependensi diperbarui",
+  ["done.not_running"] = "ReaAssist belum terbuka.",
+  ["done.step1.single"] =
+    "1.  Tutup dan buka ulang REAPER untuk memuat ekstensi baru.",
+  ["done.step1.multi"] =
+    "1.  Tutup dan buka ulang REAPER untuk memuat ekstensi baru.",
+  ["done.step2"] = "2.  Buka daftar Actions (pintasan '?').",
+  ["done.step3"] = "3.  Cari 'ReaAssist' dan jalankan.",
+  ["error.title"] = "Instalasi gagal",
+  ["error.failed_installing"] = "Gagal menginstal {name} ({step})",
+  ["error.timeout"] =
+    "Instalasi melebihi 2 menit. Periksa koneksi dan coba lagi.",
+  ["error.download"] =
+    "Tidak dapat mengunduh {name} dari GitHub (curl {code}).\nPeriksa koneksi dan coba lagi.",
+  ["error.verify"] =
+    "Checksum SHA-256 tidak cocok untuk {asset}.\nDiharapkan: {expected}...\nDiterima: {actual}...",
+  ["error.install"] = "Instalasi gagal: {detail}",
+  ["error.empty_queue"] = "Antrean instalasi kosong.",
+  ["error.unsafe_path"] =
+    "Path tidak aman ('{char}'). Instal {name} secara manual.",
+  ["error.write_script"] = "Tidak dapat menulis script instalasi.",
+}
+
+InstallerGfx.BOOTSTRAP_LANGUAGE_IDX_TO_CODE = {
+  [1] = "en", [2] = "es", [3] = "fr", [4] = "de", [5] = "it",
+  [6] = "pt", [7] = "nl", [8] = "pl", [9] = "sv", [10] = "cs",
+  [11] = "ro", [12] = "tr", [13] = "ru", [14] = "uk",
+  [15] = "zh-Hans", [16] = "zh-Hant", [17] = "ja", [18] = "ko",
+  [19] = "vi", [20] = "id",
+}
+
+InstallerGfx.GFX_FONT_UNSUPPORTED_LANGUAGE = {
+  ["zh-Hans"] = true,
+  ["zh-Hant"] = true,
+  ja = true,
+  ko = true,
+}
+
+function InstallerGfx.normalize_lang_code(code)
+  code = tostring(code or "")
+  if code == "" or code == "qps-ploc" then return "en" end
+  if InstallerGfx.GFX_FONT_UNSUPPORTED_LANGUAGE[code] then return "en" end
+  if code == "en" or InstallerGfx.STRINGS[code] then return code end
+  local base = code:match("^([a-z][a-z])[-_]")
+  if base and InstallerGfx.GFX_FONT_UNSUPPORTED_LANGUAGE[base] then
+    return "en"
+  end
+  if base and (base == "en" or InstallerGfx.STRINGS[base]) then
+    return base
+  end
+  return "en"
+end
 
 function InstallerGfx.lang_code()
   if InstallerGfx._lang_code then return InstallerGfx._lang_code end
@@ -558,12 +1994,12 @@ function InstallerGfx.lang_code()
         code = raw:match('"language_code"%s*:%s*"([^"]+)"') or ""
         if code == "" then
           local idx = tonumber(raw:match('"reply_language_idx"%s*:%s*(%d+)'))
-          if idx == 2 then code = "es" end
+          code = InstallerGfx.BOOTSTRAP_LANGUAGE_IDX_TO_CODE[idx] or ""
         end
       end
     end
   end
-  if code ~= "es" then code = "en" end
+  code = InstallerGfx.normalize_lang_code(code)
   InstallerGfx._lang_code = code
   return code
 end
@@ -1123,7 +2559,8 @@ function InstallerGfx.render_running()
   InstallerGfx.draw_text_center(InstallerGfx.status or "...", 178, InstallerGfx.C_TEXT, 2)
   -- Attribution footer (per current item)
   InstallerGfx.draw_text_center(
-    item.dep.name .. " by " .. item.dep.author .. " \xE2\x80\xA2 " .. item.dep.license,
+    item.dep.name .. " " .. InstallerGfx.t("common.by", nil, "by") .. " "
+      .. item.dep.author .. " \xE2\x80\xA2 " .. item.dep.license,
     gfx.h - 38, InstallerGfx.C_TEXT_VDIM, 4)
   InstallerGfx.draw_text_center(item.dep.source_url,
                                  gfx.h - 22, InstallerGfx.C_TEXT_VDIM, 4)
@@ -1654,7 +3091,10 @@ function InstallerGfx.poll_pipeline()
   if now - (InstallerGfx.pipeline_started_at or 0) > 120 then
     InstallerGfx.fail("timeout",
       InstallerGfx.t("error.timeout", nil,
-        "Install timed out after 2 minutes. Check your network connection and try again."))
+        "Install timed out after 2 minutes. Check your network connection and try again.\n\n"
+        .. "If this is a managed/enterprise Windows system, PowerShell policy "
+        .. "such as Constrained Language Mode may have blocked the installer. "
+        .. "Install the dependency manually or ask IT to allow the ReaAssist installer script."))
     return
   end
 
@@ -1986,6 +3426,7 @@ end
 -- Used for platform-specific curl invocation, font selection, and path separators.
 RA.IS_WINDOWS = reaper.GetOS():match("Win") ~= nil
 RA.IS_MACOS = reaper.GetOS():match("OS")  ~= nil  -- "OSX" or "macOS"
+RA.IS_LINUX = not RA.IS_WINDOWS and not RA.IS_MACOS
 RA.SEP = RA.IS_WINDOWS and "\\" or "/"
 
 -- JSFX auto-save directory: Effects/ReaAssist/ inside the REAPER resource path.
@@ -1994,7 +3435,8 @@ local JSFX_DIR = reaper.GetResourcePath() .. RA.SEP .. "Effects" .. RA.SEP .. "R
 reaper.RecursiveCreateDirectory(JSFX_DIR, 0)
 RA.SCRIPT_SAVE_DIR =
   reaper.GetResourcePath() .. RA.SEP .. "Scripts" .. RA.SEP .. "ReaAssist"
-reaper.RecursiveCreateDirectory(RA.SCRIPT_SAVE_DIR, 0)
+-- Created lazily when ReaAssist auto-saves generated Lua scripts, so startup
+-- does not leave an empty top-level Scripts/ReaAssist folder.
 
 -- Resources directory: shipped sidecars, prompts/reference files, fonts, and
 -- bundled assets such as ReEQ.
@@ -2123,7 +3565,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.4.0", -- public release version
+  VERSION           = "1.4.1", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -2515,11 +3957,16 @@ S = {
   backup_warn_code  = nil,     -- deferred code to run after unsaved-project warning
   backup_warn_jsfx  = nil,     -- deferred JSFX code to auto-save before running companion
   backup_warn_idx   = nil,     -- message index for the deferred run
+  backup_warn_typed_idx = nil, -- message index for deferred structured edit run
   open_backup_warn  = false,   -- deferred flag: open warning popup next frame
   risky_warn_code   = nil,     -- deferred code to run after risky-code confirmation
   risky_warn_idx    = nil,     -- message index for the deferred risky run
   risky_warn_detail = nil,     -- scanner warning string to show in the modal
   open_risky_warn   = false,   -- deferred flag: open risky-code popup next frame
+  jsfx_save_warn_idx = nil,    -- message index for deferred JSFX save/add confirmation
+  jsfx_save_warn_action = nil, -- "save" | "save_as" | "add"
+  jsfx_save_warn_detail = nil, -- JSFX validator finding summary for the modal
+  open_jsfx_save_warn = false, -- deferred flag: open JSFX save warning popup next frame
   last_backup_path  = nil,     -- full path of most recent backup file
   last_backup_state = nil,     -- GetProjectStateChangeCount at time of last backup
   scroll_to_bottom  = false,   -- set true to auto-scroll chat on next frame
@@ -2552,9 +3999,11 @@ S = {
   curl_pid          = nil,     -- truthy while a request is pending, nil when idle
   curl_debug        = nil,     -- structured diagnostics for the in-flight curl
   curl_os_pid       = nil,     -- OS PID of in-flight curl process (for Cancel kill)
-  curl_exited_clean = false,   -- true once exit code 0 has been observed (skips
-                               -- partial-read brace guard so HTML/non-JSON
-                               -- responses surface as errors instead of hanging)
+  curl_exited_clean = false,   -- true once exit code 0 has been observed; response
+                               -- parsing must wait for this so partial writes are
+                               -- never mistaken for complete JSON.
+  curl_output_seen_before_exit = false, -- logged once per request when tmp.out has
+                                       -- bytes before curl has reported exit code 0.
   kill_pending      = false,   -- Cancel was clicked but tmp.pid hadn't appeared
                                -- yet; main loop retries the kill until it lands.
   kill_pending_until = 0,      -- deadline (time_precise) for kill_pending retry
@@ -2663,8 +4112,12 @@ S = {
   action_validator_retries = 0,    -- per-turn counter -- model guessed unverified numeric Main_OnCommand IDs (max 1 retry)
   toolbar_validator_retries = 0,   -- per-turn counter -- model emitted fragile toolbar/defer action script (max 1 retry)
   transient_validator_retries = 0, -- per-turn counter -- model used naive audio-accessor detector for drum-hit stretch markers (max 1 retry)
+  audio_sync_validator_retries = 0, -- per-turn counter -- model used start/offset alignment for audio/take sync (max 1 retry)
   tempo_marker_validator_retries = 0, -- per-turn counter -- model inserted at old bar start instead of anchoring bar/beat to cursor (max 1 retry)
+  explicit_seconds_marker_validator_retries = 0, -- per-turn counter -- model overrode explicit second-based marker/region times
   project_tempo_validator_retries = 0, -- per-turn counter -- model used BPM for timing without setting project tempo (max 1 retry)
+  loop_time_map_validator_retries = 0, -- per-turn counter -- model set loop/time selection by bar/beat without TimeMap2 (max 1 retry)
+  ruler_timebase_validator_retries = 0, -- per-turn counter -- model conflated ruler-lane timebase with timeline ruler display (max 1 retry)
   drum_quantize_validator_retries = 0, -- per-turn counter -- model moved whole drum items instead of using shared stretch-marker map (max 1 retry)
   drum_marker_sync_validator_retries = 0, -- per-turn counter -- model set drum stretch markers without range normalization (max 1 retry)
   arity_validator_retries  = 0,    -- per-turn counter -- model emitted reaper.* call with wrong fixed arg count (max 1 retry)
@@ -2681,6 +4134,8 @@ S = {
   typed_action_escalation_count = 0, -- per-turn counter -- typed-action model escalation requests
   typed_action_escalation_model = nil, -- provider/model id for the active fallback, when escalation fires
   typed_action_escalation_restore = nil, -- original provider/model to restore after a hidden fallback-model rescue
+  typed_action_lua_fallback_used = false, -- per-turn flag -- structured edit fell back to one Lua retry after semantic exhaustion
+  fxrecfx_validator_retries = 0, -- per-turn counter -- model passed true for TrackFX_AddByName recFX on normal track FX
   fxcheck_validator_retries = 0,   -- per-turn counter -- model emitted unchecked TrackFX_AddByName result (max 1 retry)
   fxget_validator_retries = 0,     -- per-turn counter -- model silently skipped a required TrackFX_GetByName result (max 1 retry)
   fxadd_getonly_validator_retries = 0, -- per-turn counter -- model used GetByName-only for an add-FX request (max 1 retry)
@@ -2692,6 +4147,7 @@ S = {
   helper_validator_retries = 0,    -- per-turn counter -- model called helper functions without including their definitions (max 1 retry)
   void_return_validator_retries = 0,-- per-turn counter -- model assigned a void reaper.* call result (max 1 retry)
   sandbox_global_validator_retries = 0, -- per-turn counter -- model emitted Lua globals unavailable in the execution sandbox
+  track_deletion_validator_retries = 0, -- per-turn counter -- model deleted tracks without a delete/clear request
   forbidden_track_creation_validator_retries = 0, -- per-turn counter -- model inserted tracks after user forbade new tracks/buses
   forbidden_track_creation_retry_used = false, -- per-turn flag -- one hidden retry for explicit "no new bus/track" prompts
   forbidden_fx_validator_retries = 0, -- per-turn counter -- model added FX after user forbade effects/plugins
@@ -2736,6 +4192,8 @@ S = {
   parse_retry_used         = false,-- per-turn flag -- extracted ```lua block failed Lua syntax check; one hidden retry with the parser error
   jsfx_validator_retries   = 0,    -- per-turn counter -- generated JSFX failed Code.validate_jsfx (max 1 retry)
   jsfx_wrong_artifact_retry_used = false, -- per-turn flag -- JSFX request returned Lua/ReaScript instead of JSFX
+  jsfx_companion_validator_retries = 0, -- per-turn counter -- JSFX track install request omitted companion Lua
+  jsfx_companion_retry_used = false, -- per-turn flag -- hidden retry for missing JSFX companion Lua
   length_retry_used        = false,-- per-turn flag -- empty-text-from-length retry already fired with thinking forced off
   empty_retry_used         = false,-- per-turn flag -- generic-empty-response retry already fired (finish_reason=stop with no content)
   thinking_override_idx    = nil,  -- per-turn override for prefs.thinking_idx (set during length auto-retry to force "none")
@@ -2800,6 +4258,55 @@ if S.screen_reader_startup_intent
 end
 
 S.INSTANCE_ID = string.format("%.6f_%d", time_precise(), math.random(100000, 999999))
+
+function RA.instance_file_suffix()
+  local raw = tostring((S and S.INSTANCE_ID) or (CMD_ID or "session"))
+  raw = raw:gsub("[^%w%-_]", "_")
+  if raw == "" then raw = "session" end
+  return "inst_" .. raw
+end
+
+function RA.temp_live_marker_path(instance_suffix)
+  local suffix = tostring(instance_suffix or RA.instance_file_suffix())
+  suffix = suffix:gsub("[^%w%-_]", "_")
+  if suffix == "" then suffix = "inst_session" end
+  return RA.TEMP_DIR .. "reaassist_live_" .. suffix .. ".txt"
+end
+
+function RA.write_temp_live_marker(now)
+  local path = RA.temp_live_marker_path()
+  local ok_f, f = pcall(io.open, path, "w")
+  if not ok_f or not f then return false end
+  local stamp = tostring(now or time_precise())
+  local ok_w = pcall(function() f:write(stamp) end)
+  local ok_c = pcall(function() f:close() end)
+  return ok_w and ok_c
+end
+
+function RA.temp_instance_suffix_from_name(filename)
+  local s = tostring(filename or "")
+  return s:match("[_%.](inst_[%w%-_]+)%.[^%.]+$")
+    or s:match("^reaassist_live_(inst_[%w%-_]+)%.txt$")
+    or s:match("[_%.](inst_[%w%-_]+)$")
+end
+
+function RA.temp_instance_is_live(instance_suffix, now)
+  if not instance_suffix or instance_suffix == "" then return false end
+  local path = RA.temp_live_marker_path(instance_suffix)
+  local ok_f, f = pcall(io.open, path, "r")
+  if not ok_f or not f then return false end
+  local raw = f:read("*a")
+  f:close()
+  local stamp = tonumber(raw)
+  if not stamp then return false end
+  -- reaper.time_precise() is process-local but boot-anchored on supported
+  -- REAPER platforms, so two ReaAssist processes can compare live-marker
+  -- ages. If that ever changes upstream, cross-process sweeps must move to
+  -- wall-clock timestamps.
+  local age = math.abs((now or time_precise()) - stamp)
+  return age <= 15
+end
+
 do
   -- Stale lock timeout: how long before a lock from a (presumed-crashed)
   -- prior instance is considered abandoned. Set short so the user can
@@ -3355,11 +4862,12 @@ end
 -- Tmp file paths for curl/update/screenshot I/O. Files live under ReaAssist's
 -- own Data/Temp directory so the REAPER resource root never accumulates
 -- visible ReaAssist scratch artifacts.
--- CMD_ID suffix makes filenames unique per script instance.
+-- CMD_ID + INSTANCE_ID suffix makes filenames unique across REAPER processes
+-- that share one script install.
 local tmp = {}
 do
   local tmp_dir    = RA.TEMP_DIR
-  local tmp_suffix = tostring(CMD_ID or 0)
+  local tmp_suffix = tostring(CMD_ID or 0) .. "_" .. RA.instance_file_suffix()
   tmp.out    = tmp_dir .. "reaassist_resp_"       .. tmp_suffix .. ".json"
   tmp.body   = tmp_dir .. "reaassist_body_"       .. tmp_suffix .. ".json"
   tmp.log    = tmp_dir .. "reaassist_last_error_" .. tmp_suffix .. ".json"
@@ -3407,12 +4915,14 @@ do
   tmp.font_sha_ps   = tmp_dir .. "reaassist_font_sha_"     .. tmp_suffix .. ".ps1"
   tmp.screenshot  = tmp_dir .. "reaassist_screenshot_" .. tmp_suffix .. ".png"
   tmp.clipboard   = tmp_dir .. "reaassist_clipboard_"  .. tmp_suffix .. ".png"
+  tmp.live        = RA.temp_live_marker_path()
 end
+RA.write_temp_live_marker()
 
 -- Startup cleanup: wipe any temp files left behind by a prior hard crash (BSOD,
 -- power loss, OOM kill). atexit handles graceful shutdown but cannot run on
--- crash, so temp files (including the plaintext auth header) could otherwise
--- persist on disk. Doing this at startup is the only safe net.
+-- crash, so temp files (including plaintext auth headers) could otherwise
+-- persist on disk. The broad sweep below respects other live process markers.
 os.remove(tmp.auth)
 os.remove(tmp.gemini_auth)
 os.remove(tmp.cache_auth)
@@ -3441,20 +4951,20 @@ os.remove(tmp.font_sha_ps)
 os.remove(tmp.screenshot)
 os.remove(tmp.clipboard)
 
--- Stranded-CMD_ID sweep: the per-CMD_ID removes above only catch files
--- whose suffix matches THIS instance's command id. During the first-install
--- bootstrap -> auto-update -> relauncher restart cycle, the initial install
--- can leave behind temp files keyed to a CMD_ID that subsequent normal
--- launches never see again (most visibly the SHA-verify trio
--- reaassist_shain_/_shaout_/_shaexit_<id>.txt). Sweep Data/Temp for any
--- reaassist_* leftovers regardless of suffix. Safe because the
--- single-instance handshake guarantees no other live ReaAssist owns
--- these files. Pattern is anchored to known temp extensions so we never touch
--- user-authored files that happen to start with "reaassist_".
+-- Stranded temp sweep: remove crash leftovers from prior instance-suffixed
+-- launches, but keep files whose live marker is still fresh. Legacy
+-- CMD_ID-only non-auth files cannot be safely attributed across REAPER
+-- processes, so leave them rather than risking deletion of another live
+-- process's request. Auth-header files are the exception: older builds used
+-- CMD_ID-only plaintext auth temp names, and a post-update crash should not
+-- leave API-key headers sitting on disk forever.
+-- Pattern is anchored to known temp extensions so we never touch user-authored
+-- files that happen to start with "reaassist_".
 do
   local sweep_dir = RA.TEMP_DIR
   local sweep_sep = (sweep_dir:sub(-1) == "/" or sweep_dir:sub(-1) == "\\")
     and "" or RA.SEP
+  local now = time_precise()
   -- Collect first, remove second: EnumerateFiles is index-based, so
   -- os.remove mid-iteration would shift later entries down by one and
   -- we would skip every other match.
@@ -3463,18 +4973,64 @@ do
   while true do
     local fn = reaper.EnumerateFiles(sweep_dir, idx)
     if not fn then break end
-    if fn:match("^reaassist_.+%.txt$")
+    local tracked = fn:match("^reaassist_.+%.txt$")
         or fn:match("^reaassist_.+%.json$")
         or fn:match("^reaassist_.+%.ps1$")
         or fn:match("^reaassist_.+%.png$")
         or fn:match("^font_.+%.download$")
-        or fn:match("^font_.+%.exit$") then
+        or fn:match("^font_.+%.exit$")
+    local legacy_auth = fn:match("^reaassist_auth_%-?%d+%.txt$")
+        or fn:match("^reaassist_gauth_%-?%d+%.txt$")
+        or fn:match("^reaassist_cauth_%-?%d+%.txt$")
+        or fn:match("^reaassist_cdelauth_%-?%d+%.txt$")
+        or fn:match("^reaassist_crenewauth_%-?%d+%.txt$")
+        or fn:match("^reaassist_auth%.txt$")
+        or fn:match("^reaassist_gauth%.txt$")
+        or fn:match("^reaassist_cauth%.txt$")
+        or fn:match("^reaassist_cdelauth%.txt$")
+        or fn:match("^reaassist_crenewauth%.txt$")
+    local inst_suffix = tracked and RA.temp_instance_suffix_from_name(fn) or nil
+    if legacy_auth then
+      victims[#victims + 1] = fn
+    elseif tracked and inst_suffix
+        and not RA.temp_instance_is_live(inst_suffix, now) then
       victims[#victims + 1] = fn
     end
     idx = idx + 1
   end
   for _, fn in ipairs(victims) do
     os.remove(sweep_dir .. sweep_sep .. fn)
+  end
+end
+
+-- Stranded atomic store sweep: Config/State/Providers writes use
+-- `<file>.tmp.inst_*` + `<file>.bak.inst_*` so two REAPER processes sharing one
+-- install no longer collide. If a process crashes mid-write, its orphaned temp
+-- or backup file is safe to remove after its live marker goes stale.
+do
+  local store_bases = {
+    ["Config.json"]            = true,
+    ["Providers.json"]         = true,
+    ["State.json"]             = true,
+    ["Custom_Instructions.md"] = true,
+  }
+  local victims = {}
+  local idx = 0
+  local now = time_precise()
+  while true do
+    local fn = reaper.EnumerateFiles(RA.DATA_DIR, idx)
+    if not fn then break end
+    local base = fn:match("^(.+)%.tmp%.inst_[%w%-_]+$")
+        or fn:match("^(.+)%.bak%.inst_[%w%-_]+$")
+    local inst_suffix = base and store_bases[base]
+      and RA.temp_instance_suffix_from_name(fn) or nil
+    if inst_suffix and not RA.temp_instance_is_live(inst_suffix, now) then
+      victims[#victims + 1] = fn
+    end
+    idx = idx + 1
+  end
+  for _, fn in ipairs(victims) do
+    os.remove(RA.DATA_DIR .. fn)
   end
 end
 
@@ -3550,22 +5106,31 @@ reaper.atexit(function()
       pcall(reaper.DeleteTrack, _tr)
     end
   end
-  -- Close the Undo + PreventUIRefresh scopes those scans hold open. Each
-  -- scope owner (pref scan / fx_cache rescan / fx_inspect) opened one
-  -- Undo_BeginBlock + one PreventUIRefresh(1) on entry; without closing
-  -- them here, a mid-scan exit would leave the TCP/MCP redraw suppressed
-  -- and an undo block dangling. deep_scan body releases PreventUIRefresh(-1)
-  -- early on behalf of its owner (fx_inspect or fx_cache rescan), so skip
-  -- one refresh release if that already happened.
-  local _owners = 0
-  if pref_plugins.scan  and pref_plugins.scan.track  then _owners = _owners + 1 end
-  if fx_cache_ui.rescan and fx_cache_ui.rescan.track then _owners = _owners + 1 end
-  if S._fx_inspect_tmp                               then _owners = _owners + 1 end
-  local _refreshes = _owners
+  -- Release scan cleanup scopes without assuming every temp-track owner still
+  -- has an Undo block open. Refresh suppression can span the deferred read, but
+  -- Undo blocks are closed before returning to REAPER and tracked explicitly.
+  local _refresh_owners = 0
+  if pref_plugins.scan  and pref_plugins.scan.track  then _refresh_owners = _refresh_owners + 1 end
+  if fx_cache_ui.rescan and fx_cache_ui.rescan.track then _refresh_owners = _refresh_owners + 1 end
+  if S._fx_inspect_tmp                               then _refresh_owners = _refresh_owners + 1 end
+  local _undo_owners = 0
+  if pref_plugins.scan and pref_plugins.scan.undo_open then
+    _undo_owners = _undo_owners + 1
+    pref_plugins.scan.undo_open = false
+  end
+  if fx_cache_ui.rescan and fx_cache_ui.rescan.undo_open then
+    _undo_owners = _undo_owners + 1
+    fx_cache_ui.rescan.undo_open = false
+  end
+  if S._fx_inspect_tmp and S._fx_inspect_tmp.undo_open then
+    _undo_owners = _undo_owners + 1
+    S._fx_inspect_tmp.undo_open = false
+  end
+  local _refreshes = _refresh_owners
   if deep_scan._ui_refresh_released then _refreshes = _refreshes - 1 end
   if _refreshes < 0 then _refreshes = 0 end
   for _ = 1, _refreshes do pcall(reaper.PreventUIRefresh, -1) end
-  for _ = 1, _owners do
+  for _ = 1, _undo_owners do
     pcall(reaper.Undo_EndBlock, "ReaAssist: scan (closed at exit)", 0)
   end
   if reaper.ImGui_DestroyContext and RA.ctx then
@@ -3602,8 +5167,12 @@ reaper.atexit(function()
   os.remove(tmp.update_sha_out)
   os.remove(tmp.update_sha_exit)
   os.remove(tmp.update_sha_ps)
+  os.remove(tmp.font_sha_out)
+  os.remove(tmp.font_sha_exit)
+  os.remove(tmp.font_sha_ps)
   os.remove(tmp.screenshot)
   os.remove(tmp.clipboard)
+  os.remove(tmp.live)
 end)
 
 -- =============================================================================
@@ -3621,6 +5190,7 @@ prefs = {
   debug_logging    = reaper.GetExtState(CFG.EXT_NS, "debug_logging")    ~= "0",  -- default ON during early-release window so testers' bug reports include full traffic without manual opt-in; flip to == "1" later when bug volume settles
   include_api_ref  = reaper.GetExtState(CFG.EXT_NS, "include_api_ref")  == "1",  -- default off (prompt-bundle era; request docs on-demand)
   include_snapshot = reaper.GetExtState(CFG.EXT_NS, "include_snapshot") ~= "0", -- default on
+  compact_history  = reaper.GetExtState(CFG.EXT_NS, "compact_history")  == "1", -- default off; saves tail tokens by summarizing older successful code replies
   update_check     = reaper.GetExtState(CFG.EXT_NS, "update_check")    ~= "0", -- default on
   screen_reader_concise_hints = reaper.GetExtState(CFG.EXT_NS, "screen_reader_concise_hints") == "1", -- default off
   screen_reader_text_size_idx = 1, -- Screen Reader Mode visual size; separate from main UI scale/chat font
@@ -4425,6 +5995,7 @@ local function _build_sysinfo()
     L[#L+1] = "Auto-backup:     " .. tostring(prefs.auto_backup)
     L[#L+1] = "Snapshot ctx:    " .. tostring(prefs.include_snapshot)
     L[#L+1] = "API ref:         " .. tostring(prefs.include_api_ref)
+    L[#L+1] = "History compact: " .. tostring(prefs.compact_history)
   end
   L[#L+1] = "Max history:     " .. tostring(CFG and CFG.MAX_HISTORY_TURNS or "?")
   -- Coerce to a strict bool so the display reads "true"/"false" instead of
@@ -4479,7 +6050,7 @@ end
 -- Each entry: { label, id, price_in, price_out, price_cache_r [, price_cache_w] [, flags] }
 -- Prices are USD per 1 million tokens.
 -- Sources: anthropic.com/pricing, openai.com/api/pricing, ai.google.dev/gemini-api/docs/pricing
--- Last updated: April 2026
+-- Last updated: May 2026
 -- =============================================================================
 -- Provider definitions
 -- =============================================================================
@@ -4535,8 +6106,10 @@ PROVIDERS = {
     -- adaptive-thinking default. (Mythos Preview rejects disabled thinking,
     -- but we don't ship it.)
     -- Default idx is None to match pre-existing ReaAssist behavior. The
-    -- budget_tokens stay under each model's max_output and under ~21K so
-    -- non-streaming Net.fire_curl is legal.
+    -- budget_tokens stay under each model's max_output. This limit is
+    -- separate from the request-level max_tokens below: max_tokens is the
+    -- output ceiling sent to Anthropic, while budget_tokens is only the
+    -- thinking allowance for manual-thinking models.
     thinking_levels = {
       { label = "None",   value = "none"   },
       { label = "Low",    value = "low",    budget_tokens = 2048,  effort = "low"    },
@@ -4840,21 +6413,103 @@ function Store._notify_write_failure(label, err)
     "err", true)
 end
 
+function Store._atomic_write_suffix()
+  if RA and RA.instance_file_suffix then
+    return "." .. RA.instance_file_suffix()
+  end
+  local raw = tostring(CMD_ID or "session"):gsub("[^%w%-_]", "_")
+  if raw == "" then raw = "session" end
+  return ".inst_" .. raw
+end
+
+-- ===== atomic file IO (sliced by Dev/Tests/test_atomic_write.lua) =====
+Store._read_failed_paths = Store._read_failed_paths or {}
+
+function Store._mark_read_failed(path)
+  if path and path ~= "" then Store._read_failed_paths[path] = true end
+end
+
+function Store._clear_read_failed(path)
+  if path and path ~= "" and Store._read_failed_paths then
+    Store._read_failed_paths[path] = nil
+  end
+end
+
+function Store._path_read_failed(path)
+  return path and path ~= "" and Store._read_failed_paths
+    and Store._read_failed_paths[path] == true
+end
+
+function Store._should_quarantine_json_read_error(err)
+  return err and err ~= "missing" and err ~= "empty" and err ~= "read_failed"
+end
+
 function Store._read_text_file(path)
-  if not path or path == "" then return nil end
+  if not path or path == "" then return nil, "missing" end
   local ok_f, f = pcall(io.open, path, "r")
-  if not ok_f or not f then return nil end
-  local raw = f:read("*a")
-  f:close()
-  return raw
+  if not ok_f or not f then return nil, "missing", f end
+
+  local ok_r, raw, rerr = pcall(f.read, f, "*a")
+  local ok_c, c_ok, c_err = pcall(f.close, f)
+  if not ok_r then return nil, "read_failed", raw end
+  if raw == nil then return nil, "read_failed", rerr or "read failed" end
+  if not ok_c or not c_ok then
+    return nil, "read_failed",
+      ((not ok_c) and c_ok) or c_err or "close failed"
+  end
+  return raw, nil
+end
+
+function Store.atomic_write_file(path, data, opts)
+  if not path or path == "" then return "Missing file path." end
+  opts = opts or {}
+  local suffix = tostring(opts.suffix or "")
+  local tmp_path = path .. ".tmp" .. suffix
+  local bak_path = path .. ".bak" .. suffix
+  local mode = opts.binary and "wb" or "w"
+  local ok_f, f = pcall(io.open, tmp_path, mode)
+  if not ok_f or not f then
+    return "Failed to open " .. tmp_path .. ": " .. tostring(f or "open failed")
+  end
+
+  local p_w, w_ok, w_err = pcall(f.write, f, tostring(data or ""))
+  local p_c, c_ok, c_err = pcall(f.close, f)
+  if not p_w or not w_ok or not p_c or not c_ok then
+    os.remove(tmp_path)
+    local write_err = (not p_w) and w_ok or w_err
+    local close_err = (not p_c) and c_ok or c_err
+    return "Failed writing " .. tmp_path .. ": "
+      .. tostring(write_err or close_err or "write/close failed")
+  end
+
+  os.remove(bak_path)
+  local had_existing = os.rename(path, bak_path)
+  local ok_r, ren_err = os.rename(tmp_path, path)
+  if not ok_r then
+    os.remove(tmp_path)
+    if had_existing then os.rename(bak_path, path) end
+    return "Failed renaming temp file: " .. tostring(ren_err)
+  end
+  if had_existing then os.remove(bak_path) end
+  return nil
 end
 
 function Store.read_json(path, default_value, schema_version)
-  local ok_f, f = pcall(io.open, path, "r")
-  if not ok_f or not f then return default_value, "missing" end
-  local raw = f:read("*a")
-  f:close()
-  if not raw or raw == "" then return default_value, "empty" end
+  local raw, read_err, read_detail = Store._read_text_file(path)
+  if raw == nil and read_err == "read_failed" then
+    raw, read_err, read_detail = Store._read_text_file(path)
+  end
+  if raw == nil then
+    if read_err == "read_failed" then
+      Store._mark_read_failed(path)
+      Store._log("STORE", "read failed for " .. tostring(path)
+        .. ": " .. tostring(read_detail or "unknown error"))
+      return default_value, "read_failed"
+    end
+    return default_value, "missing"
+  end
+  Store._clear_read_failed(path)
+  if raw == "" then return default_value, "empty" end
   local data, err = JSON.decode(raw)
   if not data then
     Store._log("STORE", "JSON decode failed for " .. tostring(path)
@@ -4876,34 +6531,25 @@ function Store.write_json_atomic(path, value, skip_unchanged)
   local json_str, err = JSON.encode(value, "  ")
   if not json_str then return "JSON encode failed: " .. tostring(err) end
   local payload = json_str .. "\n"
-  if skip_unchanged and Store._read_text_file(path) == payload then
-    return nil, true
+  if Store._path_read_failed(path) then
+    return "Refusing to overwrite " .. tostring(path) .. ": last read failed"
+  end
+  if skip_unchanged then
+    local existing, read_err, read_detail = Store._read_text_file(path)
+    if read_err == "read_failed" then
+      Store._mark_read_failed(path)
+      return "Refusing to overwrite " .. tostring(path)
+        .. ": existing file could not be read (" .. tostring(read_detail) .. ")"
+    end
+    if existing == payload then return nil, true end
   end
 
-  local tmp_path = path .. ".tmp"
-  local ok_f, f = pcall(io.open, tmp_path, "w")
-  if not ok_f or not f then return "Failed to open " .. tmp_path end
-
-  local ok_w, w_err = pcall(function() f:write(payload) end)
-  local ok_c, c_ok, c_err = pcall(function() return f:close() end)
-  if not ok_w or not ok_c or c_ok == nil then
-    os.remove(tmp_path)
-    return "Failed writing " .. tmp_path .. ": "
-      .. tostring(w_err or c_err or c_ok or "close failed")
-  end
-
-  local bak_path = path .. ".bak"
-  os.remove(bak_path)
-  local had_existing = os.rename(path, bak_path)
-  local ok_r, ren_err = os.rename(tmp_path, path)
-  if not ok_r then
-    os.remove(tmp_path)
-    if had_existing then os.rename(bak_path, path) end
-    return "Failed renaming temp JSON: " .. tostring(ren_err)
-  end
-  if had_existing then os.remove(bak_path) end
+  local write_err = Store.atomic_write_file(path, payload,
+    { suffix = Store._atomic_write_suffix() })
+  if write_err then return write_err end
   return nil, false
 end
+-- close atomic-write scope
 
 function Store.json_array(list)
   if type(list) ~= "table" or #list == 0 then return JSON.EMPTY_ARRAY end
@@ -5109,7 +6755,7 @@ end
 function Store.load_providers()
   local doc, err = Store.read_json(RA.PROVIDERS_PATH, nil, 1)
   if not doc then
-    if err and err ~= "missing" and err ~= "empty" then
+    if Store._should_quarantine_json_read_error(err) then
       Store._quarantine_json(RA.PROVIDERS_PATH, err)
     end
     return nil, err or "missing"
@@ -5134,17 +6780,27 @@ end
 
 function Store._quarantine_json(path, reason)
   if not path or path == "" then return nil end
+  if reason == "read_failed" then
+    Store._log("STORE", "not quarantining " .. tostring(path)
+      .. " after transient read failure")
+    return nil
+  end
   if RA._file_exists and not RA._file_exists(path) then return nil end
   local stamp = tostring(os.time())
-  local bak_path = path .. ".bak"
-  if RA._file_exists and RA._file_exists(bak_path) then
-    local bak_dst = bak_path .. ".corrupt." .. stamp
-    local bak_ok, bak_err = os.rename(bak_path, bak_dst)
-    if bak_ok then
-      Store._log("STORE", "preserved JSON backup as " .. tostring(bak_dst))
-    else
-      Store._log("STORE", "could not preserve JSON backup " .. tostring(bak_path)
-        .. ": " .. tostring(bak_err))
+  local bak_paths = {
+    path .. ".bak", -- legacy pre-instance-suffix backup
+    path .. ".bak" .. Store._atomic_write_suffix(),
+  }
+  for _, bak_path in ipairs(bak_paths) do
+    if RA._file_exists and RA._file_exists(bak_path) then
+      local bak_dst = bak_path .. ".corrupt." .. stamp
+      local bak_ok, bak_err = os.rename(bak_path, bak_dst)
+      if bak_ok then
+        Store._log("STORE", "preserved JSON backup as " .. tostring(bak_dst))
+      else
+        Store._log("STORE", "could not preserve JSON backup " .. tostring(bak_path)
+          .. ": " .. tostring(bak_err))
+      end
     end
   end
   local dst = path .. ".corrupt." .. stamp
@@ -5180,6 +6836,7 @@ function Store.cleanup_config_extstate(doc)
     "debug_logging",
     "include_api_ref",
     "include_snapshot",
+    "compact_history",
     "update_check",
     "screen_reader_concise_hints",
     "screen_reader_text_size_idx",
@@ -5334,7 +6991,7 @@ function Store.config_doc()
     Store._config_doc = Store.seed_config_from_extstate(doc)
     return Store._config_doc
   end
-  if err and err ~= "missing" and err ~= "empty" then
+  if Store._should_quarantine_json_read_error(err) then
     Store._quarantine_json(RA.CONFIG_PATH, err)
   end
   Store._config_doc = Store.seed_config_from_extstate({ schema_version = 1 })
@@ -5434,6 +7091,7 @@ function Store.current_preferences()
     debug_logging         = prefs.debug_logging and true or false,
     include_api_ref       = prefs.include_api_ref and true or false,
     include_snapshot      = prefs.include_snapshot and true or false,
+    compact_history       = prefs.compact_history and true or false,
     update_check          = prefs.update_check and true or false,
     screen_reader_concise_hints =
       prefs.screen_reader_concise_hints and true or false,
@@ -5469,6 +7127,7 @@ function Store.apply_config_preferences()
   prefs.debug_logging    = Store._pref_bool("debug_logging", prefs.debug_logging)
   prefs.include_api_ref  = Store._pref_bool("include_api_ref", prefs.include_api_ref)
   prefs.include_snapshot = Store._pref_bool("include_snapshot", prefs.include_snapshot)
+  prefs.compact_history  = Store._pref_bool("compact_history", prefs.compact_history)
   prefs.update_check     = Store._pref_bool("update_check", prefs.update_check)
   prefs.screen_reader_concise_hints =
     Store._pref_bool("screen_reader_concise_hints",
@@ -5799,32 +7458,18 @@ end
 function Store.write_text_atomic(path, text, skip_unchanged)
   if not path or path == "" then return "Missing text path." end
   text = tostring(text or "")
-  if skip_unchanged and Store._read_text_file(path) == text then
-    return nil, true
+  if skip_unchanged then
+    local existing, read_err, read_detail = Store._read_text_file(path)
+    if read_err == "read_failed" then
+      return "Refusing to overwrite " .. tostring(path)
+        .. ": existing file could not be read (" .. tostring(read_detail) .. ")"
+    end
+    if existing == text then return nil, true end
   end
 
-  local tmp_path = path .. ".tmp"
-  local ok_f, f = pcall(io.open, tmp_path, "w")
-  if not ok_f or not f then return "Failed to open " .. tmp_path end
-
-  local ok_w, w_err = pcall(function() f:write(text) end)
-  local ok_c, c_ok, c_err = pcall(function() return f:close() end)
-  if not ok_w or not ok_c or c_ok == nil then
-    os.remove(tmp_path)
-    return "Failed writing " .. tmp_path .. ": "
-      .. tostring(w_err or c_err or c_ok or "close failed")
-  end
-
-  local bak_path = path .. ".bak"
-  os.remove(bak_path)
-  local had_existing = os.rename(path, bak_path)
-  local ok_r, ren_err = os.rename(tmp_path, path)
-  if not ok_r then
-    os.remove(tmp_path)
-    if had_existing then os.rename(bak_path, path) end
-    return "Failed renaming temp text file: " .. tostring(ren_err)
-  end
-  if had_existing then os.remove(bak_path) end
+  local write_err = Store.atomic_write_file(path, text,
+    { suffix = Store._atomic_write_suffix() })
+  if write_err then return write_err end
   return nil, false
 end
 
@@ -6001,7 +7646,7 @@ function Store.state_doc()
     Store._state_doc = Store.seed_state_from_extstate(doc)
     return Store._state_doc
   end
-  if err and err ~= "missing" and err ~= "empty" then
+  if Store._should_quarantine_json_read_error(err) then
     Store._quarantine_json(RA.STATE_PATH, err)
   end
   Store._state_doc = Store.seed_state_from_extstate({ schema_version = 1 })
@@ -8337,7 +9982,9 @@ function OptionalFonts.start_download(language_idx)
   else
     reaper.RecursiveCreateDirectory(RA.LANG_TMP_DIR, 0)
   end
-  local base = RA.LANG_TMP_DIR .. "font_" .. entry.key
+  local font_suffix = (RA and RA.instance_file_suffix and RA.instance_file_suffix())
+    or tostring(S and S.INSTANCE_ID or "session")
+  local base = RA.LANG_TMP_DIR .. "font_" .. entry.key .. "_" .. font_suffix
   local out_path = base .. ".download"
   local exit_path = base .. ".exit"
   os.remove(out_path)
@@ -9047,7 +10694,7 @@ local TK_DARK = {
   border_str    = 0x7896C85A,    -- rgba(120,150,200,0.35) (was 0.28)
   text          = 0xE7ECF3FF,
   text_muted    = 0x9FA7B8FF,    -- lifted from 0x9199AA for better readability of URL links and helper text on the dark card. Hue preserved; brightness up ~8%.
-  text_faint    = 0x6B7484FF,    -- lifted from 0x5B6474 so mono section labels still read
+  text_faint    = 0x8994A6FF,    -- lifted so mono section labels clear AA contrast on bg/card
   accent        = 0x5E84DCFF,    -- primary blue, toned down from the original 0x6B8FF0 so Save/Run buttons, the "ReaAssist" wordmark, and the "Unsaved changes" indicator read less shouty against the dark bg. Saturation dropped ~17% + brightness shaved ~6% while keeping the hue, so the blue still reads as ReaAssist's signature colour.
   accent_ui     = 0x44598CFF,    -- default accent for interactive surfaces in dark mode (card-toward-accent 0.45 blend). The pure `accent` above is reserved for text-on-bg uses (wordmark, status label, etc.) where the hotter tone reads right.
   accent_soft   = 0x243358FF,    -- hero gradient top -- deepened to keep gradient visible against new bg
@@ -9082,8 +10729,8 @@ local TK_LIGHT = {
   border_str    = 0x465F8C5C,
   text          = 0x0F1824FF,
   text_muted    = 0x475467FF,
-  text_faint    = 0x8B94A3FF,
-  accent        = 0x5A80CCFF,    -- slightly desaturated from the original 0x4A73D6 so Save/Run buttons (which fill with TK.accent) read calmer against the near-white light-mode bg. Hue preserved; saturation dropped ~12% for a gentler pop.
+  text_faint    = 0x5E6A7CFF,
+  accent        = 0x3F63A8FF,    -- darker light-mode blue so accent text clears contrast on bg/card while white still reads on filled buttons.
   accent_ui     = 0x89A4E4FF,    -- default accent for interactive surfaces in light mode (card-toward-accent 0.65 blend)
   accent_soft   = 0xBDD1EEFF,    -- deeper pale blue for a more visible hero gradient in light mode
   accent_text   = 0xFFFFFFFF,
@@ -9096,9 +10743,9 @@ local TK_LIGHT = {
   model_pill_bg = 0xDDE5EEFF,    -- assistant model-name pill fill -- cool light gray-blue, noticeably less bright than pure white so the pill doesn't blow out against the chat bg in light mode
   toggle_off_bg = 0xD2D8E2FF,    -- V5 toggle switch "off" pill fill (light mode)
   input_bg      = 0xECEFF5FF,    -- V5 password/text input fill -- subtle gray vs pure-white card so inputs read as recessed wells
-  green         = 0x3AA268FF,
+  green         = 0x217548FF,
   red           = 0xC14747FF,    -- V5 destructive-action fill (light-mode pair for TK.red)
-  amber         = 0xB87A20FF,    -- V5 warning tone (light-mode pair for TK.amber)
+  amber         = 0x8A5A12FF,    -- V5 warning tone (light-mode pair for TK.amber)
   autorun_fill  = 0xEB88B0FF,    -- AUTO-RUN active-segment fill (light-mode pair for TK.autorun_fill). Soft pink that signals "risky mode active" as a gentle cue rather than an error-state red.
   footer_bg     = 0x00000005,    -- rgba(0,0,0,0.02)
   code_bg       = 0xF3F6FBFF,    -- V5: subtle cool off-white, reads as a framed container on the near-white chat bg in light mode
@@ -9546,12 +11193,42 @@ function UI.open_url(url)
     local result, _, code
     if RA.IS_WINDOWS then
       result, _, code = os.execute('start "" "' .. safe .. '"')
+    elseif RA.IS_MACOS then
+      -- Single quotes disable all shell interpretation (no $(), no \, no `).
+      result, _, code = os.execute(
+        "open '" .. safe .. "' >/dev/null 2>&1 &")
     else
       -- Single quotes disable all shell interpretation (no $(), no \, no `).
-      result, _, code = os.execute("open '" .. safe .. "' 2>/dev/null || xdg-open '" .. safe .. "' &")
+      result, _, code = os.execute(
+        "xdg-open '" .. safe .. "' >/dev/null 2>&1 &")
     end
     return result == true or result == 0 or code == 0
   end
+end
+
+function UI.open_path(path)
+  path = tostring(path or "")
+  if path == "" or path:find("[%z\r\n]") then return false end
+  if reaper.CF_ShellExecute then
+    local ok, result = pcall(reaper.CF_ShellExecute, path)
+    return ok and result ~= false
+  end
+
+  local result, _, code
+  if RA.IS_WINDOWS then
+    -- Paths cannot contain literal quotes on Windows; remove shell-expansion
+    -- characters that cmd.exe would process before `start` sees the path.
+    local safe = path:gsub('[%"%%]', "")
+    if safe == "" then return false end
+    result, _, code = os.execute('start "" "' .. safe .. '"')
+  elseif RA.IS_MACOS then
+    result, _, code = os.execute(
+      "open " .. Shell.sh_quote(path) .. " >/dev/null 2>&1 &")
+  else
+    result, _, code = os.execute(
+      "xdg-open " .. Shell.sh_quote(path) .. " >/dev/null 2>&1 &")
+  end
+  return result == true or result == 0 or code == 0
 end
 
 -- =============================================================================
@@ -9890,7 +11567,8 @@ local ATTACH_MAX_COUNT   = 10  -- max attachments per message
 -- macOS: uses the built-in screencapture utility (silent, no shutter sound).
 --   This captures all screens, not just the REAPER window -- macOS does not
 --   expose a simple per-window capture via shell without extra dependencies.
--- Linux: not currently supported (returns nil).
+-- Linux: tries common desktop capture tools (grim, gnome-screenshot,
+--   spectacle, scrot, ImageMagick import), capturing the full screen.
 -- Returns the PNG file path on success, or nil + error string.
 local function capture_screenshot()
   local png_path = tmp.screenshot
@@ -9999,10 +11677,35 @@ local function capture_screenshot()
       "ReaAssist", 0)
     return nil, RA.t("attach.error.screenshot_failed_popup", nil,
       "Screenshot capture failed (see popup for details).")
+  elseif RA.IS_LINUX then
+    local q_path = Shell.sh_quote(png_path)
+    local cmds = {
+      "command -v grim >/dev/null 2>&1 && grim " .. q_path,
+      "command -v gnome-screenshot >/dev/null 2>&1 && gnome-screenshot -f " .. q_path,
+      "command -v spectacle >/dev/null 2>&1 && spectacle -b -n -o " .. q_path,
+      "command -v scrot >/dev/null 2>&1 && scrot " .. q_path,
+      "command -v import >/dev/null 2>&1 && import -window root " .. q_path,
+    }
+    for _, cmd in ipairs(cmds) do
+      os.remove(png_path)
+      local ok = os.execute(cmd)
+      if ok then
+        local f = io.open(png_path, "rb")
+        if f then
+          local size = f:seek("end")
+          f:close()
+          if size and size > 0 then return png_path end
+        end
+      end
+    end
+    os.remove(png_path)
+    return nil, RA.t("attach.error.screenshot_linux_unsupported", nil,
+      "Screenshot capture on Linux needs grim, gnome-screenshot, spectacle, "
+      .. "scrot, or ImageMagick import.")
   end
 
   return nil, RA.t("attach.error.screenshot_linux_unsupported", nil,
-    "Screenshot capture is not supported on Linux.")
+    "Screenshot capture is not available on this platform.")
 end
 
 -- =============================================================================
@@ -10011,6 +11714,7 @@ end
 -- Checks if the clipboard contains an image and returns it as a PNG file path.
 -- Windows: uses PowerShell with .NET to read the clipboard.
 -- macOS: uses osascript to read clipboard image data and write it as PNG.
+-- Linux: tries image/png clipboard targets via wl-paste (Wayland) or xclip.
 local function get_clipboard_image()
   local png_path = tmp.clipboard
 
@@ -10056,6 +11760,26 @@ local function get_clipboard_image()
       local result = handle:read("*a")
       handle:close()
       if result and result:match("OK") then
+        local f = io.open(png_path, "rb")
+        if f then
+          local size = f:seek("end")
+          f:close()
+          if size and size > 0 then return png_path end
+        end
+      end
+    end
+    os.remove(png_path)
+    return nil
+  elseif RA.IS_LINUX then
+    local q_path = Shell.sh_quote(png_path)
+    local cmds = {
+      "command -v wl-paste >/dev/null 2>&1 && wl-paste --type image/png > " .. q_path,
+      "command -v xclip >/dev/null 2>&1 && xclip -selection clipboard -t image/png -o > " .. q_path,
+    }
+    for _, cmd in ipairs(cmds) do
+      os.remove(png_path)
+      local ok = os.execute(cmd)
+      if ok then
         local f = io.open(png_path, "rb")
         if f then
           local size = f:seek("end")
@@ -10439,17 +12163,21 @@ local _is_fabfilter_ident
 -- Utility: Code.safe_write
 -- =============================================================================
 -- Writes content to a file path with crash- and failure-safe semantics:
---   1. Write to <path>.tmp, checking both f:write and f:close for nil+err
+--   1. Write to <path>.tmp.<instance>, checking both f:write and f:close
+--      for nil+err
 --      returns (not just thrown errors -- short writes/disk full/permission
 --      failures come back that way in Lua, not as exceptions).
---   2. Rename any existing <path> to <path>.bak so the original is preserved.
---   3. Rename <path>.tmp -> <path>. If that fails, restore from .bak.
---   4. On success, remove .bak.
+--   2. Rename any existing <path> to <path>.bak.<instance> so the original
+--      is preserved.
+--   3. Rename <path>.tmp.<instance> -> <path>. If that fails, restore from .bak.
+--   4. On success, remove the instance-scoped .bak.
 -- The original file is never destroyed unless the replacement is in place.
 -- Returns true on success, shows a message box and returns false on failure.
 function Code.safe_write(path, content)
-  local tmp_path = path .. ".tmp"
-  local bak_path = path .. ".bak"
+  local atomic_suffix = (RA and RA.instance_file_suffix)
+    and ("." .. RA.instance_file_suffix()) or ""
+  local tmp_path = path .. ".tmp" .. atomic_suffix
+  local bak_path = path .. ".bak" .. atomic_suffix
   local f, err = io.open(tmp_path, "wb")
   if not f then
     reaper.ShowMessageBox(
@@ -12323,32 +14051,12 @@ function FXCache.save(cache)
   cache._version = FXCACHE_VERSION
   local json_str, err = JSON.encode(cache, "  ")
   if not json_str then return "JSON encode failed: " .. tostring(err) end
-  -- Atomic write: temp file + rename. AV scanners and abrupt exits can
-  -- otherwise leave the 60+ KB cache JSON half-written, breaking parse on
-  -- the next session.
-  local tmp_path = RA.FX_CACHE_PATH .. ".tmp"
-  local ok_f, f = pcall(io.open, tmp_path, "w")
-  if not ok_f or not f then return "Failed to open " .. tmp_path end
-  local ok_w, w_err = pcall(function() f:write(json_str .. "\n") end)
-  pcall(function() f:close() end)
-  if not ok_w then
-    os.remove(tmp_path)
-    return "Failed writing " .. tmp_path .. ": " .. tostring(w_err)
-  end
-  -- Backup-and-restore rename: Windows os.rename cannot overwrite, so the
-  -- original cache must be moved out of the way before renaming tmp into
-  -- place. If the rename fails (AV lock, disk full, permission flip), the
-  -- .bak is restored so the user never loses their existing cache.
-  local bak_path = RA.FX_CACHE_PATH .. ".bak"
-  os.remove(bak_path)
-  local had_existing = os.rename(RA.FX_CACHE_PATH, bak_path)
-  local ok_r, ren_err = os.rename(tmp_path, RA.FX_CACHE_PATH)
-  if not ok_r then
-    os.remove(tmp_path)
-    if had_existing then os.rename(bak_path, RA.FX_CACHE_PATH) end
-    return "Failed renaming temp cache: " .. tostring(ren_err)
-  end
-  if had_existing then os.remove(bak_path) end
+  -- Atomic write: instance-scoped temp file + rename. AV scanners and abrupt
+  -- exits can otherwise leave the 60+ KB cache JSON half-written, breaking
+  -- parse on the next session.
+  local write_err = Store.atomic_write_file(RA.FX_CACHE_PATH, json_str .. "\n",
+    { suffix = Store._atomic_write_suffix() })
+  if write_err then return write_err end
   _fx_cache_mem = cache
   return nil  -- success
 end
@@ -12581,7 +14289,8 @@ function FXCache.canonicalize_all_preferred_types()
   FXCache._canonicalized_session = true
   if upgraded_count > 0 then
     FXCache._mutation_count = FXCache._mutation_count + 1
-    FXCache.save(cache)
+    local save_err = FXCache.save(cache)
+    if save_err then Store._notify_write_failure("FX cache", save_err) end
   end
   return upgraded_count
 end
@@ -13272,8 +14981,10 @@ function LangPacks._tmp_path(name, ext)
     or (RA and RA.LANG_TMP_DIR)
     or (RA and RA.TEMP_DIR)
     or ""
-  return dir .. "lang_" .. tostring(name or "pack") .. "."
-    .. tostring(S and S.INSTANCE_ID or "session") .. tostring(ext or ".tmp")
+  local suffix = (RA and RA.instance_file_suffix and RA.instance_file_suffix())
+    or tostring(S and S.INSTANCE_ID or "session")
+  return dir .. "lang_" .. tostring(name or "pack") .. "_"
+    .. suffix .. tostring(ext or ".tmp")
 end
 
 function LangPacks._cleanup_tmp_paths(d)
@@ -13288,11 +14999,17 @@ function LangPacks.cleanup_stale_tmp()
   if not (dir and reaper and reaper.EnumerateFiles) then return end
   local sep = dir:sub(-1) == "/" or dir:sub(-1) == "\\"
   sep = sep and "" or (RA and RA.SEP or package.config:sub(1, 1))
+  local now = time_precise()
   local idx = 0
   while true do
     local name = reaper.EnumerateFiles(dir, idx)
     if not name then break end
-    if tostring(name):match("^lang_") or tostring(name):match("^font_") then
+    local tracked = tostring(name):match("^lang_")
+      or tostring(name):match("^font_")
+    local inst_suffix = tracked and RA.temp_instance_suffix_from_name(name)
+      or nil
+    if tracked and inst_suffix
+        and not RA.temp_instance_is_live(inst_suffix, now) then
       pcall(os.remove, dir .. sep .. name)
     else
       idx = idx + 1
@@ -15902,6 +17619,13 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
       key = "openai_explicit_sidechain_route",
       prompt = [[
 - For explicit sidechain wording like "create a send from Voiceover to Music Bed", follow those named endpoints exactly: put the compressor on the destination/ducked track and create one direct source-to-destination send feeding sidechain channels. If the prompt also names a Sidechain Comp track, create/name that track only; do not route through it, send the destination into it, disable master send, or invent a separate sidechain/helper bus unless the user explicitly says that track is the bus.
+- For named routing lists, create only the requested sends from the named sources to the named destination bus, return, or print track. Do not also route return/parallel/print/bus tracks to each other unless the user explicitly asks for those extra sends.
+- If the user gives exact marker, region, item, loop, or time-selection positions in seconds, use those exact seconds. BPM, bar count, or phrase-length wording must not shorten or replace explicit second-based positions.
+- If the prompt includes `at N BPM`, `N BPM`, or asks to set tempo, include `reaper.SetCurrentBPM(0, N, true)` near the top before creating MIDI, markers, or regions. Do this even when the session snapshot already shows that BPM or all requested positions are exact seconds; a local `bpm` variable is not enough.
+- If the user says to create or append a new track after the existing tracks, insert it after the current last track. Do not insert after a similarly named existing track unless that exact existing-track insertion point is named.
+- Do not delete, clear, or replace existing tracks before building a setup unless the user explicitly asks to delete/clear/replace tracks or start from scratch.
+- For MIDI items, `reaper.TakeIsMIDI` only accepts a take handle. Never call `reaper.TakeIsMIDI(item)` on a MediaItem variable; first use `local take = reaper.GetActiveTake(item)` and then check `reaper.TakeIsMIDI(take)`.
+- For nested folders, an inner folder and an outer folder may need separate negative `I_FOLDERDEPTH` closes on different tracks. Do not remove the outer close when the inner folder is already closed.
 - Track names like Pad Synth, Arp Synth, Lead Synth, Piano, Bass, or Keys are names only unless the user explicitly asks to load a virtual instrument, synth plugin, sampler, VSTi, or sound source. Do not add instrument plugins for those names.
 - For JSFX memory, use explicit base variables and direct reads/writes such as `bufferL[i]` and `bufferR[i]`. Never use a generic `buf[base + i]` pattern, and never leave the requested words allpass, buffer, grain, freeze, or width only implicit in abbreviated variable names.
 ]],
@@ -15941,6 +17665,7 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
 - For "ready to record" track creation, create the track, arm it, enable monitoring if appropriate, leave it selected, and use the current/default input unless the user asks for a specific hardware input.
 - For short MIDI idea or pattern requests, create a new appropriately named MIDI track and item by default. Do not ask which track to use unless the user explicitly says to use an existing or selected track.
 - `reaper.MIDI_InsertNote` start/end arguments are PPQ positions, not seconds or beats. For musical/project-time note placement, convert each absolute project time with `reaper.MIDI_GetPPQPosFromProjTime(take, seconds)` before inserting notes.
+- For any prompt that says `at N BPM` or names a BPM for MIDI, marker, region, or arrangement setup, call `reaper.SetCurrentBPM(0, N, true)` before creating content. Do not satisfy this with only `local bpm = N`.
 - When the user names exact stock Cockos plugins such as ReaEQ, ReaComp, ReaDelay, ReaVerbate, ReaGate, or ReaLimit, add those exact plugins. Do not substitute preferred/FabFilter plugins or try those alternatives first.
 - Avoid plugin helper functions unless helper definitions are pinned and truly needed for a requested display-unit value. For simple/basic EQ/compressor/limiter tasks, add the resolved preferred plugin and use direct verified normalized values only when configuring is clearly requested; never invent or rewrite bundled helper bodies.
 ]],
@@ -16053,10 +17778,14 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
 - For pure track, folder, marker, region, MIDI, and routing setup requests with docs/session already pinned, write the runnable Lua immediately. Do not request `prompt_bundle:plugin` unless your script will actually call TrackFX_* or plugin parameter APIs.
 - When a request says to make, create, add, or set up a track, insert the new track first. Do not replace requested track creation with `reaper.GetTrack(0, 0)` unless the user explicitly asked to modify an existing or selected track.
 - For ordered track layouts, especially folder outlines, append tracks in forward user order: get `idx = reaper.CountTracks(0)`, insert at `idx`, fetch `reaper.GetTrack(0, idx)`, then name/store that handle. Do not repeatedly insert at index 0 or reverse the name list.
+- If the user says to create or append a new track after the existing tracks, insert it after the current last track. Do not insert after a similarly named existing track unless that exact existing-track insertion point is named.
+- Do not delete, clear, or replace existing tracks before building a setup unless the user explicitly asks to delete/clear/replace tracks or start from scratch.
 - For folder setup such as "Band folder with Drums, Bass, Guitars, and Keys inside, then Mix Print outside", create Band, Drums, Bass, Guitars, Keys, and Mix Print only. Set Band `I_FOLDERDEPTH = 1`, set the last child Keys `I_FOLDERDEPTH = -1`, and leave Mix Print at `0`. Never create a separate "(folder end)" track.
 - When the user asks for tracks going into a bus or return, create explicit sends with `reaper.CreateTrackSend(source_track, bus_or_return_track)`. Folder depth alone is not bus routing.
+- For named routing lists, create only the requested sends from the named sources to the named destination bus, return, or print track. Do not also route return/parallel/print/bus tracks to each other unless the user explicitly asks for those extra sends.
 - For explicit sidechain wording like "create a send from Voiceover to Music Bed", follow those named endpoints exactly: put the compressor on the destination/ducked track and create one direct source-to-destination send feeding sidechain channels. If the prompt also names a Sidechain Comp track, create/name that track only; do not route through it, send the destination into it, disable master send, or invent a separate sidechain/helper bus unless the user explicitly says that track is the bus.
 - When the user asks for a region, create a region, not a marker: use `reaper.AddProjectMarker(0, true, start_time, end_time, name, -1)` or the equivalent region API with the region boolean set to `true`.
+- If the user gives exact marker, region, item, loop, or time-selection positions in seconds, use those exact seconds. BPM, bar count, or phrase-length wording must not shorten or replace explicit second-based positions.
 - For short MIDI idea or pattern requests, create a new appropriately named MIDI track and pass that track handle to `reaper.CreateNewMIDIItemInProj(track, start_seconds, end_seconds, false)`. Never pass `0`, `nil`, or a project id as the first argument.
 - For chord/arpeggio MIDI scripts, keep pitch tables scalar: `local chords = { {48, 51, 55}, {53, 56, 60} }`. Do not wrap all chord rows in one extra table, because `chord[i]` must be a numeric MIDI pitch before `MIDI_InsertNote`.
 ]],
@@ -16214,6 +17943,11 @@ function Net.bundled_static_refs()
 end
 
 function Net.answer_only_context_enabled()
+  -- Intentional cache trade-off: answer-only follow-ups drop static refs,
+  -- sticky context, and snapshot for one turn. Alternating answer-only and
+  -- code-generation phrasing can rebuild a cache rung, but the answer-only
+  -- request becomes much smaller and avoids carrying code/plugin context into
+  -- pure "why did you choose that?" follow-ups.
   return S.pending_answer_only_followup == true
 end
 
@@ -16388,12 +18122,11 @@ function Net.copin_plugin_helpers(out_list, source)
   if out_list then out_list[#out_list+1] = ph_key end
 end
 
--- Pre-pin a JSFX effect-family bundle (jsfx_pitch, jsfx_reverb, ...) into
--- sticky_context. Called from the preempt path when the user prompt matches
--- a family's keyword set. The bundle adds family-specific DSP topology +
--- recipe content on top of the always-available prompt_bundle:jsfx core.
+-- Pre-pin an on-demand prompt bundle into sticky_context. Called from the
+-- preempt path when the user prompt matches a narrow bundle-specific intent
+-- (JSFX pitch recipes, drum-edit workflow rules, etc.).
 -- No-op when the bundle is already pinned this session, when the bundle
--- file is missing, or when the family name isn't registered in
+-- file is missing, or when the bundle name isn't registered in
 -- PROMPT_BUNDLE_NAMES.
 function Net.copin_jsfx_family(family, out_list)
   if not family or family == "" then return end
@@ -16473,6 +18206,12 @@ function Net.sticky_parts()
     and type(Code.prompt_forbids_fx_addition) == "function"
     and Code.prompt_forbids_fx_addition(S.pending_orig_prompt or "")
   local function skip_sticky_key(k)
+    -- Intentional cache trade-off: prompts that explicitly forbid adding FX
+    -- drop plugin/Fx sticky refs for this one turn. That can invalidate a
+    -- mid-prefix cache rung when the user alternates FX/no-FX wording, but
+    -- the suppressed turn is much smaller and the prior 5-minute rungs
+    -- usually survive for the next normal turn. Keep this local to the
+    -- skip predicate; do not "fix" it by always retaining plugin context.
     if not suppress_fx_sticky then return false end
     return k == "prompt_bundle:plugin"
       or k == "prompt_bundle:plugin_helpers"
@@ -16988,8 +18727,12 @@ function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
 
   -- Anthropic Messages API REQUIRES max_tokens (omitting returns 400). Send
   -- the active model's published output ceiling so the model can write up to
-  -- the maximum it supports. Falls back to 64K if the model entry is missing
-  -- max_output (older entries; defensive, all current entries have it).
+  -- the maximum it supports. This is intentionally larger than any thinking
+  -- budget above; thinking budget limits reasoning tokens, while max_tokens
+  -- limits total response output. Non-streaming requests with very large
+  -- ceilings rely on ReaAssist's watchdog/Extend UX to handle slow completions.
+  -- Falls back to 64K if the model entry is missing max_output (older entries;
+  -- defensive, all current entries have it).
   local active_m = MODELS[prefs.model_idx] or MODELS[1]
   local max_out  = (active_m and active_m.max_output) or 64000
 
@@ -17431,7 +19174,7 @@ end
 -- odd number of entries were removed mid-conversation), it is dropped so
 -- the API always receives a conversation starting with a user turn.
 --
--- When the compact_history dev flag is on, T-2 and older successful
+-- When compact_history is on, T-2 and older successful
 -- assistant turns are replaced with a fixed-format summary instead of
 -- the full code body. T-1 always stays verbatim. See
 -- Net.assistant_attach_compact_metadata + _maybe_compact_history below.
@@ -17679,11 +19422,17 @@ function Net._is_modify_prior_followup(hist)
 end
 
 -- Apply compaction to the trimmed history slice. Default no-op (returns
--- hist unchanged); only fires when the compact_history ExtState flag
--- is on. T-1 (the last assistant row) is always preserved verbatim;
--- T-2 and older eligible rows are replaced with their compact_summary.
+-- hist unchanged); only fires when the compact_history preference is on.
+-- T-1 (the last assistant row) is always preserved verbatim; T-2 and older
+-- eligible rows are replaced with their compact_summary.
 function Net._maybe_compact_history(hist)
-  if reaper.GetExtState(CFG.EXT_NS, "compact_history") ~= "1" then
+  local compact_on
+  if prefs and prefs.compact_history ~= nil then
+    compact_on = prefs.compact_history
+  else
+    compact_on = reaper.GetExtState(CFG.EXT_NS, "compact_history") == "1"
+  end
+  if not compact_on then
     return hist
   end
   -- modify-prior detector short-circuits compaction entirely. False
@@ -17976,7 +19725,7 @@ function Net._emit_local_answer(user_text, answer, probe_turn, opts)
     provider_id = "local",
     from_card = S.from_card or nil,
   }
-  S.display_messages[#S.display_messages + 1] = {
+  local local_answer_msg = {
     role = "assistant",
     content = answer,
     provider_id = "local",
@@ -17992,6 +19741,12 @@ function Net._emit_local_answer(user_text, answer, probe_turn, opts)
     local_retry_available = true,
     llm_retry_prompt = tostring(user_text or ""),
   }
+  if opts.selected_count_guard then
+    local_answer_msg.selected_count_guard = opts.selected_count_guard
+    local_answer_msg.validation_status = "blocked"
+    local_answer_msg.validation_block_kind = "selected_count_mismatch"
+  end
+  S.display_messages[#S.display_messages + 1] = local_answer_msg
   S.from_card = false
   if #S.display_messages > CFG.MAX_DISPLAY_MSGS then
     if Diag.uploader_enabled and Diag.capture_current_chat then
@@ -18035,6 +19790,36 @@ function Net.try_local_panner_lfo_clarification(user_text, attachments, probe_tu
     .. "a huge pan envelope that isn't what you meant."
   return Net._emit_local_answer(user_text, answer, probe_turn, {
     ctx_label = "local_clarification",
+  })
+end
+
+function Net.try_local_selected_track_rename_count_guard(user_text, attachments,
+    probe_turn)
+  if attachments then return false end
+  if type(Code.selected_track_rename_numbered_range) ~= "function" then
+    return false
+  end
+  if type(reaper.CountSelectedTracks) ~= "function" then return false end
+  local range = Code.selected_track_rename_numbered_range(user_text)
+  if not range then return false end
+  local actual = tonumber(reaper.CountSelectedTracks(0)) or 0
+  local expected = tonumber(range.expected_count) or 0
+  if expected <= 0 or actual == expected then return false end
+  local range_text = tostring(range.start_index) .. " through "
+    .. tostring(range.end_index)
+  local selected_text = actual == 0 and "no tracks are"
+    or (actual == 1 and "1 track is" or (tostring(actual) .. " tracks are"))
+  local answer = str_format(
+    "I didn't make any changes. This asks for %d sequential names (%s), but %s selected. Select %d tracks or change the range, then send it again.",
+    expected, range_text, selected_text, expected)
+  return Net._emit_local_answer(user_text, answer, probe_turn, {
+    ctx_label = "local_selected_count_guard",
+    selected_count_guard = {
+      expected_selected_count = expected,
+      actual_selected_count = actual,
+      start_index = range.start_index,
+      end_index = range.end_index,
+    },
   })
 end
 
@@ -18168,6 +19953,8 @@ function Net._try_escalate_typed_actions(reason_code, detail)
     S.pending_snapshot, S.pending_attachments))
   if not fired then
     Net._restore_typed_action_escalation_model()
+    S.status = "idle"
+    S.request_start_time = nil
     if fire_reason ~= "call_cap_exceeded" then
       local fallback = "Typed-action fallback model request did not go through. "
         .. "Please resend the last message."
@@ -18175,6 +19962,80 @@ function Net._try_escalate_typed_actions(reason_code, detail)
         "typed_actions.error.fallback_request_failed", nil, fallback))
           or fallback)
     end
+    return false
+  end
+  S.scroll_to_bottom = true
+  return true
+end
+
+function Net._try_typed_action_lua_fallback(reason_code, detail)
+  if S.typed_action_lua_fallback_used then return false end
+  S.typed_action_lua_fallback_used = true
+  S.pending_typed_action_expected = false
+  S.pending_typed_action_response_format = false
+  S.pending_typed_action_profile = nil
+  Probe.add_validator_retry(S.probe_turn, "typed_action_lua_fallback")
+
+  Log.line("TYPED-ACTION-LUA-FALLBACK",
+    "structured edit exhausted; requesting Lua fallback after "
+    .. tostring(reason_code or "typed_action_failure")
+    .. " (" .. tostring(detail or "") .. ")")
+
+  local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+    .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The structured "
+    .. "typed-action plan failed after retries and cannot be used safely. "
+    .. "Reason: " .. tostring(reason_code or "typed_action_failure")
+    .. ". Details: " .. tostring(detail or "") .. ". Do NOT emit "
+    .. "typed-action JSON, raw JSON, markdown prose-only output, or "
+    .. "`reaassist-actions`. Write one complete runnable REAPER Lua script "
+    .. "inside one ```lua code fence. The script must directly implement the "
+    .. "original request, including every requested track, stock FX, send, "
+    .. "routing level, pan, volume, mute, master-send state, and ordering. "
+    .. "Use normal ReaScript APIs, check created FX/send results, and do not "
+    .. "copy any prior bad JSON. Respond as if this is your FIRST reply -- "
+    .. "do NOT apologize, do NOT mention a retry.)\n\n"
+    .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+
+  if #S.history > 0 and S.history[#S.history].role == "assistant" then
+    S.history[#S.history] = nil
+  end
+  if #S.history > 0 and S.history[#S.history].role == "user" then
+    S.history[#S.history] = nil
+  end
+  S.history[#S.history + 1] = { role = "user", content = history_content }
+
+  if S.pending_display_idx
+     and S.display_messages[S.pending_display_idx] then
+    local dmsg = S.display_messages[S.pending_display_idx]
+    local existing = dmsg.ctx_label or ""
+    if not existing:find("typed_action_lua_fallback", 1, true) then
+      dmsg.ctx_label = existing ~= ""
+        and (existing .. " + typed_action_lua_fallback")
+        or "typed_action_lua_fallback"
+    end
+  end
+
+  if prefs.include_snapshot and not S.pending_answer_only_followup then
+    S.pending_project  = CTX.resolve_pending_project()
+    S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+      S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+  end
+
+  S.status = "waiting"
+  Net._ensure_request_start_time()
+  Code.safe_write(tmp.out, "")
+  local fired, fire_reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+    S.pending_snapshot, S.pending_attachments))
+  if not fired then
+    S.status = "idle"
+    S.request_start_time = nil
+    if fire_reason ~= "call_cap_exceeded" then
+      Log.add_error((RA and RA.retry_failed and RA.retry_failed(
+        "retry.reason.for_typed_action_lua_fallback",
+        "for typed-action Lua fallback"))
+        or "Auto-retry for typed-action Lua fallback did not go through. Please resend the last message.")
+    end
+    return false
   end
   S.scroll_to_bottom = true
   return true
@@ -18314,6 +20175,10 @@ function Net.fire_curl(body, opts)
   -- "another request in flight" (transient, deferrable) from genuine
   -- failures like disk/IO errors. Plain `if not fire_curl()` callers stay
   -- compatible -- the second return value is ignored unless inspected.
+  if S.kill_pending then
+    Net.try_finish_kill_pending()
+    if S.kill_pending then return false, "kill_pending" end
+  end
   if S.curl_pid then return false, "in_flight" end
 
   local method   = (opts and opts.method) or "POST"
@@ -18389,7 +20254,9 @@ function Net.fire_curl(body, opts)
   -- Local LLMs (custom OpenAI-compatible endpoints) need a much longer timeout
   -- than cloud providers: prompt processing alone for a 15K-token context can
   -- take 1-2 minutes on consumer hardware before any tokens stream back. Cloud
-  -- providers respond in seconds, so the snappy 30s ceiling stays for them.
+  -- providers use the high curl hard ceiling in CFG.CURL_TIMEOUT; the
+  -- user-facing timeout is the watchdog driven by prefs.cloud_request_timeout
+  -- and the Extend button.
   -- Custom providers expose a user-configurable per-provider timeout (set on
   -- the API Keys page); fall back to the 10-minute default if missing.
   local curl_timeout = (p.is_custom and (tonumber(p.request_timeout) or 600))
@@ -18578,6 +20445,7 @@ function Net.fire_curl(body, opts)
 
   S.curl_pid              = true
   S.curl_exited_clean     = false  -- reset partial-read guard for new request
+  S.curl_output_seen_before_exit = false
   S.kill_pending          = false  -- a fresh request voids any stale Cancel watchdog
   S.send_time             = time_precise()
   S.timeout_extensions    = 0      -- watchdog clock just restarted; prior
@@ -18910,9 +20778,11 @@ function Net.advance_key_test_queue(prov_id, ok, error_msg)
   -- Record result.
   local p = PROVIDERS.get(prov_id)
   api_keys.test_results[prov_id] = {
-    ok    = ok,
-    label = p and p.label or prov_id,
-    error = error_msg,
+    ok        = ok,
+    label     = p and p.label or prov_id,
+    error     = error_msg,
+    url       = p and p.console_url or nil,
+    url_label = p and p.console_label or nil,
   }
   if api_keys.key_warnings then
     local idx = PROVIDERS._by_id and PROVIDERS._by_id[prov_id]
@@ -19326,7 +21196,7 @@ function Net.fire_gemini_tier_test()
     local function ps_escape(path) return path:gsub("'", "''") end
     local cmd_line = str_format(
       'curl -sS --connect-timeout %d --max-time 30'
-      .. ' -X POST %s'
+      .. ' -X POST """%s"""'
       .. ' -H """content-type: application/json"""'
       .. ' -H @"""%s"""'
       .. ' -d @"""%s""" -o """%s""" 2> """%s"""'
@@ -19348,7 +21218,7 @@ function Net.fire_gemini_tier_test()
       .. ' -H "content-type: application/json"'
       .. ' -H @%s'
       .. ' -d @%s -o %s 2> %s ; rc=$? ; rm -f %s ; echo $rc > %s) &',
-      CONNECT_TIMEOUT_SECS, endpoint,
+      CONNECT_TIMEOUT_SECS, sq(endpoint),
       sq(tmp.gemini_auth),
       sq(tmp.body), sq(tmp.out), sq(tmp.err),
       sq(tmp.gemini_auth), sq(tmp.exit))
@@ -19597,7 +21467,7 @@ function Net.fire_gemini_cache_delete(cache_name)
     cache_name)
   if RA.IS_WINDOWS then
     local cmd_line = str_format(
-      'curl -s -X DELETE -H @"""%s""" %s & del """%s"""',
+      'curl -s -X DELETE -H @"""%s""" """%s""" & del """%s"""',
       tmp.cache_delete_auth, url, tmp.cache_delete_auth)
     local ps_cmd = str_format(
       'powershell -NoProfile -WindowStyle Hidden'
@@ -19609,7 +21479,7 @@ function Net.fire_gemini_cache_delete(cache_name)
     local function sq(path) return "'" .. path:gsub("'", "'\\''") .. "'" end
     os.execute(str_format(
       '(curl -s -X DELETE -H @%s %s > /dev/null 2>&1 ; rm -f %s) &',
-      sq(tmp.cache_delete_auth), url, sq(tmp.cache_delete_auth)))
+      sq(tmp.cache_delete_auth), sq(url), sq(tmp.cache_delete_auth)))
   end
 end
 
@@ -19786,7 +21656,7 @@ function Net.fire_gemini_cache_create()
   if RA.IS_WINDOWS then
     local cmd_line = str_format(
       'curl -sS --connect-timeout 10 --max-time 30'
-      .. ' -X POST %s'
+      .. ' -X POST """%s"""'
       .. ' -H """content-type: application/json"""'
       .. ' -H @"""%s"""'
       .. ' -d @"""%s""" -o """%s"""'
@@ -19809,7 +21679,7 @@ function Net.fire_gemini_cache_create()
       .. ' -H "content-type: application/json"'
       .. ' -H @%s'
       .. ' -d @%s -o %s 2> %s ; rc=$? ; rm -f %s ; echo $rc > %s) &',
-      url, sq(tmp.cache_auth),
+      sq(url), sq(tmp.cache_auth),
       sq(tmp.cache_body), sq(tmp.cache_out), sq(tmp.cache_err),
       sq(tmp.cache_auth), sq(tmp.cache_exit))
     os.execute(unix_curl)
@@ -19889,7 +21759,7 @@ function Net.fire_gemini_cache_renew()
     cache_name)
   if RA.IS_WINDOWS then
     local cmd_line = str_format(
-      'curl -s -X PATCH %s'
+      'curl -s -X PATCH """%s"""'
       .. ' -H """content-type: application/json"""'
       .. ' -H @"""%s"""'
       .. ' -d @"""%s""" -o NUL'
@@ -19907,7 +21777,7 @@ function Net.fire_gemini_cache_renew()
     os.execute(str_format(
       '(curl -s -X PATCH -H "content-type: application/json"'
       .. ' -H @%s -d @%s %s > /dev/null 2>&1 ; rm -f %s %s) &',
-      sq(tmp.cache_renew_auth), sq(tmp.cache_renew_body), url,
+      sq(tmp.cache_renew_auth), sq(tmp.cache_renew_body), sq(url),
       sq(tmp.cache_renew_auth), sq(tmp.cache_renew_body)))
   end
   -- Optimistically bump local expiry. If the PATCH fails server-side, the
@@ -20099,8 +21969,12 @@ function Net.send_to_api(user_text)
   S.action_validator_retries = 0
   S.toolbar_validator_retries = 0
   S.transient_validator_retries = 0
+  S.audio_sync_validator_retries = 0
   S.tempo_marker_validator_retries = 0
+  S.explicit_seconds_marker_validator_retries = 0
   S.project_tempo_validator_retries = 0
+  S.loop_time_map_validator_retries = 0
+  S.ruler_timebase_validator_retries = 0
   S.drum_quantize_validator_retries = 0
   S.drum_marker_sync_validator_retries = 0
   S.arity_validator_retries = 0
@@ -20117,6 +21991,8 @@ function Net.send_to_api(user_text)
   S.typed_action_escalation_count = 0
   S.typed_action_escalation_model = nil
   S.typed_action_escalation_restore = nil
+  S.typed_action_lua_fallback_used = false
+  S.fxrecfx_validator_retries = 0
   S.fxcheck_validator_retries = 0
   S.fxget_validator_retries = 0
   S.fxadd_getonly_validator_retries = 0
@@ -20129,6 +22005,8 @@ function Net.send_to_api(user_text)
   S.void_return_validator_retries = 0
   S.sandbox_global_validator_retries = 0
   S.void_return_retry_used = false
+  S.track_deletion_validator_retries = 0
+  S.track_deletion_retry_used = false
   S.forbidden_track_creation_validator_retries = 0
   S.forbidden_track_creation_retry_used = false
   S.forbidden_fx_validator_retries = 0
@@ -20142,6 +22020,7 @@ function Net.send_to_api(user_text)
   S.no_code_action_retry_used = false
   S.region_marker_validator_retries = 0
   S.region_marker_retry_used = false
+  S.explicit_seconds_marker_retry_used = false
   S.marker_pair_validator_retries = 0
   S.marker_pair_retry_used = false
   S.folder_boundary_retry_used = false
@@ -20173,6 +22052,8 @@ function Net.send_to_api(user_text)
   S.parse_retry_used       = false
   S.jsfx_validator_retries = 0
   S.jsfx_wrong_artifact_retry_used = false
+  S.jsfx_companion_validator_retries = 0
+  S.jsfx_companion_retry_used = false
   S.length_retry_used      = false
   S.empty_retry_used       = false
   S.api_calls_this_turn    = 0   -- aggregate cap counter (see CFG.MAX_CALLS_PER_TURN)
@@ -20180,6 +22061,7 @@ function Net.send_to_api(user_text)
   S._context_reuse_hint    = nil
   S._irrelevant_context_hint = nil
   S._timecode_context_hint = nil
+  S._jsfx_context_hint = nil
   S._mixed_output_hint     = nil
   S._fx_inspect_dropped    = nil
   S.fx_list_already_sent   = false
@@ -20240,6 +22122,11 @@ function Net.send_to_api(user_text)
   if not skip_local_answer
       and Net.try_local_panner_lfo_clarification(user_text, msg_attachments,
         probe_turn) then
+    return true
+  end
+  if not skip_local_answer
+      and Net.try_local_selected_track_rename_count_guard(user_text,
+        msg_attachments, probe_turn) then
     return true
   end
 
@@ -20387,12 +22274,6 @@ function Net.send_to_api(user_text)
   -- Bump the turn counter and prune stale sticky_context entries first, so
   -- preempt's relevance-driven re-touches happen against a fresh state and
   -- this turn's adds don't get accidentally evicted by their own arrival.
-  local typed_action_backup_ready = true
-  if prefs.auto_backup then
-    local _, typed_action_proj_path = reaper.EnumProjects(-1)
-    typed_action_backup_ready = type(typed_action_proj_path) == "string"
-      and typed_action_proj_path:match("%.[rR][pP][pP]$") ~= nil
-  end
   local active_provider = PROVIDERS.active()
   local active_model = MODELS[prefs.model_idx] or MODELS[1]
   local typed_action_profile =
@@ -20402,16 +22283,14 @@ function Net.send_to_api(user_text)
     active_provider.id == "openai"
   local typed_action_plan_prompt =
     CTX.prompt_indicates_typed_action_plan(user_text)
-  local screen_reader_typed_action_review =
-    S.screen_reader_mode == true
+  -- Contract eligibility is separate from execution eligibility. Auto-run and
+  -- backup checks still gate execution below; Auto-run-off users should still
+  -- get a reviewable structured edit instead of the heavier ReaScript path.
   local typed_action_contract =
-    ((prefs.auto_run and typed_action_backup_ready)
-      or typed_action_plan_prompt
-      or screen_reader_typed_action_review)
-    and Code.typed_actions_prompt_contract(user_text, {
+    Code.typed_actions_prompt_contract(user_text, {
       response_format = typed_action_response_format,
       profile = typed_action_profile,
-    }) or nil
+    })
   local reascript_prompt = false
   do
     local lt = user_text:lower()
@@ -21015,8 +22894,12 @@ function Net.clear_conversation(opts)
   S.action_validator_retries   = 0
   S.toolbar_validator_retries  = 0
   S.transient_validator_retries = 0
+  S.audio_sync_validator_retries = 0
   S.tempo_marker_validator_retries = 0
+  S.explicit_seconds_marker_validator_retries = 0
   S.project_tempo_validator_retries = 0
+  S.loop_time_map_validator_retries = 0
+  S.ruler_timebase_validator_retries = 0
   S.drum_quantize_validator_retries = 0
   S.drum_marker_sync_validator_retries = 0
   S.arity_validator_retries    = 0
@@ -21033,6 +22916,8 @@ function Net.clear_conversation(opts)
   S.typed_action_escalation_count = 0
   S.typed_action_escalation_model = nil
   S.typed_action_escalation_restore = nil
+  S.typed_action_lua_fallback_used = false
+  S.fxrecfx_validator_retries = 0
   S.fxcheck_validator_retries  = 0
   S.fxget_validator_retries    = 0
   S.fxadd_getonly_validator_retries = 0
@@ -21045,6 +22930,8 @@ function Net.clear_conversation(opts)
   S.void_return_validator_retries = 0
   S.sandbox_global_validator_retries = 0
   S.void_return_retry_used     = false
+  S.track_deletion_validator_retries = 0
+  S.track_deletion_retry_used = false
   S.forbidden_track_creation_validator_retries = 0
   S.forbidden_track_creation_retry_used = false
   S.forbidden_fx_validator_retries = 0
@@ -21058,6 +22945,7 @@ function Net.clear_conversation(opts)
   S.no_code_action_retry_used = false
   S.region_marker_validator_retries = 0
   S.region_marker_retry_used = false
+  S.explicit_seconds_marker_retry_used = false
   S.marker_pair_validator_retries = 0
   S.marker_pair_retry_used = false
   S.folder_boundary_retry_used = false
@@ -21096,6 +22984,7 @@ function Net.clear_conversation(opts)
   S._context_reuse_hint        = nil
   S._irrelevant_context_hint   = nil
   S._timecode_context_hint     = nil
+  S._jsfx_context_hint         = nil
   S._mixed_output_hint         = nil
   S._fx_inspect_dropped        = nil
   -- Defensive clear of fx_inspect -> fx_params handoff state (also reset per
@@ -21673,7 +23562,7 @@ function Net.process_response_buckets(text)
   -- Two-pass approach: pass 1 finds fx_params and its inline payload; pass 2
   -- collects subsequent non-keyword tokens as additional plugin name filters,
   -- so "fx_params:Plugin1, Plugin2" correctly builds filter = {Plugin1, Plugin2}.
-  local recognised_keywords = { session=true, docs=true, docs_extended=true, recent_reaper_changes=true, fx_params=true, plugin_ref=true, fx_list=true, fx_chains=true, track_flags=true, midi=true, preferred_plugins=true, theme=true, fx_inspect=true, resolve=true, prompt_bundle=true }
+  local recognised_keywords = { session=true, docs=true, docs_extended=true, recent_reaper_changes=true, fx_params=true, plugin_ref=true, fx_list=true, fx_chains=true, track_flags=true, midi=true, preferred_plugins=true, pref=true, theme=true, fx_inspect=true, resolve=true, prompt_bundle=true }
   -- Hoisted out of the resolve branch so the pre-pass (just below) and the
   -- popup-bail scan-ahead can both reference it.
   local VALID_RESOLVE_TYPES = {
@@ -21707,6 +23596,42 @@ function Net.process_response_buckets(text)
         or prompt_l:find("%f[%w]route")
         or prompt_l:find("%f[%w]set%s+up")
         or prompt_l:find("%f[%w]lay%s+out")
+  end
+
+  -- JSFX authoring/install prompts get prompt_bundle:jsfx pre-pinned. Weak
+  -- models sometimes ask for prompt_bundle:plugin anyway because the JSFX is
+  -- also being added to a track. Drop that wrong bundle and nudge them to
+  -- emit the requested JSFX artifact now.
+  if S.pending_jsfx_intent then
+    local kept, dropped = {}, {}
+    for _, tok in ipairs(raw_tokens) do
+      local kw, payload = tok:match("^([^:]+):?(.*)$")
+      kw = kw and kw:match("^%s*(.-)%s*$"):lower() or ""
+      payload = payload and payload:match("^%s*(.-)%s*$"):lower() or ""
+      if kw == "prompt_bundle" and payload == "plugin" then
+        dropped[#dropped+1] = tok
+      else
+        kept[#kept+1] = tok
+      end
+    end
+    if #dropped > 0 then
+      Log.line("DISPATCH",
+        "dropped JSFX-inapplicable prompt bundle request: "
+        .. tbl_concat(dropped, ", "))
+      raw_tokens = kept
+      S._jsfx_context_hint = S._jsfx_context_hint or {}
+      for _, dropped_tok in ipairs(dropped) do
+        S._jsfx_context_hint[#S._jsfx_context_hint+1] = dropped_tok
+      end
+      if #raw_tokens == 0 then
+        if has_final_payload then
+          Log.line("DISPATCH",
+            "JSFX-inapplicable prompt bundle request accompanied by final payload; continuing final response")
+          return false
+        end
+        wants_preempt_hint = true
+      end
+    end
   end
 
   -- Drop a common weak-model false positive: `prompt_bundle:plugin` for pure
@@ -21849,6 +23774,7 @@ function Net.process_response_buckets(text)
     fx_inspect = true,
     plugin_ref = true,
     preferred_plugins = true,
+    pref = true,
     prompt_bundle = true,
     resolve = true,
   }
@@ -21919,7 +23845,7 @@ function Net.process_response_buckets(text)
       elseif kw == "plugin_ref" and payload ~= "" then
         return (S.plugin_ref_sent and S.plugin_ref_sent[payload] == true)
           or (S.sticky_context and S.sticky_context["plugin_ref:" .. payload] ~= nil)
-      elseif kw == "preferred_plugins" and payload ~= "" then
+      elseif (kw == "preferred_plugins" or kw == "pref") and payload ~= "" then
         return (S.pref_plugins_sent and S.pref_plugins_sent[payload] == true)
           or (S.sticky_context and S.sticky_context["pref:" .. payload] ~= nil)
       elseif kw == "fx_chains" then
@@ -22064,8 +23990,8 @@ function Net.process_response_buckets(text)
     elseif kw == "midi" and not S.midi_already_sent then
       wants_midi = true
       last_scoped = nil
-    elseif kw == "preferred_plugins" then
-      last_scoped = "preferred_plugins"
+    elseif kw == "preferred_plugins" or kw == "pref" then
+      last_scoped = kw
       if payload ~= "" and not S.pref_plugins_sent[payload] then
         wants_pref_plugins = true
         pref_plugin_types[#pref_plugin_types+1] = payload
@@ -22773,7 +24699,8 @@ function Net.process_response_buckets(text)
       -- definitions in one round-trip (no second context_needed for helpers
       -- after the model sees the param map).
       Net.copin_plugin_helpers(fetched_to_sticky)
-      local tmp_tr, fx_idx, identifier, err, cached = CTX.fx_inspect_load(fx_inspect_names)
+      local tmp_tr, fx_idx, identifier, err, cached, undo_open =
+        CTX.fx_inspect_load(fx_inspect_names)
       if err then
         if S._fx_inspect_silent_for_fx_params then
           -- Silent auto-cache trigger from fx_params: don't surface the
@@ -22803,6 +24730,7 @@ function Net.process_response_buckets(text)
         S._fx_inspect_tmp = {
           tr = tmp_tr, fx = fx_idx,
           id = identifier, names = fx_inspect_names,
+          undo_open = undo_open ~= false,
         }
       end
     end
@@ -22818,6 +24746,12 @@ function Net.process_response_buckets(text)
       -- finalize_context until it completes (or is cancelled).
       if S._fx_inspect_tmp then
         local fi = S._fx_inspect_tmp
+        local function close_fx_inspect_undo(label)
+          if fi and fi.undo_open then
+            reaper.Undo_EndBlock(label or "ReaAssist: fx_inspect", 0)
+            fi.undo_open = false
+          end
+        end
         -- ValidatePtr2: try_inspect_read already checks, but finalize_context
         -- can also be entered directly (np>0 path) with no validation gap, or
         -- after a deep scan where on_complete may have already deleted fi.tr.
@@ -22825,7 +24759,7 @@ function Net.process_response_buckets(text)
         -- TrackFX_* call.
         if not reaper.ValidatePtr2(0, fi.tr, "MediaTrack*") then
           reaper.PreventUIRefresh(-1)
-          reaper.Undo_EndBlock("ReaAssist: fx_inspect (invalid track)", 0)
+          close_fx_inspect_undo("ReaAssist: fx_inspect (invalid track)")
           S._fx_inspect_tmp = nil
           if not S._fx_inspect_silent_for_fx_params then
             history_content = history_content
@@ -22835,8 +24769,8 @@ function Net.process_response_buckets(text)
         -- Wrap the shallow scan in xpcall so a thrown error (stale FX
         -- handle, REAPER returning nil from a probe, etc.) does not skip
         -- the cleanup at the end of this block, which would leave an
-        -- orphaned hidden temp track + a stuck PreventUIRefresh(-1)
-        -- imbalance + an unclosed Undo block.
+        -- orphaned hidden temp track plus a stuck PreventUIRefresh(-1)
+        -- imbalance.
         local _scan_ok, params_list, max_group, total_count, needs_deep =
           xpcall(function()
             return CTX.scan_fx_params(fi.tr, fi.fx)
@@ -22849,7 +24783,7 @@ function Net.process_response_buckets(text)
             reaper.DeleteTrack(fi.tr)
           end
           reaper.PreventUIRefresh(-1)
-          reaper.Undo_EndBlock("ReaAssist: fx_inspect (scan error)", 0)
+          close_fx_inspect_undo("ReaAssist: fx_inspect (scan error)")
           S._fx_inspect_tmp = nil
           if not S._fx_inspect_silent_for_fx_params then
             history_content = history_content
@@ -22892,10 +24826,9 @@ function Net.process_response_buckets(text)
               end
               -- PreventUIRefresh(-1) already done by scan_fx_params_deep_body;
               -- see comment there about avoiding double-release crashes.
-              -- flags=0: discard the whole temp-track block rather than
-              -- relying on Undo_DoUndo2 to walk it back (see preferred
-              -- plugins scan for the rationale).
-              reaper.Undo_EndBlock("ReaAssist: fx_inspect deep", 0)
+              -- Undo setup was closed before this deferred scan started;
+              -- this is only a legacy guard if older state is somehow live.
+              close_fx_inspect_undo("ReaAssist: fx_inspect deep")
               S._fx_inspect_tmp   = nil
               S._deep_scan_started = false
               S._deep_scan_label   = nil
@@ -22906,7 +24839,7 @@ function Net.process_response_buckets(text)
                 reaper.DeleteTrack(fi.tr)
               end
               -- PreventUIRefresh(-1) already done by scan_fx_params_deep_body.
-              reaper.Undo_EndBlock("ReaAssist: fx_inspect (cancelled)", 0)
+              close_fx_inspect_undo("ReaAssist: fx_inspect (cancelled)")
               S._fx_inspect_tmp   = nil
               S._deep_scan_started = false
               S._deep_scan_label   = nil
@@ -22935,17 +24868,16 @@ function Net.process_response_buckets(text)
             -- start_deep_scan rejected the request (already active, missing
             -- opts, or _estimate_deep_probes threw). Neither on_complete nor
             -- on_cancel will fire, so unwind the resources fx_inspect_load
-            -- set up: hidden temp track, PreventUIRefresh(+1), open Undo
-            -- block. Without this the UI stops repainting and a stale undo
-            -- block pairs with the next unrelated Undo_EndBlock in the
-            -- session.
+            -- set up: hidden temp track, PreventUIRefresh(+1), and any
+            -- legacy open Undo block. Without this the UI stops repainting
+            -- and stale cleanup state can bleed into the session.
             Log.line("DEEP_SCAN", "chat: start_deep_scan returned false for "
               .. fi.id .. "; unwinding fx_inspect resources")
             if reaper.ValidatePtr2(0, fi.tr, "MediaTrack*") then
               reaper.DeleteTrack(fi.tr)
             end
             reaper.PreventUIRefresh(-1)
-            reaper.Undo_EndBlock("ReaAssist: fx_inspect (start_deep_scan failed)", 0)
+            close_fx_inspect_undo("ReaAssist: fx_inspect (start_deep_scan failed)")
             S._fx_inspect_tmp    = nil
             S._deep_scan_started = false
             S._deep_scan_label   = nil
@@ -22970,7 +24902,7 @@ function Net.process_response_buckets(text)
         end
         reaper.DeleteTrack(fi.tr)
         reaper.PreventUIRefresh(-1)
-        reaper.Undo_EndBlock("ReaAssist: fx_inspect", 0)
+        close_fx_inspect_undo("ReaAssist: fx_inspect")
         if not S._fx_inspect_silent_for_fx_params then
           local inspect_data = CTX.format_fx_params(
             fi.id, params_list, max_group, fi.names, true)
@@ -23057,6 +24989,23 @@ function Net.process_response_buckets(text)
           .. "already pinned above. USE THEM NOW to generate runnable Lua. "
           .. "Do NOT emit another <context_needed> tag for these tags.)\n\n"
         S._irrelevant_context_hint = nil
+        reuse_hint_fired = true
+      end
+      if S._jsfx_context_hint and #S._jsfx_context_hint > 0 then
+        local tags_str = tbl_concat(S._jsfx_context_hint, ", ")
+        history_content = history_content
+          .. "(NOTE: You requested <context_needed>"
+          .. tags_str
+          .. "</context_needed>, but this is a JSFX authoring/install "
+          .. "request. The pinned JSFX bundle is the applicable reference. "
+          .. "Do NOT request prompt_bundle:plugin or any other "
+          .. "<context_needed> tag for this turn. Generate the requested "
+          .. "```jsfx code block now. If the user also asked to create a "
+          .. "track and add the JSFX, include exactly one complete ```lua "
+          .. "companion block after the JSFX that creates/resolves the "
+          .. "track, adds the saved JSFX by its ReaAssist path, and adds "
+          .. "any requested marker.)\n\n"
+        S._jsfx_context_hint = nil
         reuse_hint_fired = true
       end
       if S._context_reuse_hint and #S._context_reuse_hint > 0 then
@@ -23231,7 +25180,10 @@ function Net.process_response_buckets(text)
         -- a dangling pointer that would crash TrackFX_GetNumParams.
         if not reaper.ValidatePtr2(0, fi.tr, "MediaTrack*") then
           reaper.PreventUIRefresh(-1)
-          reaper.Undo_EndBlock("ReaAssist: fx_inspect (invalid track)", 0)
+          if fi.undo_open then
+            reaper.Undo_EndBlock("ReaAssist: fx_inspect (invalid track)", 0)
+            fi.undo_open = false
+          end
           S._fx_inspect_tmp = nil
           -- Honor the silent-inspect contract: when this inspect was an
           -- auto-trigger from fx_params (not user-requested), do not leak
@@ -23256,7 +25208,10 @@ function Net.process_response_buckets(text)
             reaper.DeleteTrack(fi.tr)
           end
           reaper.PreventUIRefresh(-1)
-          reaper.Undo_EndBlock("ReaAssist: fx_inspect (timeout)", 0)
+          if fi.undo_open then
+            reaper.Undo_EndBlock("ReaAssist: fx_inspect (timeout)", 0)
+            fi.undo_open = false
+          end
           S._fx_inspect_tmp = nil
           if S._fx_inspect_silent_for_fx_params then
             Log.line("FX_PARAMS",
@@ -23580,6 +25535,7 @@ function Net._handle_curl_launch_failure()
   if not S.send_time then
     S.curl_pid           = nil
     S.curl_exited_clean  = false
+    S.curl_output_seen_before_exit = false
     S.status             = "idle"
     Log.line("CURL", "cleared stale in-flight request with no send timestamp")
     return true
@@ -23606,6 +25562,7 @@ function Net._handle_curl_launch_failure()
   S.curl_pid           = nil
   S.send_time          = nil
   S.curl_exited_clean  = false
+  S.curl_output_seen_before_exit = false
   S.status             = "idle"
   Log.line("CURL", "network request launcher did not create a pid, exit, or response file")
   Log.add_error(RA.t("network.launch_failed", nil,
@@ -23616,7 +25573,7 @@ end
 -- Check curl's exit-code tmp file. Returns true if curl exited with a
 -- non-zero code and the network error has been surfaced (tier abort, key-test
 -- abort, or chat error). Caller should return on true. Exit code 0 sets
--- S.curl_exited_clean so the partial-read brace guard is bypassed, and
+-- S.curl_exited_clean so the response file becomes eligible for parsing, and
 -- returns false so the caller continues parsing.
 function Net._handle_curl_exit_failure()
   local ok_ef, ef = pcall(io.open, tmp.exit, "r")
@@ -23625,9 +25582,9 @@ function Net._handle_curl_exit_failure()
   local exit_code = tonumber(exit_str:match("(%d+)"))
   if not exit_code then return false end
   if exit_code == 0 then
-    -- curl finished cleanly. Bypass the partial-read brace guard so non-JSON
-    -- responses (captive portals, proxy HTML) surface as a clear error
-    -- instead of looping until the watchdog fires.
+    -- curl finished cleanly. Only now may tmp.out be parsed, so non-JSON
+    -- responses (captive portals, proxy HTML) surface as a clear error instead
+    -- of looping until the watchdog fires.
     S.curl_exited_clean = true
     os.remove(tmp.exit)
     os.remove(tmp.err)
@@ -24327,6 +26284,12 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth)
       "provider_api_error"))
 end
 
+function Net.response_file_ready_to_parse(raw)
+  if type(raw) ~= "string" or #raw < 2 then return false, "empty" end
+  if not S.curl_exited_clean then return false, "curl_running" end
+  return true, nil
+end
+
 function Net.try_finish_curl()
   if not S.curl_pid then return end
 
@@ -24340,19 +26303,21 @@ function Net.try_finish_curl()
   local ok_f, f = pcall(io.open, tmp.out, "r")
   if not ok_f or not f then return end
   local raw = f:read("*a"); f:close()
-  if #raw < 2 then return end  -- truly empty response: wait for content
-  -- Partial-read guard: while curl is still running, the body file may be
-  -- mid-write. Wait for the closing brace before parsing. Once curl has exited
-  -- (curl_exited_clean), the body is complete and we go straight to JSON.decode
-  -- so non-JSON responses surface as a clear error instead of looping.
-  if not S.curl_exited_clean then
-    local last_char = raw:match("(%S)%s*$")
-    if last_char ~= "}" then return end
+  local ready, reason = Net.response_file_ready_to_parse(raw)
+  if not ready then
+    if reason == "curl_running" and not S.curl_output_seen_before_exit then
+      S.curl_output_seen_before_exit = true
+      Log.line("CURL",
+        "response file has " .. tostring(#raw)
+        .. " byte(s) before curl exit; waiting for clean exit")
+    end
+    return
   end
 
   local elapsed = S.send_time and (time_precise() - S.send_time) or nil
   S.curl_pid  = nil
   S.send_time = nil
+  S.curl_output_seen_before_exit = false
 
   Log.response(raw, elapsed)
 
@@ -25216,6 +27181,82 @@ function Net.try_finish_curl()
     Log.add_error("The model returned Lua/ReaScript for a JSFX request even after a retry. Auto-run is blocked; ask again or switch to a stronger model for this JSFX.")
   end
 
+  if S.pending_jsfx_intent
+      and jsfx_code and not lua_code
+      and Code.prompt_requests_jsfx_track_companion
+      and Code.prompt_requests_jsfx_track_companion(S.pending_orig_prompt) then
+    if (S.jsfx_companion_validator_retries or 0) < 2 then
+      S.jsfx_companion_retry_used = true
+      S.jsfx_companion_validator_retries =
+        (S.jsfx_companion_validator_retries or 0) + 1
+      Probe.add_validator_retry(S.probe_turn, "jsfx")
+      Log.line("JSFX-COMPANION-RETRY",
+        "JSFX track-install request returned no Lua companion; retrying")
+      local jsfx_ref = "ReaAssist/<saved JSFX filename>.jsfx"
+      if Code.derive_filename_jsfx then
+        local derived = Code.derive_filename_jsfx(jsfx_code)
+        if derived and derived ~= "" then
+          jsfx_ref = "ReaAssist/" .. derived
+        end
+      end
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked "
+        .. "for a JSFX and also asked for it to be put on a track. Your "
+        .. "previous reply included the JSFX but omitted the Lua companion "
+        .. "that creates/selects the requested track, adds the saved JSFX "
+        .. "with `reaper.TrackFX_AddByName(track, \"" .. jsfx_ref
+        .. "\", false, -1)`, and performs any requested REAPER actions "
+        .. "such as markers. Store the TrackFX_AddByName return value and "
+        .. "check it immediately with `if fx < 0 then "
+        .. "reaper.ShowMessageBox(...); return end`; never leave the "
+        .. "AddByName result unassigned or unchecked. Regenerate the full "
+        .. "answer with exactly one "
+        .. "```jsfx block followed by exactly one complete ```lua block. "
+        .. "Keep the same JSFX design unless a syntax/safety fix is needed. "
+        .. "Respond as if this is your FIRST reply -- do NOT apologize, "
+        .. "do NOT mention a retry.)\n\nPrevious JSFX:\n```jsfx\n"
+        .. jsfx_code
+        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      if #S.history > 0 and S.history[#S.history].role == "assistant" then
+        S.history[#S.history] = nil
+      end
+      if #S.history > 0 and S.history[#S.history].role == "user" then
+        S.history[#S.history] = nil
+      end
+      S.history[#S.history+1] = { role = "user", content = history_content }
+      if S.pending_display_idx
+         and S.display_messages[S.pending_display_idx] then
+        local dmsg = S.display_messages[S.pending_display_idx]
+        local existing = dmsg.ctx_label or ""
+        if not existing:find("jsfx_companion_retry", 1, true) then
+          dmsg.ctx_label = existing ~= ""
+            and (existing .. " + jsfx_companion_retry")
+            or "jsfx_companion_retry"
+        end
+      end
+      if prefs.include_snapshot and not S.pending_answer_only_followup then
+        S.pending_project  = CTX.resolve_pending_project()
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+      end
+      S.status = "waiting"
+      Net._ensure_request_start_time()
+      Code.safe_write(tmp.out, "")
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
+        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
+          "retry.reason.after_missing_jsfx_companion",
+          "after missing JSFX companion Lua"))
+          or "Auto-retry after missing JSFX companion Lua did not go through. Please resend the last message.")
+      end
+      S.scroll_to_bottom = true
+      return
+    end
+    Log.line("JSFX-COMPANION-VALIDATOR",
+      "JSFX track-install request still omitted companion Lua after retry")
+  end
+
   -- Recover once when a model returns apparent Lua but omits or breaks the
   -- ```lua fence. Never execute unfenced text directly: bare-Lua recovery is
   -- gated by a sandboxed syntax check, then the model must re-emit the same
@@ -25336,15 +27377,20 @@ function Net.try_finish_curl()
         and Code.prompt_requests_podcast_bus_all_sources(S.pending_orig_prompt)
         and Code.model_validator_enabled(no_code_provider.id,
           no_code_model.id, "podcast_bus_routes_all_sources"))
+    local action_requires_lua_retry =
+      Code.model_validator_enabled(no_code_provider.id,
+        no_code_model.id, "action_requires_lua")
+    local no_code_reply_is_clarification =
+      Code.no_code_reply_is_clarification(text)
     if no_code_action_prompt
-        and Code.no_code_reply_is_clarification(text)
-        and not force_no_code_action_retry then
+        and no_code_reply_is_clarification
+        and not force_no_code_action_retry
+        and not action_requires_lua_retry then
       Log.line("NO-CODE-ACTION-RETRY",
         "action prompt returned clarification; not retrying")
     elseif no_code_action_prompt then
       if force_no_code_action_retry
-          or Code.model_validator_enabled(no_code_provider.id,
-            no_code_model.id, "action_requires_lua") then
+          or action_requires_lua_retry then
         S.no_code_action_retry_used = true
         Probe.add_validator_retry(S.probe_turn, "empty")
         Log.line("NO-CODE-ACTION-RETRY",
@@ -25767,6 +27813,73 @@ function Net.try_finish_curl()
       Log.line("FORBIDDEN-TRACK-CREATION-VALIDATOR",
         "track insertion persisted after explicit no-new-track prompt; auto-run blocked")
       Log.add_error("The script creates a new track even though the user explicitly asked not to create a new bus, track, or return. Auto-run is blocked; remove the track creation and operate on existing tracks only.")
+    end
+  end
+
+  if lua_code and type(Code.find_unrequested_track_deletion) == "function" then
+    local track_deletion =
+      Code.find_unrequested_track_deletion(lua_code, S.pending_orig_prompt)
+    if track_deletion and #track_deletion > 0
+        and not S.track_deletion_retry_used then
+      S.track_deletion_retry_used = true
+      S.track_deletion_validator_retries =
+        (S.track_deletion_validator_retries or 0) + 1
+      Probe.add_validator_retry(S.probe_turn, "track_deletion")
+      Log.line("TRACK-DELETION-RETRY",
+        "script deleted tracks without a delete/clear request; retrying")
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous script "
+        .. "deleted tracks with reaper.DeleteTrack or a native remove-tracks "
+        .. "action, but the user did not ask to delete, clear, replace, or "
+        .. "rebuild existing tracks. Regenerate the FULL script without any "
+        .. "track-deletion calls. Create the requested tracks, items, markers, "
+        .. "regions, sends, MIDI, and FX without clearing the project first. "
+        .. "Preserve the user's requested names, order, routing, master-send "
+        .. "states, note timings, marker/region timings, and plugins. Respond "
+        .. "as if this is your FIRST reply -- do NOT apologize, do NOT "
+        .. "mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+        .. lua_code
+        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      if #S.history > 0 and S.history[#S.history].role == "assistant" then
+        S.history[#S.history] = nil
+      end
+      if #S.history > 0 and S.history[#S.history].role == "user" then
+        S.history[#S.history] = nil
+      end
+      S.history[#S.history+1] = { role = "user", content = history_content }
+      if S.pending_display_idx
+         and S.display_messages[S.pending_display_idx] then
+        local dmsg = S.display_messages[S.pending_display_idx]
+        local existing = dmsg.ctx_label or ""
+        if not existing:find("track_deletion_retry", 1, true) then
+          dmsg.ctx_label = existing ~= ""
+            and (existing .. " + track_deletion_retry")
+            or "track_deletion_retry"
+        end
+      end
+      if prefs.include_snapshot and not S.pending_answer_only_followup then
+        S.pending_project  = CTX.resolve_pending_project()
+        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+      end
+      S.status = "waiting"
+      Net._ensure_request_start_time()
+      Code.safe_write(tmp.out, "")
+      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+        S.pending_snapshot, S.pending_attachments))
+      if not ok and reason ~= "call_cap_exceeded" then
+        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
+          "retry.reason.after_unrequested_track_deletion",
+          "after unrequested track deletion"))
+          or "Auto-retry after unrequested track deletion did not go through. Please resend the last message.")
+      end
+      S.scroll_to_bottom = true
+      return
+    elseif track_deletion and #track_deletion > 0 then
+      validator_gate_hit = true
+      Log.line("TRACK-DELETION-VALIDATOR",
+        "unrequested track deletion persisted after retry; auto-run blocked")
+      Log.add_error("The script deletes tracks even though the user did not ask to delete, clear, replace, or rebuild existing tracks. Auto-run is blocked; remove the track deletion and create the requested content without clearing the project.")
     end
   end
 
@@ -26425,7 +28538,7 @@ function Net.try_finish_curl()
         .. " to " .. tostring(finding.expected_name_display
           or finding.expected_name or "last child"))
     end
-    bad_folder_boundary = did_folder_repair and nil or bad_folder_boundary
+    if did_folder_repair then bad_folder_boundary = nil end
     if bad_folder_boundary and #bad_folder_boundary > 0
         and not S.folder_boundary_retry_used then
       S.folder_boundary_retry_used = true
@@ -26920,19 +29033,24 @@ function Net.try_finish_curl()
       if not S.sidechain_send_retry_used then
         S.sidechain_send_retry_used = true
         Probe.add_validator_retry(S.probe_turn, "sidechain_send")
+        local sidechain_sources = sidechain_req
+          and type(sidechain_req.sources) == "table"
+          and #sidechain_req.sources > 0
+          and table.concat(sidechain_req.sources, "`, `")
+          or (sidechain_req and sidechain_req.source or nil)
         Log.line("SIDECHAIN-SEND-RETRY",
           sidechain_req
           and ("sidechain requested but no exact "
-            .. sidechain_req.source .. "-to-" .. sidechain_req.dest
-            .. " single CreateTrackSend found")
+            .. tostring(sidechain_sources) .. "-to-" .. sidechain_req.dest
+            .. " CreateTrackSend route found")
           or "kick/bass ducking requested but no Kick-to-Bass CreateTrackSend found")
         local retry_route = sidechain_req
-          and ("The user explicitly asked for a direct sidechain send "
-            .. "from the track named `" .. sidechain_req.source
+          and ("The user explicitly asked for direct sidechain send routing "
+            .. "from the track(s) named `" .. tostring(sidechain_sources)
             .. "` to the track named `" .. sidechain_req.dest .. "`. "
-            .. "Regenerate the full script with exactly ONE "
+            .. "Regenerate the full script with exactly ONE direct "
             .. "`reaper.CreateTrackSend(source_track, destination_track)` "
-            .. "for that sidechain route, set that send's destination "
+            .. "per named source for that sidechain route, set each send's destination "
             .. "channels to 3/4 with `I_DSTCHAN = 2`, and do NOT route "
             .. "through any other sidechain/helper track or create extra sends. "
             .. "If the prompt also asks to create a track named Sidechain "
@@ -26944,7 +29062,9 @@ function Net.try_finish_curl()
             .. "script. Create Kick and Bass tracks, set Bass to four "
             .. "channels if needed, add the compressor to Bass, and create "
             .. "a send with `reaper.CreateTrackSend(kick_track, bass_track)` "
-            .. "feeding the sidechain channels.")
+            .. "feeding the sidechain channels. Store that send index and "
+            .. "set `I_DSTCHAN` to `2` on the Kick-to-Bass send so it feeds "
+            .. "destination channels 3/4.")
         local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
           .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous Lua "
           .. "did not create the required sidechain routing. "
@@ -27159,29 +29279,54 @@ function Net.try_finish_curl()
 
   -- High-confidence track-pan validator. When the user says to pan a track,
   -- D_PAN belongs on SetMediaTrackInfo_Value; SetTrackSendInfo_Value D_PAN
-  -- changes a send pan and leaves the track pan untouched.
+  -- changes a send pan and leaves the track pan untouched. Also catch Lua
+  -- table-key slips such as `{ lead_vocal = -0.20, [drum_bus] = 0.20 }`
+  -- when the table is later indexed by track handle for a D_PAN write.
   if lua_code and not S.track_pan_retry_used then
     local bad_track_pan =
       Code.find_track_pan_sent_as_send_pan(lua_code, S.pending_orig_prompt)
-    if bad_track_pan and #bad_track_pan > 0 then
+    local bad_pan_table =
+      Code.find_track_pan_bare_handle_table_key_misuse
+      and Code.find_track_pan_bare_handle_table_key_misuse(lua_code,
+        S.pending_orig_prompt)
+    if (bad_track_pan and #bad_track_pan > 0)
+        or (bad_pan_table and #bad_pan_table > 0) then
+      local issue = (bad_track_pan and #bad_track_pan > 0)
+        and "send_pan" or "bare_table_key"
       S.track_pan_retry_used = true
       S.track_pan_validator_retries =
         (S.track_pan_validator_retries or 0) + 1
       Probe.add_validator_retry(S.probe_turn, "api")
-      Log.line("TRACK-PAN-RETRY",
-        "send pan used for track-pan request; retrying with D_PAN track hint")
+      local issue_text
+      if issue == "send_pan" then
+        Log.line("TRACK-PAN-RETRY",
+          "send pan used for track-pan request; retrying with D_PAN track hint")
+        issue_text = "The user asked to pan one or more tracks, but your "
+          .. "previous reply used reaper.SetTrackSendInfo_Value(..., "
+          .. "\"D_PAN\", ...), which changes send pan only. Track pan must "
+          .. "use reaper.SetMediaTrackInfo_Value(track, \"D_PAN\", value), "
+          .. "where value is -1.0 left through 1.0 right."
+      else
+        Log.line("TRACK-PAN-RETRY",
+          "bare track-handle table key used for track pan; retrying with Lua table-key hint")
+        issue_text = "The user asked to pan one or more tracks, but your "
+          .. "previous reply built a pan lookup table with a bare track "
+          .. "variable key, for example `lead_vocal = -0.20`. In a Lua "
+          .. "table constructor, that creates a string key named "
+          .. "`\"lead_vocal\"`, not a key for the track handle variable. "
+          .. "When indexing the table by track handle, use bracketed keys "
+          .. "for every track variable, for example `[lead_vocal] = -0.20` "
+          .. "and `[drum_bus] = 0.20`, or use explicit if/elseif name "
+          .. "checks before writing D_PAN."
+      end
       local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked to pan "
-        .. "one or more tracks, but your previous reply used "
-        .. "reaper.SetTrackSendInfo_Value(..., \"D_PAN\", ...), which changes "
-        .. "send pan only. Track pan must use "
-        .. "reaper.SetMediaTrackInfo_Value(track, \"D_PAN\", value), where "
-        .. "value is -1.0 left through 1.0 right. Preserve the user's "
-        .. "requested tracks, names, plugins, parameter values, MIDI notes, "
-        .. "markers, routing, and ordering. Only fix the track-pan API usage "
-        .. "unless another change is required to make the script valid. "
-        .. "Respond as if this is your FIRST reply -- do NOT apologize, do "
-        .. "NOT mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: "
+        .. issue_text .. " Preserve the user's requested tracks, names, "
+        .. "plugins, parameter values, MIDI notes, markers, routing, and "
+        .. "ordering. Only fix the track-pan logic unless another change "
+        .. "is required to make the script valid. Respond as if this is "
+        .. "your FIRST reply -- do NOT apologize, do NOT mention a retry.)"
+        .. "\n\nPrevious Lua to fix:\n```lua\n"
         .. lua_code
         .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
       if #S.history > 0 and S.history[#S.history].role == "assistant" then
@@ -27799,6 +29944,11 @@ function Net.try_finish_curl()
           "typed_action_semantic_retry_failed", semantic_detail) then
         return
       end
+      if missing_action_family
+         and Net._try_typed_action_lua_fallback(
+           "typed_action_semantic_exhausted", semantic_detail) then
+        return
+      end
       typed_action_semantic_block_reason = semantic_detail
       typed_action_metrics.valid = false
       typed_action_metrics.error = "semantic_mismatch"
@@ -28087,6 +30237,7 @@ function Net.try_finish_curl()
             S.pending_jsfx_intent and { minimal_tracks = true } or nil)
         end
         S.status = "waiting"
+        Net._ensure_request_start_time()
         Code.safe_write(tmp.out, "")
         local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
           S.pending_snapshot, S.pending_attachments))
@@ -28144,7 +30295,11 @@ function Net.try_finish_curl()
   -- retrying again.
   if lua_code and not docs_gate_hit and not unavailable_global_gate_hit then
     local unknown, total_scanned = Code.find_unknown_reaper_calls(lua_code)
-    if not unknown then
+    local bad_lua_calls =
+      Code.find_unavailable_lua_library_calls
+      and Code.find_unavailable_lua_library_calls(lua_code)
+      or nil
+    if not unknown and not bad_lua_calls then
       -- Pass log: prove the validator actively ran on this response and
       -- found nothing wrong. Skipped when total_scanned == 0 (no reaper.*
       -- calls in the script -- e.g. pure math/string code) since there
@@ -28154,13 +30309,13 @@ function Net.try_finish_curl()
           "scanned " .. total_scanned .. " reaper.* call(s), all valid")
       end
     end
-    if unknown then
+    if unknown or bad_lua_calls then
       if (S.api_validator_retries or 0) < 1 then
         S.api_validator_retries = (S.api_validator_retries or 0) + 1
         Probe.add_validator_retry(S.probe_turn, "api")
         -- Build per-bad-name suggestion lines for the retry hint.
         local sug_lines = {}
-        for _, bad in ipairs(unknown) do
+        for _, bad in ipairs(unknown or {}) do
           local matches = Code.suggest_reaper_alternatives(bad, 6)
           local prefixed = {}
           for _, m in ipairs(matches) do prefixed[#prefixed+1] = "reaper." .. m end
@@ -28169,18 +30324,26 @@ function Net.try_finish_curl()
                 and (" (closest real names: " .. tbl_concat(prefixed, ", ") .. ")")
                 or " (no close matches in this user's installed REAPER + extensions)")
         end
+        for _, bad in ipairs(bad_lua_calls or {}) do
+          sug_lines[#sug_lines+1] = "  - line " .. tostring(bad.line)
+            .. ": `" .. tostring(bad.call) .. "(...)` is unavailable. "
+            .. tostring(bad.message)
+        end
         Log.line("API-VALIDATOR",
-          "unknown reaper.* calls (" .. #unknown .. "): "
-          .. tbl_concat(unknown, ", ")
+          "invalid generated calls (reaper=" .. tostring(unknown and #unknown or 0)
+          .. ", lua=" .. tostring(bad_lua_calls and #bad_lua_calls or 0)
+          .. "): " .. tbl_concat(sug_lines, " | ")
           .. "; retrying with hint (user-invisible)")
         local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
           .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply called "
-          .. "REAPER API functions that do not exist on this user's machine. "
-          .. "These calls would crash at runtime:\n"
+          .. "REAPER API functions or Lua library members that will not run "
+          .. "inside ReaAssist on this user's machine. These calls would crash "
+          .. "at runtime:\n"
           .. tbl_concat(sug_lines, "\n") .. "\n\n"
-          .. "Regenerate the code using only real reaper.* functions. "
-          .. "Cross-check every reaper.* call against the documented "
-          .. "signatures before emitting. Respond as if this is your FIRST "
+          .. "Regenerate the code using only real reaper.* functions and Lua "
+          .. "library members that exist in Lua 5.4. Cross-check every call "
+          .. "before emitting. For dB conversion, use the exponent operator, "
+          .. "for example `10 ^ (db / 20)`, not `math.pow(...)`. Respond as if this is your FIRST "
           .. "reply to the user's request -- do NOT apologize, do NOT say "
           .. "'let me try again' or 'on second thought', do NOT mention "
           .. "that prior calls were wrong, do NOT mention a retry. Just "
@@ -28234,16 +30397,22 @@ function Net.try_finish_curl()
       -- before clicking Run manually.
       validator_gate_hit = true
       Log.line("API-VALIDATOR",
-        "unknown reaper.* calls persist after retry: "
-        .. tbl_concat(unknown, ", ") .. "; auto-run blocked")
-      local calls = "reaper." .. tbl_concat(unknown, ", reaper.")
+        "invalid generated calls persist after retry; auto-run blocked")
+      local call_parts = {}
+      for _, bad in ipairs(unknown or {}) do
+        call_parts[#call_parts + 1] = "reaper." .. tostring(bad)
+      end
+      for _, bad in ipairs(bad_lua_calls or {}) do
+        call_parts[#call_parts + 1] = tostring(bad.call)
+      end
+      local calls = tbl_concat(call_parts, ", ")
       Log.add_error((RA and RA.t and RA.t(
         "validator.invalid_reaper_calls_blocked", { calls = calls },
-        "The model emitted REAPER API calls that don't exist "
-          .. "on your machine, even after a retry: " .. calls
+        "The model emitted Lua/ReaScript calls that will not run "
+          .. "in ReaAssist, even after a retry: " .. calls
           .. ". Auto-run is blocked; review and edit the code before clicking "
           .. "Run manually, or retry with a stronger model."))
-        or ("The model emitted REAPER API calls that don't exist on your machine, even after a retry: "
+        or ("The model emitted Lua/ReaScript calls that will not run in ReaAssist, even after a retry: "
           .. calls
           .. ". Auto-run is blocked; review and edit the code before clicking Run manually, or retry with a stronger model."))
     end
@@ -28311,6 +30480,7 @@ function Net.try_finish_curl()
             S.pending_jsfx_intent and { minimal_tracks = true } or nil)
         end
         S.status = "waiting"
+        Net._ensure_request_start_time()
         Code.safe_write(tmp.out, "")
         local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
           S.pending_snapshot, S.pending_attachments))
@@ -28372,17 +30542,52 @@ function Net.try_finish_curl()
     local literal_ppq_midi =
       Code.find_literal_midi_insertnote_ppq_misuse(lua_code,
         S.pending_orig_prompt)
+    local project_time_var_midi =
+      Code.find_midi_insertnote_project_time_variable_misuse
+      and Code.find_midi_insertnote_project_time_variable_misuse(lua_code,
+        S.pending_orig_prompt)
     local table_pitch_midi =
       Code.find_midi_insertnote_table_pitch_misuse(lua_code,
+        S.pending_orig_prompt)
+    local kick_pitch_midi =
+      Code.find_kick_midi_wrong_pitch_misuse
+      and Code.find_kick_midi_wrong_pitch_misuse(lua_code,
+        S.pending_orig_prompt)
+    local named_note_octave_midi =
+      Code.find_midi_named_note_octave_misuse
+      and Code.find_midi_named_note_octave_misuse(lua_code,
+        S.pending_orig_prompt)
+    local seconds_as_qn_midi =
+      Code.find_midi_seconds_as_qn_offset_misuse
+      and Code.find_midi_seconds_as_qn_offset_misuse(lua_code,
+        S.pending_orig_prompt)
+    local eighth_spacing_midi =
+      Code.find_midi_eighth_spacing_misuse
+      and Code.find_midi_eighth_spacing_misuse(lua_code,
         S.pending_orig_prompt)
     local bad_midi_item_track_arg =
       Code.find_create_new_midi_item_bad_track_arg(lua_code,
         S.pending_orig_prompt)
-    if plain_item_midi or literal_ppq_midi or table_pitch_midi
-       or bad_midi_item_track_arg then
+    local bad_takeismidi_arg =
+      Code.find_takeismidi_media_item_arg
+      and Code.find_takeismidi_media_item_arg(lua_code,
+        S.pending_orig_prompt)
+    if plain_item_midi or literal_ppq_midi or project_time_var_midi
+       or table_pitch_midi
+       or kick_pitch_midi or named_note_octave_midi
+       or seconds_as_qn_midi or eighth_spacing_midi
+       or bad_midi_item_track_arg
+       or bad_takeismidi_arg then
       local midi_issue = plain_item_midi and "plain_item"
         or (literal_ppq_midi and "literal_ppq"
-          or (table_pitch_midi and "table_pitch" or "bad_track_arg"))
+          or (project_time_var_midi and "project_time_var"
+            or (table_pitch_midi and "table_pitch"
+              or (kick_pitch_midi and "kick_pitch"
+                or (named_note_octave_midi and "named_note_octave"
+                or (seconds_as_qn_midi and "seconds_as_qn"
+                or (eighth_spacing_midi and "eighth_spacing"
+                  or (bad_midi_item_track_arg and "bad_track_arg"
+                    or "takeismidi_item_arg"))))))))
       if (S.midi_item_validator_retries or 0) < 1 then
         S.midi_item_retry_used = true
         S.midi_item_validator_retries =
@@ -28390,17 +30595,35 @@ function Net.try_finish_curl()
         Probe.add_validator_retry(S.probe_turn,
           midi_issue == "plain_item" and "midi_item"
           or (midi_issue == "literal_ppq" and "midi_insertnote_ppq"
-            or (midi_issue == "table_pitch" and "midi_insertnote_table_pitch"
-              or "midi_item_track_arg")))
+            or (midi_issue == "project_time_var" and "midi_insertnote_project_time"
+              or (midi_issue == "table_pitch" and "midi_insertnote_table_pitch"
+                or (midi_issue == "kick_pitch" and "midi_kick_pitch"
+                  or (midi_issue == "named_note_octave" and "midi_named_note_octave"
+                  or (midi_issue == "seconds_as_qn" and "midi_seconds_as_qn"
+                  or (midi_issue == "eighth_spacing" and "midi_eighth_spacing"
+                    or (midi_issue == "bad_track_arg" and "midi_item_track_arg"
+                      or "midi_takeismidi_arg")))))))))
         local log_msg
         if midi_issue == "plain_item" then
           log_msg = "plain media item used as MIDI item; retrying with hint"
         elseif midi_issue == "literal_ppq" then
           log_msg = "literal project-time-like PPQ values used; retrying with hint"
+        elseif midi_issue == "project_time_var" then
+          log_msg = "project-time variables used as MIDI PPQ; retrying with hint"
         elseif midi_issue == "table_pitch" then
           log_msg = "table-valued MIDI note pitch used; retrying with hint"
-        else
+        elseif midi_issue == "kick_pitch" then
+          log_msg = "non-GM kick MIDI pitch used; retrying with hint"
+        elseif midi_issue == "named_note_octave" then
+          log_msg = "C4/E4/G4 triad used C3 octave MIDI pitches; retrying with hint"
+        elseif midi_issue == "seconds_as_qn" then
+          log_msg = "seconds-per-beat values used as project-QN MIDI offsets; retrying with hint"
+        elseif midi_issue == "eighth_spacing" then
+          log_msg = "quarter-note MIDI spacing used for requested eighths; retrying with hint"
+        elseif midi_issue == "bad_track_arg" then
           log_msg = "invalid CreateNewMIDIItemInProj track argument used; retrying with hint"
+        else
+          log_msg = "TakeIsMIDI called on media item handle; retrying with hint"
         end
         Log.line("MIDI-ITEM-VALIDATOR", log_msg)
         local issue_text
@@ -28424,6 +30647,16 @@ function Net.try_finish_curl()
               .. "absolute project-time note start/end second with "
               .. "reaper.MIDI_GetPPQPosFromProjTime(take, seconds), then pass "
               .. "those PPQ values to MIDI_InsertNote."
+          elseif midi_issue == "project_time_var" then
+            issue_text = "Your previous reply calculated MIDI note starts and "
+              .. "ends as project-time variables, then passed those variables "
+              .. "directly to reaper.MIDI_InsertNote. MIDI_InsertNote start/end "
+              .. "positions are PPQ, not seconds. Use "
+              .. "reaper.CreateNewMIDIItemInProj(track, start_seconds, "
+              .. "end_seconds, false), get the active MIDI take, convert each "
+              .. "absolute project-time note start/end second with "
+              .. "reaper.MIDI_GetPPQPosFromProjTime(take, seconds), then pass "
+              .. "those PPQ variables to MIDI_InsertNote."
           elseif midi_issue == "table_pitch" then
             issue_text = "Your previous reply built a chord/arpeggio pitch "
               .. "table with one extra wrapper level, so the value passed as "
@@ -28433,7 +30666,38 @@ function Net.try_finish_curl()
               .. "`local chords = { {48, 51, 55}, {53, 56, 60} }`; then "
               .. "`chord[i]` is a numeric MIDI pitch. Regenerate the MIDI "
               .. "script with one scalar pitch row per chord."
-          else
+          elseif midi_issue == "kick_pitch" then
+            issue_text = "Your previous reply created a kick-only MIDI pattern "
+              .. "but inserted a non-kick note pitch. For an unspecified kick "
+              .. "MIDI pattern, use General MIDI kick pitch 36 for every kick "
+              .. "hit unless the user explicitly asks for a different pitch."
+          elseif midi_issue == "named_note_octave" then
+            issue_text = "Your previous reply created the requested C4/E4/G4 "
+              .. "triad using MIDI pitches 48, 52, and 55. In this context, "
+              .. "C4 is MIDI pitch 60, E4 is 64, and G4 is 67. Regenerate "
+              .. "the MIDI script with the requested C4/E4/G4 triad at "
+              .. "pitches 60, 64, and 67; do not use 48, 52, or 55 for "
+              .. "those note names."
+          elseif midi_issue == "seconds_as_qn" then
+            issue_text = "Your previous reply calculated seconds with "
+              .. "`60 / bpm`, then used those second values as project "
+              .. "quarter-note offsets with MIDI_GetPPQPosFromProjQN. "
+              .. "MIDI_GetPPQPosFromProjQN expects project QN units: an "
+              .. "eighth-note offset is 0.5 QN and a quarter-note offset is "
+              .. "1.0 QN. Either use QN offsets such as `i * 0.5`, or keep "
+              .. "the second-based math and convert note starts with "
+              .. "MIDI_GetPPQPosFromProjTime."
+          elseif midi_issue == "eighth_spacing" then
+            issue_text = "Your previous reply used quarter-note or fixed "
+              .. "0.5-second spacing for note starts even though the user "
+              .. "requested eighth-note placement. For requested next-eighth, "
+              .. "every-eighth, or eighth-note patterns, advance each note "
+              .. "start by the tempo-derived eighth-note interval. In PPQ, "
+              .. "use the eighth-note PPQ length, for example "
+              .. "`pos_ppq = ppq_start + i * ppq_per_en`; in seconds, use "
+              .. "`30 / bpm` seconds per eighth note. Keep note duration "
+              .. "separate from note spacing."
+          elseif midi_issue == "bad_track_arg" then
             issue_text = "Your previous reply called "
               .. "reaper.CreateNewMIDIItemInProj with a project id or boolean "
               .. "as the first argument. The first argument must be a "
@@ -28441,6 +30705,14 @@ function Net.try_finish_curl()
               .. "and name a track first with InsertTrackAtIndex/GetTrack, "
               .. "then call reaper.CreateNewMIDIItemInProj(track, "
               .. "start_seconds, end_seconds, false)."
+          else
+            issue_text = "Your previous reply called reaper.TakeIsMIDI with "
+              .. "a MediaItem variable instead of a MediaItem_Take. "
+              .. "Create the MIDI item with reaper.CreateNewMIDIItemInProj, "
+              .. "then call reaper.GetActiveTake(item) into a variable named "
+              .. "take, verify reaper.TakeIsMIDI(take), and pass that take "
+              .. "to MIDI_GetPPQPosFromProjTime and MIDI_InsertNote. Never "
+              .. "call reaper.TakeIsMIDI(item)."
           end
         end
         local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
@@ -28508,6 +30780,16 @@ function Net.try_finish_curl()
             .. "note start/end positions must be PPQ. Convert project time with "
             .. "MIDI_GetPPQPosFromProjTime before inserting notes."))
           or "The script passes beat or second-looking numbers directly to MIDI_InsertNote. Auto-run is blocked because MIDI note start/end positions must be PPQ. Convert project time with MIDI_GetPPQPosFromProjTime before inserting notes.")
+      elseif midi_issue == "project_time_var" then
+        Log.line("MIDI-ITEM-VALIDATOR",
+          "project-time MIDI_InsertNote variables persisted after retry; auto-run blocked")
+        Log.add_error((RA and RA.t and RA.t(
+          "validator.midi_project_time_ppq_blocked", nil,
+          "The script passes project-time variables directly to MIDI_InsertNote. "
+            .. "Auto-run is blocked because MIDI note start/end positions must "
+            .. "be PPQ. Convert project time with MIDI_GetPPQPosFromProjTime "
+            .. "before inserting notes."))
+          or "The script passes project-time variables directly to MIDI_InsertNote. Auto-run is blocked because MIDI note start/end positions must be PPQ. Convert project time with MIDI_GetPPQPosFromProjTime before inserting notes.")
       elseif midi_issue == "table_pitch" then
         Log.line("MIDI-ITEM-VALIDATOR",
           "table-valued MIDI note pitch persisted after retry; auto-run blocked")
@@ -28517,7 +30799,49 @@ function Net.try_finish_curl()
             .. "argument. Auto-run is blocked because note pitch must be a "
             .. "number from 0 to 127."))
           or "The script passes a table as the MIDI_InsertNote pitch argument. Auto-run is blocked because note pitch must be a number from 0 to 127.")
-      else
+      elseif midi_issue == "kick_pitch" then
+        Log.line("MIDI-ITEM-VALIDATOR",
+          "non-GM kick MIDI pitch persisted after retry; auto-run blocked")
+        Log.add_error((RA and RA.t and RA.t(
+          "validator.midi_kick_pitch_blocked", nil,
+          "The script inserts a non-kick MIDI note for a kick-only pattern. "
+            .. "Auto-run is blocked because the generated kick hits would be "
+            .. "on the wrong GM drum pitch. Use MIDI pitch 36 for kick hits "
+            .. "unless the user explicitly asks for another pitch."))
+          or "The script inserts a non-kick MIDI note for a kick-only pattern. Auto-run is blocked because the generated kick hits would be on the wrong GM drum pitch. Use MIDI pitch 36 for kick hits unless the user explicitly asks for another pitch.")
+      elseif midi_issue == "named_note_octave" then
+        Log.line("MIDI-ITEM-VALIDATOR",
+          "C4/E4/G4 triad octave mismatch persisted after retry; auto-run blocked")
+        Log.add_error((RA and RA.t and RA.t(
+          "validator.midi_named_note_octave_blocked", nil,
+          "The script inserts C3 octave MIDI pitches for a requested "
+            .. "C4/E4/G4 triad. Auto-run is blocked because the generated "
+            .. "notes would be an octave lower than requested. Use MIDI "
+            .. "pitches 60, 64, and 67 for C4, E4, and G4 in this context."))
+          or "The script inserts C3 octave MIDI pitches for a requested C4/E4/G4 triad. Auto-run is blocked because the generated notes would be an octave lower than requested. Use MIDI pitches 60, 64, and 67 for C4, E4, and G4 in this context.")
+      elseif midi_issue == "seconds_as_qn" then
+        Log.line("MIDI-ITEM-VALIDATOR",
+          "seconds-per-beat values persisted as project-QN MIDI offsets; auto-run blocked")
+        Log.add_error((RA and RA.t and RA.t(
+          "validator.midi_seconds_as_qn_blocked", nil,
+          "The script calculates seconds from BPM, then uses those values as "
+            .. "project QN offsets with MIDI_GetPPQPosFromProjQN. Auto-run "
+            .. "is blocked because the generated note timing would be too "
+            .. "early. Use QN offsets such as 0.5 per eighth note, or convert "
+            .. "seconds with MIDI_GetPPQPosFromProjTime."))
+          or "The script calculates seconds from BPM, then uses those values as project QN offsets with MIDI_GetPPQPosFromProjQN. Auto-run is blocked because the generated note timing would be too early. Use QN offsets such as 0.5 per eighth note, or convert seconds with MIDI_GetPPQPosFromProjTime.")
+      elseif midi_issue == "eighth_spacing" then
+        Log.line("MIDI-ITEM-VALIDATOR",
+          "quarter-note MIDI spacing persisted for requested eighths; auto-run blocked")
+        Log.add_error((RA and RA.t and RA.t(
+          "validator.midi_eighth_spacing_blocked", nil,
+          "The script advances MIDI note starts by quarter-note or fixed "
+            .. "half-second spacing even though the request asks for "
+            .. "eighth-note placement. Auto-run is blocked because the timing "
+            .. "would be wrong. Use tempo-derived eighth-note spacing for the "
+            .. "note starts."))
+          or "The script advances MIDI note starts by quarter-note or fixed half-second spacing even though the request asks for eighth-note placement. Auto-run is blocked because the timing would be wrong. Use tempo-derived eighth-note spacing for the note starts.")
+      elseif midi_issue == "bad_track_arg" then
         Log.line("MIDI-ITEM-VALIDATOR",
           "invalid CreateNewMIDIItemInProj track argument persisted after retry; auto-run blocked")
         Log.add_error((RA and RA.t and RA.t(
@@ -28526,6 +30850,15 @@ function Net.try_finish_curl()
             .. "argument to CreateNewMIDIItemInProj. Auto-run is blocked because "
             .. "that argument must be a MediaTrack handle."))
           or "The script passes a project id or boolean as the first argument to CreateNewMIDIItemInProj. Auto-run is blocked because that argument must be a MediaTrack handle.")
+      else
+        Log.line("MIDI-ITEM-VALIDATOR",
+          "TakeIsMIDI media item argument persisted after retry; auto-run blocked")
+        Log.add_error((RA and RA.t and RA.t(
+          "validator.midi_takeismidi_item_arg_blocked", nil,
+          "The script calls TakeIsMIDI with a MediaItem instead of a "
+            .. "MediaItem_Take. Auto-run is blocked because this crashes at "
+            .. "runtime. Get the active take from the item first."))
+          or "The script calls TakeIsMIDI with a MediaItem instead of a MediaItem_Take. Auto-run is blocked because this crashes at runtime. Get the active take from the item first.")
       end
     end
   end
@@ -28868,6 +31201,87 @@ function Net.try_finish_curl()
     end
   end
 
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+     and type(Code.find_explicit_second_marker_region_misuse) == "function" then
+    local explicit_marker_user_text = Net.retry_user_request_context()
+    local explicit_marker_bad =
+      Code.find_explicit_second_marker_region_misuse(
+        lua_code, explicit_marker_user_text)
+    if explicit_marker_bad and #explicit_marker_bad > 0 then
+      if not S.explicit_seconds_marker_retry_used
+         and (S.explicit_seconds_marker_validator_retries or 0) < 1 then
+        S.explicit_seconds_marker_retry_used = true
+        S.explicit_seconds_marker_validator_retries =
+          (S.explicit_seconds_marker_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "explicit_seconds_marker")
+        local details = {}
+        for _, e in ipairs(explicit_marker_bad) do
+          details[#details + 1] = tostring(e.kind) .. " " .. tostring(e.name)
+            .. " expected "
+            .. tostring(e.expected_start)
+            .. (e.expected_end and ("-" .. tostring(e.expected_end)) or "")
+            .. " seconds"
+        end
+        Log.line("EXPLICIT-SECONDS-MARKER-VALIDATOR",
+          "marker/region explicit second timing was overridden ("
+          .. table.concat(details, "; ")
+          .. "); retrying with hint (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user gave exact "
+          .. "marker or region positions in seconds, but your previous script "
+          .. "changed at least one of those times, likely by recalculating bar "
+          .. "or phrase length. Timeline marker and region APIs take seconds. "
+          .. "Regenerate the FULL script and use the user's exact seconds for "
+          .. "every named marker and region. BPM, bar count, or phrase-length "
+          .. "wording must not shorten or override explicit second-based "
+          .. "marker/region positions. Preserve the requested tracks, FX, MIDI "
+          .. "notes, sends, master-send states, and ordering. Respond as if "
+          .. "this is your FIRST reply -- do NOT apologize, do NOT mention a "
+          .. "retry.)\n\nPrevious Lua to fix:\n```lua\n"
+          .. lua_code
+          .. "\n```\n\nUSER REQUEST:\n" .. explicit_marker_user_text
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history + 1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("explicit_seconds_marker_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + explicit_seconds_marker_retry")
+              or "explicit_seconds_marker_retry"
+          end
+        end
+        if prefs.include_snapshot and not S.pending_answer_only_followup then
+          S.pending_project  = CTX.resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
+            "retry.reason.for_explicit_seconds_marker",
+            "for explicit marker/region seconds"))
+            or "Auto-retry for explicit marker/region seconds did not go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      validator_gate_hit = true
+      Log.line("EXPLICIT-SECONDS-MARKER-VALIDATOR",
+        "explicit marker/region second timing mismatch persisted after retry; auto-run blocked")
+      Log.add_error("The script changed marker or region times that the user gave as exact seconds. Auto-run is blocked; use the requested second values exactly for those named markers and regions.")
+    end
+  end
+
   -- PROJECT-TEMPO VALIDATOR: If the user asks for a project/setup at a
   -- specific BPM, using a local `bpm` variable for timing is not enough; the
   -- script must set the project tempo before creating beat-based content.
@@ -28943,6 +31357,200 @@ function Net.try_finish_curl()
           .. "project tempo even after a retry. Auto-run is blocked; add "
           .. "`reaper.SetCurrentBPM(0, bpm, true)` before running manually."))
         or "The model used a BPM value for timing but did not set the REAPER project tempo even after a retry. Auto-run is blocked; add `reaper.SetCurrentBPM(0, bpm, true)` before running manually.")
+    end
+  end
+
+  -- LOOP-TIME-MAP VALIDATOR: Loop/time-selection APIs take seconds. For
+  -- bar/beat prompts, using snapshot BPM math instead of TimeMap2 APIs creates
+  -- fragile ranges and can contradict the visible response.
+  local loop_time_map_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit then
+    local loop_time_map_user_text = Net.retry_user_request_context()
+    local loop_time_map_bad = Code.find_loop_bar_beat_without_timemap(
+      lua_code, loop_time_map_user_text)
+    if loop_time_map_bad and #loop_time_map_bad > 0 then
+      if (S.loop_time_map_validator_retries or 0) < 1 then
+        S.loop_time_map_validator_retries =
+          (S.loop_time_map_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "loop_time_map")
+        local lines = {}
+        for _, e in ipairs(loop_time_map_bad) do
+          lines[#lines + 1] = "  - line " .. tostring(e.line)
+            .. " uses reaper." .. tostring(e.api)
+        end
+        Log.line("LOOP-TIME-MAP-VALIDATOR",
+          "bar/beat loop or time selection emitted without TimeMap2 API ("
+          .. #loop_time_map_bad .. " finding(s)); retrying with hint "
+          .. "(user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: The user asked for a loop or "
+          .. "time selection using bar/beat wording, but your previous Lua set "
+          .. "the loop/time selection in seconds without using REAPER's "
+          .. "TimeMap2 APIs. GetSet_LoopTimeRange and "
+          .. "GetSet_LoopTimeRange2 take seconds, not bars or beats, and "
+          .. "hard-coded BPM/time-signature math is fragile.\n\n"
+          .. "Affected loop/time-selection line(s):\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Regenerate using the project time map. Convert user-facing bars "
+          .. "and beats to REAPER's zero-based measure plus beat offset "
+          .. "(bar 1 beat 1 = measure 0, beat offset 0), then call "
+          .. "`reaper.TimeMap2_beatsToTime(0, beat_offset, measure)` for "
+          .. "each endpoint before setting loop points. Prefer "
+          .. "`reaper.GetSet_LoopTimeRange2(0, true, true, start_time, "
+          .. "end_time, false)` when available; otherwise use the documented "
+          .. "loop range API with the converted seconds. Do not hard-code BPM "
+          .. "or time signature. Keep the screen_reader_summary and visible "
+          .. "prose aligned with the exact endpoint used by the code. If the "
+          .. "user supplied only a start, choose a one-beat default endpoint "
+          .. "only when that is reasonable and state that exact endpoint; "
+          .. "otherwise ask one concise question. Respond as if this is your "
+          .. "FIRST reply -- do NOT apologize, do NOT mention a retry.)\n\n"
+          .. "Previous Lua to fix:\n```lua\n"
+          .. lua_code
+          .. "\n```\n\nUSER REQUEST:\n" .. loop_time_map_user_text
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history + 1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("loop_time_map_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + loop_time_map_retry")
+              or "loop_time_map_retry"
+          end
+        end
+        if prefs.include_snapshot and not S.pending_answer_only_followup then
+          S.pending_project  = CTX.resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
+            "retry.reason.for_loop_time_map",
+            "for loop/time-selection bar-beat time map"))
+            or "Auto-retry for loop/time-selection bar-beat time map did not go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      loop_time_map_gate_hit = true
+      validator_gate_hit = true
+      Log.line("LOOP-TIME-MAP-VALIDATOR",
+        "bar/beat loop or time selection without TimeMap2 persisted after "
+        .. "retry; auto-run blocked")
+      Log.add_error((RA and RA.t and RA.t(
+        "validator.loop_time_map_blocked", nil,
+        "The model set a loop or time selection from bar/beat wording "
+          .. "without REAPER's time-map APIs after a retry. Auto-run is "
+          .. "blocked; convert the bar/beat positions with "
+          .. "TimeMap2_beatsToTime before running manually."))
+        or "The model set a loop or time selection from bar/beat wording without REAPER's time-map APIs after a retry. Auto-run is blocked; convert the bar/beat positions with TimeMap2_beatsToTime before running manually.")
+    end
+  end
+
+  -- RULER-TIMEBASE VALIDATOR: RULER_LANE_TIMEBASE is for marker/region
+  -- ruler lanes only. Timeline main/secondary ruler display uses native
+  -- View: Time unit actions; the lane key cannot take H:M:S:F mode value 5.
+  local ruler_timebase_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit then
+    local ruler_timebase_user_text = Net.retry_user_request_context()
+    local ruler_timebase_bad = Code.find_ruler_lane_timebase_misuse(
+      lua_code, ruler_timebase_user_text)
+    if ruler_timebase_bad and #ruler_timebase_bad > 0 then
+      local details = {}
+      for _, e in ipairs(ruler_timebase_bad) do
+        details[#details + 1] = "line " .. tostring(e.line)
+          .. " " .. tostring(e.kind or "ruler_timebase")
+          .. " " .. tostring(e.key or "RULER_LANE_TIMEBASE")
+          .. "=" .. tostring(e.value or "")
+      end
+      if (S.ruler_timebase_validator_retries or 0) < 1 then
+        S.ruler_timebase_validator_retries =
+          (S.ruler_timebase_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "ruler_timebase")
+        Log.line("RULER-TIMEBASE-VALIDATOR",
+          "timeline ruler display or invalid ruler-lane timebase emitted ("
+          .. #ruler_timebase_bad .. " finding(s)); retrying with hint "
+          .. "(user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous Lua used "
+          .. "`RULER_LANE_TIMEBASE` incorrectly for the user's ruler request.\n\n"
+          .. "Affected line(s):\n  - " .. tbl_concat(details, "\n  - ")
+          .. "\n\n"
+          .. "`RULER_LANE_TIMEBASE:X` is only for marker/region ruler lanes "
+          .. "and accepts exactly -1, 0, 1, or 2. Do NOT use "
+          .. "`format_timestr_pos`/`parse_timestr_pos` modeoverride values "
+          .. "such as 5 there. For main/primary ruler display, use the "
+          .. "verified action `reaper.Main_OnCommand(40367, 0)` "
+          .. "(View: Time unit for ruler: Measures.Beats). For secondary "
+          .. "ruler timecode/H:M:S:F, use `reaper.Main_OnCommand(42364, 0)` "
+          .. "(View: Secondary time unit for ruler: "
+          .. "Hours:Minutes:Seconds:Frames), or look up those exact action "
+          .. "names with `kbd_enumerateActions` / `kbd_getTextFromCmd`. "
+          .. "Regenerate from scratch and do not mention a retry.\n\n"
+          .. "Previous Lua to fix:\n```lua\n"
+          .. lua_code
+          .. "\n```\n\nUSER REQUEST:\n" .. ruler_timebase_user_text
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history + 1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("ruler_timebase_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + ruler_timebase_retry")
+              or "ruler_timebase_retry"
+          end
+        end
+        if prefs.include_snapshot and not S.pending_answer_only_followup then
+          S.pending_project  = CTX.resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
+            "retry.reason.for_ruler_timebase_display",
+            "for ruler display timebase repair"))
+            or "Auto-retry for ruler display timebase repair did not go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      ruler_timebase_gate_hit = true
+      validator_gate_hit = true
+      Log.line("RULER-TIMEBASE-VALIDATOR",
+        "ruler timebase misuse persisted after retry; auto-run blocked")
+      local detail_text = tbl_concat(details, "; ")
+      Log.add_error((RA and RA.t and RA.t(
+        "validator.ruler_timebase_blocked",
+        { details = detail_text },
+        "The model tried to set timeline ruler display using "
+          .. "RULER_LANE_TIMEBASE even after a retry: " .. detail_text
+          .. ". Auto-run is blocked; use verified ruler time-unit actions "
+          .. "or exact action-name lookup instead."))
+        or ("The model tried to set timeline ruler display using RULER_LANE_TIMEBASE even after a retry: "
+          .. detail_text
+          .. ". Auto-run is blocked; use verified ruler time-unit actions or exact action-name lookup instead."))
     end
   end
 
@@ -29035,6 +31643,100 @@ function Net.try_finish_curl()
           .. "action, or explicitly ask for a custom threshold detector if you "
           .. "want that lower-quality approximation."))
         or "The model tried to place drum-hit/transient stretch markers with a custom Lua audio-accessor detector even after a retry. That path tends to add false markers on decays and bleed. Auto-run is blocked; use REAPER's Dynamic Split / transient action, or explicitly ask for a custom threshold detector if you want that lower-quality approximation.")
+    end
+  end
+
+  -- AUDIO-SYNC VALIDATOR: Same-song/take sync requests should not be
+  -- satisfied by simply making media-item starts or take source offsets equal.
+  -- That does not compare the audio and can leave the musical material audibly
+  -- out of sync.
+  local audio_sync_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit then
+    local audio_sync_user_text = Net.retry_user_request_context()
+    local audio_sync_bad =
+      Code.find_audio_sync_item_start_alignment_scripts(
+        lua_code, audio_sync_user_text)
+    if audio_sync_bad and #audio_sync_bad > 0 then
+      if (S.audio_sync_validator_retries or 0) < 1 then
+        S.audio_sync_validator_retries =
+          (S.audio_sync_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "audio_sync")
+        local lines = {}
+        for _, e in ipairs(audio_sync_bad) do
+          lines[#lines + 1] = "  - line " .. tostring(e.line)
+        end
+        Log.line("AUDIO-SYNC-VALIDATOR",
+          "start/offset alignment used for audio/take sync ("
+          .. #audio_sync_bad .. " finding(s)); retrying with hint "
+          .. "(user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply treated "
+          .. "an audio/take sync request as simple media-item start or "
+          .. "take source-offset alignment. "
+          .. "That does not compare the audio, waveform, or transient and can "
+          .. "leave same-song takes out of sync.\n\n"
+          .. "Affected start/offset write line(s):\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Regenerate without claiming audio sync from item starts or take "
+          .. "source offsets. Ask one concise question distinguishing "
+          .. "start-time/offset alignment from "
+          .. "audio-content/transient matching, unless the user explicitly "
+          .. "asked to align starts or edit take offsets. If they want "
+          .. "audio-content matching, explain that ReaAssist needs a "
+          .. "user-provided anchor/workflow "
+          .. "such as a matching transient/edit cursor, snap offset, or "
+          .. "existing stretch markers. Do not invent a hidden waveform "
+          .. "matcher or emit a no-op script. Respond as if this is your FIRST "
+          .. "reply -- do NOT apologize, do NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. audio_sync_user_text
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history + 1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("audio_sync_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + audio_sync_retry")
+              or "audio_sync_retry"
+          end
+        end
+        if prefs.include_snapshot and not S.pending_answer_only_followup then
+          S.pending_project  = CTX.resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
+            "retry.reason.for_audio_sync_item_start_alignment",
+            "for item-start/take-offset alignment used as audio sync"))
+            or "Auto-retry for item-start/take-offset alignment used as audio sync did not go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      audio_sync_gate_hit = true
+      validator_gate_hit = true
+      Log.line("AUDIO-SYNC-VALIDATOR",
+        "start/offset alignment for audio/take sync persisted after retry; "
+        .. "auto-run blocked")
+      Log.add_error((RA and RA.t and RA.t(
+        "validator.audio_sync_item_start_blocked", nil,
+        "The model tried to answer an audio/take sync request by "
+          .. "only aligning media-item starts or copying take source offsets "
+          .. "even after a retry. Auto-run is blocked; ask whether the user "
+          .. "wants start-time/offset alignment or audio/transient matching, "
+          .. "or use a real user-provided anchor workflow."))
+        or "The model tried to answer an audio/take sync request by only aligning media-item starts or copying take source offsets even after a retry. Auto-run is blocked; ask whether the user wants start-time/offset alignment or audio/transient matching, or use a real user-provided anchor workflow.")
     end
   end
 
@@ -30058,6 +32760,108 @@ function Net.try_finish_curl()
     end
   end
 
+  -- FX-RECFX VALIDATOR: TrackFX_AddByName's third argument is recFX
+  -- (input/record FX), not "is instrument". Lower-tier models sometimes pass
+  -- true for ReaSynth/VSTi helpers, causing the FX to land outside the normal
+  -- track FX chain while the script reports success.
+  local fxrecfx_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+     and not arity_gate_hit and not sendidx_gate_hit
+     and not stockfx_gate_hit and not timecode_workflow_gate_hit
+     and not timecodefx_gate_hit
+     and not fxident_gate_hit then
+    local recfx_bad = Code.find_trackfx_addbyname_recfx_misuse
+      and Code.find_trackfx_addbyname_recfx_misuse(lua_code,
+        S.pending_orig_prompt)
+    if recfx_bad and #recfx_bad > 0 then
+      if (S.fxrecfx_validator_retries or 0) < 1 then
+        S.fxrecfx_validator_retries =
+          (S.fxrecfx_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "trackfx_recfx")
+        local lines = {}
+        for _, e in ipairs(recfx_bad) do
+          lines[#lines+1] = "  - " .. tostring(e.kind or "recfx_true")
+            .. " near line " .. tostring(e.line)
+            .. (e.detail and (" (" .. tostring(e.detail) .. ")") or "")
+        end
+        Log.line("FX-RECFX-VALIDATOR",
+          "TrackFX_AddByName recFX=true pattern(s) (" .. #recfx_bad
+          .. "); retrying with hint (user-invisible)")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply passed "
+          .. "`true` as the third argument to reaper.TrackFX_AddByName for "
+          .. "normal track FX/instrument insertion. That third argument is "
+          .. "`recFX` (input/record FX), NOT \"is instrument\". Passing true "
+          .. "places the plugin in the record/input FX chain, so the normal "
+          .. "track FX chain will be missing the requested ReaSynth/plugin.\n\n"
+          .. "Affected call(s):\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Regenerate the code so normal track FX and instruments use:\n"
+          .. "  local fx = reaper.TrackFX_AddByName(track, \"<name>\", false, -1)\n"
+          .. "  if fx < 0 then return end\n\n"
+          .. "Do not use helper parameters named isVSTi/isInstrument as the "
+          .. "recFX argument. The instrument/plugin name belongs in the second "
+          .. "argument; the third argument should stay false unless the user "
+          .. "explicitly asks for input FX or record FX. Respond as if this is "
+          .. "your FIRST reply -- do NOT apologize, do NOT mention a retry.)\n\n"
+          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history+1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("fxrecfx_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + fxrecfx_retry") or "fxrecfx_retry"
+          end
+        end
+        if prefs.include_snapshot and not S.pending_answer_only_followup then
+          S.pending_project  = CTX.resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
+            "retry.reason.for_trackfx_recfx_argument",
+            "for TrackFX_AddByName recFX argument"))
+            or "Auto-retry for TrackFX_AddByName recFX argument did not go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      fxrecfx_gate_hit = true
+      validator_gate_hit = true
+      Log.line("FX-RECFX-VALIDATOR",
+        "TrackFX_AddByName recFX=true pattern(s) persist after retry; auto-run blocked")
+      local user_lines = {}
+      for _, e in ipairs(recfx_bad) do
+        user_lines[#user_lines+1] = tostring(e.kind or "recFX=true")
+          .. " (line ~" .. tostring(e.line) .. ")"
+      end
+      Log.add_error((RA and RA.t and RA.t(
+        "validator.fx_trackfx_recfx_blocked",
+        { calls = tbl_concat(user_lines, ", ") },
+        "The model passed true as the TrackFX_AddByName recFX argument "
+          .. "for normal track FX, even after a retry: "
+          .. tbl_concat(user_lines, ", ")
+          .. ". Auto-run is blocked because the plugin would be added as "
+          .. "input/record FX instead of normal track FX."))
+        or ("The model passed true as the TrackFX_AddByName recFX argument for normal track FX, even after a retry: "
+          .. tbl_concat(user_lines, ", ")
+          .. ". Auto-run is blocked because the plugin would be added as input/record FX instead of normal track FX."))
+    end
+  end
+
   -- FX-CHECK VALIDATOR: After the API/arity validators pass, scan
   -- generated code for `local NAME = reaper.(Track|Take)FX_AddByName(...)`
   -- where NAME is never tested in a failure-direction comparison
@@ -30879,35 +33683,40 @@ function Net.try_finish_curl()
         S.helper_validator_retries = (S.helper_validator_retries or 0) + 1
         Probe.add_validator_retry(S.probe_turn, "helper")
         Log.line("HELPER-VALIDATOR",
-          "helper calls without definitions (" .. #missing .. "): "
+          "helper/global calls without definitions (" .. #missing .. "): "
           .. tbl_concat(missing, ", ")
-          .. "; pinning prompt_bundle:plugin_helpers + retrying (user-invisible)")
-        -- Co-pin helpers in case they aren't already pinned -- the model
-        -- needs the source to copy into the retry script.
+          .. "; retrying (user-invisible)")
+        -- Co-pin plugin helpers in case one of the missing names is from
+        -- prompt_bundle:plugin_helpers. Ad-hoc helper names still get the
+        -- general "define before first use or inline the operation" nudge.
         Net.copin_plugin_helpers(nil)
         local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
           .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply called "
-          .. "helper function(s) without a usable in-script definition. The "
+          .. "bare helper/global function(s) without a usable in-script definition. The "
           .. "definition was either missing OR placed LEXICALLY AFTER the "
           .. "first call site -- in Lua, a `local function NAME(...)` "
           .. "declared after the line that calls it is not yet a visible "
           .. "local at that line, so the call compiles to a global lookup "
           .. "and crashes at runtime with `attempt to call a nil value`. "
-          .. "Confirmed in the deferred callback inside main().\n\n"
+          .. "This can happen in normal top-level code or inside deferred "
+          .. "callbacks.\n\n"
           .. "Affected helper(s):\n  - "
           .. tbl_concat(missing, "\n  - ")
-          .. "\n\nThe definitions are ALREADY PRESENT in `prompt_bundle:"
-          .. "plugin_helpers` (pinned above). Do NOT emit "
+          .. "\n\nRegenerate the FULL script NOW. For each affected helper, "
+          .. "either paste a complete `local function NAME(...) ... end` "
+          .. "definition at the TOP of the script before any call site, or "
+          .. "remove the helper call and use direct REAPER API calls inline. "
+          .. "For send-volume helpers, call "
+          .. "`reaper.SetTrackSendInfo_Value(track, 0, send_index, "
+          .. "\"D_VOL\", 10 ^ (db / 20))` directly or define the helper "
+          .. "before it is called. If the helper is one of "
+          .. "find_param/set_param_display/set_param_enum/"
+          .. "set_param_enum_paced, its definition is already present in "
+          .. "`prompt_bundle:plugin_helpers` pinned above. Do NOT emit "
           .. "<context_needed>prompt_bundle:plugin_helpers</context_needed> "
-          .. "or any other <context_needed> tag -- the data you need is "
-          .. "already in this request. Regenerate the FULL script NOW with "
-          .. "EACH called helper's `local function NAME(...) ... end` source "
-          .. "pasted at the TOP of the script -- BEFORE `local function "
-          .. "main()` and BEFORE any function body that calls it. Only "
-          .. "include the helpers you actually call. Respond as if this is "
-          .. "your FIRST reply to the user's request -- do NOT apologize, "
-          .. "do NOT say 'let me try again', do NOT mention a retry, do "
-          .. "NOT emit <context_needed>.)\n\n"
+          .. "or any other <context_needed> tag. Respond as if this is your "
+          .. "FIRST reply to the user's request -- do NOT apologize, do NOT "
+          .. "say 'let me try again', do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
         if #S.history > 0 and S.history[#S.history].role == "assistant" then
           S.history[#S.history] = nil
@@ -30950,23 +33759,22 @@ function Net.try_finish_curl()
       -- definitions. Block auto-run + surface diagnostic.
       helper_gate_hit = true
       Log.line("HELPER-VALIDATOR",
-        "helper calls still missing definitions after retry: "
+        "helper/global calls still missing definitions after retry: "
         .. tbl_concat(missing, ", ") .. "; auto-run blocked")
       Log.add_error((RA and RA.t and RA.t(
         "validator.missing_helper_definitions_blocked",
         { helpers = tbl_concat(missing, ", ") },
-        "The model called helper function(s) without including "
+        "The model called helper/global function(s) without including "
           .. "their definitions, even after a retry: "
           .. tbl_concat(missing, ", ")
-          .. ". These are local functions (not REAPER built-ins), so the "
+          .. ". These are not REAPER built-ins, so the "
           .. "script will crash at runtime with 'attempt to call a nil value' "
-          .. "when these are reached. Auto-run is blocked; either paste the "
-          .. "helper function definitions from prompt_bundle:plugin_helpers "
-          .. "into the script before clicking Run, or refactor to use "
-          .. "SetParamNormalized directly with verified normalized values."))
+          .. "when these are reached. Auto-run is blocked; define each "
+          .. "helper before its first call or replace it with direct REAPER "
+          .. "API calls before running manually."))
         or ("The model called helper function(s) without including their definitions, even after a retry: "
           .. tbl_concat(missing, ", ")
-          .. ". These are local functions (not REAPER built-ins), so the script will crash at runtime with 'attempt to call a nil value' when these are reached. Auto-run is blocked; either paste the helper function definitions from prompt_bundle:plugin_helpers into the script before clicking Run, or refactor to use SetParamNormalized directly with verified normalized values."))
+          .. ". These are not REAPER built-ins, so the script will crash at runtime with 'attempt to call a nil value' when these are reached. Auto-run is blocked; define each helper before its first call or replace it with direct REAPER API calls before running manually."))
     end
   end
 
@@ -31115,7 +33923,10 @@ function Net.try_finish_curl()
         or toolbar_gate_hit
         or tempo_marker_gate_hit
         or project_tempo_gate_hit
+        or loop_time_map_gate_hit
+        or ruler_timebase_gate_hit
         or transient_gate_hit
+        or audio_sync_gate_hit
         or drum_quantize_gate_hit
         or drum_marker_sync_gate_hit
         or arity_gate_hit
@@ -31125,6 +33936,7 @@ function Net.try_finish_curl()
         or stockfx_gate_hit
         or timecodefx_gate_hit
         or fxident_gate_hit
+        or fxrecfx_gate_hit
         or fxcheck_gate_hit
         or getbyname_gate_hit
         or fxadd_getonly_gate_hit
@@ -31145,10 +33957,13 @@ function Net.try_finish_curl()
     if midi_input_gate_hit then return "midi_input_validator" end
     if tempo_marker_gate_hit then return "tempo_marker_validator" end
     if project_tempo_gate_hit then return "project_tempo_validator" end
+    if loop_time_map_gate_hit then return "loop_time_map_validator" end
+    if ruler_timebase_gate_hit then return "ruler_timebase_validator" end
     if validator_gate_hit then return "validator_gate" end
     if action_gate_hit then return "action_context_validator" end
     if toolbar_gate_hit then return "toolbar_validator" end
     if transient_gate_hit then return "transient_validator" end
+    if audio_sync_gate_hit then return "audio_sync_validator" end
     if drum_quantize_gate_hit then return "drum_quantize_validator" end
     if drum_marker_sync_gate_hit then return "drum_marker_sync_validator" end
     if arity_gate_hit then return "arity_validator" end
@@ -31158,6 +33973,7 @@ function Net.try_finish_curl()
     if stockfx_gate_hit then return "stock_fx_validator" end
     if timecodefx_gate_hit then return "timecode_fx_validator" end
     if fxident_gate_hit then return "fx_identifier_validator" end
+    if fxrecfx_gate_hit then return "trackfx_recfx_validator" end
     if fxcheck_gate_hit then return "fx_check_validator" end
     if getbyname_gate_hit then return "get_by_name_validator" end
     if fxadd_getonly_gate_hit then return "fx_add_getonly_validator" end
@@ -31620,22 +34436,9 @@ function Net.try_finish_curl()
         end
         -- Patch the Lua companion to use the actual saved filename (may have a
         -- numeric suffix if a file with the original name already existed).
-        if lua_code and fx_name then
-          local orig_name = Code.derive_filename_jsfx(jsfx_to_save)
-          local orig_ref  = "ReaAssist/" .. orig_name
-          if fx_name ~= orig_ref then
-            -- Escape every Lua pattern magic char in orig_ref (the previous
-            -- escape covered only . - + and missed ( ) [ ] ^ $ * ? %), and
-            -- escape % in fx_name (replacement string treats %% as literal).
-            -- Without these, a JSFX desc: line containing one of those chars
-            -- (which sanitize_filename does not strip) would either silently
-            -- fail to match or throw "invalid use of '%' in replacement
-            -- string" and the auto-run companion script would land with the
-            -- stale pre-rename ReaAssist/<orig> path.
-            local pat = orig_ref:gsub("[%(%)%.%%%+%-%*%?%[%]%^%$]", "%%%0")
-            local rep = fx_name:gsub("%%", "%%%%")
-            lua_code = lua_code:gsub(pat, rep)
-          end
+        if lua_code and fx_name and Code.rewrite_lua_companion_jsfx_refs then
+          lua_code = Code.rewrite_lua_companion_jsfx_refs(
+            lua_code, jsfx_to_save, fx_name)
         end
         if lua_code then
           jsfx_auto_status = (RA and RA.t and RA.t("jsfx.done", nil,
@@ -31804,6 +34607,11 @@ function Net.try_finish_curl()
       "typed_actions.status.auto_run_off", nil,
       "Structured edit validated, but it was not run because Auto-run is off."))
       or "Structured edit validated, but it was not run because Auto-run is off."
+    if S.history[_asst_hist_idx] then
+      S.history[_asst_hist_idx].run_status = "manual_run"
+      S.history[_asst_hist_idx].code_bytes = 0
+      S.history[_asst_hist_idx].code_type = "typed_actions"
+    end
   end
   if code and not auto_ran_ok then
     local inferred_block_reason = _auto_run_block_reason()
@@ -31895,6 +34703,8 @@ function Net.try_finish_curl()
     jsfx_saved_path = jsfx_saved_path_for_msg,        -- path if already saved (avoids re-save)
     jsfx_saved_fx_name = jsfx_saved_fx_name_for_msg,  -- FX ref name if already saved
     ceiling_injected = ceiling_inject_info ~= nil or nil,
+    ceiling_inject_info = ceiling_inject_info,
+    jsfx_user_text = jsfx_code and _compact_user_intent or nil,
     code_block_present = ((code ~= nil and code ~= "")
       or (typed_action_metrics and typed_action_metrics.present == true))
       and true or false,
@@ -31990,6 +34800,13 @@ function Net.try_finish_curl()
          and (not dmsg.run_status or dmsg.run_status == "no_code") then
         dmsg.run_status = "manual_run"
         dmsg.validation_status = "manual_required"
+      elseif dmsg.auto_run_block_reason == "auto_run_disabled"
+          and typed_action_metrics
+          and typed_action_metrics.present == true
+          and (not dmsg.run_status or dmsg.run_status == "no_code") then
+        dmsg.run_status = "manual_run"
+        dmsg.validation_status = "manual_required"
+        dmsg.code_type = "typed_actions"
       end
 
       local rr = type(S.last_run_result) == "table" and S.last_run_result or nil
@@ -32139,8 +34956,8 @@ function Net.try_finish_curl()
   S.status           = "idle"
   S.scroll_to_bottom = true
   -- Build the compact-history summary for this turn. The summary IS the
-  -- compacted "content" sent for this row when it ages past T-1 and the
-  -- compact_history flag is on. compact_eligible gates whether the
+  -- compacted "content" sent for this row when it ages past T-1 and
+  -- compact_history is on. compact_eligible gates whether the
   -- compaction substitution actually fires; only ran_ok turns with a
   -- known code body produce a usable summary, everything else stays
   -- verbatim so the model can still see the original on a "fix that"
@@ -32262,6 +35079,7 @@ function RA.factory_reset_execute(opts)
   prefs.debug_logging         = true
   prefs.include_api_ref       = false
   prefs.include_snapshot      = true
+  prefs.compact_history       = false
   prefs.update_check          = true
   prefs.typed_actions_opt_in  = true
   prefs.diag_auto_tier        = "basic"
@@ -33209,6 +36027,158 @@ function TypedActionController.message_can_undo_generated_action(msg)
   return false
 end
 
+function TypedActionController.apply_typed_action_message(msg, message_idx, opts)
+  opts = opts or {}
+  if not TypedActionController.message_has_typed_actions(msg) then
+    return false, "no_plan", TypedActionController.t(
+      "a11y.sr.apply_action_plan_unavailable", nil,
+      "There is no validated edit to run.")
+  end
+  if TypedActionController.message_can_undo_generated_action(msg) then
+    return false, "already_applied", TypedActionController.t(
+      "a11y.sr.apply_action_plan_already_applied", nil,
+      "This structured edit has already been run.")
+  end
+  if TypedActionController.request_is_active() then
+    return false, "request_active", TypedActionController.t(
+      "a11y.sr.request_already_running", nil,
+      "A request is already running.")
+  end
+  if msg.run_status == "pending"
+      or (msg.typed_actions and msg.typed_actions.deferred_pending == true) then
+    return false, "pending", TypedActionController.t(
+      "a11y.sr.apply_action_plan_pending", nil,
+      "Structured edit is running.")
+  end
+  if not (Code and type(Code.execute_typed_actions_from_text) == "function") then
+    return false, "executor_unavailable", TypedActionController.t(
+      "typed_actions.error.executor_unavailable", nil,
+      "Structured edit executor is unavailable.")
+  end
+
+  if prefs and prefs.auto_backup and not opts.skip_backup
+      and Code and Code.safety_backup then
+    local _, berr = Code.safety_backup()
+    if berr == "unsaved" then
+      return false, "backup_unsaved", TypedActionController.t(
+        "a11y.sr.apply_action_plan_backup_unsaved", nil,
+        "Auto-backup is on, but the project has not been saved.")
+    elseif berr and berr ~= "unchanged" then
+      return false, "backup_failed", TypedActionController.t(
+        "a11y.sr.apply_action_plan_backup_failed",
+        { error = tostring(berr) },
+        "Safety backup failed: " .. tostring(berr))
+    end
+  end
+
+  local plan_text = TypedActionController.generated_code_text(msg)
+  if plan_text == "" then
+    return false, "no_plan", TypedActionController.t(
+      "a11y.sr.apply_action_plan_unavailable", nil,
+      "There is no validated edit to run.")
+  end
+
+  local user_text = TypedActionController.user_prompt_before_message(
+    message_idx) or ""
+  local profile = Code and Code.typed_actions_model_profile
+    and Code.typed_actions_model_profile(msg.provider_id, msg.model_id) or nil
+
+  local function apply_result(done_ok, exec_result)
+    local completed_result = exec_result
+      and (exec_result.result or exec_result) or nil
+    msg.auto_run_block_reason = nil
+    msg.typed_actions = msg.typed_actions or { present = true }
+    msg.typed_actions.deferred_pending = nil
+    msg.typed_actions.executed = done_ok == true
+    if completed_result and completed_result.action_results then
+      msg.typed_actions.action_results = completed_result.action_results
+    end
+    if done_ok then
+      msg.auto_ran = false
+      msg.run_status = "ran_ok"
+      msg.validation_status = "passed"
+      msg.validation_block_kind = nil
+      msg.error_kind = nil
+      msg.error_debug = nil
+      msg.runtime_error = nil
+      msg.typed_actions.error = nil
+      msg.content = TypedActionController.t(
+        "a11y.sr.apply_action_plan_done", nil,
+        "Structured edit ran.")
+      if type(Code.typed_actions_display_text) == "function" then
+        msg.typed_action_summary = Code.typed_actions_display_text(plan_text,
+          msg.typed_actions.action_results)
+      end
+      if type(Code.build_run_result) == "function" then
+        msg.run_result = Code.build_run_result("typed_actions", plan_text,
+          "ran_ok", "passed", {
+            auto_ran = false,
+            validation_block_kind = nil,
+          })
+      end
+    else
+      local err = exec_result and exec_result.code or "execution_failed"
+      msg.auto_ran = false
+      msg.run_status = "errored"
+      msg.validation_status = "failed"
+      msg.validation_block_kind = err
+      msg.typed_actions.error = err
+      msg.content = Code.typed_actions_user_failure_message(exec_result)
+      if type(Code.build_run_result) == "function" then
+        msg.run_result = Code.build_run_result("typed_actions", plan_text,
+          "errored", "failed", {
+            auto_ran = false,
+            validation_block_kind = err,
+            error_kind = "runtime_error",
+            runtime_error = tostring(msg.content or err),
+            error_debug = {
+              failure_kind = "runtime_error",
+              source = "typed_action_executor",
+              typed_action_error = tostring(err),
+            },
+          })
+      end
+    end
+    S.status = done_ok and "idle" or "error"
+  end
+
+  S.status = "running"
+  local exec_ok, exec_result = Code.execute_typed_actions_from_text(plan_text, {
+    allow_raw_json = true,
+    user_text = user_text,
+    profile = profile,
+    on_done = function(done_ok, done_result)
+      apply_result(done_ok == true, done_result)
+      S.scroll_to_bottom = true
+      S.refocus_prompt = true
+    end,
+  })
+  local exec_pending = exec_ok and exec_result
+    and exec_result.deferred == true
+    and exec_result.completed ~= true
+  if exec_pending then
+    msg.run_status = "pending"
+    msg.validation_status = "pending"
+    msg.typed_actions = msg.typed_actions or { present = true }
+    msg.typed_actions.deferred = true
+    msg.typed_actions.deferred_pending = true
+    msg.content = TypedActionController.t(
+      "a11y.sr.apply_action_plan_pending", nil,
+      "Structured edit is running.")
+    return true, nil, msg.content
+  end
+
+  apply_result(exec_ok == true, exec_result)
+  S.refocus_prompt = true
+  if exec_ok then
+    return true, nil, TypedActionController.t(
+      "a11y.sr.apply_action_plan_done", nil,
+      "Structured edit ran.")
+  end
+  return false, "execution_failed",
+    Code.typed_actions_user_failure_message(exec_result)
+end
+
 function TypedActionController.user_prompt_before_message(message_idx)
   local start_idx = tonumber(message_idx) or #(S.display_messages or {})
   for j = start_idx - 1, 1, -1 do
@@ -33244,7 +36214,11 @@ function TypedActionController.typed_action_lua_request_prompt(original_request)
     .. tostring(original_request or "")
 end
 
-function TypedActionController.request_lua_for_typed_action_message(msg, message_idx)
+function TypedActionController.request_lua_for_typed_action_message(msg,
+                                                                  message_idx,
+                                                                  opts)
+  opts = opts or {}
+  local skip_undo = opts.skip_undo == true
   if TypedActionController.request_is_active() then
     return false, TypedActionController.t("a11y.sr.request_already_running", nil,
       "A request is already running.")
@@ -33257,7 +36231,8 @@ function TypedActionController.request_lua_for_typed_action_message(msg, message
     return false, TypedActionController.t("a11y.sr.request_lua_unavailable", nil,
       "Could not request the Lua/ReaScript version.")
   end
-  if not TypedActionController.message_can_undo_generated_action(msg) then
+  if not skip_undo
+      and not TypedActionController.message_can_undo_generated_action(msg) then
     return false, TypedActionController.t("a11y.sr.undo_edit_unavailable", nil,
       "There is no structured edit to undo.")
   end
@@ -33266,10 +36241,13 @@ function TypedActionController.request_lua_for_typed_action_message(msg, message
     return false, TypedActionController.t("typed_actions.no_original_prompt", nil,
       "Could not find the original prompt")
   end
-  reaper.Main_OnCommand(40029, 0)
-  msg.screen_reader_undo_clicked = true
-  msg.typed_action_undo_clicked = true
+  if not skip_undo then
+    reaper.Main_OnCommand(40029, 0)
+    msg.screen_reader_undo_clicked = true
+    msg.typed_action_undo_clicked = true
+  end
   msg.typed_action_lua_requested = true
+  msg.typed_action_lua_requested_without_undo = skip_undo or nil
   msg.auto_ran = false
   S.refocus_prompt = true
   S.skip_local_answer_once = true
@@ -33328,10 +36306,12 @@ local function loop()
   else
     if pref_plugins.scan.active then CTX.pref_plugins_scan_read() end
     if fx_cache_ui.rescan.active then
-      fx_cache_ui.rescan.active = false
-      fx_cache_ui.rescan.phase = "done"
-      fx_cache_ui.rescan.status =
-        RA.context_unavailable_message("before rescanning FX parameters")
+      if fx_cache_ui.rescan.phase == "reading" then
+        CTX.fx_cache_rescan_read()
+      else
+        fx_cache_ui.rescan.status =
+          RA.context_unavailable_message("before rescanning FX parameters")
+      end
     end
     if deep_scan.active then CTX.cancel_deep_scan() end
   end
@@ -33345,6 +36325,7 @@ local function loop()
     S._last_heartbeat = now_hb
     reaper.SetExtState(CFG.EXT_NS, "running",
       S.INSTANCE_ID .. "|" .. tostring(now_hb), false)
+    RA.write_temp_live_marker(now_hb)
   end
 
   Loop.pump_curl_or_retry()
@@ -33491,6 +36472,26 @@ local function loop()
     end
   end
 
+  -- One-time diagnostics disclosure for existing installs. New users see the
+  -- same default-on Basic notice in the TOS, and users who already opted out
+  -- do not need a toast about a disabled setting.
+  if Store and Store.migration_fired and Store.set_migration_fired
+     and not S._diag_default_notice_checked then
+    if Store.migration_fired("diag_auto_default_notice_v1") then
+      S._diag_default_notice_checked = true
+    elseif not api_keys.tos_is_accepted()
+        or prefs.diag_auto_tier == "off" then
+      Store.set_migration_fired("diag_auto_default_notice_v1")
+      S._diag_default_notice_checked = true
+    elseif not api_keys.screen then
+      Store.set_migration_fired("diag_auto_default_notice_v1")
+      S._diag_default_notice_checked = true
+      UI.show_float_toast(RA.t("settings.adv.diagnostics.default_notice", nil,
+        "Basic anonymous diagnostics are on by default. You can turn them off in Settings > Advanced."),
+        "ok", true)
+    end
+  end
+
   -- Auto-update polling (independent of main API pipeline).
   if update.state == "checking" then
     Updater.check_poll()
@@ -33563,17 +36564,30 @@ local function loop()
         pcall(reaper.DeleteTrack, _tr)
       end
     end
-    -- Close the Undo + PreventUIRefresh scopes those scans hold open.
-    -- See the matching block in atexit (above) for the rationale.
-    local _owners = 0
-    if pref_plugins.scan  and pref_plugins.scan.track  then _owners = _owners + 1 end
-    if fx_cache_ui.rescan and fx_cache_ui.rescan.track then _owners = _owners + 1 end
-    if S._fx_inspect_tmp                               then _owners = _owners + 1 end
-    local _refreshes = _owners
+    -- Release scan cleanup scopes. See the matching block in atexit (above)
+    -- for why refresh owners and undo owners are counted separately.
+    local _refresh_owners = 0
+    if pref_plugins.scan  and pref_plugins.scan.track  then _refresh_owners = _refresh_owners + 1 end
+    if fx_cache_ui.rescan and fx_cache_ui.rescan.track then _refresh_owners = _refresh_owners + 1 end
+    if S._fx_inspect_tmp                               then _refresh_owners = _refresh_owners + 1 end
+    local _undo_owners = 0
+    if pref_plugins.scan and pref_plugins.scan.undo_open then
+      _undo_owners = _undo_owners + 1
+      pref_plugins.scan.undo_open = false
+    end
+    if fx_cache_ui.rescan and fx_cache_ui.rescan.undo_open then
+      _undo_owners = _undo_owners + 1
+      fx_cache_ui.rescan.undo_open = false
+    end
+    if S._fx_inspect_tmp and S._fx_inspect_tmp.undo_open then
+      _undo_owners = _undo_owners + 1
+      S._fx_inspect_tmp.undo_open = false
+    end
+    local _refreshes = _refresh_owners
     if deep_scan._ui_refresh_released then _refreshes = _refreshes - 1 end
     if _refreshes < 0 then _refreshes = 0 end
     for _ = 1, _refreshes do pcall(reaper.PreventUIRefresh, -1) end
-    for _ = 1, _owners do
+    for _ = 1, _undo_owners do
       pcall(reaper.Undo_EndBlock, "ReaAssist: scan (closed at exit)", 0)
     end
   end
@@ -33581,6 +36595,13 @@ end
 
 function RA.pump_screen_reader_background()
   Loop.handle_close_signal()
+  local now_hb = time_precise()
+  if not S._last_heartbeat or now_hb - S._last_heartbeat >= 1.0 then
+    S._last_heartbeat = now_hb
+    reaper.SetExtState(CFG.EXT_NS, "running",
+      S.INSTANCE_ID .. "|" .. tostring(now_hb), false)
+    RA.write_temp_live_marker(now_hb)
+  end
   Loop.pump_curl_or_retry()
   if Diag and Diag.uploader_enabled and Diag.tick then
     Diag.tick()
@@ -33599,10 +36620,12 @@ function RA.pump_screen_reader_background()
         and fx_cache_ui.rescan.phase == "reading" then
       CTX.fx_cache_rescan_read()
     elseif RA.context_loaded and not RA.context_loaded() then
-      fx_cache_ui.rescan.active = false
-      fx_cache_ui.rescan.phase = "done"
-      fx_cache_ui.rescan.status = RA.context_unavailable_message(
-        "before rescanning FX parameters")
+      if fx_cache_ui.rescan.phase == "reading" then
+        CTX.fx_cache_rescan_read()
+      else
+        fx_cache_ui.rescan.status = RA.context_unavailable_message(
+          "before rescanning FX parameters")
+      end
     end
   end
   if CTX and deep_scan and deep_scan.active then

@@ -1,6 +1,6 @@
 -- @description ReaAssist - Screen Reader Mode
 -- @author Michael Briggs
--- @version 1.4.0
+-- @version 1.4.1
 -- @about
 --   Accessible ReaAssist entry point for screen-reader users.
 -- CFG.VERSION marker: do not remove; website installers verify this file.
@@ -120,6 +120,10 @@ local function safe_url(url)
   return url:gsub("[^%w%-%.%_%~%:%/%?%#%[%]%@%!%&%*%+%,%;%=%{%}%%]", "")
 end
 
+local function shell_quote(value)
+  return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'"
+end
+
 local function open_url(url)
   url = safe_url(url)
   if url == "" then return false end
@@ -132,9 +136,11 @@ local function open_url(url)
   if os_name:match("^Win") then
     result, _, code = os.execute('start "" "' .. url .. '"')
   elseif os_name:match("^OSX") or os_name:match("^macOS") then
-    result, _, code = os.execute("open '" .. url .. "' >/dev/null 2>&1 &")
+    result, _, code = os.execute(
+      "open " .. shell_quote(url) .. " >/dev/null 2>&1 &")
   else
-    result, _, code = os.execute("xdg-open '" .. url .. "' >/dev/null 2>&1 &")
+    result, _, code = os.execute(
+      "xdg-open " .. shell_quote(url) .. " >/dev/null 2>&1 &")
   end
   return result == true or result == 0 or code == 0
 end
@@ -151,9 +157,11 @@ local function open_path(path)
   if os_name:match("^Win") then
     result, _, code = os.execute('start "" "' .. path .. '"')
   elseif os_name:match("^OSX") or os_name:match("^macOS") then
-    result, _, code = os.execute("open '" .. path .. "' >/dev/null 2>&1 &")
+    result, _, code = os.execute(
+      "open " .. shell_quote(path) .. " >/dev/null 2>&1 &")
   else
-    result, _, code = os.execute("xdg-open '" .. path .. "' >/dev/null 2>&1 &")
+    result, _, code = os.execute(
+      "xdg-open " .. shell_quote(path) .. " >/dev/null 2>&1 &")
   end
   return result == true or result == 0 or code == 0
 end
@@ -1334,7 +1342,9 @@ function ScreenReader.response_ready_parts(payload)
   local response_notes_below = has_prose and has_code
     and ScreenReader.t("a11y.sr.response_notes_after_actions_hint_v2", nil,
       "Available actions are listed first.") or ""
-  local auto_run_blocked = ScreenReader.auto_run_block_text(payload)
+  local manual_run_blocked = ScreenReader.manual_lua_run_block_text(payload)
+  local auto_run_blocked = manual_run_blocked ~= ""
+    and "" or ScreenReader.auto_run_block_text(payload)
   local body_text
   if undo_sent then
     body_text = ScreenReader.payload_is_jsfx(payload)
@@ -1348,12 +1358,14 @@ function ScreenReader.response_ready_parts(payload)
     body_text = ScreenReader.response_ready_ran_text(payload, false)
   elseif typed_action then
     body_text = ScreenReader.t("a11y.sr.response_ready_body_action", nil,
-      "The response includes a validated project edit. Review the edit details first, then run it only if it matches your request.")
+      "Review the edit details before running it, or request Lua if you want a script to save.")
   elseif ScreenReader.payload_is_jsfx(payload) then
     local jsfx_status = ScreenReader.payload_jsfx_status(payload)
     body_text = jsfx_status ~= "" and jsfx_status
       or ScreenReader.t("a11y.sr.response_ready_body_jsfx", nil,
         "The response includes generated JSFX. Read it first, then add it to selected tracks if it matches your request.")
+  elseif manual_run_blocked ~= "" then
+    body_text = manual_run_blocked
   elseif has_code then
     body_text = ScreenReader.t("a11y.sr.response_ready_body_code", nil,
       "The response includes generated code. Read it first, then run it only if it matches your request.")
@@ -1377,6 +1389,7 @@ function ScreenReader.response_ready_parts(payload)
     sr_summary_raw = sr_summary_raw,
     response_notes_below = response_notes_below,
     auto_run_blocked = auto_run_blocked,
+    manual_run_blocked = manual_run_blocked,
     body_text = body_text,
   }
 end
@@ -1421,6 +1434,74 @@ function ScreenReader.queue_response_ready_announcement(payload, fallback)
   if text == "" then return end
   ScreenReader.set_status_after_rebuild(text, false)
   ScreenReader.announce_after_rebuild_settled(text)
+end
+
+function ScreenReader.payload_blocks_manual_lua_run(payload)
+  if not payload then return false, "" end
+  local status = tostring(payload.validation_status or "")
+  local reason = tostring(payload.auto_run_block_reason or "")
+  local block_kind = tostring(payload.validation_block_kind or "")
+  if reason == "" and status == "blocked" then
+    reason = block_kind ~= "" and block_kind or "validation_blocked"
+  end
+  if reason == "" then return false, "" end
+  if reason == "auto_run_disabled"
+      or reason == "backup_required"
+      or reason == "backup_failed"
+      or reason == "risky_code_confirmation" then
+    return false, ""
+  end
+  -- Keep in sync with ReaAssist.lua:_auto_run_block_reason().
+  local validator_reasons = {
+    action_context_validator = true,
+    arity_validator = true,
+    audio_sync_validator = true,
+    chain_upsert_validator = true,
+    defer_validator = true,
+    docs_gate = true,
+    drum_marker_sync_validator = true,
+    drum_quantize_validator = true,
+    fx_add_getonly_validator = true,
+    fx_check_validator = true,
+    fx_identifier_validator = true,
+    fx_param_scope_validator = true,
+    get_by_name_validator = true,
+    helper_integrity_validator = true,
+    helper_validator = true,
+    jsfx_validator = true,
+    jsfx_wrong_artifact_validator = true,
+    loop_time_map_validator = true,
+    marker_pair_validator = true,
+    media_item_label_validator = true,
+    midi_input_validator = true,
+    mistyped_reaper_global_validator = true,
+    project_tempo_validator = true,
+    proq4_bell_slope_validator = true,
+    ruler_timebase_validator = true,
+    sandbox_forbidden_global = true,
+    send_index_validator = true,
+    stock_fx_validator = true,
+    tempo_marker_validator = true,
+    timecode_fx_validator = true,
+    timecode_workflow_validator = true,
+    toolbar_validator = true,
+    trackfx_recfx_validator = true,
+    transient_validator = true,
+    validation_blocked = true,
+    validator_gate = true,
+  }
+  return validator_reasons[reason] == true, reason
+end
+
+function ScreenReader.manual_lua_run_block_text(payload)
+  local blocked, reason = ScreenReader.payload_blocks_manual_lua_run(payload)
+  if not blocked then return "" end
+  if reason == "sandbox_forbidden_global" then
+    return ScreenReader.t("a11y.sr.run_code_sandbox_blocked", nil,
+      "ReaAssist blocked this code from running because it uses a restricted Lua API. Ask ReaAssist to regenerate it instead.")
+  end
+  return ScreenReader.t("a11y.sr.run_code_validation_blocked", nil,
+    "ReaAssist blocked this code from running because validation flagged it. Ask ReaAssist to regenerate it instead.")
 end
 
 function ScreenReader.auto_run_block_text(payload)
@@ -3057,7 +3138,7 @@ function ScreenReader.reader_payload(kind)
       if ScreenReader.payload_is_typed_action(payload) then
         empty_key = "a11y.sr.response_no_prose_has_action_plan"
         empty_fallback =
-          "This response contains edit details but no separate prose response. Use Review Edit Details to review them, or Undo and Request Lua to get a reusable script."
+          "This response contains edit details but no separate prose response. Use Review Edit Details to review them, Run Edit to apply them, or Request Lua to get a reusable script."
       else
         empty_key = "a11y.sr.response_no_prose_has_code"
         empty_fallback =
@@ -3569,9 +3650,9 @@ function ScreenReader.undo_latest_typed_action(next_view)
   ScreenReader.open_view(next_view or "response_ready")
 end
 
-function ScreenReader.request_lua_for_action_plan(next_view)
+function ScreenReader.request_lua_for_action_plan(next_view, opts)
   local ok, msg = AppController.request_lua_for_latest_typed_action
-    and AppController.request_lua_for_latest_typed_action()
+    and AppController.request_lua_for_latest_typed_action(opts or {})
   if not ok then
     ScreenReader.set_status(msg or ScreenReader.t(
       "a11y.sr.request_lua_unavailable", nil,
@@ -3861,7 +3942,9 @@ function ScreenReader.response_preview_text(payload)
       and not preview:find("Run status:", 1, true) then
     notes[#notes + 1] = ScreenReader.run_status_sentence(payload.run_status)
   end
-  local block_text = ScreenReader.auto_run_block_text(payload)
+  local manual_block_text = ScreenReader.manual_lua_run_block_text(payload)
+  local block_text = manual_block_text ~= ""
+    and manual_block_text or ScreenReader.auto_run_block_text(payload)
   if block_text ~= "" then notes[#notes + 1] = block_text end
   if #notes > 0 then preview = preview .. " " .. table.concat(notes, " ") end
   return preview
@@ -3884,10 +3967,8 @@ function ScreenReader.terms_text()
 end
 
 function ScreenReader.has_usable_provider()
-  if PROVIDERS and S and S.api_key_map then
-    for _, p in ipairs(PROVIDERS) do
-      if p and (p.is_custom or S.api_key_map[p.id]) then return true end
-    end
+  if Store and Store.has_usable_provider then
+    return Store.has_usable_provider()
   end
   return AppController.active_provider_is_usable
     and AppController.active_provider_is_usable() or false
@@ -4195,6 +4276,12 @@ function ScreenReader.shortcut_run_code()
     and AppController.latest_code_run_info() or nil
   if run_info and run_info.can_run then
     ScreenReader.run_code()
+    return
+  end
+  if run_info and run_info.message and run_info.message ~= ""
+      and run_info.reason ~= "no_code"
+      and run_info.reason ~= "not_lua" then
+    ScreenReader.set_status(run_info.message, true)
     return
   end
 
@@ -7573,6 +7660,11 @@ function ScreenReader.build_response_ready_ui()
   local is_jsfx = ScreenReader.payload_is_jsfx(payload)
   local jsfx_added = ScreenReader.payload_jsfx_added(payload)
   local code_ran = parts.code_ran
+  local run_info = nil
+  if has_code and not typed_action and not is_jsfx and not code_ran then
+    run_info = AppController.latest_code_run_info
+      and AppController.latest_code_run_info() or nil
+  end
   local action_summary = parts.action_summary
   local sr_summary = parts.sr_summary
   local response_notes_below = parts.response_notes_below
@@ -7701,8 +7793,19 @@ function ScreenReader.build_response_ready_ui()
           "Runs the validated edit after ReaAssist checks it."),
         function() ScreenReader.apply_typed_action() end,
         "apply_plan")
+      ui.ids.request_lua = reagirl.Button_Add(nil, nil, 18, 5,
+        ScreenReader.t("typed_actions.request_lua", nil,
+          "Request Lua"),
+        ScreenReader.t("typed_actions.request_lua.tooltip", nil,
+          "Ask for a normal Lua/ReaScript version you can review, run, or save. The structured edit will not run."),
+        function()
+          ScreenReader.request_lua_for_action_plan("thinking",
+            { skip_undo = true })
+        end,
+        "request_lua")
     end
-    if not code_ran and not typed_action and not jsfx_added then
+    if not code_ran and not typed_action and not jsfx_added
+        and (is_jsfx or (run_info and run_info.can_run == true)) then
       ui.ids.run_code = reagirl.Button_Add(nil, nil,
         is_jsfx and 30 or 14, 5,
         is_jsfx
@@ -8498,6 +8601,11 @@ function ScreenReader.build_reader_ui()
   local typed_action = is_code and ScreenReader.payload_is_typed_action(payload)
   local is_jsfx = is_code and ScreenReader.payload_is_jsfx(payload)
   local jsfx_added = is_code and ScreenReader.payload_jsfx_added(payload)
+  local run_info = nil
+  if is_code and not typed_action and not is_jsfx and not code_ran then
+    run_info = AppController.latest_code_run_info
+      and AppController.latest_code_run_info() or nil
+  end
   local reader_button_w = typed_action and 16 or is_jsfx and 12
     or is_code and 10 or 14
   local status_text = ScreenReader.page_status_text()
@@ -8583,7 +8691,8 @@ function ScreenReader.build_reader_ui()
       function() ScreenReader.apply_typed_action() end,
       "apply_plan")
   end
-  if is_code and not code_ran and not typed_action and not jsfx_added then
+  if is_code and not code_ran and not typed_action and not jsfx_added
+      and (is_jsfx or (run_info and run_info.can_run == true)) then
     ui.ids.run_code = reagirl.Button_Add(nil, nil,
       is_jsfx and 30 or 14, 5,
       is_jsfx
@@ -9826,8 +9935,13 @@ function AppController.active_provider_key_status()
       console_label = nil,
     }
   end
-  local configured = p.is_custom
-    or (S.api_key_map and S.api_key_map[p.id] ~= nil)
+  local configured = Store and Store.provider_has_usable_credentials
+    and Store.provider_has_usable_credentials(p)
+  if not configured then
+    configured = p.is_custom
+      or (S.api_key_map and S.api_key_map[p.id]
+        and tostring(S.api_key_map[p.id]) ~= "")
+  end
   return {
     provider = p,
     configured = configured,
@@ -9908,7 +10022,9 @@ function AppController.has_any_usable_provider()
   if Store and Store.has_usable_provider then return Store.has_usable_provider() end
   if not PROVIDERS then return false end
   for _, p in ipairs(PROVIDERS) do
-    if p and (p.is_custom or (S.api_key_map and S.api_key_map[p.id])) then
+    if p and (p.is_custom
+        or (S.api_key_map and S.api_key_map[p.id]
+          and tostring(S.api_key_map[p.id]) ~= "")) then
       return true
     end
   end
@@ -9920,8 +10036,13 @@ function AppController.provider_items(opts)
   local out = {}
   if not PROVIDERS then return out end
   for i, p in ipairs(PROVIDERS) do
-    local configured = p.is_custom
-      or (S.api_key_map and S.api_key_map[p.id] ~= nil)
+    local configured = Store and Store.provider_has_usable_credentials
+      and Store.provider_has_usable_credentials(p)
+    if not configured then
+      configured = p.is_custom
+        or (S.api_key_map and S.api_key_map[p.id]
+          and tostring(S.api_key_map[p.id]) ~= "")
+    end
     if configured or opts.include_unconfigured then
       local label = p.label or p.id or ("Provider " .. tostring(i))
       if p.id == "google" and S.gemini_paid_tier == false then
@@ -10588,6 +10709,8 @@ function AppController.latest_response_payload()
       undo_sent = false,
       can_undo = false,
       auto_run_block_reason = nil,
+      validation_status = nil,
+      validation_block_kind = nil,
       local_answer = false,
       provider_id = nil,
       model_label = nil,
@@ -10615,6 +10738,8 @@ function AppController.latest_response_payload()
     undo_sent = AppController.message_undo_sent(msg),
     can_undo = AppController.message_can_undo_generated_action(msg),
     auto_run_block_reason = msg and msg.auto_run_block_reason or nil,
+    validation_status = msg and msg.validation_status or nil,
+    validation_block_kind = msg and msg.validation_block_kind or nil,
     local_answer = msg and msg.local_answer == true,
     provider_id = msg and msg.provider_id or nil,
     model_label = msg and msg.model_label or nil,
@@ -10640,6 +10765,14 @@ function AppController.latest_code_run_info()
       reason = "not_lua",
       message = AppController.t("a11y.sr.run_code_lua_only", nil,
         "Only Lua code can be run directly from Screen Reader Mode."),
+    }
+  end
+  if ScreenReader and ScreenReader.payload_blocks_manual_lua_run
+      and ScreenReader.payload_blocks_manual_lua_run(payload) then
+    return {
+      can_run = false,
+      reason = "validation_blocked",
+      message = ScreenReader.manual_lua_run_block_text(payload),
     }
   end
   local artifact = Code and Code.classify_lua_artifact
@@ -10858,14 +10991,16 @@ end
 function AppController.typed_action_lua_request_prompt(original_request)
   return TypedActionController.typed_action_lua_request_prompt(original_request)
 end
-function AppController.request_lua_for_typed_action_message(msg, message_idx)
-  return TypedActionController.request_lua_for_typed_action_message(msg, message_idx)
+function AppController.request_lua_for_typed_action_message(msg, message_idx, opts)
+  return TypedActionController.request_lua_for_typed_action_message(
+    msg, message_idx, opts)
 end
-function AppController.request_lua_for_latest_typed_action()
+function AppController.request_lua_for_latest_typed_action(opts)
   local payload = AppController.latest_response_payload()
   return TypedActionController.request_lua_for_typed_action_message(
     payload and payload.message or nil,
-    payload and payload.message_idx or nil)
+    payload and payload.message_idx or nil,
+    opts)
 end
 function AppController.feedback_available()
   return Diag and Diag.uploader_enabled == true

@@ -1,5 +1,15 @@
 # ReaAssist - Changelog
 
+## v1.4.1 - 2026-06-11
+
+- **Generated edits are safer and more accurate.** ReaAssist now catches more bad Lua and JSFX before it runs, with stronger guards for bar/beat loop ranges, ruler timebase changes, MIDI pitch/timing mistakes, track routing, waveform-sync prompts, destructive actions, and lower-tier model failure patterns.
+
+- **Structured edits have clearer manual controls.** Validated project edits can be reviewed, run, or converted to normal Lua more deliberately, including Screen Reader Mode controls and clearer handling when validation blocks a run.
+
+- **Installer, localization, and platform polish are broader.** The dependency installer has expanded localized text and clearer timeout guidance, temp files are safer for shared installs, diagnostics redact more aggressively, Linux image attachments have fallbacks, and chat bubbles handle long text better.
+
+- **REAPER knowledge is refreshed through REAPER 7.74.** The bundled reference now covers recent ReaScript and workflow changes, including read-only project state, `fxoffline:` project opening, updated FX parameter formatting, multi-mono/stereo FX containers, and sample-editing improvements.
+
 ## v1.4.0 - 2026-06-04
 
 - **Screen Reader Mode has been added.** ReaAssist now includes `ReaAssist_Screen_Reader_Mode.lua`, a dedicated accessible companion action for OSARA users. It provides a keyboard-first workflow for prompt entry, chat, settings, API key setup, custom providers, attachments, feedback, issue reporting, and help. Screen Reader Mode requires OSARA, the REAPER accessibility extension; if OSARA is missing, ReaAssist shows setup instructions and opens the official OSARA download page.

@@ -109,10 +109,10 @@ with whatever type the band currently is, or instruct the user to set the type
 manually. Never attempt to set band type via TrackFX_SetParam or SetParamNormalized.
 
 DEFAULT BAND STATES (new instance):
-  Band 1 (Low Shelf):  ENABLED  -- default gain = 0dB (0.50)
-  Band 2 (Band):       ENABLED  -- default gain = 0dB (0.50)
-  Band 3 (Band):       ENABLED  -- default gain = 0dB (0.50)
-  Band 4 (High Shelf): ENABLED  -- default gain = 0dB (0.50)
+  Band 1 (Low Shelf):  ENABLED  -- default gain = -6dB (0.25), NOT flat
+  Band 2 (Band):       ENABLED  -- default gain = -6dB (0.25), NOT flat
+  Band 3 (Band):       ENABLED  -- default gain = -6dB (0.25), NOT flat
+  Band 4 (High Shelf): ENABLED  -- default gain = -6dB (0.25), NOT flat
   Band 5 (High Pass):  DISABLED by default -- setting params has no audible effect
 Band enable/disable is stored in ReaEQ's internal chunk data, NOT as a scriptable
 parameter. There is no enable param index among the 19 exposed params.
@@ -262,12 +262,16 @@ All values use TrackFX_SetParamNormalized. 0.50 = 0dB (flat). See gain scale abo
   reaper.TrackFX_SetParamNormalized(tr, fx, 1, 0.40)   -- Gain: ~-1.5dB cut
 ```
 
-**"Remove rumble" -- raise the High Pass (band 5):**
+**"Remove rumble" -- prepare Band 1, then use the UI to make it High Pass:**
 
 ```lua
-  reaper.TrackFX_SetParamNormalized(tr, fx, 12, 0.27)  -- Freq: ~80Hz HP
-  reaper.TrackFX_SetParamNormalized(tr, fx, 13, 0.50)  -- Gain: flat (0dB)
+  reaper.TrackFX_SetParamNormalized(tr, fx, 0, 0.1094) -- Freq: ~80Hz
+  reaper.TrackFX_SetParamNormalized(tr, fx, 1, 0.50)  -- Gain: flat (0dB)
 ```
+
+Then tell the user to change Band 1's type from Low Shelf to High Pass in
+the ReaEQ UI. Do not write Band 5 params on a freshly added ReaEQ; Band 5 is
+disabled by default and will ignore parameter changes until enabled manually.
 
 ### FULL PATTERN (add ReaEQ and darken)
 
@@ -2952,7 +2956,7 @@ as representative; bands 3-24 follow the same 23-param stride.
    dynamic, positive=upward). Then tune Threshold/Attack/Release.
 
 5. **Pro-Q 4 supports 24 bands.** Band N indices run 0..22 for N=1, then stride
-   23 per band. Band 24 last param = 547. Params at 552+ are globals.
+   23 per band. Band 24 last param = 551. Params at 552+ are globals.
 
 ### BAND LAYOUT (23 params per band)
 

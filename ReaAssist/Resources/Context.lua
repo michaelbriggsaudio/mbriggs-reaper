@@ -2167,6 +2167,33 @@ function CTX.local_read_answer(user_text, proj)
   lt = lt:gsub("^%s*no%s+code%s+this%s+time:%s*", "")
   if lt:match("^%s*$") then return nil end
   if lt:find("\n", 1, true) then return nil end
+  local sound_classification =
+    (lt:find("%f[%w]sound%f[%W]") ~= nil
+      or lt:find("%f[%w]audio%f[%W]") ~= nil
+      or lt:find("%f[%w]waveform%f[%W]") ~= nil
+      or lt:find("sound wave", 1, true) ~= nil)
+    and (lt:find("%f[%w]classify%w*%f[%W]") ~= nil
+      or lt:find("%f[%w]identify%w*%f[%W]") ~= nil
+      or lt:find("%f[%w]kind%f[%W]") ~= nil
+      or lt:find("%f[%w]type%f[%W]") ~= nil
+      or lt:find("%f[%w]category%f[%W]") ~= nil
+      or lt:find("%f[%w]ucs%f[%W]") ~= nil
+      or lt:find("what is this", 1, true) ~= nil
+      or lt:find("what's this", 1, true) ~= nil)
+  local forbids_metadata =
+    lt:find("%f[%w]not%s+the%s+name", 1, false) ~= nil
+    or lt:find("%f[%w]not%s+the%s+names", 1, false) ~= nil
+    or lt:find("%f[%w]not%s+.*%f[%w]track", 1, false) ~= nil
+    or lt:find("%f[%w]not%s+.*%f[%w]item", 1, false) ~= nil
+    or lt:find("%f[%w]not%s+.*%f[%w]project", 1, false) ~= nil
+    or lt:find("%f[%w]only%s+on%s+the%s+sound", 1, false) ~= nil
+    or lt:find("%f[%w]only%s+on%s+the%s+audio", 1, false) ~= nil
+    or lt:find("%f[%w]only%s+on%s+the%s+waveform", 1, false) ~= nil
+    or lt:find("based only on the sound", 1, true) ~= nil
+    or lt:find("based only on the audio", 1, true) ~= nil
+    or lt:find("based only on the waveform", 1, true) ~= nil
+    or lt:find("based only on the sound wave", 1, true) ~= nil
+  if sound_classification or forbids_metadata then return nil end
   local session_overview =
        (lt:find("what information", 1, true) ~= nil
         and (lt:find("current reaper session", 1, true) ~= nil
@@ -4050,10 +4077,11 @@ end
 -- =============================================================================
 -- Conditional prompt bundles -- sections of the system prompt that apply only
 -- to certain request types. They live in a single physical file
--- (Resources/Prompts.md) with four buckets delimited by
+-- (Resources/Prompts.md) with buckets delimited by
 -- `<!-- SECTION:name -->` ... `<!-- /SECTION:name -->` markers:
 --   plugin          plugin / FX add + configure workflow
 --   plugin_helpers  parameter-helper code patterns (find_param, etc.)
+--   drums           phase-safe drum edit / quantize workflow
 --   jsfx            JSFX (EEL2) generation rules
 --   jsfx_dsp_cookbook  Delay/reverb/modulation JSFX memory recipes
 --   theme           SetThemeColor backup safety rule
@@ -4070,6 +4098,7 @@ local PROMPTS_FILE = "Prompts.md"
 local PROMPT_BUNDLE_NAMES = {
   plugin         = true,
   plugin_helpers = true,
+  drums          = true,
   jsfx           = true,
   jsfx_dsp_cookbook = true,
   jsfx_pitch     = true,
@@ -5765,9 +5794,8 @@ function CTX.fx_inspect_load(search_names)
   end
   Log.line("FX_INSPECT", "cache MISS: " .. best_id .. " -- scanning")
 
-  -- Insert temp track at end, add plugin. Wrap in an explicit undo block so
-  -- the flags=0 Undo_EndBlock in the read phase discards our own edits
-  -- cleanly; without a matching Begin, the End would mismatch the stack.
+  -- Insert temp track at end, add plugin. The setup block is closed before
+  -- returning to REAPER so the later deferred reader does not inherit it.
   reaper.Undo_BeginBlock()
   reaper.PreventUIRefresh(1)
   local track_count = R_CountTracks(0)
@@ -5794,7 +5822,11 @@ function CTX.fx_inspect_load(search_names)
   -- Hide the plugin UI (don't flash a window).
   reaper.TrackFX_Show(tmp_tr, fx_idx, 2)  -- 2 = hide floating window
 
-  return tmp_tr, fx_idx, best_id, nil
+  -- Do not leave the undo block open while the caller waits for plugin
+  -- initialization on later defer ticks. Cleanup deletes the temp track later;
+  -- this flags=0 block discards the setup work from the user's undo history.
+  reaper.Undo_EndBlock("ReaAssist: fx_inspect load", 0)
+  return tmp_tr, fx_idx, best_id, nil, nil, false
 end
 
 -- =============================================================================
@@ -6009,7 +6041,10 @@ function CTX.load_pref_plugins()
   -- After seeding, we write back so subsequent loads skip this block.
   if cache.preferred_aliases == nil then
     cache.preferred_aliases = pref_plugins.default_aliases()
-    FXCache.save(cache)
+    local err = FXCache.save(cache)
+    if err and Store and Store._notify_write_failure then
+      Store._notify_write_failure("FX cache", err)
+    end
   end
   local pref_aliases = cache.preferred_aliases or {}
   -- ExtState is process-shared and always current, so consumers read
@@ -6367,6 +6402,7 @@ function CTX.pref_plugins_scan_start(force)
 
   -- Phase 1: create temp track and add all plugins.
   reaper.Undo_BeginBlock()
+  scan.undo_open = true
   reaper.PreventUIRefresh(1)
   reaper.InsertTrackAtIndex(reaper.CountTracks(0), false)
   local tr = reaper.GetTrack(0, reaper.CountTracks(0) - 1)
@@ -6377,6 +6413,7 @@ function CTX.pref_plugins_scan_start(force)
       "settings.pref_plugins.toast.scan_failed_track", nil,
       "Scan failed: couldn't create temp track"), "err")
     reaper.Undo_EndBlock("ReaAssist: scan (failed)", 0)
+    scan.undo_open = false
     scan.cache = nil
     return
   end
@@ -6391,6 +6428,11 @@ function CTX.pref_plugins_scan_start(force)
     -- Hide plugin UI.
     if fx >= 0 then reaper.TrackFX_Show(tr, fx, 2) end
   end
+
+  -- Close the setup undo block before returning to the main loop. The read and
+  -- cleanup phase runs on a later frame, so it must not inherit this block.
+  reaper.Undo_EndBlock("ReaAssist: preferred plugins scan load", 0)
+  scan.undo_open = false
 
   scan.active = true
   scan.phase  = "reading"  -- will be processed on the next loop() frame
@@ -6428,7 +6470,10 @@ function CTX.pref_plugins_scan_read()
       "settings.pref_plugins.toast.scan_failed_lost", nil,
       "Scan failed: temp track lost"), "err")
     reaper.PreventUIRefresh(-1)
-    reaper.Undo_EndBlock("ReaAssist: scan (failed)", 0)
+    if scan.undo_open then
+      reaper.Undo_EndBlock("ReaAssist: scan (failed)", 0)
+      scan.undo_open = false
+    end
     return
   end
 
@@ -6441,7 +6486,7 @@ function CTX.pref_plugins_scan_read()
   -- Per-entry xpcall: if scan_fx_params throws on one plugin (stale handle,
   -- REAPER returning nil mid-probe, etc.) we do NOT want to skip the cleanup
   -- at the end of this function -- that would leave an orphaned hidden temp
-  -- track + a stuck PreventUIRefresh(-1) imbalance + an unclosed Undo block.
+  -- track plus a stuck PreventUIRefresh(-1) imbalance.
   -- The failed entry is logged and skipped so the remaining plugins still scan.
   local scan_failures = {}
   for _, entry in ipairs(scan.fx_map) do
@@ -6508,13 +6553,12 @@ function CTX.pref_plugins_scan_read()
   -- Clean up: remove temp track.
   reaper.DeleteTrack(tr)
   reaper.PreventUIRefresh(-1)
-  -- flags=0 (instead of -1) explicitly discards the block so the temp-track
-  -- insert + probe writes + delete never enter the user's undo history.
-  -- The earlier pattern relied on Undo_EndBlock(-1) + Undo_DoUndo2(0), which
-  -- walks back one slot -- safe only when REAPER's heuristic actually
-  -- registered this block. If it didn't (net-zero change detection), the
-  -- DoUndo2 would walk into the user's previous action.
-  reaper.Undo_EndBlock("ReaAssist: preferred plugins scan", 0)
+  if scan.undo_open then
+    -- Legacy guard: the setup block should already be closed before this
+    -- deferred read phase, but never let an unexpected open block leak.
+    reaper.Undo_EndBlock("ReaAssist: preferred plugins scan", 0)
+    scan.undo_open = false
+  end
 
   -- Save the unified JSON cache.
   local err = FXCache.save(cache)
@@ -7300,6 +7344,13 @@ function CTX.preempt_buckets_for_prompt(user_text)
     end
   end
   if CTX.prompt_indicates_drum_edit(user_text) then
+    local drums_key = "prompt_bundle:drums"
+    local drums_already = S.sticky_context[drums_key]
+    Net.copin_jsfx_family("drums", injected)
+    if not drums_already and S.sticky_context[drums_key] then
+      Log.line("PREEMPT",
+        "injected " .. drums_key .. " (drum edit/quantize workflow)")
+    end
     local docs_already = S.api_ref_message ~= nil
     Net.copin_docs_core(injected)
     if not docs_already and S.api_ref_message then

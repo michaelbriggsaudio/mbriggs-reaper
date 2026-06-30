@@ -6949,12 +6949,18 @@ function CTX.prompt_indicates_timecode_generator(text)
 end
 
 if REQUIRE_SWS_EXTENSION and not SupportExtFlag("optoutsws") then
-  -- SWS docs are advertised only when the rollout flag is enabled. The
-  -- loader accepts docs:sws either way, but normal releases should not
-  -- nudge the model toward extension-only calls while SWS is still optional.
+  -- SWS docs are advertised only when SWS is required for the current
+  -- install. The loader accepts docs:sws either way, but opt-out support
+  -- should not nudge the model toward extension-only calls.
   local sws_hints = {
     { "%f[%w]sws%f[%W]",                  "sws" },
     { "s&m",                              "sws" },
+    { "startup action",                   "sws" },
+    { "startup actions",                  "sws" },
+    { "custom startup action",            "sws" },
+    { "global startup action",            "sws" },
+    { "project startup action",           "sws" },
+    { "sws startup",                      "sws" },
     { "system clipboard",                 "sws" },
     { "%f[%w]clipboard%f[%W]",            "sws" },
     { "mouse cursor context",             "sws" },
@@ -7234,8 +7240,18 @@ function CTX.preempt_buckets_for_prompt(user_text)
       "new in reaper", "what's new", "whats new",
       "reaper 7.65", "reaper 7.66", "reaper 7.67", "reaper 7.68",
       "reaper 7.69", "reaper 7.70", "reaper 7.71", "reaper 7.72",
-      "reaper 7.73", "left/right to grid", "envelope points",
+      "reaper 7.73", "reaper 7.74", "reaper 7.75", "reaper 7.76",
+      "left/right to grid", "envelope points",
       "midi choke", "choke group", "track grouping", "grouped razor",
+      "multi-mono", "multi-stereo", "fx container", "fxoffline",
+      "read-only project", "project dirty", "dirty project",
+      "empty fx slot", "fx slot", "send slot", "empty send slot",
+      "ui-ordered send", "ui ordered send", "tcp sendlist",
+      "mcp sendlist", "chain_index_to_slot", "chain_slot_to_index",
+      "automation item mute", "mute automation item", "d_mute",
+      "getsetautomationiteminfo", "gettracksendname", "addregionormarker",
+      "delete all sample edits", "mono downmix", "send envelopes",
+      "spectral repair", "visual spacer", "navigator",
       "sample edit", "sample editing", "sample edit envelope",
       "set sample values to zero", "render hidden marker",
       "render hidden region", "hidden marker", "hidden region",

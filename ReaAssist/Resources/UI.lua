@@ -12564,7 +12564,7 @@ function Render.custom_llm_screen()
     -- Trailing-boundary check (next char must NOT be alphanumeric) avoids
     -- false positives on tokens like "7bee" or "7b1234" (a hash); leading
     -- side is naturally bounded by the digit class. Names without a B-token
-    -- (gpt-4o, claude-sonnet-4-6, mistral-large, "model") return nil and the
+    -- (gpt-4o, claude-sonnet-5, mistral-large, "model") return nil and the
     -- prose advisory above remains the safety net.
     local function _detect_param_b(s)
       if not s or s == "" then return nil end
@@ -17634,46 +17634,93 @@ function Render.main_window()
         end
 
         if msg.recovery == "google_model_capacity" then
+          local can_retry = msg.recovery_prompt
+            and msg.recovery_prompt ~= ""
+            and (S.status == "idle" or S.status == "error")
           local can_switch = msg.fallback_provider_id
             and msg.fallback_model_id
             and (S.status == "idle" or S.status == "error")
-          if can_switch then
+          if can_retry or can_switch then
             ImGui.ImGui_Spacing(RA.ctx)
             PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 1)
             PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(),   RA.SC(4))
             PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),    RA.SC(10), RA.SC(5))
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(), TK.border)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        TK.accent_ui)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), UI.lerp_u32(TK.accent_ui, TK.accent, 0.35))
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  UI.lerp_u32(TK.accent_ui, TK.accent, 0.55))
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.accent_text)
             PushFont(RA.ctx, FONT.mono_med, RA.SC(11))
-            local label = UI.t("message.switch_to", {
-              label = msg.fallback_label or "Flash 3.5",
-            }, "Switch to " .. (msg.fallback_label or "Flash 3.5"))
-              .. "##google_capacity_" .. i
-            if ImGui.ImGui_Button(RA.ctx, label, 0, 0) then
-              local ok, err = PROVIDERS.switch_to_model(
-                msg.fallback_provider_id, msg.fallback_model_id)
-              if ok then
-                msg.recovery_used = true
-                local sent, send_err = Net.resend_saved_prompt(
-                  msg.recovery_prompt, msg.recovery_attachments)
-                if not sent then
-                  UI.show_float_toast(send_err
-                    or UI.t("message.resend_failed", nil,
-                      "Could not resend message"), "err")
+            local ACC_BG  = TK.accent_ui
+            local ACC_HOV = UI.lerp_u32(TK.accent_ui, TK.accent, 0.35)
+            local ACC_ACT = UI.lerp_u32(TK.accent_ui, TK.accent, 0.55)
+            local SEC_BG  = TK.card_hover
+            local SEC_HOV = UI.lerp_u32(TK.card_hover, TK.accent_ui, 0.25)
+            local SEC_ACT = UI.lerp_u32(TK.card_hover, TK.accent_ui, 0.45)
+            if can_retry then
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        ACC_BG)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), ACC_HOV)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  ACC_ACT)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.accent_text)
+              if ImGui.ImGui_Button(RA.ctx,
+                  UI.t("message.retry", nil, "Retry Message")
+                  .. "##google_capacity_retry_" .. i, 0, 0) then
+                local ok, err = true, nil
+                if msg.provider_id and msg.model_id then
+                  ok, err = PROVIDERS.switch_to_model(msg.provider_id,
+                    msg.model_id)
                 end
-              else
-                UI.show_float_toast(err
-                  or UI.t("message.switch_failed", nil,
-                    "Could not switch models"), "err")
+                if ok then
+                  msg.recovery_used = true
+                  local sent, send_err = Net.resend_saved_prompt(
+                    msg.recovery_prompt, msg.recovery_attachments)
+                  if not sent then
+                    UI.show_float_toast(send_err
+                      or UI.t("message.resend_failed", nil,
+                        "Could not resend message"), "err")
+                  end
+                else
+                  UI.show_float_toast(err
+                    or UI.t("message.switch_failed", nil,
+                      "Could not switch models"), "err")
+                end
               end
+              UI.tooltip(UI.t("message.retry_same_model.tooltip", nil,
+                "Retry the same prompt on the same Gemini model."))
+              PopStyleColor(RA.ctx, 4)
             end
-            UI.tooltip(UI.t("message.switch_resend.tooltip", nil,
-              "Switch Gemini to Flash 3.5 and resend the original message."))
+            if can_switch then
+              if can_retry then Dummy(RA.ctx, 1, RA.SC(6)) end
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        SEC_BG)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), SEC_HOV)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  SEC_ACT)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.text_muted)
+              local label = UI.t("message.switch_to", {
+                label = msg.fallback_label or "the fallback model",
+              }, "Switch to " .. (msg.fallback_label or "the fallback model"))
+                .. "##google_capacity_switch_" .. i
+              if ImGui.ImGui_Button(RA.ctx, label, 0, 0) then
+                local ok, err = PROVIDERS.switch_to_model(
+                  msg.fallback_provider_id, msg.fallback_model_id)
+                if ok then
+                  msg.recovery_used = true
+                  local sent, send_err = Net.resend_saved_prompt(
+                    msg.recovery_prompt, msg.recovery_attachments)
+                  if not sent then
+                    UI.show_float_toast(send_err
+                      or UI.t("message.resend_failed", nil,
+                        "Could not resend message"), "err")
+                  end
+                else
+                  UI.show_float_toast(err
+                    or UI.t("message.switch_failed", nil,
+                      "Could not switch models"), "err")
+                end
+              end
+              UI.tooltip(UI.t("message.switch_resend.tooltip", {
+                  label = msg.fallback_label or "the fallback model",
+                },
+                "Switch Gemini to the fallback model and resend the original message."))
+              PopStyleColor(RA.ctx, 4)
+            end
             PopFont(RA.ctx)
-            PopStyleColor(RA.ctx, 5)
+            PopStyleColor(RA.ctx, 1) -- Border
             ImGui.ImGui_PopStyleVar(RA.ctx, 3)
           end
         end

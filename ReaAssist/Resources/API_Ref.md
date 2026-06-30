@@ -6,7 +6,8 @@
 <!-- SECTION:core -->
 # REAPER ReaScript Lua API Reference
 
-Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.74)
+Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.75),
+plus official Cockos changelog notes through REAPER v7.76.
 Lua-only. All functions called as reaper.FunctionName().
 Use proj=0 for active project. Track/item indices in the API are 0-based.
 
@@ -44,6 +45,22 @@ REAPER installs: `if reaper.FunctionName then ... else ... end`.
 - REAPER 7.74+: `boolean retval, string buf = reaper.TrackFX_FormatParamValueNormalized(track, fx, param, value)`
   and the `TakeFX_` equivalent return the formatted string directly in Lua; do
   not pass a dummy output string argument.
+- REAPER 7.75+: `TrackFX_GetNamedConfigParm(track, fx, "chain_index_to_slot")`
+  maps a dense FX-chain index to its displayed TCP/MCP FX slot. For the reverse
+  direction, call `TrackFX_GetNamedConfigParm(track, slot, "chain_slot_to_index")`;
+  an empty displayed slot can return `empty:x`, where `x` is the chain index
+  that would fill that slot.
+- REAPER 7.75+: `GetSetProjectInfo(0, "DIRTY", value, is_set)` can query or
+  update project modified state. Use this only for explicit save-state tasks;
+  never clear a dirty project just to suppress prompts.
+- REAPER 7.75+: TrackSend APIs can access mixer/TCP send and hardware-output
+  UI ordering. `GetTrackNumSends(track, 0x10000000)` returns the sparse UI list
+  size; add `0x10000000` to a send index for UI-ordered Get/Set/Remove/Name
+  access. Prefer dense category 0/1 indices unless the user specifically asks
+  about send slots or empty send positions.
+- REAPER 7.76+: `GetSetAutomationItemInfo(env, autoitem_idx, "D_MUTE", value,
+  is_set)` can query or set automation item mute state. `autoitem_idx` is
+  0-based within the envelope; use `CountAutomationItems(env)` before looping.
 - REAPER 7.70+: `boolean retval, string fn = reaper.GetUserFileName(integer mode, string caption, string initial_file_or_path, string extension_list)`.
   Native file picker modes: 0=new/save file, 1=existing/open file,
   2=multiple files, 3=directory. `extension_list` uses pipe-separated pairs
@@ -58,6 +75,8 @@ REAPER installs: `if reaper.FunctionName then ... else ... end`.
   Iterate numeric lane suffixes from 0 through `RULER_LANE_COUNT - 1`
   (for example, `RULER_LANE_DEFAULT:0`). Value 1=default for new regions,
   2=default for new markers, 3=default for both.
+- REAPER 7.75+: `GetThingFromPoint(x, y)` can identify item hits from
+  `mcp.sendlist`, `tcp.sendlist`, and related send-list UI surfaces.
 - REAPER 7.67+: `TrackFX_GetParamSectionName(track, fx, param)` and
   `TakeFX_GetParamSectionName(take, fx, param)` read VST3 unit / CLAP module
   parameter section names when the plug-in exposes them.
@@ -503,7 +522,9 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
   Read plug-in/chain metadata. Useful keys include `pdc`, `in_pin_X`,
   `out_pin_X`, `fx_type`, `fx_ident`, `fx_name`, `original_name`,
   `au_ids` (Audio Units), `param.X.automatable`, `container_count`,
-  `parent_container`, and `container_item.X`. Returns false if unsupported.
+  `parent_container`, and `container_item.X`. REAPER 7.75+ also supports
+  `chain_index_to_slot` and `chain_slot_to_index` for mapping between dense FX
+  chain indices and displayed sparse TCP/MCP FX slots. Returns false if unsupported.
   For dry/wet preview scripts, skip virtual instruments by checking whether
   `fx_type` ends in `i` (or the displayed name begins with VSTi/AUi/etc.), then
   use `TrackFX_GetParamFromIdent(track, fx, ":wet")` for the remaining FX.
@@ -742,7 +763,9 @@ end
 `integer reaper.GetAudioAccessorSamples(AudioAccessor accessor, integer samplerate, integer numchannels, number starttime_sec, integer numsamplesperchannel, reaper.array samplebuffer)`
   Fill samplebuffer with interleaved samples. For take accessors, scripts in
   this install use starttime_sec as take/item-relative seconds. Allocate at
-  least numsamplesperchannel*numchannels values.
+  least numsamplesperchannel*numchannels values. Treat nil or any non-positive
+  result as a read failure before inspecting the buffer; do not compare the
+  return value numerically until you have guarded nil.
 
 Use audio accessors for measurement, previews, or custom approximate detectors.
 Do NOT use a simple energy/peak threshold as the default way to place stretch
@@ -771,9 +794,11 @@ if take and not reaper.TakeIsMIDI(take) then
 
   for pos = 0, len, step_s do
     local ok = reaper.GetAudioAccessorSamples(acc, sr, ch, pos, n, buf)
-    if ok == 0 then break end
+    if not ok or ok <= 0 then break end
+    local raw = buf.table and buf.table() or nil
+    if not raw or #raw < n * ch then break end
     local peak = 0
-    for i = 1, n * ch do peak = math.max(peak, math.abs(buf[i])) end
+    for i = 1, n * ch do peak = math.max(peak, math.abs(raw[i] or 0)) end
     if peak >= 0.15 and prev_peak < 0.15 then
       candidates = candidates + 1
     end
@@ -830,6 +855,10 @@ inserted/skipped counts.
 
 - `READONLY` (REAPER 7.74+): 1 if the project is opened read-only, 0 otherwise.
   Setting it changes the temporary project state, not the filesystem attribute.
+- `DIRTY` (REAPER 7.75+): 1 if the project was modified since last save, 0 if
+  unmodified. It can also report/set 256 for the temporary-save state used when
+  REAPER's relevant preferences are enabled. Do not clear this unless the user
+  explicitly asked to manage save/dirty state.
 
 RULER LANE KEYS (REAPER 7.62+ / 7.65+ / 7.71+):
 - `RULER_HEIGHT`: ruler height in pixels.
@@ -984,6 +1013,11 @@ Useful string keys:
 
 `reaper.BypassFxAllTracks(integer bypass)`
   -1=bypass all if not all already bypassed, otherwise unbypass all.
+
+`MediaTrack retval, string info reaper.GetThingFromPoint(integer screen_x, integer screen_y)`
+  Hit-test screen coordinates. `info` can identify arrange, FX, TCP/MCP
+  controls, and REAPER 7.75+ send-list surfaces such as `mcp.sendlist` and
+  `tcp.sendlist`. May return nil with a valid `info` string for non-track hits.
 
 ReaImGui extension notes (only when writing an ImGui script):
 - Do not rely on `reaper.ImGui_PushButtonRepeat`; it is absent from common
@@ -1630,6 +1664,32 @@ inspect, filter, or programmatically pick which items go in which group.
   Use `I_DISPLAYEDCOLOR` when the user asks for the actual displayed envelope
   color; use ColorFromNative() to split the returned native color into RGB.
 
+### Automation Items
+
+`integer reaper.CountAutomationItems(TrackEnvelope env)`
+  Count automation items on an envelope.
+
+`integer reaper.InsertAutomationItem(TrackEnvelope env, integer pool_id, number position, number length)`
+  Insert a new automation item. `pool_id < 0` collects existing points into the
+  item; `pool_id >= 0` creates a new instance of that pool. The return value is
+  the automation item index for the other automation-item APIs.
+
+`number reaper.GetSetAutomationItemInfo(TrackEnvelope env, integer autoitem_idx, string desc, number value, boolean is_set)`
+  Get/set numeric automation item information. `autoitem_idx` is 0-based.
+  Common keys include `D_POOL_ID`, `D_POSITION`, `D_LENGTH`, `D_STARTOFFS`,
+  `D_PLAYRATE`, `D_BASELINE`, `D_AMPLITUDE`, `D_LOOPSRC`, `D_UISEL`,
+  `D_POOL_QNLEN`, and REAPER 7.76+ `D_MUTE` (nonzero = muted).
+
+`boolean retval, string valuestrNeedBig reaper.GetSetAutomationItemInfo_String(TrackEnvelope env, integer autoitem_idx, string desc, string valuestrNeedBig, boolean is_set)`
+  Get/set string automation item information such as `P_POOL_NAME`.
+
+`integer reaper.CountEnvelopePointsEx(TrackEnvelope envelope, integer autoitem_idx)`
+`boolean retval, number time, number value, integer shape, number tension, boolean selected reaper.GetEnvelopePointEx(TrackEnvelope envelope, integer autoitem_idx, integer ptidx)`
+`boolean reaper.SetEnvelopePointEx(TrackEnvelope envelope, integer autoitem_idx, integer ptidx, optional number timeIn, optional number valueIn, optional integer shapeIn, optional number tensionIn, optional boolean selectedIn, optional boolean noSortIn)`
+  Use the `*Ex` envelope-point functions for points inside automation items.
+  `autoitem_idx=-1` targets the underlying envelope; `0` targets the first
+  automation item, `1` the second, etc.
+
 `boolean reaper.InsertEnvelopePoint(TrackEnvelope envelope, number time, number value, integer shape, number tension, boolean selected, optional boolean noSortIn)`
   Insert envelope point. shape: 0=linear,1=square,2=slow start/end,3=fast start,4=fast end,5=bezier.
   Call Envelope_SortPoints after bulk inserts.
@@ -1697,6 +1757,19 @@ local val    = 10 ^ (-6 / 20)                    -- -6 dB -> linear amplitude
 local scaled = reaper.ScaleToEnvelopeMode(mode, val)
 reaper.InsertEnvelopePoint(env, 4.0, scaled, 0, 0, false, false)
 reaper.Envelope_SortPoints(env)
+```
+
+```lua
+-- Pattern: mute selected automation items on the selected envelope (REAPER 7.76+).
+local env = reaper.GetSelectedEnvelope(0)
+if env and reaper.GetSetAutomationItemInfo then
+  for i = 0, reaper.CountAutomationItems(env) - 1 do
+    local selected = reaper.GetSetAutomationItemInfo(env, i, "D_UISEL", 0, false)
+    if selected ~= 0 then
+      reaper.GetSetAutomationItemInfo(env, i, "D_MUTE", 1, true)
+    end
+  end
+end
 ```
 
 ```lua
@@ -1813,21 +1886,29 @@ end)
 
 `boolean reaper.RemoveTrackSend(MediaTrack tr, integer category, integer sendidx)`
   Remove send (0), receive (-1), or hardware output (1).
+  REAPER 7.75+: add `0x10000000` to `sendidx` for UI-ordered send/hardware-
+  output access, which may be sparse.
   This does not control a track's master/parent send; use `B_MAINSEND`.
 
 `integer reaper.GetTrackNumSends(MediaTrack tr, integer category)`
-  Count sends (0), receives (-1), or hardware outputs (1).
+  Count sends (0), receives (-1), or hardware outputs (1). REAPER 7.75+:
+  category `0x10000000` returns the sparse UI-ordered send/hardware-output
+  list size; query `0x10000001` to test whether UI-ordered lists are supported.
 
 `number reaper.GetTrackSendInfo_Value(MediaTrack tr, integer category, integer sendidx, string parmname)`
   Get send/receive attribute. Key parmnames:
   D_VOL, D_PAN, D_PANLAW, B_MUTE, B_PHASE, B_MONO, I_SENDMODE,
-  I_SRCCHAN, I_DSTCHAN, I_MIDI_SRCCHAN, I_MIDI_DSTCHAN,
+  I_AUTOMODE, I_SRCCHAN, I_DSTCHAN, I_SLOT_HINT, I_MIDIFLAGS,
   P_DESTTRACK (read-only), P_SRCTRACK (read-only).
+  REAPER 7.75+: add `0x10000000` to `sendidx` to inspect UI-ordered send slots
+  in the TCP/MCP list; sparse empty slots may exist.
   `D_PAN` here is send pan. For track pan, use
   `SetMediaTrackInfo_Value(track, "D_PAN", value)`.
 
 `boolean reaper.SetTrackSendInfo_Value(MediaTrack tr, integer category, integer sendidx, string parmname, number newvalue)`
   Set send/receive attribute.
+  REAPER 7.75+: `I_SLOT_HINT` can hint the UI slot index for sends/hardware
+  outputs. Prefer normal dense send indices for ordinary routing scripts.
 
 ### CHANNEL BIT-PACKING (I_SRCCHAN / I_DSTCHAN)
 
@@ -1849,12 +1930,13 @@ value yourself -- ask the user to set it in the REAPER UI and operate on the
 existing send. The few extra cents of UI friction are cheaper than silently
 landing audio on the wrong channels.
 
-I_MIDI_SRCCHAN / I_MIDI_DSTCHAN:
-  Plain integers, NOT bit-packed. -1 = disabled. 0..15 = MIDI channel 1..16.
-  Subtract 1 when converting from user input ("MIDI channel 5" -> 4).
-  (Newer REAPER builds also expose I_MIDIFLAGS as a unified bit-packed
-  replacement; if the script needs MIDI channel routing and these older
-  attributes return -1 unexpectedly, fall back to reading I_MIDIFLAGS.)
+I_MIDIFLAGS:
+  Bit-packed MIDI send routing. Low 5 bits = source channel (0=all, 1-16,
+  31=disabled), next 5 bits = destination channel (0=original, 1-16), bit 10
+  enables fader-send MIDI volume/pan, bits 14-21 are source bus (0=all,
+  1=normal, 2+ secondary buses), and bits 22-29 are destination bus. If the
+  user asks for complex MIDI send routing, prefer inspecting an existing send
+  or asking them to set it in the UI rather than inventing bit math.
 ```
 
 ```lua
@@ -2190,6 +2272,59 @@ end
 
 `reaper.NF_UpdateSWSMarkerRegionSubWindow()`
   Redraw the SWS Notes window after subtitle edits.
+
+## SWS/S&M STARTUP ACTIONS
+
+SWS/S&M supports project and global startup actions. The SWS extension menu
+path is `Extensions -> Startup actions -> Set project startup action...` or
+`Set global startup action...`; the Action List entries are
+`SWS/S&M: Set project startup action` and
+`SWS/S&M: Set global startup action`.
+
+For extension actions, custom actions, macros, and ReaScripts, use the action's
+command ID / identifier string from the Main action section, usually copied by
+right-clicking the action in the Actions window and choosing the command-ID /
+identifier-copy option, then paste that command ID or identifier string into the
+SWS startup-action prompt. When giving user-facing setup instructions, include
+that copy/paste ID step; do not describe the flow as simply picking an action.
+Identifier strings such as `_SWS_ABOUT` or `_RS...` are the safe form for
+scripts and extension actions; do not invent native Preferences or Options menu
+locations when the task is specifically an SWS/S&M startup action.
+
+Native REAPER script startup is separate: REAPER can run `__startup.eel` or
+`__startup.lua` from the resource `Scripts` folder on launch. Use that only
+when the user is asking for a native startup script file, not when they ask for
+an SWS/S&M project/global startup action.
+
+`boolean reaper.NF_GetGlobalStartupAction(string descOut, integer descOut_sz, string cmdIdOut, integer cmdIdOut_sz)`
+  Read the current global startup action description and command ID or
+  identifier string. Returns false on failure.
+  Lua bindings return output strings as return values rather than mutating the
+  placeholder strings in place; capture the returned description and command ID
+  if using this read helper.
+
+`boolean reaper.NF_SetGlobalStartupAction(string str)`
+  Set the global startup action from a valid Main-section action ID or
+  identifier string. For SWS/S&M actions, macros, and scripts, use identifier
+  strings rather than numeric command IDs.
+
+`boolean reaper.NF_ClearGlobalStartupAction()`
+  Clear the global startup action.
+
+`boolean reaper.NF_GetProjectStartupAction(string descOut, integer descOut_sz, string cmdIdOut, integer cmdIdOut_sz)`
+  Read the current project startup action description and command ID or
+  identifier string. Returns false on failure.
+  Lua bindings return output strings as return values rather than mutating the
+  placeholder strings in place; capture the returned description and command ID
+  if using this read helper.
+
+`boolean reaper.NF_SetProjectStartupAction(string str)`
+  Set the project startup action from a valid Main-section action ID or
+  identifier string. Save the project afterward if the startup action should
+  persist with that project.
+
+`boolean reaper.NF_ClearProjectStartupAction()`
+  Clear the project startup action.
 
 ## FX-CHAIN WINDOW HELPERS
 

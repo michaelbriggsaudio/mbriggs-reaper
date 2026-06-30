@@ -509,7 +509,8 @@ function Code._typed_action_user_requests_master_send_state(user_text)
     :lower()
     :gsub("%s+", " ")
   if lt == "" then return false end
-  return lt:find("master send", 1, true) ~= nil
+  return Code._typed_action_user_requests_master_send_off(user_text) == true
+    or lt:find("master send", 1, true) ~= nil
     or lt:find("master sends", 1, true) ~= nil
     or lt:find("main send", 1, true) ~= nil
     or lt:find("main sends", 1, true) ~= nil
@@ -522,6 +523,72 @@ function Code._typed_action_user_requests_master_send_state(user_text)
     or lt:find("going only to the master", 1, true) ~= nil
     or lt:find("only goes to master", 1, true) ~= nil
     or lt:find("only to the master", 1, true) ~= nil
+end
+
+function Code._typed_action_user_requests_master_send_off(user_text)
+  local lt = Code._typed_action_user_request_text(user_text)
+    :lower()
+    :gsub("[’']", "")
+    :gsub("%s+", " ")
+  if lt == "" then return false end
+  for _, phrase in ipairs({
+    "turn off master send",
+    "turn off the master send",
+    "disable master send",
+    "disable the master send",
+    "master_send false",
+    "master send false",
+    "no master send",
+    "without master send",
+    "does not go to the master",
+    "doesnt go to the master",
+    "do not go to the master",
+    "dont go to the master",
+    "not go to the master",
+    "does not feed the master",
+    "doesnt feed the master",
+    "do not feed the master",
+    "dont feed the master",
+    "not feed the master",
+    "does not route to the master",
+    "doesnt route to the master",
+    "not routed to the master",
+    "not routing to the master",
+    "out of the master",
+    "away from the master",
+    "separate from the main mix",
+    "away from the main mix",
+  }) do
+    if lt:find(phrase, 1, true) then return true end
+  end
+  if lt:find("do not send[^%.\n;:]-to the master")
+      or lt:find("dont send[^%.\n;:]-to the master")
+      or lt:find("without sending[^%.\n;:]-to the master") then
+    return true
+  end
+  return false
+end
+
+function Code._typed_action_user_requests_record_ready_state(user_text)
+  local lt = Code._typed_action_user_request_text(user_text)
+    :lower()
+    :gsub("[’']", "")
+    :gsub("%s+", " ")
+  if lt == "" then return false end
+  for _, phrase in ipairs({
+    "ready for recording",
+    "ready to record",
+    "record ready",
+    "record-ready",
+    "record armed",
+    "record-armed",
+    "record arm",
+    "arm for recording",
+    "armed for recording",
+  }) do
+    if lt:find(phrase, 1, true) then return true end
+  end
+  return lt:find("%f[%w]arm%f[%W]%s+[^%.\n;:]-record") ~= nil
 end
 
 function Code._typed_action_track_property_intent_text(user_text)
@@ -1202,6 +1269,37 @@ function Code.repair_typed_actions_plan(plan, opts)
     end
     return false
   end
+  local function repair_user_mentions_db_magnitude(db)
+    local want = math.abs(tonumber(db) or 0)
+    if want == 0 then return false end
+    for raw in user_text:gmatch("([%+%-]?%d+%.?%d*)%s*[dD][bB]") do
+      local got = tonumber(raw)
+      if got and math.abs(math.abs(got) - want) <= 0.25 then return true end
+    end
+    return false
+  end
+  local function repair_user_mentions_gain_direction(db)
+    local want = tonumber(db)
+    if not want or not repair_user_mentions_db_magnitude(want) then
+      return false
+    end
+    if want < 0 then
+      return user_text_lower:find("pull", 1, true) ~= nil
+        or user_text_lower:find("down", 1, true) ~= nil
+        or user_text_lower:find("reduce", 1, true) ~= nil
+        or user_text_lower:find("lower", 1, true) ~= nil
+        or user_text_lower:find("dip", 1, true) ~= nil
+        or user_text_lower:find("attenuate", 1, true) ~= nil
+        or user_text_lower:find("cut", 1, true) ~= nil
+    elseif want > 0 then
+      return user_text_lower:find("boost", 1, true) ~= nil
+        or user_text_lower:find("raise", 1, true) ~= nil
+        or user_text_lower:find("lift", 1, true) ~= nil
+        or user_text_lower:find("push", 1, true) ~= nil
+        or user_text_lower:find("up", 1, true) ~= nil
+    end
+    return false
+  end
   local function repair_user_mentions_param(param, value, params)
     param = tostring(param or "")
     if param == "band" then
@@ -1218,6 +1316,7 @@ function Code.repair_typed_actions_plan(plan, opts)
       return user_text_lower:find("gain", 1, true) ~= nil
         or user_text_lower:find("boost", 1, true) ~= nil
         or user_text_lower:find("cut", 1, true) ~= nil
+        or repair_user_mentions_gain_direction(value)
         or (user_text_lower:find("band", 1, true) ~= nil
           and repair_user_mentions_db_value(value))
     elseif param == "threshold_db" then
@@ -1320,13 +1419,24 @@ function Code.repair_typed_actions_plan(plan, opts)
   end
 
   do
-    local known_fx_ids = {}
+    local known_fx_ids, known_fx_type_by_id = {}, {}
     for _, action in ipairs(plan.actions) do
       if type(action) == "table"
          and action.op == "fx.add_stock"
          and _typed_action_is_nonempty_string(action.id) then
         known_fx_ids[action.id] = true
+        known_fx_type_by_id[action.id] = tostring(action.fx or "")
       end
+    end
+    local function user_requested_eq_shelf_or_filter()
+      return user_text_lower:find("shelf", 1, true) ~= nil
+        or user_text_lower:find("low pass", 1, true) ~= nil
+        or user_text_lower:find("high pass", 1, true) ~= nil
+        or user_text_lower:find("low%-pass") ~= nil
+        or user_text_lower:find("high%-pass") ~= nil
+        or user_text_lower:find("filter", 1, true) ~= nil
+        or user_text_lower:find("%f[%w]hp%f[%W]") ~= nil
+        or user_text_lower:find("%f[%w]lp%f[%W]") ~= nil
     end
     local out, dropped = {}, 0
     for _, action in ipairs(plan.actions) do
@@ -1335,6 +1445,15 @@ function Code.repair_typed_actions_plan(plan, opts)
          and action.op == "fx.set_param"
          and known_fx_ids[action.fx]
          and type(action.params) == "table" then
+        if known_fx_type_by_id[action.fx] == "ReaEQ"
+            and tonumber(action.params.band) == 1
+            and action.params.frequency_hz ~= nil
+            and action.params.gain_db ~= nil
+            and repair_user_mentions_gain_direction(action.params.gain_db)
+            and not user_requested_eq_shelf_or_filter() then
+          action.params.band = 2
+          repaired = true
+        end
         local has_param, has_requested_param = false, false
         for param, value in pairs(action.params) do
           if value ~= nil then
@@ -4208,7 +4327,8 @@ function Code.typed_actions_prompt_contract(user_text, opts)
     return nil, "unsupported_hardware_output"
   end
 
-  if has_word_phrase("arm")
+  if Code._typed_action_user_requests_record_ready_state(user_text)
+      or has_word_phrase("arm")
       or has_word_phrase("armed")
       or has_word_phrase("record arm")
       or has_word_phrase("record armed")
@@ -4429,6 +4549,35 @@ function Code.validate_typed_actions_semantics(plan, opts)
     end
     return false
   end
+  local function user_mentions_db_magnitude(db)
+    local want = math.abs(tonumber(db) or 0)
+    if want == 0 then return false end
+    for raw in tostring(opts.user_text or ""):gmatch("([%+%-]?%d+%.?%d*)%s*[dD][bB]") do
+      local got = tonumber(raw)
+      if got and math.abs(math.abs(got) - want) <= 0.25 then return true end
+    end
+    return false
+  end
+  local function user_mentions_gain_direction(db)
+    local want = tonumber(db)
+    if not want or not user_mentions_db_magnitude(want) then return false end
+    if want < 0 then
+      return u:find("pull", 1, true) ~= nil
+        or u:find("down", 1, true) ~= nil
+        or u:find("reduce", 1, true) ~= nil
+        or u:find("lower", 1, true) ~= nil
+        or u:find("dip", 1, true) ~= nil
+        or u:find("attenuate", 1, true) ~= nil
+        or u:find("cut", 1, true) ~= nil
+    elseif want > 0 then
+      return u:find("boost", 1, true) ~= nil
+        or u:find("raise", 1, true) ~= nil
+        or u:find("lift", 1, true) ~= nil
+        or u:find("push", 1, true) ~= nil
+        or u:find("up", 1, true) ~= nil
+    end
+    return false
+  end
   local required_selected_indexes, selected_index_required =
     Code._typed_action_selected_indexes_from_user_text(opts.user_text)
   local positional_selector_forbidden =
@@ -4456,7 +4605,15 @@ function Code.validate_typed_actions_semantics(plan, opts)
     requests_stock_fx
     and (u:find("threshold", 1, true) ~= nil
       or u:find("frequency", 1, true) ~= nil
+      or u:find(" hz", 1, true) ~= nil
+      or u:find("khz", 1, true) ~= nil
+      or u:find("band", 1, true) ~= nil
       or u:find("gain", 1, true) ~= nil
+      or u:find("pull", 1, true) ~= nil
+      or u:find("push", 1, true) ~= nil
+      or u:find("lower", 1, true) ~= nil
+      or u:find("raise", 1, true) ~= nil
+      or u:find("dip", 1, true) ~= nil
       or u:find("ratio", 1, true) ~= nil
       or u:find("attack", 1, true) ~= nil
       or u:find("release", 1, true) ~= nil
@@ -4480,6 +4637,7 @@ function Code.validate_typed_actions_semantics(plan, opts)
       return u:find("gain", 1, true) ~= nil
         or u:find("boost", 1, true) ~= nil
         or u:find("cut", 1, true) ~= nil
+        or user_mentions_gain_direction(value)
         or (u:find("band", 1, true) ~= nil
           and user_mentions_db_value(value))
     elseif param == "threshold_db" then
@@ -4558,6 +4716,10 @@ function Code.validate_typed_actions_semantics(plan, opts)
     Code._typed_action_track_property_intent_text(opts.user_text)
   local requests_master_send_state =
     Code._typed_action_user_requests_master_send_state(opts.user_text)
+  local requests_master_send_off =
+    Code._typed_action_user_requests_master_send_off(opts.user_text)
+  local requests_record_ready_state =
+    Code._typed_action_user_requests_record_ready_state(opts.user_text)
   local requests_track_properties =
     (track_property_text:find("volume", 1, true) ~= nil
       or track_property_text:find("fader", 1, true) ~= nil
@@ -4597,6 +4759,7 @@ function Code.validate_typed_actions_semantics(plan, opts)
   local requests_pan_lfo =
     type(Code.prompt_requests_pan_lfo_automation) == "function"
     and Code.prompt_requests_pan_lfo_automation(opts.user_text)
+  local master_send_off_seen = false
   local function is_fx_like_track_name(name)
     local n = " " .. word_text(name) .. " "
     return n:find(" eq ", 1, true) ~= nil
@@ -4664,6 +4827,24 @@ function Code.validate_typed_actions_semantics(plan, opts)
   local function requested_folder_memberships(text)
     text = tostring(text or "")
     local wanted = {}
+    local by_parent = {}
+    local function add_membership(parent, children)
+      parent = normalized_name(parent)
+      if parent == "" or type(children) ~= "table" then return end
+      local item = by_parent[parent]
+      if not item then
+        item = { parent = parent, children = {}, seen = {} }
+        by_parent[parent] = item
+        wanted[#wanted + 1] = item
+      end
+      for _, child in ipairs(children) do
+        child = normalized_name(child)
+        if child ~= "" and child ~= parent and not item.seen[child] then
+          item.children[#item.children + 1] = child
+          item.seen[child] = true
+        end
+      end
+    end
     local function mentioned_names(fragment)
       local f_words = " " .. word_text(fragment) .. " "
       local out, seen = {}, {}
@@ -4677,27 +4858,60 @@ function Code.validate_typed_actions_semantics(plan, opts)
       end
       return out
     end
+    local function pattern_escape(value)
+      return tostring(value or ""):gsub("([^%w])", "%%%1")
+    end
     for sentence in text:gmatch("[^%.\n]+") do
+      local sentence_l = lower(sentence)
+      for _, name in ipairs(track_order) do
+        local parent = normalized_name(name)
+        if parent ~= "" then
+          local pat = pattern_escape(parent) .. "%s+folder%s+with%s+"
+          local _s, e = sentence_l:find(pat)
+          if e then
+            local fragment = sentence:sub(e + 1)
+            fragment = fragment:gsub("%f[%a][Ii]nside%s+it.*$", "")
+            fragment = fragment:gsub("%f[%a][Aa]s%s+normal%s+.-$", "")
+            local children = mentioned_names(fragment)
+            add_membership(parent, children)
+          end
+        end
+      end
       local start_pos, end_pos = lower(sentence):find("folder%s+containing")
       if start_pos then
         local parents = mentioned_names(sentence:sub(1, start_pos - 1))
         local children = mentioned_names(sentence:sub(end_pos + 1))
         local parent = parents[#parents]
         if parent and #children > 0 then
-          local filtered_children = {}
-          for _, child in ipairs(children) do
-            if child ~= parent then
-              filtered_children[#filtered_children + 1] = child
-            end
-          end
-          if #filtered_children > 0 then
-            wanted[#wanted + 1] = {
-              parent = parent,
-              children = filtered_children,
-            }
-          end
+          add_membership(parent, children)
         end
       end
+    end
+    local nested_children_by_parent = {}
+    for _, item in ipairs(wanted) do
+      nested_children_by_parent[item.parent] = nested_children_by_parent[item.parent] or {}
+      for _, child in ipairs(item.children) do
+        nested_children_by_parent[item.parent][child] = true
+      end
+    end
+    for _, item in ipairs(wanted) do
+      local immediate_set = {}
+      for _, child in ipairs(item.children) do immediate_set[child] = true end
+      local filtered = {}
+      for _, child in ipairs(item.children) do
+        local nested_descendant = false
+        for nested_parent in pairs(immediate_set) do
+          if nested_parent ~= item.parent
+              and nested_children_by_parent[nested_parent]
+              and nested_children_by_parent[nested_parent][child] then
+            nested_descendant = true
+            break
+          end
+        end
+        if not nested_descendant then filtered[#filtered + 1] = child end
+      end
+      item.children = filtered
+      item.seen = nil
     end
     return wanted
   end
@@ -4781,6 +4995,9 @@ function Code.validate_typed_actions_semantics(plan, opts)
           "User did not explicitly request master/parent send state for "
             .. tostring(track_name)
             .. "; leave master_send null and use send.create for routing")
+      end
+      if action.master_send == false then
+        master_send_off_seen = true
       end
     elseif action.op == "track.pan_lfo" then
       if not requests_pan_lfo then
@@ -4979,6 +5196,19 @@ function Code.validate_typed_actions_semantics(plan, opts)
       "User requested track rename/name, volume, pan, mute, unmute, solo, unsolo, or "
         .. "master/parent send state; the typed-action plan must include "
         .. "track.set actions")
+  end
+  if requests_master_send_off and not master_send_off_seen then
+    errors[#errors + 1] = _typed_action_error(
+      "missing_master_send_off_action", "$.actions",
+      "User requested a track/bus not feed the master; include a track.set "
+        .. "action with master_send=false on the requested track id")
+  end
+  if requests_record_ready_state then
+    errors[#errors + 1] = _typed_action_error(
+      "unsupported_record_arm_typed_action", "$.actions",
+      "User requested a track ready for recording/record arm, but the "
+        .. "typed-action schema cannot arm tracks yet; use Lua instead of "
+        .. "executing an incomplete typed-action plan")
   end
   if requests_folders and (op_counts["track.folder"] or 0) == 0 then
     errors[#errors + 1] = _typed_action_error(
@@ -6798,6 +7028,121 @@ function Code.find_audio_accessor_transient_marker_scripts(lua_code, user_text)
     end
   end
   return #findings > 0 and findings or { { line = 1 } }
+end
+
+-- =============================================================================
+-- Code.find_nil_unsafe_audio_accessor_sample_checks
+-- =============================================================================
+-- reaper.GetAudioAccessorSamples can fail to read and return nil. Catch the
+-- high-confidence crash shape where generated Lua saves that return value and
+-- immediately compares it with <, <=, >, or >= before proving it is non-nil.
+function Code.find_nil_unsafe_audio_accessor_sample_checks(lua_code)
+  if not lua_code or lua_code == "" then return nil end
+  if not lua_code:find("reaper%.GetAudioAccessorSamples", 1, false) then
+    return nil
+  end
+
+  local function strip_comment(line)
+    return tostring(line or ""):gsub("%-%-[^\n]*", "")
+  end
+
+  local function ident(name)
+    return "%f[%w_]" .. tostring(name) .. "%f[^%w_]"
+  end
+
+  local function first_match_pos(line, patterns)
+    local best
+    for _, pattern in ipairs(patterns) do
+      local pos = line:find(pattern)
+      if pos and (not best or pos < best) then best = pos end
+    end
+    return best
+  end
+
+  local function capture_return_var(line)
+    if not line:find("reaper%.GetAudioAccessorSamples", 1, false) then
+      return nil
+    end
+    local before = line:match("^(.-)reaper%.GetAudioAccessorSamples%s*%(")
+    if not before then return nil end
+    local lhs = before:match("^%s*local%s+(.+)%s*=%s*$")
+      or before:match("^%s*(.-)%s*=%s*$")
+    if not lhs or lhs == "" then return nil end
+    local name = lhs:match("^%s*([_%a][_%w]*)")
+    if name == "if" or name == "return" then return nil end
+    return name
+  end
+
+  local function nil_guard_pos(line, name)
+    local id = ident(name)
+    return first_match_pos(line, {
+      "not%s+" .. id,
+      id .. "%s*==%s*nil",
+      "nil%s*==%s*" .. id,
+      id .. "%s*~=%s*nil",
+      "nil%s*~=%s*" .. id,
+      id .. "%s*==%s*1",
+      "1%s*==%s*" .. id,
+      id .. "%s*~=%s*1",
+      "1%s*~=%s*" .. id,
+      "type%s*%(%s*" .. id .. "%s*%)%s*==%s*[\"']number[\"']",
+      id .. "%s+and%s+" .. id,
+    })
+  end
+
+  local function relation_pos(line, name)
+    local id = ident(name)
+    return first_match_pos(line, {
+      id .. "%s*[<>]=?",
+      "[<>]=?%s*" .. id,
+    })
+  end
+
+  local function reassigns_name(line, name)
+    local id = ident(name)
+    return line:find("^%s*local%s+" .. id .. "%s*=")
+      or (line:find("^%s*" .. id .. "%s*=")
+          and not line:find("^%s*" .. id .. "%s*=="))
+  end
+
+  local lines = {}
+  for raw_line in (lua_code .. "\n"):gmatch("([^\n]*)\n") do
+    lines[#lines + 1] = strip_comment(raw_line)
+  end
+
+  local findings = {}
+  for i, line in ipairs(lines) do
+    local name = capture_return_var(line)
+    if name then
+      local guarded = false
+      local scanned = 0
+      for j = i, math.min(#lines, i + 8) do
+        local candidate = lines[j]
+        if candidate:match("%S") then
+          scanned = scanned + 1
+          if j > i and reassigns_name(candidate, name) then break end
+          local compare_at = relation_pos(candidate, name)
+          local guard_at = nil_guard_pos(candidate, name)
+          if guard_at and (not compare_at or guard_at < compare_at) then
+            guarded = true
+          end
+          if compare_at then
+            if not guarded then
+              findings[#findings + 1] = {
+                line = j,
+                variable = name,
+                source_line = i,
+              }
+            end
+            break
+          end
+          if scanned >= 5 then break end
+        end
+      end
+    end
+  end
+
+  return #findings > 0 and findings or nil
 end
 
 -- =============================================================================
@@ -8789,13 +9134,34 @@ function Code.lua_satisfies_podcast_bus_all_sources(lua_code, user_text)
           "reaper%.createtracksend%s*%(%s*src%s*,%s*dst%s*%)") ~= nil
           or lowered:find(
             "reaper%.createtracksend%s*%(%s*src_track%s*,%s*dst_track%s*%)") ~= nil))
+    local route_helper_names = { "route_track", "route", "add_send", "send" }
+    local function has_route_helper_definition()
+      for _, helper in ipairs(route_helper_names) do
+        if lowered:find("function%s+" .. helper .. "%s*%(") ~= nil then
+          return true
+        end
+      end
+      return false
+    end
     local has_route_helper_send =
-      (lowered:find("function%s+route_track%s*%(") ~= nil
-        or lowered:find("function%s+route%s*%(") ~= nil)
+      has_route_helper_definition()
       and (lowered:find(
         "reaper%.createtracksend%s*%(%s*src%s*,%s*dst%s*%)") ~= nil
         or lowered:find(
           "reaper%.createtracksend%s*%(%s*src%s*,%s*dest%s*%)") ~= nil)
+    local has_pair_table_send =
+      ((lowered:find("tracks%s*%[%s*pair%s*%[%s*1%s*%]%s*%]") ~= nil
+        and lowered:find("tracks%s*%[%s*pair%s*%[%s*2%s*%]%s*%]") ~= nil)
+        or (lowered:find("pair%s*%[%s*1%s*%]") ~= nil
+          and lowered:find("pair%s*%[%s*2%s*%]") ~= nil))
+      and lowered:find(
+        "reaper%.createtracksend%s*%(%s*src%s*,%s*dst%s*%)") ~= nil
+    local has_routing_map_send =
+      lowered:find("for%s+src_name%s*,%s*dst_name%s+in%s+pairs%s*%(") ~= nil
+      and lowered:find("tracks%s*%[%s*src_name%s*%]") ~= nil
+      and lowered:find("tracks%s*%[%s*dst_name%s*%]") ~= nil
+      and lowered:find(
+        "reaper%.createtracksend%s*%(%s*src%s*,%s*dst%s*%)") ~= nil
     local function config_table_has_pair(src_role, dest_role)
       for body in lowered:gmatch("{([^{}]*)}") do
         if expr_matches_role(body, src_role)
@@ -8806,7 +9172,7 @@ function Code.lua_satisfies_podcast_bus_all_sources(lua_code, user_text)
       return false
     end
     local function route_helper_has_pair(src_role, dest_role)
-      for _, helper in ipairs({ "route_track", "route" }) do
+      for _, helper in ipairs(route_helper_names) do
         for src_name, dst_name in lowered:gmatch(
             helper .. "%s*%(%s*[\"']([^\"']+)[\"']%s*,%s*[\"']([^\"']+)[\"']%s*%)") do
           if expr_matches_role(src_name, src_role)
@@ -8824,6 +9190,16 @@ function Code.lua_satisfies_podcast_bus_all_sources(lua_code, user_text)
       end
       return false
     end
+    local function routing_map_has_pair(src_role, dest_role)
+      for src_name, dst_name in lowered:gmatch(
+          "%[%s*[\"']([^\"']+)[\"']%s*%]%s*=%s*[\"']([^\"']+)[\"']") do
+        if expr_matches_role(src_name, src_role)
+            and expr_matches_role(dst_name, dest_role) then
+          return true
+        end
+      end
+      return false
+    end
     for _, role in ipairs(roles) do
       local dest_role = required[role]
       local ok = false
@@ -8832,6 +9208,12 @@ function Code.lua_satisfies_podcast_bus_all_sources(lua_code, user_text)
       end
       if not ok and has_config_table_send and dest_role then
         ok = config_table_has_pair(role, dest_role)
+      end
+      if not ok and has_pair_table_send and dest_role then
+        ok = config_table_has_pair(role, dest_role)
+      end
+      if not ok and has_routing_map_send and dest_role then
+        ok = routing_map_has_pair(role, dest_role)
       end
       if not ok and has_route_helper_send and dest_role then
         ok = route_helper_has_pair(role, dest_role)

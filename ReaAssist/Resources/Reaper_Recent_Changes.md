@@ -7,6 +7,43 @@ model training cutoffs. This is not the full changelog.
 If a user asks outside this slice, do not invent details. Say the installed
 REAPER changelog is authoritative, or ask for the relevant changelog lines.
 
+## REAPER 7.76 - June 2026
+
+- ReaScript: automation items can be muted/read via
+  `GetSetAutomationItemInfo(env, autoitem_idx, "D_MUTE", value, is_set)`.
+  REAPER also fixed `GetSetTrackSendInfo()` and `GetTrackSendName()` behavior
+  for the new UI-ordered send/hardware-output slots from 7.75, and fixed the
+  official `AddRegionOrMarker()` documentation.
+- FX and send-slot polish: REAPER fixed FX reordering quirks around empty FX
+  slots and includes slot information in floating FX window title bars and the
+  Project Bay when the displayed slot differs from the dense chain index.
+- Sample edits: first-selected-item sample edit actions also work with razor
+  edits, new actions can delete all sample edits, mono downmix channel mode is
+  supported for delete-all actions, and very long sample edits warn but can run
+  up to the new larger limit.
+- UI/workflow fixes: the Envelope Manager correctly displays send envelopes
+  after empty send slots, mixer scroll offset survives project-tab switches,
+  click source paths entered as relative paths are converted to absolute paths,
+  and spectral repair uses a smaller analysis window for very short repairs.
+
+## REAPER 7.75 - June 2026
+
+- FX and sends: REAPER can show empty slots in TCP/MCP FX lists and send/
+  hardware-output lists, and users can move FX or sends to particular visible
+  slots. New actions can toggle selected tracks' FX bypass for slots 1-10.
+- Sample editing: REAPER added spectral repair actions for replacing a time
+  selection with extrapolated surrounding audio, plus bias/scale/balance/DC/
+  fade controls and versions that apply to the first selected item in the time
+  selection. The scale and spectral repair windows also have better initial
+  focus and keyboard accessibility.
+- ReaScript: `TrackFX_GetNamedConfigParm` can map between FX chain indices and
+  displayed FX slots, `GetSetProjectInfo(..., "DIRTY", ...)` can query or clear
+  project modified state, TrackSend APIs can access UI-ordered send/hardware
+  output slots, and `GetThingFromPoint()` can identify TCP/MCP send-list hits.
+- Navigator and visual spacers: Navigator can display envelope lanes and visual
+  spacers, and Preferences/Appearance can avoid constraining TCP visual spacer
+  size to track lane height.
+
 ## REAPER 7.74 - June 2026
 
 - FX: REAPER added multi-mono and multi-stereo FX containers, shows linked

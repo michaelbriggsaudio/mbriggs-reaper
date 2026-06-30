@@ -1,5 +1,15 @@
 # ReaAssist - Changelog
 
+## v1.4.2 - 2026-06-30
+
+- **Claude Sonnet has been updated to Sonnet 5.** ReaAssist now uses `claude-sonnet-5` as the recommended Claude default, migrates saved Sonnet 4.6 selections, refreshes diagnostics and cost estimates, and uses Anthropic's promotional Sonnet 5 pricing through August 31, 2026.
+
+- **Gemini capacity recovery is smoother.** When Gemini returns a provider-side 503 capacity error, ReaAssist now offers a same-model retry when appropriate, suggests the best available fallback model, preserves the original prompt and attachments, and records the recovery path in diagnostics.
+
+- **Generated edits are safer around audio reads, routing, and structured edits.** ReaAssist now blocks nil-unsafe `GetAudioAccessorSamples` code before auto-run, recognizes routing-map send creation, handles more master-send and record-ready wording safely, and is less brittle with EQ gain phrasing and nested folder requests.
+
+- **REAPER and SWS guidance is refreshed through REAPER 7.76.** The bundled references now cover REAPER 7.75/7.76 changes including FX and send slot mapping, project dirty-state handling, automation item mute support, UI-ordered send slots, updated MIDI send routing notes, and clearer SWS/S&M startup-action setup guidance.
+
 ## v1.4.1 - 2026-06-11
 
 - **Generated edits are safer and more accurate.** ReaAssist now catches more bad Lua and JSFX before it runs, with stronger guards for bar/beat loop ranges, ruler timebase changes, MIDI pitch/timing mistakes, track routing, waveform-sync prompts, destructive actions, and lower-tier model failure patterns.

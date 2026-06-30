@@ -1,6 +1,6 @@
 -- @description ReaAssist - Screen Reader Mode
 -- @author Michael Briggs
--- @version 1.4.1
+-- @version 1.4.2
 -- @about
 --   Accessible ReaAssist entry point for screen-reader users.
 -- CFG.VERSION marker: do not remove; website installers verify this file.

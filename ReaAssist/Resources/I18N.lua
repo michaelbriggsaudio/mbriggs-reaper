@@ -324,8 +324,8 @@ I18N.catalogs = {
         "Requires Google's paid API tier. Upgrade at aistudio.google.com/apikey.",
       ["mode.model_tip.claude-haiku-4-5"] =
         "Cheapest Claude. Use High thinking. Sonnet None is faster for complex work.",
-      ["mode.model_tip.claude-sonnet-4-6"] =
-        "Recommended Claude default. Use None thinking. Higher levels add latency without quality gain.",
+      ["mode.model_tip.claude-sonnet-5"] =
+        "Recommended Claude default. Use None thinking. Raise effort only if a prompt struggles.",
       ["mode.model_tip.claude-opus-4-8"] =
         "Premium Claude. Use None thinking. Higher levels add cost without quality gain.",
       ["mode.model_tip.gpt-5.4-nano"] =
@@ -350,14 +350,14 @@ I18N.catalogs = {
         "Simple and complex | Mid-cost | Slow with retries | Use Sonnet for complex",
       ["mode.combo_hint.anthropic.claude-haiku-4-5.high"] =
         "Recommended Level | Simple tasks; complex with caveats | Mid-cost | Moderate speed | Use Sonnet for complex",
-      ["mode.combo_hint.anthropic.claude-sonnet-4-6.none"] =
-        "Recommended Level | Simple and complex | Higher cost | Fast",
-      ["mode.combo_hint.anthropic.claude-sonnet-4-6.low"] =
-        "Simple and complex | Higher cost | Slow | Marginal lift over None -- use None",
-      ["mode.combo_hint.anthropic.claude-sonnet-4-6.medium"] =
-        "Simple and complex | Higher cost | Very slow | Use only if None struggles",
-      ["mode.combo_hint.anthropic.claude-sonnet-4-6.high"] =
-        "Avoid long prompts | Higher cost | Very slow (hits timeouts) | Use None or Opus None",
+      ["mode.combo_hint.anthropic.claude-sonnet-5.none"] =
+        "Recommended Level | Simple and complex | Promo mid-cost | Fast",
+      ["mode.combo_hint.anthropic.claude-sonnet-5.low"] =
+        "Simple and complex | Promo mid-cost | Slower | Use only if None struggles",
+      ["mode.combo_hint.anthropic.claude-sonnet-5.medium"] =
+        "Simple and complex | Promo mid-cost | Very slow | Use only if None struggles",
+      ["mode.combo_hint.anthropic.claude-sonnet-5.high"] =
+        "Avoid long prompts | Promo mid-cost | Very slow (hits timeouts) | Use None or Opus None",
       ["mode.combo_hint.anthropic.claude-opus-4-8.none"] =
         "Recommended Level | Simple and complex (top quality) | Most expensive | Very fast",
       ["mode.combo_hint.anthropic.claude-opus-4-8.low"] =
@@ -715,9 +715,11 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["message.retry"] = "Retry Message",
       ["message.retry.tooltip"] =
         "Re-send the last prompt with the current settings.",
+      ["message.retry_same_model.tooltip"] =
+        "Retry the same prompt on the same Gemini model.",
       ["message.switch_to"] = "Switch to {label}",
       ["message.switch_resend.tooltip"] =
-        "Switch Gemini to Flash 3.5 and resend the original message.",
+        "Switch Gemini to {label} and resend the original message.",
       ["message.resend_failed"] = "Could not resend message",
       ["message.switch_failed"] = "Could not switch models",
       ["message.return_home"] = "Return to home screen",
@@ -2629,6 +2631,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "for poor transient stretch-marker detector",
       ["retry.reason.for_audio_sync_item_start_alignment"] =
         "for item-start/take-offset alignment used as audio sync",
+      ["retry.reason.for_nil_unsafe_audio_accessor_samples"] =
+        "for nil-unsafe GetAudioAccessorSamples handling",
       ["retry.reason.for_whole_item_drum_quantize"] =
         "for whole-item drum quantize",
       ["retry.reason.for_unsynchronized_drum_stretch_markers"] =
@@ -2717,6 +2721,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "The model tried to place drum-hit/transient stretch markers with a custom Lua audio-accessor detector even after a retry. That path tends to add false markers on decays and bleed. Auto-run is blocked; use REAPER's Dynamic Split / transient action, or explicitly ask for a custom threshold detector if you want that lower-quality approximation.",
       ["validator.audio_sync_item_start_blocked"] =
         "The model tried to answer an audio/take sync request by only aligning media-item starts or copying take source offsets even after a retry. Auto-run is blocked; ask whether the user wants start-time/offset alignment or audio/transient matching, or use a real user-provided anchor workflow.",
+      ["validator.audio_accessor_samples_nil_blocked"] =
+        "The model used a GetAudioAccessorSamples return value in a numeric comparison before checking for nil, even after a retry. Auto-run is blocked; add a nil-safe guard such as `if not ok or ok <= 0 then ... end` before running manually.",
       ["validator.drum_whole_item_quantize_blocked"] =
         "The model tried to quantize/edit drums by moving whole media items even after a retry. That can do nothing or move the wrong musical material. Auto-run is blocked; use a shared guide-track stretch-marker timing map instead.",
       ["validator.drum_marker_sync_blocked"] =
@@ -2776,7 +2782,9 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["response.openai_throttle_exhausted"] =
         "OpenAI is throttling this request because the account/model token-per-minute limit is temporarily saturated. This is a provider-side throughput limit, not a Lua or prompt failure.\n\nReaAssist retried with exponential backoff and OpenAI still returned a rate-limit error. Wait a minute and retry, or switch to a smaller model for this request.",
       ["response.google_503_recovery"] =
-        "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can wait and retry later, or switch to Flash 3.5 and resend the same message.",
+        "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can retry the same model, or switch to {label} and resend the same message.",
+      ["response.google_503_retry"] =
+        "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can retry the same message.",
       ["response.google_503"] =
         "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can wait and retry later.",
       ["response.api_key_invalid"] =

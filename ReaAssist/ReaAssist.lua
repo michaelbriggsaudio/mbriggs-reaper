@@ -3565,7 +3565,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.4.1", -- public release version
+  VERSION           = "1.4.2", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -4113,6 +4113,7 @@ S = {
   toolbar_validator_retries = 0,   -- per-turn counter -- model emitted fragile toolbar/defer action script (max 1 retry)
   transient_validator_retries = 0, -- per-turn counter -- model used naive audio-accessor detector for drum-hit stretch markers (max 1 retry)
   audio_sync_validator_retries = 0, -- per-turn counter -- model used start/offset alignment for audio/take sync (max 1 retry)
+  audio_accessor_nil_validator_retries = 0, -- per-turn counter -- model compared GetAudioAccessorSamples return before nil guard (max 1 retry)
   tempo_marker_validator_retries = 0, -- per-turn counter -- model inserted at old bar start instead of anchoring bar/beat to cursor (max 1 retry)
   explicit_seconds_marker_validator_retries = 0, -- per-turn counter -- model overrode explicit second-based marker/region times
   project_tempo_validator_retries = 0, -- per-turn counter -- model used BPM for timing without setting project tempo (max 1 retry)
@@ -6094,13 +6095,11 @@ PROVIDERS = {
     -- {"thinking":{"type":"adaptive"},"output_config":{"effort":"..."}}).
     -- Which shape lands on the wire is decided per-MODEL via
     -- thinking_style on the model entry, because Anthropic split the
-    -- thinking API across the 4.x lineup:
+    -- thinking API across the current Claude lineup:
     --   * Haiku 4.5 (and other "Claude 4" models without adaptive
     --     support): manual budget_tokens only.
-    --   * Sonnet 4.6: both work; adaptive + effort is recommended,
-    --     manual is deprecated.
-    --   * Opus 4.8: adaptive + effort REQUIRED. Sending the manual
-    --     shape returns a 400.
+    --   * Sonnet 5 / Opus 4.8: adaptive + effort. Sending the manual
+    --     shape to either model returns a 400.
     -- "None" is the explicit off switch: ReaAssist sends
     -- {"thinking":{"type":"disabled"}} so Claude cannot inherit a future
     -- adaptive-thinking default. (Mythos Preview rejects disabled thinking,
@@ -6123,17 +6122,17 @@ PROVIDERS = {
     -- was dropped). 1h writes would be 2x but we never use them.
     -- max_output: per-model output-token ceiling (Anthropic Messages API
     -- enforces server-side; we send this as max_tokens). Sourced from
-    -- Anthropic's published model docs as of May 2026. Update when
+    -- Anthropic's published model docs as of Jun 2026. Update when
     -- ceilings change.
     -- context_window: per-model context size used by the preflight token
-    -- gate. Haiku 4.5 stays at the 200K default (no field); Sonnet 4.6
+    -- gate. Haiku 4.5 stays at the 200K default (no field); Sonnet 5
     -- and Opus 4.8 advertise 1M-token windows.
     -- thinking_style: which wire-format shape this model accepts.
     --   "claude_manual"   = {"thinking":{"type":"enabled","budget_tokens":N}}
     --   "claude_adaptive" = {"thinking":{"type":"adaptive"},
     --                        "output_config":{"effort":"<level>"}}
-    -- Haiku 4.5 only accepts manual; Opus 4.8 only accepts adaptive
-    -- (manual returns 400); Sonnet 4.6 accepts both, adaptive preferred.
+    -- Haiku 4.5 accepts manual; Sonnet 5 / Opus 4.8 use adaptive
+    -- and reject manual budget_tokens.
     --
     -- default_thinking_idx (per-model override): Haiku at None/Low
     -- struggles on multi-step REAPER scripting and Medium needs a
@@ -6148,8 +6147,8 @@ PROVIDERS = {
     models = {
       { label = "Haiku 4.5",  chip_label = "HAIKU",  id = "claude-haiku-4-5",
         price_in = 1.00,  price_out = 5.00,  price_cache_r = 0.10, price_cache_w = 1.25, max_output = 64000,  thinking_style = "claude_manual",   default_thinking_idx = 4 },
-      { label = "Sonnet 4.6", chip_label = "SONNET", id = "claude-sonnet-4-6",
-        price_in = 3.00,  price_out = 15.00, price_cache_r = 0.30, price_cache_w = 3.75, max_output = 64000,  context_window = 1000000, thinking_style = "claude_adaptive" },
+      { label = "Sonnet 5",   chip_label = "SONNET", id = "claude-sonnet-5",
+        price_in = 2.00,  price_out = 10.00, price_cache_r = 0.20, price_cache_w = 2.50, max_output = 128000, context_window = 1000000, thinking_style = "claude_adaptive" },
       { label = "Opus 4.8",   chip_label = "OPUS",   id = "claude-opus-4-8",
         price_in = 5.00,  price_out = 25.00, price_cache_r = 0.50, price_cache_w = 6.25, max_output = 128000, context_window = 1000000, thinking_style = "claude_adaptive" },
     },
@@ -9161,6 +9160,52 @@ do
   end
 end
 
+-- One-time Anthropic model-id migration. Sonnet 5 replaces Sonnet 4.6 as the
+-- recommended Claude default; promotional pricing is lower through Aug 31,
+-- 2026, then it returns to the same standard Sonnet tier. Preserve any saved
+-- per-model thinking preference because the adaptive wire shape remains valid.
+do
+  if not (S and S._factory_reset_clean_boot)
+     and not Store.migration_fired("anthropic_sonnet_5_model_v1") then
+    local doc = Store.config_doc()
+    doc.selection = type(doc.selection) == "table" and doc.selection or {}
+    doc.selection.model_id_by_provider =
+      type(doc.selection.model_id_by_provider) == "table"
+      and doc.selection.model_id_by_provider or {}
+    doc.selection.thinking_idx_by_provider_model =
+      type(doc.selection.thinking_idx_by_provider_model) == "table"
+      and doc.selection.thinking_idx_by_provider_model or {}
+    if doc.selection.model_id_by_provider.anthropic == "claude-sonnet-4-6" then
+      doc.selection.model_id_by_provider.anthropic = "claude-sonnet-5"
+    end
+    local old_key = "anthropic/claude-sonnet-4-6"
+    local new_key = "anthropic/claude-sonnet-5"
+    if doc.selection.thinking_idx_by_provider_model[new_key] == nil then
+      doc.selection.thinking_idx_by_provider_model[new_key] =
+        doc.selection.thinking_idx_by_provider_model[old_key]
+        or tonumber(reaper.GetExtState(CFG.EXT_NS,
+          "thinking_idx_anthropic_claude-sonnet-4-6"))
+    end
+    doc.selection.thinking_idx_by_provider_model[old_key] = nil
+    local old_ext = reaper.GetExtState(
+      CFG.EXT_NS, "thinking_idx_anthropic_claude-sonnet-4-6")
+    if old_ext ~= ""
+       and reaper.GetExtState(
+         CFG.EXT_NS, "thinking_idx_anthropic_claude-sonnet-5") == "" then
+      reaper.SetExtState(
+        CFG.EXT_NS, "thinking_idx_anthropic_claude-sonnet-5", old_ext, true)
+    end
+    reaper.DeleteExtState(
+      CFG.EXT_NS, "thinking_idx_anthropic_claude-sonnet-4-6", true)
+    doc.migrations = type(doc.migrations) == "table" and doc.migrations or {}
+    doc.migrations.anthropic_sonnet_5_model_v1 = true
+    local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
+    if err then
+      Store._notify_write_failure("Config.json", err)
+    end
+  end
+end
+
 -- One-time Gemini model-id migration. Gemini 3 Flash Preview is retired in
 -- favor of Gemini 3.5 Flash, so users who saved the old model id should land
 -- on the new GA Flash row instead of falling through an unknown-model default.
@@ -10970,7 +11015,7 @@ UI = {}
 -- redirects weak combos or calls out a quality property of strong ones.
 UI.MODEL_TIPS = {
   ["claude-haiku-4-5"]               = "Cheapest Claude. Use High thinking. Sonnet None is faster for complex work.",
-  ["claude-sonnet-4-6"]              = "Recommended Claude default. Use None thinking. Higher levels add latency without quality gain.",
+  ["claude-sonnet-5"]                = "Recommended Claude default. Use None thinking. Raise effort only if a prompt struggles.",
   ["claude-opus-4-8"]                = "Premium Claude. Use None thinking. Higher levels add cost without quality gain.",
   ["gpt-5.4-nano"]                   = "Cheapest GPT. Use None thinking. Simple tasks only -- pick full GPT-5.4 for complex.",
   ["gpt-5.4-mini"]                   = "Cheap GPT. Use Low thinking. Simple tasks only -- pick full GPT-5.4 for complex.",
@@ -11015,11 +11060,11 @@ UI.COMBO_HINTS = {
       medium = "Simple and complex | Mid-cost | Slow with retries | Use Sonnet for complex",
       high   = "Recommended Level | Simple tasks; complex with caveats | Mid-cost | Moderate speed | Use Sonnet for complex",
     },
-    ["claude-sonnet-4-6"] = {
-      none   = "Recommended Level | Simple and complex | Higher cost | Fast",
-      low    = "Simple and complex | Higher cost | Slow | Marginal lift over None -- use None",
-      medium = "Simple and complex | Higher cost | Very slow | Use only if None struggles",
-      high   = "Avoid long prompts | Higher cost | Very slow (hits timeouts) | Use None or Opus None",
+    ["claude-sonnet-5"] = {
+      none   = "Recommended Level | Simple and complex | Promo mid-cost | Fast",
+      low    = "Simple and complex | Promo mid-cost | Slower | Use only if None struggles",
+      medium = "Simple and complex | Promo mid-cost | Very slow | Use only if None struggles",
+      high   = "Avoid long prompts | Promo mid-cost | Very slow (hits timeouts) | Use None or Opus None",
     },
     ["claude-opus-4-8"] = {
       none   = "Recommended Level | Simple and complex (top quality) | Most expensive | Very fast",
@@ -11081,7 +11126,7 @@ UI.COMBO_HINTS = {
 -- source of the explanatory copy.
 UI.COMBO_TONES = {
   anthropic = {
-    ["claude-sonnet-4-6"] = {
+    ["claude-sonnet-5"] = {
       high = "warn",
     },
   },
@@ -12097,8 +12142,8 @@ local function load_system_prompt()
     SYSTEM_PROMPT = SYSTEM_PROMPT .. [[
 
 SWS DOCS ROUTING:
-- Before using SWS-only calls, request <context_needed>docs:sws</context_needed> unless that section is already present in context.
-- Prefer native REAPER APIs when they are equally direct; use SWS for clipboard, mouse cursor context, GUID helpers, loudness analysis, SWS notes, FX-chain window helpers, and other APIs documented in docs:sws.
+- Before using SWS-only calls, SWS/S&M startup actions, or SWS/S&M menu/action workflows, request <context_needed>docs:sws</context_needed> unless that section is already present in context.
+- Prefer native REAPER APIs when they are equally direct; use SWS for clipboard, mouse cursor context, GUID helpers, loudness analysis, SWS notes, FX-chain window helpers, SWS/S&M startup actions, and other APIs/workflows documented in docs:sws.
 ]]
   end
   -- Tamper guard for the SHIPPED prompt only: if the stock file has been
@@ -17711,8 +17756,8 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
         action_requires_lua = true,
       },
     },
-    ["claude-sonnet-4-6"] = {
-      key = "sonnet_explicit_bus_sends",
+    ["claude-sonnet-5"] = {
+      key = "sonnet5_explicit_bus_sends",
       prompt = [[
 - When the user asks for tracks going into a bus or return, create explicit sends with `reaper.CreateTrackSend(source_track, bus_or_return_track)`. Folder depth alone is not bus routing and should not be used as a substitute unless the user explicitly asks for folders.
 - Treat "basic EQ" by itself as add-only. Add the resolved EQ plugin to the requested/selected track(s), check each AddByName result, and stop there unless the user gives a tonal goal, explicit settings, or asks for starter/generic EQ settings. Do not use track-type starter EQ recipes, call `TrackFX_SetParam*`, or call/rewrite plugin helper functions for add-only/basic EQ tasks.
@@ -18741,9 +18786,9 @@ function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
   -- non-thinking mode regardless of which 4.x variant is active. The
   -- "None" dropdown entry maps to an explicit disabled-thinking request.
   -- When a non-None level is picked, the wire shape depends on the active model's
-  -- thinking_style: Haiku 4.5 takes manual budget_tokens; Opus 4.8
-  -- requires adaptive + an effort knob (manual returns 400); Sonnet 4.6
-  -- accepts either, adaptive preferred. S.thinking_override_idx (when
+  -- thinking_style: Haiku 4.5 takes manual budget_tokens; Sonnet 5 and
+  -- Opus 4.8 use adaptive + an effort knob and reject manual budgets.
+  -- S.thinking_override_idx (when
   -- set) wins over prefs.thinking_idx so the length-retry path can force
   -- "None" for one round-trip.
   local p_active = PROVIDERS.active()
@@ -19632,7 +19677,7 @@ function Net._call_cap_message()
   end
   local hint
   if pid == "anthropic" and tag("haiku") then
-    hint = "Try Sonnet 4.6 or Opus 4.8 for this request."
+    hint = "Try Sonnet 5 or Opus 4.8 for this request."
   elseif pid == "google" and (tag("flash") or tag("nano")) then
     hint = "Try Gemini 3.1 Pro for this request."
   elseif pid == "openai" and tag("mini") then
@@ -21970,6 +22015,7 @@ function Net.send_to_api(user_text)
   S.toolbar_validator_retries = 0
   S.transient_validator_retries = 0
   S.audio_sync_validator_retries = 0
+  S.audio_accessor_nil_validator_retries = 0
   S.tempo_marker_validator_retries = 0
   S.explicit_seconds_marker_validator_retries = 0
   S.project_tempo_validator_retries = 0
@@ -22895,6 +22941,7 @@ function Net.clear_conversation(opts)
   S.toolbar_validator_retries  = 0
   S.transient_validator_retries = 0
   S.audio_sync_validator_retries = 0
+  S.audio_accessor_nil_validator_retries = 0
   S.tempo_marker_validator_retries = 0
   S.explicit_seconds_marker_validator_retries = 0
   S.project_tempo_validator_retries = 0
@@ -25274,7 +25321,7 @@ function Net.process_response_buckets(text)
       -- name dedup tables (plugin_ref_sent, pref_plugins_sent, eventually
       -- prompt_bundle_sent), which fixed plugin-shaped loops but missed
       -- the simpler one-shot booleans (docs / session / midi / theme /
-      -- fx_*). Sonnet 4.6 has been observed re-emitting any of these
+      -- fx_*). Sonnet-class models have been observed re-emitting any of these
       -- under the right conditions, so we now clear the full set.
       S.plugin_ref_sent              = {}
       S.pref_plugins_sent            = {}
@@ -25944,21 +25991,35 @@ end
 function Net._google_capacity_recovery(p)
   if not p or p.id ~= "google" or not S.pending_orig_prompt then return nil end
   local current_model = p.models and p.models[S.pending_model_idx or prefs.model_idx] or nil
-  if current_model and current_model.id == "gemini-3.5-flash" then return nil end
-  local fallback
-  for _, m in ipairs(p.models or {}) do
-    if m.id == "gemini-3.5-flash" then fallback = m; break end
+  local current_id = current_model and current_model.id or nil
+  local fallback_id
+  if current_id == "gemini-3.1-pro-preview" then
+    fallback_id = "gemini-3.5-flash"
+  elseif current_id == "gemini-3.5-flash" then
+    fallback_id = "gemini-3.1-flash-lite"
+  elseif not current_id then
+    fallback_id = "gemini-3.5-flash"
+  elseif current_id ~= "gemini-3.1-flash-lite" then
+    fallback_id = "gemini-3.5-flash"
   end
-  if not fallback then return nil end
-  return {
+  local fallback
+  if fallback_id then
+    for _, m in ipairs(p.models or {}) do
+      if m.id == fallback_id then fallback = m; break end
+    end
+  end
+  local recovery = {
     provider_id = "google",
-    model_id = current_model and current_model.id or nil,
-    fallback_provider_id = "google",
-    fallback_model_id = fallback.id,
-    fallback_label = fallback.label or "Flash 3.5",
+    model_id = current_id,
     recovery_prompt = S.pending_orig_prompt,
     recovery_attachments = S.pending_attachments,
   }
+  if fallback then
+    recovery.fallback_provider_id = "google"
+    recovery.fallback_model_id = fallback.id
+    recovery.fallback_label = fallback.label or fallback.id
+  end
+  return recovery
 end
 
 function Net.normalize_error_kind(raw_kind, failure_kind)
@@ -26099,9 +26160,16 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth)
     end
     local recovery = Net._google_capacity_recovery(p)
     local msg
-    if recovery then
-      msg = RA.t("response.google_503_recovery", nil,
-        "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can wait and retry later, or switch to Flash 3.5 and resend the same message.")
+    if recovery and recovery.fallback_model_id then
+      msg = RA.t("response.google_503_recovery", {
+          label = recovery.fallback_label or "the fallback model",
+        },
+        "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can retry the same model, or switch to "
+          .. tostring(recovery.fallback_label or "the fallback model")
+          .. " and resend the same message.")
+    elseif recovery then
+      msg = RA.t("response.google_503_retry", nil,
+        "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can retry the same message.")
     else
       msg = RA.t("response.google_503", nil,
         "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can wait and retry later.")
@@ -31740,6 +31808,101 @@ function Net.try_finish_curl()
     end
   end
 
+  -- AUDIO-ACCESSOR RETURN VALIDATOR: GetAudioAccessorSamples can fail to read
+  -- and return nil. Comparing that result numerically before a nil guard
+  -- crashes with "attempt to compare nil with number".
+  local audio_accessor_nil_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit then
+    local audio_accessor_nil_bad =
+      type(Code.find_nil_unsafe_audio_accessor_sample_checks) == "function"
+      and Code.find_nil_unsafe_audio_accessor_sample_checks(lua_code) or nil
+    if audio_accessor_nil_bad and #audio_accessor_nil_bad > 0 then
+      if (S.audio_accessor_nil_validator_retries or 0) < 1 then
+        S.audio_accessor_nil_validator_retries =
+          (S.audio_accessor_nil_validator_retries or 0) + 1
+        Probe.add_validator_retry(S.probe_turn, "audio_accessor_nil")
+        local lines = {}
+        for _, e in ipairs(audio_accessor_nil_bad) do
+          lines[#lines + 1] = "  - line " .. tostring(e.line)
+            .. " (`" .. tostring(e.variable or "ok") .. "` from line "
+            .. tostring(e.source_line or "?") .. ")"
+        end
+        Log.line("AUDIO-ACCESSOR-VALIDATOR",
+          "GetAudioAccessorSamples return compared before nil guard ("
+          .. #audio_accessor_nil_bad .. " finding(s)); retrying with hint "
+          .. "(user-invisible)")
+        local audio_accessor_user_text = Net.retry_user_request_context()
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply "
+          .. "read audio with reaper.GetAudioAccessorSamples and then compared "
+          .. "its return value numerically before proving it was non-nil. "
+          .. "REAPER can return nil when audio cannot be read, and comparing "
+          .. "nil with a number crashes the script.\n\n"
+          .. "Affected unsafe audio-read line(s):\n"
+          .. tbl_concat(lines, "\n") .. "\n\n"
+          .. "Regenerate the same requested BPM/audio-analysis workflow, but "
+          .. "make every GetAudioAccessorSamples return nil-safe before any "
+          .. "numeric comparison. Preferred shapes include `if not ok or ok "
+          .. "<= 0 then ... end` or `if ok ~= 1 then ... end`; `ok and ok "
+          .. "> 0` and `type(ok) == \"number\" and ok > 0` are also safe. "
+          .. "Guard buffer.table() and sample values before indexing. Do not "
+          .. "turn this into a generic apology or refusal. Respond as if this "
+          .. "is your FIRST reply -- do NOT apologize, do NOT mention a "
+          .. "retry.)\n\n"
+          .. "Previous Lua to fix:\n```lua\n"
+          .. lua_code
+          .. "\n```\n\n"
+          .. "USER REQUEST:\n" .. audio_accessor_user_text
+        if #S.history > 0 and S.history[#S.history].role == "assistant" then
+          S.history[#S.history] = nil
+        end
+        if #S.history > 0 and S.history[#S.history].role == "user" then
+          S.history[#S.history] = nil
+        end
+        S.history[#S.history + 1] = { role = "user", content = history_content }
+        if S.pending_display_idx
+           and S.display_messages[S.pending_display_idx] then
+          local dmsg = S.display_messages[S.pending_display_idx]
+          local existing = dmsg.ctx_label or ""
+          if not existing:find("audio_accessor_nil_retry", 1, true) then
+            dmsg.ctx_label = existing ~= ""
+              and (existing .. " + audio_accessor_nil_retry")
+              or "audio_accessor_nil_retry"
+          end
+        end
+        if prefs.include_snapshot and not S.pending_answer_only_followup then
+          S.pending_project  = CTX.resolve_pending_project()
+          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+        end
+        S.status = "waiting"
+        Code.safe_write(tmp.out, "")
+        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
+          S.pending_snapshot, S.pending_attachments))
+        if not ok and reason ~= "call_cap_exceeded" then
+          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
+            "retry.reason.for_nil_unsafe_audio_accessor_samples",
+            "for nil-unsafe GetAudioAccessorSamples handling"))
+            or "Auto-retry for nil-unsafe GetAudioAccessorSamples handling did not go through. Please resend the last message.")
+        end
+        S.scroll_to_bottom = true
+        return
+      end
+      audio_accessor_nil_gate_hit = true
+      validator_gate_hit = true
+      Log.line("AUDIO-ACCESSOR-VALIDATOR",
+        "GetAudioAccessorSamples return compared before nil guard persisted "
+        .. "after retry; auto-run blocked")
+      Log.add_error((RA and RA.t and RA.t(
+        "validator.audio_accessor_samples_nil_blocked", nil,
+        "The model used a GetAudioAccessorSamples return value in a numeric "
+          .. "comparison before checking for nil, even after a retry. Auto-run "
+          .. "is blocked; add a nil-safe guard such as `if not ok or ok <= 0 "
+          .. "then ... end` before running manually."))
+        or "The model used a GetAudioAccessorSamples return value in a numeric comparison before checking for nil, even after a retry. Auto-run is blocked; add a nil-safe guard such as `if not ok or ok <= 0 then ... end` before running manually.")
+    end
+  end
+
   -- DRUM-QUANTIZE VALIDATOR: Drum quantize/edit prompts should not be
   -- satisfied by moving whole media items to snapped item-start positions.
   -- That treats clip starts as hits and can report "moved" even when no
@@ -33927,6 +34090,7 @@ function Net.try_finish_curl()
         or ruler_timebase_gate_hit
         or transient_gate_hit
         or audio_sync_gate_hit
+        or audio_accessor_nil_gate_hit
         or drum_quantize_gate_hit
         or drum_marker_sync_gate_hit
         or arity_gate_hit
@@ -33959,6 +34123,7 @@ function Net.try_finish_curl()
     if project_tempo_gate_hit then return "project_tempo_validator" end
     if loop_time_map_gate_hit then return "loop_time_map_validator" end
     if ruler_timebase_gate_hit then return "ruler_timebase_validator" end
+    if audio_accessor_nil_gate_hit then return "audio_accessor_samples_nil_validator" end
     if validator_gate_hit then return "validator_gate" end
     if action_gate_hit then return "action_context_validator" end
     if toolbar_gate_hit then return "toolbar_validator" end

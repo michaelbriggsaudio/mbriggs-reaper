@@ -1,5 +1,5 @@
 {
-  "version": "1.4.1",
+  "version": "1.4.2",
   "removed_files": [
     "ReaAssist - Screen Reader Mode.lua",
     "ReaAssist_ScreenReaderMode.lua",
@@ -12,7 +12,7 @@
   "files": [
     {
       "name": "CHANGELOG.md",
-      "sha256": "99b01107a08feb244b73f5f217615d48cdd5555e8f58049004414415a9b3c578"
+      "sha256": "c29cd26dbe0fd23ce75977da7b453381ddcc910a5ccb4c2e11e68fbdef126c9a"
     },
     {
       "name": "LICENSE.txt",
@@ -24,31 +24,31 @@
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "5d0c08a1f1da79f76be42cb6dfc331ed0286da36598760db6d11ba52764a584c"
+      "sha256": "5395285224d9be1bd99f0cf2e08d181ccac4fd074c80db02c3d8644e38f1fad3"
     },
     {
       "name": "ReaAssist_Screen_Reader_Mode.lua",
-      "sha256": "9551cc66f32e5f3b3841540328c86d6f0175f5623c7615925bfb2ff10f225b0c"
+      "sha256": "e473e1adc527046a560270dedb0490c217a1addc8767fe3f11bd28c9a4af1eb3"
     },
     {
       "name": "Resources/API_Ref.md",
-      "sha256": "65acb875e7142b0727d68876df9d75f91d12e681895e0a6d08779c787fddb56a"
+      "sha256": "dfae1939103bc4df86aec758d7a753c6b8ea755673cc62af24611580ab0df286"
     },
     {
       "name": "Resources/CodeRuntime.lua",
-      "sha256": "704f2ee9f2e23463db5f763f425e9004e96aecbf6459b07ad31dbf9f5d2364fc"
+      "sha256": "8459c41b0f619b8ad4b499280d73c4f0ba289d115b434c50251fcbbd3a473432"
     },
     {
       "name": "Resources/Context.lua",
-      "sha256": "2bad612fd69c7aaf83d52e61b6d8799fb7a2d6f2b9cb810efaf5d40da287eee4"
+      "sha256": "5840289cbf275dfffff8bb5b560f57a51c7b4dbb72b969fbc8b2d2b2bc35d76b"
     },
     {
       "name": "Resources/Diag.lua",
-      "sha256": "41660baf7e3d3be3ba24da7253a6e5c3917789f83a60adddd762c9a6cc10922f"
+      "sha256": "c08208b4769069a758f986920a12e91c822b2cd8f45c58ef38d0c151f629b235"
     },
     {
       "name": "Resources/I18N.lua",
-      "sha256": "b8c01d2043fe1298e1c96f5bafdb724870422e87b0ea87c871ebfed4d3ff56c3"
+      "sha256": "96164b8c375117a5492815690c37cfbd585c8203d082e07183a96ef3dcb608f6"
     },
     {
       "name": "Resources/Plugin_Ref.md",
@@ -80,7 +80,7 @@
     },
     {
       "name": "Resources/Reaper_Recent_Changes.md",
-      "sha256": "55c87a650719dfc7889b15e14d639dca88d47059760b836c790b947c5e1f0d21"
+      "sha256": "8b2732a84bc54779d4e4e18925dd3c499d988ef53cad4181412bb336e0ab546b"
     },
     {
       "name": "Resources/Relaunch.lua",
@@ -88,11 +88,11 @@
     },
     {
       "name": "Resources/System_Prompt.md",
-      "sha256": "69b26ead49a0419bbccb25c5f467ed071726637138dbb91aebc843bea157c5af"
+      "sha256": "a34ac7c5e8228a1592824dc3f96fa3a1f3d506cafdb4322ffe4bde06b325525c"
     },
     {
       "name": "Resources/UI.lua",
-      "sha256": "4906a19409ffa29f2c3f201096de3a25ddc9583de78c639de9230cc12dd915b8"
+      "sha256": "55998051f9e884f65cb0bef01d63f77dc1bb0a1d56896211eca256a9734ae87d"
     },
     {
       "name": "Resources/fonts/Inter_18pt-Bold.ttf",

@@ -85,6 +85,7 @@ Diag.MODEL_TIER_MAP = {
   ["claude-haiku-4-5"]   = "fast",
   ["claude-sonnet-4-5"]  = "balanced",
   ["claude-sonnet-4-6"]  = "balanced",
+  ["claude-sonnet-5"]    = "balanced",
   ["claude-opus-4-5"]    = "smart",
   ["claude-opus-4-7"]    = "smart",
   ["claude-opus-4-8"]    = "smart",
@@ -856,6 +857,21 @@ local function _turn_to_table(msg, redact_content)
       t.recovery_kind = tostring(msg.recovery_kind or "")
     elseif msg.recovery ~= nil then
       t.recovery_kind = tostring(msg.recovery or "")
+    end
+    if msg.recovery_used ~= nil then
+      t.recovery_used = msg.recovery_used == true
+    end
+    if msg.fallback_provider_id ~= nil then
+      local fallback_provider_id =
+        _safe_turn_provider_id(tostring(msg.fallback_provider_id or ""))
+      t.fallback_provider_id = fallback_provider_id
+      if msg.fallback_model_id ~= nil then
+        t.fallback_model_id = _safe_turn_model_id(
+          tostring(msg.fallback_model_id or ""), fallback_provider_id)
+      end
+    end
+    if msg.fallback_label ~= nil then
+      t.fallback_label = tostring(msg.fallback_label or "")
     end
     if msg.generated_code ~= nil or msg.code_block then
       t.generated_code = _turn_generated_code(msg, redact_content)

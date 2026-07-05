@@ -1,7 +1,7 @@
 local I18N = rawget(_G, "I18N") or {}
 
 I18N.fallback_code = "en"
-I18N.active_code = I18N.active_code or I18N.fallback_code
+I18N._runtime_cache = I18N._runtime_cache or {}
 
 I18N.catalogs = {
   en = {
@@ -3538,7 +3538,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.adv.compact_history.label"] =
         "Compact long chat history",
       ["settings.adv.compact_history.tooltip"] =
-        "Replace older successful code replies with short summaries to save tokens in long sessions. The latest reply stays verbatim, and follow-up edit requests keep the full history.",
+        "Replace older successful code replies with short summaries to save tokens in long sessions. The latest reply stays verbatim, and follow-up edit requests keep the full history. For Claude, ReaAssist keeps history verbatim to preserve prompt-cache savings.",
       ["settings.adv.diagnostics.label"] = "Automatic diagnostics",
       ["settings.adv.diagnostics.off"] = "Off",
       ["settings.adv.diagnostics.basic"] = "Basic",
@@ -3778,19 +3778,22 @@ function I18N.validate_ui_pack(doc, requested_code)
   local english_strings = type(english) == "table" and english.strings or nil
   if type(english_strings) ~= "table" then return nil, "english_missing" end
   local strings = {}
+  local skipped = 0
   for key, value in pairs(doc.strings) do
     if type(key) ~= "string" or key == "" or key:sub(1, 1) == "_" then
-      return nil, "invalid_key"
+      skipped = skipped + 1
+    elseif type(value) ~= "string" then
+      skipped = skipped + 1
+    else
+      local source = english_strings[key]
+      local missing = source ~= nil and I18N._placeholder_mismatch(source, value)
+        or nil
+      if missing then
+        skipped = skipped + 1
+      else
+        strings[key] = value
+      end
     end
-    if type(value) ~= "string" then
-      return nil, "invalid_value"
-    end
-    local source = english_strings[key]
-    if source ~= nil then
-      local missing = I18N._placeholder_mismatch(source, value)
-      if missing then return nil, "placeholder_mismatch:" .. key end
-    end
-    strings[key] = value
   end
   return {
     _meta = {
@@ -3799,6 +3802,7 @@ function I18N.validate_ui_pack(doc, requested_code)
       schema = I18N.PACK_SCHEMA,
       source_version = tostring(doc.source_version or ""),
       remote = true,
+      skipped_string_count = skipped,
     },
     strings = strings,
   }
@@ -3841,6 +3845,7 @@ function I18N.load_cached_ui_pack(code, opts)
   end
   I18N.catalogs[code] = catalog
   I18N._cached_pack_miss[code] = nil
+  I18N._runtime_cache = {}
   return true, catalog
 end
 
@@ -3903,7 +3908,7 @@ end
 function I18N.set_language_code(code)
   code = tostring(code or "")
   if not I18N.catalog_available(code) then return false end
-  I18N.active_code = code
+  I18N._runtime_cache = {}
   if type(prefs) == "table" then
     prefs.language_code = code
     if CFG and CFG.legacy_idx_for_language_code then
@@ -3938,6 +3943,34 @@ function I18N.has_key(code, key)
   local catalog = I18N.load_catalog(code)
   local strings = type(catalog) == "table" and catalog.strings or nil
   return type(strings) == "table" and strings[tostring(key or "")] ~= nil
+end
+
+function I18N._active_lookup()
+  local pref_code = type(prefs) == "table" and tostring(prefs.language_code or "")
+    or ""
+  local pref_idx = type(prefs) == "table" and tostring(prefs.reply_language_idx or "")
+    or ""
+  local cache = I18N._runtime_cache or {}
+  if cache.pref_code == pref_code and cache.pref_idx == pref_idx
+      and cache.code ~= nil then
+    return cache
+  end
+
+  local code = I18N.lang_code()
+  local catalog = I18N.load_catalog(code)
+  local fallback = code ~= I18N.fallback_code
+    and I18N.load_catalog(I18N.fallback_code) or nil
+  cache = {
+    pref_code = pref_code,
+    pref_idx = pref_idx,
+    code = code,
+    overrides = type(I18N.local_overrides) == "table"
+      and I18N.local_overrides[code] or nil,
+    strings = type(catalog) == "table" and catalog.strings or nil,
+    fallback_strings = type(fallback) == "table" and fallback.strings or nil,
+  }
+  I18N._runtime_cache = cache
+  return cache
 end
 
 function I18N.interpolate(text, values)
@@ -4094,17 +4127,32 @@ end
 
 function I18N.t(key, values, opts)
   key = tostring(key or "")
-  local code = type(opts) == "table" and opts.code or I18N.lang_code()
-  local overrides = I18N.local_overrides and I18N.local_overrides[code]
-  local text = type(overrides) == "table" and overrides[key] or nil
-  if text ~= nil then return I18N.interpolate(text, values) end
-  local catalog = I18N.load_catalog(code)
-  local strings = type(catalog) == "table" and catalog.strings or nil
-  text = type(strings) == "table" and strings[key] or nil
-  if text == nil and code ~= I18N.fallback_code then
-    catalog = I18N.load_catalog(I18N.fallback_code)
-    strings = type(catalog) == "table" and catalog.strings or nil
+  local code = type(opts) == "table" and opts.code or nil
+  local text
+  if code ~= nil then
+    code = tostring(code or "")
+    local catalog = I18N.load_catalog(code)
+    local strings = type(catalog) == "table" and catalog.strings or nil
     text = type(strings) == "table" and strings[key] or nil
+    if text == nil then
+      local overrides = I18N.local_overrides and I18N.local_overrides[code]
+      text = type(overrides) == "table" and overrides[key] or nil
+    end
+    if text == nil and code ~= I18N.fallback_code then
+      catalog = I18N.load_catalog(I18N.fallback_code)
+      strings = type(catalog) == "table" and catalog.strings or nil
+      text = type(strings) == "table" and strings[key] or nil
+    end
+  else
+    local lookup = I18N._active_lookup()
+    text = type(lookup.strings) == "table" and lookup.strings[key] or nil
+    if text == nil then
+      text = type(lookup.overrides) == "table" and lookup.overrides[key] or nil
+    end
+    if text == nil and lookup.code ~= I18N.fallback_code then
+      text = type(lookup.fallback_strings) == "table"
+        and lookup.fallback_strings[key] or nil
+    end
   end
   if text == nil then text = key end
   return I18N.interpolate(text, values)

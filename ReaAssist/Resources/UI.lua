@@ -237,13 +237,17 @@ local function jsfx_manual_perform_action(msg, idx, action, allow_invalid)
   end
 
   if action == "save_as" then
-    local saved = Code.save_file_jsfx(prepared, Code.derive_filename_jsfx(prepared))
+    local saved, save_reason = Code.save_file_jsfx(prepared,
+      Code.derive_filename_jsfx(prepared))
     if saved then
       jsfx_manual_record_ceiling_slot(msg, inject_info, saved, prepared)
       msg.jsfx_status = UI.t("jsfx.saved_to", {
         path = saved,
       }, "Saved to " .. saved)
       return true
+    end
+    if save_reason ~= "cancelled" then
+      msg.jsfx_status = UI.t("jsfx.save_failed", nil, "Failed to save JSFX.")
     end
     return false
   end
@@ -434,6 +438,29 @@ local _UI_SCALE_LABEL_BY_LANG = {
   id = "Skala antarmuka",
 }
 
+local _THEME_NAMES = { "auto", "dark", "light" }
+local _THEME_LABEL_ITEMS = {
+  { "settings.pref.theme.auto", "Auto" },
+  { "settings.pref.theme.dark", "Dark" },
+  { "settings.pref.theme.light", "Light" },
+}
+local _CHAT_FONT_LABEL_ITEMS = {
+  { "settings.pref.chat_font.small", "Small" },
+  { "settings.pref.chat_font.medium", "Medium" },
+  { "settings.pref.chat_font.large", "Large" },
+}
+local _TIMEOUT_PRESETS = { 60, 120, 180, 300, 600, 1200, 1800 }
+local _FEEDBACK_TAG_CHIPS = {
+  { "fb_tag_wrong", "feedback.modal.tag.wrong_result", "Wrong result",
+    "wrong_result" },
+  { "fb_tag_plugin", "feedback.modal.tag.wrong_plugin", "Wrong plugin",
+    "wrong_plugin" },
+  { "fb_tag_didnt", "feedback.modal.tag.didnt_follow",
+    "Didn't follow request", "didnt_follow_request" },
+  { "fb_tag_slow", "feedback.modal.tag.too_slow", "Too slow", "too_slow" },
+}
+local _RESOLVE_TYPE_ACRONYM = { eq = "EQ" }
+
 function UI.ui_scale_label()
   local code = UI.active_language_code()
   return _UI_SCALE_LABEL_BY_LANG[code]
@@ -446,6 +473,81 @@ function UI.t_combo(items)
     out[i] = UI.t(item[1], nil, item[2])
   end
   return tbl_concat(out, "\0") .. "\0"
+end
+
+local function t_combo_labels(cache_key, items)
+  local lang_code = UI.active_language_code()
+  UI._t_combo_labels_cache = UI._t_combo_labels_cache or {}
+  local cached = UI._t_combo_labels_cache[cache_key]
+  if cached and cached.lang_code == lang_code then
+    return cached.combo, cached.labels
+  end
+
+  local labels = {}
+  for i, item in ipairs(type(items) == "table" and items or {}) do
+    labels[i] = UI.t(item[1], nil, item[2])
+  end
+  cached = {
+    lang_code = lang_code,
+    labels = labels,
+    combo = tbl_concat(labels, "\0") .. "\0",
+  }
+  UI._t_combo_labels_cache[cache_key] = cached
+  return cached.combo, cached.labels
+end
+
+local function settings_pref_select_min_w(label, value)
+  local PAD_X      = RA.SC(12)
+  local LABEL_SZ   = RA.SC(12)
+  local MONO_SIZE  = RA.SC(10)
+  local CHEV_SIZE  = RA.SC(10)
+  local CHIP_PAD_X = RA.SC(9)
+  local CHEV_GAP   = RA.SC(4)
+  PushFont(RA.ctx, FONT.inter_reg, LABEL_SZ)
+  local label_w = CalcTextSize(RA.ctx, tostring(label or ""))
+  PopFont(RA.ctx)
+  PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
+  local value_w = CalcTextSize(RA.ctx, tostring(value or ""):upper())
+  PopFont(RA.ctx)
+  PushFont(RA.ctx, FONT.lucide, CHEV_SIZE)
+  local chev_w = CalcTextSize(RA.ctx, ICON.CHEVRON_DOWN)
+  PopFont(RA.ctx)
+  local chip_w = CHIP_PAD_X * 2 + value_w + CHEV_GAP + chev_w
+  return PAD_X * 2 + label_w + RA.SC(8) + chip_w
+end
+
+local function settings_pref_select_pos(row_sx, row_sy, slot, grid_cols,
+    col_w, grid_gap, row_step)
+  local col = (slot - 1) % grid_cols
+  local row = math_floor((slot - 1) / grid_cols)
+  ImGui.ImGui_SetCursorPos(RA.ctx,
+    row_sx + col * (col_w + grid_gap),
+    row_sy + row * row_step)
+end
+
+local function custom_provider_field_label(label, suffix)
+  PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
+  Text(RA.ctx, label)
+  PopStyleColor(RA.ctx)
+  PopFont(RA.ctx)
+  if suffix and suffix ~= "" then
+    SameLine(RA.ctx, 0, RA.SC(6))
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(10))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
+    Text(RA.ctx, suffix)
+    PopStyleColor(RA.ctx)
+    PopFont(RA.ctx)
+  end
+end
+
+local function custom_provider_inline_msg(txt, col)
+  if not txt or txt == "" then return end
+  PushFont(RA.ctx, FONT.inter_reg, RA.SC(10))
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), col or TK.red)
+  Text(RA.ctx, txt)
+  PopStyleColor(RA.ctx)
+  PopFont(RA.ctx)
 end
 
 function UI.thinking_level_label(level, fallback)
@@ -758,24 +860,9 @@ end
 -- (API keys, custom URLs, names) where the user pastes into an empty
 -- or about-to-be-replaced field anyway.
 function UI.input_with_menu(ctx, changed, new_value)
-  -- Per-frame counter assigns each call site a unique popup ID. Without
-  -- this, every InputText shares the same popup ID; when BeginPopup is
-  -- called with that shared ID, it returns true for ALL call sites
-  -- once the popup is open, and the menu renders one stacked copy per
-  -- input on screen (visible on dense pages like Preferred Plugins
-  -- where 16 rows x 3 fields = 48 stacked Copy/Paste/Cut popups).
-  -- Counter resets at the top of Render.main_window each frame, so the
-  -- per-call IDs are stable across frames as long as the iteration
-  -- order of input rendering is stable (which it always is in our UI).
-  UI._txt_menu_count = (UI._txt_menu_count or 0) + 1
-  local popup_id = "##ra_text_ctx_menu_" .. UI._txt_menu_count
-
-  -- IsMouseClicked(ctx, 1) -> right mouse button.
-  if ImGui.ImGui_IsItemHovered(ctx)
-      and ImGui.ImGui_IsMouseClicked(ctx, 1) then
-    ImGui.ImGui_OpenPopup(ctx, popup_id)
-  end
-  if ImGui.ImGui_BeginPopup(ctx, popup_id) then
+  -- Bind the popup to the last submitted InputText item. This keeps the menu
+  -- identity stable even if rows are inserted/removed while the popup is open.
+  if ImGui.ImGui_BeginPopupContextItem(ctx) then
     if ImGui.ImGui_MenuItem(ctx, UI.t("common.copy", nil, "Copy")) then
       ImGui.ImGui_SetClipboardText(ctx, new_value or "")
     end
@@ -1229,6 +1316,49 @@ function UI._split_wrap_units(text, max_units)
   return chunks
 end
 
+function UI.unwrap_wrapped_selection(original, wrapped, a, b)
+  original = tostring(original or "")
+  wrapped = tostring(wrapped or "")
+  a = math_max(0, math_min(tonumber(a) or 0, #wrapped))
+  b = math_max(a, math_min(tonumber(b) or #wrapped, #wrapped))
+  local result = {}
+  local wi, oi = 1, 1
+  while wi <= #wrapped and wi <= b do
+    local wc = str_sub(wrapped, wi, wi)
+    local oc = oi <= #original and str_sub(original, oi, oi) or ""
+    local emit = wi > a
+    if wc == oc then
+      if emit then result[#result + 1] = wc end
+      wi = wi + 1
+      oi = oi + 1
+    elseif wc == "\n" and oc == " " then
+      if emit then result[#result + 1] = " " end
+      wi = wi + 1
+      oi = oi + 1
+    elseif wc == "\n" then
+      -- Hard wrap inserted inside a long word; omit the artificial break and
+      -- do not advance original text so the next glyph rejoins the word.
+      wi = wi + 1
+    else
+      if emit then result[#result + 1] = wc end
+      wi = wi + 1
+      oi = oi + 1
+    end
+  end
+  return tbl_concat(result)
+end
+
+function UI.expire_missing_scroll_to_msg()
+  if not S.scroll_to_msg then return false end
+  S.scroll_to_msg_frames = (S.scroll_to_msg_frames or 0) + 1
+  if S.scroll_to_msg_frames > 30 then
+    S.scroll_to_msg = nil
+    S.scroll_to_msg_frames = nil
+    return true
+  end
+  return false
+end
+
 function UI._utf8_safe_prefix_bytes(text, max_bytes)
   text = tostring(text or "")
   max_bytes = math_floor(tonumber(max_bytes) or 0)
@@ -1261,6 +1391,324 @@ function UI._utf8_safe_prefix_bytes(text, max_bytes)
     end
   end
   return str_sub(text, 1, cut), str_sub(text, cut + 1)
+end
+
+function UI._utf8_prefix_chars(text, max_chars)
+  text = tostring(text or "")
+  max_chars = math_floor(tonumber(max_chars) or 0)
+  if max_chars <= 0 then return "" end
+  local len = utf8.len(text)
+  if len and len <= max_chars then return text end
+  if len then
+    local cut = utf8.offset(text, max_chars + 1)
+    return cut and str_sub(text, 1, cut - 1) or text
+  end
+  return UI._utf8_safe_prefix_bytes(text, max_chars)
+end
+
+function UI._utf8_truncate_chars(text, max_chars, ellipsis)
+  text = tostring(text or "")
+  max_chars = math_floor(tonumber(max_chars) or 0)
+  if max_chars <= 0 then return "" end
+  local len = utf8.len(text)
+  if len and len <= max_chars then return text end
+  ellipsis = ellipsis or "..."
+  local ell_len = utf8.len(ellipsis) or #ellipsis
+  local keep = math_max(max_chars - ell_len, 0)
+  return UI._utf8_prefix_chars(text, keep) .. ellipsis
+end
+
+function UI._utf8_drop_last_char(text)
+  text = tostring(text or "")
+  local len = utf8.len(text)
+  if len and len > 0 then return UI._utf8_prefix_chars(text, len - 1) end
+  return str_sub(text, 1, math_max(#text - 1, 0))
+end
+
+function UI._utf8_char_count(text)
+  text = tostring(text or "")
+  return utf8.len(text) or #text
+end
+
+function UI.preview_cache_key(...)
+  local parts = { ... }
+  for i = 1, #parts do
+    parts[i] = tostring(parts[i] or "")
+  end
+  return tbl_concat(parts, "\31")
+end
+
+function UI.preview_flags_key(flags)
+  if type(flags) ~= "table" then return "" end
+  local keys = {}
+  for k in pairs(flags) do keys[#keys + 1] = tostring(k) end
+  table.sort(keys)
+  local parts = {}
+  for i = 1, #keys do
+    local k = keys[i]
+    parts[i] = k .. "=" .. tostring(flags[k])
+  end
+  return tbl_concat(parts, "\31")
+end
+
+function UI.preview_text_lines(text)
+  text = tostring(text or "")
+  local lines, rp = {}, 1
+  while rp <= #text do
+    local nl = str_find(text, "\n", rp, true)
+    lines[#lines + 1] = nl and str_sub(text, rp, nl - 1) or str_sub(text, rp)
+    if not nl then break end
+    rp = nl + 1
+  end
+  return lines
+end
+
+function UI.preview_payload_cache(cache, key, build_fn)
+  if cache and cache.key == key then return cache end
+  local text = build_fn and build_fn() or ""
+  text = tostring(text or "")
+  return {
+    key = key,
+    text = text,
+    lines = UI.preview_text_lines(text),
+  }
+end
+
+function UI.preview_display_lines(cache, wrap_w)
+  if type(cache) ~= "table" then return {} end
+  local sample_w = 0
+  if ImGui.ImGui_CalcTextSize then
+    sample_w = ImGui.ImGui_CalcTextSize(RA.ctx, "M")
+  end
+  if not sample_w or sample_w <= 0 then
+    sample_w = math_max(ImGui.ImGui_GetFontSize(RA.ctx) * 0.60, 1)
+  end
+  local wrap_units = math_floor(math_max((tonumber(wrap_w) or 0) / sample_w, 20))
+  if cache.display_units == wrap_units and cache.display_lines then
+    return cache.display_lines
+  end
+
+  local display = {}
+  for i = 1, #(cache.lines or {}) do
+    local line = cache.lines[i] or ""
+    if line == "" then
+      display[#display + 1] = ""
+    else
+      local chunks = UI._split_wrap_units(line, wrap_units)
+      for j = 1, #chunks do
+        display[#display + 1] = chunks[j]
+      end
+    end
+  end
+  cache.display_units = wrap_units
+  cache.display_lines = display
+  return display
+end
+
+function UI.render_preview_display_lines(lines)
+  if type(lines) ~= "table" or #lines == 0 then return end
+
+  local function draw_line(line)
+    Text(RA.ctx, line ~= "" and line or " ")
+  end
+
+  if type(ImGui.ImGui_CreateListClipper) == "function"
+      and type(ImGui.ImGui_ListClipper_Begin) == "function"
+      and type(ImGui.ImGui_ListClipper_Step) == "function"
+      and type(ImGui.ImGui_ListClipper_GetDisplayRange) == "function"
+      and type(ImGui.ImGui_ListClipper_End) == "function" then
+    UI._preview_line_clipper = UI._preview_line_clipper
+      or ImGui.ImGui_CreateListClipper(RA.ctx)
+    if UI._preview_line_clipper then
+      if not UI._preview_line_clipper_attached
+          and type(ImGui.ImGui_Attach) == "function" then
+        ImGui.ImGui_Attach(RA.ctx, UI._preview_line_clipper)
+        UI._preview_line_clipper_attached = true
+      end
+      ImGui.ImGui_ListClipper_Begin(UI._preview_line_clipper, #lines)
+      while ImGui.ImGui_ListClipper_Step(UI._preview_line_clipper) do
+        local display_start, display_end =
+          ImGui.ImGui_ListClipper_GetDisplayRange(UI._preview_line_clipper)
+        for i = display_start + 1, math_min(display_end, #lines) do
+          draw_line(lines[i])
+        end
+      end
+      ImGui.ImGui_ListClipper_End(UI._preview_line_clipper)
+      return
+    end
+  end
+
+  for i = 1, #lines do draw_line(lines[i]) end
+end
+
+function UI.chat_message_value_cull_sig(v, depth)
+  local tv = type(v)
+  if tv ~= "table" then return tv .. ":" .. tostring(v) end
+  depth = (depth or 0) + 1
+  if depth > 3 then return "table" end
+
+  local keys = {}
+  for k in pairs(v) do keys[#keys + 1] = k end
+  table.sort(keys, function(a, b)
+    local ta, tb = type(a), type(b)
+    if ta ~= tb then return ta < tb end
+    return tostring(a) < tostring(b)
+  end)
+
+  local parts = {}
+  for i = 1, #keys do
+    local k = keys[i]
+    local item = v[k]
+    local item_sig
+    if type(item) == "table" then
+      item_sig = UI.chat_message_value_cull_sig(item, depth)
+    elseif type(item) == "function"
+        or type(item) == "userdata"
+        or type(item) == "thread" then
+      item_sig = type(item)
+    else
+      item_sig = type(item) .. ":" .. tostring(item)
+    end
+    parts[#parts + 1] = tostring(k) .. "=" .. item_sig
+  end
+  return "{" .. tbl_concat(parts, "\30") .. "}"
+end
+
+function UI.chat_message_static_cull_sig(msg)
+  if type(msg) ~= "table" then return "" end
+  local generated = msg.generated_code and msg.generated_code.content or ""
+  local attach_names = msg.attach_names
+  local attach_sig = ""
+  if type(attach_names) == "table" and #attach_names > 0 then
+    attach_sig = tbl_concat(attach_names, "\30")
+  end
+  local typed = msg.typed_actions
+  local typed_results = typed and typed.action_results or nil
+  local typed_sig = ""
+  if typed then
+    typed_sig = UI.preview_cache_key(
+      typed.present,
+      typed.valid,
+      typed.executed,
+      typed.deferred_pending,
+      typed.kind,
+      typed.error,
+      UI.chat_message_value_cull_sig(typed_results))
+  end
+  local lua_artifact_sig = UI.chat_message_value_cull_sig(msg.lua_artifact)
+  local ceiling_sig = UI.chat_message_value_cull_sig(msg.ceiling_inject_info)
+  local recovery_attach_sig =
+    UI.chat_message_value_cull_sig(msg.recovery_attachments)
+
+  if msg._chat_cull_sig_content ~= msg.content
+      or msg._chat_cull_sig_code ~= msg.code_block
+      or msg._chat_cull_sig_generated ~= generated
+      or msg._chat_cull_sig_attach ~= attach_sig
+      or msg._chat_cull_sig_typed ~= typed_sig
+      or msg._chat_cull_sig_lua_artifact ~= lua_artifact_sig
+      or msg._chat_cull_sig_ceiling ~= ceiling_sig
+      or msg._chat_cull_sig_recovery_attach ~= recovery_attach_sig
+      or msg._chat_cull_sig_storage ~= msg.storage_note then
+    msg._chat_cull_sig_content = msg.content
+    msg._chat_cull_sig_code = msg.code_block
+    msg._chat_cull_sig_generated = generated
+    msg._chat_cull_sig_attach = attach_sig
+    msg._chat_cull_sig_typed = typed_sig
+    msg._chat_cull_sig_lua_artifact = lua_artifact_sig
+    msg._chat_cull_sig_ceiling = ceiling_sig
+    msg._chat_cull_sig_recovery_attach = recovery_attach_sig
+    msg._chat_cull_sig_storage = msg.storage_note
+    msg._chat_cull_static_sig = UI.preview_cache_key(
+      msg.role,
+      msg.content,
+      msg.code_type,
+      msg.code_block,
+      generated,
+      attach_sig,
+      typed_sig,
+      lua_artifact_sig,
+      ceiling_sig,
+      recovery_attach_sig,
+      msg.storage_note)
+  end
+  return msg._chat_cull_static_sig or ""
+end
+
+function UI.chat_message_cull_key(msg, i, count, avail_w, chat_font_key,
+                                  running_cost, running_cost_count, prev_msg)
+  msg = msg or {}
+  local active_provider_label = ""
+  if msg.local_answer and msg.local_retry_available ~= false
+      and PROVIDERS and PROVIDERS.active then
+    local active_provider = PROVIDERS.active()
+    active_provider_label = active_provider
+      and tostring(active_provider.label or active_provider.id or "")
+      or ""
+  end
+  return UI.preview_cache_key(
+    math_floor(tonumber(avail_w) or 0),
+    prefs.show_details and "details" or "no_details",
+    prefs.chat_font_idx,
+    prefs.ui_scale_idx,
+    prefs.language_code,
+    prefs.reply_language_idx,
+    prefs.provider_idx,
+    prefs.model_idx,
+    prefs.thinking_idx,
+    chat_font_key,
+    Diag and Diag.uploader_enabled and "diag_on" or "diag_off",
+    S.status,
+    S.pending_display_idx == i,
+    i == count,
+    i == count and S.pending_code and "pending_code" or "",
+    running_cost,
+    running_cost_count,
+    prev_msg and prev_msg.from_card,
+    msg.ctx_label,
+    msg.model_label,
+    msg.provider_id,
+    msg.model_id,
+    msg.tok_in,
+    msg.tok_out,
+    msg.cost,
+    msg.free_tier,
+    msg.response_time,
+    msg.tok_cache_read,
+    msg.tok_cache_create,
+    msg.thinking_label,
+    msg.fx_cache_label,
+    msg.api_calls,
+    msg.auto_ran,
+    msg.auto_run_block_reason,
+    msg.run_status,
+    msg.run_blocked,
+    msg.edit_mode,
+    msg.truncated,
+    msg.local_answer,
+    msg.local_retry_available,
+    msg.local_llm_requested,
+    msg.llm_retry_prompt,
+    active_provider_label,
+    msg.link_label,
+    msg.link_url,
+    msg.typed_action_token_cap,
+    msg.typed_action_lua_requested,
+    msg.typed_action_undo_clicked,
+    msg.screen_reader_undo_clicked,
+    msg.recovery,
+    msg.recovery_used,
+    msg.recovery_prompt,
+    msg.fallback_provider_id,
+    msg.fallback_model_id,
+    msg.fallback_label,
+    msg.jsfx_saved_path,
+    msg.jsfx_saved_fx_name,
+    msg.jsfx_added_to_tracks,
+    msg.jsfx_status,
+    msg.jsfx_auto_saved,
+    msg.ceiling_injected,
+    msg.from_card,
+    UI.chat_message_static_cull_sig(msg))
 end
 
 function UI.maybe_prompt_missing_active_language_font()
@@ -1670,6 +2118,54 @@ function UI.logo(inner_w, title_size)
   return logo_sx0, logo_sy0, title_tw, TITLE_SIZE
 end
 
+function UI.open_settings(return_to)
+  if return_to == nil then
+    return_to = {
+      screen       = api_keys.screen,
+      show_help    = S.show_help,
+      show_bug     = S.show_bug_report,
+      show_credits = S.show_credits,
+    }
+  end
+  S._settings_return_to = return_to
+  S.show_help       = false
+  S.show_bug_report = false
+  S.show_credits    = false
+
+  api_keys.screen          = "settings"
+  api_keys.is_reentry      = true
+  api_keys.key_bufs        = {}
+  api_keys.key_errors      = {}
+  api_keys.key_warnings    = {}
+  api_keys.key_error       = nil
+  api_keys.key_focused     = false
+  api_keys.key_validating  = false
+
+  -- Stash current Preferences values so Cancel / "unsaved" discard can
+  -- revert them. Save persists + clears these; discard restores + clears.
+  api_keys.saved_ui_scale_idx          = prefs.ui_scale_idx
+  api_keys.saved_theme                 = prefs.theme
+  api_keys.saved_update_check          = prefs.update_check
+  api_keys.saved_auto_backup           = prefs.auto_backup
+  api_keys.saved_chat_font_idx         = prefs.chat_font_idx
+  api_keys.saved_reply_language_idx    = prefs.reply_language_idx
+  api_keys.saved_include_snapshot      = prefs.include_snapshot
+  api_keys.saved_include_api_ref       = prefs.include_api_ref
+  api_keys.saved_compact_history       = prefs.compact_history
+  api_keys.saved_diag_auto_tier        = prefs.diag_auto_tier
+  api_keys.saved_cloud_request_timeout = prefs.cloud_request_timeout
+
+  -- Section-open state is per Settings session; API Keys + Preferences start
+  -- open, Advanced stays closed so destructive controls remain tucked away.
+  api_keys.section_open = {
+    api  = true,
+    pref = true,
+    adv  = false,
+  }
+  api_keys.key_validating_idx = nil
+  api_keys.custom_edit = nil
+end
+
 -- V5 Bold Premium hero band. Renders across the full inner window width.
 -- Layout: gradient bg (accent_soft -> bg), wordmark "Rea" (Inter Light) +
 -- "Assist" (Inter Bold) left-aligned, status chip right-aligned, two-line
@@ -1814,7 +2310,7 @@ function UI.hero_band_v5(phase)
   do
     local ax = wm_x + rea_w
     for i, ltr in ipairs(assist_letters) do
-      local glyph_w = letter_widths[i] * (wm_scale or 1)
+      local glyph_w = letter_widths[i] * wm_scale
       draw_letter(f_wm_b, ltr, ax, glyph_w)
       ax = ax + glyph_w
     end
@@ -1971,39 +2467,7 @@ function UI.hero_band_v5(phase)
     end
     UI.tooltip_v5(st_tooltip)
     if st_clicked and st_is_settings then
-      api_keys.screen          = "settings"
-      api_keys.is_reentry      = true
-      api_keys.key_bufs        = {}
-      api_keys.key_errors      = {}
-      api_keys.key_warnings    = {}
-      api_keys.key_error       = nil
-      api_keys.key_focused     = false
-      api_keys.key_validating  = false
-      -- Stash current Preferences values so Cancel / "unsaved" discard
-      -- can revert them. Save persists + clears these; discard restores
-      -- + clears. Keys get their own buffer flow above; everything
-      -- below (main preferences plus advanced controls) lives here.
-      api_keys.saved_ui_scale_idx         = prefs.ui_scale_idx
-      api_keys.saved_theme                = prefs.theme
-      api_keys.saved_update_check         = prefs.update_check
-      api_keys.saved_auto_backup          = prefs.auto_backup
-      api_keys.saved_chat_font_idx        = prefs.chat_font_idx
-      api_keys.saved_reply_language_idx   = prefs.reply_language_idx
-      api_keys.saved_include_snapshot     = prefs.include_snapshot
-      api_keys.saved_include_api_ref      = prefs.include_api_ref
-      api_keys.saved_compact_history      = prefs.compact_history
-      api_keys.saved_diag_auto_tier       = prefs.diag_auto_tier
-      api_keys.saved_cloud_request_timeout = prefs.cloud_request_timeout
-      -- Section-open state (per Settings session; not persisted across
-      -- script reloads). API KEYS + PREFERENCES default open, ADVANCED
-      -- defaults closed so the destructive actions stay tucked away.
-      api_keys.section_open = {
-        api  = true,
-        pref = true,
-        adv  = false,
-      }
-      api_keys.key_validating_idx = nil
-      api_keys.custom_edit = nil
+      UI.open_settings()
     end
   end
 
@@ -2209,7 +2673,7 @@ function UI.hero_band_settings_v5(subtitle, right_text)
   do
     local ax = wm_x + rea_w
     for i, ltr in ipairs(assist_letters) do
-      local glyph_w = letter_widths[i] * (wm_scale or 1)
+      local glyph_w = letter_widths[i]
       draw_letter(f_wm_b, ltr, ax, glyph_w)
       ax = ax + glyph_w
     end
@@ -2304,7 +2768,8 @@ end
 -- every undoable op) or after a 5s fallback for non-undoable changes
 -- like project swaps. Play-cursor time still reads per frame.
 local _session_cache = {
-  t = 0, state = -1, name = "", tracks = 0, items = 0, fx = 0
+  t = 0, state = -1, name = "", tracks = 0, items = 0, fx = 0,
+  unsaved = false
 }
 local function _format_time(sec)
   sec = math_max(0, sec)
@@ -2349,19 +2814,13 @@ function UI.session_strip_v5()
   if (cur_state ~= _session_cache.state and age > 0.1) or age > 5 then
     local proj_path = select(2, reaper.EnumProjects(-1)) or ""
     local proj_name = proj_path:match("[^\\/]+$")
+    local proj_unsaved = not proj_name or proj_name == ""
     if not proj_name or proj_name == "" then
       proj_name = UI.t("session.unsaved", nil, "unsaved")
     end
-    -- Cap to 33 chars (including the ".rpp" tail) so the session strip
-    -- doesn't blow past the card width on long project names. Truncate to
-    -- 30 chars + "..." so the total stays at exactly 33. Use utf8.len /
-    -- utf8.offset so a CJK / Cyrillic / accented project name isn't cut
-    -- mid-codepoint (which would feed ImGui invalid UTF-8 and render as
-    -- a replacement glyph).
-    if utf8.len(proj_name) and utf8.len(proj_name) > 33 then
-      local cut = utf8.offset(proj_name, 31)
-      if cut then proj_name = proj_name:sub(1, cut - 1) .. "..." end
-    end
+    -- Cap to 33 chars (including the ".rpp" tail) without cutting a UTF-8
+    -- codepoint mid-byte.
+    proj_name = UI._utf8_truncate_chars(proj_name, 33, "...")
     local nt = R.CountTracks(0)
     local items, fxs = 0, 0
     for i = 0, nt - 1 do
@@ -2381,6 +2840,34 @@ function UI.session_strip_v5()
     _session_cache.tracks = nt
     _session_cache.items  = items
     _session_cache.fx     = fxs
+    _session_cache.unsaved = proj_unsaved
+  end
+
+  local session_lang = UI.active_language_code()
+  local session_catalog = I18N and I18N.load_catalog
+    and I18N.load_catalog(session_lang) or nil
+  local session_meta = type(session_catalog) == "table" and session_catalog._meta or nil
+  local session_locale_key = tostring(session_lang) .. ":"
+    .. tostring(session_meta and session_meta.source_version or "")
+  local session_labels_key = session_locale_key .. ":"
+    .. tostring(_session_cache.tracks) .. ":"
+    .. tostring(_session_cache.items) .. ":"
+    .. tostring(_session_cache.fx) .. ":"
+    .. tostring(_session_cache.unsaved)
+  if _session_cache.labels_key ~= session_labels_key then
+    if _session_cache.unsaved then
+      _session_cache.name = UI.t("session.unsaved", nil, "unsaved")
+    end
+    _session_cache.tracks_label =
+      UI.t("session.tracks", { count = _session_cache.tracks },
+        tostring(_session_cache.tracks) .. " tracks")
+    _session_cache.items_label =
+      UI.t("session.items", { count = _session_cache.items },
+        tostring(_session_cache.items) .. " items")
+    _session_cache.fx_label =
+      UI.t("session.fx", { count = _session_cache.fx },
+        tostring(_session_cache.fx) .. " fx")
+    _session_cache.labels_key = session_labels_key
   end
 
   local card_x_local = start_x_local + CONT_PAD_X
@@ -2455,17 +2942,11 @@ function UI.session_strip_v5()
   end
   draw_seg(FONT.mono_reg, MONO_SIZE,  TK.text,       _session_cache.name)
   draw_dot()
-  draw_seg(FONT.mono_reg, MONO_SIZE,  TK.text_muted,
-           UI.t("session.tracks", { count = _session_cache.tracks },
-             tostring(_session_cache.tracks) .. " tracks"))
+  draw_seg(FONT.mono_reg, MONO_SIZE,  TK.text_muted, _session_cache.tracks_label)
   draw_dot()
-  draw_seg(FONT.mono_reg, MONO_SIZE,  TK.text_muted,
-           UI.t("session.items", { count = _session_cache.items },
-             tostring(_session_cache.items) .. " items"))
+  draw_seg(FONT.mono_reg, MONO_SIZE,  TK.text_muted, _session_cache.items_label)
   draw_dot()
-  draw_seg(FONT.mono_reg, MONO_SIZE,  TK.text_muted,
-           UI.t("session.fx", { count = _session_cache.fx },
-             tostring(_session_cache.fx) .. " fx"))
+  draw_seg(FONT.mono_reg, MONO_SIZE,  TK.text_muted, _session_cache.fx_label)
 
   -- Transport state + play-cursor time (both mono, right-aligned). The time
   -- reads fresh each frame so it animates smoothly during playback; the state
@@ -2473,20 +2954,25 @@ function UI.session_strip_v5()
   -- bit 2 = record). State colour: green when playing, red when recording,
   -- amber when paused, muted grey when stopped.
   local st = reaper.GetPlayState() or 0
-  local st_label, st_col
-  if (st & 4) ~= 0 then
-    st_label, st_col = UI.t("session.transport.rec", nil, "REC"),
-      0xFF5555FF
-  elseif (st & 2) ~= 0 then
-    st_label, st_col = UI.t("session.transport.pause", nil, "PAUSE"),
-      TK.amber
-  elseif (st & 1) ~= 0 then
-    st_label, st_col = UI.t("session.transport.play", nil, "PLAY"),
-      TK.green
-  else
-    st_label, st_col = UI.t("session.transport.stop", nil, "STOP"),
-      TK.text_faint
+  local transport_key = session_locale_key .. ":" .. tostring(st)
+  if _session_cache.transport_key ~= transport_key then
+    if (st & 4) ~= 0 then
+      _session_cache.transport_label = UI.t("session.transport.rec", nil, "REC")
+      _session_cache.transport_col = 0xFF5555FF
+    elseif (st & 2) ~= 0 then
+      _session_cache.transport_label = UI.t("session.transport.pause", nil, "PAUSE")
+      _session_cache.transport_col = TK.amber
+    elseif (st & 1) ~= 0 then
+      _session_cache.transport_label = UI.t("session.transport.play", nil, "PLAY")
+      _session_cache.transport_col = TK.green
+    else
+      _session_cache.transport_label = UI.t("session.transport.stop", nil, "STOP")
+      _session_cache.transport_col = TK.text_faint
+    end
+    _session_cache.transport_key = transport_key
   end
+  local st_label = _session_cache.transport_label or "STOP"
+  local st_col = _session_cache.transport_col or TK.text_faint
   -- Playhead: show the live play-cursor during playback, otherwise show the
   -- edit cursor so the readout tracks where the user has clicked/moved the
   -- playhead even when transport is stopped. Both calls are O(1) reads.
@@ -2544,6 +3030,26 @@ function UI.mode_model_row_v5()
   local ROUND_SEG  = RA.SC(3)
 
   local req_live = (S.status == "waiting")
+  UI._mode_model_row_metrics = UI._mode_model_row_metrics or {}
+  local mode_metrics = UI._mode_model_row_metrics
+  local function mode_text_metrics(font, size, text)
+    text = tostring(text or "")
+    if text == "" then return 0, 0 end
+    if not font then
+      local w, h = CalcTextSize(RA.ctx, text)
+      return tonumber(w) or 0, tonumber(h) or 0
+    end
+    local key = tostring(font) .. ":" .. tostring(size) .. ":" .. text
+    local m = mode_metrics[key]
+    if not m then
+      PushFont(RA.ctx, font, size)
+      local w, h = CalcTextSize(RA.ctx, text)
+      PopFont(RA.ctx)
+      m = { w = tonumber(w) or 0, h = tonumber(h) or 0 }
+      mode_metrics[key] = m
+    end
+    return m.w, m.h
+  end
 
   local cursor_x = sx + PAD_X
   -- Lift the chip row 7px above its layout slot. The Dummy at the bottom
@@ -2554,9 +3060,7 @@ function UI.mode_model_row_v5()
   local CHIP_ROW_LIFT = RA.SC(5)
   local y1, y2 = sy - CHIP_ROW_LIFT, sy - CHIP_ROW_LIFT + ROW_H
 
-  PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
-  local _, th = CalcTextSize(RA.ctx, "M")
-  PopFont(RA.ctx)
+  local _, th = mode_text_metrics(FONT.mono_med, MONO_SIZE, "M")
   local t_y = y1 + math_floor((ROW_H - th) * 0.5)
 
   -- Place an InvisibleButton at (x1, y1) with size (w, h). Returns true if the
@@ -2577,20 +3081,14 @@ function UI.mode_model_row_v5()
   -- chip's left edge (for popup anchoring) and whether it was clicked.
   local function draw_chip(label, btn_id, enabled, tooltip_text,
                            leading_icon, leading_icon_color)
-    PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
-    local lw = CalcTextSize(RA.ctx, label)
-    PopFont(RA.ctx)
+    local lw = mode_text_metrics(FONT.mono_med, MONO_SIZE, label)
     local iw = 0
     local icon_gap = 0
     if leading_icon then
-      PushFont(RA.ctx, FONT.lucide, CHEV_SIZE)
-      iw = CalcTextSize(RA.ctx, leading_icon)
-      PopFont(RA.ctx)
+      iw = mode_text_metrics(FONT.lucide, CHEV_SIZE, leading_icon)
       icon_gap = RA.SC(4)
     end
-    PushFont(RA.ctx, FONT.lucide, CHEV_SIZE)
-    local cw = CalcTextSize(RA.ctx, ICON.CHEVRON_DOWN)
-    PopFont(RA.ctx)
+    local cw = mode_text_metrics(FONT.lucide, CHEV_SIZE, ICON.CHEVRON_DOWN)
     local w = CHIP_PAD_X * 2 + iw + icon_gap + lw + CHEV_GAP + cw
     local cx1, cx2 = cursor_x, cursor_x + w
 
@@ -2637,9 +3135,11 @@ function UI.mode_model_row_v5()
 
   local function menu_text_w(text, font)
     if not text or text == "" then return 0 end
-    if font then PushFont(RA.ctx, font, MONO_SIZE) end
+    if font then
+      local w = mode_text_metrics(font, MONO_SIZE, text)
+      return w
+    end
     local w = CalcTextSize(RA.ctx, text)
-    if font then PopFont(RA.ctx) end
     return w or 0
   end
 
@@ -2727,8 +3227,7 @@ function UI.mode_model_row_v5()
   local CHIP_MAX_MODEL = 22
   local function _chip_truncate(s, max_chars)
     if not s then return "" end
-    if #s <= max_chars then return s end
-    return s:sub(1, max_chars - 1) .. "\xe2\x80\xa6"
+    return UI._utf8_truncate_chars(s, max_chars, "\xe2\x80\xa6")
   end
 
   -- The Free-tier suffix only appears in the provider dropdown (see label
@@ -3088,10 +3587,8 @@ function UI.mode_model_row_v5()
   -- logical order: pick what AI to use first, then pick how it behaves.
   local ask_label = UI.t("mode.ask", nil, "ASK")
   local auto_run_label = UI.t("mode.auto_run", nil, "AUTO-RUN")
-  PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
-  local ask_tw  = CalcTextSize(RA.ctx, ask_label)
-  local auto_tw = CalcTextSize(RA.ctx, auto_run_label)
-  PopFont(RA.ctx)
+  local ask_tw  = mode_text_metrics(FONT.mono_med, MONO_SIZE, ask_label)
+  local auto_tw = mode_text_metrics(FONT.mono_med, MONO_SIZE, auto_run_label)
   local s1w = ask_tw  + SEG_PAD_X * 2
   local s2w = auto_tw + SEG_PAD_X * 2
   local pill_w = s1w + s2w + INNER_PAD * 2
@@ -3724,53 +4221,7 @@ function UI.footer_rail_v5()
         -- at the top of its frame and clears it.
         S._settings_request_cancel = true
       else
-        -- Toggle on: remember where we came from so the next click
-        -- can restore it. Covers nav from chat ("") + from a help /
-        -- credits / bug-report modal (captures those flags too).
-        S._settings_return_to = {
-          screen        = api_keys.screen,
-          show_help     = S.show_help,
-          show_bug      = S.show_bug_report,
-          show_credits  = S.show_credits,
-        }
-        -- Close any currently-open modal screen so Settings dispatches.
-        S.show_help        = false
-        S.show_bug_report  = false
-        S.show_credits     = false
-
-        api_keys.screen          = "settings"
-        api_keys.is_reentry      = true
-        api_keys.key_bufs        = {}
-        api_keys.key_errors      = {}
-        api_keys.key_warnings    = {}
-        api_keys.key_error       = nil
-        api_keys.key_focused     = false
-        api_keys.key_validating  = false
-        -- Stash current Preferences values so Cancel / "unsaved" discard
-        -- can revert them. Save persists + clears these; discard restores
-        -- + clears. Keys get their own buffer flow above; everything
-        -- below (main preferences plus advanced controls) lives here.
-        api_keys.saved_ui_scale_idx         = prefs.ui_scale_idx
-        api_keys.saved_theme                = prefs.theme
-        api_keys.saved_update_check         = prefs.update_check
-        api_keys.saved_auto_backup          = prefs.auto_backup
-        api_keys.saved_chat_font_idx        = prefs.chat_font_idx
-        api_keys.saved_reply_language_idx   = prefs.reply_language_idx
-        api_keys.saved_include_snapshot     = prefs.include_snapshot
-        api_keys.saved_include_api_ref      = prefs.include_api_ref
-        api_keys.saved_compact_history      = prefs.compact_history
-        api_keys.saved_diag_auto_tier       = prefs.diag_auto_tier
-        api_keys.saved_cloud_request_timeout = prefs.cloud_request_timeout
-        -- Section-open state (per Settings session; not persisted across
-        -- script reloads). API KEYS + PREFERENCES default open, ADVANCED
-        -- defaults closed so the destructive actions stay tucked away.
-        api_keys.section_open = {
-          api  = true,
-          pref = true,
-          adv  = false,
-        }
-        api_keys.key_validating_idx = nil
-        api_keys.custom_edit = nil
+        UI.open_settings()
       end
     end
     cursor_x = x1 - GAP
@@ -4087,16 +4538,27 @@ function UI.v5_section_label(txt, is_open, right_text, size_scale, color_overrid
 
   -- Measure the label text up front so the whole row width can be
   -- computed for the click-target + the layout reservation below.
-  PushFont(RA.ctx, FONT.mono_reg, LABEL_SZ)
-  local chars, total_w = {}, 0
-  for _, cp in utf8.codes(txt) do
-    local ch = utf8.char(cp)
-    local cw = CalcTextSize(RA.ctx, ch)
-    chars[#chars+1] = { c = ch, w = cw }
-    total_w = total_w + cw
+  UI._v5_section_label_metrics = UI._v5_section_label_metrics or {}
+  local label_key = tostring(FONT.mono_reg) .. ":" .. tostring(LABEL_SZ)
+    .. ":" .. tostring(WIDE_KERN) .. ":" .. tostring(txt or "")
+  local label_metrics = UI._v5_section_label_metrics[label_key]
+  if not label_metrics then
+    PushFont(RA.ctx, FONT.mono_reg, LABEL_SZ)
+    local measured_chars, measured_total_w = {}, 0
+    for _, cp in utf8.codes(txt) do
+      local ch = utf8.char(cp)
+      local cw = CalcTextSize(RA.ctx, ch)
+      measured_chars[#measured_chars+1] = { c = ch, w = cw }
+      measured_total_w = measured_total_w + cw
+    end
+    PopFont(RA.ctx)
+    if #measured_chars > 1 then
+      measured_total_w = measured_total_w + WIDE_KERN * (#measured_chars - 1)
+    end
+    label_metrics = { chars = measured_chars, total_w = measured_total_w }
+    UI._v5_section_label_metrics[label_key] = label_metrics
   end
-  PopFont(RA.ctx)
-  if #chars > 1 then total_w = total_w + WIDE_KERN * (#chars - 1) end
+  local chars, total_w = label_metrics.chars, label_metrics.total_w
 
   -- Hit region: the entire row width when collapsible, so users can
   -- click anywhere (not just the tiny 14px accent bar) to toggle.
@@ -4158,9 +4620,15 @@ function UI.v5_section_label(txt, is_open, right_text, size_scale, color_overrid
   -- in fixed-width glyphs on a single line.
   if right_text and right_text ~= "" then
     local RIGHT_SZ = RA.SC(10)
-    PushFont(RA.ctx, FONT.inter_reg, RIGHT_SZ)
-    local rt_w = CalcTextSize(RA.ctx, right_text)
-    PopFont(RA.ctx)
+    local right_key = "right:" .. tostring(FONT.inter_reg) .. ":"
+      .. tostring(RIGHT_SZ) .. ":" .. tostring(right_text)
+    local rt_w = UI._v5_section_label_metrics[right_key]
+    if not rt_w then
+      PushFont(RA.ctx, FONT.inter_reg, RIGHT_SZ)
+      rt_w = CalcTextSize(RA.ctx, right_text)
+      PopFont(RA.ctx)
+      UI._v5_section_label_metrics[right_key] = rt_w
+    end
     local right_edge_x = sx + avail_w
     local rt_x = right_edge_x - rt_w
     -- Center the right-note vertically on the mono label's cap line.
@@ -4772,7 +5240,7 @@ function UI.v5_select_row(id, label, items_str, cur_idx, tooltip, col_w, badge_t
     PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
     while #chip_draw_label > 0
         and CalcTextSize(RA.ctx, chip_draw_label .. ell) > max_text_w do
-      chip_draw_label = chip_draw_label:sub(1, #chip_draw_label - 1)
+      chip_draw_label = UI._utf8_drop_last_char(chip_draw_label)
     end
     if chip_draw_label ~= chip_label then
       chip_draw_label = (#chip_draw_label > 0) and (chip_draw_label .. ell)
@@ -5064,9 +5532,9 @@ function UI.selectable_text(text, widget_id, avail_w, color, chars_per_line_over
     while li <= #all_lines do
       local line = all_lines[li]
       if line:match("^%s*|") then
-        local rows, next_i = parse_md_table(all_lines, li)
+        local rows, next_i, num_cols = parse_md_table(all_lines, li)
         if #rows > 0 then
-          segments[#segments+1] = { type = "table", rows = rows }
+          segments[#segments+1] = { type = "table", rows = rows, num_cols = num_cols }
         end
         li = next_i
       else
@@ -5176,50 +5644,7 @@ function UI.selectable_text(text, widget_id, avail_w, color, chars_per_line_over
       -- the original (pre-wrap) text so that copied text doesn't contain the
       -- artificial line breaks inserted by word wrapping.
       local function unwrap_selection(a, b)
-        local sel_wrapped = str_sub(wrapped, a + 1, b)
-        -- Build a map of newline positions that exist in the original text.
-        local orig_nls = {}
-        for p in seg.text:gmatch("()\n") do orig_nls[p] = true end
-        -- Walk both strings in sync to identify which wrapped newlines
-        -- are original (keep) vs wrap-inserted (replace with space).
-        local result = {}
-        local wi = a + 1  -- position in wrapped string
-        local oi = 1      -- position in original string
-        -- Advance oi to match the start of the selection in wrapped.
-        -- Both strings have the same characters except \n vs space at
-        -- wrap points, so step through together.
-        local sync_wi = 1
-        while sync_wi < wi and oi <= #seg.text do
-          local wc = str_sub(wrapped, sync_wi, sync_wi)
-          local oc = str_sub(seg.text, oi, oi)
-          if wc == oc then
-            sync_wi = sync_wi + 1
-            oi = oi + 1
-          elseif wc == "\n" and oc == " " then
-            -- wrap-inserted newline corresponds to original space
-            sync_wi = sync_wi + 1
-            oi = oi + 1
-          elseif wc == "\n" then
-            -- wrap-inserted newline with no corresponding space (word break)
-            sync_wi = sync_wi + 1
-          else
-            sync_wi = sync_wi + 1
-            oi = oi + 1
-          end
-        end
-        -- Now extract the selection, replacing wrap newlines with spaces.
-        for ci = 1, #sel_wrapped do
-          local wc = str_sub(sel_wrapped, ci, ci)
-          local oc = oi <= #seg.text and str_sub(seg.text, oi, oi) or ""
-          if wc == "\n" and oc ~= "\n" then
-            result[#result+1] = oc == " " and " " or " "
-            if oc == " " then oi = oi + 1 end
-          else
-            result[#result+1] = wc
-            oi = oi + 1
-          end
-        end
-        return tbl_concat(result)
+        return UI.unwrap_wrapped_selection(seg.text, wrapped, a, b)
       end
 
       -- Intercept Ctrl+C / Cmd+C: overwrite clipboard with unwrapped text.
@@ -5267,9 +5692,12 @@ function UI.selectable_text(text, widget_id, avail_w, color, chars_per_line_over
 
     else
       -- Render table segment as a real ImGui table.
-      local num_cols = 0
-      for _, cells in ipairs(seg.rows) do
-        if #cells > num_cols then num_cols = #cells end
+      local num_cols = seg.num_cols or 0
+      if num_cols <= 0 then
+        for _, cells in ipairs(seg.rows) do
+          if #cells > num_cols then num_cols = #cells end
+        end
+        seg.num_cols = num_cols
       end
       if num_cols > 0 then
         local tbl_id = widget_id .. "_t" .. si
@@ -5278,14 +5706,26 @@ function UI.selectable_text(text, widget_id, avail_w, color, chars_per_line_over
                         | ImGui.ImGui_TableFlags_PadOuterX()
         PushFont(RA.ctx, RA.code_font, RA.SC(12))
         PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_CellPadding(), 5, 2)
-        -- Pre-calculate max pixel width per column from cell content.
-        local col_px = {}
-        for c = 1, num_cols do col_px[c] = 0 end
-        for _, cells in ipairs(seg.rows) do
-          for c = 1, num_cols do
-            local w = CalcTextSize(RA.ctx, cells[c] or "")
-            if w > col_px[c] then col_px[c] = w end
+        -- Pre-calculate natural pixel width per column from cell content.
+        -- The parsed segment is cached by widget/raw text, so cell measurement
+        -- only needs to repeat when the table font or scaled font size changes.
+        local table_metric_key = tostring(RA.code_font) .. ":" .. tostring(RA.SC(12))
+        if seg._table_col_px_key ~= table_metric_key then
+          local measured_col_px = {}
+          for c = 1, num_cols do measured_col_px[c] = 0 end
+          for _, cells in ipairs(seg.rows) do
+            for c = 1, num_cols do
+              local w = CalcTextSize(RA.ctx, cells[c] or "")
+              if w > measured_col_px[c] then measured_col_px[c] = w end
+            end
           end
+          seg._table_col_px = measured_col_px
+          seg._table_col_px_key = table_metric_key
+        end
+        local natural_col_px = seg._table_col_px or {}
+        local col_px = {}
+        for c = 1, num_cols do
+          col_px[c] = natural_col_px[c] or 0
         end
         -- Fit all columns within avail_w: keep small columns at natural width,
         -- shrink only the oversized ones to fill remaining space.
@@ -5603,10 +6043,26 @@ function Render.tos_screen()
   UI.page_title(UI.t("tos.title", nil, "Terms of Use"), inner_w)
   Dummy(RA.ctx, 1, RA.SC(10))
 
-  -- Parse localized TOS text into structured blocks on first render. Cached on
-  -- api_keys so subsequent renders skip the split unless language changes.
-  local tos_text = UI.t("tos.body", { year = os.date("%Y") }, api_keys.tos_text)
   local tos_lang = (I18N and I18N.lang_code and I18N.lang_code()) or "en"
+  local tos_year = os.date("%Y")
+  local tos_catalog = I18N and I18N.load_catalog and I18N.load_catalog(tos_lang) or nil
+  local tos_meta = type(tos_catalog) == "table" and tos_catalog._meta or nil
+  local tos_source_version = tos_meta and tos_meta.source_version or ""
+  if api_keys._tos_text_lang ~= tos_lang
+      or api_keys._tos_text_year ~= tos_year
+      or api_keys._tos_text_source ~= api_keys.tos_text
+      or api_keys._tos_text_source_version ~= tos_source_version then
+    api_keys._tos_text = UI.t("tos.body", { year = tos_year }, api_keys.tos_text)
+    api_keys._tos_text_lang = tos_lang
+    api_keys._tos_text_year = tos_year
+    api_keys._tos_text_source = api_keys.tos_text
+    api_keys._tos_text_source_version = tos_source_version
+  end
+
+  -- Parse localized TOS text into structured blocks on first render. Cached on
+  -- api_keys so subsequent renders skip the split unless the rendered body
+  -- changes through language, year, source text, or catalog-version updates.
+  local tos_text = api_keys._tos_text or api_keys.tos_text or ""
   if not api_keys._tos_blocks
       or api_keys._tos_blocks_lang ~= tos_lang
       or api_keys._tos_blocks_text ~= tos_text then
@@ -5774,9 +6230,11 @@ local function load_help_sections()
     or (CFG and CFG.current_language_code and CFG.current_language_code())
     or (prefs and prefs.language_code)
     or "en"
+  local help_catalog_ready = I18N and I18N.has_key
+    and I18N.has_key(lang, "help.intro.what")
   if lang ~= "en" and lang ~= "qps-ploc"
       and I18N and I18N.has_key
-      and not I18N.has_key(lang, "help.intro.what")
+      and not help_catalog_ready
       and LangPacks and not (LangPacks.is_busy and LangPacks.is_busy()) then
     local refresh_key = tostring(lang) .. ":help"
     if S and S._help_lang_refresh_key ~= refresh_key then
@@ -5789,12 +6247,21 @@ local function load_help_sections()
       if ok then S._help_lang_refresh_key = refresh_key end
     end
   end
+  local catalog = I18N and I18N.load_catalog and I18N.load_catalog(lang) or nil
+  local meta = type(catalog) == "table" and catalog._meta or nil
+  local help_cache_key = tostring(lang) .. ":"
+    .. tostring(help_catalog_ready and true or false) .. ":"
+    .. tostring(meta and meta.source_version or "")
+  if UI._help_sections_cache_key == help_cache_key
+      and UI._help_sections_cache then
+    return UI._help_sections_cache
+  end
   local function t(key, fallback) return UI.t(key, nil, fallback) end
   local function h3(key, fallback) return "### " .. t(key, fallback) end
   local function bullet(key, fallback)
     return "- " .. t(key, fallback)
   end
-  return {{
+  local sections = {{
     title = t("help.section.essential", "Essential Guidance"),
     lines = {
       t("help.intro.what",
@@ -5848,6 +6315,9 @@ local function load_help_sections()
         "Use Read Online Manual above for detailed setup and troubleshooting."),
     },
   }}
+  UI._help_sections_cache_key = help_cache_key
+  UI._help_sections_cache = sections
+  return sections
 end
 
 function Render.help_screen()
@@ -5912,7 +6382,9 @@ function Render.help_screen()
     UI.lerp_u32(TK.border_str, TK.text, 0.30))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
     UI.lerp_u32(TK.border_str, TK.text, 0.55))
-  ImGui.ImGui_BeginChild(RA.ctx, "##help_body", _body_avail_w, _body_h, 0)
+  local help_body_open = ImGui.ImGui_BeginChild(RA.ctx,
+    "##help_body", _body_avail_w, _body_h, 0)
+  if help_body_open then
 
   ImGui.ImGui_Indent(RA.ctx, indent)
   Dummy(RA.ctx, 1, RA.SC(14))
@@ -6064,6 +6536,7 @@ function Render.help_screen()
 
   ImGui.ImGui_Unindent(RA.ctx, indent)
   ImGui.ImGui_EndChild(RA.ctx)
+  end
   PopStyleColor(RA.ctx, 4)               -- scrollbar bg + grab + hovered + active
   ImGui.ImGui_PopStyleVar(RA.ctx, 2)     -- ChildBorderSize, WindowPadding
   UI.pop_settings_styles()
@@ -6132,7 +6605,9 @@ function Render.bug_report_screen()
     UI.lerp_u32(TK.border_str, TK.text, 0.30))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
     UI.lerp_u32(TK.border_str, TK.text, 0.55))
-  ImGui.ImGui_BeginChild(RA.ctx, "##bugrpt_body", _body_avail_w, _body_h, 0)
+  local bugrpt_body_open = ImGui.ImGui_BeginChild(RA.ctx,
+    "##bugrpt_body", _body_avail_w, _body_h, 0)
+  if bugrpt_body_open then
 
   ImGui.ImGui_Indent(RA.ctx, indent)
   Dummy(RA.ctx, 1, RA.SC(10))
@@ -6202,16 +6677,31 @@ function Render.bug_report_screen()
 
   -- Decide what attachment will accompany the report. Same rule as
   -- Diag.begin_bug_report_draft: log if available, else chat, else none.
-  -- Read on every render so the summary updates immediately when the user
-  -- toggles "Enable Advanced Log" below or sends a new chat message.
+  -- The real preview/send paths still read a fresh diagnostic draft; this
+  -- summary only needs a cheap, near-live log-size hint for the bullet list.
   local _log_size, _log_present = nil, false
-  if prefs.debug_logging and Log and Log.path and Log.path ~= "" then
-    local f = io.open(Log.path, "rb")
-    if f then
-      local sz = f:seek("end") or 0
-      f:close()
-      if sz > 0 then _log_size, _log_present = sz, true end
+  do
+    local log_path = Log and Log.path or ""
+    local log_key = tostring(prefs.debug_logging and true or false)
+      .. ":" .. tostring(log_path)
+    local now = reaper.time_precise and reaper.time_precise() or os.clock()
+    local probe = S.bug_report_log_probe
+    if not probe or probe.key ~= log_key
+        or (now - (probe.checked_at or 0)) > 1.0 then
+      local sz, present = nil, false
+      if prefs.debug_logging and log_path ~= "" then
+        local f = io.open(log_path, "rb")
+        if f then
+          sz = f:seek("end") or 0
+          f:close()
+          present = sz > 0
+        end
+      end
+      probe = { key = log_key, checked_at = now, size = sz, present = present }
+      S.bug_report_log_probe = probe
     end
+    _log_size = probe.size
+    _log_present = probe.present and true or false
   end
   local _chat_count = 0
   if type(S.display_messages) == "table" then _chat_count = #S.display_messages end
@@ -6531,10 +7021,22 @@ function Render.bug_report_screen()
       S.bug_report_preview_draft = Diag.begin_bug_report_draft()
     end
     local draft = S.bug_report_preview_draft
-    local preview = Diag.preview_bug_report_text(draft,
-      S.bug_report_form_comment or "",
-      S.bug_report_form_name    or "",
-      S.bug_report_form_email   or "")
+    local preview_key = UI.preview_cache_key(
+      draft and draft.event_id,
+      draft and draft.drafted_at,
+      S.bug_report_form_comment,
+      S.bug_report_form_name,
+      S.bug_report_form_email)
+    S.bug_report_preview_payload_cache =
+      UI.preview_payload_cache(S.bug_report_preview_payload_cache,
+        preview_key, function()
+          return Diag.preview_bug_report_text(draft,
+            S.bug_report_form_comment or "",
+            S.bug_report_form_name    or "",
+            S.bug_report_form_email   or "")
+        end)
+    local preview_entry = S.bug_report_preview_payload_cache
+    local preview = preview_entry.text
 
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), TK.code_bg)
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),  TK.border)
@@ -6558,18 +7060,8 @@ function Render.bug_report_screen()
         ImGui.ImGui_EndPopup(RA.ctx)
       end
       PushFont(RA.ctx, FONT.mono_reg, RA.SC(10))
-      local rp = 1
-      while rp <= #preview do
-        local nl = str_find(preview, "\n", rp, true)
-        local line = nl and str_sub(preview, rp, nl - 1) or str_sub(preview, rp)
-        if line == "" then
-          Dummy(RA.ctx, 1, 4)
-        else
-          ImGui.ImGui_TextWrapped(RA.ctx, line)
-        end
-        if not nl then break end
-        rp = nl + 1
-      end
+      UI.render_preview_display_lines(UI.preview_display_lines(preview_entry,
+        ImGui.ImGui_GetContentRegionAvail(RA.ctx)))
       PopFont(RA.ctx)
       ImGui.ImGui_EndChild(RA.ctx)
     end
@@ -6581,6 +7073,7 @@ function Render.bug_report_screen()
     -- triggers a fresh log read (and so we don't pin a multi-MB string in
     -- S indefinitely).
     S.bug_report_preview_draft = nil
+    S.bug_report_preview_payload_cache = nil
   end
 
   -- Details & privacy. Mirrors the feedback_modal's privacy panel layout
@@ -6873,6 +7366,7 @@ function Render.bug_report_screen()
 
   ImGui.ImGui_Unindent(RA.ctx, indent)
   ImGui.ImGui_EndChild(RA.ctx)
+  end
   PopStyleColor(RA.ctx, 4)               -- scrollbar bg + grab + hovered + active
   ImGui.ImGui_PopStyleVar(RA.ctx, 2)     -- ChildBorderSize, WindowPadding
 
@@ -6948,7 +7442,9 @@ function Render.credits_screen()
     UI.lerp_u32(TK.border_str, TK.text, 0.30))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
     UI.lerp_u32(TK.border_str, TK.text, 0.55))
-  ImGui.ImGui_BeginChild(RA.ctx, "##credits_body", _body_avail_w, _body_h, 0)
+  local credits_body_open = ImGui.ImGui_BeginChild(RA.ctx,
+    "##credits_body", _body_avail_w, _body_h, 0)
+  if credits_body_open then
 
   ImGui.ImGui_Indent(RA.ctx, indent)
   Dummy(RA.ctx, 1, RA.SC(10))
@@ -7130,6 +7626,7 @@ function Render.credits_screen()
 
   ImGui.ImGui_Unindent(RA.ctx, indent)
   ImGui.ImGui_EndChild(RA.ctx)
+  end
   PopStyleColor(RA.ctx, 4)               -- scrollbar bg + grab + hovered + active
   ImGui.ImGui_PopStyleVar(RA.ctx, 2)     -- ChildBorderSize, WindowPadding
   UI.pop_settings_styles()
@@ -7543,6 +8040,7 @@ local function _close_feedback_modal()
   S.feedback_modal_flags      = nil
   S.feedback_modal_state      = nil
   S.feedback_modal_error      = nil
+  S.feedback_modal_preview_cache = nil
   -- Reset the collapsible-section open state so each modal open starts
   -- with both Preview feedback and the privacy panel closed (treat the
   -- modal as a one-shot consent dialog rather than a persistent
@@ -7834,16 +8332,6 @@ function Render.feedback_modal()
       Dummy(RA.ctx, 1, RA.SC(6))
 
       _fb_begin_disabled(locked)
-      local chips = {
-        { "fb_tag_wrong", UI.t("feedback.modal.tag.wrong_result", nil,
-          "Wrong result"), "wrong_result" },
-        { "fb_tag_plugin", UI.t("feedback.modal.tag.wrong_plugin", nil,
-          "Wrong plugin"), "wrong_plugin" },
-        { "fb_tag_didnt", UI.t("feedback.modal.tag.didnt_follow", nil,
-          "Didn't follow request"), "didnt_follow_request" },
-        { "fb_tag_slow", UI.t("feedback.modal.tag.too_slow", nil,
-          "Too slow"), "too_slow" },
-      }
       -- Track horizontal cursor to break to next row before overflow.
       -- ImGui_Button width auto-fits content + FramePadding; CalcTextSize
       -- gives us the inner text width, so the rendered button width is
@@ -7852,8 +8340,10 @@ function Render.feedback_modal()
       local CHIP_GAP   = RA.SC(6)
       local row_w = 0
       PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
-      for i, c in ipairs(chips) do
-        local id, label, key = c[1], c[2], c[3]
+      for i, c in ipairs(_FEEDBACK_TAG_CHIPS) do
+        local id = c[1]
+        local label = UI.t(c[2], nil, c[3])
+        local key = c[4]
         local tw = CalcTextSize(RA.ctx, label)
         local btn_w = tw + CHIP_PAD_X * 2 + 2
         local need_w = (i == 1) and btn_w or (CHIP_GAP + btn_w)
@@ -7941,16 +8431,27 @@ function Render.feedback_modal()
     -- default. When expanded, shows the EXACT JSON bytes that Send would
     -- post (preview_payload_text and send_draft both render the same
     -- draft + comment + flags through Diag.assemble_payload). Walked
-    -- line-by-line with TextWrapped so the box shape and styling match
-    -- the bug-report preview rather than ImGui's default text-input look.
+    -- as cached, clipped mono rows so expanded previews do not re-serialize
+    -- or re-render the entire diagnostic payload every frame.
     Dummy(RA.ctx, 1, RA.SC(14))
     S.feedback_modal_preview_open = S.feedback_modal_preview_open or false
     S.feedback_modal_preview_open = UI.v5_section_label(
       UI.t("feedback.modal.preview", nil, "Preview feedback"),
       S.feedback_modal_preview_open, nil, 1.0, TK.text_muted)
     if S.feedback_modal_preview_open then
-      local preview = Diag.preview_payload_text(draft,
-        S.feedback_modal_comment or "", f)
+      local preview_key = UI.preview_cache_key(
+        draft and draft.event_id,
+        draft and draft.drafted_at,
+        S.feedback_modal_comment,
+        UI.preview_flags_key(f))
+      S.feedback_modal_preview_cache =
+        UI.preview_payload_cache(S.feedback_modal_preview_cache,
+          preview_key, function()
+            return Diag.preview_payload_text(draft,
+              S.feedback_modal_comment or "", f)
+          end)
+      local preview_entry = S.feedback_modal_preview_cache
+      local preview = preview_entry.text
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), TK.code_bg)
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),  TK.border)
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),    TK.text)
@@ -7982,24 +8483,16 @@ function Render.feedback_modal()
           ImGui.ImGui_EndPopup(RA.ctx)
         end
         PushFont(RA.ctx, FONT.mono_reg, RA.SC(10))
-        local rp = 1
-        while rp <= #preview do
-          local nl = str_find(preview, "\n", rp, true)
-          local line = nl and str_sub(preview, rp, nl - 1) or str_sub(preview, rp)
-          if line == "" then
-            Dummy(RA.ctx, 1, 4)
-          else
-            ImGui.ImGui_TextWrapped(RA.ctx, line)
-          end
-          if not nl then break end
-          rp = nl + 1
-        end
+        UI.render_preview_display_lines(UI.preview_display_lines(preview_entry,
+          ImGui.ImGui_GetContentRegionAvail(RA.ctx)))
         PopFont(RA.ctx)
         ImGui.ImGui_EndChild(RA.ctx)
       end
       ImGui.ImGui_PopStyleVar(RA.ctx, 3)
       PopStyleColor(RA.ctx, 7)   -- ChildBg, Border, Text + Scrollbar x4
       Dummy(RA.ctx, 1, RA.SC(6))
+    else
+      S.feedback_modal_preview_cache = nil
     end
 
     -- ──── What's in the Report (privacy) -- collapsible sub-section.
@@ -8725,6 +9218,12 @@ function Render._custom_instructions_leave()
   api_keys.custom_instr_saved_enabled = nil
   api_keys.custom_instr_status = nil
   api_keys.custom_instr_status_kind = nil
+  api_keys.custom_instr_font_buf = nil
+  api_keys.custom_instr_font_lang_idx = nil
+  api_keys.custom_instr_font_lang_code = nil
+  api_keys.custom_instr_font_active_key = nil
+  api_keys.custom_instr_font_download_state = nil
+  api_keys.custom_instr_font = nil
   api_keys.custom_instr_return_screen = nil
   api_keys.screen = ret
   if ret == nil then api_keys.is_reentry = false end
@@ -8858,8 +9357,11 @@ function Render.custom_instructions_screen()
     UI.lerp_u32(TK.border_str, TK.text, 0.30))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
     UI.lerp_u32(TK.border_str, TK.text, 0.55))
-  ImGui.ImGui_BeginChild(RA.ctx, "##custom_instr_body",
+  local back_clicked, clear_clicked = false, false
+  local save_clicked, save_back_clicked = false, false
+  local custom_instr_body_open = ImGui.ImGui_BeginChild(RA.ctx, "##custom_instr_body",
     _body_avail_w, _body_h, 0)
+  if custom_instr_body_open then
   ImGui.ImGui_Indent(RA.ctx, body_indent)
   Dummy(RA.ctx, 1, RA.SC(16))
 
@@ -8904,7 +9406,24 @@ function Render.custom_instructions_screen()
   local input_x, input_y = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
   local editor_h = math_max(RA.SC(160),
     math_min(RA.SC(210), _body_h - RA.SC(390)))
-  PushFont(RA.ctx, UI.font_for_language_text(buf) or FONT.inter_reg, RA.SC(12))
+  local font_lang_idx = prefs.reply_language_idx or ""
+  local font_lang_code = prefs.language_code or ""
+  local font_active_key = UI.active_chat_font_key and UI.active_chat_font_key() or ""
+  local font_download_state = OptionalFonts and OptionalFonts.download
+    and OptionalFonts.download.state or ""
+  if api_keys.custom_instr_font_buf ~= buf
+      or api_keys.custom_instr_font_lang_idx ~= font_lang_idx
+      or api_keys.custom_instr_font_lang_code ~= font_lang_code
+      or api_keys.custom_instr_font_active_key ~= font_active_key
+      or api_keys.custom_instr_font_download_state ~= font_download_state then
+    api_keys.custom_instr_font_buf = buf
+    api_keys.custom_instr_font_lang_idx = font_lang_idx
+    api_keys.custom_instr_font_lang_code = font_lang_code
+    api_keys.custom_instr_font_active_key = font_active_key
+    api_keys.custom_instr_font_download_state = font_download_state
+    api_keys.custom_instr_font = UI.font_for_language_text(buf) or FONT.inter_reg
+  end
+  PushFont(RA.ctx, api_keys.custom_instr_font or FONT.inter_reg, RA.SC(12))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBg(),       TK.card)
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgHovered(), TK.card_hover)
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgActive(),  TK.card_hover)
@@ -8974,8 +9493,6 @@ function Render.custom_instructions_screen()
   local save_label = UI.t("common.save", nil, "Save")
   local save_back_label = UI.t("settings.custom_instructions.save_back", nil,
     "Save & Back")
-  local back_clicked, clear_clicked = false, false
-  local save_clicked, save_back_clicked = false, false
   do
     Dummy(RA.ctx, 1, RA.SC(12))
     PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
@@ -9049,88 +9566,100 @@ function Render.custom_instructions_screen()
     "EXAMPLES"))
   Dummy(RA.ctx, 1, RA.SC(8))
 
-  local examples = {
-    {
-      title = UI.t("settings.custom_instructions.example.scope.title", nil,
-        "Edit Scope"),
-      items = {
-        UI.t("settings.custom_instructions.example.scope.body", nil,
-          "Work only on selected tracks or items unless I say to edit the whole project."),
-        UI.t("settings.custom_instructions.example.scope.body_2", nil,
-          "If nothing is selected, ask before making project-wide changes."),
+  local examples_lang = UI.active_language_code()
+  local examples_catalog = I18N and I18N.load_catalog
+    and I18N.load_catalog(examples_lang) or nil
+  local examples_meta = type(examples_catalog) == "table"
+    and examples_catalog._meta or nil
+  local examples_key = tostring(examples_lang) .. ":"
+    .. tostring(examples_meta and examples_meta.source_version or "")
+  if UI._custom_instr_examples_key ~= examples_key
+      or not UI._custom_instr_examples then
+    UI._custom_instr_examples = {
+      {
+        title = UI.t("settings.custom_instructions.example.scope.title", nil,
+          "Edit Scope"),
+        items = {
+          UI.t("settings.custom_instructions.example.scope.body", nil,
+            "Work only on selected tracks or items unless I say to edit the whole project."),
+          UI.t("settings.custom_instructions.example.scope.body_2", nil,
+            "If nothing is selected, ask before making project-wide changes."),
+        },
       },
-    },
-    {
-      title = UI.t("settings.custom_instructions.example.destructive.title", nil,
-        "Destructive Edits"),
-      items = {
-        UI.t("settings.custom_instructions.example.destructive.body", nil,
-          "Ask before deleting tracks, items, takes, automation, or files."),
-        UI.t("settings.custom_instructions.example.destructive.body_2", nil,
-          "Prefer muting or bypassing over removing things when either would work."),
+      {
+        title = UI.t("settings.custom_instructions.example.destructive.title", nil,
+          "Destructive Edits"),
+        items = {
+          UI.t("settings.custom_instructions.example.destructive.body", nil,
+            "Ask before deleting tracks, items, takes, automation, or files."),
+          UI.t("settings.custom_instructions.example.destructive.body_2", nil,
+            "Prefer muting or bypassing over removing things when either would work."),
+        },
       },
-    },
-    {
-      title = UI.t("settings.custom_instructions.example.broad.title", nil,
-        "Broad Changes"),
-      items = {
-        UI.t("settings.custom_instructions.example.broad.body", nil,
-          "For broad edits, summarize the plan before generating code."),
-        UI.t("settings.custom_instructions.example.broad.body_2", nil,
-          "When a request affects many tracks, explain the assumptions first."),
+      {
+        title = UI.t("settings.custom_instructions.example.broad.title", nil,
+          "Broad Changes"),
+        items = {
+          UI.t("settings.custom_instructions.example.broad.body", nil,
+            "For broad edits, summarize the plan before generating code."),
+          UI.t("settings.custom_instructions.example.broad.body_2", nil,
+            "When a request affects many tracks, explain the assumptions first."),
+        },
       },
-    },
-    {
-      title = UI.t("settings.custom_instructions.example.session.title", nil,
-        "Track Style"),
-      items = {
-        UI.t("settings.custom_instructions.example.session.body", nil,
-          "Use short track names and keep related tracks grouped and colored consistently."),
-        UI.t("settings.custom_instructions.example.session.body_2", nil,
-          "Name utility tracks clearly, like VERB BUS, DRUM PARALLEL, or PRINT."),
+      {
+        title = UI.t("settings.custom_instructions.example.session.title", nil,
+          "Track Style"),
+        items = {
+          UI.t("settings.custom_instructions.example.session.body", nil,
+            "Use short track names and keep related tracks grouped and colored consistently."),
+          UI.t("settings.custom_instructions.example.session.body_2", nil,
+            "Name utility tracks clearly, like VERB BUS, DRUM PARALLEL, or PRINT."),
+        },
       },
-    },
-    {
-      title = UI.t("settings.custom_instructions.example.routing.title", nil,
-        "Routing"),
-      items = {
-        UI.t("settings.custom_instructions.example.routing.body", nil,
-          "Preserve existing routing, sends, and receives unless I ask to rebuild them."),
-        UI.t("settings.custom_instructions.example.routing.body_2", nil,
-          "When adding sends, keep them organized and name the destination clearly."),
+      {
+        title = UI.t("settings.custom_instructions.example.routing.title", nil,
+          "Routing"),
+        items = {
+          UI.t("settings.custom_instructions.example.routing.body", nil,
+            "Preserve existing routing, sends, and receives unless I ask to rebuild them."),
+          UI.t("settings.custom_instructions.example.routing.body_2", nil,
+            "When adding sends, keep them organized and name the destination clearly."),
+        },
       },
-    },
-    {
-      title = UI.t("settings.custom_instructions.example.reversible.title", nil,
-        "Reversibility"),
-      items = {
-        UI.t("settings.custom_instructions.example.reversible.body", nil,
-          "Prefer reversible edits, like new takes, markers, regions, or muted items."),
-        UI.t("settings.custom_instructions.example.reversible.body_2", nil,
-          "Keep originals intact when rendering, freezing, gluing, or committing edits."),
+      {
+        title = UI.t("settings.custom_instructions.example.reversible.title", nil,
+          "Reversibility"),
+        items = {
+          UI.t("settings.custom_instructions.example.reversible.body", nil,
+            "Prefer reversible edits, like new takes, markers, regions, or muted items."),
+          UI.t("settings.custom_instructions.example.reversible.body_2", nil,
+            "Keep originals intact when rendering, freezing, gluing, or committing edits."),
+        },
       },
-    },
-    {
-      title = UI.t("settings.custom_instructions.example.midi.title", nil,
-        "MIDI Edits"),
-      items = {
-        UI.t("settings.custom_instructions.example.midi.body", nil,
-          "Preserve timing and note lengths unless timing is the request."),
-        UI.t("settings.custom_instructions.example.midi.body_2", nil,
-          "When editing CC data, avoid changing notes outside the selected range."),
+      {
+        title = UI.t("settings.custom_instructions.example.midi.title", nil,
+          "MIDI Edits"),
+        items = {
+          UI.t("settings.custom_instructions.example.midi.body", nil,
+            "Preserve timing and note lengths unless timing is the request."),
+          UI.t("settings.custom_instructions.example.midi.body_2", nil,
+            "When editing CC data, avoid changing notes outside the selected range."),
+        },
       },
-    },
-    {
-      title = UI.t("settings.custom_instructions.example.reply.title", nil,
-        "Replies"),
-      items = {
-        UI.t("settings.custom_instructions.example.reply.body", nil,
-          "Keep replies concise, but call out assumptions that could affect the session."),
-        UI.t("settings.custom_instructions.example.reply.body_2", nil,
-          "If a request is ambiguous, make the safest useful choice and say so."),
+      {
+        title = UI.t("settings.custom_instructions.example.reply.title", nil,
+          "Replies"),
+        items = {
+          UI.t("settings.custom_instructions.example.reply.body", nil,
+            "Keep replies concise, but call out assumptions that could affect the session."),
+          UI.t("settings.custom_instructions.example.reply.body_2", nil,
+            "If a request is ambiguous, make the safest useful choice and say so."),
+        },
       },
-    },
-  }
+    }
+    UI._custom_instr_examples_key = examples_key
+  end
+  local examples = UI._custom_instr_examples
   local EXAMPLE_GAP = RA.SC(8)
   local example_card_w = math_max(RA.SC(170),
     math_floor((inner_w - EXAMPLE_GAP) * 0.5))
@@ -9144,7 +9673,17 @@ function Render.custom_instructions_screen()
   local example_text_w = math_max(RA.SC(92),
     example_card_w - EXAMPLE_CARD_PAD_X * 2 - EXAMPLE_COPY_W
       - EXAMPLE_COPY_GAP)
-  local function example_card_height(title, items)
+  local function example_card_height(example)
+    local title = example and example.title or ""
+    local items = example and example.items or {}
+    local height_key = tostring(FONT.inter_reg) .. ":"
+      .. tostring(RA.SC(12)) .. ":" .. tostring(RA.SC(11)) .. ":"
+      .. tostring(example_text_w) .. ":" .. tostring(EXAMPLE_ITEM_MIN_H) .. ":"
+      .. tostring(EXAMPLE_CARD_PAD_Y) .. ":" .. tostring(EXAMPLE_TITLE_GAP)
+      .. ":" .. tostring(EXAMPLE_ITEM_GAP)
+    if example and example._height_key == height_key and example._height then
+      return example._height
+    end
     local total_h = EXAMPLE_CARD_PAD_Y * 2
     PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
     local _, title_h = ImGui.ImGui_CalcTextSize(RA.ctx, title or "")
@@ -9161,7 +9700,12 @@ function Render.custom_instructions_screen()
       end
     end
     PopFont(RA.ctx)
-    return math_max(RA.SC(148), math.ceil(total_h + RA.SC(16)))
+    local h = math_max(RA.SC(148), math.ceil(total_h + RA.SC(16)))
+    if example then
+      example._height_key = height_key
+      example._height = h
+    end
+    return h
   end
   local function example_card(idx, title, items, card_w, card_h)
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), TK.card)
@@ -9246,9 +9790,9 @@ function Render.custom_instructions_screen()
   for i = 1, #examples, 2 do
     local left = examples[i]
     local right = examples[i + 1]
-    local row_h = example_card_height(left.title, left.items)
+    local row_h = example_card_height(left)
     if right then
-      row_h = math_max(row_h, example_card_height(right.title, right.items))
+      row_h = math_max(row_h, example_card_height(right))
     end
     example_card(i, left.title, left.items, example_card_w, row_h)
     if right then
@@ -9261,6 +9805,7 @@ function Render.custom_instructions_screen()
 
   ImGui.ImGui_Unindent(RA.ctx, body_indent)
   ImGui.ImGui_EndChild(RA.ctx)
+  end
   PopStyleColor(RA.ctx, 4)
   ImGui.ImGui_PopStyleVar(RA.ctx, 2)
 
@@ -9383,6 +9928,7 @@ local function _exit_settings_screen()
   api_keys.saved_cloud_request_timeout = nil
   api_keys.pending_diag_auto_tier      = nil
   api_keys.open_diag_auto_confirm      = nil
+  api_keys.pending_settings_save_from_unsaved = nil
   api_keys.pending_reply_language_idx  = nil
   api_keys.open_font_download_confirm  = nil
   api_keys.font_download_error         = nil
@@ -9532,7 +10078,9 @@ function Render._shared_key_screen_impl()
     UI.lerp_u32(TK.border_str, TK.text, 0.30))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
     UI.lerp_u32(TK.border_str, TK.text, 0.55))
-  ImGui.ImGui_BeginChild(RA.ctx, "##settings_body", _body_avail_w, _body_h, 0)
+  local settings_body_open = ImGui.ImGui_BeginChild(RA.ctx,
+    "##settings_body", _body_avail_w, _body_h, 0)
+  if settings_body_open then
   -- Indent *inside* the child so the content column sits BODY_PAD_X
   -- from the window's left edge; the child's remaining right-side
   -- slack is where the scrollbar renders.
@@ -10281,89 +10829,54 @@ function Render._shared_key_screen_impl()
     local row_step = RA.SC(42)
 
     -- --- Theme ---
-    local theme_names = { "auto", "dark", "light" }
     local theme_idx = 0
-    for i, n in ipairs(theme_names) do
+    for i, n in ipairs(_THEME_NAMES) do
       if prefs.theme == n then theme_idx = i - 1; break end
     end
     local theme_label = UI.t("settings.pref.theme.label", nil, "Theme")
-    local theme_items = {
-      UI.t("settings.pref.theme.auto", nil, "Auto"),
-      UI.t("settings.pref.theme.dark", nil, "Dark"),
-      UI.t("settings.pref.theme.light", nil, "Light"),
-    }
-    local theme_combo_str = table.concat(theme_items, "\0") .. "\0"
+    local theme_combo_str, theme_items = t_combo_labels("settings.theme",
+      _THEME_LABEL_ITEMS)
     local theme_value = theme_items[theme_idx + 1] or theme_items[1] or ""
 
     -- --- UI Scale ---
     local scale_label = UI.ui_scale_label()
-    local scale_combo_str = table.concat(CFG.UI_SCALE_LABELS, "\0") .. "\0"
+    UI._scale_combo_str = UI._scale_combo_str
+      or (tbl_concat(CFG.UI_SCALE_LABELS, "\0") .. "\0")
+    local scale_combo_str = UI._scale_combo_str
     local scale_value = CFG.UI_SCALE_LABELS[prefs.ui_scale_idx] or ""
 
     -- --- Chat Font ---
     local chat_font_label = UI.t("settings.pref.chat_font.label", nil,
       "Chat Font")
-    local chat_font_items = {
-      UI.t("settings.pref.chat_font.small",
-        CFG.CHAT_FONT_LABELS[1] or "Small"),
-      UI.t("settings.pref.chat_font.medium",
-        CFG.CHAT_FONT_LABELS[2] or "Medium"),
-      UI.t("settings.pref.chat_font.large",
-        CFG.CHAT_FONT_LABELS[3] or "Large"),
-    }
-    local chat_font_combo_str = table.concat(chat_font_items, "\0") .. "\0"
+    local chat_font_combo_str, chat_font_items = t_combo_labels(
+      "settings.chat_font", _CHAT_FONT_LABEL_ITEMS)
     local chat_font_value = chat_font_items[prefs.chat_font_idx]
       or chat_font_items[1] or ""
 
-    local function pref_select_min_w(label, value)
-      local PAD_X      = RA.SC(12)
-      local LABEL_SZ   = RA.SC(12)
-      local MONO_SIZE  = RA.SC(10)
-      local CHEV_SIZE  = RA.SC(10)
-      local CHIP_PAD_X = RA.SC(9)
-      local CHEV_GAP   = RA.SC(4)
-      PushFont(RA.ctx, FONT.inter_reg, LABEL_SZ)
-      local label_w = CalcTextSize(RA.ctx, tostring(label or ""))
-      PopFont(RA.ctx)
-      PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
-      local value_w = CalcTextSize(RA.ctx,
-        tostring(value or ""):upper())
-      PopFont(RA.ctx)
-      PushFont(RA.ctx, FONT.lucide, CHEV_SIZE)
-      local chev_w = CalcTextSize(RA.ctx, ICON.CHEVRON_DOWN)
-      PopFont(RA.ctx)
-      local chip_w = CHIP_PAD_X * 2 + value_w + CHEV_GAP + chev_w
-      return PAD_X * 2 + label_w + RA.SC(8) + chip_w
-    end
-
     local col_w_three = math_floor((inner_w - GRID_GAP * 2) / 3)
     local needs_two_cols =
-      pref_select_min_w(theme_label, theme_value) > col_w_three
-      or pref_select_min_w(scale_label, scale_value) > col_w_three
-      or pref_select_min_w(chat_font_label, chat_font_value) > col_w_three
+      settings_pref_select_min_w(theme_label, theme_value) > col_w_three
+      or settings_pref_select_min_w(scale_label, scale_value) > col_w_three
+      or settings_pref_select_min_w(chat_font_label, chat_font_value)
+        > col_w_three
     local grid_cols = needs_two_cols and 2 or 3
     local col_w = math_floor((inner_w - GRID_GAP * (grid_cols - 1))
       / grid_cols)
-    local function pref_select_pos(slot)
-      local col = (slot - 1) % grid_cols
-      local row = math_floor((slot - 1) / grid_cols)
-      ImGui.ImGui_SetCursorPos(RA.ctx,
-        row_sx + col * (col_w + GRID_GAP),
-        row_sy + row * row_step)
-    end
 
-    pref_select_pos(1)
+    settings_pref_select_pos(row_sx, row_sy, 1, grid_cols, col_w, GRID_GAP,
+      row_step)
     local th_changed, th_new = UI.v5_select_row("##pref_theme",
       theme_label,
       theme_combo_str, theme_idx,
       UI.t("settings.pref.theme.tooltip", nil,
         "Color theme: Auto follows your OS dark/light mode setting"), col_w)
     if th_changed then
-      prefs.theme = theme_names[th_new + 1]
+      prefs.theme = _THEME_NAMES[th_new + 1]
       apply_palette(PALETTES[resolve_theme(prefs.theme)])  -- live preview
     end
 
-    pref_select_pos(2)
+    settings_pref_select_pos(row_sx, row_sy, 2, grid_cols, col_w, GRID_GAP,
+      row_step)
     local sc_changed, sc_new = UI.v5_select_row("##pref_ui_scale",
       scale_label,
       scale_combo_str, prefs.ui_scale_idx - 1,
@@ -10376,7 +10889,8 @@ function Render._shared_key_screen_impl()
       S._open_scale_confirm = true
     end
 
-    pref_select_pos(3)
+    settings_pref_select_pos(row_sx, row_sy, 3, grid_cols, col_w, GRID_GAP,
+      row_step)
     local cf_changed, cf_new = UI.v5_select_row("##pref_chat_font",
       chat_font_label,
       chat_font_combo_str, prefs.chat_font_idx - 1,
@@ -10387,7 +10901,8 @@ function Render._shared_key_screen_impl()
       prefs.chat_font_idx = cf_new + 1
     end
 
-    pref_select_pos(4)
+    settings_pref_select_pos(row_sx, row_sy, 4, grid_cols, col_w, GRID_GAP,
+      row_step)
     if UI.v5_nav_row("##pref_custom_instructions",
         UI.t("settings.custom_instructions.label", nil, "Custom Instructions"),
         UI.t("settings.custom_instructions.tooltip", nil,
@@ -10459,7 +10974,8 @@ function Render._shared_key_screen_impl()
         UI.t("settings.adv.compact_history.tooltip", nil,
           "Replace older successful code replies with short summaries to "
           .. "save tokens in long sessions. The latest reply stays verbatim, "
-          .. "and follow-up edit requests keep the full history."),
+          .. "and follow-up edit requests keep the full history. For Claude, "
+          .. "ReaAssist keeps history verbatim to preserve prompt-cache savings."),
         inner_w)
       if changed then prefs.compact_history = new_on end
     end
@@ -10529,13 +11045,12 @@ function Render._shared_key_screen_impl()
       -- assembly + sort + concat only re-fire when the saved timeout
       -- changes. The list is one of two shapes: pure presets, or
       -- presets + sorted-in custom value.
-      local TO_PRESETS = { 60, 120, 180, 300, 600, 1200, 1800 }
       local cur_to = prefs.cloud_request_timeout or 180
       local to_lang_code = UI.active_language_code()
       if UI._to_combo_cur ~= cur_to or UI._to_combo_lang ~= to_lang_code then
         local to_labels, to_values = {}, {}
         local cur_in_presets = false
-        for _, v in ipairs(TO_PRESETS) do
+        for _, v in ipairs(_TIMEOUT_PRESETS) do
           if v == cur_to then cur_in_presets = true end
           to_labels[#to_labels+1] = UI.format_seconds_compact(v)
           to_values[#to_values+1] = v
@@ -10750,6 +11265,7 @@ function Render._shared_key_screen_impl()
   -- otherwise the indent state leaks to subsequent frames.
   ImGui.ImGui_Unindent(RA.ctx, api_indent)
   ImGui.ImGui_EndChild(RA.ctx)
+  end
   PopStyleColor(RA.ctx, 4)  -- ScrollbarBg, ScrollbarGrab, -Hovered, -Active
   ImGui.ImGui_PopStyleVar(RA.ctx, 2)  -- ChildBorderSize, WindowPadding
 
@@ -10877,10 +11393,10 @@ function Render._shared_key_screen_impl()
       UI.push_modal_primary_btn()
       if ImGui.ImGui_Button(RA.ctx,
           us_save_label .. "##us_save", us_save_w, 0) then
-        -- Persist every staged Preference. Mirrors the main Save handler
-        -- below so this "Save on exit" path writes the same config fields.
-        if Store and Store.save_config then Store.save_config() end
-        _exit_settings_screen()
+        -- Route through the normal Save handler below so key-format
+        -- validation, test-launch, provider fallback, and preference
+        -- persistence all follow one path.
+        api_keys.pending_settings_save_from_unsaved = true
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
       end
       UI.pop_modal_primary_btn()
@@ -11018,6 +11534,10 @@ function Render._shared_key_screen_impl()
   -- bottom (drawn after the body content to overlay on top). Both
   -- feed the submit/discard handler below.
   local save_clicked, cancel_clicked = false, false
+  if api_keys.pending_settings_save_from_unsaved then
+    api_keys.pending_settings_save_from_unsaved = nil
+    if can_submit then save_clicked = true end
+  end
 
   -- Enter key anywhere on the Settings screen fires Save when submittable.
   -- Suppressed when a popup was open at the start of this frame: the
@@ -11297,43 +11817,6 @@ function Render._shared_key_screen_impl()
   -- test for the first newly entered valid key. If no new keys were entered
   -- (re-entry with only removals), return to the main UI immediately.
   if save_clicked and can_submit then
-    -- Persist every staged Preference to Config.json. Each saved_* stash
-    -- is cleared so the screen starts "clean" if the user re-enters
-    -- Settings without leaving the script.
-    if api_keys.saved_ui_scale_idx then
-      api_keys.saved_ui_scale_idx = nil
-    end
-    if api_keys.saved_theme then
-      api_keys.saved_theme = nil
-    end
-    if api_keys.saved_update_check ~= nil then
-      api_keys.saved_update_check = nil
-    end
-    if api_keys.saved_auto_backup ~= nil then
-      api_keys.saved_auto_backup = nil
-    end
-    if api_keys.saved_chat_font_idx then
-      api_keys.saved_chat_font_idx = nil
-    end
-    if api_keys.saved_reply_language_idx then
-      api_keys.saved_reply_language_idx = nil
-    end
-    if api_keys.saved_include_snapshot ~= nil then
-      api_keys.saved_include_snapshot = nil
-    end
-    if api_keys.saved_include_api_ref ~= nil then
-      api_keys.saved_include_api_ref = nil
-    end
-    if api_keys.saved_compact_history ~= nil then
-      api_keys.saved_compact_history = nil
-    end
-    if api_keys.saved_diag_auto_tier ~= nil then
-      api_keys.saved_diag_auto_tier = nil
-    end
-    if api_keys.saved_cloud_request_timeout then
-      api_keys.saved_cloud_request_timeout = nil
-    end
-    if Store and Store.save_config then Store.save_config() end
     api_keys.key_error    = nil
     local first_valid_idx  = nil
     local has_format_error = false
@@ -11361,6 +11844,44 @@ function Render._shared_key_screen_impl()
     if has_format_error then
       -- Stay on screen with per-field errors.
     else
+      -- Persist staged Preferences only after all local key-format validation
+      -- passes. If validation fails, the saved_* snapshots must stay intact so
+      -- the dirty indicator, Cancel/Discard, and retry flow still reflect the
+      -- real unsaved state.
+      if api_keys.saved_ui_scale_idx then
+        api_keys.saved_ui_scale_idx = nil
+      end
+      if api_keys.saved_theme then
+        api_keys.saved_theme = nil
+      end
+      if api_keys.saved_update_check ~= nil then
+        api_keys.saved_update_check = nil
+      end
+      if api_keys.saved_auto_backup ~= nil then
+        api_keys.saved_auto_backup = nil
+      end
+      if api_keys.saved_chat_font_idx then
+        api_keys.saved_chat_font_idx = nil
+      end
+      if api_keys.saved_reply_language_idx then
+        api_keys.saved_reply_language_idx = nil
+      end
+      if api_keys.saved_include_snapshot ~= nil then
+        api_keys.saved_include_snapshot = nil
+      end
+      if api_keys.saved_include_api_ref ~= nil then
+        api_keys.saved_include_api_ref = nil
+      end
+      if api_keys.saved_compact_history ~= nil then
+        api_keys.saved_compact_history = nil
+      end
+      if api_keys.saved_diag_auto_tier ~= nil then
+        api_keys.saved_diag_auto_tier = nil
+      end
+      if api_keys.saved_cloud_request_timeout then
+        api_keys.saved_cloud_request_timeout = nil
+      end
+      if Store and Store.save_config then Store.save_config() end
       if first_valid_idx then
         -- Fire a test call for the first newly entered valid CLOUD key.
         -- Snapshot the active provider before flipping so the post-test
@@ -11617,7 +12138,10 @@ function Render.custom_providers_screen()
     UI.lerp_u32(TK.border_str, TK.text, 0.30))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
     UI.lerp_u32(TK.border_str, TK.text, 0.55))
-  ImGui.ImGui_BeginChild(RA.ctx, "##cpl_body", _body_avail_w, _body_h, 0)
+  local back_clicked = false
+  local cpl_body_open = ImGui.ImGui_BeginChild(RA.ctx,
+    "##cpl_body", _body_avail_w, _body_h, 0)
+  if cpl_body_open then
   ImGui.ImGui_Indent(RA.ctx, indent_w)
 
   Dummy(RA.ctx, 1, RA.SC(16))
@@ -11957,7 +12481,7 @@ function Render.custom_providers_screen()
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        TK.card)
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), TK.card_hover)
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  TK.card_hover)
-  local back_clicked = ImGui.ImGui_Button(RA.ctx,
+  back_clicked = ImGui.ImGui_Button(RA.ctx,
     back_label .. "##cpl_back", back_w, 0)
   UI.pressable()
   PopStyleColor(RA.ctx, 5)
@@ -11968,6 +12492,7 @@ function Render.custom_providers_screen()
 
   ImGui.ImGui_Unindent(RA.ctx, indent_w)
   ImGui.ImGui_EndChild(RA.ctx)
+  end
   PopStyleColor(RA.ctx, 4)
   ImGui.ImGui_PopStyleVar(RA.ctx, 2)
   UI.pop_settings_styles()
@@ -12043,7 +12568,11 @@ function Render.custom_llm_screen()
     UI.lerp_u32(TK.border_str, TK.text, 0.30))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
     UI.lerp_u32(TK.border_str, TK.text, 0.55))
-  ImGui.ImGui_BeginChild(RA.ctx, "##cllm_body", _body_avail_w, _body_h, 0)
+  local can_save_custom = false
+  local cllm_save_clicked = false
+  local cllm_body_open = ImGui.ImGui_BeginChild(RA.ctx,
+    "##cllm_body", _body_avail_w, _body_h, 0)
+  if cllm_body_open then
 
   ImGui.ImGui_Indent(RA.ctx, cllm_indent)
 
@@ -12149,34 +12678,8 @@ function Render.custom_llm_screen()
     PopStyleColor(RA.ctx, 5)
   end
 
-  -- Field-label pair: "Label" (Inter SemiBold SC(11) / TK.text) + optional
-  -- "(hint)" muted suffix. Consolidates the label boilerplate used above
-  -- every input on this page.
-  local function _field_label(label, suffix)
-    PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
-    Text(RA.ctx, label)
-    PopStyleColor(RA.ctx)
-    PopFont(RA.ctx)
-    if suffix and suffix ~= "" then
-      SameLine(RA.ctx, 0, RA.SC(6))
-      PushFont(RA.ctx, FONT.inter_reg, RA.SC(10))
-      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
-      Text(RA.ctx, suffix)
-      PopStyleColor(RA.ctx)
-      PopFont(RA.ctx)
-    end
-  end
-
-  -- Inline error / advisory line (Inter SC(10), TK.red or TK.amber).
-  local function _inline_msg(txt, col)
-    if not txt or txt == "" then return end
-    PushFont(RA.ctx, FONT.inter_reg, RA.SC(10))
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), col or TK.red)
-    Text(RA.ctx, txt)
-    PopStyleColor(RA.ctx)
-    PopFont(RA.ctx)
-  end
+  -- Field labels and inline validation messages share file-scope helpers so
+  -- this render path does not recreate them every frame.
 
   -- Outer disable wraps every input on the page while a key test /
   -- connection test is in flight, mirroring the Settings page.
@@ -12236,7 +12739,8 @@ function Render.custom_llm_screen()
     -- the main model picker and every on-disk reference, so it's placed
     -- first -- users who open this card to add a provider should see "what
     -- am I naming?" before they start wiring up URLs.
-    _field_label(UI.t("settings.custom.field.name", nil, "Name"))
+    custom_provider_field_label(UI.t("settings.custom.field.name", nil,
+      "Name"))
     _push_input_style()
     ImGui.ImGui_SetNextItemWidth(RA.ctx, card_w)
     local _, new_label = ImGui.ImGui_InputTextWithHint(RA.ctx, "##cus_label",
@@ -12255,12 +12759,13 @@ function Render.custom_llm_screen()
       .. "Tip: if you have several endpoints for the same service, include "
       .. "the variant in the name (e.g. 'Ollama - Llama 70B', "
       .. "'OpenRouter - Free Tier')."))
-    _inline_msg(edit.errors.label, TK.red)
+    custom_provider_inline_msg(edit.errors.label, TK.red)
 
     Dummy(RA.ctx, 1, RA.SC(10))
 
     -- Endpoint URL input (full card width, mono text well).
-    _field_label(UI.t("settings.custom.field.endpoint", nil, "Endpoint URL"))
+    custom_provider_field_label(UI.t("settings.custom.field.endpoint", nil,
+      "Endpoint URL"))
     _push_input_style()
     ImGui.ImGui_SetNextItemWidth(RA.ctx, card_w)
     local _, new_endpoint = ImGui.ImGui_InputTextWithHint(RA.ctx, "##cus_endpoint",
@@ -12279,12 +12784,12 @@ function Render.custom_llm_screen()
       .. "  http://localhost:8080/v1/chat/completions    (llama.cpp)\n"
       .. "  https://openrouter.ai/api/v1/chat/completions (OpenRouter)\n\n"
       .. "Use the preset pills below to fill in the common defaults."))
-    _inline_msg(edit.errors.endpoint, TK.red)
+    custom_provider_inline_msg(edit.errors.endpoint, TK.red)
     if edit.endpoint
        and edit.endpoint:match("^http://")
        and not edit.endpoint:match("^http://localhost[:/]")
        and not edit.endpoint:match("^http://127%.0%.0%.1[:/]") then
-      _inline_msg(UI.t("settings.custom.warning.unencrypted", nil,
+      custom_provider_inline_msg(UI.t("settings.custom.warning.unencrypted", nil,
         "Unencrypted connection. Credentials sent in plain text."), TK.amber)
     end
 
@@ -12427,7 +12932,7 @@ function Render.custom_llm_screen()
     -- API Key (merged into ENDPOINT section). Optional for local servers;
     -- required for hosted OpenAI-compatible gateways (OpenRouter, Groq, etc).
     Dummy(RA.ctx, 1, RA.SC(10))
-    _field_label(UI.t("settings.custom.field.api_key", nil, "API Key"),
+    custom_provider_field_label(UI.t("settings.custom.field.api_key", nil, "API Key"),
       UI.t("settings.custom.field.api_key_suffix", nil,
         "(optional, required for hosted gateways)"))
     _push_input_style()
@@ -12452,7 +12957,7 @@ function Render.custom_llm_screen()
       .. "bare 'Bearer ' header, so empty really does mean empty.\n\n"
       .. "The key is stored XOR-obfuscated and tied to this REAPER "
       .. "install path; copying the .ini to another machine won't work."))
-    _inline_msg(edit.errors.key, TK.red)
+    custom_provider_inline_msg(edit.errors.key, TK.red)
 
     ImGui.ImGui_EndChild(RA.ctx)
   end
@@ -12658,7 +13163,7 @@ function Render.custom_llm_screen()
       end
       if (row.extra_body or "") ~= "" then
         local eb = row.extra_body
-        if #eb > 120 then eb = eb:sub(1, 117) .. "..." end
+        eb = UI._utf8_truncate_chars(eb, 120, "...")
         tip_lines[#tip_lines+1] = UI.t("settings.custom.details.extra_body_summary",
           { body = eb },
           "Extra body: " .. eb)
@@ -12702,8 +13207,8 @@ function Render.custom_llm_screen()
         Dummy(RA.ctx, RM_W, 1)
       end
 
-      _inline_msg(edit.errors["model_notes_" .. ri], TK.red)
-      _inline_msg(edit.errors["model_" .. ri],       TK.red)
+      custom_provider_inline_msg(edit.errors["model_notes_" .. ri], TK.red)
+      custom_provider_inline_msg(edit.errors["model_" .. ri],       TK.red)
       -- Soft size advisory: parses a B-number from row.id and flags anything
       -- under ~14B as likely too small. Muted-amber color (matching the
       -- Experimental advisory at the top of the page) so it reads as a
@@ -12712,7 +13217,7 @@ function Render.custom_llm_screen()
       do
         local b = _detect_param_b(row.id)
         if b and b < 14 then
-          _inline_msg(UI.t("settings.custom.model.too_small",
+          custom_provider_inline_msg(UI.t("settings.custom.model.too_small",
             { size = str_format("%g", b) },
             str_format("~%gB detected - usually too small for reliable REAPER output.", b)),
             UI.lerp_u32(TK.amber, TK.text_muted, 0.5))
@@ -12749,10 +13254,13 @@ function Render.custom_llm_screen()
     -- ReaAssist window via the geometry captured at end of frame.
     local details_title = UI.t("settings.custom.details.title", nil, "Model Details")
     if open_details_ri then
+      edit._details_ri = open_details_ri
       ImGui.ImGui_OpenPopup(RA.ctx,
         details_title .. "##cus_details_popup_" .. open_details_ri)
     end
-    for ri, row in ipairs(edit.models) do
+    local ri = tonumber(edit._details_ri)
+    local row = ri and edit.models[ri] or nil
+    if row then
       local popup_id = details_title .. "##cus_details_popup_" .. ri
       local pw, ph = RA.SC(460), RA.SC(600)
       if update._main_w then
@@ -12763,6 +13271,7 @@ function Render.custom_llm_screen()
       end
       ImGui.ImGui_SetNextWindowSize(RA.ctx, pw, ph, ImGui.ImGui_Cond_Appearing())
       UI.push_modal_style()
+      local close_details = false
       if ImGui.ImGui_BeginPopupModal(RA.ctx, popup_id, true,
           ImGui.ImGui_WindowFlags_NoResize()) then
         -- Subtitle: mono-small model id so the user can see which row this
@@ -12858,7 +13367,7 @@ function Render.custom_llm_screen()
             .. "Kimi ~17% ($0.16 vs $0.95). Leave at 0 for endpoints without "
             .. "caching or unknown rates; cached tokens will then be billed "
             .. "at $0 in the cost estimate."))
-        _inline_msg(edit.errors["model_cache_" .. ri], TK.red)
+        custom_provider_inline_msg(edit.errors["model_cache_" .. ri], TK.red)
         Dummy(RA.ctx, 1, RA.SC(6))
         _price_field("price_out",
           UI.t("settings.custom.details.price_out", nil,
@@ -12926,7 +13435,7 @@ function Render.custom_llm_screen()
           .. "  Any OpenAI-compat: {\"temperature\":0.3,\"top_p\":0.9}\n\n"
           .. "Must be a valid JSON object (wrapped in {...}), not an array "
           .. "or scalar. Validated on Save."))
-        _inline_msg(edit.errors["model_body_" .. ri], TK.red)
+        custom_provider_inline_msg(edit.errors["model_body_" .. ri], TK.red)
 
         Dummy(RA.ctx, 1, RA.SC(12))
 
@@ -12939,13 +13448,20 @@ function Render.custom_llm_screen()
               .. "##cus_det_close_" .. ri,
             fw, RA.SC(26)) then
           ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+          close_details = true
         end
         if ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
           ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+          close_details = true
         end
         ImGui.ImGui_EndPopup(RA.ctx)
+      elseif not open_details_ri then
+        edit._details_ri = nil
       end
       UI.pop_modal_style()
+      if close_details then edit._details_ri = nil end
+    else
+      edit._details_ri = nil
     end
 
     Dummy(RA.ctx, 1, RA.SC(6))
@@ -12977,7 +13493,7 @@ function Render.custom_llm_screen()
     ImGui.ImGui_PopStyleVar(RA.ctx, 3)
     PopFont(RA.ctx)
 
-    _inline_msg(edit.errors.model_id, TK.red)
+    custom_provider_inline_msg(edit.errors.model_id, TK.red)
 
     ImGui.ImGui_EndChild(RA.ctx)
   end
@@ -12999,7 +13515,7 @@ function Render.custom_llm_screen()
     local adv_card_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
 
     -- Request timeout (narrow numeric field).
-    _field_label(UI.t("settings.custom.field.request_timeout", nil,
+    custom_provider_field_label(UI.t("settings.custom.field.request_timeout", nil,
       "Request Timeout"),
       UI.t("settings.custom.field.seconds_suffix", nil, "(seconds)"))
     _push_input_style()
@@ -13012,7 +13528,7 @@ function Render.custom_llm_screen()
     edit.timeout = new_timeout
     UI.tooltip(UI.t("settings.custom.tip.request_timeout", nil,
       "Total time allowed for a request after connecting."))
-    _inline_msg(edit.errors.timeout, TK.red)
+    custom_provider_inline_msg(edit.errors.timeout, TK.red)
 
     Dummy(RA.ctx, 1, RA.SC(10))
 
@@ -13020,7 +13536,7 @@ function Render.custom_llm_screen()
     -- intent but laid out below so both inline errors have room). Applies
     -- only to the TCP/TLS handshake; once connected, Request Timeout takes
     -- over as the per-request ceiling.
-    _field_label(UI.t("settings.custom.field.connect_timeout", nil,
+    custom_provider_field_label(UI.t("settings.custom.field.connect_timeout", nil,
       "Connect Timeout"),
       UI.t("settings.custom.field.seconds_suffix", nil, "(seconds)"))
     _push_input_style()
@@ -13033,7 +13549,7 @@ function Render.custom_llm_screen()
     edit.connect_timeout = new_ctimeout
     UI.tooltip(UI.t("settings.custom.tip.connect_timeout", nil,
       "Time allowed for the initial TCP/TLS connection."))
-    _inline_msg(edit.errors.connect_timeout, TK.red)
+    custom_provider_inline_msg(edit.errors.connect_timeout, TK.red)
 
     Dummy(RA.ctx, 1, RA.SC(10))
 
@@ -13041,7 +13557,7 @@ function Render.custom_llm_screen()
     -- muted hint text explains when they would. Prepended to every model
     -- id we send (not shown in the UI model-row inputs) so the dropdown
     -- stays clean and the prefix lives in exactly one place.
-    _field_label(UI.t("settings.custom.field.model_prefix", nil,
+    custom_provider_field_label(UI.t("settings.custom.field.model_prefix", nil,
       "Model ID Prefix"),
       UI.t("settings.custom.field.optional_suffix", nil, "(optional)"))
     _push_input_style()
@@ -13062,7 +13578,7 @@ function Render.custom_llm_screen()
     -- Custom request headers (multi-line text well, one header per line).
     -- Each non-blank line must match "Name: value" and must not contain
     -- triple-quotes / newlines (the save-time validator enforces both).
-    _field_label(UI.t("settings.custom.field.headers", nil,
+    custom_provider_field_label(UI.t("settings.custom.field.headers", nil,
       "Extra HTTP Headers"),
       UI.t("settings.custom.field.headers_suffix", nil,
         "(one \"Name: value\" per line)"))
@@ -13076,7 +13592,7 @@ function Render.custom_llm_screen()
     edit.headers_text = new_headers
     UI.tooltip(UI.t("settings.custom.tip.headers", nil,
       "Additional HTTP headers sent on every request."))
-    _inline_msg(edit.errors.headers, TK.red)
+    custom_provider_inline_msg(edit.errors.headers, TK.red)
 
     Dummy(RA.ctx, 1, RA.SC(10))
 
@@ -13084,7 +13600,7 @@ function Render.custom_llm_screen()
     -- request on this endpoint. Per-model extra_body (in the Details popup)
     -- overrides same-named keys here on a per-request basis. Validated as
     -- a JSON object at save time (Custom.validate_extra_body).
-    _field_label(UI.t("settings.custom.field.extra_body_provider", nil,
+    custom_provider_field_label(UI.t("settings.custom.field.extra_body_provider", nil,
       "Extra Body JSON"),
       UI.t("settings.custom.field.extra_body_provider_suffix", nil,
         "(optional, applies to every request)"))
@@ -13098,7 +13614,7 @@ function Render.custom_llm_screen()
     edit.extra_body = new_body
     UI.tooltip(UI.t("settings.custom.tip.extra_body_provider", nil,
       "JSON object merged into every chat-completions request."))
-    _inline_msg(edit.errors.extra_body, TK.red)
+    custom_provider_inline_msg(edit.errors.extra_body, TK.red)
 
     Dummy(RA.ctx, 1, RA.SC(10))
 
@@ -13118,7 +13634,7 @@ function Render.custom_llm_screen()
       edit.allow_insecure = new_insecure
       if edit.allow_insecure then
         Dummy(RA.ctx, 1, RA.SC(4))
-        _inline_msg(UI.t("settings.custom.warning.tls_disabled", nil,
+        custom_provider_inline_msg(UI.t("settings.custom.warning.tls_disabled", nil,
           "TLS verification disabled. Credentials can be intercepted. "
           .. "Only keep this on for trusted endpoints."),
           TK.amber)
@@ -13234,6 +13750,7 @@ function Render.custom_llm_screen()
     or UI.t("settings.custom.action.test_connection", nil, "Test Connection")
   local save_label = UI.t("common.save", nil, "Save")
   local cancel_label = UI.t("common.cancel", nil, "Cancel")
+  can_save_custom = not api_keys.key_validating and not test_active
 
   -- Measure button widths from their real label widths so the row
   -- auto-adjusts when "Test Connection" flips to "Cancel Test".
@@ -13292,13 +13809,13 @@ function Render.custom_llm_screen()
     UI.lerp_u32(TK.accent, 0xFFFFFFFF, 0.12))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),
     UI.lerp_u32(TK.accent, 0x000000FF, 0.15))
-  ImGui.ImGui_BeginDisabled(RA.ctx, api_keys.key_validating)
-  -- Ctrl+S (Cmd+S on Mac) mirrors the Save button. Disabled state mirrors
-  -- the button: don't fire the shortcut while a key validation curl is
-  -- in flight (matches the BeginDisabled gate above).
-  local cllm_save_clicked = ImGui.ImGui_Button(RA.ctx,
+  ImGui.ImGui_BeginDisabled(RA.ctx, not can_save_custom)
+  -- Ctrl+S (Cmd+S on Mac) mirrors the Save button. Disabled state mirrors the
+  -- button: don't fire the shortcut while either key validation or the custom
+  -- connection test is in flight (matches the BeginDisabled gate above).
+  cllm_save_clicked = ImGui.ImGui_Button(RA.ctx,
     save_label .. "##cllm_save", save_w, 0)
-    or (not api_keys.key_validating and UI.is_save_shortcut())
+    or (can_save_custom and UI.is_save_shortcut())
   UI.pressable()
   ImGui.ImGui_EndDisabled(RA.ctx)
   PopStyleColor(RA.ctx, 4)
@@ -13329,6 +13846,7 @@ function Render.custom_llm_screen()
 
   ImGui.ImGui_Unindent(RA.ctx, cllm_indent)
   ImGui.ImGui_EndChild(RA.ctx)
+  end
   PopStyleColor(RA.ctx, 4)               -- scrollbar bg + grab + hovered + active
   ImGui.ImGui_PopStyleVar(RA.ctx, 2)     -- ChildBorderSize, WindowPadding
   UI.pop_settings_styles()
@@ -13339,7 +13857,7 @@ function Render.custom_llm_screen()
   -- Handle Save: validate, persist, register, return to the list. The list
   -- screen owns the route back to Settings / first-run, so this branch only
   -- decides Save-vs-error.
-  if cllm_save_clicked and not api_keys.key_validating then
+  if cllm_save_clicked and can_save_custom then
     edit.errors = {}
     local has_format_error = false
 
@@ -13684,7 +14202,9 @@ function Render.preferred_plugins_screen()
     UI.lerp_u32(TK.border_str, TK.text, 0.30))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
     UI.lerp_u32(TK.border_str, TK.text, 0.55))
-  ImGui.ImGui_BeginChild(RA.ctx, "##pref_body", _body_avail_w, _body_h, 0)
+  local pref_body_open = ImGui.ImGui_BeginChild(RA.ctx,
+    "##pref_body", _body_avail_w, _body_h, 0)
+  if pref_body_open then
 
   ImGui.ImGui_Indent(RA.ctx, pref_indent)
 
@@ -14203,7 +14723,9 @@ function Render.preferred_plugins_screen()
   -- in-loop Enter check would miss the commit. Gating on `ac.row_idx` +
   -- `ac.sel > 0` keeps this scoped to the active dropdown.
   if ac.row_idx and ac.sel > 0 and ac.matches[ac.sel]
-        and ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Enter()) then
+        and (ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Enter())
+          or ImGui.ImGui_IsKeyPressed(RA.ctx,
+            ImGui.ImGui_Key_KeypadEnter())) then
     ac_picked_ident = ac.matches[ac.sel]
   end
 
@@ -14336,7 +14858,7 @@ function Render.preferred_plugins_screen()
         if canonical_ident ~= ident then
           Log.line("PREF", "per-row rescan canonicalized " .. rkey
             .. " = " .. tostring(ident) .. " -> " .. tostring(canonical_ident))
-          pref_plugins.rows[rescan_idx].name = canonical_ident
+          pref_plugins.rows[rescan_row_idx].name = canonical_ident
         end
         cache.preferred_types[rkey] = canonical_ident
         local err = FXCache.save(cache)
@@ -14621,6 +15143,7 @@ function Render.preferred_plugins_screen()
 
   ImGui.ImGui_Unindent(RA.ctx, pref_indent)
   ImGui.ImGui_EndChild(RA.ctx)
+  end
   PopStyleColor(RA.ctx, 4)               -- scrollbar bg + grab + hovered + active
   ImGui.ImGui_PopStyleVar(RA.ctx, 2)     -- ChildBorderSize, WindowPadding
 
@@ -14987,7 +15510,9 @@ function Render.fx_cache_screen()
     UI.lerp_u32(TK.border_str, TK.text, 0.30))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
     UI.lerp_u32(TK.border_str, TK.text, 0.55))
-  ImGui.ImGui_BeginChild(RA.ctx, "##fx_cache_body", _body_avail_w, _body_h, 0)
+  local fx_cache_body_open = ImGui.ImGui_BeginChild(RA.ctx,
+    "##fx_cache_body", _body_avail_w, _body_h, 0)
+  if fx_cache_body_open then
 
   ImGui.ImGui_Indent(RA.ctx, cache_indent)
 
@@ -15178,7 +15703,7 @@ function Render.fx_cache_screen()
         -- Confirm for caches with more than 10 plugins (risk of a
         -- long batch); otherwise start immediately.
         if #plugin_ids > 10 then
-          ImGui.ImGui_OpenPopup(RA.ctx, fx_rescan_popup)
+          fx_cache_ui.open_rescan_all_confirm = true
         else
           CTX.fx_cache_rescan_all_start(plugin_ids)
         end
@@ -15204,7 +15729,7 @@ function Render.fx_cache_screen()
       ImGui.ImGui_BeginDisabled(RA.ctx, any_scan_busy)
       if ImGui.ImGui_Button(RA.ctx,
            clear_all_label .. "##fx_cache_clear", CLEAR_W, 0) then
-        ImGui.ImGui_OpenPopup(RA.ctx, fx_clear_popup)
+        fx_cache_ui.open_clear_all_confirm = true
       end
       UI.tooltip(UI.t("settings.fx_cache.action.clear_all.tooltip", nil,
         "Remove every cached plugin's parameter data. Re-scans on next use."))
@@ -15455,6 +15980,13 @@ function Render.fx_cache_screen()
 
   -- Confirmation popup for Rescan All (shown only when the cache has
   -- more than 10 plugins -- tuned so small caches skip the extra click).
+  -- OpenPopup is deferred out of the scanned-plugins child above; ImGui binds
+  -- popup ids to the active window, so opening inside the card child and
+  -- beginning the modal here at parent scope makes the confirm a no-op.
+  if fx_cache_ui.open_rescan_all_confirm then
+    fx_cache_ui.open_rescan_all_confirm = false
+    ImGui.ImGui_OpenPopup(RA.ctx, fx_rescan_popup)
+  end
   local rc_w, rc_h = RA.SC(340), RA.SC(160)
   if update._main_w then
     ImGui.ImGui_SetNextWindowPos(RA.ctx,
@@ -15522,6 +16054,10 @@ function Render.fx_cache_screen()
   UI.pop_modal_style()
 
   -- Confirmation popup for Clear All (styled to match Factory Reset dialog).
+  if fx_cache_ui.open_clear_all_confirm then
+    fx_cache_ui.open_clear_all_confirm = false
+    ImGui.ImGui_OpenPopup(RA.ctx, fx_clear_popup)
+  end
   local cc_w, cc_h = RA.SC(340), RA.SC(150)
   if update._main_w then
     ImGui.ImGui_SetNextWindowPos(RA.ctx,
@@ -15684,6 +16220,7 @@ function Render.fx_cache_screen()
 
   ImGui.ImGui_Unindent(RA.ctx, cache_indent)
   ImGui.ImGui_EndChild(RA.ctx)
+  end
   PopStyleColor(RA.ctx, 4)               -- scrollbar bg + grab + hovered + active
   ImGui.ImGui_PopStyleVar(RA.ctx, 2)     -- ChildBorderSize, WindowPadding
   UI.pop_settings_styles()
@@ -15807,18 +16344,49 @@ Attach.render_ui = function(fhs, avail_w)
   if #S.attachments > 0 then
     ImGui.ImGui_SetCursorPosY(RA.ctx, ImGui.ImGui_GetCursorPosY(RA.ctx) + 2)
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), COL.FRAME_BG)
-    local strip_h = fhs * 1.3
+    local chip_gap = RA.SC(8)
+    local chip_rm_gap = RA.SC(2)
+    local rm_w = RA.SC(16)
+    local visible_strip_w = math_max(avail_w - RA.SC(10), RA.SC(80))
+    local max_chip_w = math_max(visible_strip_w - rm_w - chip_rm_gap,
+      RA.SC(80))
+    local row_count, row_used = 1, 0
+    for _, att in ipairs(S.attachments) do
+      local label = Attach.kind_prefix(att.kind)
+        .. UI._utf8_truncate_chars(att.name or "", 20, "...")
+      local chip_w = math_min(CalcTextSize(RA.ctx, label) + RA.SC(18),
+        max_chip_w)
+      local group_w = chip_w + chip_rm_gap + rm_w
+      local next_w = row_used == 0 and group_w or row_used + chip_gap + group_w
+      if row_used > 0 and next_w > visible_strip_w then
+        row_count = row_count + 1
+        row_used = group_w
+      else
+        row_used = next_w
+      end
+    end
+    local strip_rows = math_min(row_count, 3)
+    local strip_h = fhs * (1.3 * strip_rows) + RA.SC(4)
     ImGui.ImGui_BeginChild(RA.ctx, "##attach_strip", avail_w, strip_h)
 
     local remove_idx = nil
+    local render_row_used = 0
     for ai, att in ipairs(S.attachments) do
-      if ai > 1 then SameLine(RA.ctx, 0, 8) end
-
       local icon = Attach.kind_prefix(att.kind)
 
       local display_name = att.name
-      if #display_name > 20 then
-        display_name = display_name:sub(1, 17) .. "..."
+      display_name = UI._utf8_truncate_chars(display_name, 20, "...")
+      local chip_visible_label = icon .. display_name
+      local chip_w = math_min(CalcTextSize(RA.ctx, chip_visible_label)
+        + RA.SC(18), max_chip_w)
+      local group_w = chip_w + chip_rm_gap + rm_w
+      local next_w = render_row_used == 0 and group_w
+        or render_row_used + chip_gap + group_w
+      if render_row_used > 0 and next_w <= visible_strip_w then
+        SameLine(RA.ctx, 0, chip_gap)
+        render_row_used = next_w
+      else
+        render_row_used = group_w
       end
 
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(), COL.CODE_BG)
@@ -15827,7 +16395,7 @@ Attach.render_ui = function(fhs, avail_w)
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), COL.CHAT_TEXT)
 
       local chip_label = str_format("%s%s##att_%d", icon, display_name, ai)
-      ImGui.ImGui_Button(RA.ctx, chip_label, 0, 0)
+      ImGui.ImGui_Button(RA.ctx, chip_label, chip_w, 0)
       local kind_label = att.kind == "image"
         and UI.t("attach.kind.image", nil, "image")
         or att.kind == "pdf"
@@ -15847,7 +16415,7 @@ Attach.render_ui = function(fhs, avail_w)
       PopStyleColor(RA.ctx, 4)
 
       -- X remove button
-      SameLine(RA.ctx, 0, RA.SC(2))
+      SameLine(RA.ctx, 0, chip_rm_gap)
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), COL.ERROR)
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(), 0x00000000)
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), COL.BTN_HOV)
@@ -15879,12 +16447,6 @@ end
 -- Returns `open` from ImGui_Begin so loop() can detect the X-button
 -- close on frames where the window is minimised / collapsed.
 function Render.main_window()
-  -- Reset the per-frame text-input context-menu counter (see
-  -- UI.input_with_menu). Every right-click menu call site claims a
-  -- unique popup ID derived from this counter; resetting at the top of
-  -- main_window guarantees the same call site gets the same ID across
-  -- frames, so an open popup keeps matching its originating field.
-  UI._txt_menu_count = 0
   -- Set initial window size on first open; user can freely resize thereafter.
   -- When UI scale changes, re-apply the scaled default size immediately.
   -- Minimum width matches the default so the welcome text never needs to wrap.
@@ -16154,18 +16716,7 @@ function Render.main_window()
       -- Cancel any in-flight request so a late response doesn't write
       -- back into the now-cleared conversation.
       if S.status == "waiting" then
-        if deep_scan.active then CTX.cancel_deep_scan() end
-        Net.kill_curl()
-        S.curl_pid            = nil
-        S.send_time           = nil
-        S.request_start_time  = nil
-        S.status              = "idle"
-        S.pending_display_idx = nil
-        S.pending_code        = nil
-        S.retry_scheduled     = false
-        S.retry_count         = 0
-        S.retry_max           = CFG.MAX_RETRIES
-        S.retry_saved_body    = nil
+        Net.cancel_active_request("cancelled")
       end
       -- Drop any screen / modal navigation state so the dispatcher
       -- falls through to the main chat branch on the same frame.
@@ -16568,9 +17119,17 @@ function Render.main_window()
     local chat_font_key = UI.active_chat_font_key()
     local USER_MAX_W   = math_floor(avail_w * 0.72) - BUBBLE_RIGHT  -- max user bubble width
     local LABEL_H      = ImGui.ImGui_GetFrameHeightWithSpacing(RA.ctx)
+    local chat_view_top = ImGui.ImGui_GetScrollY(RA.ctx)
+    local chat_view_bottom = chat_view_top + chat_h
+    local CHAT_CULL_PAD = math_max(RA.SC(320), chat_h * 0.5)
 
     local scroll_to_msg_y = nil  -- captured Y for smooth-scroll target
+    local chat_cull_running_cost, chat_cull_running_cost_count = 0, 0
     for i, msg in ipairs(S.display_messages) do
+      if msg.cost then
+        chat_cull_running_cost = chat_cull_running_cost + msg.cost
+        chat_cull_running_cost_count = chat_cull_running_cost_count + 1
+      end
       if not msg.hidden then
         -- Extra gap between turns (larger than default Spacing).
         ImGui.ImGui_SetCursorPosY(RA.ctx, ImGui.ImGui_GetCursorPosY(RA.ctx) + BUBBLE_GAP)
@@ -16578,6 +17137,20 @@ function Render.main_window()
         -- Capture scroll target position (content Y, not screen Y).
         if S.scroll_to_msg and i == S.scroll_to_msg then
           scroll_to_msg_y = ImGui.ImGui_GetCursorPosY(RA.ctx) - BUBBLE_GAP
+        end
+
+        local msg_start_y = ImGui.ImGui_GetCursorPosY(RA.ctx)
+        local prev_msg = i > 1 and S.display_messages[i - 1] or nil
+        local msg_cull_key = UI.chat_message_cull_key(msg, i,
+          #S.display_messages, avail_w, chat_font_key,
+          chat_cull_running_cost, chat_cull_running_cost_count, prev_msg)
+        local cached_render_h = msg._chat_render_h
+        if cached_render_h and cached_render_h > 0
+            and msg._chat_render_key == msg_cull_key
+            and (msg_start_y + cached_render_h < chat_view_top - CHAT_CULL_PAD
+              or msg_start_y > chat_view_bottom + CHAT_CULL_PAD) then
+          ImGui.ImGui_SetCursorPosY(RA.ctx, msg_start_y + cached_render_h)
+          goto continue_chat_message
         end
 
       if msg.role == "user" then
@@ -16608,8 +17181,11 @@ function Render.main_window()
         -- once added, and previously every visible user bubble re-measured
         -- it every frame plus every attachment width per attachment per
         -- frame -- an O(messages * attachments) tax for invariant data.
-        -- Invalidate on font_idx change so a chat-font swap rebuilds.
-        local _w_key = tostring(prefs.chat_font_idx or 2) .. ":" .. chat_font_key
+        -- Invalidate on font_idx or UI scale change so chat-font or RA.SC()
+        -- measurement changes rebuild cached natural widths.
+        local _w_key = tostring(prefs.chat_font_idx or 2)
+          .. ":" .. tostring(prefs.ui_scale_idx or 3)
+          .. ":" .. chat_font_key
         if msg._natural_content_w == nil
            or msg._natural_content_w_key ~= _w_key
            or msg._natural_content_w_src ~= stripped then
@@ -16897,8 +17473,9 @@ function Render.main_window()
                          aname:match("%.jpeg$") or aname:match("%.gif$") or
                          aname:match("%.webp$") or aname == "Screenshot" or
                          aname == "Clipboard image"
-            local prefix = icon and "[IMG] " or
-                           aname:match("%.pdf$") and "[PDF] " or "[TXT] "
+            local kind = icon and "image"
+              or aname:match("%.pdf$") and "pdf" or "text"
+            local prefix = Attach.kind_prefix(kind)
             Text(RA.ctx, prefix .. aname)
           end
           PopStyleColor(RA.ctx)
@@ -17118,23 +17695,15 @@ function Render.main_window()
                                  and S.request_start_time)
 
           -- Running total cost across every turn up to and including this
-          -- one. Computed per-frame (instead of folded into the cached
-          -- field_map) so that if a prior turn's cost is ever rebuilt --
-          -- e.g. via the Retry button -- this row reflects the new sum
-          -- without needing to invalidate every downstream message's
-          -- cache. Cheap: O(i) additions, ~once per visible bubble per
-          -- frame. Hidden on turn 1 (count == 1) since it would just
-          -- duplicate Est. Cost and clutter the card.
+          -- one. The chat loop maintains this prefix as it walks messages, so
+          -- Est. Total stays live after retries without re-walking
+          -- S.display_messages[1..i] inside every visible details card.
+          -- Hidden on turn 1 (count == 1) since it would just duplicate
+          -- Est. Cost and clutter the card.
           local total_cost_value = nil
           if msg.tok_in and msg.cost then
-            local total, count = 0, 0
-            for j = 1, i do
-              local pm = S.display_messages[j]
-              if pm and pm.cost then
-                total = total + pm.cost
-                count = count + 1
-              end
-            end
+            local total = chat_cull_running_cost
+            local count = chat_cull_running_cost_count
             -- Suppress Est. Total when the running sum is 0 -- e.g. every
             -- turn so far ran on a local/custom model with no per-token
             -- prices entered, so a "this chat: $0.000000" line would just
@@ -17733,12 +18302,92 @@ function Render.main_window()
 
         if msg.typed_actions and msg.typed_actions.present == true then
           local plan_text = msg.generated_code and msg.generated_code.content or nil
-          local summary = Code.typed_actions_display_text
-            and Code.typed_actions_display_text(plan_text,
-              msg.typed_actions.action_results) or nil
-          if (not summary or summary == "") and type(plan_text) == "string" then
-            summary = plan_text
+          local ta_lang = UI.active_language_code()
+          local ta_catalog = I18N and I18N.load_catalog
+            and I18N.load_catalog(ta_lang) or nil
+          local ta_meta = type(ta_catalog) == "table" and ta_catalog._meta or nil
+          local ta_font_key = UI.active_chat_font_key
+            and UI.active_chat_font_key() or ""
+          local ta_results_sig =
+            UI.chat_message_value_cull_sig(msg.typed_actions.action_results)
+          local ta_source_version = ta_meta and ta_meta.source_version or ""
+          if msg._typed_receipt_plan ~= plan_text
+              or msg._typed_receipt_results_sig ~= ta_results_sig
+              or msg._typed_receipt_present ~= msg.typed_actions.present
+              or msg._typed_receipt_valid ~= msg.typed_actions.valid
+              or msg._typed_receipt_executed ~= msg.typed_actions.executed
+              or msg._typed_receipt_pending ~= msg.typed_actions.deferred_pending
+              or msg._typed_receipt_kind ~= msg.typed_actions.kind
+              or msg._typed_receipt_error ~= msg.typed_actions.error
+              or msg._typed_receipt_lua_requested ~= msg.typed_action_lua_requested
+              or msg._typed_receipt_undo_clicked ~= msg.typed_action_undo_clicked
+              or msg._typed_receipt_sr_undo_clicked ~= msg.screen_reader_undo_clicked
+              or msg._typed_receipt_run_status ~= msg.run_status
+              or msg._typed_receipt_auto_ran ~= msg.auto_ran
+              or msg._typed_receipt_lang ~= ta_lang
+              or msg._typed_receipt_source_version ~= ta_source_version
+              or msg._typed_receipt_font_state ~= ta_font_key then
+            local summary = Code.typed_actions_display_text
+              and Code.typed_actions_display_text(plan_text,
+                msg.typed_actions.action_results) or nil
+            if (not summary or summary == "") and type(plan_text) == "string" then
+              summary = plan_text
+            end
+            local action_count = Code.typed_actions_action_count
+              and Code.typed_actions_action_count(msg.typed_actions, plan_text)
+              or 0
+            local count_label = UI.t(
+              action_count == 1 and "typed_actions.count.one"
+                or "typed_actions.count.many",
+              { count = action_count },
+              tostring(action_count) .. " action"
+                .. (action_count == 1 and "" or "s"))
+            local status_label = msg.typed_action_lua_requested
+              and ((msg.typed_action_undo_clicked
+                or msg.screen_reader_undo_clicked)
+                and UI.t("typed_actions.status.undo_lua", nil,
+                  "UNDO + LUA")
+                or UI.t("typed_actions.status.lua_requested", nil,
+                  "LUA REQUESTED"))
+              or msg.typed_action_undo_clicked
+              and UI.t("typed_actions.status.undo_sent", nil,
+                "UNDO SENT")
+              or ((msg.run_status == "errored")
+                and UI.t("typed_actions.status.failed", nil, "FAILED")
+                or (msg.auto_ran
+                  and UI.t("typed_actions.status.auto_ran", nil, "AUTO-RAN")
+                  or UI.t("typed_actions.status.validated", nil, "VALIDATED")))
+            local kind_label = Code.typed_actions_kind_label
+              and Code.typed_actions_kind_label(msg.typed_actions)
+              or UI.t("typed_actions.kind.project_edit", nil,
+                "Project edit")
+            msg._typed_receipt_plan = plan_text
+            msg._typed_receipt_results_sig = ta_results_sig
+            msg._typed_receipt_present = msg.typed_actions.present
+            msg._typed_receipt_valid = msg.typed_actions.valid
+            msg._typed_receipt_executed = msg.typed_actions.executed
+            msg._typed_receipt_pending = msg.typed_actions.deferred_pending
+            msg._typed_receipt_kind = msg.typed_actions.kind
+            msg._typed_receipt_error = msg.typed_actions.error
+            msg._typed_receipt_lua_requested = msg.typed_action_lua_requested
+            msg._typed_receipt_undo_clicked = msg.typed_action_undo_clicked
+            msg._typed_receipt_sr_undo_clicked = msg.screen_reader_undo_clicked
+            msg._typed_receipt_run_status = msg.run_status
+            msg._typed_receipt_auto_ran = msg.auto_ran
+            msg._typed_receipt_lang = ta_lang
+            msg._typed_receipt_source_version = ta_source_version
+            msg._typed_receipt_font_state = ta_font_key
+            msg._typed_receipt_summary = summary
+            msg._typed_receipt_font = summary and summary ~= ""
+              and (UI.font_for_language_text(summary) or RA.code_font)
+              or RA.code_font
+            msg._typed_receipt_header_left =
+              UI.t("typed_actions.header", nil,
+                "STRUCTURED EDIT") .. "  \xc2\xb7  " .. kind_label
+            msg._typed_receipt_header_right = status_label .. "  \xc2\xb7  " .. count_label
+            msg._typed_receipt_body_key = nil
           end
+          local summary = msg._typed_receipt_summary
           if summary and summary ~= "" then
             ImGui.ImGui_Spacing(RA.ctx)
             local TA_PAD     = RA.SC(20)
@@ -17748,13 +18397,26 @@ function Render.main_window()
             local ta_w       = avail_w - 40
             local body_w     = ta_w - TA_PAD * 2
             local BODY_FONT = RA.SC(12)
-            local receipt_font = UI.font_for_language_text(summary) or RA.code_font
-            PushFont(RA.ctx, receipt_font, BODY_FONT)
-            local body_char_w = math_max(CalcTextSize(RA.ctx, "M"), 1)
-            local body_cpl = math_max(
-              math_floor((body_w - RA.SC(12)) / body_char_w), 20)
-            local body_h = UI.measure_stripped_height(summary, body_w, body_cpl)
-            PopFont(RA.ctx)
+            local receipt_font = msg._typed_receipt_font or RA.code_font
+            if msg._typed_receipt_body_src ~= summary
+                or msg._typed_receipt_body_font ~= receipt_font
+                or msg._typed_receipt_body_font_size ~= BODY_FONT
+                or msg._typed_receipt_body_w ~= body_w then
+              PushFont(RA.ctx, receipt_font, BODY_FONT)
+              local body_char_w = math_max(CalcTextSize(RA.ctx, "M"), 1)
+              local body_cpl = math_max(
+                math_floor((body_w - RA.SC(12)) / body_char_w), 20)
+              msg._typed_receipt_body_h =
+                UI.measure_stripped_height(summary, body_w, body_cpl)
+              PopFont(RA.ctx)
+              msg._typed_receipt_body_src = summary
+              msg._typed_receipt_body_font = receipt_font
+              msg._typed_receipt_body_font_size = BODY_FONT
+              msg._typed_receipt_body_w = body_w
+              msg._typed_receipt_body_cpl = body_cpl
+            end
+            local body_h = msg._typed_receipt_body_h or RA.SC(40)
+            local body_cpl = msg._typed_receipt_body_cpl or 99999
             local ta_h = TA_HEADER + TA_GAP + body_h + TA_PAD
             local ta_sx, ta_sy = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
             local ta_x2, ta_y2 = ta_sx + ta_w, ta_sy + ta_h
@@ -17777,41 +18439,17 @@ function Render.main_window()
               ta_sx, ta_sy, ta_x2, ta_y2, TK.border, TA_ROUND, 0, 1)
 
             do
-              local action_count = Code.typed_actions_action_count
-                and Code.typed_actions_action_count(msg.typed_actions, plan_text)
-                or 0
-              local count_label = UI.t(
-                action_count == 1 and "typed_actions.count.one"
-                  or "typed_actions.count.many",
-                { count = action_count },
-                tostring(action_count) .. " action"
-                  .. (action_count == 1 and "" or "s"))
-              local status_label = msg.typed_action_lua_requested
-                and ((msg.typed_action_undo_clicked
-                  or msg.screen_reader_undo_clicked)
-                  and UI.t("typed_actions.status.undo_lua", nil,
-                    "UNDO + LUA")
-                  or UI.t("typed_actions.status.lua_requested", nil,
-                    "LUA REQUESTED"))
-                or msg.typed_action_undo_clicked
-                and UI.t("typed_actions.status.undo_sent", nil,
-                  "UNDO SENT")
-                or ((msg.run_status == "errored")
-                  and UI.t("typed_actions.status.failed", nil, "FAILED")
-                  or (msg.auto_ran
-                    and UI.t("typed_actions.status.auto_ran", nil, "AUTO-RAN")
-                    or UI.t("typed_actions.status.validated", nil, "VALIDATED")))
-              local kind_label = Code.typed_actions_kind_label
-                and Code.typed_actions_kind_label(msg.typed_actions)
-                or UI.t("typed_actions.kind.project_edit", nil,
-                  "Project edit")
-              local header_left = UI.t("typed_actions.header", nil,
-                "STRUCTURED EDIT") .. "  \xc2\xb7  " .. kind_label
-              local header_right = status_label .. "  \xc2\xb7  " .. count_label
+              local header_left = msg._typed_receipt_header_left or ""
+              local header_right = msg._typed_receipt_header_right or ""
               local HDR_FONT = RA.SC(10)
-              PushFont(RA.ctx, FONT.mono_med, HDR_FONT)
-              local right_tw = CalcTextSize(RA.ctx, header_right)
-              PopFont(RA.ctx)
+              local right_w_key = tostring(HDR_FONT) .. ":" .. header_right
+              if msg._typed_receipt_right_w_key ~= right_w_key then
+                PushFont(RA.ctx, FONT.mono_med, HDR_FONT)
+                msg._typed_receipt_right_w = CalcTextSize(RA.ctx, header_right)
+                PopFont(RA.ctx)
+                msg._typed_receipt_right_w_key = right_w_key
+              end
+              local right_tw = msg._typed_receipt_right_w or 0
               local hdr_y = ta_sy + math_floor((TA_HEADER - HDR_FONT) * 0.5)
               ImGui.ImGui_DrawList_AddTextEx(ta_dl, FONT.mono_med, HDR_FONT,
                 ta_sx + TA_PAD, hdr_y, TK.text_faint, header_left)
@@ -18037,22 +18675,44 @@ function Render.main_window()
           -- code types, LUA otherwise. 1 px divider separates header from
           -- code body for visual section clarity.
           do
-            local is_jsfx = (msg.code_type == "jsfx" or msg.code_type == "eel")
-            local lang = is_jsfx and "JSFX" or "LUA"
-            local filename
-            if is_jsfx then
-              filename = Code.derive_filename_jsfx(msg.code_block) or "effect.jsfx"
-            else
-              filename = Code.derive_filename(msg.code_block) or "snippet.lua"
+            local header_font_state = UI.active_chat_font_key
+              and UI.active_chat_font_key() or ""
+            if msg._code_header_src ~= msg.code_block
+                or msg._code_header_type ~= msg.code_type
+                or msg._code_header_line_count ~= line_count
+                or msg._code_header_font_state ~= header_font_state then
+              local is_jsfx = (msg.code_type == "jsfx" or msg.code_type == "eel")
+              local lang = is_jsfx and "JSFX" or "LUA"
+              local filename
+              if is_jsfx then
+                filename = Code.derive_filename_jsfx(msg.code_block) or "effect.jsfx"
+              else
+                filename = Code.derive_filename(msg.code_block) or "snippet.lua"
+              end
+              local header_left  = lang .. "  \xc2\xb7  " .. filename
+              local header_right = tostring(line_count) .. " lines"
+              msg._code_header_src = msg.code_block
+              msg._code_header_type = msg.code_type
+              msg._code_header_line_count = line_count
+              msg._code_header_font_state = header_font_state
+              msg._code_header_left = header_left
+              msg._code_header_right = header_right
+              msg._code_header_left_font = UI.font_for_language_text(header_left)
+                or FONT.mono_med
+              msg._code_header_right_w_key = nil
             end
-            local header_left  = lang .. "  \xc2\xb7  " .. filename
-            local header_right = tostring(line_count) .. " lines"
+            local header_left  = msg._code_header_left or ""
+            local header_right = msg._code_header_right or ""
             local HDR_FONT = RA.SC(10)
-            local header_left_font = UI.font_for_language_text(header_left)
-              or FONT.mono_med
-            PushFont(RA.ctx, FONT.mono_med, HDR_FONT)
-            local right_tw = CalcTextSize(RA.ctx, header_right)
-            PopFont(RA.ctx)
+            local header_left_font = msg._code_header_left_font or FONT.mono_med
+            local right_w_key = tostring(HDR_FONT) .. ":" .. header_right
+            if msg._code_header_right_w_key ~= right_w_key then
+              PushFont(RA.ctx, FONT.mono_med, HDR_FONT)
+              msg._code_header_right_w = CalcTextSize(RA.ctx, header_right)
+              PopFont(RA.ctx)
+              msg._code_header_right_w_key = right_w_key
+            end
+            local right_tw = msg._code_header_right_w or 0
             local hdr_text_y = cb_sy + math_floor((HEADER_H - HDR_FONT) * 0.5)
             ImGui.ImGui_DrawList_AddTextEx(code_dl, header_left_font, HDR_FONT,
               cb_sx + CODE_PAD, hdr_text_y, TK.text_faint, header_left)
@@ -18662,7 +19322,6 @@ function Render.main_window()
         -- cancels any in-flight request, clears the conversation, and
         -- restores the welcome view) so the user can pick another
         -- info card without manually starting a new chat first.
-        local prev_msg = i > 1 and S.display_messages[i - 1] or nil
         if prev_msg and prev_msg.from_card and S.status ~= "waiting" then
           ImGui.ImGui_Spacing(RA.ctx)
           PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), COL.FOOTER)
@@ -18810,6 +19469,11 @@ function Render.main_window()
         ImGui.ImGui_Unindent(RA.ctx, BUBBLE_IND)
       end
 
+      msg._chat_render_h = math_max(0,
+        ImGui.ImGui_GetCursorPosY(RA.ctx) - msg_start_y)
+      msg._chat_render_key = msg_cull_key
+
+      ::continue_chat_message::
       end -- visible message
     end
 
@@ -18849,36 +19513,7 @@ function Render.main_window()
         PushFont(RA.ctx, FONT.mono_med, RA.SC(11))
         if ImGui.ImGui_Button(RA.ctx,
             UI.t("chat.status.cancel", nil, "Cancel")) then
-          -- If a deep param scan is running for this turn, signal cancel so
-          -- the coroutine returns early and its on_cancel handler tears down
-          -- the temp track.
-          if deep_scan.active then CTX.cancel_deep_scan() end
-          -- Kill the curl OS process before clearing state. Without this the
-          -- request keeps running in the background and may write a late
-          -- response to tmp.out that gets picked up by the next request.
-          Net.kill_curl()
-          S.curl_pid            = nil
-          S.send_time           = nil
-          S.request_start_time  = nil
-          S.status              = "idle"
-          -- Remove the pending user bubble if the AI never responded.
-          if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-            local last = #S.display_messages
-            -- Remove trailing assistant placeholder and user bubble.
-            if last > S.pending_display_idx then
-              S.display_messages[last] = nil
-            end
-            S.display_messages[S.pending_display_idx] = nil
-            -- Also remove from conversation history.
-            if #S.history >= 1 then S.history[#S.history] = nil end
-          end
-          S.pending_display_idx = nil
-          S.pending_code        = nil
-          S.retry_scheduled     = false
-          S.retry_count         = 0
-          S.retry_max           = CFG.MAX_RETRIES
-          S.retry_saved_body    = nil
-          S.scroll_to_bottom    = true
+          Net.cancel_active_request("cancelled")
         end
         PopFont(RA.ctx)
         PopStyleColor(RA.ctx, 5)             -- Border, Button, Hovered, Active, Text
@@ -19133,6 +19768,8 @@ function Render.main_window()
       else
         ImGui.ImGui_SetScrollY(RA.ctx, math_floor(cur + diff * 0.2))
       end
+    elseif S.scroll_to_msg then
+      UI.expire_missing_scroll_to_msg()
     end
 
     -- Drag-select auto-scroll: when mouse button is held and cursor is near
@@ -19460,10 +20097,11 @@ function Render.main_window()
     ImGui.ImGui_BeginDisabled(RA.ctx, not can_send)
     local armed = (has_input or #S.attachments > 0)
     -- Armed fill uses the shared muted-accent (same voice as the pill active
-    -- segment, toggle "on"s, and card dots). Disabled state uses a solid
-    -- muted blue so the button still reads as a button; transparent border
-    -- tones would vanish against the window.
-    local send_bg        = armed and TK.accent_ui or 0x93A9D6FF
+    -- segment, toggle "on"s, and card dots). Empty/disabled fill is still a
+    -- visible button surface, but derived from theme tokens instead of a fixed
+    -- blue literal so light/dark/custom themes keep the right contrast.
+    local send_bg        = armed and TK.accent_ui
+      or UI.lerp_u32(TK.card_hover, TK.accent_ui, 0.55)
     -- Hover / pressed tints: lift toward white on hover, deepen toward black
     -- on press. Only visible when armed + can_send -- BeginDisabled(true)
     -- suppresses these slots when the button is non-interactive.
@@ -19487,7 +20125,8 @@ function Render.main_window()
       -- send glyph (arrow skews visually up-right in its em-box).
       local ix = (bx1 + bx2) * 0.5 - icon_size * 0.5 - RA.SC(1)
       local iy = (by1 + by2) * 0.5 - icon_size * 0.5 + RA.SC(1)
-      local arrow_col = armed and TK.accent_text or 0xD8E1F0FF
+      local arrow_col = armed and TK.accent_text
+        or UI.lerp_u32(TK.text_muted, TK.accent_text, 0.45)
       ImGui.ImGui_DrawList_AddTextEx(adl, FONT.lucide, icon_size,
         ix, iy, arrow_col, ICON.SEND)
     end
@@ -19520,12 +20159,13 @@ function Render.main_window()
 
 
     -- Show a character counter inline after buttons when approaching the limit.
-    local input_len = #S.input_buf
-    if input_len > INPUT_BUF_SIZE * 0.8 then
+    local input_bytes = #S.input_buf
+    if input_bytes > INPUT_BUF_SIZE * 0.8 then
+      local input_chars = UI._utf8_char_count(S.input_buf)
       SameLine(RA.ctx, 0, BTN_GAP)
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),
-        input_len >= INPUT_BUF_SIZE - 1 and COL.ERROR or COL.WARN)
-      ImGui.ImGui_TextWrapped(RA.ctx, str_format("%d / %d", input_len, INPUT_BUF_SIZE))
+        input_bytes >= INPUT_BUF_SIZE - 1 and COL.ERROR or COL.WARN)
+      ImGui.ImGui_TextWrapped(RA.ctx, str_format("%d / %d", input_chars, INPUT_BUF_SIZE))
       PopStyleColor(RA.ctx)
     end
 
@@ -19916,8 +20556,7 @@ function Render.main_window()
       -- Display form: uppercase known acronyms (EQ, etc.) when they appear
       -- in body copy or button labels. Other types read naturally lowercase
       -- ("compressor", "reverb") and need no mapping.
-      local RSV_ACRONYM = { eq = "EQ" }
-      local rsv_type_display = RSV_ACRONYM[rsv_type] or rsv_type
+      local rsv_type_display = _RESOLVE_TYPE_ACRONYM[rsv_type] or rsv_type
 
       -- Consistent vertical gap between each logical section of the popup.
       -- Applied above and below every section so they breathe evenly.
@@ -20041,7 +20680,9 @@ function Render.main_window()
       -- dropdown row.
       -- Named separately from the chat prompt's enter flag; both scopes can
       -- be inspected during the same debug session.
-      local popup_enter_pressed = ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Enter())
+      local popup_enter_pressed =
+        ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Enter())
+        or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_KeypadEnter())
       local has_ac_selection = (S.resolve_popup_sel or 0) > 0
         and S.resolve_popup_matches
         and S.resolve_popup_matches[S.resolve_popup_sel] ~= nil
@@ -20347,11 +20988,10 @@ function Render.main_window()
           -- deesser, pitch_correction, custom): full abort. Tear down the
           -- pending turn the same way the in-flight chat Cancel does.
           if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-            local last = #S.display_messages
-            if last > S.pending_display_idx then
-              S.display_messages[last] = nil
+            for i = #S.display_messages, S.pending_display_idx, -1 do
+              tbl_remove(S.display_messages, i)
             end
-            S.display_messages[S.pending_display_idx] = nil
+            S.wrap_cache = {}
             if #S.history >= 1 then S.history[#S.history] = nil end
           end
           S.pending_display_idx  = nil
@@ -20753,13 +21393,22 @@ function Render.main_window()
     S._main_pre_collapse_h = update._main_h
     -- Save window geometry periodically (every ~2 seconds at 30fps).
     -- Skipped after Factory Reset so the freshly-cleared keys don't reappear
-    -- mid-session; the flag is cleared on the next script reload.
+    -- mid-session; the flag is cleared on the next script reload. The Store
+    -- layer also skips unchanged writes, but keeping a local signature avoids
+    -- calling through the persistence stack every timer tick while idle.
     S._win_save_counter = (S._win_save_counter or 0) + 1
     if S._win_save_counter >= 60 and not S._suppress_geometry_save then
       S._win_save_counter = 0
       if Store and Store.save_window_geometry then
-        Store.save_window_geometry(
-          update._main_x, update._main_y, update._main_w, update._main_h)
+        local gx = math_floor(update._main_x)
+        local gy = math_floor(update._main_y)
+        local gw = math_floor(update._main_w)
+        local gh = math_floor(update._main_h)
+        local geom_sig = tbl_concat({ gx, gy, gw, gh }, "|")
+        if S._last_saved_window_geometry_sig ~= geom_sig then
+          Store.save_window_geometry(gx, gy, gw, gh)
+          S._last_saved_window_geometry_sig = geom_sig
+        end
       end
     end
     -- Gemini Free Tier warning popup (top-level scope so it works from any
@@ -21595,21 +22244,35 @@ end
 function parse_md_table(lines, start_i)
   local rows = {}
   local i = start_i
+  local max_cols = 0
+  local function is_separator_row(row)
+    local body = row:match("^%s*|(.-)%s*$")
+    if not body then return false end
+    if body:sub(-1) == "|" then body = body:sub(1, -2) end
+    local saw_cell = false
+    for cell in (body .. "|"):gmatch("(.-)|") do
+      local trimmed = cell:match("^%s*(.-)%s*$") or ""
+      if not trimmed:match("^:?-+:?$") then return false end
+      saw_cell = true
+    end
+    return saw_cell
+  end
   while i <= #lines and lines[i]:match("^%s*|") do
     local row = lines[i]
-    -- Skip separator rows like |---|---|
-    if not row:match("^%s*|%s*[:-]+[|-]+%s*$") then
+    -- Skip separator rows like |---|---| and padded/aligned variants.
+    if not is_separator_row(row) then
       row = row:match("^%s*|(.-)%s*$") or row
       if row:sub(-1) == "|" then row = row:sub(1, -2) end
       local cells = {}
       for cell in (row .. "|"):gmatch("(.-)|") do
         cells[#cells+1] = cell:match("^%s*(.-)%s*$") or ""
       end
+      if #cells > max_cols then max_cols = #cells end
       rows[#rows+1] = cells
     end
     i = i + 1
   end
-  return rows, i
+  return rows, i, max_cols
 end
 
 -- =============================================================================
@@ -21718,6 +22381,38 @@ end
 -- Keyed by raw text; each entry stores the chars_per_line it was wrapped at
 -- so the cache auto-invalidates on resize. Cleared on Net.clear_conversation().
 
+function UI._wrap_cache_meta()
+  S.wrap_cache = S.wrap_cache or {}
+  if S._wrap_cache_table ~= S.wrap_cache then
+    local n = 0
+    for _ in pairs(S.wrap_cache) do n = n + 1 end
+    S._wrap_cache_table = S.wrap_cache
+    S._wrap_cache_count = n
+  end
+  S._wrap_cache_tick = (S._wrap_cache_tick or 0) + 1
+  return S.wrap_cache, S._wrap_cache_tick
+end
+
+function UI._wrap_cache_prune(limit)
+  local cache = S.wrap_cache
+  local count = S._wrap_cache_count or 0
+  if not cache or count <= limit then return end
+
+  while count > limit do
+    local oldest_key, oldest_tick = nil, nil
+    for key, entry in pairs(cache) do
+      local tick = type(entry) == "table" and entry.last_used or 0
+      if not oldest_tick or tick < oldest_tick then
+        oldest_key, oldest_tick = key, tick
+      end
+    end
+    if oldest_key == nil then break end
+    cache[oldest_key] = nil
+    count = count - 1
+  end
+  S._wrap_cache_count = count
+end
+
 function UI.get_wrap_cached(raw_text, chars_per_line)
   -- Cache keyed on (text, chars_per_line, font_idx, active language font).
   -- The language-font key matters because CJK wrapping uses two-unit glyphs
@@ -21732,9 +22427,11 @@ function UI.get_wrap_cached(raw_text, chars_per_line)
   -- string concatenation + gmatch pattern per frame per visible bubble.
   local font_idx = prefs.chat_font_idx or 2
   local font_key = UI.active_chat_font_key()
-  local entry = S.wrap_cache[raw_text]
+  local cache, tick = UI._wrap_cache_meta()
+  local entry = cache[raw_text]
   if entry and entry.cpl == chars_per_line and entry.font_idx == font_idx
       and entry.font_key == font_key then
+    entry.last_used = tick
     return entry.wrapped, entry.line_count, entry.lines
   end
   local wrapped = UI.wrap_text(raw_text, chars_per_line)
@@ -21745,14 +22442,19 @@ function UI.get_wrap_cached(raw_text, chars_per_line)
     lines[line_count] = line
   end
   if line_count == 0 then line_count = 1 end  -- empty input -> one empty line
-  S.wrap_cache[raw_text] = {
+  if not entry then
+    S._wrap_cache_count = (S._wrap_cache_count or 0) + 1
+  end
+  cache[raw_text] = {
     wrapped    = wrapped,
     line_count = line_count,
     lines      = lines,
     cpl        = chars_per_line,
     font_idx   = font_idx,
     font_key   = font_key,
+    last_used  = tick,
   }
+  UI._wrap_cache_prune(512)
   return wrapped, line_count, lines
 end
 

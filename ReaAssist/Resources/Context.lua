@@ -40,7 +40,7 @@ function CTX.extension_status(user_text)
   local wants_sws = text:find("%f[%w]sws%f[%W]") ~= nil
   local wants_jsapi = compact:find("jsreascriptapi", 1, true) ~= nil
     or clean:find("js reascript api", 1, true) ~= nil
-    or clean:find("reascript api", 1, true) ~= nil
+    or clean:find("js api", 1, true) ~= nil
   local wants_all = clean:find("%f[%w]extensions?%f[%W]") ~= nil
     and (clean:find("%f[%w]installed%f[%W]") ~= nil
       or clean:find("%f[%w]available%f[%W]") ~= nil
@@ -389,10 +389,13 @@ function CTX.tracks(proj, opts)
   local count = R_CountTracks(proj)
   if count == 0 then return "Tracks: none" end
   local minimal = opts and opts.minimal
+  local full = opts and opts.full
+  local cap = (opts and opts.cap) or 60
   local sel_lines = {}
   local lines = {
     str_format("Tracks (N=%d) [idx|name|items|folder_delta]:", count),
   }
+  local selected_rows, other_rows, all_rows = {}, {}, {}
   for i = 0, count - 1 do
     -- Long-lived defer scripts can race with project tab close / reload
     -- between R_CountTracks and the following R_GetTrack: the count
@@ -411,8 +414,18 @@ function CTX.tracks(proj, opts)
             folder_delta)
         end
       else
-        lines[#lines+1] = str_format("%d|%s|%d|%d",
+        local row = str_format("%d|%s|%d|%d",
           i + 1, _scrub_pipes(nm), item_count, folder_delta)
+        if full then
+          lines[#lines+1] = row
+        else
+          all_rows[#all_rows+1] = row
+          if R_IsTrackSelected(tr) then
+            selected_rows[#selected_rows+1] = row
+          else
+            other_rows[#other_rows+1] = row
+          end
+        end
       end
     end
   end
@@ -430,14 +443,149 @@ function CTX.tracks(proj, opts)
     for _, ln in ipairs(sel_lines) do out[#out+1] = ln end
     return tbl_concat(out, "\n")
   end
+  if not full and count > cap then
+    lines = {
+      str_format(
+        "Tracks (N=%d, capped; selected first) [idx|name|items|folder_delta]:",
+        count),
+    }
+    local shown = 0
+    for _, ln in ipairs(selected_rows) do
+      lines[#lines+1] = ln
+      shown = shown + 1
+    end
+    local remaining_slots = cap - shown
+    if remaining_slots < 0 then remaining_slots = 0 end
+    for i = 1, math_min(#other_rows, remaining_slots) do
+      lines[#lines+1] = other_rows[i]
+      shown = shown + 1
+    end
+    local omitted = count - shown
+    if omitted > 0 then
+      lines[#lines+1] = str_format(
+        "(+%d more tracks omitted -- request <context_needed>tracks</context_needed> for the full track list if a hidden track name/index matters)",
+        omitted)
+    end
+  else
+    for _, ln in ipairs(all_rows) do lines[#lines+1] = ln end
+  end
   return tbl_concat(lines, "\n")
 end
 
--- CTX.track_flags(proj) -> string
--- On-demand bucket: returns mute/solo/arm state for all tracks.
-function CTX.track_flags(proj)
+function CTX.snapshot_track_rows(proj)
   local count = R_CountTracks(proj)
   local rows = {}
+  for i = 0, count - 1 do
+    local tr = R_GetTrack(proj, i)
+    if tr then
+      local _, nm      = R_GetTrackName(tr)
+      local item_count = R_CountTrackMediaItems(tr)
+      local folder_delta =
+        math_floor(R_GetMediaTrackInfo_Value(tr, "I_FOLDERDEPTH") or 0)
+      local row = {
+        track = tr,
+        index = i + 1,
+        name = nm,
+        item_count = item_count,
+        folder_delta = folder_delta,
+      }
+      row.text = str_format("%d|%s|%d|%d",
+        row.index, _scrub_pipes(nm), item_count, folder_delta)
+      rows[#rows + 1] = row
+    end
+  end
+  return count, rows
+end
+
+function CTX.snapshot_selected_rows(rows)
+  local selected = {}
+  for _, row in ipairs(rows or {}) do
+    if row.track and R_IsTrackSelected(row.track) then
+      selected[#selected + 1] = row
+    end
+  end
+  return selected
+end
+
+function CTX.tracks_from_snapshot_rows(count, rows, selected_rows, opts)
+  count = count or 0
+  rows = rows or {}
+  selected_rows = selected_rows or {}
+  if count == 0 then return "Tracks: none" end
+  local minimal = opts and opts.minimal
+  local full = opts and opts.full
+  local cap = (opts and opts.cap) or 60
+  if minimal then
+    if #selected_rows == 0 then
+      return str_format(
+        "Tracks (N=%d): none selected (full list omitted -- JSFX prompt)",
+        count)
+    end
+    local out = {
+      str_format(
+        "Tracks (N=%d, showing selected only -- JSFX prompt) [idx|name|items|folder_delta]:",
+        count),
+    }
+    for _, row in ipairs(selected_rows) do out[#out + 1] = row.text end
+    return tbl_concat(out, "\n")
+  end
+  local lines = {
+    str_format("Tracks (N=%d) [idx|name|items|folder_delta]:", count),
+  }
+  if full or count <= cap then
+    for _, row in ipairs(rows) do lines[#lines + 1] = row.text end
+    return tbl_concat(lines, "\n")
+  end
+
+  lines = {
+    str_format(
+      "Tracks (N=%d, capped; selected first) [idx|name|items|folder_delta]:",
+      count),
+  }
+  local selected = {}
+  local shown = 0
+  for _, row in ipairs(selected_rows) do
+    selected[row] = true
+    lines[#lines + 1] = row.text
+    shown = shown + 1
+  end
+  local remaining_slots = cap - shown
+  if remaining_slots < 0 then remaining_slots = 0 end
+  for _, row in ipairs(rows) do
+    if not selected[row] and remaining_slots > 0 then
+      lines[#lines + 1] = row.text
+      shown = shown + 1
+      remaining_slots = remaining_slots - 1
+    end
+  end
+  local omitted = count - shown
+  if omitted > 0 then
+    lines[#lines + 1] = str_format(
+      "(+%d more tracks omitted -- request <context_needed>tracks</context_needed> for the full track list if a hidden track name/index matters)",
+      omitted)
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.selected_from_snapshot_rows(selected_rows)
+  local selected = {}
+  for _, row in ipairs(selected_rows or {}) do
+    selected[#selected + 1] = str_format("%q (index %d)",
+      row.name or "", row.index or 0)
+  end
+  return #selected > 0
+    and ("Selected tracks: " .. tbl_concat(selected, ", "))
+    or  "Selected tracks: none"
+end
+
+-- CTX.track_flags(proj, opts) -> string
+-- On-demand bucket: returns mute/solo/arm state, capped for very large sessions.
+function CTX.track_flags(proj, opts)
+  local count = R_CountTracks(proj)
+  local rows = {}
+  local total = 0
+  local full = opts and opts.full
+  local cap = (opts and opts.cap) or 60
   for i = 0, count - 1 do
     local tr = R_GetTrack(proj, i)
     if tr then
@@ -446,14 +594,26 @@ function CTX.track_flags(proj)
       if R_GetMediaTrackInfo_Value(tr, "I_SOLO")   ~= 0 then flags[#flags+1] = "soloed" end
       if R_GetMediaTrackInfo_Value(tr, "I_RECARM") == 1 then flags[#flags+1] = "armed"  end
       if #flags > 0 then
-        local _, nm = R_GetTrackName(tr)
-        rows[#rows+1] = str_format("%d|%s|%s",
-          i + 1, _scrub_pipes(nm), tbl_concat(flags, ","))
+        total = total + 1
+        if full or #rows < cap then
+          local _, nm = R_GetTrackName(tr)
+          rows[#rows+1] = str_format("%d|%s|%s",
+            i + 1, _scrub_pipes(nm), tbl_concat(flags, ","))
+        end
       end
     end
   end
-  if #rows == 0 then return "Track flags: none (no tracks muted/soloed/armed)" end
-  table.insert(rows, 1, "Track flags [idx|name|flags]:")
+  if total == 0 then return "Track flags: none (no tracks muted/soloed/armed)" end
+  if not full and total > #rows then
+    local omitted = total - #rows
+    table.insert(rows, 1, str_format(
+      "Track flags (N=%d, capped) [idx|name|flags]:", total))
+    rows[#rows+1] = str_format(
+      "(+%d more flagged tracks omitted -- narrow the request by selected/muted/soloed/armed state if hidden rows matter)",
+      omitted)
+  else
+    table.insert(rows, 1, "Track flags [idx|name|flags]:")
+  end
   return tbl_concat(rows, "\n")
 end
 
@@ -737,12 +897,14 @@ CTX.MAX_FX_REPORT = 30
 
 -- FX chain listing by track. This reports plugin names and indices only; live
 -- parameter names/values are intentionally deferred to fx_params or fx_inspect.
+-- Whole-project listings include the master track as `M|Master|...`; selected
+-- and explicitly scoped track listings stay limited to normal project tracks.
 function CTX.fx(proj, opts)
   local count = R_CountTracks(proj)
   local selected_only = opts and opts.selected_only == true
   local source_track = opts and opts.source_track or nil
   local source_name = opts and opts.source_name or nil
-  local sel_with_fx, other_with_fx = {}, {}
+  local sel_with_fx, master_with_fx, other_with_fx = {}, {}, {}
   for i = 0, count - 1 do
     local tr = R_GetTrack(proj, i)
     if tr
@@ -767,7 +929,24 @@ function CTX.fx(proj, opts)
       end
     end
   end
-  local total = #sel_with_fx + #other_with_fx
+  if not selected_only and not source_track then
+    local master = reaper.GetMasterTrack and reaper.GetMasterTrack(proj)
+    if master then
+      local fx_count = R_TrackFX_GetCount(master) or 0
+      if fx_count > 0 then
+        local _, nm = R_GetTrackName(master)
+        if nm == "" or tostring(nm):lower() == "master" then nm = "Master" end
+        local fx_names = {}
+        for f = 0, fx_count - 1 do
+          local _, fx_nm = R_TrackFX_GetFXName(master, f, "")
+          fx_names[#fx_names+1] = str_format("[%d]%s", f, _scrub_pipes(fx_nm))
+        end
+        master_with_fx[#master_with_fx+1] = str_format("%s|%s|%s",
+          "M", _scrub_pipes(nm), tbl_concat(fx_names, ","))
+      end
+    end
+  end
+  local total = #sel_with_fx + #master_with_fx + #other_with_fx
   if total == 0 then
     if source_track then
       return "FX chains: none on " .. (source_name or "track")
@@ -776,7 +955,9 @@ function CTX.fx(proj, opts)
   end
   local lines = { "FX chains [track_idx|track_name|[fx_idx]fx_name,...]:" }
   for _, e in ipairs(sel_with_fx) do lines[#lines+1] = e end
-  local remaining = math_max(0, CTX.MAX_FX_REPORT - #sel_with_fx)
+  for _, e in ipairs(master_with_fx) do lines[#lines+1] = e end
+  local remaining = math_max(0,
+    CTX.MAX_FX_REPORT - #sel_with_fx - #master_with_fx)
   local shown = 0
   for _, e in ipairs(other_with_fx) do
     if shown >= remaining then break end
@@ -831,6 +1012,7 @@ function CTX.local_fx_search_key(s)
 end
 
 function CTX.local_fx_search_query(lt)
+  local where_q = lt:match("^%s*where%s+is%s+(.+)$")
   local q =
        lt:match("^%s*which%s+tracks%s+have%s+(.+)$")
     or lt:match("^%s*what%s+tracks%s+have%s+(.+)$")
@@ -838,13 +1020,51 @@ function CTX.local_fx_search_query(lt)
     or lt:match("^%s*show%s+tracks%s+with%s+(.+)$")
     or lt:match("^%s*which%s+tracks%s+use%s+(.+)$")
     or lt:match("^%s*what%s+tracks%s+use%s+(.+)$")
-    or lt:match("^%s*where%s+is%s+(.+)$")
+    or where_q
   if not q then return nil end
   q = q:gsub("[%.%?%!]+$", "")
   q = q:gsub("%s+on%s+them%s*$", "")
   q = q:gsub("%s+inserted%s*$", "")
   q = q:gsub("%s+loaded%s*$", "")
   local original_q = q:gsub("^%s+", ""):gsub("%s+$", "")
+  if where_q then
+    local ql = original_q:lower()
+    local explicit_fx_scope =
+         ql:find("%f[%w]plugins?%f[%W]") ~= nil
+      or ql:find("%f[%w]effects?%f[%W]") ~= nil
+      or ql:find("%f[%w]fx%f[%W]") ~= nil
+    local location_scope =
+         ql:find("%f[%w]markers?%f[%W]") ~= nil
+      or ql:find("%f[%w]regions?%f[%W]") ~= nil
+      or ql:find("%f[%w]tracks?%f[%W]") ~= nil
+      or ql:find("%f[%w]items?%f[%W]") ~= nil
+    if location_scope and not explicit_fx_scope then return nil end
+    local looks_like_fx =
+         explicit_fx_scope
+      or ql:find("%f[%w]comp%f[%W]") ~= nil
+      or ql:find("%f[%w]compressor%f[%W]") ~= nil
+      or ql:find("%f[%w]compression%f[%W]") ~= nil
+      or ql:find("%f[%w]delay%f[%W]") ~= nil
+      or ql:find("%f[%w]echo%f[%W]") ~= nil
+      or ql:find("%f[%w]eq%f[%W]") ~= nil
+      or ql:find("%f[%w]gate%f[%W]") ~= nil
+      or ql:find("%f[%w]chorus%f[%W]") ~= nil
+      or ql:find("%f[%w]limit%f[%W]") ~= nil
+      or ql:find("%f[%w]limiter%f[%W]") ~= nil
+      or ql:find("%f[%w]reverb%f[%W]") ~= nil
+      or ql:find("%f[%w]verb%f[%W]") ~= nil
+    if not looks_like_fx
+        and type(CTX.populate_installed_fx) == "function"
+        and CTX.populate_installed_fx() then
+      for _, name in ipairs(CTX._installed_fx_list or {}) do
+        if CTX.fx_name_matches(name, { original_q }) then
+          looks_like_fx = true
+          break
+        end
+      end
+    end
+    if not looks_like_fx then return nil end
+  end
   if original_q == "fx" or original_q == "plugin" or original_q == "plugins"
       or original_q == "effect" or original_q == "effects" then
     return "*"
@@ -1206,6 +1426,9 @@ function CTX.master_properties(proj)
 end
 
 function CTX.selected(proj)
+  if type(proj) == "table" and proj.snapshot_selected_rows then
+    return CTX.selected_from_snapshot_rows(proj.snapshot_selected_rows)
+  end
   local count    = R_CountTracks(proj)
   local selected = {}
   for i = 0, count - 1 do
@@ -1220,22 +1443,13 @@ function CTX.selected(proj)
     or  "Selected tracks: none"
 end
 
--- Returns a TARGET HINT block for the snapshot when one or more tracks are
--- selected at request time. Lifts snapshot data into instruction-shape so
--- the model writes code targeting the captured track(s) by index/name first
--- and falls back to live GetSelectedTrack() only if the captured target no
--- longer exists. Without this, the model commonly emits pure GetSelectedTrack
--- calls and a script delayed past the user's next click produces "No track
--- selected." Returns "" when no tracks are selected (suppresses the block).
-function CTX.target_hint(proj, user_text)
-  local count = R_CountTracks(proj)
+function CTX.target_hint_from_selected_rows(selected_rows, user_text)
   local sel = {}
-  for i = 0, count - 1 do
-    local tr = R_GetTrack(proj, i)
-    if tr and R_IsTrackSelected(tr) then
-      local _, nm = R_GetTrackName(tr)
-      sel[#sel+1] = { idx = i + 1, name = nm }
-    end
+  for _, row in ipairs(selected_rows or {}) do
+    sel[#sel + 1] = {
+      idx = row.index or 0,
+      name = row.name or "",
+    }
   end
   if #sel == 0 then return "" end
   -- Suppress on clearly create-new-track prompts. Small models have been
@@ -1266,19 +1480,6 @@ function CTX.target_hint(proj, user_text)
     end
     lines[#lines+1] = "Selected tracks at request time: " .. tbl_concat(list, "; ") .. "."
   end
-  lines[#lines+1] = "Use this captured target ONLY when: (a) the user "
-    .. "request says \"the/this/selected/current\" track, OR (b) the request "
-    .. "operates on an existing track AND no prior turn in this conversation "
-    .. "already operated on a specific track. A targetless follow-up to a "
-    .. "prior turn that targeted Track N continues on Track N -- do NOT "
-    .. "switch to this captured target unless the user said "
-    .. "\"selected/current/this/the\" track or named a different one. "
-    .. "IGNORE this block when the user asks to create, insert, or add a "
-    .. "new track -- those should call InsertTrackAtIndex and target the "
-    .. "freshly created track, not the captured one. When honoring the "
-    .. "hint: validate the target still exists (and preferably still has "
-    .. "the same name); fall back to reaper.GetSelectedTrack() only if "
-    .. "the captured target is invalid."
   return tbl_concat(lines, "\n")
 end
 
@@ -1368,10 +1569,32 @@ function CTX.loop(proj, opts)
   return "Loop: " .. (enabled and "enabled" or "disabled") .. " | no loop points set"
 end
 
-function CTX.dynamic_split_settings()
-  local resource = reaper.GetResourcePath()
-  local ini_path = resource .. RA.SEP .. "reaper.ini"
-  local dyn_preset_path = resource .. RA.SEP .. "reaper-dynsplit.ini"
+function CTX.dynamic_split_file_stamp(path)
+  if type(file_mod_time) == "function" then
+    local ok, stamp = pcall(file_mod_time, path)
+    if ok and stamp ~= nil then return "mtime:" .. tostring(stamp) end
+  end
+
+  if reaper and type(reaper.JS_File_Stat) == "function" then
+    local ok, _, size, _, modified = pcall(reaper.JS_File_Stat, path)
+    if ok and (size ~= nil or modified ~= nil) then
+      return "js:" .. tostring(size or "?") .. ":" .. tostring(modified or "?")
+    end
+  end
+
+  local f = io.open(path, "rb")
+  if not f then return "missing" end
+  local size = f:seek("end") or 0
+  f:close()
+  return "size:" .. tostring(size)
+end
+
+function CTX.dynamic_split_read_cached(path)
+  local stamp = CTX.dynamic_split_file_stamp(path)
+  CTX._dynamic_split_file_cache = CTX._dynamic_split_file_cache or {}
+  local cached = CTX._dynamic_split_file_cache[path]
+  if cached and cached.stamp == stamp then return cached.text end
+
   local function _read_text(path)
     if type(read_file_text) == "function" then return read_file_text(path) end
     local f = io.open(path, "r")
@@ -1380,7 +1603,17 @@ function CTX.dynamic_split_settings()
     f:close()
     return data
   end
-  local text = _read_text(ini_path)
+
+  local text = _read_text(path)
+  CTX._dynamic_split_file_cache[path] = { stamp = stamp, text = text }
+  return text
+end
+
+function CTX.dynamic_split_settings()
+  local resource = reaper.GetResourcePath()
+  local ini_path = resource .. RA.SEP .. "reaper.ini"
+  local dyn_preset_path = resource .. RA.SEP .. "reaper-dynsplit.ini"
+  local text = CTX.dynamic_split_read_cached(ini_path)
   if type(text) ~= "string" or text == "" then
     return "Dynamic Split settings: unavailable"
   end
@@ -1403,7 +1636,7 @@ function CTX.dynamic_split_settings()
     return v and str_format("%.1fdB", v / 100) or "?"
   end
   local function dynsplit_preset_names()
-    local preset_text = _read_text(dyn_preset_path)
+    local preset_text = CTX.dynamic_split_read_cached(dyn_preset_path)
     if type(preset_text) ~= "string" or preset_text == "" then return "none" end
     local names = {}
     for line in (preset_text .. "\n"):gmatch("([^\r\n]*)\r?\n") do
@@ -1587,7 +1820,7 @@ end
 -- CTX.MAX_MARKER_REPORT to keep snapshot size bounded on heavily-markered projects).
 -- EnumProjectMarkers3 returns (retval, isrgn, pos, rgnend, name, idx).
 -- Markers and region boundaries are both reported; regions include an end pos.
-CTX.MAX_MARKER_REPORT, CTX.MAX_ITEM_REPORT, CTX.MAX_SEND_REPORT = 20, 5, 40
+CTX.MAX_MARKER_REPORT, CTX.MAX_ITEM_REPORT, CTX.MAX_SEND_REPORT = 20, 20, 40
 function CTX.markers(proj)
   local total = R_CountProjectMarkers(proj)
   if total == 0 then return "Markers/regions: none" end
@@ -1612,6 +1845,24 @@ function CTX.markers(proj)
       "(+%d more)", total - CTX.MAX_MARKER_REPORT)
   end
   return tbl_concat(lines, "\n")
+end
+
+-- Returns a TARGET HINT block for the snapshot when one or more tracks are
+-- selected at request time. Lifts snapshot data into instruction-shape so
+-- the model writes code targeting the captured track(s) by index/name first
+-- and falls back to live GetSelectedTrack() only if the captured target no
+-- longer exists. Without this, the model commonly emits pure GetSelectedTrack
+-- calls and a script delayed past the user's next click produces "No track
+-- selected." Returns "" when no tracks are selected (suppresses the block).
+function CTX.target_hint(proj, user_text)
+  if type(proj) == "table" and proj.snapshot_selected_rows then
+    return CTX.target_hint_from_selected_rows(proj.snapshot_selected_rows,
+      user_text)
+  end
+  local count, rows = CTX.snapshot_track_rows(proj)
+  if count == 0 then return "" end
+  return CTX.target_hint_from_selected_rows(CTX.snapshot_selected_rows(rows),
+    user_text)
 end
 
 -- =============================================================================
@@ -2067,6 +2318,7 @@ function CTX.local_installed_plugin_answer(user_text)
   local term_compact = term_l:gsub("[_%-%s]+", "")
   if term_compact == "reaimgui"
       or term_compact == "jsreascriptapi"
+      or term_compact == "reascriptapi"
       or term_l == "sws"
       or term_l == "sws extension" then
     return nil
@@ -2095,6 +2347,30 @@ function CTX.local_installed_plugin_answer(user_text)
     if #matches > 8 then
       lines[#lines + 1] = "... " .. tostring(#matches - 8) .. " more"
     end
+  end
+  return tbl_concat(lines, "\n")
+end
+
+function CTX.installed_fx_inventory_summary(limit)
+  if type(CTX.populate_installed_fx) ~= "function"
+     or not CTX.populate_installed_fx() then
+    return "Installed plugin inventory: unavailable in this REAPER version "
+      .. "(requires REAPER 7.42+)."
+  end
+  local list = CTX._installed_fx_list_deduped or CTX._installed_fx_list or {}
+  local total = #list
+  if total == 0 then return "Installed plugin inventory: 0 plugins found." end
+  local cap = math_min(tonumber(limit) or 24, total)
+  local lines = {
+    str_format("Installed plugin inventory (N=%d; showing %d):", total, cap),
+  }
+  for i = 1, cap do
+    lines[#lines + 1] = "- " .. tostring(list[i])
+  end
+  if total > cap then
+    lines[#lines + 1] = str_format(
+      "... %d more omitted; ask for a specific plugin name to search.",
+      total - cap)
   end
   return tbl_concat(lines, "\n")
 end
@@ -2233,9 +2509,7 @@ function CTX.local_read_answer(user_text, proj)
       or lt:find("fx installed", 1, true)
       or lt:find("plugin inventory", 1, true)
       or lt:find("fx inventory", 1, true) then
-    return "Installed plugin inventory: full installed-plugin lists are not "
-      .. "available from the current session. Ask me to check a specific "
-      .. "plugin name."
+    return CTX.installed_fx_inventory_summary()
   end
   local installed_plugin_answer = CTX.local_installed_plugin_answer(raw)
   if installed_plugin_answer then return installed_plugin_answer end
@@ -2684,6 +2958,20 @@ function CTX.local_read_answer(user_text, proj)
       selected_only = selected_track_phrase,
     })
   end
+  local item_state_question =
+       lt:find("media item", 1, true) ~= nil
+    or lt:find("media items", 1, true) ~= nil
+    or lt:find("%f[%w]item%f[%W]") ~= nil
+    or lt:find("%f[%w]items%f[%W]") ~= nil
+  if item_state_question
+      and (lt:find("%f[%w]muted%f[%W]") ~= nil
+        or lt:find("%f[%w]mute%f[%W]") ~= nil
+        or lt:find("%f[%w]unmuted%f[%W]") ~= nil
+        or lt:find("%f[%w]locked%f[%W]") ~= nil
+        or lt:find("%f[%w]lock%f[%W]") ~= nil
+        or lt:find("%f[%w]unlocked%f[%W]") ~= nil) then
+    return nil
+  end
   if lt:find("selected item", 1, true)
       or lt:find("selected items", 1, true)
       or lt:find("item is selected", 1, true)
@@ -3078,34 +3366,44 @@ function CTX.selected_items(proj, opts)
   if opts and opts.human == true then
     local lines = { str_format("Selected items: %d", count) }
     local report_n = math_min(count, CTX.MAX_ITEM_REPORT)
+    local missing = 0
     for i = 0, report_n - 1 do
       local item = R_GetSelectedMediaItem(proj, i)
-      local pos = R_GetMediaItemInfo_Value(item, "D_POSITION") or 0
-      local len = R_GetMediaItemInfo_Value(item, "D_LENGTH") or 0
-      local track = R_GetMediaItem_Track(item)
-      local track_idx = -1
-      local track_nm = "unknown"
-      if track then
-        track_idx = math_floor(R_GetMediaTrackInfo_Value(track,
-          "IP_TRACKNUMBER") or -1)
-        local _, nm = R_GetTrackName(track)
-        track_nm = nm ~= "" and nm or "(unnamed)"
-      end
-      local item_nm = include_names and CTX.media_item_name(item) or nil
-      if item_nm then item_nm = item_nm:gsub('"', "'") end
-      track_nm = tostring(track_nm):gsub('"', "'")
-      local track_label = track_idx > 0
-        and str_format('track %d "%s"', track_idx, track_nm)
-        or "unknown track"
-      if item_nm and item_nm ~= "" then
-        lines[#lines + 1] = str_format(
-          '- "%s" on %s (start %.3fs, length %.3fs)',
-          item_nm, track_label, pos, len)
+      if item then
+        local pos = R_GetMediaItemInfo_Value(item, "D_POSITION") or 0
+        local len = R_GetMediaItemInfo_Value(item, "D_LENGTH") or 0
+        local track = R_GetMediaItem_Track(item)
+        local track_idx = -1
+        local track_nm = "unknown"
+        if track then
+          track_idx = math_floor(R_GetMediaTrackInfo_Value(track,
+            "IP_TRACKNUMBER") or -1)
+          local _, nm = R_GetTrackName(track)
+          track_nm = nm ~= "" and nm or "(unnamed)"
+        end
+        local item_nm = include_names and CTX.media_item_name(item) or nil
+        if item_nm then item_nm = item_nm:gsub('"', "'") end
+        track_nm = tostring(track_nm):gsub('"', "'")
+        local track_label = track_idx > 0
+          and str_format('track %d "%s"', track_idx, track_nm)
+          or "unknown track"
+        if item_nm and item_nm ~= "" then
+          lines[#lines + 1] = str_format(
+            '- "%s" on %s (start %.3fs, length %.3fs)',
+            item_nm, track_label, pos, len)
+        else
+          lines[#lines + 1] = str_format(
+            "- Item %d on %s (start %.3fs, length %.3fs)",
+            i + 1, track_label, pos, len)
+        end
       else
-        lines[#lines + 1] = str_format(
-          "- Item %d on %s (start %.3fs, length %.3fs)",
-          i + 1, track_label, pos, len)
+        missing = missing + 1
       end
+    end
+    if missing > 0 then
+      lines[#lines + 1] = str_format(
+        "(%d selected item%s unavailable; selection changed during snapshot)",
+        missing, missing == 1 and "" or "s")
     end
     if count > CTX.MAX_ITEM_REPORT then
       lines[#lines + 1] = str_format("(+%d more)",
@@ -3120,31 +3418,42 @@ function CTX.selected_items(proj, opts)
       or str_format("Selected items (N=%d) [item_idx|track_idx|track_name|pos_s|len_s]:", count)
   }
   local report_n = math_min(count, CTX.MAX_ITEM_REPORT)
+  local missing = 0
   for i = 0, report_n - 1 do
     local item  = R_GetSelectedMediaItem(proj, i)
-    local pos   = R_GetMediaItemInfo_Value(item, "D_POSITION")
-    local len   = R_GetMediaItemInfo_Value(item, "D_LENGTH")
-    -- GetMediaItem_Track returns the track that owns this item. We resolve its
-    -- display name and 1-based index for a human-readable description.
-    local track = R_GetMediaItem_Track(item)
-    local track_idx = -1
-    local track_nm  = "unknown"
-    if track then
-      -- MediaTrackInfo "IP_TRACKNUMBER" returns the 1-based track number.
-      track_idx = math_floor(R_GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER"))
-      local _, nm = R_GetTrackName(track)
-      track_nm = nm
-    end
-    if include_names then
-      lines[#lines+1] = str_format(
-        "%d|%d|%s|%s|%.3f|%.3f",
-        i + 1, track_idx, _scrub_pipes(track_nm),
-        _scrub_pipes(CTX.media_item_name(item)), pos, len)
+    if item then
+      local pos   = R_GetMediaItemInfo_Value(item, "D_POSITION") or 0
+      local len   = R_GetMediaItemInfo_Value(item, "D_LENGTH") or 0
+      -- GetMediaItem_Track returns the track that owns this item. We resolve its
+      -- display name and 1-based index for a human-readable description.
+      local track = R_GetMediaItem_Track(item)
+      local track_idx = -1
+      local track_nm  = "unknown"
+      if track then
+        -- MediaTrackInfo "IP_TRACKNUMBER" returns the 1-based track number.
+        track_idx = math_floor(R_GetMediaTrackInfo_Value(track,
+          "IP_TRACKNUMBER") or -1)
+        local _, nm = R_GetTrackName(track)
+        track_nm = nm
+      end
+      if include_names then
+        lines[#lines+1] = str_format(
+          "%d|%d|%s|%s|%.3f|%.3f",
+          i + 1, track_idx, _scrub_pipes(track_nm),
+          _scrub_pipes(CTX.media_item_name(item)), pos, len)
+      else
+        lines[#lines+1] = str_format(
+          "%d|%d|%s|%.3f|%.3f",
+          i + 1, track_idx, _scrub_pipes(track_nm), pos, len)
+      end
     else
-      lines[#lines+1] = str_format(
-        "%d|%d|%s|%.3f|%.3f",
-        i + 1, track_idx, _scrub_pipes(track_nm), pos, len)
+      missing = missing + 1
     end
+  end
+  if missing > 0 then
+    lines[#lines+1] = str_format(
+      "(%d selected item%s unavailable; selection changed during snapshot)",
+      missing, missing == 1 and "" or "s")
   end
   if count > CTX.MAX_ITEM_REPORT then
     lines[#lines+1] = str_format(
@@ -3165,6 +3474,9 @@ function CTX.media_items(proj, opts)
   local items = {}
   if source_track then
     total = R_CountTrackMediaItems(source_track)
+    if count_only then
+      return str_format("Items on %s: %d", source_name or "track", total)
+    end
     local report_n = math_min(total, CTX.MAX_ITEM_REPORT)
     for i = 0, report_n - 1 do
       local item = reaper.GetTrackMediaItem(source_track, i)
@@ -3174,6 +3486,18 @@ function CTX.media_items(proj, opts)
     local project_total = reaper.CountMediaItems
       and (reaper.CountMediaItems(proj) or 0)
       or 0
+    if count_only and not selected_only then
+      return str_format("Items: %d", project_total)
+    end
+    if count_only and selected_only
+        and reaper.CountSelectedTracks and reaper.GetSelectedTrack then
+      local selected_count = reaper.CountSelectedTracks(proj) or 0
+      for i = 0, selected_count - 1 do
+        local tr = reaper.GetSelectedTrack(proj, i)
+        if tr then total = total + (R_CountTrackMediaItems(tr) or 0) end
+      end
+      return str_format("Items on selected tracks: %d", total)
+    end
     for i = 0, project_total - 1 do
       local item = reaper.GetMediaItem and reaper.GetMediaItem(proj, i) or nil
       local tr = item and R_GetMediaItem_Track(item) or nil
@@ -3184,9 +3508,6 @@ function CTX.media_items(proj, opts)
     end
   end
   if count_only then
-    if source_track then
-      return str_format("Items on %s: %d", source_name or "track", total)
-    end
     return selected_only and str_format("Items on selected tracks: %d", total)
       or str_format("Items: %d", total)
   end
@@ -3298,6 +3619,7 @@ function CTX.sends(proj, opts)
   local dest_track = opts and opts.dest_track or nil
   local dest_name = opts and opts.dest_name or nil
   local total = 0
+  local hardware_total = 0
   local rows = {}
   local track_count = R_CountTracks(proj)
   for i = 0, track_count - 1 do
@@ -3306,6 +3628,10 @@ function CTX.sends(proj, opts)
         and (not selected_only or R_IsTrackSelected(src))
         and (not source_track or src == source_track) then
       local _, src_name = R_GetTrackName(src)
+      if not dest_track then
+        hardware_total = hardware_total
+          + (reaper.GetTrackNumSends(src, 1) or 0)
+      end
       local send_count = reaper.GetTrackNumSends(src, 0) or 0
       for si = 0, send_count - 1 do
         local dest = reaper.GetTrackSendInfo_Value(src, 0, si, "P_DESTTRACK")
@@ -3331,6 +3657,10 @@ function CTX.sends(proj, opts)
       end
     end
   end
+  local hardware_note = hardware_total > 0
+    and str_format(" (%d hardware output send%s not listed)",
+      hardware_total, hardware_total == 1 and "" or "s")
+    or ""
   if total == 0 then
     if source_track and dest_track then
       return "Sends: none from " .. (source_name or "track")
@@ -3340,12 +3670,18 @@ function CTX.sends(proj, opts)
       return "Sends: none to " .. (dest_name or "track")
     end
     if source_track then
-      return "Sends: none on " .. (source_name or "track")
+      return "Sends: none on " .. (source_name or "track") .. hardware_note
     end
-    return selected_only and "Sends: none on selected tracks" or "Sends: none"
+    return (selected_only and "Sends: none on selected tracks" or "Sends: none")
+      .. hardware_note
   end
+  local scope_note = hardware_total > 0
+    and str_format("track sends only; %d hardware output send%s not listed",
+      hardware_total, hardware_total == 1 and "" or "s")
+    or "track sends only"
   local lines = {
-    str_format("Sends (N=%d) [src_idx|src_name|send_idx|dest_idx|dest_name|vol_db|pan|mode]:", total)
+    str_format("Sends (N=%d) [%s] [src_idx|src_name|send_idx|dest_idx|dest_name|vol_db|pan|mode]:",
+      total, scope_note)
   }
   for _, row in ipairs(rows) do lines[#lines + 1] = row end
   if total > CTX.MAX_SEND_REPORT then
@@ -3592,6 +3928,8 @@ end
 -- restricts the match to that single 1-based track index -- so the model can
 -- request "fx_params:Pro-Q 4@2" to read only track 2's instance instead of
 -- triggering a 200K-token dump across every Pro-Q 4 in the project.
+-- Unscoped filters also scan the master track; master entries are labelled
+-- "Master" rather than "Track N".
 --
 -- Identical-state dedup: when multiple matched FX produce byte-identical
 -- param bodies (typical for freshly-added EQ instances on N tracks: only the
@@ -3638,14 +3976,29 @@ function CTX.fx_params(proj, filter_names)
   -- 7-9". When the FX index varies across dups (uncommon: same plugin at
   -- different chain positions on different tracks), emit "Track N FX[I]"
   -- verbatim so the model can disambiguate.
+  local function fx_params_track_label(entry)
+    return entry.track_idx == "M" and "Master"
+      or ("Track " .. tostring(entry.track_idx))
+  end
+
+  local function fx_params_dup_track_label(entry)
+    return entry.track_idx == "M" and "Master" or tostring(entry.track_idx)
+  end
+
   local function format_dup_list(dups, primary_fx_idx)
     local same_fx = true
     for _, d in ipairs(dups) do
       if d.fx_idx ~= primary_fx_idx then same_fx = false; break end
     end
     if same_fx then
-      local nums = {}
-      for _, d in ipairs(dups) do nums[#nums+1] = d.track_idx end
+      local nums, labels = {}, {}
+      for _, d in ipairs(dups) do
+        if type(d.track_idx) == "number" then
+          nums[#nums+1] = d.track_idx
+        else
+          labels[#labels+1] = fx_params_dup_track_label(d)
+        end
+      end
       table.sort(nums)
       local out, i = {}, 1
       while i <= #nums do
@@ -3658,11 +4011,15 @@ function CTX.fx_params(proj, filter_names)
         end
         i = j + 1
       end
-      return "tracks " .. tbl_concat(out, ", ")
+      local parts = {}
+      if #out > 0 then parts[#parts+1] = "tracks " .. tbl_concat(out, ", ") end
+      for _, label in ipairs(labels) do parts[#parts+1] = label end
+      return tbl_concat(parts, ", ")
     else
       local out = {}
       for _, d in ipairs(dups) do
-        out[#out+1] = "Track " .. d.track_idx .. " FX[" .. d.fx_idx .. "]"
+        out[#out+1] = fx_params_track_label(d)
+          .. " FX[" .. d.fx_idx .. "]"
       end
       return tbl_concat(out, ", ")
     end
@@ -3696,18 +4053,12 @@ function CTX.fx_params(proj, filter_names)
   -- body buffered as a single string. We dedup by (fx_nm, body) below so
   -- N identical instances of a freshly-added EQ collapse to one block.
   local entries = {}
-  for ti = 0, track_count - 1 do
-    -- Nil-guard R_GetTrack against project-tab close races: track_count
-    -- was sampled at the top of fx_params, but on long FX walks the user
-    -- can swap or close the project tab mid-loop. R_GetTrackName(nil)
-    -- would crash; skipping the iteration is safe.
-    local tr = R_GetTrack(proj, ti)
-    if tr then
-      local _, nm    = R_GetTrackName(tr)
-      local fx_count = R_TrackFX_GetCount(tr)
-      for fi = 0, fx_count - 1 do
-        local _, fx_nm = R_TrackFX_GetFXName(tr, fi, "")
-        if matches_any(ti + 1, fx_nm) then
+  local function collect_track_entries(tr, track_idx, track_nm)
+    if not tr then return end
+    local fx_count = R_TrackFX_GetCount(tr) or 0
+    for fi = 0, fx_count - 1 do
+      local _, fx_nm = R_TrackFX_GetFXName(tr, fi, "")
+      if matches_any(track_idx, fx_nm) then
           -- Look up cached enum data for this plugin (if available).
           local cached_key, cached_plugin = FXCache.find_plugin(fx_nm)
           local cached_enums = {}  -- idx -> enum list
@@ -3775,15 +4126,32 @@ function CTX.fx_params(proj, filter_names)
               param_count - param_shown)
           end
           entries[#entries+1] = {
-            track_idx = ti + 1,
-            track_nm  = nm,
+            track_idx = track_idx,
+            track_nm  = track_nm,
             fx_idx    = fi,
             fx_nm     = fx_nm,
             body      = tbl_concat(body_lines, "\n"),
           }
-        end
       end
     end
+  end
+
+  for ti = 0, track_count - 1 do
+    -- Nil-guard R_GetTrack against project-tab close races: track_count
+    -- was sampled at the top of fx_params, but on long FX walks the user
+    -- can swap or close the project tab mid-loop. R_GetTrackName(nil)
+    -- would crash; skipping the iteration is safe.
+    local tr = R_GetTrack(proj, ti)
+    if tr then
+      local _, nm = R_GetTrackName(tr)
+      collect_track_entries(tr, ti + 1, nm)
+    end
+  end
+  local master = reaper.GetMasterTrack and reaper.GetMasterTrack(proj)
+  if master then
+    local _, nm = R_GetTrackName(master)
+    if nm == "" or tostring(nm):lower() == "master" then nm = "Master" end
+    collect_track_entries(master, "M", nm)
   end
 
   -- Group entries by (fx_nm, body). Order is preserved by the order entries
@@ -3809,7 +4177,8 @@ function CTX.fx_params(proj, filter_names)
     local p = g.primary
     if last_track_emitted ~= p.track_idx then
       last_track_emitted = p.track_idx
-      lines[#lines+1] = str_format("Track %d %q:", p.track_idx, p.track_nm)
+      lines[#lines+1] = str_format("%s %q:",
+        fx_params_track_label(p), p.track_nm)
     end
     local also = ""
     if #g.dups > 0 then
@@ -3820,7 +4189,8 @@ function CTX.fx_params(proj, filter_names)
   end
 
   if #entries == 0 then
-    lines[#lines+1] = "  (no matching FX found on any track -- the plugin is not loaded yet. "
+    lines[#lines+1] = "  (no matching FX found in the requested scope. "
+      .. "The plugin may be absent, named differently, or outside the requested track scope. "
       .. "If fx_list results are available above, use them to write code that adds the plugin and sets parameters "
       .. "using find_param and set_param_display at runtime. Do NOT request fx_list again -- proceed with the code.)"
   end
@@ -3922,6 +4292,11 @@ local DOCS_SECTION_ALIASES = {
   ["take fx"]  = "take_fx",
   ["sends"]    = "routing",
   ["receives"] = "routing",
+  ["send/receive"] = "routing",
+  ["sends/receives"] = "routing",
+  ["send receive"] = "routing",
+  ["send and receive"] = "routing",
+  ["send & receive"] = "routing",
   ["envelope"] = "envelopes",
   ["item"]     = "items",
   ["send"]     = "routing",
@@ -4297,7 +4672,10 @@ function Theme.save_to_file()
     -- Find the end of the [color theme] section (next section header or EOF).
     local next_section = content:find("\n%[", 2)
     if next_section then
-      content = content:sub(1, next_section - 1) .. append_str .. content:sub(next_section)
+      -- Slice INCLUSIVE of the newline before the next [section] header;
+      -- slicing at next_section - 1 glued the first appended key onto the
+      -- last character of the previous line, corrupting the theme file.
+      content = content:sub(1, next_section) .. append_str .. content:sub(next_section + 1)
     else
       -- No other sections; append at end.
       if content:sub(-1) ~= "\n" then content = content .. "\n" end
@@ -6616,8 +6994,7 @@ end
 --   transport        - play/record/pause/stopped state
 --   loop             - loop enable state and loop point range
 --   markers/regions  - all markers and region start/end points (capped)
---   tracks           - track list with name, item count, mute/solo/arm flags
---   fx chains        - which FX are loaded on each track (names only; not params)
+--   tracks           - track list with name, item count, and folder depth
 --   selected tracks  - which tracks are currently selected
 --   time selection   - start/end of the current time selection (or "none")
 --   edit cursor      - current cursor position in seconds
@@ -6628,16 +7005,15 @@ end
 -- tracks). The assistant requests them on demand via
 -- <context_needed>fx_params:PluginName</context_needed>, which scopes the
 -- collection to only the named plugin(s).
--- Heavy-snapshot memoization. tracks() walks every track + FX chain and
--- markers() walks every marker/region; both can take hundreds of ms on
--- dense projects. Cache them keyed on reaper.GetProjectStateChangeCount(),
--- which increments on every undo-tracked mutation (track/FX/marker/loop
--- edits). The cheap + volatile bits (tempo, cursor, selection, transport,
--- selected items, time selection) are re-read every call -- they're each
--- under ~1ms, AND some of them (cursor, selection, transport) aren't
--- reflected in the state-count so we'd risk serving stale data if we
--- cached them. Invalidated automatically on project switch because proj
--- is part of the key.
+-- Heavy-snapshot memoization. Track rows and markers can take hundreds of ms
+-- on dense projects, so cache the stable track row data and markers keyed on
+-- reaper.GetProjectStateChangeCount(), which increments on every undo-tracked
+-- mutation (track/FX/marker/loop edits). The volatile selection state is
+-- checked once per snapshot against those cached rows, then reused for the
+-- Tracks block, Selected tracks line, and TARGET HINT. Other cheap + volatile
+-- bits (tempo, cursor, transport, selected items, time selection) are re-read
+-- every call. Invalidated automatically on project switch because proj is part
+-- of the key.
 CTX._snapshot_heavy_cache = nil
 
 -- =============================================================================
@@ -6804,9 +7180,8 @@ local DOCS_PHRASE_HINTS = {
   { "on the active take",    "take_fx"   },
   { "to the take",           "take_fx"   },
   { "on the take",           "take_fx"   },
-  -- items (markers/regions stay in core, so don't pin items on those words)
-  { "razor edit",            "items"     },
-  { "razor area",            "items"     },
+  -- items (markers/regions and razor edits stay in core, so don't pin items
+  -- on those words)
   { "media item",            "items"     },
   { "midi item",             "items"     },
   { "midi items",            "items"     },
@@ -6948,37 +7323,44 @@ function CTX.prompt_indicates_timecode_generator(text)
   return false
 end
 
-if REQUIRE_SWS_EXTENSION and not SupportExtFlag("optoutsws") then
+CTX.SWS_DOCS_PHRASE_HINTS = {
+  { "%f[%w]sws%f[%W]",                  "sws" },
+  { "s&m",                              "sws" },
+  { "startup action",                   "sws" },
+  { "startup actions",                  "sws" },
+  { "custom startup action",            "sws" },
+  { "global startup action",            "sws" },
+  { "project startup action",           "sws" },
+  { "sws startup",                      "sws" },
+  { "system clipboard",                 "sws" },
+  { "%f[%w]clipboard%f[%W]",            "sws" },
+  { "mouse cursor context",             "sws" },
+  { "mouse cursor",                     "sws" },
+  { "under my mouse",                   "sws" },
+  { "under the mouse",                  "sws" },
+  { "%f[%w]hovering%f[%W]",             "sws" },
+  { "%f[%w]hovered%f[%W]",              "sws" },
+  { "br_getmousecursorcontext",         "sws" },
+  { "%f[%w]loudness%f[%W]",             "sws" },
+  { "%f[%w]lufs%f[%W]",                 "sws" },
+  { "sws notes",                        "sws" },
+  { "marker region subtitle",           "sws" },
+  { "region subtitle",                  "sws" },
+}
+
+function CTX.each_docs_phrase_hint(fn)
+  for _, hint in ipairs(DOCS_PHRASE_HINTS) do
+    if fn(hint) == false then return false end
+  end
   -- SWS docs are advertised only when SWS is required for the current
   -- install. The loader accepts docs:sws either way, but opt-out support
   -- should not nudge the model toward extension-only calls.
-  local sws_hints = {
-    { "%f[%w]sws%f[%W]",                  "sws" },
-    { "s&m",                              "sws" },
-    { "startup action",                   "sws" },
-    { "startup actions",                  "sws" },
-    { "custom startup action",            "sws" },
-    { "global startup action",            "sws" },
-    { "project startup action",           "sws" },
-    { "sws startup",                      "sws" },
-    { "system clipboard",                 "sws" },
-    { "%f[%w]clipboard%f[%W]",            "sws" },
-    { "mouse cursor context",             "sws" },
-    { "mouse cursor",                     "sws" },
-    { "under my mouse",                   "sws" },
-    { "under the mouse",                  "sws" },
-    { "%f[%w]hovering%f[%W]",             "sws" },
-    { "%f[%w]hovered%f[%W]",              "sws" },
-    { "br_getmousecursorcontext",         "sws" },
-    { "%f[%w]loudness%f[%W]",             "sws" },
-    { "%f[%w]lufs%f[%W]",                 "sws" },
-    { "sws notes",                        "sws" },
-    { "marker region subtitle",           "sws" },
-    { "region subtitle",                  "sws" },
-  }
-  for _, hint in ipairs(sws_hints) do
-    DOCS_PHRASE_HINTS[#DOCS_PHRASE_HINTS + 1] = hint
+  if REQUIRE_SWS_EXTENSION and not SupportExtFlag("optoutsws") then
+    for _, hint in ipairs(CTX.SWS_DOCS_PHRASE_HINTS) do
+      if fn(hint) == false then return false end
+    end
   end
+  return true
 end
 
 -- JSFX-intent detection: returns true when the user's prompt explicitly
@@ -7335,7 +7717,7 @@ function CTX.preempt_buckets_for_prompt(user_text)
   -- section file doesn't block the user's request.
   S.docs_section_sent = S.docs_section_sent or {}
   local sec_seen = {}
-  for _, hint in ipairs(DOCS_PHRASE_HINTS) do
+  CTX.each_docs_phrase_hint(function(hint)
     if text:find(hint[1]) then
       local section = hint[2]
       if not sec_seen[section] then
@@ -7358,7 +7740,7 @@ function CTX.preempt_buckets_for_prompt(user_text)
         end
       end
     end
-  end
+  end)
   if CTX.prompt_indicates_drum_edit(user_text) then
     local drums_key = "prompt_bundle:drums"
     local drums_already = S.sticky_context[drums_key]
@@ -7665,17 +8047,8 @@ function CTX.preempt_buckets_for_prompt(user_text)
                  and not (S.pref_plugins_sent or {})[tkey] then
                 local hint = "PREFERRED PLUGINS:\n"
                   .. "  " .. tkey .. " = " .. (exact_ident or ident or curated_name) .. "\n"
-                  .. "(User's saved preference; full parameter reference above "
-                  .. "in plugin_ref:" .. curated_name .. ". Use this plugin directly "
-                  .. "and do NOT emit <context_needed>resolve:" .. tkey
-                  .. "</context_needed>. For add-only/load-only tasks (no parameter "
-                  .. "values set), use the AddByName identifier directly -- do NOT "
-                  .. "emit <context_needed>fx_inspect:" .. (exact_ident or ident or curated_name)
-                  .. "</context_needed> just to load the plugin. After every "
-                  .. "TrackFX_AddByName, the next non-blank line MUST be `if "
-                  .. "fx < 0 then ShowMessageBox(...) return end` before "
-                  .. "using fx -- the static FX-CHECK-VALIDATOR rejects "
-                  .. "unchecked AddByName results and forces a retry.)"
+                  .. "(User's saved preference; full parameter reference is pinned "
+                  .. "as plugin_ref:" .. curated_name .. ".)"
                 Net.sticky_set(pp_key, hint)
                 if S.pref_plugins_sent then S.pref_plugins_sent[tkey] = true end
                 injected[#injected+1] = pp_key
@@ -7852,16 +8225,8 @@ function CTX.preempt_buckets_for_prompt(user_text)
               local add_ident = exact_ident or preferred_ident or ident or curated
               local hint = "PREFERRED PLUGINS:\n"
                 .. "  " .. tkey .. " = " .. add_ident .. "\n"
-                .. "(User's saved preference; full parameter reference above "
-                .. "in plugin_ref:" .. curated .. ". Use this plugin directly "
-                .. "and do NOT emit <context_needed>resolve:" .. tkey
-                .. "</context_needed>. For add-only/load-only tasks (no parameter "
-                .. "values set), use the AddByName identifier directly -- do NOT "
-                .. "emit <context_needed>fx_inspect:" .. add_ident
-                .. "</context_needed> just to load the plugin. After every "
-                .. "TrackFX_AddByName, the next non-blank line MUST check "
-                .. "`if fx < 0 then ... return end` before storing or using "
-                .. "the FX index.)"
+                .. "(User's saved preference; full parameter reference is pinned "
+                .. "as plugin_ref:" .. curated .. ".)"
               Net.sticky_set(pp_key, hint)
               if S.pref_plugins_sent then S.pref_plugins_sent[tkey] = true end
               injected[#injected+1] = pp_key
@@ -7877,26 +8242,7 @@ function CTX.preempt_buckets_for_prompt(user_text)
            and not (S.pref_plugins_sent or {})[tkey] then
           local pp_content, pp_err = CTX.preferred_plugins({tkey})
           if pp_content then
-            -- Always-on directive (conditional in wording): tells the
-            -- model that for add-only/load-only tasks the AddByName
-            -- identifier in pp_content is sufficient, and fx_inspect
-            -- isn't needed just to load the plugin. Without this, the
-            -- model defensively emits <context_needed>fx_inspect:Name</context_needed>
-            -- on add-only synth/instrument tasks even when pref already
-            -- pins the AddByName string -- observed costing one extra
-            -- API call on a "create a synth track + MIDI item" prompt
-            -- where Twin 3 was already in pref:synth.
-            local pp_directive = "\n\nDIRECTIVE: For add-only/load-only "
-              .. "tasks (no parameter values set), use the AddByName "
-              .. "identifier above directly with TrackFX_AddByName. Do "
-              .. "NOT emit <context_needed>fx_inspect:Name</context_needed> "
-              .. "just to load the plugin -- the parameter map is only "
-              .. "needed when configuring values. After every "
-              .. "TrackFX_AddByName, the next non-blank line MUST be `if "
-              .. "fx < 0 then ShowMessageBox(...) return end` before using "
-              .. "fx -- the static FX-CHECK-VALIDATOR rejects unchecked "
-              .. "AddByName results and forces a retry."
-            Net.sticky_set(pp_key, pp_content .. pp_directive)
+            Net.sticky_set(pp_key, pp_content)
             -- Mark sent so the model's <context_needed>preferred_plugins:tkey
             -- (if it emits one anyway) gets deduped by the bucket dispatcher.
             if S.pref_plugins_sent then S.pref_plugins_sent[tkey] = true end
@@ -7965,27 +8311,25 @@ CTX.build_snapshot = function(proj, opts)
   local drum_edit = (opts and opts.drum_edit) or S.pending_drum_edit_intent
   local state_count = reaper.GetProjectStateChangeCount(proj or 0)
   local c = CTX._snapshot_heavy_cache
-  local tracks_txt, markers_txt
-  if minimal_tracks then
-    tracks_txt  = CTX.tracks(proj, { minimal = true })
-    if c and c.proj == proj and c.state_count == state_count then
-      markers_txt = c.markers
-    else
-      markers_txt = CTX.markers(proj)
-    end
-  elseif c and c.proj == proj and c.state_count == state_count then
-    tracks_txt  = c.tracks
+  local track_count, track_rows, markers_txt
+  if c and c.proj == proj and c.state_count == state_count then
+    track_count = c.track_count
+    track_rows  = c.track_rows
     markers_txt = c.markers
   else
-    tracks_txt  = CTX.tracks(proj)
+    track_count, track_rows = CTX.snapshot_track_rows(proj)
     markers_txt = CTX.markers(proj)
     CTX._snapshot_heavy_cache = {
-      proj        = proj,
-      state_count = state_count,
-      tracks      = tracks_txt,
-      markers     = markers_txt,
+      proj         = proj,
+      state_count  = state_count,
+      track_count  = track_count,
+      track_rows   = track_rows,
+      markers      = markers_txt,
     }
   end
+  local selected_rows = CTX.snapshot_selected_rows(track_rows)
+  local tracks_txt = CTX.tracks_from_snapshot_rows(track_count, track_rows,
+    selected_rows, { minimal = minimal_tracks })
   local parts = {
     CTX.reaper_version(),
     CTX.tempo(proj),
@@ -7994,7 +8338,7 @@ CTX.build_snapshot = function(proj, opts)
     CTX.loop(proj),
     markers_txt,
     tracks_txt,
-    CTX.selected(proj),
+    CTX.selected_from_snapshot_rows(selected_rows),
     CTX.time_selection(proj),
     CTX.cursor(proj),
     CTX.selected_items(proj, {
@@ -8007,18 +8351,18 @@ CTX.build_snapshot = function(proj, opts)
     parts[#parts + 1] = CTX.sends(proj, {})
   end
   if drum_edit then parts[#parts + 1] = CTX.dynamic_split_settings() end
-  -- Multi-row sections (Tracks, FX chains, Track flags, Markers/regions,
-  -- Selected items) use a compact pipe-delimited format with a header row
-  -- declaring the columns. This shaves ~15-25% snapshot tokens on large
-  -- sessions vs the previous prose form. Single-value lines remain
-  -- human-readable. Selected item names are included only when the prompt
-  -- explicitly asks about selected items/names, not on every context send.
-  -- Pipe characters in track/item names are scrubbed to "_" to keep parsing
-  -- trivial.
+  -- Multi-row sections (Tracks, Markers/regions, Selected items, and optional
+  -- Sends) use a compact pipe-delimited format with a header row declaring the
+  -- columns. This shaves ~15-25% snapshot tokens on large sessions vs the
+  -- previous prose form. Single-value lines remain human-readable. Selected
+  -- item names are included only when the prompt explicitly asks about selected
+  -- items/names, not on every context send. Pipe characters in track/item names
+  -- are scrubbed to "_" to keep parsing trivial.
   local body = "SESSION CONTEXT (multi-row sections use pipe-delimited rows -- "
     .. "see each section's [col|col|...] header for column names):\n"
     .. tbl_concat(parts, "\n") .. "\n\n"
-  local hint = CTX.target_hint(proj, S.pending_orig_prompt)
+  local hint = CTX.target_hint_from_selected_rows(selected_rows,
+    S.pending_orig_prompt)
   if hint ~= "" then body = body .. hint .. "\n\n" end
   return body
 end

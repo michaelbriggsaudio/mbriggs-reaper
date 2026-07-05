@@ -68,6 +68,13 @@ The resolver tries formats in order `VST3 > VSTi > VST > AU > CLAP`. JSFX
 entries use the full relative path (e.g. `ReJJ/ReEQ/ReEQ.jsfx`, or `JS:` prefix
 for stock JSFX under `Effects/`).
 
+Fallback-chain entries are not automatically curated parameter references.
+Use a `PLUGIN:Name` section below only for the exact matching version named by
+that marker. If an installed fallback has no matching marker (for example,
+`Pro-Q 3`, `Pro-Q 2`, or `Twin 2`), add/load it by its resolved identifier but
+do not borrow another version's parameter map; request live `fx_inspect` or
+`fx_params` before writing parameters.
+
 Edit chains freely to add other preferred plugins. Plugin type keys match
 ReaAssist's preferred-plugins types (lowercase, underscored). Types may
 have an empty chain (`type: || stock`) for stock-only types.
@@ -109,11 +116,16 @@ with whatever type the band currently is, or instruct the user to set the type
 manually. Never attempt to set band type via TrackFX_SetParam or SetParamNormalized.
 
 DEFAULT BAND STATES (new instance):
-  Band 1 (Low Shelf):  ENABLED  -- default gain = -6dB (0.25), NOT flat
-  Band 2 (Band):       ENABLED  -- default gain = -6dB (0.25), NOT flat
-  Band 3 (Band):       ENABLED  -- default gain = -6dB (0.25), NOT flat
-  Band 4 (High Shelf): ENABLED  -- default gain = -6dB (0.25), NOT flat
+  Band 1 (Low Shelf):  ENABLED  -- default gain 0dB / flat (normalized 0.50)
+  Band 2 (Band):       ENABLED  -- default gain 0dB / flat (normalized 0.50)
+  Band 3 (Band):       ENABLED  -- default gain 0dB / flat (normalized 0.50)
+  Band 4 (High Shelf): ENABLED  -- default gain 0dB / flat (normalized 0.50)
   Band 5 (High Pass):  DISABLED by default -- setting params has no audible effect
+Verified on REAPER 7.76: a fresh ReaEQ reads normalized 0.50 / formatted 0.0 dB
+on every band gain. TrackFX_GetParam returns RAW 0.25 for that same flat state --
+raw is a linear-amplitude scale (raw 0.25 = 0dB, raw 0.5 = +6dB, raw 1.0 = +12dB).
+Never read a raw value through the normalized table below: normalized 0.25 is
+-6dB, but raw 0.25 is flat.
 Band enable/disable is stored in ReaEQ's internal chunk data, NOT as a scriptable
 parameter. There is no enable param index among the 19 exposed params.
 A disabled band ignores all param changes until the user enables it in the UI.
@@ -133,23 +145,23 @@ Available band types (UI only, not scriptable):
 idx  Name               Default val   Min   Max   Notes
 ---  -----------------  -----------   ----  ----  --------------------------------
 0    Freq-Low Shelf     0.1414        0.0   1.0   Normalized freq (~100Hz default)
-1    Gain-Low Shelf     0.25          0.0   1.0   Normalized: 0.50 = 0dB (default 0.25 = -6dB)
+1    Gain-Low Shelf     0.50          0.0   1.0   Normalized: 0.50 = 0dB (default; flat)
 2    BW-Low Shelf       0.20          0.0   1.0   Bandwidth normalized
 
 3    Freq-Band 2        0.2895        0.0   1.0   ~300Hz default
-4    Gain-Band 2        0.25          0.0   1.0   0.50 = 0dB (default 0.25 = -6dB)
+4    Gain-Band 2        0.50          0.0   1.0   0.50 = 0dB (default; flat)
 5    BW-Band 2          0.50          0.0   1.0
 
 6    Freq-Band 3        0.4760        0.0   1.0   ~1kHz default
-7    Gain-Band 3        0.25          0.0   1.0   0.50 = 0dB (default 0.25 = -6dB)
+7    Gain-Band 3        0.50          0.0   1.0   0.50 = 0dB (default; flat)
 8    BW-Band 3          0.50          0.0   1.0
 
 9    Freq-High Shelf 4  0.7394        0.0   1.0   ~5kHz default
-10   Gain-High Shelf 4  0.25          0.0   1.0   0.50 = 0dB (default 0.25 = -6dB)
+10   Gain-High Shelf 4  0.50          0.0   1.0   0.50 = 0dB (default; flat)
 11   BW-High Shelf 4    0.20          0.0   1.0
 
 12   Freq-High Pass 5   0.1414        0.0   1.0   ~100Hz default
-13   Gain-High Pass 5   0.25          0.0   1.0   0.50 = 0dB (default 0.25 = -6dB)
+13   Gain-High Pass 5   0.50          0.0   1.0   0.50 = 0dB (default; flat)
 14   BW-High Pass 5     0.50          0.0   1.0
 
 15   Global Gain        1.0           0.0   4.0   Linear: 1.0=0dB, 2.0=+6dB
@@ -167,13 +179,13 @@ All per-band Gain params are normalized 0..1. Verified dB values (exact):
   0.1250 = -12.0 dB
   0.1582 = -10.0 dB
   0.1992 = -8.0 dB
-  0.2500 = -6.0 dB  (THIS IS THE DEFAULT -- all bands default to -6dB, NOT flat)
+  0.2500 = -6.0 dB
   0.2813 = -5.0 dB
   0.3164 = -4.0 dB
   0.3555 = -3.0 dB
   0.3984 = -2.0 dB
   0.4453 = -1.0 dB
-  0.5000 = 0.0 dB   (FLAT/UNITY -- use this when you want no gain change)
+  0.5000 = 0.0 dB   (FLAT/UNITY -- the fresh-instance default; use for no gain change)
   0.5195 = +1.0 dB
   0.5430 = +2.0 dB
   0.5684 = +3.0 dB
@@ -188,8 +200,10 @@ All per-band Gain params are normalized 0..1. Verified dB values (exact):
   0.9961 = +12.0 dB
 ```
 
-CRITICAL: 0.50 = 0dB (flat). 0.25 is the default value but it equals -6dB, NOT flat.
-When you want a band to have no effect, set gain to 0.50, not 0.25.
+CRITICAL: 0.50 = 0dB (flat) and IS the fresh-instance default. Normalized 0.25
+= -6dB. If a live raw dump (TrackFX_GetParam) shows 0.25 on a band gain, that is
+the flat default in raw linear-amplitude units, NOT -6dB -- use normalized
+values with this table only.
 Always use TrackFX_SetParamNormalized for Gain.
 Do NOT use TrackFX_SetParam with raw dB values -- min/max are 0..1, not dB.
 Use ONLY the verified values above. Do NOT invent your own gain formula, do NOT
@@ -446,17 +460,19 @@ end)
 <!-- PLUGIN:ReaXcomp -->
 ## ReaXcomp
 
-REAPER's stock multiband compressor. Fixed 4-band split with per-band threshold,
-ratio, attack, release, knee, RMS, and make-up gain. Crossovers set by each
-band's "top frequency". Use for multiband mastering, targeted frequency ducking,
-or narrowband de-essing.
+REAPER's stock multiband compressor. The script-visible processing layout is
+four bands, each with threshold, ratio, attack, release, knee, RMS, make-up
+gain, and crossover top frequency. Use for multiband mastering, targeted
+frequency ducking, or narrowband de-essing.
 
 AddByName string: "ReaXcomp"
-Total params (default instance): 50 (indices 0-49)
+Total params (default instance): 51 (indices 0-50). Script-useful processing
+params are indices 0-49; idx 50 is REAPER's Delta utility param.
 
 ### CRITICAL CONSTRAINTS
 
-1. **4 fixed bands.** Band count is hardcoded and cannot be changed via script.
+1. **4 script-visible processing bands.** Current REAPER exposes Bands 1-4 as
+   a fixed 12-param stride; there is no band-count parameter in the script map.
    Use each band's `Active` param (offset +11) to bypass unused bands.
 
 2. **Crossovers set by `N-Band top frequency`.** Band N covers from the top of
@@ -472,7 +488,8 @@ Total params (default instance): 50 (indices 0-49)
 
 ### BAND LAYOUT
 
-4 bands × 12 params = 48 band params, plus 2 globals (Bypass, Wet).
+4 bands × 12 params = 48 band params, plus 3 utility/global params
+(Bypass, Wet, Delta).
 
 ```
 Formula: base = (N - 1) * 12
@@ -505,6 +522,7 @@ idx  Name    Default  Notes
 ---  ------  -------  ---------------------------------
 48   Bypass  0        1 = bypassed
 49   Wet     1.0      Wet mix. 1 = full wet, 0 = dry only.
+50   Delta   0        REAPER utility audition mode; leave at default.
 ```
 
 ### DEFAULTS PER BAND
@@ -595,15 +613,11 @@ Key points: 0.25 = 1:1 (no compression), 0.325 = 2:1 (default), 0.5 = 12:1
 Piecewise: slider 0..0.5 linear to 0..6 dB; slider 0.5..1 linear to 6..24 dB.
 
 ```
-slider   dB          slider   dB          slider   dB
--------  ------      -------  ------      -------  ------
-0.00     0.00        0.35     4.20        0.70     13.20
-0.05     0.60        0.40     4.80        0.75     15.00
-0.10     1.20        0.45     5.40        0.80     16.80
-0.15     1.80        0.50     6.00        0.85     18.60
-0.20     2.40        0.55     7.80        0.90     20.40
-0.25     3.00        0.60     9.60        0.95     22.20
-0.30     3.60        0.65     11.40       1.00     24.00
+if dB <= 6:  slider = dB / 12
+if dB > 6:   slider = 0.5 + ((dB - 6) / 36)
+
+0 dB = 0.000    3 dB = 0.250    6 dB = 0.500
+12 dB = 0.667   18 dB = 0.833   24 dB = 1.000
 ```
 
 ### ATTACK / RMS SCALE (shared, 0..250 ms linear)
@@ -611,36 +625,26 @@ slider   dB          slider   dB          slider   dB
 Attack (offset +5) and RMS (offset +7) share a simple linear scale.
 
 ```
-slider   ms          slider   ms          slider   ms
--------  ----        -------  ----        -------  ----
-0.00     0           0.35     87          0.70     175
-0.05     12          0.40     100         0.75     187
-0.10     25          0.45     112         0.80     200
-0.15     37          0.50     125         0.85     212
-0.20     50          0.55     137         0.90     225
-0.25     62          0.60     150         0.95     237
-0.30     75          0.65     162         1.00     250
+Formula: slider = ms / 250.
+
+5 ms = 0.020    15 ms = 0.060 *    50 ms = 0.200
+100 ms = 0.400  150 ms = 0.600     250 ms = 1.000
 ```
 
-Formula: slider = ms / 250. Defaults: Attack=15ms (slider 0.06), RMS=5ms (0.02).
+Defaults: Attack=15 ms (slider 0.060), RMS=5 ms (0.020).
 
 ### RELEASE SCALE (0..2000 ms, parabolic)
 
 Quadratic taper -- more resolution at short release times.
 
 ```
-slider   ms          slider   ms          slider   ms
--------  -----       -------  -----       -------  -----
-0.00     0           0.35     244         0.70     979
-0.05     5           0.40     320         0.75     1125
-0.10     20          0.45     404         0.80     1280
-0.15     45          0.50     500         0.85     1445
-0.20     80          0.55     605         0.90     1619
-0.25     125         0.60     720         0.95     1804
-0.30     180         0.65     844         1.00     2000
+Formula: ms = 2000 * slider^2. Slider = sqrt(ms / 2000).
+
+20 ms = 0.100    50 ms = 0.158    100 ms = 0.224
+150 ms = 0.274 * 250 ms = 0.354    500 ms = 0.500
+1 sec = 0.707    2 sec = 1.000
 ```
 
-Formula: ms = 2000 * slider^2. Slider = sqrt(ms / 2000).
 Default 150 ms = slider ~0.274.
 
 ### COMMON RECIPES
@@ -801,7 +805,7 @@ idx  Name                  Default val   Min    Max    Notes
 1    Dry                   1.0           0.0    2.0    Dry level: 1.0=0dB
 2    1: Enabled            1.0           0.0    1.0    Tap 1 on/off
 3    1: Length (time)       0.0           0.0    1.0    Delay in seconds (0=off)
-4    1: Length (musical)    0.0078        0.0    1.0    Musical length (display: 2.00)
+4    1: Length (musical)    0.0078        0.0    1.0    Whole notes; raw = display/256 (default 0.0078 -> 2.00)
 5    1: Feedback           0.0           0.0    2.0    Feedback: 0=off, 1.0=0dB
 6    1: Lowpass            1.0           0.0    1.0    Filter normalized (20000Hz)
 7    1: Hipass             0.0           0.0    1.0    Filter normalized (0Hz)
@@ -819,12 +823,18 @@ idx  Name                  Default val   Min    Max    Notes
 There are two length params per tap. Use "Length (musical)" for tempo-synced delay,
 "Length (time)" for free time in seconds. To set a specific delay in ms, use
 set_param_display on "Length (time)".
+Length (musical) is in whole notes and its raw value is display/256 (verified on
+REAPER 7.76: raw 0.25/256 = 0.000977 displays 0.25 = quarter note; the DEFAULT raw
+0.0078 displays 2.00 = TWO WHOLE NOTES). A tempo-synced recipe that does not set
+Length (musical) ships a 2-measure delay, not the echo the user asked for.
 
 ### COMMON RECIPE
 
 **"Simple quarter-note echo":**
 
 ```lua
+  reaper.TrackFX_SetParam(tr, fx, 4, 0.25 / 256)        -- Length (musical): quarter note
+  reaper.TrackFX_SetParam(tr, fx, 3, 0.0)               -- Length (time): 0 (musical sync only)
   reaper.TrackFX_SetParamNormalized(tr, fx, 0, 0.25)    -- Wet: ~-12dB
   reaper.TrackFX_SetParamNormalized(tr, fx, 5, 0.25)    -- Feedback: ~-12dB
 ```
@@ -981,13 +991,13 @@ to add it as an instrument. It responds to MIDI input.
 ```
 idx  Name                                    Default   Min     Max    Notes
 ---  --------------------------------------  -------   ------  -----  -----------------------
-0    Attack                                  0.006     0.0     10.0   Seconds (display: 3.0ms)
-1    Release                                 0.0016    0.0     1.0    Seconds (display: 8ms)
+0    Attack                                  0.006     0.0     10.0   ms = raw*500 (default 0.006 -> 3.0ms; max 5000ms)
+1    Release                                 0.0016    0.0     1.0    ms = raw*5000 (default 0.0016 -> 8ms; max 5000ms)
 2    Square mix                              0.0       0.0     1.0    0=off, 1=full
 3    Saw mix                                 0.0       0.0     1.0    0=off, 1=full
 4    Triangle mix                            0.0       0.0     1.0    0=off, 1=full
 5    Volume                                  0.5012    0.0     2.0    Linear: 0.5=-6dB
-6    Decay                                   0.0666    0.0     1.0    Seconds (display: 1000ms)
+6    Decay                                   0.0666    0.0     1.0    ms = raw*15000 (default 0.0666 -> 1000ms; max 15000ms)
 7    Extra sine mix                          0.0       0.0     1.0    Sub-oscillator: 0=off
 8    Extra sine tuning                       0.5       0.0     1.0    Sub-osc tuning: 0.5=0
 9    Sustain                                 1.0       0.0     2.0    Linear: 1.0=0dB
@@ -1010,12 +1020,15 @@ by setting Square/Saw/Triangle mix > 0. Values are additive.
 
 **"Basic saw synth pad":**
 
+Envelope time scales are linear in the raw value (verified on REAPER 7.76):
+Attack ms = raw*500, Decay ms = raw*15000, Release ms = raw*5000.
+
 ```lua
   reaper.TrackFX_SetParamNormalized(tr, fx, 3, 0.8)     -- Saw mix: 80%
-  reaper.TrackFX_SetParam(tr, fx, 0, 0.1)               -- Attack: 100ms
-  reaper.TrackFX_SetParam(tr, fx, 6, 0.5)               -- Decay: ~500ms
+  reaper.TrackFX_SetParam(tr, fx, 0, 0.2)               -- Attack: 100ms (raw*500)
+  reaper.TrackFX_SetParam(tr, fx, 6, 0.0333)            -- Decay: ~500ms (raw*15000)
   reaper.TrackFX_SetParam(tr, fx, 9, 0.5)               -- Sustain: -6dB
-  reaper.TrackFX_SetParamNormalized(tr, fx, 1, 0.1)     -- Release: 100ms
+  reaper.TrackFX_SetParam(tr, fx, 1, 0.02)              -- Release: 100ms (raw*5000)
 ```
 
 <!-- /PLUGIN:ReaSynth -->
@@ -1576,7 +1589,16 @@ reaper.defer(function()
 end)
 ```
 
+<!-- /PLUGIN:ReEQ -->
+
 ---
+
+<!-- NOTE: this FabFilter intro sits OUTSIDE the PLUGIN blocks, so it is     -->
+<!-- never served to the model (Context.lua slices PLUGIN blocks only).      -->
+<!-- It previously sat INSIDE the ReEQ block, shipping with plugin_ref:ReEQ  -->
+<!-- and with no Pro-* bucket. The two load-bearing rules (exact preferred   -->
+<!-- identifier; TrackFX_SetParamNormalized) are repeated inside each Pro-*  -->
+<!-- entry, which is what the model actually receives.                       -->
 
 # FabFilter third-party plugins
 
@@ -1593,8 +1615,6 @@ All FabFilter params use TrackFX_SetParamNormalized (values 0..1). Raw ranges
 are not documented here since the normalized slider values are what scripts
 actually write.
 
-<!-- /PLUGIN:ReEQ -->
-
 <!-- PLUGIN:Pro-DS -->
 ## Pro-DS
 
@@ -1603,8 +1623,8 @@ and sidechain HP/LP filtering. Works well for dialogue, vocals, and general
 sibilance reduction without user threshold hunting.
 
 AddByName identifier: use the exact preferred identifier, normally "VST3: Pro-DS"
-Total params (default instance): 23 useful (plus ~130 MIDI-CC routing params
-REAPER exposes but scripts should ignore)
+Documented useful params: 21 (indices 0-20). REAPER also exposes MIDI-CC
+routing params that scripts should ignore.
 
 ### CRITICAL CONSTRAINTS
 
@@ -2429,7 +2449,9 @@ post-EQ. Designed for quick tonal shaping without managing individual
 reflections.
 
 AddByName identifier: use the exact preferred identifier, normally "VST3: Pro-R 2"
-Total params (default instance): 75 useful -- mostly macros + internal EQ
+Total params (current VST3 instance): 276 exposed. This reference documents the
+audible/useful macro controls and representative internal EQ params; leave
+utility, modulation, and host-routing params outside the tables at defaults.
 
 ### PARAM INDEX TABLE (macro controls, idx 0-18)
 
@@ -2488,15 +2510,26 @@ Live room     ~ 0.25     Cathedral    ~ 0.90+
 
 ### STYLE ENUM (idx 4)
 
-At least 3 distinct values seen in scan. The plugin may have additional
-styles not sampled at 21-probe resolution; use UI to audition.
+Current probe found exactly 3 values.
 
 ```
 Slider    Display      Feel
 -------   -----------  ----------------------------
 0.00      Modern       Clean, neutral (default)
-~0.33     Vintage      Warm, analog-flavored
-~0.80     Plate        Metallic, bright, dense
+0.25      Vintage      Warm, analog-flavored
+0.75      Plate        Metallic, bright, dense
+```
+
+### PREDELAY SYNC ENUM (idx 18)
+
+```
+Slider    Display
+-------   ------------
+0.000     Free
+0.125     1/4 Note
+0.375     1/8 Note
+0.625     1/16 Note
+0.875     1/32 Note
 ```
 
 ### MIX SCALE (idx 9, dry/wet)

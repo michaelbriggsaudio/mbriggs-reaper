@@ -61,6 +61,19 @@ local REAASSIST_PATH = parent_dir .. "ReaAssist.lua"
 local start_t     = reaper.time_precise()
 local cleared_at  = nil
 local launched    = false
+local notified    = false
+
+local function notify_manual_reopen()
+  if notified then return end
+  notified = true
+  local msg = "ReaAssist could not finish its automatic restart.\n\n" ..
+    "Close and reopen ReaAssist manually from REAPER's Action List."
+  if reaper and type(reaper.ShowMessageBox) == "function" then
+    reaper.ShowMessageBox(msg, "ReaAssist", 0)
+  elseif reaper and type(reaper.MB) == "function" then
+    reaper.MB(msg, "ReaAssist", 0)
+  end
+end
 
 local function tick()
   local now = reaper.time_precise()
@@ -69,6 +82,7 @@ local function tick()
 
   if (now - start_t) > MAX_WAIT_S then
     -- Gave up waiting; exit without relaunching.
+    notify_manual_reopen()
     return
   end
 
@@ -84,6 +98,8 @@ local function tick()
       local cmd_id = reaper.AddRemoveReaScript(true, 0, REAASSIST_PATH, true)
       if cmd_id and cmd_id ~= 0 then
         reaper.Main_OnCommand(cmd_id, 0)
+      else
+        notify_manual_reopen()
       end
       return  -- no further defer; script exits
     end

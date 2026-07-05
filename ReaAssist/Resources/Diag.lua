@@ -62,12 +62,13 @@ Diag.BUG_REPORT_TICK_TIMEOUT_S = 240
 Diag.AUTO_CAP_BYTES             = 1024 * 1024
 Diag.AUTO_FLUSH_INTERVAL_S      = 60
 Diag.AUTO_SEND_IDLE_S           = 60
+Diag.AUTO_SEND_CLAIM_STALE_S    = 5 * 60
 Diag.AUTO_RECENT_TURN_LIMIT     = 80
 Diag.LEGACY_STORAGE_CLEANUP_DELAY_S = 3
 Diag.LEGACY_STORAGE_CLEANUP_VERSION = 6
 Diag.PRICE_TABLE_VERSION        = "2026-05-27"
 
-Diag.PROVIDER_VOCABULARY     = { "anthropic", "openai", "google", "custom", "unknown" }
+Diag.PROVIDER_VOCABULARY     = { "anthropic", "openai", "google", "deepseek", "custom", "unknown" }
 Diag.MODEL_TIER_VOCABULARY   = { "fast", "balanced", "smart", "custom", "unknown" }
 Diag.BUCKET_TYPE_VOCABULARY  = { "session", "docs", "docs_section", "api_ref", "midi",
                                   "theme", "plugin_ref", "preferred_plugins", "fx_params",
@@ -81,28 +82,6 @@ Diag.CACHE_STATE_VOCABULARY  = { "hit", "miss", "created", "invalidated",
                                   "create_failed", "not_supported", "unknown" }
 Diag.RETRY_REASON_VOCABULARY = { "validator", "docs_gate", "plugin_helper", "semantic",
                                   "http_5xx", "timeout", "rate_limit" }
-Diag.MODEL_TIER_MAP = {
-  ["claude-haiku-4-5"]   = "fast",
-  ["claude-sonnet-4-5"]  = "balanced",
-  ["claude-sonnet-4-6"]  = "balanced",
-  ["claude-sonnet-5"]    = "balanced",
-  ["claude-opus-4-5"]    = "smart",
-  ["claude-opus-4-7"]    = "smart",
-  ["claude-opus-4-8"]    = "smart",
-  ["gpt-5-nano"]         = "fast",
-  ["gpt-5-mini"]         = "balanced",
-  ["gpt-5"]              = "smart",
-  ["gpt-5.4-nano"]       = "fast",
-  ["gpt-5.4-mini"]       = "balanced",
-  ["gpt-5.4"]            = "smart",
-  ["gemini-2.5-flash"]   = "fast",
-  ["gemini-2.5-pro"]     = "smart",
-  ["gemini-3.1-flash-lite"] = "fast",
-  ["gemini-3.5-flash"]   = "fast",
-  ["gemini-3.1-pro-preview"] = "smart",
-  ["deepseek-v4-flash"]  = "fast",
-}
-
 local EXT_NS             = "reaassist"
 local EXT_KEY_INSTALL_ID = "feedback_install_id"
 
@@ -123,7 +102,7 @@ local launch_started_at    = os.time()
 local chat_id_value        = nil
 local chat_started_at      = os.time()
 local auto_recent_turns    = {}
-local auto_seen_turns      = {}
+local auto_seen_turns      = setmetatable({}, { __mode = "k" })
 local in_flight            = nil
 
 -- ============================================================================
@@ -641,7 +620,8 @@ local function _safe_turn_provider_id(raw)
   if type(raw) ~= "string" or raw == "" then return "unknown" end
   local id = raw:lower()
   if id == "gemini" then return "google" end
-  if id == "anthropic" or id == "openai" or id == "google" then return id end
+  if id == "anthropic" or id == "openai" or id == "google"
+     or id == "deepseek" then return id end
   return "custom"
 end
 
@@ -915,10 +895,8 @@ end
 
 local function _remember_turn(msg)
   if type(msg) ~= "table" then return end
-  if not msg._diag_accum_id then msg._diag_accum_id = uuidv4() end
-  local id = tostring(msg._diag_accum_id)
-  if auto_seen_turns[id] then return end
-  auto_seen_turns[id] = true
+  if auto_seen_turns[msg] then return end
+  auto_seen_turns[msg] = true
   local copy = _turn_to_table(msg, true)
   if type(copy.content) == "string" and #copy.content > 4096 then
     copy.content = _truncate_with_byte_count_marker(copy.content, 4096,
@@ -1026,9 +1004,33 @@ local function _active_thinking_level()
   return nil
 end
 
+local function _model_tier_from_id(provider_id, model_id)
+  local id = tostring(model_id or ""):lower()
+  if id == "" then return nil end
+
+  if provider_id == "anthropic" then
+    if id:find("haiku", 1, true) then return "fast" end
+    if id:find("sonnet", 1, true) then return "balanced" end
+    if id:find("opus", 1, true) then return "smart" end
+  elseif provider_id == "openai" then
+    if id:find("nano", 1, true) then return "fast" end
+    if id:find("mini", 1, true) then return "balanced" end
+    if id:match("^gpt[%-%._%w]*") then return "smart" end
+  elseif provider_id == "google" then
+    if id:find("flash", 1, true) then return "fast" end
+    if id:find("pro", 1, true) then return "smart" end
+  elseif provider_id == "deepseek" then
+    if id:find("flash", 1, true) then return "fast" end
+    if id:find("reason", 1, true) or id:find("r1", 1, true) then
+      return "smart"
+    end
+  end
+  return nil
+end
+
 local function _model_tier(provider_id, model_id)
   if provider_id == "custom" then return "custom" end
-  local mapped = Diag.MODEL_TIER_MAP[model_id or ""]
+  local mapped = _model_tier_from_id(provider_id, model_id)
   return _coarsen(mapped, MODEL_TIER_VOCAB, "unknown")
 end
 
@@ -1048,8 +1050,9 @@ local function _configured_providers()
   return out
 end
 
-local function _session_summary()
+local function _session_summary(now)
   local msgs = _session_messages()
+  local uptime_now = tonumber(now) or os.time()
   local summary = {
     chat_count = 1,
     turn_count_total = #msgs,
@@ -1057,14 +1060,8 @@ local function _session_summary()
     assistant_turn_count_total = 0,
     code_block_count = 0,
     auto_run_count = 0,
-    uptime_seconds = 0,
+    uptime_seconds = math.max(0, uptime_now - launch_started_at),
   }
-  if type(S) == "table" and S.session_start_ts and type(reaper) == "table"
-     and type(reaper.time_precise) == "function" then
-    summary.uptime_seconds = math.max(0, math.floor(reaper.time_precise() - S.session_start_ts))
-  elseif launch_started_at then
-    summary.uptime_seconds = math.max(0, os.time() - launch_started_at)
-  end
   for _, m in ipairs(msgs) do
     if type(m) == "table" then
       if m.role == "user" then summary.user_turn_count_total = summary.user_turn_count_total + 1 end
@@ -1103,6 +1100,28 @@ local function _environment_summary()
       return n
     end
   end, 0)
+  local preferred_plugins_count = _safe_try(function()
+    if type(FXCache) == "table"
+       and type(FXCache.get_preferred_types) == "function" then
+      local pref = FXCache.get_preferred_types()
+      local n = 0
+      if type(pref) == "table" then
+        for _, ident in pairs(pref) do
+          if type(ident) == "string" and ident:find("%S") then n = n + 1 end
+        end
+      end
+      return n
+    end
+  end, 0)
+  local plugin_ref_present = _safe_try(function()
+    if type(RA) ~= "table" or type(RA.RESOURCES_DIR) ~= "string"
+       or RA.RESOURCES_DIR == "" then
+      return false
+    end
+    local f = io.open(RA.RESOURCES_DIR .. "Plugin_Ref.md", "rb")
+    if f then f:close(); return true end
+    return false
+  end, false)
   local imgui_version = _safe_try(function()
     if type(ImGui) == "table" and type(ImGui.ImGui_GetVersion) == "function" then
       return select(1, ImGui.ImGui_GetVersion())
@@ -1125,9 +1144,9 @@ local function _environment_summary()
     fx_cache_size = fx_cache_size,
     installed_fx_count = fx_cache_size,
     fx_cache_schema_version = 1,
-    plugin_ref_present = true,
-    plugin_ref_schema_version = 1,
-    preferred_plugins_count = 0,
+    plugin_ref_present = plugin_ref_present == true,
+    plugin_ref_schema_version = plugin_ref_present and 1 or nil,
+    preferred_plugins_count = preferred_plugins_count,
     fallback_chains_count = chains_count,
     extensions_present = {
       shellexecute = type(reaper) == "table" and reaper.CF_ShellExecute ~= nil,
@@ -1200,7 +1219,7 @@ local function _metrics_summary()
   local token_in = (type(S) == "table" and tonumber(S.session_tok_in)) or 0
   local token_out = (type(S) == "table" and tonumber(S.session_tok_out)) or 0
   local cache_read, cache_create, api_call_count, latency_vals = 0, 0, 0, {}
-  local context_features, bucket_counts, bucket_states, est_tokens = {}, {}, {}, {}
+  local context_features, bucket_counts, bucket_states = {}, {}, {}
   local network_by_provider, cache_by_provider = {}, {}
   local validator_pass, validator_fail, validator_autofix, ceiling_inject =
     0, 0, 0, 0
@@ -1223,10 +1242,24 @@ local function _metrics_summary()
     backup_failed = true,
     backup_required = true,
   }
+  local network_error_kinds = {
+    curl_exit = true,
+    watchdog_timeout = true,
+    provider_auth_error = true,
+    insufficient_quota = true,
+    provider_throttle = true,
+    provider_capacity = true,
+    provider_api_error = true,
+  }
+  local network_error_count = 0
   local msgs = (type(S) == "table" and type(S.display_messages) == "table")
                and S.display_messages or {}
   for _, m in ipairs(msgs) do
     if type(m) == "table" then
+      local err_kind = Diag.normalize_error_kind(m.error_kind, m.error_debug)
+      if network_error_kinds[err_kind] then
+        network_error_count = network_error_count + 1
+      end
       cache_read = cache_read + (tonumber(m.tok_cache_read) or 0)
       cache_create = cache_create + (tonumber(m.tok_cache_create) or 0)
       api_call_count = api_call_count + (tonumber(m.api_calls) or 0)
@@ -1306,7 +1339,7 @@ local function _metrics_summary()
     return latency_vals[idx]
   end
   local max_latency = #latency_vals > 0 and latency_vals[#latency_vals] or 0
-  local network_entry = { ok = #latency_vals, curl_exit_codes = { ["0"] = #latency_vals }, http_status_codes = { ["200"] = #latency_vals } }
+  local network_entry = { ok = #latency_vals, error_count = network_error_count }
   if provider_id ~= "unknown" then network_by_provider[provider_id] = network_entry end
   if (provider_id == "anthropic" or provider_id == "openai") and (cache_read > 0 or cache_create > 0) then
     cache_by_provider[provider_id] = {
@@ -1347,17 +1380,17 @@ local function _metrics_summary()
       features_used = context_features,
       bucket_counts_by_type = bucket_counts,
       bucket_state_counts = bucket_states,
-      estimated_tokens_by_type = est_tokens,
     },
     cache = {
-      stable_prefix_tokens_est = token_in,
+      stable_prefix_tokens_est = cache_read,
       cache_control_count = cache_create > 0 and 1 or 0,
       by_provider = cache_by_provider,
     },
     network = {
       ok = #latency_vals,
-      curl_exit_codes = { ["0"] = #latency_vals },
-      http_status_codes = { ["200"] = #latency_vals },
+      error_count = network_error_count,
+      curl_exit_codes = {},
+      http_status_codes = {},
       by_provider = network_by_provider,
     },
     outcomes = {
@@ -1377,18 +1410,53 @@ end
 local function _errors_summary()
   local runtime_error_count = (type(Diag.errors) == "table") and #Diag.errors or 0
   local code_block_error_count = 0
+  local validator_reject_count = 0
+  local network_error_count = 0
+  local network_error_kinds = {
+    curl_exit = true,
+    watchdog_timeout = true,
+    provider_auth_error = true,
+    insufficient_quota = true,
+    provider_throttle = true,
+    provider_capacity = true,
+    provider_api_error = true,
+  }
   local msgs = (type(S) == "table" and type(S.display_messages) == "table")
                and S.display_messages or {}
   for _, m in ipairs(msgs) do
-    if type(m) == "table" and (m.error_kind or m.error_debug) then
-      code_block_error_count = code_block_error_count + 1
+    if type(m) == "table" then
+      if m.error_kind or m.error_debug then
+        code_block_error_count = code_block_error_count + 1
+      end
+      local ta = type(m.typed_actions) == "table" and m.typed_actions or nil
+      local rejected = m.docs_gate_hit == true
+        or (ta and ta.valid == false)
+        or m.validation_status == "failed"
+        or m.validation_status == "blocked"
+      if rejected then validator_reject_count = validator_reject_count + 1 end
+      local err_kind = Diag.normalize_error_kind(m.error_kind, m.error_debug)
+      if network_error_kinds[err_kind] then
+        network_error_count = network_error_count + 1
+      end
+    end
+  end
+  if type(Diag.errors) == "table" then
+    for _, err in ipairs(Diag.errors) do
+      local kind = type(err) == "table" and err.kind or nil
+      local detail = type(err) == "table"
+        and (err.detail or err.message or err.msg or err.traceback or err.code)
+        or err
+      local norm = Diag.normalize_error_kind(kind, detail)
+      if kind == "network" or network_error_kinds[norm] then
+        network_error_count = network_error_count + 1
+      end
     end
   end
   return {
     runtime_error_count = runtime_error_count,
     code_block_error_count = code_block_error_count,
-    validator_reject_count = 0,
-    network_error_count = 0,
+    validator_reject_count = validator_reject_count,
+    network_error_count = network_error_count,
   }
 end
 
@@ -1440,14 +1508,12 @@ function Diag.assemble_auto_payload(tier)
     os                   = _detect_os(),
     provider             = provider_id,
     model_tier           = _model_tier(provider_id, model_id),
-    session_summary      = _session_summary(),
+    session_summary      = _session_summary(now),
     environment_summary  = _environment_summary(),
     settings_shape       = _settings_shape(),
     metrics              = _metrics_summary(),
     errors_summary       = _errors_summary(),
   }
-  payload.session_summary.uptime_seconds = math.max(0, now - launch_started_at)
-
   if tier == "extended" then
     local msgs = _session_messages()
     local turns = {}
@@ -1573,11 +1639,10 @@ function Diag.assemble_auto_ping_payload()
     os                   = _detect_os(),
     provider             = provider_id,
     model_tier           = _model_tier(provider_id, model_id),
-    session_summary      = _session_summary(),
+    session_summary      = _session_summary(now),
     environment_summary  = _environment_summary(),
     settings_shape       = _settings_shape(),
   }
-  payload.session_summary.uptime_seconds = math.max(0, now - launch_started_at)
   return payload
 end
 
@@ -1787,13 +1852,23 @@ function Diag.assemble_payload(draft, comment, flags)
     return s
   end
 
-  -- Phase 0: try decreasing last_n; if any value of last_n fits, return.
-  for last_n = original_turn_count, 0, -1 do
+  -- Phase 0: find the largest recent-tail window that fits. Serialized size is
+  -- monotonic with last_n, so avoid O(turns * full serialize) linear scans.
+  local lo, hi, best_last_n = 0, original_turn_count, nil
+  while lo <= hi do
+    local last_n = math.floor((lo + hi) / 2)
     local s = build(last_n)
     if #s <= Diag.PAYLOAD_CAP_BYTES then
-      stabilize(s)
-      return payload, payload.truncation_info
+      best_last_n = last_n
+      lo = last_n + 1
+    else
+      hi = last_n - 1
     end
+  end
+  if best_last_n ~= nil then
+    local s = build(best_last_n)
+    stabilize(s)
+    return payload, payload.truncation_info
   end
 
   -- Even with last_n = 0 we're over: enter the shrink phases.
@@ -2257,6 +2332,31 @@ local function _ensure_dir(dir)
   return dir
 end
 
+local function _fallback_data_dir()
+  local sep = _sep()
+  local base = nil
+  if type(RA) == "table" and type(RA.RESOURCES_DIR) == "string"
+     and RA.RESOURCES_DIR ~= "" then
+    base = RA.RESOURCES_DIR:gsub("[/\\]+$", "")
+    base = base:gsub("[/\\]Resources$", "")
+  elseif type(reaper) == "table" and type(reaper.GetResourcePath) == "function" then
+    local rp = reaper.GetResourcePath()
+    if type(rp) == "string" and rp ~= "" then
+      base = rp .. sep .. "Scripts" .. sep .. "mbriggs-reaper" .. sep .. "ReaAssist"
+    end
+  end
+  if not base or base == "" then
+    if _detect_os() == "win" then
+      base = os.getenv("TEMP") or os.getenv("TMP") or "."
+    else
+      base = os.getenv("TMPDIR") or "/tmp"
+    end
+    base = base .. sep .. "ReaAssist"
+  end
+  if not base:match("[/\\]$") then base = base .. sep end
+  return base .. "Data" .. sep
+end
+
 local function _data_diag_dir(kind)
   local sep = _sep()
   if type(RA) == "table" and type(RA.DATA_DIR) == "string" and RA.DATA_DIR ~= "" then
@@ -2264,7 +2364,7 @@ local function _data_diag_dir(kind)
     if not base:match("[/\\]$") then base = base .. sep end
     return _ensure_dir(base .. "Diag" .. sep .. kind .. sep)
   end
-  return "/tmp/"
+  return _ensure_dir(_fallback_data_dir() .. "Diag" .. sep .. kind .. sep)
 end
 
 local function _legacy_resource_dir()
@@ -2285,7 +2385,11 @@ local function _tmp_path(suffix)
   return _tmp_dir() .. "reaassist_fb_" .. suffix .. "_" .. _instance_id()
 end
 
-local function _path_safe(p) return type(p) == "string" and not p:find('"', 1, true) end
+local function _path_safe(p)
+  if type(p) ~= "string" or p:find('"', 1, true) then return false end
+  if _detect_os() == "win" and p:find("%%") then return false end
+  return true
+end
 
 local function _path_exists(p)
   if type(p) ~= "string" or p == "" then return false end
@@ -2312,7 +2416,7 @@ local function _build_windows(body_path, resp_path, status_path, exit_path, max_
     .. ' -o """%s""" -w """%%{http_code}"""'
     .. ' """%s"""'
     .. ' > """%s"""'
-    .. ' & echo %%errorlevel%% > """%s"""',
+    .. ' & call echo ^%%errorlevel^%% > """%s"""',
     Diag.CONNECT_TIMEOUT_S, max_time_s,
     body_path, resp_path, Diag.URL, status_path, exit_path
   )
@@ -2346,11 +2450,13 @@ end
 local function _launch_curl(cmd, is_windows)
   if is_windows then
     if type(reaper) == "table" and type(reaper.ExecProcess) == "function" then
-      reaper.ExecProcess(cmd, 5000)
+      local ok, err = pcall(reaper.ExecProcess, cmd, 5000)
+      if not ok then return false, tostring(err) end
     end
   else
     os.execute(cmd)
   end
+  return true
 end
 
 local function _send_body(body, curl_timeout_s, tick_timeout_s, on_done)
@@ -2393,14 +2499,18 @@ local function _send_body(body, curl_timeout_s, tick_timeout_s, on_done)
     status_path    = status_path,
     exit_path      = exit_path,
     started_at     = os.time(),
+    launch_cmd     = cmd,
+    launch_is_win  = is_win,
+    launch_after   = (type(reaper) == "table"
+                      and type(reaper.time_precise) == "function")
+                     and (reaper.time_precise() + 0.15) or nil,
+    launched       = false,
     on_done        = on_done,
     -- 60 s is generous given the 30 s curl --max-time + manual feedback's
     -- sub-MB body. Bug-report sends override this with a higher value to
     -- cover multi-MB log uploads on slow uplinks.
     tick_timeout_s = tick_timeout_s or 60,
   }
-
-  _launch_curl(cmd, is_win)
 end
 
 function Diag.send_draft(draft, comment, flags, on_done)
@@ -2903,6 +3013,15 @@ local function _finalize_wrapper(wrapper)
   end
 end
 
+local function _sending_claim_is_fresh(file, wrapper, now)
+  if type(file) ~= "table" or file.kind ~= "sending" then return false end
+  if file.claimer == _current_owner() then return false end
+  local last_attempt = tonumber(wrapper and wrapper.last_send_attempt_at)
+  if not last_attempt then return false end
+  return last_attempt >= (tonumber(now) or os.time())
+    - (tonumber(Diag.AUTO_SEND_CLAIM_STALE_S) or 300)
+end
+
 local function _process_auto_file(file)
   if in_flight or not _dispatch_ready() then return false end
   if file.owner == _current_owner() then return false end
@@ -2911,6 +3030,9 @@ local function _process_auto_file(file)
   if type(wrapper) ~= "table" or type(wrapper.payload) ~= "table" then
     os.remove(file.path)
     return true
+  end
+  if _sending_claim_is_fresh(file, wrapper) then
+    return false
   end
   local tier = Diag.current_tier()
   if tier == "off" then
@@ -2929,7 +3051,8 @@ local function _process_auto_file(file)
   end
   _finalize_wrapper(wrapper)
   local claimed = file.path
-  if file.kind == "pending" then
+  if file.kind == "pending"
+     or (file.kind == "sending" and file.claimer ~= _current_owner()) then
     claimed = _ensure_auto_dir() .. "diag_auto_sending."
       .. file.owner .. "." .. _current_owner() .. ".json"
     os.remove(claimed)
@@ -2994,7 +3117,7 @@ local function _auto_tick()
     end
   end
   if _send_first_chat_ping() then return end
-  if not in_flight then _flush_current_auto() end
+  if not in_flight and _dispatch_ready() then _flush_current_auto() end
 end
 
 local function _cleanup_inflight()
@@ -3009,6 +3132,23 @@ function Diag.tick()
   if not in_flight then
     _auto_tick()
     return
+  end
+
+  if not in_flight.launched then
+    if in_flight.launch_after
+       and type(reaper) == "table"
+       and type(reaper.time_precise) == "function"
+       and reaper.time_precise() < in_flight.launch_after then
+      return
+    end
+    local ok, err = _launch_curl(in_flight.launch_cmd, in_flight.launch_is_win)
+    if not ok then
+      local cb = in_flight.on_done
+      _cleanup_inflight(); in_flight = nil
+      if cb then cb(false, nil, "curl launch failed: " .. tostring(err)) end
+      return
+    end
+    in_flight.launched = true
   end
 
   local exit_str = _read_file(in_flight.exit_path)

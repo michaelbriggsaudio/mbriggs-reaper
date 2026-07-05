@@ -311,12 +311,14 @@ end
 function ScreenReader.reagirl_sentence(text)
   text = tostring(text or ""):gsub("%s+$", "")
   if text == "" then return "." end
-  if text:sub(-1) == "." or text:sub(-1) == "?" then return text end
+  if text:sub(-1) == "." or text:sub(-1) == "?"
+      or text:sub(-1) == "!" then return text end
   local terminal_map = {
     ["\227\128\130"] = ".", -- U+3002 ideographic full stop
     ["\239\188\142"] = ".", -- U+FF0E fullwidth full stop
     ["\239\189\161"] = ".", -- U+FF61 halfwidth ideographic full stop
     ["\239\188\159"] = "?", -- U+FF1F fullwidth question mark
+    ["\239\188\129"] = "!", -- U+FF01 fullwidth exclamation mark
     ["\216\159"] = "?",     -- U+061F Arabic question mark
   }
   for suffix, replacement in pairs(terminal_map) do
@@ -446,10 +448,6 @@ function ScreenReader.language_display_label(code, fallback)
       or fallback or cfg_lang.code or code
   end
   return fallback or code
-end
-
-function ScreenReader.cjk_layout()
-  return false
 end
 
 function ScreenReader.reagirl_system_font_dirs()
@@ -629,9 +627,7 @@ function ScreenReader.next_line_for_large_text()
 end
 
 function ScreenReader.next_line_for_spacious_layout()
-  if ScreenReader.large_text_layout() or ScreenReader.cjk_layout() then
-    reagirl.NextLine()
-  end
+  ScreenReader.next_line_for_large_text()
 end
 
 function ScreenReader.apply_reagirl_contrast()
@@ -960,6 +956,18 @@ function ScreenReader.clean_label(text, limit)
   return text
 end
 
+function ScreenReader.format_count(value)
+  local n = math.floor(tonumber(value) or 0)
+  local s = tostring(n)
+  local out, count = "", 0
+  for i = #s, 1, -1 do
+    out = s:sub(i, i) .. out
+    count = count + 1
+    if count % 3 == 0 and i > 1 then out = "," .. out end
+  end
+  return out
+end
+
 function ScreenReader.run_status_label(status)
   status = tostring(status or "")
   local labels = {
@@ -1018,6 +1026,13 @@ function ScreenReader.humanize_response_text(text, payload)
     .. text:sub(pos + #raw)
 end
 
+function ScreenReader.response_metadata_paragraph(text)
+  local lower = tostring(text or ""):lower()
+  lower = lower:gsub("^%s+", ""):gsub("%s+$", "")
+  return lower:match("^run%s+status%s*:") ~= nil
+    or lower:match("^tokens%s*:") ~= nil
+end
+
 function ScreenReader.plain_response_text(text)
   text = tostring(text or "")
   text = text:gsub("\r\n", "\n"):gsub("\r", "\n")
@@ -1054,8 +1069,7 @@ end
 function ScreenReader.response_prose_text(payload)
   payload = payload or (AppController.latest_response_payload
     and AppController.latest_response_payload() or nil)
-  local text = ScreenReader.humanize_response_text(
-    payload and payload.text or "", payload)
+  local text = payload and payload.text or ""
   if AppController and AppController.strip_screen_reader_summary_tags then
     text = AppController.strip_screen_reader_summary_tags(text)
   end
@@ -1075,8 +1089,7 @@ function ScreenReader.response_prose_text(payload)
         and payload.code ~= "" and paragraph == generated_notice
       if paragraph ~= ""
           and not generated_only
-          and not paragraph:match("^Run status:")
-          and not paragraph:match("^Tokens:") then
+          and not ScreenReader.response_metadata_paragraph(paragraph) then
         keep[#keep + 1] = paragraph
       end
     end
@@ -1135,14 +1148,29 @@ end
 
 function ScreenReader.response_text_is_internal(text)
   local lower = tostring(text or ""):lower()
+  lower = lower:gsub("\226\128\152", "'"):gsub("\226\128\153", "'")
   lower = lower:gsub("^%s+", ""):gsub("%s+$", "")
   if lower == "" then return false end
-  return lower:match("^helper:") ~= nil
-    or lower:match("^i need%s") ~= nil
-    or lower:match("^i will%s") ~= nil
-    or lower:match("^i'll%s") ~= nil
-    or lower:find("plugin_ref", 1, true) ~= nil
-    or lower:find("binary search", 1, true) ~= nil
+  if lower:match("^helper:") or lower:find("plugin_ref", 1, true)
+      or lower:find("binary search", 1, true) then
+    return true
+  end
+  local starts_like_internal_note = lower:match("^i need%s")
+    or lower:match("^i will%s")
+    or lower:match("^i'll%s")
+  if not starts_like_internal_note then return false end
+  local markers = {
+    "<context_needed", "api_ref", "cache breakpoint", "cache key",
+    "cache marker", "cache refresh", "context bucket", "context request",
+    "context tag", "context_needed", "docs:", "docs reference",
+    "metadata scan", "midi reference", "plugin reference", "prompt_bundle",
+    "reference bundle", "request metadata", "snapshot", "sticky context",
+    "sticky_context", "system prompt", "validator",
+  }
+  for _, marker in ipairs(markers) do
+    if lower:find(marker, 1, true) then return true end
+  end
+  return false
 end
 
 function ScreenReader.response_action_summary(text)
@@ -1206,6 +1234,84 @@ function ScreenReader.response_display_prose(text, summary)
     end
   end
   return table.concat(keep, "\n\n")
+end
+
+function ScreenReader.response_details_text(payload)
+  if not (prefs and prefs.show_details == true and payload) then return "" end
+  local msg = payload.request_message or payload.message or {}
+  local fields = {}
+  local function add(label, value)
+    value = tostring(value or ""):match("^%s*(.-)%s*$") or ""
+    if value ~= "" then fields[#fields + 1] = label .. ": " .. value end
+  end
+  local ctx_label = tostring(payload.ctx_label or msg.ctx_label or "")
+  if ctx_label ~= "" then
+    ctx_label = ctx_label
+      :gsub("snapshot", ScreenReader.t("details.value.session", nil, "Session"))
+      :gsub("api_ref", "API")
+    add(ScreenReader.t("details.label.context", nil, "Context"), ctx_label)
+  end
+  local model_label = tostring(payload.model_label or msg.model_label or "")
+  if model_label ~= "" then
+    add(ScreenReader.t("details.label.model", nil, "Model"),
+      model_label:gsub(" %b()", ""))
+  end
+  if payload.tok_in or msg.tok_in then
+    add(ScreenReader.t("details.label.tokens", nil, "Tokens"),
+      ScreenReader.t("details.value.tokens_io", {
+        input = ScreenReader.format_count(payload.tok_in or msg.tok_in),
+        output = ScreenReader.format_count(payload.tok_out or msg.tok_out),
+      }, ScreenReader.format_count(payload.tok_in or msg.tok_in)
+        .. " in / " .. ScreenReader.format_count(payload.tok_out or msg.tok_out)
+        .. " out"))
+  end
+  do
+    local cr = tonumber(payload.tok_cache_read or msg.tok_cache_read) or 0
+    local cc = tonumber(payload.tok_cache_create or msg.tok_cache_create) or 0
+    if cr > 0 or cc > 0 then
+      add(ScreenReader.t("details.label.cache", nil, "Cache"),
+        ScreenReader.t("details.value.cache_io", {
+          read = ScreenReader.format_count(cr),
+          created = ScreenReader.format_count(cc),
+        }, ScreenReader.format_count(cr) .. " read, "
+          .. ScreenReader.format_count(cc) .. " created"))
+    end
+  end
+  local response_time = tonumber(payload.response_time or msg.response_time)
+  if response_time then
+    add(ScreenReader.t("details.label.time", nil, "Time"),
+      string.format("%.1fs", response_time))
+  end
+  local cost = tonumber(payload.cost or msg.cost)
+  local free_tier = payload.free_tier == true or msg.free_tier == true
+  if cost and (cost > 0 or free_tier) then
+    local cost_text = MODELS and MODELS.format_cost
+      and MODELS.format_cost(cost) or string.format("$%.4f", cost)
+    if free_tier then
+      add(ScreenReader.t("details.label.est_cost", nil, "Estimated cost"),
+        ScreenReader.t("details.value.free_tier_cost", { cost = cost_text },
+          "Free Tier (would have been ~" .. cost_text .. ")"))
+    else
+      add(ScreenReader.t("details.label.est_cost", nil, "Estimated cost"),
+        "~" .. cost_text)
+    end
+  end
+  local thinking = tostring(payload.thinking_label or msg.thinking_label or "")
+  if thinking ~= "" then
+    add(ScreenReader.t("details.label.thinking", nil, "Thinking"), thinking)
+  end
+  local fx_cache = tostring(payload.fx_cache_label or msg.fx_cache_label or "")
+  if fx_cache ~= "" then
+    add(ScreenReader.t("details.label.fx_cache", nil, "FX Cache"), fx_cache)
+  end
+  if payload.api_calls or msg.api_calls then
+    add(ScreenReader.t("details.label.api_calls", nil, "API Calls"),
+      tostring(payload.api_calls or msg.api_calls))
+  end
+  if #fields == 0 then return "" end
+  return ScreenReader.reagirl_sentence(ScreenReader.t(
+    "a11y.sr.response_details_prefix", nil, "Details: ")
+    .. table.concat(fields, ". "))
 end
 
 function ScreenReader.payload_is_typed_action(payload)
@@ -1337,7 +1443,11 @@ function ScreenReader.response_ready_parts(payload)
     end
   end
   local sr_summary = ScreenReader.clean_label(sr_summary_raw, 220)
+  local details_text = ScreenReader.response_details_text(payload)
   prose = ScreenReader.response_display_prose(prose, sr_summary_raw)
+  if details_text ~= "" then
+    prose = prose ~= "" and (prose .. "\n\n" .. details_text) or details_text
+  end
   local has_prose = prose ~= ""
   local response_notes_below = has_prose and has_code
     and ScreenReader.t("a11y.sr.response_notes_after_actions_hint_v2", nil,
@@ -1387,6 +1497,7 @@ function ScreenReader.response_ready_parts(payload)
     action_summary = action_summary,
     sr_summary = sr_summary,
     sr_summary_raw = sr_summary_raw,
+    details_text = details_text,
     response_notes_below = response_notes_below,
     auto_run_blocked = auto_run_blocked,
     manual_run_blocked = manual_run_blocked,
@@ -1412,6 +1523,9 @@ function ScreenReader.response_ready_announcement_text(payload, fallback)
     if status_text ~= "" then messages[#messages + 1] = status_text end
     if parts.auto_run_blocked ~= "" then
       messages[#messages + 1] = parts.auto_run_blocked
+    end
+    if parts.details_text ~= "" then
+      messages[#messages + 1] = parts.details_text
     end
     if #messages == 0 and parts.prose ~= "" then
       messages[#messages + 1] = parts.prose
@@ -1448,49 +1562,20 @@ function ScreenReader.payload_blocks_manual_lua_run(payload)
   if reason == "auto_run_disabled"
       or reason == "backup_required"
       or reason == "backup_failed"
-      or reason == "risky_code_confirmation" then
+      or reason == "risky_code_confirmation"
+      or reason == "non_runnable_lua_artifact"
+      or reason == "manual_run_only_lua_artifact" then
     return false, ""
   end
-  -- Keep in sync with ReaAssist.lua:_auto_run_block_reason().
-  local validator_reasons = {
-    action_context_validator = true,
-    arity_validator = true,
-    audio_sync_validator = true,
-    chain_upsert_validator = true,
-    defer_validator = true,
-    docs_gate = true,
-    drum_marker_sync_validator = true,
-    drum_quantize_validator = true,
-    fx_add_getonly_validator = true,
-    fx_check_validator = true,
-    fx_identifier_validator = true,
-    fx_param_scope_validator = true,
-    get_by_name_validator = true,
-    helper_integrity_validator = true,
-    helper_validator = true,
-    jsfx_validator = true,
-    jsfx_wrong_artifact_validator = true,
-    loop_time_map_validator = true,
-    marker_pair_validator = true,
-    media_item_label_validator = true,
-    midi_input_validator = true,
-    mistyped_reaper_global_validator = true,
-    project_tempo_validator = true,
-    proq4_bell_slope_validator = true,
-    ruler_timebase_validator = true,
-    sandbox_forbidden_global = true,
-    send_index_validator = true,
-    stock_fx_validator = true,
-    tempo_marker_validator = true,
-    timecode_fx_validator = true,
-    timecode_workflow_validator = true,
-    toolbar_validator = true,
-    trackfx_recfx_validator = true,
-    transient_validator = true,
-    validation_blocked = true,
-    validator_gate = true,
-  }
-  return validator_reasons[reason] == true, reason
+  if Code and Code.auto_run_block_reason_blocks_manual_lua
+      and Code.auto_run_block_reason_blocks_manual_lua(reason) then
+    return true, reason
+  end
+  if status == "blocked" then
+    local fallback = block_kind ~= "" and block_kind or "validation_blocked"
+    return true, fallback
+  end
+  return false, reason
 end
 
 function ScreenReader.manual_lua_run_block_text(payload)
@@ -1861,8 +1946,20 @@ function ScreenReader.prompt_body_text()
     " characters). Use Copy Prompt or Save Prompt to review the full text.")
 end
 
+function ScreenReader.prompt_input_projection(text)
+  return ScreenReader.clean_label(text, 1000)
+end
+
+function ScreenReader.should_preserve_prompt_input_projection(text)
+  local current = tostring(S and S._screen_reader_prompt or "")
+  if current == "" then return false end
+  local projected = ScreenReader.prompt_input_projection(current)
+  return current ~= projected and tostring(text or "") == projected
+end
+
 function ScreenReader.prompt_input_text()
-  return ScreenReader.clean_label(S and S._screen_reader_prompt or "", 1000)
+  return ScreenReader.prompt_input_projection(
+    S and S._screen_reader_prompt or "")
 end
 
 function ScreenReader.set_prompt_input(text)
@@ -1872,12 +1969,20 @@ function ScreenReader.set_prompt_input(text)
     local source = text
     if source == nil then source = S and S._screen_reader_prompt or "" end
     pcall(reagirl.Inputbox_SetText, id,
-      ScreenReader.clean_label(source, 1000))
+      ScreenReader.prompt_input_projection(source))
   end
 end
 
-function ScreenReader.update_prompt_from_input(text, should_announce)
-  S._screen_reader_prompt = tostring(text or "")
+function ScreenReader.update_prompt_from_input(text, should_announce,
+    preserve_projection)
+  local incoming = tostring(text or "")
+  if preserve_projection ~= false
+      and ScreenReader.should_preserve_prompt_input_projection(incoming) then
+    ScreenReader.refresh_prompt_preview(true)
+    ScreenReader.refresh_actions()
+    return
+  end
+  S._screen_reader_prompt = incoming
   ScreenReader.refresh_prompt_preview(true)
   ScreenReader.refresh_actions()
   if should_announce then
@@ -2610,6 +2715,8 @@ function ScreenReader.set_feedback_sentiment(sentiment)
     "Feedback rating changed to " .. ScreenReader.feedback_sentiment_text()
       .. "."), true)
   if S and S._screen_reader_view == "feedback" then
+    ScreenReader.focus_after_rebuild(sentiment == "down"
+      and "feedback_not_helpful" or "feedback_helpful")
     ScreenReader.open_view("feedback")
   end
 end
@@ -2814,6 +2921,11 @@ function ScreenReader.apply_focus_after_rebuild()
   if not (ui and ui.ids and reagirl and reagirl.UI_Element_SetFocused) then
     return
   end
+  -- ReaGirl can leave this private sentinel nil before the first UI loop.
+  -- Re-vet this fallback whenever the pinned ReaGirl version changes.
+  if reagirl.Elements and reagirl.Elements.FocusedElement == nil then
+    reagirl.Elements.FocusedElement = 0
+  end
   if type(keys) ~= "table" then keys = { tostring(keys or "") } end
   for _, key in ipairs(keys) do
     key = tostring(key or "")
@@ -2844,9 +2956,19 @@ function ScreenReader.set_auto_backup(checked)
     true)
 end
 
-function ScreenReader.refresh_actions()
+function ScreenReader.refresh_actions(opts)
   local ui = S and S.screen_reader_ui or nil
   if not (ui and ui.ids) then return end
+  opts = type(opts) == "table" and opts or nil
+  local now = reaper and reaper.time_precise and reaper.time_precise() or nil
+  if opts and opts.throttle then
+    local interval = tonumber(opts.interval) or 0.35
+    local next_at = tonumber(S._screen_reader_next_action_refresh_at) or 0
+    if now and now < next_at then return false end
+    if now then S._screen_reader_next_action_refresh_at = now + interval end
+  elseif now then
+    S._screen_reader_next_action_refresh_at = now + 0.35
+  end
   local request_active = AppController.request_is_active()
   local provider_ready = AppController.active_provider_is_usable()
   local has_attachments = AppController.attachment_count
@@ -2971,6 +3093,7 @@ function ScreenReader.refresh_actions()
   ScreenReader.refresh_feedback_summary()
   ScreenReader.track_pref_plugin_scan()
   ScreenReader.track_fx_cache_scan()
+  return true
 end
 
 function ScreenReader.refresh_status(prefix, should_announce)
@@ -3128,6 +3251,10 @@ function ScreenReader.reader_payload(kind)
     end
   else
     text = ScreenReader.response_prose_text(payload)
+    local details_text = ScreenReader.response_details_text(payload)
+    if details_text ~= "" then
+      text = text ~= "" and (text .. "\n\n" .. details_text) or details_text
+    end
     if payload and payload.has_code then
       label = ScreenReader.t("a11y.sr.response_notes_body", nil,
         "Response notes")
@@ -3145,9 +3272,6 @@ function ScreenReader.reader_payload(kind)
           "This response contains generated code but no separate prose response. Use Read or Save Code to review the generated code."
       end
     end
-  end
-  if kind == "code" then
-    text = ScreenReader.humanize_response_text(text, payload)
   end
   if text == "" then text = ScreenReader.t(empty_key, nil, empty_fallback) end
   return {
@@ -3517,7 +3641,154 @@ function ScreenReader.jsfx_saved_path_valid(msg)
   return false
 end
 
-function ScreenReader.save_jsfx_for_payload(payload)
+function ScreenReader.jsfx_manual_validation_source(code)
+  code = tostring(code or "")
+  if not code:find("// --- ReaAssist output ceiling", 1, true) then
+    return code
+  end
+
+  local out = {}
+  local in_injected_block = false
+  for line in (code .. "\n"):gmatch("([^\n]*)\n") do
+    if line:find("// --- ReaAssist output ceiling", 1, true) then
+      in_injected_block = true
+    elseif in_injected_block then
+      if line:find("// ----------------------------------------------------------",
+          1, true) then
+        in_injected_block = false
+      end
+    else
+      local cleaned = line:gsub("%s*gmem=ReaAssist_Ceiling", "")
+      if cleaned:match("^%s*options:%s*$") then
+        cleaned = nil
+      elseif cleaned:find("Safety Output Ceiling (dBFS)", 1, true)
+          and cleaned:match("^%s*slider%d+:") then
+        cleaned = nil
+      end
+      if cleaned ~= nil then out[#out + 1] = cleaned end
+    end
+  end
+  return table.concat(out, "\n")
+end
+
+function ScreenReader.jsfx_fatal_code_summary(findings)
+  local codes, seen = {}, {}
+  for _, f in ipairs(findings or {}) do
+    if f.severity == "fatal" then
+      local code = tostring(f.code or "jsfx")
+      if not seen[code] then
+        seen[code] = true
+        codes[#codes + 1] = code
+      end
+    end
+  end
+  return (#codes > 0) and table.concat(codes, ", ") or "jsfx"
+end
+
+function ScreenReader.jsfx_finding_detail(findings)
+  local fatal, warn = {}, {}
+  for _, f in ipairs(findings or {}) do
+    local line = f.line and ("line " .. tostring(f.line) .. ": ") or ""
+    local text = "[" .. tostring(f.code or "jsfx") .. "] "
+      .. line .. tostring(f.message or "")
+    if f.severity == "fatal" then
+      fatal[#fatal + 1] = text
+    else
+      warn[#warn + 1] = text
+    end
+  end
+  local parts = {}
+  if #fatal > 0 then parts[#parts + 1] = table.concat(fatal, "\n") end
+  if #warn > 0 then
+    parts[#parts + 1] = "Advisory:\n" .. table.concat(warn, "\n")
+  end
+  return table.concat(parts, "\n\n")
+end
+
+function ScreenReader.jsfx_ceiling_info_from_code(code)
+  code = tostring(code or "")
+  local slot = tonumber(code:match("_ra_slot%s*=%s*(%d+)%s*;"))
+  if not slot then return nil end
+  return {
+    slot_base = slot,
+    desc = code:match("^%s*desc:%s*(.-)%s*[\r\n]") or "",
+  }
+end
+
+function ScreenReader.record_jsfx_ceiling_slot(msg, info, saved_path, code)
+  if not (msg and saved_path and Code and Code.ceiling_record_slot) then
+    return
+  end
+  info = info or msg.ceiling_inject_info
+    or ScreenReader.jsfx_ceiling_info_from_code(code)
+  if not (info and info.slot_base) then return end
+  msg._ceiling_recorded_paths = msg._ceiling_recorded_paths or {}
+  local key = tostring(saved_path) .. "#" .. tostring(info.slot_base)
+  if msg._ceiling_recorded_paths[key] then return end
+  Code.ceiling_record_slot(info, saved_path, info.desc)
+  msg._ceiling_recorded_paths[key] = true
+end
+
+function ScreenReader.prepare_jsfx_for_save(payload, msg, allow_invalid)
+  local code = tostring(payload and payload.code or "")
+  if code == "" or not (Code and Code.auto_save_jsfx) then
+    return nil, nil, ScreenReader.t("jsfx.save_failed", nil,
+      "Failed to save JSFX.")
+  end
+
+  if not allow_invalid
+     and Code.validate_jsfx and Code.jsfx_findings_have_gate then
+    local validation_code = ScreenReader.jsfx_manual_validation_source(code)
+    local findings = Code.validate_jsfx(validation_code,
+      tostring(msg and msg.jsfx_user_text or ""))
+    if findings and Code.jsfx_findings_have_gate(findings) then
+      local codes = ScreenReader.jsfx_fatal_code_summary(findings)
+      return nil, nil, ScreenReader.t("validator.jsfx_safety_blocked_no_retry", {
+        codes = codes,
+      }, "The generated JSFX failed ReaAssist's safety/syntax validator: "
+        .. codes .. ". It was not saved."),
+        ScreenReader.jsfx_finding_detail(findings)
+    end
+  end
+
+  local inject_info = nil
+  if Code.inject_output_ceiling then
+    local injected, info_or_reason = Code.inject_output_ceiling(code)
+    if injected then
+      code = injected
+      inject_info = info_or_reason
+      if payload then payload.code = code end
+      if msg then
+        msg.code_block = code
+        msg.jsfx_saved_path = nil
+        msg.jsfx_saved_fx_name = nil
+        msg.ceiling_injected = true
+        msg.ceiling_inject_info = inject_info
+      end
+    end
+  end
+  return code, inject_info, nil
+end
+
+function ScreenReader.confirm_invalid_jsfx_save(detail, action)
+  detail = tostring(detail or "")
+  local intro = ScreenReader.t("modal.jsfx_save.intro", nil,
+    "This JSFX failed ReaAssist's safety/syntax validator:")
+  local outro = ScreenReader.t("modal.jsfx_save.outro", nil,
+    "Saving or adding it can write unsafe effect code to disk or load it "
+    .. "on selected tracks. ReaAssist will still apply the output ceiling "
+    .. "first when possible.")
+  local action_text = action == "add"
+    and "Choose Yes to add it anyway, or No to cancel."
+    or "Choose Yes to save it anyway, or No to cancel."
+  local message = intro .. "\n\n" .. detail .. "\n\n" .. outro
+    .. "\n\n" .. action_text
+  local response = reaper.ShowMessageBox
+    and reaper.ShowMessageBox(message, "Review Before Saving", 4) or 7
+  return response == 6
+end
+
+function ScreenReader.save_jsfx_for_payload(payload, allow_invalid)
   local msg = ScreenReader.payload_jsfx_message(payload)
   if not msg then
     return nil, nil, false, ScreenReader.t("a11y.sr.no_code_to_copy", nil,
@@ -3537,16 +3808,15 @@ function ScreenReader.save_jsfx_for_payload(payload)
     if fx_name ~= "" then return path, fx_name, true end
   end
 
-  local code = tostring(payload and payload.code or "")
-  if code == "" or not (Code and Code.auto_save_jsfx) then
-    return nil, nil, false, ScreenReader.t("jsfx.save_failed", nil,
-      "Failed to save JSFX.")
-  end
+  local code, inject_info, prepare_err, validator_detail =
+    ScreenReader.prepare_jsfx_for_save(payload, msg, allow_invalid)
+  if not code then return nil, nil, false, prepare_err, validator_detail end
 
   local path, fx_name = Code.auto_save_jsfx(code)
   if path and fx_name then
     msg.jsfx_saved_path = path
     msg.jsfx_saved_fx_name = fx_name
+    ScreenReader.record_jsfx_ceiling_slot(msg, inject_info, path, code)
     return path, fx_name, false
   end
   return nil, nil, false, ScreenReader.t("jsfx.save_failed", nil,
@@ -3555,7 +3825,16 @@ end
 
 function ScreenReader.save_latest_jsfx()
   local payload = AppController.latest_response_payload()
-  local path, _, already, err = ScreenReader.save_jsfx_for_payload(payload)
+  local path, _, already, err, detail =
+    ScreenReader.save_jsfx_for_payload(payload)
+  if not path and detail then
+    if ScreenReader.confirm_invalid_jsfx_save(detail, "save") then
+      path, _, already, err = ScreenReader.save_jsfx_for_payload(payload, true)
+    else
+      err = ScreenReader.t("a11y.sr.jsfx_save_cancelled", nil,
+        "JSFX save cancelled.")
+    end
+  end
   if not path then
     ScreenReader.set_status(err or ScreenReader.t("jsfx.save_failed", nil,
       "Failed to save JSFX."), true)
@@ -3591,7 +3870,17 @@ function ScreenReader.add_latest_jsfx_to_selected_tracks(next_view)
     return false
   end
 
-  local saved_path, fx_name, _, err = ScreenReader.save_jsfx_for_payload(payload)
+  local saved_path, fx_name, _, err, detail =
+    ScreenReader.save_jsfx_for_payload(payload)
+  if not (saved_path and fx_name) and detail then
+    if ScreenReader.confirm_invalid_jsfx_save(detail, "add") then
+      saved_path, fx_name, _, err =
+        ScreenReader.save_jsfx_for_payload(payload, true)
+    else
+      err = ScreenReader.t("a11y.sr.jsfx_add_cancelled", nil,
+        "JSFX add cancelled.")
+    end
+  end
   if not (saved_path and fx_name) then
     ScreenReader.set_status(err or ScreenReader.t("jsfx.save_failed", nil,
       "Failed to save JSFX."), true)
@@ -3870,11 +4159,27 @@ function ScreenReader.reset_window_size()
       820, 380)
     ScreenReader.store_reagirl_window_size("ReaAssist_Screen_Reader_Mode",
       820, 500)
+    ScreenReader.store_reagirl_window_size("ReaAssist_Screen_Reader_Examples",
+      640, 430)
+    ScreenReader.store_reagirl_window_size(
+      "ReaAssist_Screen_Reader_Response_Ready", 760, 300)
+    ScreenReader.store_reagirl_window_size("ReaAssist_Screen_Reader_Feedback",
+      860, 500)
+    ScreenReader.store_reagirl_window_size("ReaAssist_Screen_Reader_Thinking",
+      520, 210)
     if reagirl and reagirl.Window_Open then
       local active = tostring(reagirl.Window_name or "")
       local w, h = 820, 500
       if active == "ReaAssist_Screen_Reader_Main" then
         w, h = 820, 380
+      elseif active == "ReaAssist_Screen_Reader_Examples" then
+        w, h = 640, 430
+      elseif active == "ReaAssist_Screen_Reader_Response_Ready" then
+        w, h = 760, 300
+      elseif active == "ReaAssist_Screen_Reader_Feedback" then
+        w, h = 860, 500
+      elseif active == "ReaAssist_Screen_Reader_Thinking" then
+        w, h = 520, 210
       end
       local target_w, target_h = ScreenReader.target_window_size(w, h)
       pcall(reagirl.Window_Open, "", target_w, target_h, 0, nil, nil)
@@ -4207,7 +4512,7 @@ function ScreenReader.shortcut_new_prompt()
   end
   local ok, text = ScreenReader.new_prompt_dialog()
   if ok == true then
-    ScreenReader.update_prompt_from_input(text, false)
+    ScreenReader.update_prompt_from_input(text, false, false)
     if ScreenReader.current_prompt() == "" then
       ScreenReader.focus_after_rebuild("prompt_input")
       ScreenReader.set_status_after_rebuild(ScreenReader.t(
@@ -5410,13 +5715,22 @@ function ScreenReader.select_text_size(menu_idx)
 end
 
 function ScreenReader.timeout_menu()
-  local values = { 60, 120, 180, 300, 600 }
-  local labels, selected = {}, 3
+  local values = { 60, 120, 180, 300, 600, 1200, 1800 }
+  local current = tonumber(prefs and prefs.cloud_request_timeout) or 180
+  local current_in_presets = false
+  for i, value in ipairs(values) do
+    if value == current then current_in_presets = true end
+  end
+  if not current_in_presets then
+    values[#values + 1] = current
+    table.sort(values)
+  end
+  local labels, selected = {}, 1
   for i, value in ipairs(values) do
     labels[i] = ScreenReader.t("a11y.sr.seconds_value", {
       value = tostring(value),
     }, tostring(value) .. " seconds")
-    if prefs and tonumber(prefs.cloud_request_timeout) == value then
+    if current == value then
       selected = i
     end
   end
@@ -9595,7 +9909,6 @@ function ScreenReader.build_ui()
     prefs and prefs.auto_run == true,
     function(_, checked) ScreenReader.set_auto_run(checked) end,
     "auto_run")
-  if ScreenReader.cjk_layout() then reagirl.NextLine() end
   ui.ids.auto_backup = reagirl.Checkbox_Add(nil, nil,
     ScreenReader.t("a11y.sr.auto_backup", nil, "Auto-backup session"),
     ScreenReader.t("a11y.sr.auto_backup.meaning", nil,
@@ -9687,6 +10000,7 @@ function ScreenReader.heartbeat()
     S._last_heartbeat = now
     reaper.SetExtState(CFG.EXT_NS, "running",
       S.INSTANCE_ID .. "|" .. tostring(now), false)
+    if RA and RA.write_temp_live_marker then RA.write_temp_live_marker(now) end
   end
 end
 
@@ -9722,7 +10036,7 @@ function ScreenReader.loop()
   elseif AppController and AppController.pump_background then
     AppController.pump_background()
     ScreenReader.track_update_status()
-    ScreenReader.refresh_actions()
+    ScreenReader.refresh_actions({ throttle = true })
   end
   ScreenReader.track_language_download_status()
   if reagirl and reagirl.Gui_Manage then pcall(reagirl.Gui_Manage) end
@@ -9874,8 +10188,24 @@ if type(REAASSIST_SCREEN_READER_TEST_HOOK) == "table" then
   REAASSIST_SCREEN_READER_TEST_HOOK.open_feedback = function(sentiment)
     return ScreenReader.open_feedback(sentiment)
   end
+  REAASSIST_SCREEN_READER_TEST_HOOK.set_feedback_sentiment =
+    function(sentiment)
+      return ScreenReader.set_feedback_sentiment(sentiment)
+    end
+  REAASSIST_SCREEN_READER_TEST_HOOK.rebuild_ui = function()
+    return ScreenReader.rebuild_ui()
+  end
+  REAASSIST_SCREEN_READER_TEST_HOOK.reset_window_size = function()
+    return ScreenReader.reset_window_size()
+  end
   REAASSIST_SCREEN_READER_TEST_HOOK.handle_reagirl_shortcuts = function()
     return ScreenReader.handle_reagirl_shortcuts()
+  end
+  REAASSIST_SCREEN_READER_TEST_HOOK.heartbeat = function()
+    return ScreenReader.heartbeat()
+  end
+  REAASSIST_SCREEN_READER_TEST_HOOK.cancel_request = function()
+    return ScreenReader.cancel_request()
   end
   REAASSIST_SCREEN_READER_TEST_HOOK.shortcut_run_code = function()
     return ScreenReader.shortcut_run_code()
@@ -10159,6 +10489,7 @@ function AppController.select_provider_idx(idx)
   local active = AppController.active_provider()
   S.api_key = active and S.api_key_map[active.id] or nil
   S.api_ref_message = nil
+  if active and active.id == "google" and Net then Net.gemini_cache_invalidate() end
   AppController._refresh_attachment_costs(AppController.active_model())
   if Store and Store.save_config then Store.save_config() end
   return true
@@ -10320,34 +10651,8 @@ function AppController.send_prompt(prompt)
 end
 
 function AppController.cancel_request()
-  if not AppController.request_is_active() then return false, "not_active" end
-  if deep_scan and deep_scan.active and CTX and CTX.cancel_deep_scan then
-    pcall(CTX.cancel_deep_scan)
-  end
-  if Net and Net.kill_curl then pcall(Net.kill_curl) end
-  S.curl_pid            = nil
-  S.send_time           = nil
-  S.request_start_time  = nil
-  S.status              = "idle"
-  if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-    local last = #S.display_messages
-    if last > S.pending_display_idx then
-      S.display_messages[last] = nil
-    end
-    S.display_messages[S.pending_display_idx] = nil
-    if #S.history >= 1 then S.history[#S.history] = nil end
-  end
-  S.pending_display_idx = nil
-  S.pending_code        = nil
-  S.retry_scheduled     = false
-  S.retry_count         = 0
-  S.retry_max           = CFG.MAX_RETRIES
-  S.retry_saved_body    = nil
-  S.scroll_to_bottom    = true
-  if Code and Code.safe_write and tmp and tmp.out then
-    Code.safe_write(tmp.out, "")
-  end
-  return true
+  if not (Net and Net.cancel_active_request) then return false, "not_active" end
+  return Net.cancel_active_request("screen_reader_cancelled")
 end
 
 function AppController.request_is_active()
@@ -10577,6 +10882,15 @@ function AppController.last_assistant_message()
   return nil, nil
 end
 
+function AppController.request_message_for_response(message_idx)
+  message_idx = tonumber(message_idx) or 0
+  for i = message_idx - 1, 1, -1 do
+    local msg = S.display_messages[i]
+    if msg and msg.role == "user" then return msg, i end
+  end
+  return nil, nil
+end
+
 function AppController.message_has_typed_actions(msg)
   return TypedActionController.message_has_typed_actions(msg)
 end
@@ -10691,10 +11005,13 @@ end
 
 function AppController.latest_response_payload()
   local msg, idx = AppController.last_assistant_message()
+  local request_msg, request_idx = AppController.request_message_for_response(idx)
   if not msg then
     return {
       message = nil,
       message_idx = nil,
+      request_message = nil,
+      request_message_idx = nil,
       text = "",
       code = "",
       code_type = nil,
@@ -10714,6 +11031,8 @@ function AppController.latest_response_payload()
       local_answer = false,
       provider_id = nil,
       model_label = nil,
+      ctx_label = nil,
+      thinking_label = nil,
     }
   end
   local code = AppController.generated_code_text(msg)
@@ -10722,6 +11041,8 @@ function AppController.latest_response_payload()
   return {
     message = msg,
     message_idx = idx,
+    request_message = request_msg,
+    request_message_idx = request_idx,
     text = AppController.response_text(msg),
     code = code,
     code_type = code_type,
@@ -10741,8 +11062,21 @@ function AppController.latest_response_payload()
     validation_status = msg and msg.validation_status or nil,
     validation_block_kind = msg and msg.validation_block_kind or nil,
     local_answer = msg and msg.local_answer == true,
-    provider_id = msg and msg.provider_id or nil,
-    model_label = msg and msg.model_label or nil,
+    provider_id = (request_msg and request_msg.provider_id)
+      or (msg and msg.provider_id) or nil,
+    model_label = (request_msg and request_msg.model_label)
+      or (msg and msg.model_label) or nil,
+    ctx_label = request_msg and request_msg.ctx_label or nil,
+    thinking_label = request_msg and request_msg.thinking_label or nil,
+    tok_in = request_msg and request_msg.tok_in or nil,
+    tok_out = request_msg and request_msg.tok_out or nil,
+    tok_cache_read = request_msg and request_msg.tok_cache_read or nil,
+    tok_cache_create = request_msg and request_msg.tok_cache_create or nil,
+    cost = request_msg and request_msg.cost or nil,
+    free_tier = request_msg and request_msg.free_tier == true or false,
+    response_time = request_msg and request_msg.response_time or nil,
+    fx_cache_label = request_msg and request_msg.fx_cache_label or nil,
+    api_calls = request_msg and request_msg.api_calls or nil,
   }
 end
 

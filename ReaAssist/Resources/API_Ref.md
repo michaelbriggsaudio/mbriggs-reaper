@@ -14,7 +14,7 @@ Use proj=0 for active project. Track/item indices in the API are 0-based.
 This is the CORE reference -- value scales, common patterns, tracks, track FX,
 markers, transport, undo, performance tips, and common pitfalls. Less-common
 surface lives in on-demand sections requested via `<context_needed>docs:NAME</context_needed>`:
-  docs:items      -- media items, takes, item grouping, splits, fades, item properties, P_RAZOREDITS
+  docs:items      -- media items, takes, item grouping, splits, fades, item properties
   docs:take_fx    -- take FX (TakeFX_*); per-item / per-clip / per-take effects
   docs:routing    -- sends, receives, sidechain routing, hardware outputs, channel bit-packing, MIDI channel routing
   docs:envelopes  -- envelopes, automation, automation points, automation modes, envelope scaling, volume/pan envelopes
@@ -94,7 +94,7 @@ VOLUME (D_VOL is LINEAR AMPLITUDE, not dB and not slider position):
   or skip the log; passing 0 yields -inf).
 - dB -> amp: `amp = 10 ^ (db / 20)`.
 - DO NOT pass D_VOL through SLIDER2DB / DB2SLIDER -- those operate on
-  REAPER's 0..1000 fader-position scale (where 540 = 0dB), not linear
+  REAPER's 0..1000 fader-position scale (where 716 = 0dB), not linear
   amplitude. Feeding D_VOL=1.0 (which is 0dB) into SLIDER2DB returns
   a deeply negative dB value (~ -150 to -1000). The same caveat applies
   to D_VOL on items, takes, and sends; envelope volumes have their own
@@ -283,24 +283,9 @@ I_FREEMODE is the track lane/free-position mode: 1 = free item positioning,
 2 = fixed lanes. Treat `GetMediaTrackInfo_Value(track, "I_FREEMODE") == 2`
 as fixed-lane state and call `reaper.UpdateTimeline()` after changing it.
 
-Toolbar toggle actions: do not use "script is running" as the lit toolbar
-state when the requested state is project/track state. Do not make the same
-toolbar action both a long-lived watcher and the click-to-toggle mutator; a
-second click can re-enter the action while the watcher is still alive and
-create double-click/stale-state behavior. Prefer a one-shot toolbar action:
-derive the button state from live REAPER data (for example `I_FREEMODE == 2`
-on the primary selected track), toggle the selected track(s), refresh the
-toolbar, and exit. If a watcher/defer loop is truly needed, keep it
-observational only or use a separate action/clear handoff. Capture the action
-ids once and refresh the toolbar after every state change:
-```lua
-local _, _, section_id, command_id = reaper.get_action_context()
-
-local function set_toolbar(on)
-  reaper.SetToggleCommandState(section_id, command_id, on and 1 or 0)
-  reaper.RefreshToolbar2(section_id, command_id)
-end
-```
+Toolbar toggle actions: prefer one-shot scripts whose lit state is derived from
+live project/track data. For full toolbar action-context patterns, request/use
+`docs_extended`.
 
 `boolean reaper.SetMediaTrackInfo_Value(MediaTrack tr, string parmname, number newvalue)`
   Set track numerical attribute.
@@ -347,6 +332,15 @@ specific tracks/items/takes.
   `GetTrack(0, idx)`, name it, and store that handle. Do not repeatedly insert
   at index 0 and reverse the name list; the handles and final project order can
   diverge.
+  If you insert N tracks and then query `local total = reaper.CountTracks(0)`,
+  the new tracks are `total - N` through `total - 1`; never call
+  `GetTrack(0, total)`. For folder/exact-outline creation, keep a handle for
+  each inserted track at the index where it was created. If the user says not
+  to create a new track, bus, or return, operate on existing named tracks from
+  session context and stop with a clear message when one is missing.
+  If the user says to add or append a new track after the existing tracks,
+  insert at the current end, not after a similarly named existing track unless
+  that exact insertion point is explicitly named.
 
 `reaper.DeleteTrack(MediaTrack tr)`
   Delete a track.
@@ -616,6 +610,12 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
   script needs to reference the created marker/region; it returns a
   ProjectMarker handle instead of an ambiguous index number.
 
+`integer retval, boolean isrgn, number pos, number rgnend, string name, integer markrgnindexnumber, integer color reaper.EnumProjectMarkers3(ReaProject proj, integer idx)`
+  Enumerate project markers/regions by zero-based list index. `retval` is 0
+  when `idx` is past the end. `markrgnindexnumber` is the displayed marker/
+  region number for legacy DeleteProjectMarker calls; use `idx` itself for
+  DeleteProjectMarkerByIndex and SWS marker-subtitle APIs.
+
 `integer reaper.AddProjectMarker(ReaProject proj, boolean isrgn, number pos, number rgnend, string name, integer wantidx)`
   Legacy/discouraged in REAPER 7.72+. Add marker/region. Returns an index or
   -1 on failure.
@@ -882,10 +882,22 @@ RULER LANE KEYS (REAPER 7.62+ / 7.65+ / 7.71+):
   Get or set string project information.
 
 Useful string keys:
+- `PROJECT_NAME`: project file name (read-only).
+- `PROJECT_TITLE`: title field from Project Settings/Notes.
+- `PROJECT_AUTHOR`: author field from Project Settings/Notes.
 - `RULER_LANE_NAME:X`: ruler lane name.
 - `RULER_LANE_GUID:X`: ruler lane unique identifier.
 - `RULER_LANE_TYPE`: changelog-documented key that can create a new ruler lane;
   current official HTML does not document value format, so do not guess values.
+- `RENDER_FILE`: render directory.
+- `RENDER_PATTERN`: render file name; may contain wildcards.
+- `RENDER_EXTRAFILEDIR`: alternate path for renderedfile.wav.rpp and
+  render_stats.html.
+- `RENDER_METADATA`: get/set project render metadata. To list defined metadata
+  ids, call with `valuestrNeedBig=""` and `is_set=false`. To set one, pass
+  `ID|value` such as `ID3:TALB|Album Name`.
+- `RENDER_TARGETS`: semicolon-separated files that would be written using the
+  most recent render settings.
 - `RENDER_STATS`: read-only semicolon-separated stats for most recent renders.
   Pass valuestr as an action ID string (for example `"42437"`) to run an
   action before returning stats.
@@ -917,6 +929,19 @@ Useful string keys:
 `boolean retval, string filenameNeed4096 reaper.GetUserFileNameForRead(string filenameNeed4096, string title, string defext)`
   Older open-file picker. Superseded by GetUserFileName in REAPER 7.70+.
   Use only as a guarded fallback for existing-file selection.
+
+`integer reaper.InsertMedia(string file, integer mode)`
+  Import/insert a media file. Common modes: 0=add to current track, 1=add new
+  track, 3=add to selected items as takes. Bit flags include 4=stretch/loop to
+  fit time selection, 8/16/32=try to match tempo at 1x/0.5x/2x, 64=do not
+  preserve pitch when matching tempo, 256=force loop, 4096=move to BWF source
+  preferred position, 8192=reverse, 16384=apply ripple according to project
+  setting. Use only with a user-provided or picker-returned path; do not invent
+  filesystem paths.
+
+`integer reaper.InsertMediaSection(string file, integer mode, number startpct, number endpct, number pitchshift)`
+  Insert a section of a media file; mode flags match InsertMedia. startpct and
+  endpct are fractions of the source length.
 
 `boolean reaper.file_exists(string path)`
   Returns true if file exists and is readable.
@@ -1152,34 +1177,20 @@ before routing.
 
 ### DRUM EDIT / QUANTIZE WORKFLOW
 
-Drum timing edits are phase-critical. For multi-mic drums, derive timing from
-guide items (commonly kick and snare) and apply the same source-time ->
-target-time map to every selected/grouped drum item. Do not detect, split,
-or warp each mic independently unless the user explicitly asks.
+Detailed drum-edit rules live in `prompt_bundle:drums`; request/use that bundle
+before code for drum edit, quantize, tighten, snap, transient, or Dynamic Split
+tasks. This extended API bucket only carries API signposts:
 
-Best default workflow:
-1. If the user asks to find "every hit", "transients", "tighten drums", or
-   create stretch markers from drum audio, ask/resolve which guide tracks or
-   selected guide items drive detection. Do not assume tracks named Kick or
-   Snare are the guide mics; they may be folder/container tracks.
-2. Use REAPER's native Dynamic Split / transient engine via Action List lookup
-   on the guide items. Do not replace it with a custom GetAudioAccessorSamples
-   threshold detector.
-3. Build a shared edit map from guide marker project times to snapped project
-   times (bar/grid/strength as requested). Apply those same project-time moves
-   to every grouped drum item that overlaps each guide hit.
-4. If stretch markers already exist and the user asks to quantize or snap
-   drums, move existing markers with GetTakeStretchMarker + SnapToGrid +
-   SetTakeStretchMarker, preserving srcpos. For grouped drum items, use the
-   shared guide map, not independent per-item snapping.
-5. Do not quantize drums by moving whole media items or item starts with
-   D_POSITION unless the user explicitly asked for whole-item movement. Item
-   starts are not hit positions, and this can report success while doing
-   nothing useful.
-6. If the choice affects the sound, ask one concise question: guide track(s),
-   range, open Dynamic Split settings vs use most recent settings,
-   grid/bar value, strength/swing, or selected item vs whole selected drum
-   group.
+- Prefer REAPER's native Dynamic Split / transient actions found by Action List
+  lookup. Do not substitute a custom `GetAudioAccessorSamples` threshold detector
+  unless the user explicitly asks for that approximation.
+- For existing stretch-marker quantize, use `GetTakeStretchMarker` +
+  `SnapToGrid` or `docs:tempo` bar/grid math + `SetTakeStretchMarker`, preserving
+  source positions through a shared guide-hit map.
+- Do not quantize multi-mic drums by moving whole media items or item starts
+  with `D_POSITION` unless the user explicitly asked for whole-item movement.
+- After automatic Dynamic Split, verify marker counts on guide items increased
+  before applying a map; stop instead of continuing with empty/stale guide data.
 
 For non-drum "same song" / selected-take audio sync requests, distinguish
 item-start alignment from audio-content matching. Moving a media item with
@@ -1191,126 +1202,6 @@ audio point between different source files. Unless the user explicitly asks to
 align starts or edit take start offsets, ask whether they want start-time/offset
 alignment or audio/transient matching, or use an explicit user-provided anchor
 such as edit cursor, snap offset, or existing stretch markers.
-
-Setup prompt for under-specified drum quantize:
-- Guide tracks/items: ask the user to select or name the guide tracks/items.
-  Offer currently selected tracks/items only when they are a plausible small
-  guide selection. Do not infer guide mics from folder/container names like
-  Kick or Snare.
-- Edit scope: prefer the outermost folder track named Drums (case-insensitive)
-  and offer all child tracks/items in that folder as the default scope. Nested
-  Drums folders inside that parent are organizational subfolders, not separate
-  scope choices. Ask which track index to use only when there are multiple
-  separate outermost Drums folders.
-- Range: prefer the active time selection when one exists. If there is no time
-  selection, ask whether to use selected items, a time selection the user makes
-  first, or the whole song. Whole song is not the default.
-- Grid/feel: ask for bar line, beat, 1/8, 1/16, strength percentage, and swing
-  only when not already supplied or obvious from the user's wording.
-- Detection mode: offer automatic Dynamic Split using most recent settings,
-  one-time Dynamic Split settings dialog, or existing stretch markers. If the
-  user chooses automatic / "a", do not open the dialog; look up the action text
-  that clearly says it immediately uses recent/last Dynamic Split settings.
-  Only use the normal dialog action when the user chose settings/manual setup.
-- Dynamic Split settings: if session context includes a Dynamic Split settings
-  line, check it before automatic mode. Do not assume any saved preset exists,
-  and do not treat a preset name as special unless the user explicitly named
-  it. If settings say state=not_persisted_likely_defaults or show unknown
-  action/min-slice values, treat automatic Dynamic Split as unsafe unless a
-  dedicated ReaAssist recommended-settings helper is available. The ReaAssist
-  recommended drum-detection profile uses Transient Detection sensitivity 70%,
-  threshold -10 dB, split at transients, add stretch markers to selected/grouped
-  items, and grouped-item handling. The live SWS config API can set/restore
-  the Transient Detection settings, but current REAPER/SWS builds do not expose
-  the Dynamic Split dialog fields as live config vars; do not invent code that
-  claims otherwise. Automatic mode is suitable only when the current action
-  mode adds stretch markers, transient detection settings are plausible, and
-  min-slice is not obviously longer than the requested grid. Do not silently
-  edit or replace the user's Dynamic Split settings; ask the user to load/check
-  settings, use ReaAssist recommended settings if offered, or run one manual
-  Dynamic Split setup pass first if current settings do not look right.
-
-```lua
-local function action_text(section, cmd, fallback)
-  local text = reaper.kbd_getTextFromCmd(cmd, section)
-  if text and text ~= "" then return text end
-  return fallback or ""
-end
-
-local function find_main_action_contains_all(words)
-  local section = reaper.SectionFromUniqueID(0) -- Main section
-  for i = 0, 100000 do
-    local cmd, action_name = reaper.kbd_enumerateActions(section, i)
-    if not cmd or cmd == 0 then break end
-    local text = string.lower(action_text(section, cmd, action_name))
-    local ok = true
-    for _, word in ipairs(words) do
-      if not text:find(string.lower(word), 1, true) then
-        ok = false
-        break
-      end
-    end
-    if ok then return cmd end
-  end
-  return 0
-end
-
-local dynamic_split_cmd = find_main_action_contains_all({
-  "dynamic", "split", "immediately"
-})
-if dynamic_split_cmd == 0 then
-  dynamic_split_cmd = find_main_action_contains_all({
-    "dynamic", "split", "recent"
-  })
-end
-if dynamic_split_cmd == 0 then
-  dynamic_split_cmd = find_main_action_contains_all({
-    "dynamic", "split", "last"
-  })
-end
-if dynamic_split_cmd ~= 0 then
-  reaper.Main_OnCommand(dynamic_split_cmd, 0)
-else
-  reaper.ShowMessageBox("Could not find automatic Dynamic Split in the Action List.",
-    "ReaAssist", 0)
-end
-```
-
-For automatic Dynamic Split, verify marker counts on guide items increased
-before applying the map. If not, stop and tell the user their most recent
-Dynamic Split settings may not be set to add stretch markers. Do not continue
-into quantize with an empty or stale guide map.
-
-Guide-map application pattern:
-- Collect guide marker project times from the explicit guide items after native
-  transient detection.
-- Snap each guide time once (for example with SnapToGrid, or bar/grid math from
-  docs:tempo when the user asks for bar-line behavior).
-- For a Drums folder scope, choose the outermost matching parent. Derive child
-  tracks by walking tracks after that parent until the folder depth closes;
-  include nested subfolders and their children.
-- Normalize every affected drum item to the same marker map, including the
-  guide items. Guide tracks are analysis sources only; do not leave extra
-  Dynamic Split markers on guide items.
-- Delete/replace stretch markers in the edit range on every affected item,
-  then insert the same sorted source-time -> target-time pairs on every item
-  that overlaps those project times. Add unchanged boundary markers at the
-  range edges so stretching does not leak outside the edit range.
-- Convert project source/target times to item-relative values by subtracting
-  the item's D_POSITION. For each marker use pos = target_time - item_pos and
-  srcpos = source_time - item_pos. Do not preserve arbitrary existing/guide
-  srcpos values when rebuilding the shared map.
-- Count a marker as moved only when the target position differs from the old
-  position by more than a tiny tolerance. Do not count no-op SetTakeStretchMarker
-  calls as moved.
-- If guide tracks contain duplicate close hits (kick + snare flams, bleed,
-  layered samples), merge source times that are within a small musical/audio
-  tolerance before applying the map.
-- Also merge hit pairs whose snapped target grid position is the same or nearly
-  the same. Target collisions or crossed source/target ordering can create
-  extreme stretch ratios.
-- Report guide-hit count, affected item count, inserted marker count, and moved
-  marker count. This makes reruns auditable.
 
 ### COMMON ACTION IDS
 
@@ -1340,7 +1231,7 @@ EDITING
   40057   Edit: Copy items/tracks/envelope points (depending on focus)
   40058   Item: Paste items/tracks
   40698   Edit: Copy items
-  40434   Item: Group items
+  40032   Item grouping: Group items
   40033   Item grouping: Remove items from group
   40123   Item properties: Mute
   40719   Item properties: Unmute
@@ -1353,26 +1244,27 @@ TRACKS
     track; it does not preserve FX, sends/routing, envelopes, or settings.
   40297   Track: Unselect (clear selection of) all tracks
   40296   Track: Select all tracks
+  40769   Unselect (clear selection of) all tracks/items/envelope points
 
 TIME / VIEW
   40020   Time selection: Remove (unselect) time selection and loop points
-  40635   Time selection: Set start point to edit cursor
-  40626   Time selection: Set end point to edit cursor
+  40625   Time selection: Set start point
+  40626   Time selection: Set end point
+  40635   Time selection: Remove (unselect) time selection
   40364   Options: Toggle metronome
-  40769   View: Toggle show timeline ruler
   40367   View: Time unit for ruler: Measures.Beats
   42364   View: Secondary time unit for ruler: Hours:Minutes:Seconds:Frames
 
 MIDI EDITOR (use MIDIEditor_OnCommand, not Main_OnCommand, with these IDs)
-  40003   Edit: Insert note at edit cursor
-  40051   Edit: Quantize events
-  40659   Edit: Glue notes
+  40003   Edit: Select all notes
+  40051   Edit: Insert note at edit cursor
+  40659   Correct overlapping notes
 ```
 
 ```lua
 -- Pattern: split selected items at the edit cursor and group them
 reaper.Main_OnCommand(40012, 0)  -- Split items at edit cursor
-reaper.Main_OnCommand(40434, 0)  -- Group items
+reaper.Main_OnCommand(40032, 0)  -- Group items
 ```
 
 PITFALL: many "intuitive" actions have multiple variants ("Split items at
@@ -1383,8 +1275,8 @@ most general one (40012).
 ## MISC UTILITIES
 
 `number reaper.DB2SLIDER(number x)`
-  Convert dB to REAPER's 0..1000 fader-position scale (540 = 0dB,
-  716 = +12dB). NOT for D_VOL -- D_VOL is linear amplitude, see NOTES.
+  Convert dB to REAPER's 0..1000 fader-position scale (716 = 0dB,
+  1000 = +12dB). NOT for D_VOL -- D_VOL is linear amplitude, see NOTES.
 
 `number reaper.SLIDER2DB(number y)`
   Convert REAPER's 0..1000 fader-position scale to dB. NOT for D_VOL --
@@ -1418,6 +1310,26 @@ most general one (40012).
 
 `reaper.RefreshToolbar2(integer sectionID, integer commandID)`
   Refresh toolbar button appearance.
+
+Toolbar toggle actions: do not use "script is running" as the lit toolbar state
+when the requested state is project/track state. Do not make the same toolbar
+action both a long-lived watcher and the click-to-toggle mutator; a second click
+can re-enter the action while the watcher is still alive and create
+double-click/stale-state behavior. Prefer a one-shot toolbar action: derive the
+button state from live REAPER data (for example `I_FREEMODE == 2` on the
+primary selected track), toggle the selected track(s), refresh the toolbar, and
+exit. If a watcher/defer loop is truly needed, keep it observational only or use
+a separate action/clear handoff. Capture the action ids once and refresh the
+toolbar after every state change:
+
+```lua
+local _, _, section_id, command_id = reaper.get_action_context()
+
+local function set_toolbar(on)
+  reaper.SetToggleCommandState(section_id, command_id, on and 1 or 0)
+  reaper.RefreshToolbar2(section_id, command_id)
+end
+```
 
 `boolean retval, string name, string ident reaper.EnumInstalledFX(integer index)`
   Enumerate installed FX. index=-1 to refresh JSFX list (REAPER 7.42+).
@@ -1633,9 +1545,9 @@ if first then
 end
 ```
 
-NOTE: action 40434 ("Item: Group items") does the same thing as the grouping
-pattern above and is shorter. Prefer the action when you just need to group
-the current selection; use the manual I_GROUPID approach when you need to
+NOTE: action 40032 ("Item grouping: Group items") does the same thing as the
+grouping pattern above and is shorter. Prefer the action when you just need to
+group the current selection; use the manual I_GROUPID approach when you need to
 inspect, filter, or programmatically pick which items go in which group.
 <!-- /SECTION:items -->
 
@@ -1653,6 +1565,18 @@ inspect, filter, or programmatically pick which items go in which group.
 
 `TrackEnvelope reaper.GetTrackEnvelopeByChunkName(MediaTrack track, string chunkname)`
   Get envelope by chunk name (e.g. "<VOLENV", "<PANENV").
+
+`integer reaper.CountTakeEnvelopes(MediaItem_Take take)`
+  Count take envelopes. Use this for item/take volume, pan, mute, or pitch
+  envelope lanes; track-envelope APIs only enumerate track lanes.
+
+`TrackEnvelope reaper.GetTakeEnvelope(MediaItem_Take take, integer envidx)`
+  Get a take envelope by zero-based index.
+
+`TrackEnvelope reaper.GetTakeEnvelopeByName(MediaItem_Take take, string envname)`
+  Get a take envelope by name such as "Volume", "Pan", "Mute", or "Pitch".
+  Combine with GetActiveTake/GetMediaItemTake when the prompt targets an item
+  or take envelope instead of the track envelope.
 
 `boolean retval, string buf reaper.GetEnvelopeName(TrackEnvelope env)`
   Get envelope name.
@@ -2005,6 +1929,25 @@ reaper.SetMediaTrackInfo_Value(src, "B_MAINSEND", 0)           -- no master/main
 
 `number reaper.TimeMap_GetDividedBpmAtTime(number time)`
   Get BPM at a specific time position (envelope-aware).
+
+Time-unit rules:
+- Timeline positions, item positions/lengths, edit cursor, markers/regions,
+  loop points, and time selection are seconds unless a specific API says
+  otherwise. If the user gives exact second-based positions, use those exact
+  seconds; BPM, bars, or phrase-length wording controls only derived positions
+  or lengths, not explicit second starts.
+- For beat/bar or tempo-map work, convert through `TimeMap2_*` /
+  `TimeMap2_QNToTime`; do not hard-code BPM or 4/4 math. For a single loop
+  point such as "bar 19 beat 3", default to a one-beat loop by converting both
+  the start and next beat to seconds.
+- If the user says "set/change tempo to N BPM" or asks for new musical content
+  "at N BPM", call `reaper.SetCurrentBPM(0, N, true)` before calculating beat
+  lengths or creating MIDI/markers, even if the session snapshot already shows
+  N BPM or the requested positions are exact seconds. Do not use a local `bpm`
+  variable as a substitute for changing the project tempo; do not use
+  `GetSetProjectInfo(..., "BPM", ...)`.
+- If the user asks for both a point marker and a region with the same name/time
+  span, create both. A region does not count as the marker.
 
 ### MOVE A BAR LINE TO THE EDIT CURSOR
 

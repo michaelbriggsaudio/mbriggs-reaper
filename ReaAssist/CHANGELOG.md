@@ -1,5 +1,19 @@
 # ReaAssist - Changelog
 
+## v1.4.3 - 2026-07-05
+
+- **Generated-code safety is tighter.** ReaAssist now catches more unsafe or mismatched Lua/JSFX before auto-run, including bad track/send assumptions, Pro-Q slope mistakes, unsafe JSFX saves, time/PPQ mixups, and retry loops that previously let weak fixes through.
+
+- **Typed actions and routing are more reliable.** Track creation, deletion, renaming, foldering, sends, stock-FX setup, and aggregate/no-code requests route more consistently, with better repair behavior when a model returns noisy or incomplete structured edits.
+
+- **Screen Reader Mode gets another polish pass.** The accessible workflow preserves prompt text and timeout choices more reliably, shares clearer validator block reasons, improves response/run status wording, keeps feedback focus stable, and handles missing actions or Gemini provider state more gracefully.
+
+- **Diagnostics and update handling are safer.** Automatic diagnostics avoid fabricated metrics, redact and classify runtime data more carefully, defer network sends until ReaAssist is idle, and the updater avoids stale inline SHA fallbacks while preserving verified CDN cache behavior.
+
+- **Long sessions should feel lighter.** ReaAssist trims repeated prompt/context load, stabilizes provider cache prefixes, keeps Claude history cache-friendly, caches more UI measurements and rendered text, and reduces offscreen chat/render work in busy sessions.
+
+- **REAPER and plugin references are refreshed.** The bundled references include verified corrections from the July audit, REAPER 7.75/7.76 API notes, updated SWS startup-action guidance, marker/take-envelope/media-insert/render docs, and cleaner plugin prompt guidance.
+
 ## v1.4.2 - 2026-06-30
 
 - **Claude Sonnet has been updated to Sonnet 5.** ReaAssist now uses `claude-sonnet-5` as the recommended Claude default, migrates saved Sonnet 4.6 selections, refreshes diagnostics and cost estimates, and uses Anthropic's promotional Sonnet 5 pricing through August 31, 2026.

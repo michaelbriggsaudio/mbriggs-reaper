@@ -1946,6 +1946,30 @@ InstallerGfx.STRINGS.id = {
   ["error.write_script"] = "Tidak dapat menulis script instalasi.",
 }
 
+InstallerGfx.A11Y_FALLBACK = {
+  ["a11y.button.install"] = "Install button.",
+  ["a11y.button.quit"] = "Quit button.",
+  ["a11y.button.retry"] = "Retry button.",
+  ["a11y.button.close"] = "Close button.",
+  ["a11y.disclose.single"] =
+    "ReaAssist needs to install or update {name}. Press Enter to install. Press Escape to quit. Press Tab to switch buttons.",
+  ["a11y.disclose.multi"] =
+    "ReaAssist needs to install or update {count} dependencies. Press Enter to install. Press Escape to quit. Press Tab to switch buttons.",
+  ["a11y.running"] = "{name}: {status}",
+  ["a11y.running.escape"] =
+    "Installation is already running. Please wait for it to finish.",
+  ["a11y.done"] =
+    "{list} installed. Close and reopen REAPER. Then open the Action List and run ReaAssist. Press Enter or Escape to close this installer.",
+  ["a11y.error"] =
+    "Installation failed for {name} during {step}. {error} Press Escape to close. Press Tab to choose Retry or Close, then Enter.",
+  ["a11y.step.setup"] = "setup",
+  ["a11y.step.download"] = "download",
+  ["a11y.step.verify"] = "verification",
+  ["a11y.step.install"] = "installation",
+  ["a11y.step.timeout"] = "timeout",
+  ["a11y.step.unknown"] = "unknown step",
+}
+
 InstallerGfx.BOOTSTRAP_LANGUAGE_IDX_TO_CODE = {
   [1] = "en", [2] = "es", [3] = "fr", [4] = "de", [5] = "it",
   [6] = "pt", [7] = "nl", [8] = "pl", [9] = "sv", [10] = "cs",
@@ -2006,7 +2030,13 @@ end
 
 function InstallerGfx.t(key, values, fallback)
   local strings = InstallerGfx.STRINGS[InstallerGfx.lang_code()]
-  local text = (strings and strings[key]) or fallback or key
+  local text = strings and strings[key] or nil
+  if text == nil
+     and type(key) == "string"
+     and key:find("a11y.", 1, true) == 1 then
+    text = InstallerGfx.A11Y_FALLBACK[key]
+  end
+  text = text or fallback or key
   if type(values) == "table" then
     text = text:gsub("{([%w_]+)}", function(name)
       local value = values[name]
@@ -2031,6 +2061,27 @@ end
 function InstallerGfx.write_status_transcript(text)
   local line = tostring(text or "")
   if line == "" then return end
+  local stamp = os.date("%Y-%m-%d %H:%M:%S") .. "  " .. line
+  local max_lines = 80
+  local function write_tail(path)
+    local lines = {}
+    local rf = io.open(path, "r")
+    if rf then
+      for old in rf:lines() do
+        lines[#lines + 1] = old
+        if #lines > max_lines - 1 then
+          table.remove(lines, 1)
+        end
+      end
+      rf:close()
+    end
+    lines[#lines + 1] = stamp
+    local wf = io.open(path, "w")
+    if not wf then return false end
+    wf:write(table.concat(lines, "\n"), "\n")
+    wf:close()
+    return true
+  end
   local sep = InstallerGfx.sep()
   local paths = {}
   local base = InstallerGfx.script_dir()
@@ -2046,12 +2097,7 @@ function InstallerGfx.write_status_transcript(text)
       .. "ReaAssist-accessibility-status.txt"
   end
   for _, path in ipairs(paths) do
-    local f = io.open(path, "a")
-    if f then
-      f:write(os.date("%Y-%m-%d %H:%M:%S"), "  ", line, "\n")
-      f:close()
-      return
-    end
+    if write_tail(path) then return end
   end
 end
 
@@ -2929,7 +2975,7 @@ function InstallerGfx.spawn_pipeline()
       "  $url = "      .. Shell.ps_quote(url),
       "  $expected = " .. Shell.ps_quote(expected),
       "  Mark 'downloading'",
-      "  & curl.exe -fsSL --max-time 60 -o $tmp $url",
+      "  & curl.exe -fsSL --retry 3 --retry-delay 1 --retry-connrefused --max-time 60 -o $tmp $url",
       "  if ($LASTEXITCODE -ne 0) { Mark \"download_failed:$LASTEXITCODE\"; return }",
       "  Mark 'verifying'",
       "  function Get-Sha256Hex($path) {",
@@ -3014,7 +3060,7 @@ function InstallerGfx.spawn_pipeline()
       "mark() { printf '%s' \"$1\" > \"$MARKER\"; }",
       "mark running",
       "mark downloading",
-      "if ! curl -fsSL --max-time 60 -o \"$TMP\" \"$URL\"; then",
+      "if ! curl -fsSL --retry 3 --retry-delay 1 --retry-connrefused --max-time 60 -o \"$TMP\" \"$URL\"; then",
       "  mark \"download_failed:$?\"; exit 0",
       "fi",
       "mark verifying",
@@ -3565,7 +3611,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.4.2", -- public release version
+  VERSION           = "1.4.3", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -3586,6 +3632,7 @@ CFG = {
   SCREEN_READER_TEXT_FONT_SIZES = { 15, 18, 22, 26 },
   SCREEN_READER_TEXT_SIZE_FACTORS = { 1.0, 1.2, 1.45, 1.7 },
   MAX_HISTORY_TURNS = 6,         -- sliding window size (keep even)
+  HISTORY_TRIM_HYSTERESIS = 2,   -- when over cap, drop below MAX so the API prefix does not slide every turn
   MAX_DISPLAY_MSGS  = 120,       -- soft cap on display_messages; oldest pruned
   MAX_CACHED_PARAMS = 80,        -- per-plugin cap in scan_fx_params / scan_fx_params_deep_body / _estimate_deep_probes (cache file size + LLM context budget)
   WIN_W             = 600,       -- initial window width (user can resize)
@@ -3606,6 +3653,10 @@ CFG = {
                                  -- cost. Per-vector caps still apply; this is
                                  -- the aggregate backstop. Per-provider tuning
                                  -- is intentionally not exposed in v1.
+  MAX_VALIDATOR_RETRIES_PER_TURN = 3, -- lower cap on automatic repair/retry
+                                 -- loops before the aggregate POST cap.
+                                 -- Allows normal one- or two-step repairs
+                                 -- but stops chained validator failures early.
   -- Auto-update / repair / bootstrap URL. Points at the raw GitHub base
   -- for the public release channel. Dev smoke tests can redirect or disable
   -- this through the guarded test-only update override below; normal user
@@ -3945,6 +3996,7 @@ S = {
   sticky_context_order = {}, -- insertion-order key list; drives sticky_parts() emit order so appends
                              -- preserve byte-prefix cache stability. See Net.sticky_set / sticky_parts.
   turn_counter      = 0,   -- monotonic per-send counter; drives sticky_context_age expiry
+  history_trim_start = nil, -- API history-window start; hysteresis keeps prefix stable across adjacent turns
   input_buf         = "",
   status            = "idle",  -- "idle" | "waiting" | "running" | "error"
   pending_code      = nil,     -- Lua code block waiting for user confirmation
@@ -4002,14 +4054,13 @@ S = {
   curl_exited_clean = false,   -- true once exit code 0 has been observed; response
                                -- parsing must wait for this so partial writes are
                                -- never mistaken for complete JSON.
-  curl_output_seen_before_exit = false, -- logged once per request when tmp.out has
-                                       -- bytes before curl has reported exit code 0.
   kill_pending      = false,   -- Cancel was clicked but tmp.pid hadn't appeared
                                -- yet; main loop retries the kill until it lands.
   kill_pending_until = 0,      -- deadline (time_precise) for kill_pending retry
   last_poll_time    = 0,       -- timestamp of last poll-loop file check
   pending_provider_idx = nil,  -- provider index snapshot at send time (for response parsing)
   pending_model_idx    = nil,  -- model index snapshot at send time
+  pending_thinking_idx = nil,  -- thinking index snapshot at send time
   pending_jsfx_intent  = nil,  -- mirror of CTX.prompt_indicates_jsfx for the in-flight
                                -- turn, so the JSFX validator-retry path can rebuild the
                                -- snapshot with the same minimal-tracks trim used on the
@@ -4023,12 +4074,9 @@ S = {
   retry_scheduled   = false,
   retry_fire_time   = 0,
   retry_saved_body  = nil,     -- saved request body for retry
-  -- Anthropic extended-cache-ttl beta header fallback. Set true if the API
-  -- ever rejects the beta header (likely after Anthropic deprecates it).
-  -- Causes Net.fire_curl to strip the header and build_body_anthropic to
-  -- emit 5-minute ephemeral cache markers instead of 1-hour. Not persisted --
-  -- resets on script reload, which is fine (worst case: one 400 per session).
-  anthropic_beta_disabled = false,
+  retry_saved_provider_idx = nil,
+  retry_saved_model_idx    = nil,
+  retry_saved_thinking_idx = nil,
   pending_attachments     = nil,  -- snapshot of attachments for rebuild retries
   -- API reference. Single physical file (Resources/API_Ref.md)
   -- with seven SECTION-marker buckets (core, extended, items, envelopes,
@@ -4056,6 +4104,9 @@ S = {
   gemini_cache_name     = nil, -- e.g. "cachedContents/abc123"
   gemini_cache_model    = nil, -- model id the cache is bound to
   gemini_cache_signature = nil, -- source fingerprint for system/custom prefs + api_ref
+  gemini_cache_sig_sys = nil,   -- memo input for gemini_cache_source_signature
+  gemini_cache_sig_ref = nil,   -- memo input for gemini_cache_source_signature
+  gemini_cache_sig_value = nil, -- memo output for gemini_cache_source_signature
   gemini_cache_expires  = 0,   -- os.time() epoch seconds when cache expires
   gemini_cache_creating   = false, -- true while a cache-create curl is in flight
   gemini_cache_create_aborted = false, -- true when an in-flight create was invalidated
@@ -4063,6 +4114,7 @@ S = {
   gemini_cache_last_state = nil,   -- request-time cache diagnostics for bench/details
   gemini_cache_last_used  = false, -- true when the last Gemini body used cachedContent
   gemini_cache_last_create_reason = nil, -- last explicit-cache create outcome/blocker
+  openai_prompt_cache_key = nil, -- persisted routing-affinity key for OpenAI prompt cache
   last_cache_poll_time    = 0,     -- throttle for cache-create response polling
   -- Script save state
   saved_script_path = nil,
@@ -4101,103 +4153,13 @@ S = {
                                    -- grounded in the reference. Survives until
                                    -- session clear / factory reset.
   session_already_sent   = false,
+  tracks_already_sent    = false,
   fx_params_already_sent = false,
   plugin_ref_sent          = {},   -- set of plugin names sent this turn (dedup per-name, not turn-wide)
   pending_resolves         = {},   -- queue of resolve:Type tokens deferred when a popup blocks the loop
   pending_plugin_ref_names = {},   -- plugin_ref names accumulated before a popup bailed the parse loop
   pending_pref_plugin_types= {},   -- preferred_plugins types accumulated before a popup bailed the parse loop
-  context_loop_retries     = 0,    -- per-turn counter -- model re-asking for already-provided context (max 1 retry)
-  api_validator_retries    = 0,    -- per-turn counter -- model emitted nonexistent reaper.* calls (max 1 retry)
-  unavailable_global_validator_retries = 0, -- per-turn counter -- model typoed the reaper global before a real API call
-  action_validator_retries = 0,    -- per-turn counter -- model guessed unverified numeric Main_OnCommand IDs (max 1 retry)
-  toolbar_validator_retries = 0,   -- per-turn counter -- model emitted fragile toolbar/defer action script (max 1 retry)
-  transient_validator_retries = 0, -- per-turn counter -- model used naive audio-accessor detector for drum-hit stretch markers (max 1 retry)
-  audio_sync_validator_retries = 0, -- per-turn counter -- model used start/offset alignment for audio/take sync (max 1 retry)
-  audio_accessor_nil_validator_retries = 0, -- per-turn counter -- model compared GetAudioAccessorSamples return before nil guard (max 1 retry)
-  tempo_marker_validator_retries = 0, -- per-turn counter -- model inserted at old bar start instead of anchoring bar/beat to cursor (max 1 retry)
-  explicit_seconds_marker_validator_retries = 0, -- per-turn counter -- model overrode explicit second-based marker/region times
-  project_tempo_validator_retries = 0, -- per-turn counter -- model used BPM for timing without setting project tempo (max 1 retry)
-  loop_time_map_validator_retries = 0, -- per-turn counter -- model set loop/time selection by bar/beat without TimeMap2 (max 1 retry)
-  ruler_timebase_validator_retries = 0, -- per-turn counter -- model conflated ruler-lane timebase with timeline ruler display (max 1 retry)
-  drum_quantize_validator_retries = 0, -- per-turn counter -- model moved whole drum items instead of using shared stretch-marker map (max 1 retry)
-  drum_marker_sync_validator_retries = 0, -- per-turn counter -- model set drum stretch markers without range normalization (max 1 retry)
-  arity_validator_retries  = 0,    -- per-turn counter -- model emitted reaper.* call with wrong fixed arg count (max 1 retry)
-  sendidx_validator_retries = 0,   -- per-turn counter -- model ignored CreateTrackSend result and used literal send slots (max 1 retry)
-  timecode_workflow_validator_retries = 0, -- per-turn counter -- model routed the wrong native timecode track/send (max 1 retry)
-  stockfx_validator_retries = 0,   -- per-turn counter -- model substituted third-party FX for explicitly requested stock FX (max 1 retry)
-  timecodefx_validator_retries = 0, -- per-turn counter -- model tried to load SMPTE/LTC/MTC generator as an FX plugin (max 1 retry)
-  fxident_validator_retries = 0,   -- per-turn counter -- model stripped exact preferred AddByName identifier prefix/vendor (max 1 retry)
-  typed_action_format_validator_retries = 0, -- per-turn counter -- model emitted typed-action JSON under wrong fence label (max 1 retry)
-  typed_action_schema_validator_retries = 0, -- per-turn counter -- model emitted malformed/invalid typed-action JSON (max 1 retry)
-  typed_action_semantic_validator_retries = 0, -- per-turn counter -- model emitted valid typed-action JSON with risky routing semantics (max 1 retry)
-  typed_action_retry_offset = 0, -- per-turn counter -- retries spent before fallback-model escalation
-  typed_action_escalation_used = false, -- per-turn flag -- weak typed-action model escalated to configured fallback once
-  typed_action_escalation_count = 0, -- per-turn counter -- typed-action model escalation requests
-  typed_action_escalation_model = nil, -- provider/model id for the active fallback, when escalation fires
-  typed_action_escalation_restore = nil, -- original provider/model to restore after a hidden fallback-model rescue
-  typed_action_lua_fallback_used = false, -- per-turn flag -- structured edit fell back to one Lua retry after semantic exhaustion
-  fxrecfx_validator_retries = 0, -- per-turn counter -- model passed true for TrackFX_AddByName recFX on normal track FX
-  fxcheck_validator_retries = 0,   -- per-turn counter -- model emitted unchecked TrackFX_AddByName result (max 1 retry)
-  fxget_validator_retries = 0,     -- per-turn counter -- model silently skipped a required TrackFX_GetByName result (max 1 retry)
-  fxadd_getonly_validator_retries = 0, -- per-turn counter -- model used GetByName-only for an add-FX request (max 1 retry)
-  upsert_validator_retries = 0,    -- per-turn counter -- chain-build script violated upsert pairing (Get without Add, or Add without Get) (max 1 retry)
-  helper_int_validator_retries = 0,-- per-turn counter -- model rewrote a bundled helper body (e.g. dropped parens on the range-guard) (max 1 retry)
-  defer_validator_retries  = 0,    -- per-turn counter -- model emitted plugin param calls outside reaper.defer (max 1 retry)
-  proq4_slope_validator_retries = 0, -- per-turn counter -- model omitted 12 dB/oct slope on fresh Pro-Q 4 Bell boost/cut (max 1 retry)
-  fx_param_scope_validator_retries = 0, -- per-turn counter -- model wrote plugin params for add-only FX prompt (max 1 retry)
-  helper_validator_retries = 0,    -- per-turn counter -- model called helper functions without including their definitions (max 1 retry)
-  void_return_validator_retries = 0,-- per-turn counter -- model assigned a void reaper.* call result (max 1 retry)
-  sandbox_global_validator_retries = 0, -- per-turn counter -- model emitted Lua globals unavailable in the execution sandbox
-  track_deletion_validator_retries = 0, -- per-turn counter -- model deleted tracks without a delete/clear request
-  forbidden_track_creation_validator_retries = 0, -- per-turn counter -- model inserted tracks after user forbade new tracks/buses
-  forbidden_track_creation_retry_used = false, -- per-turn flag -- one hidden retry for explicit "no new bus/track" prompts
-  forbidden_fx_validator_retries = 0, -- per-turn counter -- model added FX after user forbade effects/plugins
-  forbidden_fx_retry_used = false, -- per-turn flag -- one hidden retry for explicit "no effects/plugins" prompts
-  track_duplication_validator_retries = 0, -- per-turn counter -- model inserted blank track for requested track duplicate
-  track_duplication_retry_used = false, -- per-turn flag -- one hidden retry for inert track-duplicate scripts
-  track_creation_validator_retries = 0, -- per-turn counter -- model looked up tracks instead of creating requested tracks (max 1 retry)
-  track_creation_retry_used = false, -- per-turn flag -- one hidden retry for inert create-track scripts
-  track_creation_index_retry_used = false, -- per-turn flag -- one hidden retry for bad InsertTrackAtIndex/GetTrack pairing
-  track_name_retry_used = false, -- per-turn flag -- one hidden retry for unnamed created instrument/MIDI tracks
-  no_code_action_retry_used = false, -- per-turn flag -- one hidden retry for prose-only action responses
-  region_marker_validator_retries = 0, -- per-turn counter -- model created marker for requested region
-  region_marker_retry_used = false, -- per-turn flag -- one hidden retry for marker-vs-region mistakes
-  marker_pair_validator_retries = 0, -- per-turn counter -- model used a requested marker+region name only as a region
-  marker_pair_retry_used = false, -- per-turn flag -- one hidden retry for missing point marker alongside same-named region
-  folder_boundary_retry_used = false, -- per-turn flag -- one hidden retry for wrong I_FOLDERDEPTH close track
-  track_index_validator_retries = 0, -- per-turn counter -- model used 1-based SESSION track indices in GetTrack (max 1 retry)
-  track_index_retry_used = false, -- per-turn flag -- one hidden retry for literal GetTrack index mismatch
-  target_consistency_validator_retries = 0, -- per-turn counter -- model added a hard name guard for a numeric track target
-  target_consistency_retry_used = false, -- per-turn flag -- one hidden retry for numeric target/name-guard drift
-  track_selection_validator_retries = 0, -- per-turn counter -- model wrote B/I_SELECTED via SetMediaTrackInfo_Value (max 1 retry)
-  track_selection_retry_used = false, -- per-turn flag -- one hidden retry for track selection write anti-pattern
-  setmedia_bool_validator_retries = 0, -- per-turn counter -- model passed true/false to SetMediaTrackInfo_Value
-  setmedia_bool_retry_used = false, -- per-turn flag -- one hidden retry for numeric track-property flags
-  exclusive_selection_retry_used = false, -- per-turn flag -- one hidden retry for omitted "select only" writes
-  bus_routing_validator_retries = 0, -- per-turn counter -- model omitted sends for requested bus/return routing
-  bus_routing_retry_used = false, -- per-turn flag -- one hidden retry for missing sends to bus/return
-  sidechain_send_retry_used = false, -- per-turn flag -- one hidden retry for missing kick-to-bass sidechain send
-  podcast_bus_retry_used = false, -- per-turn flag -- one hidden retry for incomplete podcast bus routing
-  track_pan_validator_retries = 0, -- per-turn counter -- model wrote send pan when asked for track pan (max 1 retry)
-  track_pan_retry_used = false, -- per-turn flag -- one hidden retry for track-pan API anti-pattern
-  master_send_validator_retries = 0, -- per-turn counter -- model used RemoveTrackSend for B_MAINSEND (max 1 retry)
-  master_send_retry_used = false, -- per-turn flag -- one hidden retry for master-send API anti-pattern
-  midi_item_validator_retries = 0, -- per-turn counter -- model used a plain media item as a new MIDI item (max 1 retry)
-  midi_item_retry_used    = false, -- per-turn flag -- one hidden retry for plain-item MIDI insertion anti-pattern
-  midi_input_validator_retries = 0, -- per-turn counter -- model invented MIDI input all-except-device routing (max 1 retry)
-  midi_input_retry_used = false, -- per-turn flag -- one hidden retry for MIDI input device filtering
-  media_item_label_validator_retries = 0, -- per-turn counter -- model used MediaItem P_NAME for visible item labels
-  media_item_label_retry_used = false, -- per-turn flag -- one hidden retry for MediaItem-vs-take label confusion
-  bare_lua_retry_used      = false,-- per-turn flag -- valid-looking Lua arrived without a ```lua fence; one hidden re-fence retry
-  unclosed_fence_retry_used = false,-- per-turn flag -- Lua fence was opened but not closed; one hidden re-fence retry
-  parse_retry_used         = false,-- per-turn flag -- extracted ```lua block failed Lua syntax check; one hidden retry with the parser error
-  jsfx_validator_retries   = 0,    -- per-turn counter -- generated JSFX failed Code.validate_jsfx (max 1 retry)
-  jsfx_wrong_artifact_retry_used = false, -- per-turn flag -- JSFX request returned Lua/ReaScript instead of JSFX
-  jsfx_companion_validator_retries = 0, -- per-turn counter -- JSFX track install request omitted companion Lua
-  jsfx_companion_retry_used = false, -- per-turn flag -- hidden retry for missing JSFX companion Lua
-  length_retry_used        = false,-- per-turn flag -- empty-text-from-length retry already fired with thinking forced off
-  empty_retry_used         = false,-- per-turn flag -- generic-empty-response retry already fired (finish_reason=stop with no content)
-  thinking_override_idx    = nil,  -- per-turn override for prefs.thinking_idx (set during length auto-retry to force "none")
+  turn_retries         = {},      -- per-turn retry/call counters and one-shot guards; see S._turn_retry_keys
   fx_list_already_sent   = false,
   fx_chains_already_sent = false,
   track_flags_already_sent = false,
@@ -4239,6 +4201,232 @@ S = {
 S.section_id = SECTION_ID
 S.cmd_id = CMD_ID
 
+S._turn_retry_keys = {
+  context_loop_retries = true,
+  validator_retries_this_turn = true,
+  api_calls_this_turn = true,
+  api_validator_retries = true,
+  unavailable_global_validator_retries = true,
+  action_validator_retries = true,
+  toolbar_validator_retries = true,
+  transient_validator_retries = true,
+  audio_sync_validator_retries = true,
+  audio_accessor_nil_validator_retries = true,
+  tempo_marker_validator_retries = true,
+  explicit_seconds_marker_validator_retries = true,
+  explicit_seconds_marker_retry_used = true,
+  project_tempo_validator_retries = true,
+  loop_time_map_validator_retries = true,
+  ruler_timebase_validator_retries = true,
+  drum_quantize_validator_retries = true,
+  drum_marker_sync_validator_retries = true,
+  arity_validator_retries = true,
+  sendidx_validator_retries = true,
+  timecode_workflow_validator_retries = true,
+  stockfx_validator_retries = true,
+  timecodefx_validator_retries = true,
+  fxident_validator_retries = true,
+  typed_action_format_validator_retries = true,
+  typed_action_schema_validator_retries = true,
+  typed_action_semantic_validator_retries = true,
+  typed_action_retry_offset = true,
+  typed_action_escalation_used = true,
+  typed_action_escalation_count = true,
+  typed_action_escalation_model = true,
+  typed_action_escalation_restore = true,
+  typed_action_lua_fallback_used = true,
+  fxrecfx_validator_retries = true,
+  fxcheck_validator_retries = true,
+  fxget_validator_retries = true,
+  fxadd_getonly_validator_retries = true,
+  upsert_validator_retries = true,
+  helper_int_validator_retries = true,
+  defer_validator_retries = true,
+  proq4_slope_validator_retries = true,
+  fx_param_scope_validator_retries = true,
+  helper_validator_retries = true,
+  void_return_validator_retries = true,
+  void_return_retry_used = true,
+  sandbox_global_validator_retries = true,
+  track_deletion_validator_retries = true,
+  track_deletion_retry_used = true,
+  forbidden_track_creation_validator_retries = true,
+  forbidden_track_creation_retry_used = true,
+  forbidden_fx_validator_retries = true,
+  forbidden_fx_retry_used = true,
+  track_duplication_validator_retries = true,
+  track_duplication_retry_used = true,
+  track_creation_validator_retries = true,
+  track_creation_retry_used = true,
+  track_creation_index_retry_used = true,
+  track_name_retry_used = true,
+  no_code_action_retry_used = true,
+  region_marker_validator_retries = true,
+  region_marker_retry_used = true,
+  marker_pair_validator_retries = true,
+  marker_pair_retry_used = true,
+  folder_boundary_retry_used = true,
+  track_index_validator_retries = true,
+  track_index_retry_used = true,
+  target_consistency_validator_retries = true,
+  target_consistency_retry_used = true,
+  track_selection_validator_retries = true,
+  track_selection_retry_used = true,
+  setmedia_bool_validator_retries = true,
+  setmedia_bool_retry_used = true,
+  exclusive_selection_retry_used = true,
+  bus_routing_validator_retries = true,
+  bus_routing_retry_used = true,
+  sidechain_send_retry_used = true,
+  podcast_bus_retry_used = true,
+  track_pan_validator_retries = true,
+  track_pan_retry_used = true,
+  master_send_validator_retries = true,
+  master_send_retry_used = true,
+  midi_item_validator_retries = true,
+  midi_item_retry_used = true,
+  midi_input_validator_retries = true,
+  midi_input_retry_used = true,
+  media_item_label_validator_retries = true,
+  media_item_label_retry_used = true,
+  bare_lua_retry_used = true,
+  unclosed_fence_retry_used = true,
+  parse_retry_used = true,
+  jsfx_validator_retries = true,
+  jsfx_wrong_artifact_retry_used = true,
+  jsfx_companion_validator_retries = true,
+  jsfx_companion_retry_used = true,
+  length_retry_used = true,
+  empty_retry_used = true,
+  thinking_override_idx = true,
+}
+
+S._turn_retry_defaults = {
+  context_loop_retries = 0,
+  validator_retries_this_turn = 0,
+  api_calls_this_turn = 0,
+  api_validator_retries = 0,
+  unavailable_global_validator_retries = 0,
+  action_validator_retries = 0,
+  toolbar_validator_retries = 0,
+  transient_validator_retries = 0,
+  audio_sync_validator_retries = 0,
+  audio_accessor_nil_validator_retries = 0,
+  tempo_marker_validator_retries = 0,
+  explicit_seconds_marker_validator_retries = 0,
+  explicit_seconds_marker_retry_used = false,
+  project_tempo_validator_retries = 0,
+  loop_time_map_validator_retries = 0,
+  ruler_timebase_validator_retries = 0,
+  drum_quantize_validator_retries = 0,
+  drum_marker_sync_validator_retries = 0,
+  arity_validator_retries = 0,
+  sendidx_validator_retries = 0,
+  timecode_workflow_validator_retries = 0,
+  stockfx_validator_retries = 0,
+  timecodefx_validator_retries = 0,
+  fxident_validator_retries = 0,
+  typed_action_format_validator_retries = 0,
+  typed_action_schema_validator_retries = 0,
+  typed_action_semantic_validator_retries = 0,
+  typed_action_retry_offset = 0,
+  typed_action_escalation_used = false,
+  typed_action_escalation_count = 0,
+  typed_action_lua_fallback_used = false,
+  fxrecfx_validator_retries = 0,
+  fxcheck_validator_retries = 0,
+  fxget_validator_retries = 0,
+  fxadd_getonly_validator_retries = 0,
+  upsert_validator_retries = 0,
+  helper_int_validator_retries = 0,
+  defer_validator_retries = 0,
+  proq4_slope_validator_retries = 0,
+  fx_param_scope_validator_retries = 0,
+  helper_validator_retries = 0,
+  void_return_validator_retries = 0,
+  void_return_retry_used = false,
+  sandbox_global_validator_retries = 0,
+  track_deletion_validator_retries = 0,
+  track_deletion_retry_used = false,
+  forbidden_track_creation_validator_retries = 0,
+  forbidden_track_creation_retry_used = false,
+  forbidden_fx_validator_retries = 0,
+  forbidden_fx_retry_used = false,
+  track_duplication_validator_retries = 0,
+  track_duplication_retry_used = false,
+  track_creation_validator_retries = 0,
+  track_creation_retry_used = false,
+  track_creation_index_retry_used = false,
+  track_name_retry_used = false,
+  no_code_action_retry_used = false,
+  region_marker_validator_retries = 0,
+  region_marker_retry_used = false,
+  marker_pair_validator_retries = 0,
+  marker_pair_retry_used = false,
+  folder_boundary_retry_used = false,
+  track_index_validator_retries = 0,
+  track_index_retry_used = false,
+  target_consistency_validator_retries = 0,
+  target_consistency_retry_used = false,
+  track_selection_validator_retries = 0,
+  track_selection_retry_used = false,
+  setmedia_bool_validator_retries = 0,
+  setmedia_bool_retry_used = false,
+  exclusive_selection_retry_used = false,
+  bus_routing_validator_retries = 0,
+  bus_routing_retry_used = false,
+  sidechain_send_retry_used = false,
+  podcast_bus_retry_used = false,
+  track_pan_validator_retries = 0,
+  track_pan_retry_used = false,
+  master_send_validator_retries = 0,
+  master_send_retry_used = false,
+  midi_item_validator_retries = 0,
+  midi_item_retry_used = false,
+  midi_input_validator_retries = 0,
+  midi_input_retry_used = false,
+  media_item_label_validator_retries = 0,
+  media_item_label_retry_used = false,
+  bare_lua_retry_used = false,
+  unclosed_fence_retry_used = false,
+  parse_retry_used = false,
+  jsfx_validator_retries = 0,
+  jsfx_wrong_artifact_retry_used = false,
+  jsfx_companion_validator_retries = 0,
+  jsfx_companion_retry_used = false,
+  length_retry_used = false,
+  empty_retry_used = false,
+}
+
+function S.reset_turn_retries()
+  S.turn_retries = {}
+end
+
+setmetatable(S, {
+  __index = function(t, k)
+    local keys = rawget(t, "_turn_retry_keys")
+    if keys and keys[k] then
+      local values = rawget(t, "turn_retries")
+      if type(values) == "table" and values[k] ~= nil then return values[k] end
+      local defaults = rawget(t, "_turn_retry_defaults") or {}
+      return defaults[k]
+    end
+  end,
+  __newindex = function(t, k, v)
+    local keys = rawget(t, "_turn_retry_keys")
+    if keys and keys[k] then
+      local values = rawget(t, "turn_retries")
+      if type(values) ~= "table" then
+        values = {}
+        rawset(t, "turn_retries", values)
+      end
+      values[k] = v
+    else
+      rawset(t, k, v)
+    end
+  end,
+})
+
 do
   local clean_boot = reaper.GetExtState(CFG.EXT_NS, "factory_reset_clean_boot")
   if clean_boot == "1" then
@@ -4250,12 +4438,23 @@ do
   end
 end
 
-if S.screen_reader_startup_intent
-   and not S.screen_reader_mode
-   and RA.screen_reader_action_cmd
-   and RA.screen_reader_action_cmd ~= 0 then
-  reaper.Main_OnCommand(RA.screen_reader_action_cmd, 0)
-  return
+if S.screen_reader_startup_intent and not S.screen_reader_mode then
+  if RA.screen_reader_action_cmd and RA.screen_reader_action_cmd ~= 0 then
+    reaper.Main_OnCommand(RA.screen_reader_action_cmd, 0)
+    return
+  end
+  S.screen_reader_startup_intent = false
+  S.screen_reader_missing_action_fallback = true
+  local msg = RA.early_t(
+    "Screen Reader Mode is preferred, but the Screen Reader action could not be found.\n\n" ..
+    "Starting the standard ReaAssist window instead. To restore automatic Screen Reader startup, repair or reinstall ReaAssist.",
+    "Se prefiere el modo lector de pantalla, pero no se pudo encontrar la acción del lector de pantalla.\n\n" ..
+    "Se abrirá la ventana estándar de ReaAssist. Para restaurar el inicio automático del lector de pantalla, repara o reinstala ReaAssist.")
+  if reaper.osara_outputMessage then
+    pcall(reaper.osara_outputMessage, msg)
+  else
+    reaper.ShowMessageBox(msg, "ReaAssist - Screen Reader Mode", 0)
+  end
 end
 
 S.INSTANCE_ID = string.format("%.6f_%d", time_precise(), math.random(100000, 999999))
@@ -4289,6 +4488,13 @@ function RA.temp_instance_suffix_from_name(filename)
   return s:match("[_%.](inst_[%w%-_]+)%.[^%.]+$")
     or s:match("^reaassist_live_(inst_[%w%-_]+)%.txt$")
     or s:match("[_%.](inst_[%w%-_]+)$")
+end
+
+function RA.is_windows_reserved_name(name)
+  local n = tostring(name or ""):upper()
+  return n == "CON" or n == "PRN" or n == "AUX" or n == "NUL"
+    or n:match("^COM[1-9]$") ~= nil
+    or n:match("^LPT[1-9]$") ~= nil
 end
 
 function RA.temp_instance_is_live(instance_suffix, now)
@@ -5188,7 +5394,7 @@ prefs = {
   auto_backup      = reaper.GetExtState(CFG.EXT_NS, "auto_backup")      ~= "0",  -- default on
   show_details     = reaper.GetExtState(CFG.EXT_NS, "show_details")     == "1",  -- default off
   custom_instructions_enabled = reaper.GetExtState(CFG.EXT_NS, "custom_instructions_enabled") == "1", -- default off
-  debug_logging    = reaper.GetExtState(CFG.EXT_NS, "debug_logging")    ~= "0",  -- default ON during early-release window so testers' bug reports include full traffic without manual opt-in; flip to == "1" later when bug volume settles
+  debug_logging    = reaper.GetExtState(CFG.EXT_NS, "debug_logging")    == "1",  -- default off; verbose request/response logging is opt-in
   include_api_ref  = reaper.GetExtState(CFG.EXT_NS, "include_api_ref")  == "1",  -- default off (prompt-bundle era; request docs on-demand)
   include_snapshot = reaper.GetExtState(CFG.EXT_NS, "include_snapshot") ~= "0", -- default on
   compact_history  = reaper.GetExtState(CFG.EXT_NS, "compact_history")  == "1", -- default off; saves tail tokens by summarizing older successful code replies
@@ -5209,11 +5415,17 @@ prefs = {
   cloud_request_timeout = 180,  -- seconds; user-facing watchdog timeout for cloud providers (Claude/ChatGPT/Gemini). Set below from ExtState. Custom providers use their own per-provider timeout instead.
   -- Testing-only: when true, a per-send timestamp is appended to the
   -- system prompt as a hidden comment so every request hashes to a new
-  -- cache prefix across all three providers. Gives reliably cold-cache
-  -- measurements during cost testing. Persisted so a test session
-  -- survives a reload, but users who forget to toggle it off will see
-  -- higher costs until they do.
-  test_force_cold_cache = reaper.GetExtState(CFG.EXT_NS, "test_force_cold_cache") == "1",
+  -- cache prefix across all three providers. Consumed as a one-shot startup
+  -- flag so an accidentally persisted test toggle cannot silently defeat
+  -- cache behavior across future sessions.
+  test_force_cold_cache = (function()
+    local enabled = reaper.GetExtState(CFG.EXT_NS, "test_force_cold_cache") == "1"
+    if enabled and type(reaper.DeleteExtState) == "function" then
+      reaper.DeleteExtState(CFG.EXT_NS, "test_force_cold_cache", false)
+      reaper.DeleteExtState(CFG.EXT_NS, "test_force_cold_cache", true)
+    end
+    return enabled
+  end)(),
   -- Dev-only: the FabFilter-hide flag (used to test resolve/not-found
   -- popups without physically uninstalling anything) lives in ExtState
   -- under "dev_hide_fabfilter" and is read directly at every consumer.
@@ -5400,6 +5612,7 @@ local function _elide_static_refs(s)
   -- "<label>\0<body>", reset on session header / clear / prune so
   -- references never point outside the current log window.
   local _DEDUP_HEADERS = {
+    { hdr = "SESSION CONTEXT:",     label = "SESSION CONTEXT" },
     { hdr = "SESSION CONTEXT ",     label = "SESSION CONTEXT" },
     { hdr = "PINNED REFERENCES ",   label = "PINNED REFERENCES" },
     { hdr = "INSTALLED FX MATCHING ", label = "INSTALLED FX MATCHING" },
@@ -5589,7 +5802,7 @@ local function _render_request(body)
       model = true, max_tokens = true, max_completion_tokens = true,
       temperature = true, system = true, systemInstruction = true,
       messages = true, contents = true, tools = true,
-      prompt_cache_key = true,  -- fixed per-session id; noise in the log
+      prompt_cache_key = true,  -- fixed routing id; noise in the log
     }
     local extras = {}
     local extra_keys = {}
@@ -5625,10 +5838,11 @@ local function _render_request(body)
         -- conversation's request log doesn't grow quadratically with prior
         -- code-gen output. Short acks ("Understood.") fall through and render
         -- normally.
-        if m.role == "assistant" then
+        if m.role == "assistant" or m.role == "model" then
           local len = _assistant_text_len(content)
           if len > _ASST_HISTORY_TRIM_THRESHOLD then
-            out[#out+1] = "      [assistant turn replay -- " .. len
+            out[#out+1] = "      [" .. tostring(m.role)
+              .. " turn replay -- " .. len
               .. " chars; full text in earlier RESPONSE block]"
           else
             out[#out+1] = _render_content(content, "      ")
@@ -5718,6 +5932,7 @@ end
 -- holds after the new turn is appended. Session header + system info
 -- above the first kept REQUEST delimiter are preserved.
 local MAX_LOG_TURNS = 40
+local LOG_PRUNE_KEEP_TURNS = 32
 local _REQ_DELIM = "\n======= REQUEST #"
 
 -- Monotonic turn counter, shared by REQUEST / RESPONSE pairs so it's obvious
@@ -5725,6 +5940,7 @@ local _REQ_DELIM = "\n======= REQUEST #"
 -- scanning the existing log file for the highest existing #N so numbers never
 -- repeat across script reloads.
 Log._turn_counter = nil
+Log._window_turn_count = nil
 
 -- Cross-request dedupe state for repeated almost-static section blocks
 -- (SESSION CONTEXT / PINNED REFERENCES / INSTALLED FX MATCHING). Maps
@@ -5741,6 +5957,7 @@ Log._last_chain_msg = nil
 local function _init_turn_counter()
   if Log._turn_counter then return end
   Log._turn_counter = 0
+  Log._window_turn_count = 0
   local f = io.open(Log.path, "r")
   if not f then return end
   local content = f:read("*a")
@@ -5748,12 +5965,14 @@ local function _init_turn_counter()
   if not content then return end
   -- Find the largest "#N" immediately after a REQUEST delimiter.
   for n in content:gmatch("======= REQUEST #(%d+)") do
+    Log._window_turn_count = Log._window_turn_count + 1
     local num = tonumber(n)
     if num and num > Log._turn_counter then Log._turn_counter = num end
   end
 end
 
 local function _prune_log()
+  if (Log._window_turn_count or 0) < MAX_LOG_TURNS then return end
   local f = io.open(Log.path, "r")
   if not f then return end
   local content = f:read("*a")
@@ -5765,7 +5984,10 @@ local function _prune_log()
     positions[#positions+1] = p
     pos = p + #_REQ_DELIM
   end
-  if #positions < MAX_LOG_TURNS then return end
+  if #positions < MAX_LOG_TURNS then
+    Log._window_turn_count = #positions
+    return
+  end
   -- We're about to drop the oldest turns. Any back-references in the
   -- kept turns to "[X same as request #N]" where N is in the dropped
   -- range now point outside the file. Reset the dedupe state so the
@@ -5784,10 +6006,12 @@ local function _prune_log()
   Log._seen_sections  = {}
   Log._last_chain_msg = nil
   -- Preserve the prefix (session header / system info) above positions[1],
-  -- then keep the newest (MAX_LOG_TURNS - 1) turns so the append makes MAX.
+  -- then keep a hysteresis window so the append does not force another full
+  -- prune/rewrite on the very next request once the log reaches MAX.
   local prefix_end = positions[1] - 1
   local prefix     = content:sub(1, prefix_end)
-  local keep_from  = positions[#positions - (MAX_LOG_TURNS - 1) + 1]
+  local keep_count = math.min(LOG_PRUNE_KEEP_TURNS, #positions)
+  local keep_from  = positions[#positions - keep_count + 1]
   if not keep_from then return end
   local trimmed = content:sub(keep_from)
   local fw = io.open(Log.path, "w")
@@ -5797,6 +6021,7 @@ local function _prune_log()
     .. MAX_LOG_TURNS .. " turns]\n")
   fw:write(trimmed)
   fw:close()
+  Log._window_turn_count = keep_count
 end
 
 Log.request = function(provider_label, body)
@@ -5807,10 +6032,14 @@ Log.request = function(provider_label, body)
     local f = io.open(Log.path, "r")
     if not f then
       Log._session_header_written = false
+      Log._window_turn_count = 0
     else
       local first = f:read(1)
       f:close()
-      if not first then Log._session_header_written = false end
+      if not first then
+        Log._session_header_written = false
+        Log._window_turn_count = 0
+      end
     end
   end
   -- First request since script load (or file was externally deleted): drop a
@@ -5820,9 +6049,10 @@ Log.request = function(provider_label, body)
     Log._session_header_written = true
     Log.session_header()
   end
-  _prune_log()
   _init_turn_counter()
+  _prune_log()
   Log._turn_counter = Log._turn_counter + 1
+  Log._window_turn_count = (Log._window_turn_count or 0) + 1
   Log._current_turn_num = Log._turn_counter
   local ts = os.date("%Y-%m-%d %H:%M:%S")
   _log_write(_REQ_DELIM .. Log._current_turn_num .. " ======= " .. ts
@@ -5868,6 +6098,11 @@ if RA._MIGRATE_MESSAGES then
     Log.line("MIGRATE", msg)
   end
   RA._MIGRATE_MESSAGES = nil
+end
+
+if S.screen_reader_missing_action_fallback then
+  Log.line("SCREEN-READER",
+    "Preferred startup fell back to the standard UI because the Screen Reader action was unavailable.")
 end
 
 if RA.update_override_status then
@@ -6051,7 +6286,8 @@ end
 -- Each entry: { label, id, price_in, price_out, price_cache_r [, price_cache_w] [, flags] }
 -- Prices are USD per 1 million tokens.
 -- Sources: anthropic.com/pricing, openai.com/api/pricing, ai.google.dev/gemini-api/docs/pricing
--- Last updated: May 2026
+-- Last pricing re-check: Jul 2026. Sonnet 5 uses Anthropic promotional
+-- pricing through 2026-08-31; re-check before any release on/after 2026-09-01.
 -- =============================================================================
 -- Provider definitions
 -- =============================================================================
@@ -6078,7 +6314,6 @@ PROVIDERS = {
     auth_prefix   = "",
     extra_headers = {
       "anthropic-version: 2023-06-01",
-      "anthropic-beta: extended-cache-ttl-2025-04-11",
     },
     key_prefix    = "sk-ant-",
     key_min_len   = 40,
@@ -6443,10 +6678,24 @@ function Store._should_quarantine_json_read_error(err)
   return err and err ~= "missing" and err ~= "empty" and err ~= "read_failed"
 end
 
+function Store._open_error_is_missing(err, code)
+  if code == 2 then return true end
+  local msg = tostring(err or ""):lower()
+  return msg:find("no such file", 1, true) ~= nil
+    or msg:find("not found", 1, true) ~= nil
+    or msg:find("cannot find", 1, true) ~= nil
+end
+
 function Store._read_text_file(path)
   if not path or path == "" then return nil, "missing" end
-  local ok_f, f = pcall(io.open, path, "r")
-  if not ok_f or not f then return nil, "missing", f end
+  local ok_f, f, ferr, fcode = pcall(io.open, path, "r")
+  if not ok_f then return nil, "read_failed", f end
+  if not f then
+    if Store._open_error_is_missing(ferr, fcode) then
+      return nil, "missing", ferr
+    end
+    return nil, "read_failed", ferr or "open failed"
+  end
 
   local ok_r, raw, rerr = pcall(f.read, f, "*a")
   local ok_c, c_ok, c_err = pcall(f.close, f)
@@ -6904,6 +7153,7 @@ function Store.cleanup_state_extstate()
     "gemini_cache_model",
     "gemini_cache_signature",
     "gemini_cache_expires",
+    "openai_prompt_cache_key",
     "ceiling_next_base",
     "ceiling_slots",
     "diag_auto_last_ping_at",
@@ -7443,11 +7693,7 @@ function Store.save_config()
   local doc = Store.config_doc()
   doc.schema_version = 1
   doc.preferences = Store.current_preferences()
-  if Store.has_usable_provider() then
-    doc.selection = Store.current_selection()
-  else
-    doc.selection = nil
-  end
+  doc.selection = Store.current_selection()
   local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
   if err then Store._notify_write_failure("Config.json", err) end
   if not err then Store.cleanup_config_extstate(doc) end
@@ -7581,6 +7827,12 @@ function Store.seed_state_from_extstate(doc)
     if cache_expires then doc.gemini_cache.expires = math_floor(cache_expires) end
   end
 
+  doc.openai = type(doc.openai) == "table" and doc.openai or {}
+  local prompt_cache_key = reaper.GetExtState(CFG.EXT_NS, "openai_prompt_cache_key")
+  if prompt_cache_key ~= "" and doc.openai.prompt_cache_key == nil then
+    doc.openai.prompt_cache_key = prompt_cache_key
+  end
+
   doc.output_ceiling = type(doc.output_ceiling) == "table"
     and doc.output_ceiling or {}
   local next_base = tonumber(reaper.GetExtState(CFG.EXT_NS, "ceiling_next_base"))
@@ -7621,6 +7873,7 @@ function Store.legacy_state_extstate_exists()
     "gemini_cache_model",
     "gemini_cache_signature",
     "gemini_cache_expires",
+    "openai_prompt_cache_key",
     "ceiling_next_base",
     "ceiling_slots",
     "diag_auto_last_ping_at",
@@ -7782,6 +8035,29 @@ function Store.clear_gemini_cache_state()
   local doc = Store.state_doc()
   doc.gemini_cache = {}
   return Store.save_state()
+end
+
+function Store.openai_prompt_cache_key()
+  local doc = Store.state_doc()
+  doc.openai = type(doc.openai) == "table" and doc.openai or {}
+  local key = type(doc.openai.prompt_cache_key) == "string"
+    and doc.openai.prompt_cache_key or ""
+  if key ~= "" then return key end
+  key = reaper.GetExtState(CFG.EXT_NS, "openai_prompt_cache_key")
+  if key == "" then
+    key = string.format("ra_%s_%06d",
+      tostring(time_precise()):gsub("[^%w]", ""),
+      math.random(100000, 999999))
+  end
+  key = key:gsub("[^%w%-_]", "_")
+  if #key > 96 then key = key:sub(1, 96) end
+  if key == "" then key = "ra_prompt_cache" end
+  doc.openai.prompt_cache_key = key
+  local err = Store.save_state()
+  if err then
+    reaper.SetExtState(CFG.EXT_NS, "openai_prompt_cache_key", key, true)
+  end
+  return key
 end
 
 function Store.ceiling_output_doc()
@@ -7970,23 +8246,24 @@ local function sanitize_utf8(s)
 end
 JSON.sanitize_utf8 = sanitize_utf8
 
+JSON._ESCAPE_MAP = JSON._ESCAPE_MAP or {
+  ['\\'] = '\\\\',
+  ['"'] = '\\"',
+  ['\n'] = '\\n',
+  ['\r'] = '\\r',
+  ['\t'] = '\\t',
+}
+
 -- Escapes a Lua string for safe embedding inside a JSON string value.
--- Order matters: backslashes must be escaped first.
 -- Also escapes control characters below 0x20 (backspace, form feed,
 -- null bytes, etc.) that can appear in track names or user input and would
 -- produce invalid JSON, causing silent API call failures. Invalid UTF-8 byte
 -- sequences are replaced with '?' so the API never sees malformed payloads.
 function JSON.escape(s)
-  return sanitize_utf8(s)
-           :gsub('\\', '\\\\')
-           :gsub('"',  '\\"')
-           :gsub('\n', '\\n')
-           :gsub('\r', '\\r')
-           :gsub('\t', '\\t')
-           :gsub('[\x00-\x08\x0b\x0c\x0e-\x1f]', function(c)
-             -- Encode remaining control chars as \u00XX JSON unicode escapes.
-             return str_format('\\u%04x', str_byte(c))
-           end)
+  return sanitize_utf8(s):gsub('[\\"\n\r\t\x00-\x08\x0b\x0c\x0e-\x1f]',
+    function(c)
+      return JSON._ESCAPE_MAP[c] or str_format('\\u%04x', str_byte(c))
+    end)
 end
 
 -- =============================================================================
@@ -8020,14 +8297,25 @@ do
   decode_string = function(s, pos)
     -- pos points to the opening '"'
     pos = pos + 1  -- skip opening quote
+    local start = pos
     local len = #s
-    local buf = {}
+    local buf
     while pos <= len do
-      local ch = str_sub(s, pos, pos)
+      local hit = str_find(s, '[\\"]', pos)
+      if not hit then return nil, "unterminated string" end
+      local ch = str_sub(s, hit, hit)
       if ch == '"' then
-        return tbl_concat(buf), pos + 1
-      elseif ch == '\\' then
-        pos = pos + 1
+        if not buf then return str_sub(s, start, hit - 1), hit + 1 end
+        if hit > pos then buf[#buf+1] = str_sub(s, pos, hit - 1) end
+        return tbl_concat(buf), hit + 1
+      else
+        if not buf then
+          buf = {}
+          if hit > start then buf[1] = str_sub(s, start, hit - 1) end
+        elseif hit > pos then
+          buf[#buf+1] = str_sub(s, pos, hit - 1)
+        end
+        pos = hit + 1
         if pos > len then return nil, "unterminated string escape" end
         local esc = str_sub(s, pos, pos)
         if     esc == 'n'  then buf[#buf+1] = '\n'
@@ -8079,8 +8367,6 @@ do
           -- Unknown escape: preserve as-is for debugging.
           buf[#buf+1] = '\\' .. esc
         end
-      else
-        buf[#buf+1] = ch
       end
       pos = pos + 1
     end
@@ -8213,7 +8499,7 @@ do
     if math.floor(n) == n and math.abs(n) < 2^53 then
       return str_format("%d", n)
     end
-    return str_format("%.4f", n)
+    return str_format("%.14g", n)
   end
 
   local function encode_array(t, indent, depth)
@@ -8459,7 +8745,7 @@ end
 -- cleanly; the re-encoded canonical form is what gets stored. Called from the
 -- UI save handlers for both the provider-level field and the per-model popup.
 --
--- JSON.decode is populated before custom providers register at startup.
+-- JSON.decode is already populated by the time custom providers load or save.
 function Custom.validate_extra_body(text)
   if not text then return "", nil end
   local trimmed = text:match("^%s*(.-)%s*$") or ""
@@ -8523,10 +8809,9 @@ function Custom.validate_notes(text)
   return trimmed, nil
 end
 
--- Seed math.random once per script load so consecutive Custom.gen_id calls
--- don't return the same value. math.randomseed is otherwise never called;
--- Lua's default seed is deterministic, so two reloads would otherwise mint
--- identical ids and collide with previously-saved records.
+-- Seed math.random once per script load from REAPER's high-resolution clock so
+-- consecutive Custom.gen_id calls across rapid reloads do not reuse the same
+-- short random sequence.
 math.randomseed(math.floor((reaper.time_precise() or 0) * 1e6) % 2147483647)
 -- Generate a new stable record id. Prefixed "custom_" so logs and ExtState
 -- dumps are self-describing; 8 random hex chars for 4-billion-wide namespace
@@ -8600,6 +8885,8 @@ end
 --
 -- Row format:
 --   id|price_in|price_out|context|price_cache_r|notes[\t<extra_body_json>]
+-- Legacy rows may omit the cache-hit price and/or notes fields. Keep them
+-- loadable so an upgrade does not silently drop a user's custom models.
 --
 -- Empty / malformed rows are dropped.
 local function parse_models_blob(raw)
@@ -8610,9 +8897,16 @@ local function parse_models_blob(raw)
       -- Peel off optional extra_body after the tab sentinel.
       local main, extra = line:match("^(.-)\t(.*)$")
       if not main then main = line end
-      local id, pin, pout, ctx, pcache, notes =
-        main:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
-      if id and id ~= "" then
+      local fields = {}
+      for part in (main .. "|"):gmatch("([^|]*)|") do
+        fields[#fields+1] = part
+      end
+      local id, pin, pout, ctx = fields[1], fields[2], fields[3], fields[4]
+      local pcache, notes = fields[5] or "0", fields[6] or ""
+      if #fields == 5 and pcache ~= "" and not tonumber(pcache) then
+        notes, pcache = pcache, "0"
+      end
+      if id and id ~= "" and #fields >= 4 and #fields <= 6 then
         local ctx_n = tonumber(ctx) or CUSTOM_DEFAULT_CTX
         if ctx_n < CUSTOM_MIN_CTX then ctx_n = CUSTOM_MIN_CTX end
         out[#out+1] = {
@@ -8733,6 +9027,7 @@ function Custom.load_all_extstate()
   local ids = Custom.load_ids()
   local records = {}
   local valid_ids = {}
+  local pruned_ids = {}
   local pruned = false
   for _, id in ipairs(ids) do
     local rec, reason = Custom.load_record(id)
@@ -8743,9 +9038,15 @@ function Custom.load_all_extstate()
       valid_ids[#valid_ids+1] = id
     else
       pruned = true
+      pruned_ids[#pruned_ids+1] = id
     end
   end
-  if pruned then Custom.save_ids(valid_ids) end
+  if pruned then
+    Custom.save_ids(valid_ids)
+    for _, id in ipairs(pruned_ids) do
+      Custom.delete_record_extstate(id, true)
+    end
+  end
   return records
 end
 
@@ -9037,7 +9338,7 @@ Store.mirror_providers_if_missing()
 -- model after upgrade because the legacy key bleeds across models.
 --
 -- Defaults users land on after the reset:
---   Claude:   Haiku=Medium (per-model override), Sonnet/Opus=None
+--   Claude:   Haiku=High (per-model override), Sonnet/Opus=None
 --   ChatGPT:  Medium (provider default)
 --   Gemini:   Medium (provider default)
 --   DeepSeek: Non-Thinking (provider default)
@@ -9514,12 +9815,22 @@ end
 function OptionalFonts._load_font_path(entry, path, source)
   if not entry then return false, "Missing optional font metadata." end
   if not path or path == "" then return false, "Font path is missing." end
+  if not (RA and RA.ctx) then
+    return false, "ImGui context is not available."
+  end
+  if reaper.ImGui_ValidatePtr
+      and not reaper.ImGui_ValidatePtr(RA.ctx, "ImGui_Context*") then
+    return false, "ImGui context is not available."
+  end
   local f = io.open(path, "rb")
   if not f then return false, "Font file is missing." end
   f:close()
   local font = ImGui.ImGui_CreateFontFromFile(path, 0, 0)
   if not font then return false, "Font file could not be loaded." end
-  ImGui.ImGui_Attach(RA.ctx, font)
+  local ok_attach, attach_err = pcall(ImGui.ImGui_Attach, RA.ctx, font)
+  if not ok_attach then
+    return false, tostring(attach_err or "Font file could not be attached.")
+  end
   entry.font = font
   entry.font_path = path
   entry.font_source = source or "download"
@@ -10047,7 +10358,8 @@ function OptionalFonts.start_download(language_idx)
       "Downloading font..."),
   }
   local ok = RA.fire_get_to(entry.url, out_path, exit_path,
-    CFG.FONT_DOWNLOAD_TIMEOUT, OptionalFonts.download, "FONT")
+    CFG.FONT_DOWNLOAD_TIMEOUT, OptionalFonts.download, "FONT",
+    { cache_bust = false })
   if not ok then
     if OptionalFonts._fail_or_use_system_fallback("launch", OptionalFonts._t(
         "settings.font.error.launch", nil, "Font download could not start.")) then
@@ -11213,6 +11525,16 @@ if Store and Store.flush_user_notice then Store.flush_user_notice() end
 -- Opens a URL in the user's default browser. Tries SWS CF_ShellExecute first
 -- (available when the SWS extension is installed), then falls back to
 -- platform-native commands.
+function UI._safe_shell_url(url)
+  local safe = tostring(url or ""):gsub("[^%w%-%.%_%~%:%/%?%#%[%]%@%!%&%*%+%,%;%=%{%}%%]", "")
+  -- Keep real percent-encoded octets (%20, %7B, etc.) but drop stray percent
+  -- signs so Windows cmd fallback cannot expand %ENV_VAR% after sanitization.
+  safe = safe:gsub("%%(%x%x)", "\31%1")
+  safe = safe:gsub("%%", "")
+  safe = safe:gsub("\31(%x%x)", "%%%1")
+  return safe
+end
+
 function UI.open_url(url)
   url = tostring(url or "")
   -- Only allow http(s) / mailto: / tel: URLs. Reject file://, javascript:,
@@ -11230,10 +11552,10 @@ function UI.open_url(url)
     return ok and result ~= false
   else
     -- Sanitise: strip any characters that could enable shell injection.
-    -- Excluded: $, (, ), %, `, ", \, ', and non-printable chars.
+    -- Excluded: $, (, ), `, ", \, ', non-printable chars, and stray percent.
     -- $() = command substitution on Unix; %VAR% = expansion on Windows;
     -- backtick/backslash/quotes could break quoting boundaries.
-    local safe = url:gsub("[^%w%-%.%_%~%:%/%?%#%[%]%@%!%&%*%+%,%;%=%{%}]", "")
+    local safe = UI._safe_shell_url(url)
     if safe == "" then return false end
     local result, _, code
     if RA.IS_WINDOWS then
@@ -11441,17 +11763,17 @@ local function is_likely_binary(path)
 end
 
 -- classify_file(path) -> "image", "pdf", "text", or "unsupported" + media_type
--- Only files with a recognised text extension (or that pass a binary sniff
--- test) are treated as text. Unknown extensions default to "unsupported" to
--- prevent binary files from being shoved into the prompt as garbage.
+-- Files with a recognised text extension, unknown extension, or no extension
+-- are treated as text only when the binary sniff passes. Binary-looking files
+-- stay unsupported so they are not shoved into the prompt as garbage.
 local function classify_file(path)
   local ext = get_file_extension(path)
   if IMAGE_EXTENSIONS[ext] then return "image", IMAGE_EXTENSIONS[ext] end
   if ext == "pdf" then return "pdf", "application/pdf" end
   if TEXT_EXTENSIONS[ext] then return "text", nil end
-  -- Unknown extension: attempt a binary sniff. If the file looks like text,
+  -- Unknown/extensionless: attempt a binary sniff. If the file looks like text,
   -- allow it; otherwise reject it as unsupported.
-  if ext ~= "" and not is_likely_binary(path) then return "text", nil end
+  if not is_likely_binary(path) then return "text", nil end
   return "unsupported", nil
 end
 
@@ -11593,7 +11915,7 @@ end
 local function estimate_attachment_cost(tokens)
   local model = MODELS[prefs.model_idx]
   if not model then return 0 end
-  return tokens * model.price_in / 1000000
+  return tokens * (model.price_in or 0) / 1000000
 end
 
 -- Max attachment size (bytes) -- warn above 5MB, reject above 10MB.
@@ -12132,10 +12454,26 @@ local function load_system_prompt()
   local sws_required_prompt =
     REQUIRE_SWS_EXTENSION and not SupportExtFlag("optoutsws")
   if sws_required_prompt then
-    raw = raw:gsub(
-      "%- Extension APIs: avoid SWS %(CF_%*%), js_ReaScriptAPI %(JS_%*%), and other non%-core extension functions unless the user explicitly requests them or the script first checks the function exists %(e%.g%. if reaper%.CF_GetClipboard then %.%.%. end%) and shows a clear error if missing%.",
+    local sws_rewrite_pattern =
+      "%- Extension APIs: avoid SWS %(CF_%*%), js_ReaScriptAPI %(JS_%*%), and other non%-core extension functions unless the user explicitly requests them or the script first checks the function exists %(e%.g%. if reaper%.CF_GetClipboard then %.%.%. end%) and shows a clear error if missing%."
+    local sws_rewrite_replacement =
       "- Extension APIs: SWS Extension is available and required in this build. Treat documented SWS APIs (`CF_*`, `BR_*`, `NF_*`, `FNG_*`) as available after requesting `docs:sws` when needed. js_ReaScriptAPI (`JS_*`) and other non-core extension functions remain optional unless the user explicitly requests them or the script first checks the function exists and shows a clear error if missing."
-    )
+    local sws_rewrite_n
+    raw, sws_rewrite_n = raw:gsub(sws_rewrite_pattern,
+      sws_rewrite_replacement, 1)
+    if sws_rewrite_n == 0 then
+      Log.line("PROMPT",
+        "system_prompt_load: SWS prompt rewrite anchor not found")
+      if not SYSTEM_PROMPT_IS_CUSTOM then
+        S.bootstrap_active = true
+        S.bootstrap_missing[#S.bootstrap_missing + 1] =
+          "Resources/System_Prompt.md (corrupt)"
+        Log.line("BOOTSTRAP",
+          "system_prompt_load: System_Prompt.md corrupt "
+          .. "(missing SWS rewrite anchor); routing to recovery prompt.")
+        return false
+      end
+    end
   end
   SYSTEM_PROMPT = raw:gsub("{VERSION}", CFG.VERSION)
   if sws_required_prompt then
@@ -12286,16 +12624,6 @@ end
 --   4. Fallback: "reaassist_script.lua"
 -- Result is safe for all OSes: filesystem-unsafe chars stripped,
 -- spaces preserved, length capped at 60 chars.
--- Windows reserved device names. Any filename whose stem (case-insensitive,
--- ignoring extension) matches one of these is rejected by Win32 even on NTFS,
--- so we can't write "CON.lua" or "AUX.jsfx". Suffix with "_" to dodge.
-local WIN_RESERVED_NAMES = {
-  CON=true, PRN=true, AUX=true, NUL=true,
-  COM1=true, COM2=true, COM3=true, COM4=true, COM5=true,
-  COM6=true, COM7=true, COM8=true, COM9=true,
-  LPT1=true, LPT2=true, LPT3=true, LPT4=true, LPT5=true,
-  LPT6=true, LPT7=true, LPT8=true, LPT9=true,
-}
 -- Shared filename sanitizer: strip filesystem-unsafe chars, collapse whitespace,
 -- cap at 60 chars. Returns cleaned string (caller appends extension).
 local function sanitize_filename(s, fallback)
@@ -12307,7 +12635,7 @@ local function sanitize_filename(s, fallback)
   if s == "" then s = fallback end
   -- Reject Windows reserved device names. Match the stem before any extension
   -- the caller will append, so "CON" alone is enough to trigger.
-  if WIN_RESERVED_NAMES[s:upper()] then s = s .. "_" end
+  if RA.is_windows_reserved_name(s) then s = s .. "_" end
   return s
 end
 
@@ -12566,9 +12894,9 @@ end
 -- practice the only caller is the poll loop, which attaches before
 -- doing anything else.
 --
--- Reads only the first 4 KB of each file -- the marker + `_ra_slot`
--- are emitted at the very top of the @init injection, well within
--- that window. Allocation is monotonic so pruned slot indices are
+-- Scans each file in chunks for the `_ra_slot` marker. The injector may
+-- append @init after a long JSFX header, so a fixed header read can falsely
+-- prune live slots. Allocation is monotonic so pruned slot indices are
 -- never reused; this just trims the metadata + gmem cruft.
 --
 -- Returns the number of slots pruned (0 if everything still valid).
@@ -12582,12 +12910,21 @@ function Code.ceiling_gc_slots()
     if e.file and e.file ~= "" and e.slot then
       local f = io.open(e.file, "rb")
       if f then
-        local head = f:read(4096) or ""
-        f:close()
         -- Match `_ra_slot = N;` (whitespace tolerant). The injector
-        -- emits exactly this in @init right under the header marker.
+        -- emits exactly this in the injected @init block.
         local pat = "_ra_slot%s*=%s*" .. tostring(e.slot) .. "%s*;"
-        if head:find(pat) then keep = true end
+        local scan = ""
+        while true do
+          local chunk = f:read(32768)
+          if not chunk or chunk == "" then break end
+          scan = scan .. chunk
+          if scan:find(pat) then
+            keep = true
+            break
+          end
+          if #scan > 128 then scan = scan:sub(-128) end
+        end
+        f:close()
       end
     end
     if keep then
@@ -13458,7 +13795,7 @@ end
 -- Code.save_file_jsfx. Opens a native save dialog when js_ReaScriptAPI is
 -- present; otherwise falls back to a GetUserInputs prompt and strips path
 -- separators from the input so the user cannot escape opts.base_dir.
--- Returns the saved path on success, or nil on cancellation/error.
+-- Returns the saved path on success, or nil plus a reason on cancellation/error.
 function Code._save_generated(code, suggested_name, opts)
   local dest_path
   local save_dialog = reaper.ReaAssist_Native_JS_Dialog_BrowseForSaveFile
@@ -13479,9 +13816,9 @@ function Code._save_generated(code, suggested_name, opts)
       end
     end
     if not ok then
-      return nil
+      return nil, "dialog_failed"
     end
-    if ret ~= 1 or not path or path == "" then return nil end
+    if ret ~= 1 or not path or path == "" then return nil, "cancelled" end
     -- Lower-case the path before matching ext_pattern. Filesystems on
     -- Windows / macOS preserve the typed case, so a user who picks
     -- "MyScript.LUA" in the dialog used to fall through the case-
@@ -13492,13 +13829,13 @@ function Code._save_generated(code, suggested_name, opts)
   else
     local ret, name = reaper.GetUserInputs(
       opts.fallback_title, 1, opts.fallback_label, suggested_name)
-    if not ret or name == "" then return nil end
+    if not ret or name == "" then return nil, "cancelled" end
     if not name:lower():match(opts.ext_pattern) then name = name .. opts.ext end
     name = name:match("[^\\/]+$") or name
     dest_path = opts.base_dir .. RA.SEP .. name
   end
   if Code.safe_write(dest_path, code) then return dest_path end
-  return nil
+  return nil, "write_failed"
 end
 
 -- Save JSFX code to REAPER's Effects folder (thin wrapper over _save_generated).
@@ -13762,7 +14099,7 @@ function Diag.build_report(opts)
   end
   parts[#parts + 1] = "API ref loaded:    " .. _onoff(
     S.api_ref_section_cache and S.api_ref_section_cache.core ~= nil)
-  parts[#parts + 1] = "UI theme:          " .. tostring(prefs.theme_id or "default")
+  parts[#parts + 1] = "UI theme:          " .. tostring(prefs.theme or "default")
   local scale_val = CFG.UI_SCALE_OPTIONS[prefs.ui_scale_idx or 3] or 1.0
   parts[#parts + 1] = str_format("UI scale:          %.2fx", scale_val)
   -- API keys configured per provider (without revealing the keys). Helps
@@ -14880,11 +15217,12 @@ end
 
 -- Fire an async curl GET. Writes response to out_path, exit code to exit_path.
 -- Returns true if launched, false if URL is empty or launch fails.
-function RA.fire_get_to(url, out_path, exit_path, timeout, send_state, log_tag)
+function RA.fire_get_to(url, out_path, exit_path, timeout, send_state, log_tag, opts)
   if not url or url == "" then return false end
   if send_state then send_state.request_url = tostring(url or "") end
   os.remove(out_path)
   os.remove(exit_path)
+  opts = type(opts) == "table" and opts or {}
   -- Cache-busting: append a unix-time query parameter to the URL.
   -- GitHub's raw CDN keys on URL, so a unique timestamp guarantees a
   -- cache miss on every check. This eliminates the propagation race we
@@ -14900,17 +15238,24 @@ function RA.fire_get_to(url, out_path, exit_path, timeout, send_state, log_tag)
   -- update server" on every press. The timestamp query alone is
   -- sufficient (a CDN cannot serve a cached response for a URL it has
   -- never seen before), so the headers were dropped.
-  local sep = url:find("?", 1, true) and "&" or "?"
-  -- Cache-bust query: combine os.time() seconds with time_precise()
-  -- millisecond fraction so two fetches inside the same second still
-  -- produce distinct URLs. Pure os.time() collides on rapid Retry
-  -- clicks (the v0.9.8.22 CDN-propagation fix encourages users to
-  -- click Retry repeatedly), and a duplicate URL re-hits whatever
-  -- the CDN has cached for that key, defeating the whole point.
-  local ms = math.floor((time_precise() % 1) * 1000)
-  url = url .. sep .. "_=" .. tostring(os.time())
-                  .. string.format("%03d", ms)
-  if send_state then send_state.request_url_with_cache_bust = url end
+  -- Content-addressed payload downloads can opt out because their SHA-256
+  -- verification already rejects stale or corrupted bytes, and keeping the
+  -- URL stable lets CDNs serve large fonts/lang packs/update files from cache.
+  if opts.cache_bust == false then
+    if send_state then send_state.request_url_with_cache_bust = nil end
+  else
+    local sep = url:find("?", 1, true) and "&" or "?"
+    -- Cache-bust query: combine os.time() seconds with time_precise()
+    -- millisecond fraction so two fetches inside the same second still
+    -- produce distinct URLs. Pure os.time() collides on rapid Retry
+    -- clicks (the v0.9.8.22 CDN-propagation fix encourages users to
+    -- click Retry repeatedly), and a duplicate URL re-hits whatever
+    -- the CDN has cached for that key, defeating the whole point.
+    local ms = math.floor((time_precise() % 1) * 1000)
+    url = url .. sep .. "_=" .. tostring(os.time())
+                    .. string.format("%03d", ms)
+    if send_state then send_state.request_url_with_cache_bust = url end
+  end
   timeout = timeout or CFG.UPDATE_CURL_TIMEOUT
   log_tag = log_tag or "NET"
   if RA.IS_WINDOWS then
@@ -14964,9 +15309,9 @@ function RA.fire_get_to(url, out_path, exit_path, timeout, send_state, log_tag)
   return true
 end
 
-function Updater.fire_get(url, out_path, exit_path)
+function Updater.fire_get(url, out_path, exit_path, opts)
   return RA.fire_get_to(url, out_path, exit_path,
-    CFG.UPDATE_CURL_TIMEOUT, update, "UPDATE")
+    CFG.UPDATE_CURL_TIMEOUT, update, "UPDATE", opts)
 end
 
 LangPacks = LangPacks or { download = { state = "idle" } }
@@ -15608,7 +15953,8 @@ function LangPacks.start_language_download(code, force)
     UI.show_float_toast(LangPacks.download.status_text)
   end
   local ok = RA.fire_get_to(entry.url, out_path, exit_path,
-    CFG.LANG_DOWNLOAD_TIMEOUT, LangPacks.download, "LANG")
+    CFG.LANG_DOWNLOAD_TIMEOUT, LangPacks.download, "LANG",
+    { cache_bust = false })
   if not ok then
     LangPacks._set_failure(code, "launch",
       "Language pack download could not start.")
@@ -15906,10 +16252,8 @@ end
 -- tick_sha_diff once per frame while update.state == "verifying", same
 -- shape as "checking" / "downloading" / "rename_retry".
 --
--- download_start (the post-Update-Now path) keeps its own per-file
--- file_sha256_hex calls inline -- it's fired by an explicit user click
--- and only takes the same hash hit once, so a brief stall before the
--- download progress UI takes over is acceptable there.
+-- download_start (the post-Update-Now path) consumes the precomputed diff and
+-- never hashes the whole manifest synchronously on the UI thread.
 
 -- Begin SHA verification. Caller passes the parsed manifest plus the
 -- snapshotted manual / forced flags (so tick_*_sha -> _complete can branch
@@ -15963,8 +16307,8 @@ function Updater.start_sha_diff(manifest, manual, forced, purpose)
         path_to_entry[path] = entry
       end
     end
-    -- Malformed manifest entry: skip silently (is_safe_filename gates the
-    -- same way in download_start's inline diff).
+    -- Malformed manifest entry: skip silently here; download_start still
+    -- rejects malformed entries before queueing any download.
   end
 
   update._sha_diff = {
@@ -16641,14 +16985,7 @@ function Updater.is_safe_filename(name)
   local base_name = name:match("([^/]+)$") or name
   -- Reject Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9).
   local base = base_name:match("^([^%.]+)") or ""
-  local reserved = {
-    CON=true, PRN=true, AUX=true, NUL=true,
-    COM1=true, COM2=true, COM3=true, COM4=true, COM5=true,
-    COM6=true, COM7=true, COM8=true, COM9=true,
-    LPT1=true, LPT2=true, LPT3=true, LPT4=true, LPT5=true,
-    LPT6=true, LPT7=true, LPT8=true, LPT9=true,
-  }
-  if reserved[base:upper()] then return false end
+  if RA.is_windows_reserved_name(base) then return false end
   -- Allow only known safe extensions.
   local ext = base_name:match("%.([^%.]+)$")
   if not ext then return false end
@@ -16664,44 +17001,9 @@ function Updater.is_safe_filename(name)
   return true
 end
 
--- Read a local file and return its SHA-256 hex digest (lowercase). Used
--- by Updater.download_start() to skip files whose local content already
--- matches the manifest SHA, and the open path is mirrored inline by
--- Updater.tick_sha_diff() (incremental verify) to classify files as
--- missing, mismatched, or intact.
---
--- Returns (hex, nil) on success, or (nil, kind) on failure where kind is:
---   "missing" - genuinely not on disk
---   "locked"  - exists on disk but couldn't be opened (AV scanner mid-
---               scan, editor open handle, permission flicker). The caller
---               should treat this as "intact" rather than triggering a
---               repair: rolling a download in over a perfectly good file
---               just because the AV scanner caught it for 50ms produces
---               a confusing "repair available" prompt out of nowhere.
-function Updater.file_sha256_hex(path)
-  local f, open_err = io.open(path, "rb")
-  if not f then
-    -- reaper.file_exists handles Windows path separators and long-path
-    -- weirdness better than a pcall around a second open. Its result
-    -- tells us whether this is a true "missing" or a transient lock.
-    if reaper.file_exists and reaper.file_exists(path) then
-      Log.line("UPDATE", string.format(
-        "file_sha256_hex: %s exists but open failed: %s "
-        .. "(likely AV / editor lock; treating as intact for this run)",
-        path, tostring(open_err)))
-      return nil, "locked"
-    end
-    return nil, "missing"
-  end
-  local content = f:read("*a")
-  f:close()
-  if not content then return nil, "locked" end
-  return sha256_hash(content)
-end
-
 -- Resolve a manifest filename ("Resources/X.md") to an absolute local path
--- using the host OS separator. Centralized so download_start (the local-SHA
--- check) and download_poll (the write target) agree on the layout.
+-- using the host OS separator. Centralized so the SHA-diff verifier and
+-- download_poll (the write target) agree on the layout.
 function Updater.local_path_for(filename)
   local rel = filename
   if RA.SEP ~= "/" then rel = rel:gsub("/", RA.SEP) end
@@ -16858,22 +17160,15 @@ function Updater.download_start()
         update.skipped_count = update.skipped_count + 1
       end
     else
-      -- Version-bump path: hash each file synchronously to skip those whose
-      -- local content already matches the manifest. This is unavoidable
-      -- here -- we have no precomputed diff to lean on -- but it makes the
-      -- download itself incremental (a point release that changes one
-      -- markdown file only downloads that file, not the full manifest).
-      local local_path = Updater.local_path_for(filename)
-      local local_hash = Updater.file_sha256_hex(local_path)
-      if local_hash and local_hash == expected_hash:lower() then
-        update.skipped_count = update.skipped_count + 1
-      else
-        update.download_queue[#update.download_queue+1] = {
-          filename = filename,
-          url      = Updater.url_for(filename),
-          sha256   = expected_hash,
-        }
-      end
+      -- Legacy/impossible state: modern check paths compute repair_fileset or
+      -- update_fileset before the button is shown. If a stale state reaches
+      -- here without that diff, do not synchronously hash the whole manifest on
+      -- the UI thread; queue the file and rely on post-download SHA verify.
+      update.download_queue[#update.download_queue+1] = {
+        filename = filename,
+        url      = Updater.url_for(filename),
+        sha256   = expected_hash,
+      }
     end
   end
   -- If every file already matches (user manually swapped files, or re-invoked
@@ -16900,7 +17195,8 @@ function Updater.download_start()
   update.download_idx = 1
   update.state = "downloading"
   local entry = update.download_queue[1]
-  if not Updater.fire_get(entry.url, tmp.update_out, tmp.update_exit) then
+  if not Updater.fire_get(entry.url, tmp.update_out, tmp.update_exit,
+      { cache_bust = false }) then
     Updater._set_failure("download_start", string.format(
       "Could not start download for %s.", tostring(entry.filename)))
     update.state = "failed"
@@ -17180,7 +17476,8 @@ function Updater.advance_after_rename(dest)
   if update.download_idx < #update.download_queue then
     update.download_idx = update.download_idx + 1
     local next_entry = update.download_queue[update.download_idx]
-    if not Updater.fire_get(next_entry.url, tmp.update_out, tmp.update_exit) then
+    if not Updater.fire_get(next_entry.url, tmp.update_out, tmp.update_exit,
+        { cache_bust = false }) then
       Updater._set_failure("download_start", string.format(
         "Could not start download for %s.", tostring(next_entry.filename)))
       Updater.rollback()
@@ -17899,6 +18196,250 @@ function Code.model_validator_enabled(provider_id, model_id, validator_key)
   return validators[tostring(validator_key or "")] == true
 end
 
+function Code.validate_model_guidance_tables()
+  local issues = {}
+  local function add_issue(msg) issues[#issues + 1] = msg end
+
+  if type(PROVIDERS) ~= "table" or type(UI) ~= "table" then
+    return true, issues
+  end
+
+  local provider_seen = {}
+  local model_seen = {}
+  local thinking_seen = {}
+
+  for _, provider in ipairs(PROVIDERS) do
+    if type(provider) == "table" and provider.id then
+      local provider_id = tostring(provider.id)
+      provider_seen[provider_id] = true
+      thinking_seen[provider_id] = {}
+
+      local combo_provider = type(UI.COMBO_HINTS) == "table"
+        and UI.COMBO_HINTS[provider_id] or nil
+      for _, model in ipairs(provider.models or {}) do
+        if type(model) == "table" and model.id then
+          local model_id = tostring(model.id)
+          model_seen[model_id] = provider_id
+          thinking_seen[provider_id][model_id] = {}
+
+          if type(UI.MODEL_TIPS) ~= "table"
+             or type(UI.MODEL_TIPS[model_id]) ~= "string"
+             or UI.MODEL_TIPS[model_id] == "" then
+            add_issue("MODEL_TIPS missing " .. provider_id .. "/" .. model_id)
+          end
+
+          local combo_model = type(combo_provider) == "table"
+            and combo_provider[model_id] or nil
+          for _, level in ipairs(provider.thinking_levels or {}) do
+            local value = level and level.value
+            if value and not (level.flash_only and not model.is_flash) then
+              local value_s = tostring(value)
+              thinking_seen[provider_id][model_id][value_s] = true
+              if type(combo_model) ~= "table"
+                 or type(combo_model[value_s]) ~= "string"
+                 or combo_model[value_s] == "" then
+                add_issue("COMBO_HINTS missing " .. provider_id .. "/"
+                  .. model_id .. "/" .. value_s)
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  for model_id in pairs(UI.MODEL_TIPS or {}) do
+    if not model_seen[tostring(model_id)] then
+      add_issue("MODEL_TIPS stale " .. tostring(model_id))
+    end
+  end
+
+  for provider_id, provider_tbl in pairs(UI.COMBO_HINTS or {}) do
+    provider_id = tostring(provider_id)
+    if not provider_seen[provider_id] then
+      add_issue("COMBO_HINTS stale provider " .. provider_id)
+    elseif type(provider_tbl) == "table" then
+      for model_id, model_tbl in pairs(provider_tbl) do
+        model_id = tostring(model_id)
+        if model_seen[model_id] ~= provider_id then
+          add_issue("COMBO_HINTS stale model " .. provider_id .. "/"
+            .. model_id)
+        elseif type(model_tbl) == "table" then
+          for value in pairs(model_tbl) do
+            value = tostring(value)
+            if not (thinking_seen[provider_id]
+                    and thinking_seen[provider_id][model_id]
+                    and thinking_seen[provider_id][model_id][value]) then
+              add_issue("COMBO_HINTS stale thinking " .. provider_id .. "/"
+                .. model_id .. "/" .. value)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  for provider_id, provider_tbl in pairs(UI.COMBO_TONES or {}) do
+    provider_id = tostring(provider_id)
+    if not provider_seen[provider_id] then
+      add_issue("COMBO_TONES stale provider " .. provider_id)
+    elseif type(provider_tbl) == "table" then
+      for model_id, tone_tbl in pairs(provider_tbl) do
+        model_id = tostring(model_id)
+        if model_seen[model_id] ~= provider_id then
+          add_issue("COMBO_TONES stale model " .. provider_id .. "/"
+            .. model_id)
+        elseif type(tone_tbl) == "table" then
+          for value in pairs(tone_tbl) do
+            value = tostring(value)
+            if not (UI.COMBO_HINTS
+                    and UI.COMBO_HINTS[provider_id]
+                    and UI.COMBO_HINTS[provider_id][model_id]
+                    and UI.COMBO_HINTS[provider_id][model_id][value]) then
+              add_issue("COMBO_TONES without COMBO_HINTS " .. provider_id
+                .. "/" .. model_id .. "/" .. value)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  for provider_id, provider_tbl in pairs(Code.MODEL_GUIDANCE_BY_MODEL or {}) do
+    provider_id = tostring(provider_id)
+    if not provider_seen[provider_id] then
+      add_issue("MODEL_GUIDANCE stale provider " .. provider_id)
+    elseif type(provider_tbl) == "table" then
+      for model_id in pairs(provider_tbl) do
+        model_id = tostring(model_id)
+        if model_id ~= "*" and model_seen[model_id] ~= provider_id then
+          add_issue("MODEL_GUIDANCE stale model " .. provider_id .. "/"
+            .. model_id)
+        end
+      end
+    end
+  end
+
+  return #issues == 0, issues
+end
+
+function Code.compact_system_prompt_text()
+  local version = (type(CFG) == "table" and CFG.VERSION) or ""
+  local text = [[-- ReaAssist v]] .. version .. "\n" .. [[
+You are a REAPER DAW assistant. This is the compact prompt for local/custom models: be practical, obey the context protocol exactly, and generate safe standalone REAPER Lua/JSFX.
+
+CONTEXT PROTOCOL:
+- Check the PINNED REFERENCES manifest before asking for context. If a key is listed, use the already-pinned data and do not request it again.
+- When context is needed, the whole reply must be one tag only: <context_needed>bucket, bucket</context_needed>. No prose, no fence, no explanation.
+- Required buckets: `docs` before any reaper.* code unless docs is pinned or the request is covered only by pinned `midi`; `session` for project state/track selection; `tracks` only when capped session rows omit needed tracks; `recent_reaper_changes` for current/latest REAPER behavior.
+- Plugin buckets: `resolve:Type` for generic FX types; `plugin_ref:Name` for curated plugins; `fx_list:Name` for add-only unknown plugins; `fx_inspect:Name` for add+configure unknown plugins; `fx_params:Name@TrackIndex` for current values on loaded plugins. Use full prefixes for multiple tokens.
+- Prompt bundles are mandatory before their domains: `prompt_bundle:plugin` before TrackFX_*/param code, `prompt_bundle:plugin_helpers` before using helper functions, `prompt_bundle:drums` for drum edit/quantize code, `prompt_bundle:jsfx` before JSFX, and `prompt_bundle:theme` before SetThemeColor.
+
+OUTPUT CONTRACT:
+- For action requests, prefer one complete runnable ```lua block after required context is pinned. For JSFX requests, output one ```jsfx block with `desc:` first.
+- Do not claim code ran unless runtime output says so. Keep visible prose short and user-facing; never expose param indices, normalized values, helper internals, or cache annotations.
+- Ask one concise question only for genuine ambiguity that context cannot resolve. Negative constraints such as no FX, no sends, no new tracks, or no delete are hard requirements.
+
+SANDBOX / SAFETY:
+- FORBIDDEN in code: os, io, ffi, debug, coroutine, package, require, dofile, loadfile, loadstring, load, _G, getfenv, setfenv, rawget, rawset.
+- Use only reaper.*, gfx.* when a persistent UI is explicitly requested, and safe Lua builtins (math, string, table, pairs, ipairs, tonumber, tostring, type, pcall, xpcall, select, error, assert, next, unpack).
+- Do not use SWS/js_ReaScriptAPI/extension APIs unless requested or docs says they exist and the script checks availability with a clear user error.
+
+REAPER LUA PITFALLS:
+- Void APIs return nil: InsertTrackAtIndex, SetEditCurPos, Main_OnCommand, Undo_BeginBlock, Undo_EndBlock, PreventUIRefresh, UpdateArrange, ThemeLayout_RefreshAll. Call them separately, then fetch handles.
+- Track indices shown to users are 1-based; API indices are 0-based. Never invent track indices. Nil-check tracks/items/takes before use.
+- Create tracks with InsertTrackAtIndex(index, true), then GetTrack(0, index), then name with GetSetMediaTrackInfo_String(track, "P_NAME", name, true).
+- Wrap project changes in one Undo_BeginBlock/Undo_EndBlock. Balance PreventUIRefresh with pcall and always call UpdateArrange after changes.
+- D_VOL is linear amplitude. Do not use DB2SLIDER/SLIDER2DB for track/item/take/send volume.
+- CreateTrackSend returns one integer send index; 0 is valid and -1 is failure. Master send is B_MAINSEND, not RemoveTrackSend category 1.
+- For folders, parent track gets I_FOLDERDEPTH=1 and the final child closes with a negative depth. Do not create a fake "(folder end)" track.
+- For MIDI notes, use MIDI PPQ positions, CreateNewMIDIItemInProj(track,...), GM drums kick 36/snare 38/closed hat 42, and REAPER note numbering C4=60.
+- For exact seconds, use exact seconds. For bars/beats/tempo math, request docs:tempo; for MIDI note work, request midi.
+- Use Main_OnCommand only for verified action IDs from provided docs/context or when the user explicitly names a known action.
+
+PLUGIN RULES:
+- Every TrackFX_AddByName result must be checked immediately: if fx < 0 then ShowMessageBox and return.
+- Add-only FX means leave defaults; no param writes unless the user requests settings, a preset/recipe, or a tonal setup.
+- For generic FX type requests, request resolve:Type so user preferences can win. For exact stock names like ReaEQ/ReaComp, use that exact plugin.
+- For existing loaded plugin edits, request fx_params scoped to the target track when possible. For adding/configuring unknown third-party plugins, request fx_inspect.
+- Helper functions such as find_param/set_param_display are not built-ins. If used, paste their definitions from prompt_bundle:plugin_helpers into the script.
+- Plugin param writes that need defer must keep shared state in an outer local visible to the deferred function.
+
+JSFX RULES:
+- JSFX is opt-in only. EEL2 has no `reaper`, no Lua syntax, no `if/end`, and no `math.` prefix. Use sections such as @init, @slider, @sample.
+- Do not declare or touch gmem; ReaAssist injects its own safety layer. Initialize every memory base before using `name[index]`, and keep feedback clamped/DC-blocked.
+
+STYLE:
+- One logical user action per answer, concise summary, then code. No repeated caveats. If a TrackFX_SetParam* write is used, include only the standard UI-verification tip after the code.
+]]
+  if REQUIRE_SWS_EXTENSION
+     and (not SupportExtFlag or not SupportExtFlag("optoutsws")) then
+    text = text .. [[
+
+SWS DOCS ROUTING:
+- SWS is available in this build. Before SWS-only calls or SWS actions, request <context_needed>docs:sws</context_needed> unless already pinned.
+]]
+  end
+  return text
+end
+
+function Code.model_id_looks_local(model_id)
+  local mid = tostring(model_id or ""):lower()
+  return mid:find("local", 1, true) ~= nil
+    or mid:find("ollama", 1, true) ~= nil
+    or mid:find("llama", 1, true) ~= nil
+    or mid:find("qwen", 1, true) ~= nil
+    or mid:find("mistral", 1, true) ~= nil
+    or mid:find("mixtral", 1, true) ~= nil
+    or mid:find("codestral", 1, true) ~= nil
+    or mid:find("gemma", 1, true) ~= nil
+    or mid:find("phi", 1, true) ~= nil
+    or mid:find("gguf", 1, true) ~= nil
+end
+
+function Code.custom_endpoint_looks_hosted(endpoint)
+  local ep = tostring(endpoint or ""):lower()
+  return ep:find("openrouter%.ai") ~= nil
+    or ep:find("api%.openai%.com") ~= nil
+    or ep:find("anthropic%.com") ~= nil
+    or ep:find("generativelanguage%.googleapis%.com") ~= nil
+    or ep:find("api%.together%.xyz") ~= nil
+    or ep:find("api%.fireworks%.ai") ~= nil
+    or ep:find("api%.groq%.com") ~= nil
+    or ep:find("api%.deepseek%.com") ~= nil
+    or ep:find("openai%.azure%.com") ~= nil
+end
+
+function Code.custom_endpoint_looks_local(endpoint)
+  local ep = tostring(endpoint or ""):lower()
+  if ep:find("localhost", 1, true)
+     or ep:find("127.", 1, true)
+     or ep:find("0.0.0.0", 1, true)
+     or ep:find("[::1]", 1, true) then
+    return true
+  end
+  if ep:find("://10%.") then return true end
+  if ep:find("://192%.168%.") then return true end
+  if ep:find("://172%.1[6-9]%.")
+     or ep:find("://172%.2%d%.")
+     or ep:find("://172%.3[01]%.") then
+    return true
+  end
+  return false
+end
+
+function Code.use_compact_system_prompt(provider, model_id)
+  if SYSTEM_PROMPT_IS_CUSTOM then return false end
+  if type(provider) == "table" and provider.is_custom then
+    if Code.custom_endpoint_looks_hosted(provider.endpoint) then
+      return false
+    end
+    return Code.custom_endpoint_looks_local(provider.endpoint)
+      or Code.model_id_looks_local(model_id)
+  end
+  return Code.model_id_looks_local(model_id)
+end
+
 -- Return the SYSTEM_PROMPT string plus request-stable system-level additions,
 -- optionally with a per-TEST-SESSION stamp appended as a hidden comment when
 -- prefs.test_force_cold_cache is on.
@@ -17913,8 +18454,21 @@ end
 --
 -- Starting a fresh cold test: toggle off, then toggle on again -- that
 -- mints a new stamp.
+do
+  local ok, issues = Code.validate_model_guidance_tables()
+  if not ok and Log and Log.line then
+    Log.line("MODEL-GUIDANCE", table.concat(issues, "; "))
+  end
+end
+
 function Net.system_prompt_text()
-  local text = SYSTEM_PROMPT
+  local active_provider = PROVIDERS and PROVIDERS.active and PROVIDERS.active()
+    or nil
+  local active_model_id = MODELS and MODELS.active_id
+    and MODELS.active_id() or nil
+  local text = Code.use_compact_system_prompt(active_provider, active_model_id)
+    and Code.compact_system_prompt_text()
+    or SYSTEM_PROMPT
   local custom_blob = Net.custom_instructions_prompt_block_for_request()
   if custom_blob then
     text = text .. "\n\n" .. custom_blob
@@ -17949,10 +18503,6 @@ function Net.system_prompt_text()
       .. "- If a contract requires raw code, JSON, or a bare "
       .. "<context_needed> tag only, obey that contract exactly."
   end
-  local active_provider = PROVIDERS and PROVIDERS.active and PROVIDERS.active()
-    or nil
-  local active_model_id = MODELS and MODELS.active_id
-    and MODELS.active_id() or nil
   local model_guidance = Code.model_guidance_text(
     active_provider and active_provider.id or nil,
     active_model_id)
@@ -17977,13 +18527,18 @@ end
 -- number of message turns the providers' caches have to align on (matters
 -- most for Gemini's cachedContents structure). Returns nil when no refs
 -- are present. Order is stable: api_ref first (largest, most stable), then
--- midi_ref, then theme_ref.
+-- midi_ref, then theme_ref, then a small manifest line so static-only turns
+-- do not need a separate manifest-only sticky message.
 function Net.bundled_static_refs()
   local parts = {}
-  if S.api_ref_message   then parts[#parts+1] = S.api_ref_message   end
-  if S.midi_ref_message  then parts[#parts+1] = S.midi_ref_message  end
-  if S.theme_ref_message then parts[#parts+1] = S.theme_ref_message end
+  local keys = {}
+  if S.api_ref_message   then parts[#parts+1] = S.api_ref_message;   keys[#keys+1] = "docs"  end
+  if S.midi_ref_message  then parts[#parts+1] = S.midi_ref_message;  keys[#keys+1] = "midi"  end
+  if S.theme_ref_message then parts[#parts+1] = S.theme_ref_message; keys[#keys+1] = "theme" end
   if #parts == 0 then return nil end
+  parts[#parts+1] =
+    "PINNED REFERENCES (already provided above; do NOT re-request via "
+    .. "<context_needed>): " .. tbl_concat(keys, ", ")
   return tbl_concat(parts, "\n\n")
 end
 
@@ -18113,6 +18668,20 @@ function Net.sticky_unset(key)
   end
 end
 
+function Net.sticky_key_mentioned_in_prompt(key, lower_prompt)
+  local ident = key and key:match("^[^:]+:(.+)$")
+  if not ident or lower_prompt == "" then return false end
+  local ident_lower = ident:lower()
+  if lower_prompt:find(ident_lower, 1, true) then return true end
+  for part in ident:gmatch("[^/]+") do
+    part = part:match("^%s*(.-)%s*$")
+    if part ~= "" and lower_prompt:find(part:lower(), 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
 -- Pin prompt_bundle:plugin into sticky if it's not already there. Called from
 -- every site that pins a plugin_ref / pref_plugin / preferred_plugins entry,
 -- so that any plugin ADD/CONFIGURE task arrives at the model already holding
@@ -18132,6 +18701,22 @@ function Net.copin_plugin_bundle(out_list)
   if not pb_content then return end
   Net.sticky_set(pb_key, pb_content)
   if S.prompt_bundle_sent then S.prompt_bundle_sent["plugin"] = true end
+  if out_list then out_list[#out_list+1] = pb_key end
+end
+
+-- Pin prompt_bundle:theme next to the theme color reference. The theme bucket
+-- lists the color keys; this bundle carries the backup/restore safety rule
+-- required before any SetThemeColor code.
+function Net.copin_theme_bundle(out_list)
+  local pb_key = "prompt_bundle:theme"
+  if S.sticky_context[pb_key] then
+    if S.prompt_bundle_sent then S.prompt_bundle_sent["theme"] = true end
+    return
+  end
+  local pb_content, _ = CTX.prompt_bundle("theme")
+  if not pb_content then return end
+  Net.sticky_set(pb_key, pb_content)
+  if S.prompt_bundle_sent then S.prompt_bundle_sent["theme"] = true end
   if out_list then out_list[#out_list+1] = pb_key end
 end
 
@@ -18264,6 +18849,8 @@ function Net.sticky_parts()
       or k:find("^pref:") ~= nil
       or k:find("^preferred_plugins:") ~= nil
       or k:find("^fx:") ~= nil
+      or k == "fx_list"
+      or k:find("^fx_list:") ~= nil
       or k:find("^fx_inspect:") ~= nil
       or k == "fx_chains"
   end
@@ -18317,6 +18904,12 @@ function Net.sticky_parts()
   if #static_keys == 0 and #stable_keys == 0 and #growing_keys == 0 then
     return nil, nil
   end
+  -- Static-only pinned refs already carry their manifest inside
+  -- Net.bundled_static_refs(). Avoid emitting a separate manifest-only sticky
+  -- message plus acknowledgement when no actual sticky keys are present.
+  if #stable_keys == 0 and #growing_keys == 0 then
+    return nil, nil
+  end
 
   local stable_text
   if #stable_keys > 0 then
@@ -18325,9 +18918,10 @@ function Net.sticky_parts()
     stable_text = tbl_concat(parts, "\n\n")
   end
 
-  -- Always emit the manifest when any pinned bucket exists (static or sticky).
-  -- The manifest lists every pinned key so the model can short-circuit
-  -- re-requests. Order: static refs first (stable slot), then stable sticky
+  -- Always emit the sticky manifest when any sticky bucket exists. Static-only
+  -- turns carry their manifest inside Net.bundled_static_refs() instead. The
+  -- manifest lists every pinned key so the model can short-circuit re-requests.
+  -- Order: static refs first (stable slot), then stable sticky
   -- (prompt_bundle:*), then growing sticky (plugin_ref/pref/fx_*).
   --
   -- LAYOUT WITHIN growing_text (cache-stability-driven):
@@ -18346,7 +18940,11 @@ function Net.sticky_parts()
   -- ref-addition turn.
   local all_keys = {}
   for _, k in ipairs(static_keys)  do all_keys[#all_keys+1] = k end
-  if S.pending_snapshot then all_keys[#all_keys+1] = "session" end
+  -- Keep the manifest shape stable on normal snapshot-enabled turns. The
+  -- snapshot itself rides the latest user message, not sticky_context, but
+  -- changing this manifest line every time a retry/follow-up rebuild toggles
+  -- S.pending_snapshot would invalidate the sticky cache rung.
+  if prefs.include_snapshot ~= false then all_keys[#all_keys+1] = "session" end
   for _, k in ipairs(stable_keys)  do all_keys[#all_keys+1] = k end
   for _, k in ipairs(growing_keys) do all_keys[#all_keys+1] = k end
   local growing_parts = {}
@@ -18414,18 +19012,17 @@ function Net.sticky_evict(user_text)
   -- Initialize new keys, refresh keys whose identifier hits in the prompt.
   for k in pairs(S.sticky_context) do
     if not age[k] then age[k] = now end
-    local ident = k:match("^[^:]+:(.+)$")
-    if ident and lower ~= "" and lower:find(ident:lower(), 1, true) then
+    if Net.sticky_key_mentioned_in_prompt(k, lower) then
       age[k] = now
     end
   end
   -- Drop stale keys + clean up orphaned age entries.
-  -- Exemption: docs:* and docs_extended are stable session-wide reference
-  -- material, not per-task context that should churn.
-  -- The full set of doc payloads totals ~5K tokens; once loaded, cheaper to
-  -- keep than to re-fetch on a follow-up keyword mention. Also makes the
-  -- system prompt's "stays pinned for the rest of the conversation" promise
-  -- truthful.
+  -- Exemption: docs:* / docs_extended and prompt_bundle:* are stable
+  -- session-wide reference material, not per-task context that should churn.
+  -- The doc payloads are cheaper to keep than to re-fetch on a follow-up
+  -- keyword mention. Prompt bundles are treated as system-prompt content
+  -- (`prompt_bundle_sent` is session-scoped), so evicting them would make the
+  -- manifest/sent flags claim a bundle is pinned when it no longer is.
   -- Trade-off: a misfired pre-pin stays alive forever (bounded ~850-1800
   -- tokens × cache rolls; if this becomes a problem, a softer "evict at
   -- 25 turns of no-keyword-mention" rule could be added).
@@ -18433,7 +19030,8 @@ function Net.sticky_evict(user_text)
   for k, t in pairs(age) do
     if not S.sticky_context[k] then
       age[k] = nil
-    elseif k == "docs_extended" or k:find("^docs:") then
+    elseif k == "docs_extended" or k:find("^docs:")
+        or k:find("^prompt_bundle:") then
       -- exempt; see comment above.
     elseif k == "recent_reaper_changes"
         and (now - t) > 2 then
@@ -18711,6 +19309,15 @@ function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
     msg_parts[#msg_parts+1] = '{"role":"assistant","content":[{"type":"text","text":"Understood."}]}'
   end
 
+  local last_asst_idx = nil
+  for idx = #msgs, 1, -1 do
+    local m = msgs[idx]
+    if m and m.role == "assistant" then
+      last_asst_idx = idx
+      break
+    end
+  end
+
   for idx, m in ipairs(msgs) do
     local is_last_user = (m.role == "user" and idx == #msgs)
 
@@ -18750,7 +19357,7 @@ function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
       -- Non-final messages: single block. Mark the last assistant message as a
       -- moving cache breakpoint so the conversation prefix is cached for
       -- cheaper follow-up turns.
-      local is_last_asst = (m.role == "assistant" and idx == #msgs - 1)
+      local is_last_asst = (m.role == "assistant" and idx == last_asst_idx)
       local cache = is_last_asst and rung_cache_mark("last_asst", m.content) or ""
       msg_parts[#msg_parts+1] = str_format(
         '{"role":"%s","content":[{"type":"text","text":"%s"%s}]}',
@@ -18872,6 +19479,26 @@ end
 -- OpenAI Chat Completions API format. System prompt as a "system" role message.
 -- All messages are simple {role, content} objects. Attachments: images as
 -- image_url content parts, text files inline, PDFs as text note (unsupported).
+function Net.openai_prompt_cache_key()
+  if type(S.openai_prompt_cache_key) == "string"
+     and S.openai_prompt_cache_key ~= "" then
+    return S.openai_prompt_cache_key
+  end
+  local key
+  if Store and Store.openai_prompt_cache_key then
+    local ok, result = pcall(Store.openai_prompt_cache_key)
+    if ok and type(result) == "string" and result ~= "" then
+      key = result
+    elseif not ok then
+      Log.line("CACHE", "openai prompt_cache_key restore failed: "
+        .. tostring(result))
+    end
+  end
+  key = key or S.INSTANCE_ID or "ra_prompt_cache"
+  S.openai_prompt_cache_key = key
+  return key
+end
+
 function Net.build_body_openai(msgs, snapshot, msg_attachments)
   local msg_parts = {}
 
@@ -18988,9 +19615,10 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
       reasoning = str_format(',"reasoning_effort":"%s"', val)
     end
   end
-  -- prompt_cache_key: stable per script-session identifier. OpenAI's automatic
+  -- prompt_cache_key: stable per install identifier. OpenAI's automatic
   -- prefix caching auto-routes requests sharing this key to the same backend
-  -- worker, raising cache-hit rate on long sessions. The key is opaque to us.
+  -- worker, raising cache-hit rate on long sessions and across REAPER
+  -- restarts. The key is opaque to us and persisted in State.json.
   -- Custom-provider model prefix: OpenRouter/LiteLLM/Ollama routing gateways
   -- often require a prefix ("openrouter/anthropic/...", "ollama/...") on the
   -- model id. Stored per-provider so users don't have to type it into every
@@ -19071,7 +19699,7 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
   end
   return str_format(
     '{"model":"%s"%s,"prompt_cache_key":"%s","messages":[%s]%s%s%s}',
-    model_id, max_tokens_field, JSON.escape(S.INSTANCE_ID),
+    model_id, max_tokens_field, JSON.escape(Net.openai_prompt_cache_key()),
     tbl_concat(msg_parts, ","), reasoning, response_format, extra_suffix)
 end
 
@@ -19226,10 +19854,29 @@ end
 function Net.trimmed_history()
   local hist
   if #S.history <= CFG.MAX_HISTORY_TURNS then
+    S.history_trim_start = nil
     hist = S.history
   else
     hist = {}
-    for i = #S.history - CFG.MAX_HISTORY_TURNS + 1, #S.history do
+    local start = tonumber(S.history_trim_start)
+    if not start or start < 1 or start > #S.history
+       or (#S.history - start + 1) > CFG.MAX_HISTORY_TURNS then
+      local hysteresis = math_floor(
+        tonumber(CFG.HISTORY_TRIM_HYSTERESIS) or 0)
+      if hysteresis < 0 then hysteresis = 0 end
+      if hysteresis >= CFG.MAX_HISTORY_TURNS then hysteresis = 0 end
+      local keep = CFG.MAX_HISTORY_TURNS - hysteresis
+      if keep < 1 then keep = CFG.MAX_HISTORY_TURNS end
+      start = #S.history - keep + 1
+      if start < 1 then start = 1 end
+      if S.history[start]
+         and S.history[start].role == "assistant"
+         and start < #S.history then
+        start = start + 1
+      end
+      S.history_trim_start = start
+    end
+    for i = start, #S.history do
       hist[#hist+1] = S.history[i]
     end
     if #hist > 0 and hist[1].role == "assistant" then
@@ -19260,6 +19907,21 @@ function Net._compact_hash(s)
     h = h & 0xFFFFFFFF
   end
   return string.format("%08x", h)
+end
+
+function Net._compact_history_cache_sensitive_provider()
+  if type(PROVIDERS) ~= "table"
+     or type(PROVIDERS.active) ~= "function" then
+    return nil
+  end
+  local ok, p = pcall(PROVIDERS.active)
+  if not ok or type(p) ~= "table" then return nil end
+
+  -- Anthropic's explicit `last_asst` cache rung covers the full conversation
+  -- prefix. Rewriting older assistant rows after they have already ridden that
+  -- rung trades a small token saving for a fresh cache write on every follow-up.
+  if p.id == "anthropic" then return p.id end
+  return nil
 end
 
 -- Build a fixed-format structured summary for an assistant turn. Local
@@ -19480,6 +20142,15 @@ function Net._maybe_compact_history(hist)
   if not compact_on then
     return hist
   end
+  local cache_sensitive_provider = Net._compact_history_cache_sensitive_provider()
+  if cache_sensitive_provider then
+    if prefs.debug_logging then
+      Log.line("HISTORY-COMPACT",
+        "skipped (preserve prompt cache for provider: "
+        .. tostring(cache_sensitive_provider) .. ")")
+    end
+    return hist
+  end
   -- modify-prior detector short-circuits compaction entirely. False
   -- positives only cost the savings for this one turn.
   local is_modify, mp_match = Net._is_modify_prior_followup(hist)
@@ -19574,10 +20245,17 @@ end
 -- centralised so the per-turn-call-cap abort path can reuse the same
 -- semantics without leaving an internal note as the user's last turn.
 function Net._restore_pending_user_history()
-  if S.pending_orig_prompt
-     and #S.history > 0
-     and S.history[#S.history].role == "user" then
-    S.history[#S.history].content = "USER REQUEST:\n" .. S.pending_orig_prompt
+  if not S.pending_orig_prompt or not S.history or #S.history == 0 then return end
+  local restored = "USER REQUEST:\n" .. S.pending_orig_prompt
+  local tail = S.history[#S.history]
+  if tail and tail.role == "user" then
+    tail.content = restored
+    return
+  end
+  local prev = S.history[#S.history - 1]
+  if tail and tail.role == "assistant"
+     and prev and prev.role == "user" then
+    prev.content = restored
   end
 end
 
@@ -19696,6 +20374,11 @@ function Net._call_cap_message()
          :format(CFG.MAX_CALLS_PER_TURN, hint)
 end
 
+function Net._validator_retry_cap_message()
+  return ("Stopped after %d automatic repair retries in one turn to avoid runaway cost. Try rephrasing the request or using a stronger model if it repeats.")
+         :format(CFG.MAX_VALIDATOR_RETRIES_PER_TURN or 3)
+end
+
 function Net._call_cap_error_extra()
   local p   = PROVIDERS.active() or {}
   local m   = MODELS[prefs.model_idx] or MODELS[1] or {}
@@ -19709,6 +20392,32 @@ function Net._call_cap_error_extra()
       matched_condition = "api_call_turn_cap",
       provider_id = provider_id,
       model_id = model_id,
+      api_calls_this_turn = S.api_calls_this_turn or 0,
+      max_api_calls_per_turn = CFG.MAX_CALLS_PER_TURN,
+      session_status_before = S.status or nil,
+      retry_count = S.retry_count,
+      retry_max = S.retry_max,
+      pending_display_idx = S.pending_display_idx,
+      pending_turn_state = S.pending_orig_prompt and "orig_prompt" or nil,
+    },
+  }
+end
+
+function Net._validator_retry_cap_error_extra()
+  local p   = PROVIDERS.active() or {}
+  local m   = MODELS[prefs.model_idx] or MODELS[1] or {}
+  local provider_id = p.is_custom and "custom" or (p.id or nil)
+  local model_id = p.is_custom and "custom" or (m and (m.id or m.name) or nil)
+  return {
+    error_kind = "runaway_validator_retry_cap",
+    error_debug = {
+      failure_kind = "runaway_validator_retry_cap",
+      source = "runaway_validator_retry_guardrail",
+      matched_condition = "validator_retry_turn_cap",
+      provider_id = provider_id,
+      model_id = model_id,
+      validator_retries_this_turn = S.validator_retries_this_turn or 0,
+      max_validator_retries_per_turn = CFG.MAX_VALIDATOR_RETRIES_PER_TURN or 3,
       api_calls_this_turn = S.api_calls_this_turn or 0,
       max_api_calls_per_turn = CFG.MAX_CALLS_PER_TURN,
       session_status_before = S.status or nil,
@@ -19749,6 +20458,61 @@ function Net.try_local_jsfx_capability_overview(user_text, attachments, probe_tu
   return Net._emit_local_answer(user_text, answer, probe_turn, {
     ctx_label = "local_jsfx_overview",
   })
+end
+
+function Net._prune_display_messages(max_count)
+  local list = S and S.display_messages
+  if type(list) ~= "table" then return 0 end
+  local max = tonumber(max_count) or CFG.MAX_DISPLAY_MSGS
+  local n = #list
+  if n <= max then return 0 end
+  local pruned_count = n - max
+  for i = 1, max do
+    list[i] = list[i + pruned_count]
+  end
+  for i = max + 1, n do
+    list[i] = nil
+  end
+  return pruned_count
+end
+
+function Net._rebase_display_message_index(idx, pruned_count)
+  local n = tonumber(idx)
+  local pruned = tonumber(pruned_count) or 0
+  if not n then return nil end
+  n = n - pruned
+  if n < 1 then return nil end
+  return n
+end
+
+function Net._rebase_display_message_refs(pruned_count)
+  pruned_count = tonumber(pruned_count) or 0
+  if pruned_count <= 0 or type(S) ~= "table" then return end
+  S.pending_display_idx = Net._rebase_display_message_index(
+    S.pending_display_idx, pruned_count)
+  S.backup_warn_idx = Net._rebase_display_message_index(
+    S.backup_warn_idx, pruned_count)
+  S.backup_warn_typed_idx = Net._rebase_display_message_index(
+    S.backup_warn_typed_idx, pruned_count)
+  S.risky_warn_idx = Net._rebase_display_message_index(
+    S.risky_warn_idx, pruned_count)
+  S.jsfx_save_warn_idx = Net._rebase_display_message_index(
+    S.jsfx_save_warn_idx, pruned_count)
+  S.scroll_to_msg = Net._rebase_display_message_index(
+    S.scroll_to_msg, pruned_count)
+  if not S.scroll_to_msg then S.scroll_to_msg_frames = nil end
+  if type(S.lua_defer_run) == "table" then
+    S.lua_defer_run.message_idx = Net._rebase_display_message_index(
+      S.lua_defer_run.message_idx, pruned_count)
+  end
+  if type(S.backup_flash) == "table" then
+    local shifted = {}
+    for idx, flash in pairs(S.backup_flash) do
+      local rebased = Net._rebase_display_message_index(idx, pruned_count)
+      if rebased then shifted[rebased] = flash end
+    end
+    S.backup_flash = shifted
+  end
 end
 
 function Net._emit_local_answer(user_text, answer, probe_turn, opts)
@@ -19797,10 +20561,11 @@ function Net._emit_local_answer(user_text, answer, probe_turn, opts)
     if Diag.uploader_enabled and Diag.capture_current_chat then
       Diag.capture_current_chat()
     end
-    while #S.display_messages > CFG.MAX_DISPLAY_MSGS do
-      tbl_remove(S.display_messages, 1)
+    local pruned_count = Net._prune_display_messages(CFG.MAX_DISPLAY_MSGS)
+    if pruned_count > 0 then
+      Net._rebase_display_message_refs(pruned_count)
+      S.wrap_cache = {}
     end
-    S.wrap_cache = {}
   end
 
   S.status = "idle"
@@ -20122,6 +20887,109 @@ function Net._restore_typed_action_escalation_model()
   return true
 end
 
+function Net._drop_pending_display_rows()
+  local idx = tonumber(S.pending_display_idx)
+  if not (idx and S.display_messages and S.display_messages[idx]) then return end
+  for i = #S.display_messages, idx, -1 do
+    tbl_remove(S.display_messages, i)
+  end
+  S.wrap_cache = {}
+end
+
+function Net._drop_pending_history_rows()
+  if not (S.pending_orig_prompt and S.history and #S.history > 0) then return end
+  local tail = S.history[#S.history]
+  if tail and tail.role == "assistant" then
+    local prev = S.history[#S.history - 1]
+    if prev and prev.role == "user" then
+      tbl_remove(S.history, #S.history)
+      tbl_remove(S.history, #S.history)
+      return
+    end
+  end
+  if tail and tail.role == "user" then
+    tbl_remove(S.history, #S.history)
+  end
+end
+
+function Net.cancel_active_request(probe_reason)
+  local active = S.status == "waiting"
+    or S.curl_pid ~= nil
+    or S.retry_scheduled == true
+    or S.gemini_tier_pending == true
+    or (deep_scan and deep_scan.active == true)
+  if not active then return false, "not_active" end
+
+  if deep_scan and deep_scan.active and CTX and CTX.cancel_deep_scan then
+    pcall(CTX.cancel_deep_scan)
+  end
+  if Net.kill_curl then pcall(Net.kill_curl) end
+
+  Net._drop_pending_display_rows()
+  Net._drop_pending_history_rows()
+  Net._restore_typed_action_escalation_model()
+
+  S.curl_pid            = nil
+  S.curl_os_pid         = nil
+  S.send_time           = nil
+  S.request_start_time  = nil
+  S.status              = "idle"
+  S.pending_display_idx = nil
+  S.pending_code        = nil
+  S.pending_orig_prompt = nil
+  S.pending_typed_action_expected = false
+  S.pending_typed_action_response_format = false
+  S.pending_typed_action_profile = nil
+  S.pending_answer_only_followup = nil
+  S.pending_project     = nil
+  S.pending_snapshot    = nil
+  S.pending_attachments = nil
+  S._fx_cache_events    = nil
+  S.retry_scheduled     = false
+  S.retry_fire_time     = nil
+  S.retry_count         = 0
+  S.retry_max           = CFG.MAX_RETRIES
+  S.retry_saved_body    = nil
+  S.retry_saved_provider_idx = nil
+  S.retry_saved_model_idx    = nil
+  S.retry_saved_thinking_idx = nil
+  S.reset_turn_retries()
+  S.scroll_to_bottom    = true
+
+  if S.probe_turn then
+    Probe.end_turn(S.probe_turn, probe_reason or "cancelled")
+    S.probe_turn = nil
+  end
+  if Code and Code.safe_write and tmp and tmp.out then
+    Code.safe_write(tmp.out, "")
+  end
+  return true
+end
+
+function Net._abort_runaway_turn(probe_reason)
+  Net._restore_pending_user_history()
+  Net._restore_typed_action_escalation_model()
+  S.status               = "idle"
+  S.pending_display_idx  = nil
+  S.pending_orig_prompt  = nil
+  S.pending_typed_action_expected = false
+  S.pending_typed_action_response_format = false
+  S.pending_typed_action_profile = nil
+  S.pending_answer_only_followup = nil
+  S.request_start_time   = nil
+  S.retry_count          = 0
+  S.retry_max            = CFG.MAX_RETRIES
+  S.retry_scheduled      = false
+  S.retry_saved_body     = nil
+  S.retry_saved_provider_idx = nil
+  S.retry_saved_model_idx    = nil
+  S.retry_saved_thinking_idx = nil
+  if S.probe_turn then
+    Probe.end_turn(S.probe_turn, probe_reason or "call_cap")
+  end
+  return false, "call_cap_exceeded"
+end
+
 function Net._read_file_limited(path, cap)
   if not path or path == "" then return "", 0, false end
   local f = io.open(path, "rb")
@@ -20228,6 +21096,9 @@ function Net.fire_curl(body, opts)
 
   local method   = (opts and opts.method) or "POST"
   local is_get   = (method == "GET")
+  local launch_provider_idx = (opts and opts.provider_idx) or prefs.provider_idx
+  local launch_model_idx    = (opts and opts.model_idx) or prefs.model_idx
+  local launch_thinking_idx = (opts and opts.thinking_idx) or prefs.thinking_idx
 
   -- A "turn POST" is a POST tied to the user's currently-pending display
   -- message: the initial send and every silent retry / context fetch /
@@ -20241,6 +21112,17 @@ function Net.fire_curl(body, opts)
                        and S.pending_display_idx
                        and S.display_messages[S.pending_display_idx] ~= nil
 
+  -- Validator/repair retry sub-cap. Individual retry vectors still have
+  -- their own small counters; this aggregate guard catches a turn that keeps
+  -- tripping different validators before it reaches the broader POST cap.
+  if is_turn_post
+     and (S.validator_retries_this_turn or 0)
+         > (CFG.MAX_VALIDATOR_RETRIES_PER_TURN or 3) then
+    Log.add_error(Net._validator_retry_cap_message(), nil, nil, nil,
+      Net._validator_retry_cap_error_extra())
+    return Net._abort_runaway_turn("validator_retry_cap")
+  end
+
   -- Per-turn call cap. Catches runaway loops (small / local model
   -- thrashing on context_needed or validator retries) before they rack
   -- up real cost. Aborts the turn cleanly: logs ONE user-visible error,
@@ -20251,22 +21133,7 @@ function Net.fire_curl(body, opts)
      and (S.api_calls_this_turn or 0) >= CFG.MAX_CALLS_PER_TURN then
     Log.add_error(Net._call_cap_message(), nil, nil, nil,
       Net._call_cap_error_extra())
-    Net._restore_pending_user_history()
-    Net._restore_typed_action_escalation_model()
-    S.status               = "idle"
-    S.pending_display_idx  = nil
-    S.pending_orig_prompt  = nil
-    S.pending_typed_action_expected = false
-    S.pending_typed_action_response_format = false
-    S.pending_typed_action_profile = nil
-    S.pending_answer_only_followup = nil
-    S.request_start_time   = nil
-    S.retry_count          = 0
-    S.retry_max            = CFG.MAX_RETRIES
-    S.retry_scheduled      = false
-    S.retry_saved_body     = nil
-    if S.probe_turn then Probe.end_turn(S.probe_turn, "call_cap") end
-    return false, "call_cap_exceeded"
+    return Net._abort_runaway_turn("call_cap")
   end
 
   -- Per-message API-call counter. Incremented for every POST that's tied
@@ -20292,7 +21159,19 @@ function Net.fire_curl(body, opts)
     if not Code.safe_write(tmp.body, body) then return false, "io_error" end
   end
 
-  local p = PROVIDERS.active()
+  local p = PROVIDERS[launch_provider_idx] or PROVIDERS.active()
+  launch_provider_idx = PROVIDERS[launch_provider_idx] and launch_provider_idx
+    or prefs.provider_idx
+  if not (p and p.models and p.models[launch_model_idx]) then
+    if p == PROVIDERS.active() and p and p.models and p.models[prefs.model_idx] then
+      launch_model_idx = prefs.model_idx
+    else
+      launch_model_idx = 1
+    end
+  end
+  local active_model = (p and p.models and p.models[launch_model_idx])
+    or (p == PROVIDERS.active() and (MODELS[prefs.model_idx] or MODELS[1]))
+    or {}
 
   Log.request(p.label, is_get and ("[GET " .. (opts.endpoint_override or "?") .. "]") or body)
 
@@ -20337,11 +21216,11 @@ function Net.fire_curl(body, opts)
   if opts and opts.endpoint_override then
     endpoint = opts.endpoint_override
   elseif p.endpoint_tpl then
-    endpoint = str_format(p.endpoint_tpl, MODELS.active_id())
+    endpoint = str_format(p.endpoint_tpl,
+      active_model.id or MODELS.active_id())
   else
     endpoint = p.endpoint
   end
-  local active_model = MODELS[prefs.model_idx] or MODELS[1] or {}
   S.curl_debug = {
     launched_at_utc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     method = method,
@@ -20354,16 +21233,18 @@ function Net.fire_curl(body, opts)
     curl_timeout_s = curl_timeout,
     request_body_bytes = (not is_get and type(body) == "string") and #body or 0,
     is_turn_post = is_turn_post and true or false,
-    provider_idx = prefs.provider_idx,
-    model_idx = prefs.model_idx,
+    provider_idx = launch_provider_idx,
+    model_idx = launch_model_idx,
   }
   -- Write the auth header file (header-based auth only). Custom providers may
   -- have no key at all -- in that case skip the auth file so we don't send a
   -- bare "Authorization: Bearer " header that some servers reject.
+  local api_key = (S.api_key_map and S.api_key_map[p.id])
+    or (p == PROVIDERS.active() and S.api_key) or nil
   local use_auth_file = (p.auth_style == "header")
-    and S.api_key ~= nil and S.api_key ~= ""
+    and api_key ~= nil and api_key ~= ""
   if use_auth_file then
-    local auth_value = (p.auth_prefix or "") .. S.api_key
+    local auth_value = (p.auth_prefix or "") .. api_key
     if not Code.safe_write(tmp.auth, p.auth_header .. ": " .. auth_value) then return false, "io_error" end
   end
 
@@ -20381,16 +21262,10 @@ function Net.fire_curl(body, opts)
   Code.safe_write(tmp.out, "")
   Code.safe_write(tmp.err, "")
 
-  -- Build the list of extra header flags. Skip the Anthropic extended-cache
-  -- beta header if it has been rejected earlier this session -- paired with
-  -- the 5-minute fallback in build_body_anthropic.
+  -- Build the list of extra header flags.
   local extra_h_parts = {}
-  for _, h in ipairs(p.extra_headers) do
-    if not (S.anthropic_beta_disabled
-            and p.id == "anthropic"
-            and h:find("extended%-cache%-ttl", 1, false)) then
-      extra_h_parts[#extra_h_parts+1] = h
-    end
+  for _, h in ipairs(p.extra_headers or {}) do
+    extra_h_parts[#extra_h_parts+1] = h
   end
 
   if RA.IS_WINDOWS then
@@ -20490,14 +21365,17 @@ function Net.fire_curl(body, opts)
 
   S.curl_pid              = true
   S.curl_exited_clean     = false  -- reset partial-read guard for new request
-  S.curl_output_seen_before_exit = false
   S.kill_pending          = false  -- a fresh request voids any stale Cancel watchdog
   S.send_time             = time_precise()
   S.timeout_extensions    = 0      -- watchdog clock just restarted; prior
                                    -- "Extend by Ns" clicks no longer apply
   S.retry_saved_body      = body  -- saved so a 529/overload retry can re-send
-  S.pending_provider_idx  = prefs.provider_idx  -- snapshot for response parsing
-  S.pending_model_idx     = prefs.model_idx
+  S.retry_saved_provider_idx = launch_provider_idx
+  S.retry_saved_model_idx    = launch_model_idx
+  S.retry_saved_thinking_idx = launch_thinking_idx
+  S.pending_provider_idx  = launch_provider_idx  -- snapshot for response parsing
+  S.pending_model_idx     = launch_model_idx
+  S.pending_thinking_idx  = launch_thinking_idx
   -- Probe timing: curl_wait phase begins here. The curl
   -- process is now running; we are waiting for its response. The
   -- corresponding mark_phase_end fires inside Net.try_finish_curl
@@ -20507,6 +21385,111 @@ function Net.fire_curl(body, opts)
   -- correctly via mark_phase_end's additive timing.
   Probe.mark_phase_start(S.probe_turn, "curl_wait")
   return true
+end
+
+function Net.build_body_for_launch(msgs, snapshot, msg_attachments,
+                                   provider_idx, model_idx, thinking_idx)
+  local saved_provider_idx = prefs.provider_idx
+  local saved_model_idx    = prefs.model_idx
+  local saved_thinking_idx = prefs.thinking_idx
+  local saved_api_key      = S.api_key
+  local launch_provider = PROVIDERS[provider_idx]
+  if not launch_provider then return nil, nil, "provider_unavailable" end
+
+  local function restore_selection()
+    prefs.provider_idx = saved_provider_idx
+    MODELS.refresh()
+    if MODELS[saved_model_idx] then prefs.model_idx = saved_model_idx end
+    prefs.thinking_idx = saved_thinking_idx
+    S.api_key = saved_api_key
+  end
+
+  prefs.provider_idx = provider_idx
+  MODELS.refresh()
+  if launch_provider.models and launch_provider.models[model_idx] then
+    prefs.model_idx = model_idx
+  else
+    prefs.model_idx = 1
+  end
+  local launch_model = MODELS[prefs.model_idx] or launch_provider.models[1]
+  if launch_provider.thinking_levels then
+    prefs.thinking_idx = thinking_idx
+      or PROVIDERS.load_thinking_idx(launch_provider, launch_model)
+  else
+    prefs.thinking_idx = 0
+  end
+  S.api_key = S.api_key_map[launch_provider.id]
+
+  local ok, body = pcall(Net.build_body, msgs, snapshot, msg_attachments)
+  local actual_model_idx = prefs.model_idx
+  local actual_thinking_idx = prefs.thinking_idx
+  restore_selection()
+  if not ok then error(body) end
+  return body, {
+    provider_idx = provider_idx,
+    model_idx = actual_model_idx,
+    thinking_idx = actual_thinking_idx,
+  }
+end
+
+function Net.fire_pending_retry(msgs, snapshot, msg_attachments)
+  local provider_idx = S.pending_provider_idx or prefs.provider_idx
+  local model_idx    = S.pending_model_idx or prefs.model_idx
+  local thinking_idx = S.pending_thinking_idx or prefs.thinking_idx
+  local body, opts, reason = Net.build_body_for_launch(msgs, snapshot,
+    msg_attachments, provider_idx, model_idx, thinking_idx)
+  if not body then return false, reason or "body_build_failed" end
+  return Net.fire_curl(body, opts)
+end
+
+function Net.fire_validator_retry(opts)
+  opts = type(opts) == "table" and opts or {}
+  if opts.kind then Probe.add_validator_retry(S.probe_turn, opts.kind) end
+  if opts.log_tag and opts.log_message then
+    Log.line(opts.log_tag, opts.log_message)
+  end
+  if #S.history > 0 and S.history[#S.history].role == "assistant" then
+    S.history[#S.history] = nil
+  end
+  if #S.history > 0 and S.history[#S.history].role == "user" then
+    S.history[#S.history] = nil
+  end
+  S.history[#S.history + 1] = {
+    role = "user",
+    content = tostring(opts.history_content or ""),
+  }
+  local label = tostring(opts.ctx_label or "")
+  if label ~= "" and S.pending_display_idx
+     and S.display_messages[S.pending_display_idx] then
+    local dmsg = S.display_messages[S.pending_display_idx]
+    local existing = dmsg.ctx_label or ""
+    if not existing:find(label, 1, true) then
+      dmsg.ctx_label = existing ~= "" and (existing .. " + " .. label) or label
+    end
+  end
+  if opts.rebuild_snapshot ~= false
+     and prefs.include_snapshot
+     and not S.pending_answer_only_followup then
+    S.pending_project  = CTX.resolve_pending_project()
+    S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+      S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+  end
+  S.status = "waiting"
+  Net._ensure_request_start_time()
+  Code.safe_write(tmp.out, "")
+  local ok, reason = Net.fire_pending_retry(Net.trimmed_history(),
+    S.pending_snapshot, S.pending_attachments)
+  if not ok and reason ~= "call_cap_exceeded" then
+    local msg
+    if opts.retry_failed_key and RA and RA.retry_failed then
+      msg = RA.retry_failed(opts.retry_failed_key,
+        opts.retry_failed_label or opts.ctx_label or opts.kind or "validator retry")
+    end
+    Log.add_error(msg or opts.failure_message
+      or "Auto-retry did not go through. Please resend the last message.")
+  end
+  S.scroll_to_bottom = true
+  return ok, reason
 end
 
 -- =============================================================================
@@ -21174,8 +22157,52 @@ end
 -- Net.fire_gemini_tier_test
 -- =============================================================================
 -- Fires a 1-token request using the Pro model to detect free vs paid tier.
--- Free tier: response body contains "free_tier" in quota metrics (429, limit=0).
+-- Free tier: response body contains positive quota evidence
+-- ("free_tier" metric text, or a quota limit/value of 0). Plain 429/403
+-- responses are ambiguous: paid accounts can hit transient per-minute
+-- throttles, and treating those as "free" hides Pro/caching until manual
+-- reclassification.
 -- Paid tier: request succeeds (Pro accessible).
+function Net._gemini_error_has_free_tier_signal(err)
+  if type(err) ~= "table" then return false end
+  local saw_free_tier, saw_quota_context, saw_zero_limit = false, false, false
+  local seen = {}
+
+  local function scan(node, key_hint)
+    if saw_free_tier or (saw_quota_context and saw_zero_limit) then return end
+    local t = type(node)
+    local key = tostring(key_hint or ""):lower()
+    if key:find("quota", 1, true) then saw_quota_context = true end
+    if t == "table" then
+      if seen[node] then return end
+      seen[node] = true
+      for k, v in pairs(node) do scan(v, k) end
+    elseif t == "string" then
+      local text = node:lower()
+      if text:find("free_tier", 1, true)
+         or text:find("free-tier", 1, true)
+         or text:find("freetier", 1, true) then
+        saw_free_tier = true
+      end
+      if text:find("quota", 1, true) then saw_quota_context = true end
+      if (key:find("limit", 1, true)
+          or key:find("quota", 1, true))
+         and tonumber(text) == 0 then
+        saw_zero_limit = true
+      end
+    elseif t == "number" then
+      if (key:find("limit", 1, true)
+          or key:find("quota", 1, true))
+         and node == 0 then
+        saw_zero_limit = true
+      end
+    end
+  end
+
+  scan(err, nil)
+  return saw_free_tier or (saw_quota_context and saw_zero_limit)
+end
+
 function Net.fire_gemini_tier_test()
   -- Don't fire while another request is in-flight.
   if S.curl_pid then return end
@@ -21302,8 +22329,7 @@ function Net.handle_gemini_tier_test(raw)
       if type(resp.error) == "table" and resp.error ~= JSON.NULL then
         local code   = tonumber(resp.error.code)
         local status = type(resp.error.status) == "string" and resp.error.status or ""
-        if code == 429 or code == 403
-           or status == "RESOURCE_EXHAUSTED" or status == "PERMISSION_DENIED" then
+        if Net._gemini_error_has_free_tier_signal(resp.error) then
           is_free = true
         elseif code == 503 or status == "UNAVAILABLE" then
           provider_unavailable = true
@@ -21382,6 +22408,11 @@ function Net.gemini_cache_source_signature(api_ref)
   local sys = tostring((Net.system_prompt_text and Net.system_prompt_text())
     or SYSTEM_PROMPT or "")
   local ref = tostring(api_ref or "")
+  if S.gemini_cache_sig_value
+      and S.gemini_cache_sig_sys == sys
+      and S.gemini_cache_sig_ref == ref then
+    return S.gemini_cache_sig_value
+  end
   local h = 5381
   local function fold(s)
     for i = 1, #s do
@@ -21391,8 +22422,12 @@ function Net.gemini_cache_source_signature(api_ref)
   fold(sys)
   h = (h * 33 + 10) % 4294967296
   fold(ref)
-  return tostring(#sys) .. ":" .. tostring(#ref)
+  local signature = tostring(#sys) .. ":" .. tostring(#ref)
     .. ":" .. str_format("%08x", h)
+  S.gemini_cache_sig_sys = sys
+  S.gemini_cache_sig_ref = ref
+  S.gemini_cache_sig_value = signature
+  return signature
 end
 
 function Net.gemini_cache_is_usable()
@@ -21955,6 +22990,90 @@ end
 -- =============================================================================
 -- Net.send_to_api
 -- =============================================================================
+function Net.should_auto_inject_theme(user_text)
+  local lt = tostring(user_text or ""):lower()
+  local function term_pattern(term)
+    local parts = {}
+    for part in tostring(term or ""):gmatch("%S+") do
+      parts[#parts + 1] = part:gsub("([^%w])", "%%%1")
+    end
+    return table.concat(parts, "%s+")
+  end
+  local function has_term(term)
+    local pat = term_pattern(term)
+    if pat == "" then return false end
+    return lt:find("%f[%w]" .. pat .. "%f[%W]") ~= nil
+  end
+  local function has_any(terms)
+    for _, term in ipairs(terms) do
+      if has_term(term) then return true end
+    end
+    return false
+  end
+
+  -- Appearance action words. Keep these token-bounded so audio/DSP words
+  -- like "coloration" do not look like REAPER theme-edit requests.
+  local has_appearance = has_any({
+    "color", "colors", "colour", "colours", "background",
+    "darker", "lighter", "bright", "brighter", "brighten",
+    "appearance",
+  })
+
+  -- Path A: "theme" as a standalone token + appearance word.
+  local has_theme_word = has_term("theme")
+
+  -- Path B: REAPER UI element name + appearance action (covers "make the
+  -- arrange darker", "change waveform color", "mixer background", etc.).
+  local has_ui_element = has_any({
+    "arrange", "mixer", "track panel", "tcp", "mcp",
+    "waveform", "waveforms", "peaks", "cursor", "grid",
+    "meter", "meters", "timeline", "ruler", "transport",
+    "marker", "markers", "region", "regions", "envelope",
+    "envelopes", "midi editor",
+  })
+
+  return has_appearance and (has_theme_word or has_ui_element)
+end
+
+function Net._token_estimate_codepoint_is_cjk(cp)
+  cp = tonumber(cp) or 0
+  return (cp >= 0x3400 and cp <= 0x4DBF)   -- CJK extension A
+    or (cp >= 0x4E00 and cp <= 0x9FFF)     -- CJK unified ideographs
+    or (cp >= 0xF900 and cp <= 0xFAFF)     -- CJK compatibility ideographs
+    or (cp >= 0x20000 and cp <= 0x2EBEF)   -- CJK extensions B-F
+    or (cp >= 0x3040 and cp <= 0x30FF)     -- Hiragana + Katakana
+    or (cp >= 0xAC00 and cp <= 0xD7AF)     -- Hangul syllables
+    or (cp >= 0xFF00 and cp <= 0xFFEF)     -- Fullwidth forms
+end
+
+function Net.estimate_request_tokens_from_body(body)
+  body = tostring(body or "")
+  if body == "" then return 0 end
+  if not body:find("[\128-\255]") then
+    return math_floor(#body / 4)
+  end
+  local ascii_bytes, other_bytes, cjk_chars = 0, 0, 0
+  local ok = pcall(function()
+    for _, cp in utf8.codes(body) do
+      if Net._token_estimate_codepoint_is_cjk(cp) then
+        cjk_chars = cjk_chars + 1
+      elseif cp < 0x80 then
+        ascii_bytes = ascii_bytes + 1
+      elseif cp < 0x800 then
+        other_bytes = other_bytes + 2
+      elseif cp < 0x10000 then
+        other_bytes = other_bytes + 3
+      else
+        other_bytes = other_bytes + 4
+      end
+    end
+  end)
+  if not ok then return math_floor(#body / 4) end
+  return math_floor(ascii_bytes / 4)
+    + math_floor(other_bytes / 4)
+    + cjk_chars
+end
+
 -- Entry point for every user-initiated send.
 --
 -- Flow:
@@ -21965,8 +23084,8 @@ end
 --      API call by Net.build_body() outside the sliding window, keeping its cache
 --      position stable.
 --   4. Push the user text to S.history (snapshot and API ref are NOT stored here).
---   5. Preflight token estimation: abort with a friendly error if the request
---      would exceed the model's 200K context window (rough chars/4 heuristic).
+  --   5. Preflight token estimation: abort with a friendly error if the request
+  --      would exceed the model's context window (UTF-8-aware rough heuristic).
 --   6. Fire curl. The snapshot is injected by Net.build_body(), not stored in S.history.
 function Net.send_to_api(user_text)
   if not RA.code_runtime_loaded() then
@@ -21999,111 +23118,18 @@ function Net.send_to_api(user_text)
   S.status                = "waiting"
   S.request_start_time    = reaper.time_precise()
   S.pending_code          = nil
+  S.lua_defer_run         = nil
   S.docs_already_sent     = false
   S.docs_extended_already_sent = false
   S.docs_section_sent     = {}
   S.session_already_sent  = false
+  S.tracks_already_sent   = false
   S.fx_params_already_sent = false
   S.plugin_ref_sent        = {}
   S.pending_resolves       = {}
   S.pending_plugin_ref_names = {}
   S.pending_pref_plugin_types = {}
-  S.context_loop_retries   = 0
-  S.api_validator_retries  = 0
-  S.unavailable_global_validator_retries = 0
-  S.action_validator_retries = 0
-  S.toolbar_validator_retries = 0
-  S.transient_validator_retries = 0
-  S.audio_sync_validator_retries = 0
-  S.audio_accessor_nil_validator_retries = 0
-  S.tempo_marker_validator_retries = 0
-  S.explicit_seconds_marker_validator_retries = 0
-  S.project_tempo_validator_retries = 0
-  S.loop_time_map_validator_retries = 0
-  S.ruler_timebase_validator_retries = 0
-  S.drum_quantize_validator_retries = 0
-  S.drum_marker_sync_validator_retries = 0
-  S.arity_validator_retries = 0
-  S.sendidx_validator_retries = 0
-  S.timecode_workflow_validator_retries = 0
-  S.stockfx_validator_retries = 0
-  S.timecodefx_validator_retries = 0
-  S.fxident_validator_retries = 0
-  S.typed_action_format_validator_retries = 0
-  S.typed_action_schema_validator_retries = 0
-  S.typed_action_semantic_validator_retries = 0
-  S.typed_action_retry_offset = 0
-  S.typed_action_escalation_used = false
-  S.typed_action_escalation_count = 0
-  S.typed_action_escalation_model = nil
-  S.typed_action_escalation_restore = nil
-  S.typed_action_lua_fallback_used = false
-  S.fxrecfx_validator_retries = 0
-  S.fxcheck_validator_retries = 0
-  S.fxget_validator_retries = 0
-  S.fxadd_getonly_validator_retries = 0
-  S.upsert_validator_retries = 0
-  S.helper_int_validator_retries = 0
-  S.defer_validator_retries = 0
-  S.proq4_slope_validator_retries = 0
-  S.fx_param_scope_validator_retries = 0
-  S.helper_validator_retries = 0
-  S.void_return_validator_retries = 0
-  S.sandbox_global_validator_retries = 0
-  S.void_return_retry_used = false
-  S.track_deletion_validator_retries = 0
-  S.track_deletion_retry_used = false
-  S.forbidden_track_creation_validator_retries = 0
-  S.forbidden_track_creation_retry_used = false
-  S.forbidden_fx_validator_retries = 0
-  S.forbidden_fx_retry_used = false
-  S.track_duplication_validator_retries = 0
-  S.track_duplication_retry_used = false
-  S.track_creation_validator_retries = 0
-  S.track_creation_retry_used = false
-  S.track_creation_index_retry_used = false
-  S.track_name_retry_used = false
-  S.no_code_action_retry_used = false
-  S.region_marker_validator_retries = 0
-  S.region_marker_retry_used = false
-  S.explicit_seconds_marker_retry_used = false
-  S.marker_pair_validator_retries = 0
-  S.marker_pair_retry_used = false
-  S.folder_boundary_retry_used = false
-  S.track_index_validator_retries = 0
-  S.track_index_retry_used = false
-  S.target_consistency_validator_retries = 0
-  S.target_consistency_retry_used = false
-  S.track_selection_validator_retries = 0
-  S.track_selection_retry_used = false
-  S.setmedia_bool_validator_retries = 0
-  S.setmedia_bool_retry_used = false
-  S.exclusive_selection_retry_used = false
-  S.bus_routing_validator_retries = 0
-  S.bus_routing_retry_used = false
-  S.sidechain_send_retry_used = false
-  S.podcast_bus_retry_used = false
-  S.track_pan_validator_retries = 0
-  S.track_pan_retry_used = false
-  S.master_send_validator_retries = 0
-  S.master_send_retry_used = false
-  S.midi_item_validator_retries = 0
-  S.midi_item_retry_used = false
-  S.midi_input_validator_retries = 0
-  S.midi_input_retry_used = false
-  S.media_item_label_validator_retries = 0
-  S.media_item_label_retry_used = false
-  S.bare_lua_retry_used = false
-  S.unclosed_fence_retry_used = false
-  S.parse_retry_used       = false
-  S.jsfx_validator_retries = 0
-  S.jsfx_wrong_artifact_retry_used = false
-  S.jsfx_companion_validator_retries = 0
-  S.jsfx_companion_retry_used = false
-  S.length_retry_used      = false
-  S.empty_retry_used       = false
-  S.api_calls_this_turn    = 0   -- aggregate cap counter (see CFG.MAX_CALLS_PER_TURN)
-  S.thinking_override_idx  = nil
+  S.reset_turn_retries()
   S._context_reuse_hint    = nil
   S._irrelevant_context_hint = nil
   S._timecode_context_hint = nil
@@ -22131,6 +23157,10 @@ function Net.send_to_api(user_text)
   S.retry_count           = 0          -- reset retry counter for each new user send
   S.retry_max             = CFG.MAX_RETRIES
   S.retry_scheduled       = false
+  S.retry_saved_body      = nil
+  S.retry_saved_provider_idx = nil
+  S.retry_saved_model_idx    = nil
+  S.retry_saved_thinking_idx = nil
 
   -- Capture current attachments and clear the queue before any early returns.
   local msg_attachments = #S.attachments > 0 and S.attachments or nil
@@ -22278,30 +23308,16 @@ function Net.send_to_api(user_text)
   -- bucket explicitly via <context_needed>theme</context_needed>.
   local theme_injected = false
   if not answer_only_followup and not S.theme_already_sent then
-    local lt = user_text:lower()
-    -- Appearance action words.
-    local has_appearance = lt:find("color") or lt:find("colour")
-      or lt:find("background") or lt:find("darker") or lt:find("lighter")
-      or lt:find("bright") or lt:find("appearance")
-    -- Path A: "theme" as a standalone token + appearance word.
-    local has_theme_word = lt:match("[^%a]theme[^%a]") or lt:match("^theme[^%a]")
-      or lt:match("[^%a]theme$") or lt == "theme"
-    -- Path B: REAPER UI element name + appearance action (covers "make the
-    -- arrange darker", "change waveform color", "mixer background", etc.).
-    local has_ui_element = lt:find("arrange") or lt:find("mixer")
-      or lt:find("track panel") or lt:find("tcp") or lt:find("mcp")
-      or lt:find("waveform") or lt:find("peaks") or lt:find("cursor")
-      or lt:find("grid") or lt:find("meter") or lt:find("timeline")
-      or lt:find("ruler") or lt:find("transport") or lt:find("marker")
-      or lt:find("region") or lt:find("envelope") or lt:find("midi editor")
-    if has_appearance and (has_theme_word or has_ui_element) then
+    if Net.should_auto_inject_theme(user_text) then
       local th_content, th_err = CTX.theme()
       if th_content then
         S.theme_ref_message = th_content
           .. "\n\n(Theme reference is loaded above. Do NOT request "
           .. "<context_needed>theme</context_needed> or "
+          .. "<context_needed>prompt_bundle:theme</context_needed> or "
           .. "<context_needed>session</context_needed> -- you have "
           .. "everything needed. Proceed directly with the color change code.)"
+        Net.copin_theme_bundle()
         theme_injected = true
         S.theme_already_sent = true
       end
@@ -22468,7 +23484,10 @@ function Net.send_to_api(user_text)
   end
 
   do
-    local latest_note = Code.latest_code_followup_note(user_text)
+    local latest_note = Code.latest_code_followup_note(user_text, {
+      had_last_run_error = _saved_last_run_error ~= nil
+        and _saved_last_run_error ~= "",
+    })
     if latest_note then
       history_text = latest_note .. "\n\n" .. history_text
     end
@@ -22725,7 +23744,7 @@ function Net.send_to_api(user_text)
     end
     Probe.set_body_total(probe_turn, #body)
   end
-  local estimated_tokens = math_floor(#body / CHARS_PER_TOKEN)
+  local estimated_tokens = Net.estimate_request_tokens_from_body(body)
   -- Base64 inflates size ~33%, so compensate: attachment tokens are more accurate
   -- than the chars/4 heuristic on the inflated base64. Subtract the base64 size
   -- contribution and add the pre-computed token estimates instead.
@@ -22766,7 +23785,7 @@ function Net.send_to_api(user_text)
     -- their work. The user can trim attachments or clear and retry without
     -- re-typing.
     S.history[#S.history]          = nil
-    S.display_messages[disp_idx] = nil
+    tbl_remove(S.display_messages, disp_idx)
     S.pending_display_idx        = nil
     S.status    = "error"
     S.send_time = nil
@@ -22810,7 +23829,7 @@ function Net.send_to_api(user_text)
   if not Net.fire_curl(body) then
     -- Roll back on failure and restore the user's input so they can retry.
     S.history[#S.history]          = nil
-    S.display_messages[disp_idx] = nil
+    tbl_remove(S.display_messages, disp_idx)
     S.pending_display_idx        = nil
     S.status    = "error"
     S.send_time = nil
@@ -22900,7 +23919,9 @@ function Net.clear_conversation(opts)
   -- session pins don't invalidate the bigger stable bundle.
   S.sticky_pin_source    = {}
   S.turn_counter         = 0
+  S.history_trim_start   = nil
   S.last_run_error       = nil
+  S.lua_defer_run        = nil
   -- Pending follow-up state (mid-flight when clear is hit)
   Net._restore_typed_action_escalation_model()
   S.pending_code         = nil
@@ -22918,6 +23939,7 @@ function Net.clear_conversation(opts)
   S.pending_attachments       = nil
   S.pending_provider_idx      = nil
   S.pending_model_idx         = nil
+  S.pending_thinking_idx      = nil
   S.pending_jsfx_intent       = nil
   S.pending_drum_edit_intent  = nil
   -- Per-turn one-shot guards
@@ -22925,6 +23947,7 @@ function Net.clear_conversation(opts)
   S.docs_extended_already_sent = false
   S.docs_section_sent          = {}
   S.session_already_sent       = false
+  S.tracks_already_sent        = false
   S.fx_params_already_sent     = false
   S.fx_list_already_sent       = false
   S.fx_chains_already_sent     = false
@@ -22934,100 +23957,7 @@ function Net.clear_conversation(opts)
   S.fx_inspect_already_sent    = false
   S.plugin_ref_sent            = {}
   S.pref_plugins_sent          = {}
-  S.context_loop_retries       = 0
-  S.api_validator_retries      = 0
-  S.unavailable_global_validator_retries = 0
-  S.action_validator_retries   = 0
-  S.toolbar_validator_retries  = 0
-  S.transient_validator_retries = 0
-  S.audio_sync_validator_retries = 0
-  S.audio_accessor_nil_validator_retries = 0
-  S.tempo_marker_validator_retries = 0
-  S.explicit_seconds_marker_validator_retries = 0
-  S.project_tempo_validator_retries = 0
-  S.loop_time_map_validator_retries = 0
-  S.ruler_timebase_validator_retries = 0
-  S.drum_quantize_validator_retries = 0
-  S.drum_marker_sync_validator_retries = 0
-  S.arity_validator_retries    = 0
-  S.sendidx_validator_retries  = 0
-  S.timecode_workflow_validator_retries = 0
-  S.stockfx_validator_retries  = 0
-  S.timecodefx_validator_retries = 0
-  S.fxident_validator_retries  = 0
-  S.typed_action_format_validator_retries = 0
-  S.typed_action_schema_validator_retries = 0
-  S.typed_action_semantic_validator_retries = 0
-  S.typed_action_retry_offset = 0
-  S.typed_action_escalation_used = false
-  S.typed_action_escalation_count = 0
-  S.typed_action_escalation_model = nil
-  S.typed_action_escalation_restore = nil
-  S.typed_action_lua_fallback_used = false
-  S.fxrecfx_validator_retries = 0
-  S.fxcheck_validator_retries  = 0
-  S.fxget_validator_retries    = 0
-  S.fxadd_getonly_validator_retries = 0
-  S.upsert_validator_retries   = 0
-  S.helper_int_validator_retries = 0
-  S.defer_validator_retries    = 0
-  S.proq4_slope_validator_retries = 0
-  S.fx_param_scope_validator_retries = 0
-  S.helper_validator_retries   = 0
-  S.void_return_validator_retries = 0
-  S.sandbox_global_validator_retries = 0
-  S.void_return_retry_used     = false
-  S.track_deletion_validator_retries = 0
-  S.track_deletion_retry_used = false
-  S.forbidden_track_creation_validator_retries = 0
-  S.forbidden_track_creation_retry_used = false
-  S.forbidden_fx_validator_retries = 0
-  S.forbidden_fx_retry_used = false
-  S.track_duplication_validator_retries = 0
-  S.track_duplication_retry_used = false
-  S.track_creation_validator_retries = 0
-  S.track_creation_retry_used   = false
-  S.track_creation_index_retry_used = false
-  S.track_name_retry_used = false
-  S.no_code_action_retry_used = false
-  S.region_marker_validator_retries = 0
-  S.region_marker_retry_used = false
-  S.explicit_seconds_marker_retry_used = false
-  S.marker_pair_validator_retries = 0
-  S.marker_pair_retry_used = false
-  S.folder_boundary_retry_used = false
-  S.track_index_validator_retries = 0
-  S.track_index_retry_used = false
-  S.target_consistency_validator_retries = 0
-  S.target_consistency_retry_used = false
-  S.track_selection_validator_retries = 0
-  S.track_selection_retry_used = false
-  S.setmedia_bool_validator_retries = 0
-  S.setmedia_bool_retry_used = false
-  S.exclusive_selection_retry_used = false
-  S.bus_routing_validator_retries = 0
-  S.bus_routing_retry_used = false
-  S.sidechain_send_retry_used = false
-  S.podcast_bus_retry_used = false
-  S.track_pan_validator_retries = 0
-  S.track_pan_retry_used = false
-  S.master_send_validator_retries = 0
-  S.master_send_retry_used = false
-  S.midi_item_validator_retries = 0
-  S.midi_item_retry_used       = false
-  S.midi_input_validator_retries = 0
-  S.midi_input_retry_used      = false
-  S.media_item_label_validator_retries = 0
-  S.media_item_label_retry_used = false
-  S.bare_lua_retry_used        = false
-  S.unclosed_fence_retry_used  = false
-  S.parse_retry_used           = false
-  S.jsfx_validator_retries     = 0
-  S.jsfx_wrong_artifact_retry_used = false
-  S.length_retry_used          = false
-  S.empty_retry_used           = false
-  S.api_calls_this_turn        = 0
-  S.thinking_override_idx      = nil
+  S.reset_turn_retries()
   S._context_reuse_hint        = nil
   S._irrelevant_context_hint   = nil
   S._timecode_context_hint     = nil
@@ -23048,6 +23978,12 @@ function Net.clear_conversation(opts)
   -- inlined docs content lived) is about to be wiped. Next send will either
   -- re-pin via the pref or wait for the model to re-request docs.
   S.docs_fetched_session = false
+  -- Prompt bundles live in the sticky context, which this clear wipes --
+  -- reset the sent-set to match. Leaving it populated made the dispatcher
+  -- tell the model a bundle was "already present in PINNED REFERENCES"
+  -- after "+ New Chat" when it no longer was, and loop detection's
+  -- had_sticky check read the same stale set.
+  S.prompt_bundle_sent = {}
   -- Resolve popup state (could be open mid-clear; close it cleanly)
   S.resolve_popup             = nil
   S.open_resolve_popup        = false
@@ -23073,6 +24009,9 @@ function Net.clear_conversation(opts)
   S.retry_max            = CFG.MAX_RETRIES
   S.retry_scheduled      = false
   S.retry_saved_body     = nil
+  S.retry_saved_provider_idx = nil
+  S.retry_saved_model_idx    = nil
+  S.retry_saved_thinking_idx = nil
   S.attachments          = {}
   S.attach_error         = nil
   S.attach_error_time    = 0
@@ -23573,6 +24512,7 @@ function Net.process_response_buckets(text)
   local docs_section_names  = {}  -- canonical section names to fetch this turn
   local bogus_docs_sections = {}  -- raw payloads that failed allowlist; for nudge
   local wants_session     = false
+  local wants_tracks      = false
   local wants_fx_params   = false
   local wants_plugin_ref  = false
   local plugin_ref_names  = {}  -- plugin names for plugin_ref scoped bucket
@@ -23609,7 +24549,7 @@ function Net.process_response_buckets(text)
   -- Two-pass approach: pass 1 finds fx_params and its inline payload; pass 2
   -- collects subsequent non-keyword tokens as additional plugin name filters,
   -- so "fx_params:Plugin1, Plugin2" correctly builds filter = {Plugin1, Plugin2}.
-  local recognised_keywords = { session=true, docs=true, docs_extended=true, recent_reaper_changes=true, fx_params=true, plugin_ref=true, fx_list=true, fx_chains=true, track_flags=true, midi=true, preferred_plugins=true, pref=true, theme=true, fx_inspect=true, resolve=true, prompt_bundle=true }
+  local recognised_keywords = { session=true, tracks=true, docs=true, docs_extended=true, recent_reaper_changes=true, fx_params=true, plugin_ref=true, fx_list=true, fx_chains=true, track_flags=true, midi=true, preferred_plugins=true, pref=true, theme=true, fx_inspect=true, resolve=true, prompt_bundle=true }
   -- Hoisted out of the resolve branch so the pre-pass (just below) and the
   -- popup-bail scan-ahead can both reference it.
   local VALID_RESOLVE_TYPES = {
@@ -23869,6 +24809,8 @@ function Net.process_response_buckets(text)
         -- this turn). A re-fetch would just rebuild the same snapshot
         -- the model is about to read.
         return S.pending_snapshot ~= nil
+      elseif kw == "tracks" then
+        return S.tracks_already_sent == true
       elseif kw == "docs" and payload == "" then
         return S.api_ref_message ~= nil or S.docs_already_sent
       elseif kw == "docs" and payload ~= "" then
@@ -23895,6 +24837,9 @@ function Net.process_response_buckets(text)
       elseif (kw == "preferred_plugins" or kw == "pref") and payload ~= "" then
         return (S.pref_plugins_sent and S.pref_plugins_sent[payload] == true)
           or (S.sticky_context and S.sticky_context["pref:" .. payload] ~= nil)
+      elseif kw == "fx_list" and payload ~= "" then
+        local fl_key = "fx_list:" .. CTX.fx_filter_key({ payload })
+        return S.sticky_context and S.sticky_context[fl_key] ~= nil
       elseif kw == "fx_chains" then
         return S.fx_chains_already_sent == true
       elseif kw == "track_flags" then
@@ -23908,6 +24853,7 @@ function Net.process_response_buckets(text)
         return S.fx_params_already_sent == true
       elseif kw == "fx_list" and payload == "" then
         return S.fx_list_already_sent == true
+          or (S.sticky_context and S.sticky_context["fx_list"] ~= nil)
       elseif kw == "fx_inspect" and payload == "" then
         return S.fx_inspect_already_sent == true
       end
@@ -23977,6 +24923,9 @@ function Net.process_response_buckets(text)
     if kw == "session" and not S.session_already_sent then
       wants_session = true
       last_scoped = nil
+    elseif kw == "tracks" and not S.tracks_already_sent then
+      wants_tracks = true
+      last_scoped = nil
     elseif kw == "docs" and payload ~= "" then
       -- docs:<section> -- on-demand API ref section. MUST come before the
       -- bare-docs branch below: that branch matches kw=="docs" regardless
@@ -24016,8 +24965,12 @@ function Net.process_response_buckets(text)
         wants_plugin_ref = true
         plugin_ref_names[#plugin_ref_names+1] = payload
       end
-    elseif kw == "fx_list" and not S.fx_list_already_sent then
-      wants_fx_list = true
+    elseif kw == "fx_list" then
+      local fl_key = payload ~= "" and ("fx_list:" .. CTX.fx_filter_key({ payload }))
+        or "fx_list"
+      if not (S.sticky_context and S.sticky_context[fl_key]) then
+        wants_fx_list = true
+      end
       last_scoped = "fx_list"
       if payload ~= "" then
         fx_list_search[#fx_list_search+1] = payload
@@ -24274,7 +25227,7 @@ function Net.process_response_buckets(text)
   -- If fx_list was requested (now or earlier this turn), skip fx_params -
   -- the plugin likely isn't loaded yet, so fx_params will fail. The AI
   -- should use runtime helpers (find_param, set_param_display) instead.
-  if wants_fx_params and (wants_fx_list or S.fx_list_already_sent) then
+  if wants_fx_params and wants_fx_list then
     wants_fx_params = false
     fx_filter_names = {}
   end
@@ -24312,7 +25265,16 @@ function Net.process_response_buckets(text)
     end
   end
 
-  if wants_docs or wants_docs_extended or wants_docs_section or wants_session or wants_fx_params or wants_plugin_ref or wants_fx_list or wants_fx_chains or wants_track_flags or wants_midi or wants_recent_reaper_changes or wants_pref_plugins or wants_theme or wants_fx_inspect or wants_preempt_hint or wants_prompt_bundle or #bogus_docs_sections > 0 then
+  if wants_docs or wants_docs_extended or wants_docs_section or wants_session or wants_tracks or wants_fx_params or wants_plugin_ref or wants_fx_list or wants_fx_chains or wants_track_flags or wants_midi or wants_recent_reaper_changes or wants_pref_plugins or wants_theme or wants_fx_inspect or wants_preempt_hint or wants_prompt_bundle or #bogus_docs_sections > 0 then
+    -- Collects bucket keys that were fetched-and-stickied this turn. Used to
+    -- emit a brief model-facing pointer ("<context_needed> satisfied; data
+    -- is in PINNED REFERENCES above") so the model doesn't re-request.
+    -- Declared up here, ABOVE early bucket branches: the write-intent
+    -- plugin_helpers co-pin appends to fetched_to_sticky, and inline buckets
+    -- such as tracks append to history_content before the main docs/session
+    -- assembly below.
+    local fetched_to_sticky = {}
+    local history_content = ""
     -- Build a fresh session snapshot if requested and not already present.
     if wants_session then
       S.session_already_sent = true
@@ -24324,6 +25286,12 @@ function Net.process_response_buckets(text)
       -- rung and re-sending tracks the JSFX writer never reads.
       S.pending_snapshot = CTX.build_snapshot(S.pending_project,
         S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+    end
+    if wants_tracks then
+      S.tracks_already_sent = true
+      S.pending_project = CTX.resolve_pending_project()
+      history_content = history_content
+        .. CTX.tracks(S.pending_project, { full = true }) .. "\n\n"
     end
 
     -- Build the fx_params block for the requested plugins.
@@ -24342,6 +25310,8 @@ function Net.process_response_buckets(text)
       -- requiring an extra <context_needed>prompt_bundle:plugin_helpers
       -- round-trip after the model sees fx_params.
       if Code.prompt_has_param_write_intent(S.pending_orig_prompt) then
+        Net.copin_plugin_bundle(fetched_to_sticky)
+        Net.copin_docs_core(fetched_to_sticky)
         Net.copin_plugin_helpers(fetched_to_sticky)
       end
 
@@ -24428,11 +25398,6 @@ function Net.process_response_buckets(text)
     -- Sonnet. See fetched_to_sticky below for the model-facing ack.
     -- CTX.docs/CTX.plugin_ref return nil + error on failure; show the error
     -- and proceed without the missing bucket rather than blocking the follow-up.
-    local history_content = ""
-    -- Collects bucket keys that were fetched-and-stickied this turn. Used to
-    -- emit a brief model-facing pointer ("<context_needed> satisfied; data
-    -- is in PINNED REFERENCES above") so the model doesn't re-request.
-    local fetched_to_sticky = {}
     if wants_docs then
       S.docs_already_sent = true
       local ref_content, ref_err = CTX.docs()
@@ -24582,12 +25547,8 @@ function Net.process_response_buckets(text)
           end
           local hint = "PREFERRED PLUGINS:\n"
             .. "  " .. h.tkey .. " = " .. (exact_ident or h.ident or h.curated) .. "\n"
-            .. "(User's saved preference; full parameter reference above "
-            .. "in plugin_ref:" .. h.curated .. ". Use this plugin directly "
-            .. "and do NOT emit <context_needed>resolve:" .. h.tkey
-            .. "</context_needed>. After every TrackFX_AddByName, the next "
-            .. "non-blank line MUST check `if fx < 0 then ... return end` "
-            .. "before storing or using the FX index.)"
+            .. "(User's saved preference; full parameter reference is pinned "
+            .. "as plugin_ref:" .. h.curated .. ".)"
           Net.sticky_set(pp_key, hint)
           fetched_to_sticky[#fetched_to_sticky+1] = pp_key
         end
@@ -24620,11 +25581,28 @@ function Net.process_response_buckets(text)
       if ok == 0 then wants_prompt_bundle = false end
     end
     if wants_fx_list then
-      S.fx_list_already_sent = true
+      local fl_key = #fx_list_search > 0
+        and ("fx_list:" .. CTX.fx_filter_key(fx_list_search))
+        or "fx_list"
+      if S.sticky_context and S.sticky_context[fl_key] then
+        wants_fx_list = false
+        S._context_reuse_hint = S._context_reuse_hint or {}
+        S._context_reuse_hint[#S._context_reuse_hint+1] = fl_key
+      end
+    end
+    if wants_fx_list then
       local fl_content, fl_result = CTX.installed_fx(fx_list_search)
       if fl_content then
-        history_content = history_content .. fl_content .. "\n"
+        S.fx_list_already_sent = true
+        local fl_key = #fx_list_search > 0
+          and ("fx_list:" .. CTX.fx_filter_key(fx_list_search))
+          or "fx_list"
+        Net.sticky_set(fl_key, fl_content .. "\n"
           .. "Use the identifiers above with TrackFX_AddByName. Set parameters using find_param and set_param_display at runtime. Do NOT request fx_params.\n\n"
+        )
+        fetched_to_sticky[#fetched_to_sticky+1] = fl_key
+        Net.copin_plugin_bundle(fetched_to_sticky)
+        Net.copin_docs_core(fetched_to_sticky)
         -- Zero-match notice is embedded in fl_content so the assistant
         -- sees it and can self-correct. No user-facing error needed.
       else
@@ -24667,8 +25645,10 @@ function Net.process_response_buckets(text)
         S.theme_ref_message = th_content
           .. "\n\n(Theme reference is loaded above. Do NOT request "
           .. "<context_needed>theme</context_needed> or "
+          .. "<context_needed>prompt_bundle:theme</context_needed> or "
           .. "<context_needed>session</context_needed> -- you have "
           .. "everything needed. Proceed directly with the color change code.)"
+        Net.copin_theme_bundle(fetched_to_sticky)
       else
         Log.add_error(th_err)
         wants_theme = false
@@ -24745,6 +25725,8 @@ function Net.process_response_buckets(text)
       -- here so the follow-up build contains both fx_inspect data AND helper
       -- definitions in one round-trip (no second context_needed for helpers
       -- after the model sees the param map).
+      Net.copin_plugin_bundle(fetched_to_sticky)
+      Net.copin_docs_core(fetched_to_sticky)
       Net.copin_plugin_helpers(fetched_to_sticky)
       local tmp_tr, fx_idx, identifier, err, cached, undo_open =
         CTX.fx_inspect_load(fx_inspect_names)
@@ -25120,6 +26102,7 @@ function Net.process_response_buckets(text)
         if wants_session and not existing:find("snapshot") then
           parts[#parts+1] = "snapshot"
         end
+        if wants_tracks then parts[#parts+1] = "tracks" end
         -- "docs" and "api_ref" alias the same content; skip if either is
         -- already in the chip label so we don't render both.
         if wants_docs and not existing:find("api_ref", 1, true)
@@ -25171,40 +26154,15 @@ function Net.process_response_buckets(text)
       -- (history append, sticky context, ctx_label) have read it.
       S._fx_inspect_silent_for_fx_params = nil
 
-      -- Replace the last user history entry with the enriched content
-      -- (snapshot is passed to Net.build_body(), never stored in history).
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = {
-        role    = "user",
-        content = history_content,
-      }
-      -- Refresh the snapshot right before firing. finalize_context can run
-      -- many seconds after the original send -- if fx_inspect triggered a
-      -- deep scan, the user's cursor/selection/play state could have moved
-      -- on. The snapshot rebuild is cheap next to the curl round trip, so
-      -- always re-capture (when snapshots are enabled) rather than sending
-      -- stale "at the cursor" / "to the selected item" context.
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        -- See JSFX-intent comment on the analogous retry sites above:
-        -- carry pending_jsfx_intent across snapshot rebuilds so the trim
-        -- survives every retry path, not just the JSFX-validator's.
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        local fallback = "Tried to load additional project info but the "
-          .. "follow-up request didn't go through. Please try again."
-        Log.add_error((RA and RA.t and RA.t(
-          "response.context_followup_failed", nil, fallback)) or fallback)
-      end
-      S.scroll_to_bottom = true
+      local fallback = "Tried to load additional project info but the "
+        .. "follow-up request didn't go through. Please try again."
+      Net.fire_validator_retry({
+        kind = "docs",
+        history_content = history_content,
+        ctx_label = "docs",
+        failure_message = (RA and RA.t and RA.t(
+          "response.context_followup_failed", nil, fallback)) or fallback,
+      })
     end  -- finalize_context
 
     -- If fx_inspect loaded a plugin, poll until it's initialised (params
@@ -25330,6 +26288,7 @@ function Net.process_response_buckets(text)
       S.docs_extended_already_sent   = false
       S.docs_section_sent            = {}
       S.session_already_sent         = false
+      S.tracks_already_sent          = false
       S.fx_params_already_sent       = false
       S.fx_list_already_sent         = false
       S.fx_chains_already_sent       = false
@@ -25345,6 +26304,7 @@ function Net.process_response_buckets(text)
     else
       Log.line("CONTEXT_LOOP",
         "unresolvable context loop; aborting turn with user error")
+      Net._restore_pending_user_history()
       local fallback = "The model re-requested context that was already provided. "
         .. "Try rephrasing your request, or switch to a different model."
       Log.add_error((RA and RA.t and RA.t(
@@ -25496,7 +26456,7 @@ end
 -- chance to write its exit code before the watchdog fires. Custom providers
 -- use their user-configured request_timeout + 15s slack.
 function Net._handle_watchdog_timeout()
-  local p_active = PROVIDERS.active()
+  local p_active = PROVIDERS[S.pending_provider_idx] or PROVIDERS.active()
   local poll_timeout = (p_active.is_custom
     and ((tonumber(p_active.request_timeout) or 600) + 15))
     or (prefs.cloud_request_timeout or CFG.CLOUD_TIMEOUT_DEFAULT)
@@ -25522,6 +26482,16 @@ function Net._handle_watchdog_timeout()
   local debug = Net._curl_failure_debug(nil, timeout_msg, "watchdog_timeout")
   debug.elapsed_s = elapsed
   debug.poll_timeout_s = poll_timeout
+  -- Kill the orphaned curl before clearing state. curl's own --max-time is
+  -- far above this watchdog, so without an explicit kill the process keeps
+  -- running and its late write into tmp.out/tmp.exit can be parsed as the
+  -- NEXT request's response. kill_curl reads tmp.pid itself and arms the
+  -- deferred-kill watchdog when the pid file hasn't landed yet. Skip for
+  -- tier tests: they never capture a PID, and kill_curl's early bail would
+  -- clear S.gemini_tier_pending before the tier branch below can log it.
+  if not S.gemini_tier_pending then
+    Net.kill_curl()
+  end
   S.curl_pid  = nil
   S.send_time = nil
   if S.gemini_tier_pending then
@@ -25536,7 +26506,7 @@ function Net._handle_watchdog_timeout()
       UI.show_float_toast(RA.t("gemini.toast.tier_timeout", nil,
         "Gemini tier check timed out - will retry"), "err")
     end
-    if PROVIDERS.active().id == "google" then MODELS.refresh() end
+    if p_active.id == "google" then MODELS.refresh() end
     return true
   end
   if S.key_test_pending then
@@ -25582,7 +26552,6 @@ function Net._handle_curl_launch_failure()
   if not S.send_time then
     S.curl_pid           = nil
     S.curl_exited_clean  = false
-    S.curl_output_seen_before_exit = false
     S.status             = "idle"
     Log.line("CURL", "cleared stale in-flight request with no send timestamp")
     return true
@@ -25609,7 +26578,6 @@ function Net._handle_curl_launch_failure()
   S.curl_pid           = nil
   S.send_time          = nil
   S.curl_exited_clean  = false
-  S.curl_output_seen_before_exit = false
   S.status             = "idle"
   Log.line("CURL", "network request launcher did not create a pid, exit, or response file")
   Log.add_error(RA.t("network.launch_failed", nil,
@@ -25640,7 +26608,8 @@ function Net._handle_curl_exit_failure()
   S.curl_pid  = nil
   S.send_time = nil
   os.remove(tmp.exit)
-  local prov_label = PROVIDERS.active().label
+  local p_active = PROVIDERS[S.pending_provider_idx] or PROVIDERS.active()
+  local prov_label = p_active.label
   local curl_errors = {
     [5]  = RA.t("network.curl.proxy", { provider = prov_label },
       "Can't reach the proxy configured for " .. prov_label .. ". "
@@ -25698,7 +26667,7 @@ function Net._handle_curl_exit_failure()
       UI.show_float_toast(RA.t("gemini.toast.tier_failed", nil,
         "Gemini tier check failed - will retry"), "err")
     end
-    if PROVIDERS.active().id == "google" then MODELS.refresh() end
+    if p_active.id == "google" then MODELS.refresh() end
     return true
   end
   if S.key_test_pending then
@@ -25990,23 +26959,38 @@ end
 
 function Net._google_capacity_recovery(p)
   if not p or p.id ~= "google" or not S.pending_orig_prompt then return nil end
-  local current_model = p.models and p.models[S.pending_model_idx or prefs.model_idx] or nil
+  local models = p.models or {}
+  local current_model = models[S.pending_model_idx or prefs.model_idx] or nil
   local current_id = current_model and current_model.id or nil
-  local fallback_id
-  if current_id == "gemini-3.1-pro-preview" then
-    fallback_id = "gemini-3.5-flash"
-  elseif current_id == "gemini-3.5-flash" then
-    fallback_id = "gemini-3.1-flash-lite"
-  elseif not current_id then
-    fallback_id = "gemini-3.5-flash"
-  elseif current_id ~= "gemini-3.1-flash-lite" then
-    fallback_id = "gemini-3.5-flash"
+  local function model_price(m)
+    return tonumber(m and m.price_in) or 0
+  end
+  local function stronger_flash(a, b)
+    if not a then return b end
+    if not b then return a end
+    local ap, bp = model_price(a), model_price(b)
+    if bp ~= ap then return (bp > ap) and b or a end
+    return b
+  end
+  local function best_flash_below(max_price)
+    local best
+    for _, m in ipairs(models) do
+      if m ~= current_model and m.is_flash and not m.paid_only then
+        local price = model_price(m)
+        if not max_price or price < max_price then
+          best = stronger_flash(best, m)
+        end
+      end
+    end
+    return best
   end
   local fallback
-  if fallback_id then
-    for _, m in ipairs(p.models or {}) do
-      if m.id == fallback_id then fallback = m; break end
-    end
+  if current_model and current_model.is_flash and not current_model.paid_only then
+    fallback = best_flash_below(model_price(current_model))
+  elseif current_model and model_price(current_model) > 0 then
+    fallback = best_flash_below(model_price(current_model))
+  else
+    fallback = best_flash_below(nil)
   end
   local recovery = {
     provider_id = "google",
@@ -26185,9 +27169,11 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth)
   end
 
   if is_auth then
-    S.api_key = nil
-    S.api_key_map[p.id] = nil
-    Key.clear(p.key_extstate)
+    if p.key_extstate ~= nil then
+      S.api_key = nil
+      S.api_key_map[p.id] = nil
+      Key.clear(p.key_extstate)
+    end
     if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
       S.display_messages[S.pending_display_idx].ctx_label = "auth error"
     end
@@ -26354,7 +27340,6 @@ end
 
 function Net.response_file_ready_to_parse(raw)
   if type(raw) ~= "string" or #raw < 2 then return false, "empty" end
-  if not S.curl_exited_clean then return false, "curl_running" end
   return true, nil
 end
 
@@ -26367,25 +27352,20 @@ function Net.try_finish_curl()
 
   if Net._handle_curl_exit_failure() then return end
 
+  if not S.curl_exited_clean then return end
+
   -- Read the response file (pcall handles transient AV scanner file locks).
   local ok_f, f = pcall(io.open, tmp.out, "r")
   if not ok_f or not f then return end
   local raw = f:read("*a"); f:close()
   local ready, reason = Net.response_file_ready_to_parse(raw)
   if not ready then
-    if reason == "curl_running" and not S.curl_output_seen_before_exit then
-      S.curl_output_seen_before_exit = true
-      Log.line("CURL",
-        "response file has " .. tostring(#raw)
-        .. " byte(s) before curl exit; waiting for clean exit")
-    end
     return
   end
 
   local elapsed = S.send_time and (time_precise() - S.send_time) or nil
   S.curl_pid  = nil
   S.send_time = nil
-  S.curl_output_seen_before_exit = false
 
   Log.response(raw, elapsed)
 
@@ -26448,40 +27428,6 @@ function Net.try_finish_curl()
     if resp.type == "error" and type(resp.error) == "table" and resp.error ~= JSON.NULL then
       local it = resp.error.type
       local em = type(resp.error.message) == "string" and resp.error.message or ""
-      -- Beta-header rejection guard. When Anthropic deprecates the
-      -- extended-cache-ttl-2025-04-11 beta header, the API starts returning
-      -- 400 invalid_request_error referencing the header name or "beta"
-      -- + "ttl"/"cache". Strip the header session-wide, fall back to 5-min
-      -- ephemeral caching, rebuild the body, and silently retry the same
-      -- request so the user never sees the deprecation. Only attempt this
-      -- once per session (anthropic_beta_disabled flag) so a genuinely bad
-      -- request doesn't loop forever.
-      if not S.anthropic_beta_disabled and it == "invalid_request_error" then
-        local lm = em:lower()
-        local mentions_beta = lm:find("extended-cache-ttl", 1, true)
-                           or lm:find("anthropic-beta",     1, true)
-                           or (lm:find("beta", 1, true)
-                               and (lm:find("ttl", 1, true)
-                                    or lm:find("cache_control", 1, true)
-                                    or lm:find('"1h"', 1, true)))
-        if mentions_beta then
-          S.anthropic_beta_disabled = true
-          -- Rebuild the body without 1h cache markers and re-fire on the
-          -- normal retry timer (no backoff -- this isn't an overload).
-          local rebuilt = Net.build_body(
-            Net.trimmed_history(),
-            S.pending_snapshot,
-            S.pending_attachments)
-          S.retry_saved_body = rebuilt
-          S.retry_scheduled  = true
-          S.retry_fire_time  = time_precise()  -- fire next loop tick
-          S.status           = "waiting"
-          if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-            S.display_messages[S.pending_display_idx].ctx_label = "retrying (5m cache)"
-          end
-          return
-        end
-      end
       Net._handle_api_error(p, it, em,
         it == "overloaded_error"
           or Net._recoverable_anthropic_server_error(it, em),
@@ -26633,10 +27579,13 @@ function Net.try_finish_curl()
         S.status = "error"
         return
       end
-      -- Fallback free tier detection: 403/429 on a paid_only model.
-      local cur_model = p.models[prefs.model_idx] or MODELS[prefs.model_idx]
-      if (code == 403 or code == 429 or status == "PERMISSION_DENIED"
-          or status == "RESOURCE_EXHAUSTED") and cur_model and cur_model.paid_only then
+      -- Fallback free-tier detection on a paid_only model. Only persist the
+      -- "free" classification on positive quota evidence; paid accounts can
+      -- return transient 429/RESOURCE_EXHAUSTED during throughput bursts.
+      local cur_model = p.models[S.pending_model_idx or prefs.model_idx]
+        or MODELS[S.pending_model_idx or prefs.model_idx]
+      if cur_model and cur_model.paid_only
+         and Net._gemini_error_has_free_tier_signal(resp.error) then
         Store.set_gemini_paid_tier(false)
         MODELS.refresh()
         if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
@@ -26771,7 +27720,7 @@ function Net.try_finish_curl()
     -- fall through to the visible error so the user can intervene.
     -- Skipped when the active provider doesn't expose thinking levels
     -- (Anthropic today): nothing to retry-with-different-thinking.
-    local _retry_prov = PROVIDERS.active()
+    local _retry_prov = PROVIDERS[S.pending_provider_idx] or PROVIDERS.active()
     -- "Thinking off" is provider-specific. For OpenAI/Gemini, override_idx=0
     -- omits the reasoning_effort field which is effectively off. For
     -- DeepSeek, omitting the "thinking" field falls through to its
@@ -26792,7 +27741,8 @@ function Net.try_finish_curl()
     -- Don't fire the retry if we are already at the provider's off entry
     -- (the prior request already had thinking off and still hit the cap;
     -- another retry with the same setting won't change anything).
-    local _cur_idx = S.thinking_override_idx or prefs.thinking_idx
+    local _cur_idx = S.thinking_override_idx
+      or S.pending_thinking_idx or prefs.thinking_idx
     local _cur_tl  = _retry_prov.thinking_levels
                      and _retry_prov.thinking_levels[_cur_idx]
     local _cur_is_off = _cur_tl
@@ -26804,7 +27754,6 @@ function Net.try_finish_curl()
        and not _cur_is_off
        and _cur_idx > 0 then
       S.length_retry_used     = true
-      Probe.add_validator_retry(S.probe_turn, "length")
       S.thinking_override_idx = _retry_off_idx  -- provider-aware "off"
       local detail = ""
       if reasoning_only_tokens and reasoning_only_tokens > 0 then
@@ -26825,42 +27774,14 @@ function Net.try_finish_curl()
         .. "is your FIRST reply -- do NOT apologize, do NOT say 'let me "
         .. "try again', do NOT mention the retry.)\n\n"
         .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("length_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + length_retry") or "length_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        -- See JSFX-intent comment on the analogous retry sites above:
-        -- carry pending_jsfx_intent across snapshot rebuilds so the trim
-        -- survives every retry path, not just the JSFX-validator's.
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_empty_length_capped_reply",
-          "after empty length-capped reply"))
-          or "Auto-retry after empty length-capped reply did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "length",
+        history_content = history_content,
+        ctx_label = "length_retry",
+        retry_failed_key = "retry.reason.after_empty_length_capped_reply",
+        retry_failed_label = "after empty length-capped reply",
+        failure_message = "Auto-retry after empty length-capped reply did not go through. Please resend the last message.",
+      })
       return
     end
 
@@ -26879,7 +27800,11 @@ function Net.try_finish_curl()
           " (%d of %d output tokens went to internal reasoning)",
           reasoning_only_tokens, raw_tok_out or 0)
       end
-      local has_thinking = PROVIDERS.active().thinking_levels and prefs.thinking_idx > 0
+      local pending_provider = PROVIDERS[S.pending_provider_idx]
+        or PROVIDERS.active()
+      local pending_thinking_idx = S.pending_thinking_idx or prefs.thinking_idx
+      local has_thinking = pending_provider.thinking_levels
+        and pending_thinking_idx > 0
       msg = "The model hit its output token limit before producing any "
         .. "visible response" .. detail .. ".\n"
         .. (has_thinking
@@ -26903,51 +27828,40 @@ function Net.try_finish_curl()
       -- pattern as the length-cap retry above.
       if not S.empty_retry_used then
         S.empty_retry_used = true
+        local empty_retry_thinking_note = ""
+        local empty_retry_provider = PROVIDERS[S.pending_provider_idx]
+          or PROVIDERS.active()
+        if empty_retry_provider.id == "google"
+           and empty_retry_provider.thinking_levels then
+          S.thinking_override_idx = 1 -- lowest Gemini level; Pro bumps to LOW
+          empty_retry_thinking_note =
+            "; retrying with lowest Gemini thinking level"
+        end
         Log.line("EMPTY-RETRY",
-          "empty response from provider; retrying once (user-invisible)")
+          "empty response from provider; retrying once (user-invisible)"
+          .. empty_retry_thinking_note)
         local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
           .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous "
           .. "reply was empty -- finish_reason=stop with no content. "
           .. "Generate the response now. Respond as if this is your "
           .. "FIRST reply -- do NOT apologize, do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("empty_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + empty_retry") or "empty_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Net._ensure_request_start_time()
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.after_empty_response", "after empty response"))
-            or "Auto-retry after empty response did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          history_content = history_content,
+          ctx_label = "empty_retry",
+          retry_failed_key = "retry.reason.after_empty_response",
+          retry_failed_label = "after empty response",
+          failure_message = "Auto-retry after empty response did not go through. Please resend the last message.",
+        })
         return
       end
       label = "error"
       recovery_kind = "token_limit"
-      local has_thinking2 = PROVIDERS.active().thinking_levels and prefs.thinking_idx > 0
+      local pending_provider2 = PROVIDERS[S.pending_provider_idx]
+        or PROVIDERS.active()
+      local pending_thinking_idx2 = S.pending_thinking_idx or prefs.thinking_idx
+      local has_thinking2 = pending_provider2.thinking_levels
+        and pending_thinking_idx2 > 0
       msg = "The model's response was empty after processing, even after a "
         .. "retry. This can happen when the model uses all its output for "
         .. "internal reasoning.\n"
@@ -27129,11 +28043,7 @@ function Net.try_finish_curl()
   -- build_body_*, so keeping it in history would duplicate those bytes on
   -- every subsequent turn's cache breakpoint. Restoring history[last] to
   -- just "USER REQUEST: <text>" keeps the moving cache prefix lean.
-  if S.pending_orig_prompt
-     and #S.history > 0
-     and S.history[#S.history].role == "user" then
-    S.history[#S.history].content = "USER REQUEST:\n" .. S.pending_orig_prompt
-  end
+  Net._restore_pending_user_history()
 
   -- Store assistant turn in history.
   S.history[#S.history+1] = { role = "assistant", content = text }
@@ -27192,7 +28102,6 @@ function Net.try_finish_curl()
   if S.pending_jsfx_intent and lua_code and not jsfx_code then
     if not S.jsfx_wrong_artifact_retry_used then
       S.jsfx_wrong_artifact_retry_used = true
-      Probe.add_validator_retry(S.probe_turn, "jsfx")
       Log.line("JSFX-WRONG-ARTIFACT-RETRY",
         "JSFX request returned Lua/ReaScript; retrying for JSFX fence")
       local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
@@ -27206,40 +28115,14 @@ function Net.try_finish_curl()
         .. "@init, @slider, and @sample as needed. Respond as if this is "
         .. "your FIRST reply -- do NOT apologize, do NOT mention a retry.)\n\n"
         .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("jsfx_artifact_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + jsfx_artifact_retry")
-            or "jsfx_artifact_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_jsfx_wrong_artifact",
-          "after JSFX request returned Lua"))
-          or "Auto-retry after JSFX request returned Lua did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "jsfx",
+        history_content = history_content,
+        ctx_label = "jsfx_artifact_retry",
+        retry_failed_key = "retry.reason.after_jsfx_wrong_artifact",
+        retry_failed_label = "after JSFX request returned Lua",
+        failure_message = "Auto-retry after JSFX request returned Lua did not go through. Please resend the last message.",
+      })
       return
     end
     jsfx_wrong_artifact_gate_hit = true
@@ -27257,7 +28140,6 @@ function Net.try_finish_curl()
       S.jsfx_companion_retry_used = true
       S.jsfx_companion_validator_retries =
         (S.jsfx_companion_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "jsfx")
       Log.line("JSFX-COMPANION-RETRY",
         "JSFX track-install request returned no Lua companion; retrying")
       local jsfx_ref = "ReaAssist/<saved JSFX filename>.jsfx"
@@ -27285,40 +28167,14 @@ function Net.try_finish_curl()
         .. "do NOT mention a retry.)\n\nPrevious JSFX:\n```jsfx\n"
         .. jsfx_code
         .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("jsfx_companion_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + jsfx_companion_retry")
-            or "jsfx_companion_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_missing_jsfx_companion",
-          "after missing JSFX companion Lua"))
-          or "Auto-retry after missing JSFX companion Lua did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "jsfx",
+        history_content = history_content,
+        ctx_label = "jsfx_companion_retry",
+        retry_failed_key = "retry.reason.after_missing_jsfx_companion",
+        retry_failed_label = "after missing JSFX companion Lua",
+        failure_message = "Auto-retry after missing JSFX companion Lua did not go through. Please resend the last message.",
+      })
       return
     end
     Log.line("JSFX-COMPANION-VALIDATOR",
@@ -27333,12 +28189,6 @@ function Net.try_finish_curl()
     local function retry_lua_fence_retry(kind, previous_lua, ctx_label,
                                          log_tag, log_message, user_note,
                                          fail_message)
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
       local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
         .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: "
         .. user_note
@@ -27351,32 +28201,14 @@ function Net.try_finish_curl()
         .. " Lua:\n```text\n"
         .. previous_lua
         .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      Probe.add_validator_retry(S.probe_turn, "parse")
-      Log.line(log_tag, log_message)
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find(ctx_label, 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + " .. ctx_label) or ctx_label
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error(fail_message)
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "parse",
+        log_tag = log_tag,
+        log_message = log_message,
+        history_content = history_content,
+        ctx_label = ctx_label,
+        failure_message = fail_message,
+      })
       return true
     end
 
@@ -27430,7 +28262,10 @@ function Net.try_finish_curl()
     local no_code_action_prompt = not lua_code
         and not jsfx_code
         and not early_typed_actions_present
+        and not S.pending_typed_action_expected
         and not S.no_code_action_retry_used
+        and (not Code.prompt_is_question_or_readonly
+          or not Code.prompt_is_question_or_readonly(S.pending_orig_prompt))
         and Code.prompt_likely_needs_lua_action(S.pending_orig_prompt)
     local no_code_provider = PROVIDERS[S.pending_provider_idx]
       or PROVIDERS.active() or {}
@@ -27457,59 +28292,29 @@ function Net.try_finish_curl()
       Log.line("NO-CODE-ACTION-RETRY",
         "action prompt returned clarification; not retrying")
     elseif no_code_action_prompt then
-      if force_no_code_action_retry
-          or action_requires_lua_retry then
-        S.no_code_action_retry_used = true
-        Probe.add_validator_retry(S.probe_turn, "empty")
-        Log.line("NO-CODE-ACTION-RETRY",
-          "action prompt returned prose only; retrying with Lua requirement")
-        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked "
-          .. "for a REAPER action that changes project state, but your "
-          .. "previous reply only described what should happen and did not "
-          .. "include runnable code. Regenerate the full response as a "
-          .. "fenced ```lua script that performs the requested action. "
-          .. "Do not answer with a prose-only summary. Respond as if this "
-          .. "is your FIRST reply -- do NOT apologize, do NOT mention a "
-          .. "retry.)\n\nPrevious reply:\n"
-          .. text
-          .. "\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("no_code_action_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + no_code_action_retry")
-              or "no_code_action_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Net._ensure_request_start_time()
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.after_prose_only_action_response",
-            "after prose-only action response"))
-            or "Auto-retry after prose-only action response did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
-        return
-      end
+      S.no_code_action_retry_used = true
+      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked "
+        .. "for a REAPER action that changes project state, but your "
+        .. "previous reply only described what should happen and did not "
+        .. "include runnable code. Regenerate the full response as a "
+        .. "fenced ```lua script that performs the requested action. "
+        .. "Do not answer with a prose-only summary. Respond as if this "
+        .. "is your FIRST reply -- do NOT apologize, do NOT mention a "
+        .. "retry.)\n\nPrevious reply:\n"
+        .. text
+        .. "\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      Net.fire_validator_retry({
+        kind = "empty",
+        log_tag = "NO-CODE-ACTION-RETRY",
+        log_message = "action prompt returned prose only; retrying with Lua requirement",
+        history_content = history_content,
+        ctx_label = "no_code_action_retry",
+        retry_failed_key = "retry.reason.after_prose_only_action_response",
+        retry_failed_label = "after prose-only action response",
+        failure_message = "Auto-retry after prose-only action response did not go through. Please resend the last message.",
+      })
+      return
     end
   end
 
@@ -27531,9 +28336,6 @@ function Net.try_finish_curl()
       S.region_marker_retry_used = true
       S.region_marker_validator_retries =
         (S.region_marker_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "region_marker")
-      Log.line("REGION-MARKER-RETRY",
-        "region prompt produced marker-mode API call; retrying with hint")
       local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
         .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked for "
         .. "a region, but your previous Lua created a point marker or used "
@@ -27545,40 +28347,16 @@ function Net.try_finish_curl()
         .. "apologize, do NOT mention a retry.)\n\nPrevious Lua to fix:\n"
         .. "```lua\n" .. lua_code .. "\n```\n\nUSER REQUEST:\n"
         .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("region_marker_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + region_marker_retry")
-            or "region_marker_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_marker_vs_region_response",
-          "after marker-vs-region response"))
-          or "Auto-retry after marker-vs-region response did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "region_marker",
+        log_tag = "REGION-MARKER-RETRY",
+        log_message = "region prompt produced marker-mode API call; retrying with hint",
+        history_content = history_content,
+        ctx_label = "region_marker_retry",
+        retry_failed_key = "retry.reason.after_marker_vs_region_response",
+        retry_failed_label = "after marker-vs-region response",
+        failure_message = "Auto-retry after marker-vs-region response did not go through. Please resend the last message.",
+      })
       return
     end
   end
@@ -27595,9 +28373,6 @@ function Net.try_finish_curl()
     S.region_marker_retry_used = true
     S.region_marker_validator_retries =
       (S.region_marker_validator_retries or 0) + 1
-    Probe.add_validator_retry(S.probe_turn, "region_marker")
-    Log.line("POINT-MARKER-RETRY",
-      "point-marker prompt used region-mode API call; retrying with hint")
     local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
       .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked for "
       .. "a point marker, but your previous Lua set the marker/region "
@@ -27609,40 +28384,16 @@ function Net.try_finish_curl()
       .. "apologize, do NOT mention a retry.)\n\nPrevious Lua to fix:\n"
       .. "```lua\n" .. lua_code .. "\n```\n\nUSER REQUEST:\n"
       .. (S.pending_orig_prompt or "")
-    if #S.history > 0 and S.history[#S.history].role == "assistant" then
-      S.history[#S.history] = nil
-    end
-    if #S.history > 0 and S.history[#S.history].role == "user" then
-      S.history[#S.history] = nil
-    end
-    S.history[#S.history+1] = { role = "user", content = history_content }
-    if S.pending_display_idx
-       and S.display_messages[S.pending_display_idx] then
-      local dmsg = S.display_messages[S.pending_display_idx]
-      local existing = dmsg.ctx_label or ""
-      if not existing:find("point_marker_retry", 1, true) then
-        dmsg.ctx_label = existing ~= ""
-          and (existing .. " + point_marker_retry")
-          or "point_marker_retry"
-      end
-    end
-    if prefs.include_snapshot and not S.pending_answer_only_followup then
-      S.pending_project  = CTX.resolve_pending_project()
-      S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-        S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-    end
-    S.status = "waiting"
-    Net._ensure_request_start_time()
-    Code.safe_write(tmp.out, "")
-    local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-      S.pending_snapshot, S.pending_attachments))
-    if not ok and reason ~= "call_cap_exceeded" then
-      Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-        "retry.reason.after_point_marker_as_region",
-        "after point marker was created as a region"))
-        or "Auto-retry after point marker was created as a region did not go through. Please resend the last message.")
-    end
-    S.scroll_to_bottom = true
+    Net.fire_validator_retry({
+      kind = "region_marker",
+      log_tag = "POINT-MARKER-RETRY",
+      log_message = "point-marker prompt used region-mode API call; retrying with hint",
+      history_content = history_content,
+      ctx_label = "point_marker_retry",
+      retry_failed_key = "retry.reason.after_point_marker_as_region",
+      retry_failed_label = "after point marker was created as a region",
+      failure_message = "Auto-retry after point marker was created as a region did not go through. Please resend the last message.",
+    })
     return
   end
 
@@ -27659,14 +28410,10 @@ function Net.try_finish_curl()
         S.marker_pair_retry_used = true
         S.marker_pair_validator_retries =
           (S.marker_pair_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "marker_pair")
         local names = {}
         for _, e in ipairs(marker_pair_bad) do
           names[#names + 1] = tostring(e.name)
         end
-        Log.line("MARKER-PAIR-VALIDATOR",
-          "requested marker name(s) only created as region(s): "
-          .. tbl_concat(names, ", ") .. "; retrying with hint")
         local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
           .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked for "
           .. "both point marker(s) and region(s), but your previous Lua only "
@@ -27681,40 +28428,17 @@ function Net.try_finish_curl()
           .. "reply -- do NOT apologize, do NOT mention a retry.)\n\n"
           .. "Previous Lua to fix:\n```lua\n" .. lua_code
           .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("marker_pair_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + marker_pair_retry")
-              or "marker_pair_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Net._ensure_request_start_time()
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.after_missing_point_marker",
-            "after missing point marker"))
-            or "Auto-retry after missing point marker did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "marker_pair",
+          log_tag = "MARKER-PAIR-VALIDATOR",
+          log_message = "requested marker name(s) only created as region(s): "
+            .. tbl_concat(names, ", ") .. "; retrying with hint",
+          history_content = history_content,
+          ctx_label = "marker_pair_retry",
+          retry_failed_key = "retry.reason.after_missing_point_marker",
+          retry_failed_label = "after missing point marker",
+          failure_message = "Auto-retry after missing point marker did not go through. Please resend the last message.",
+        })
         return
       end
       marker_pair_gate_hit = true
@@ -27763,7 +28487,6 @@ function Net.try_finish_curl()
       S.void_return_retry_used = true
       S.void_return_validator_retries =
         (S.void_return_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "api")
       Log.line("VOID-RETURN-RETRY",
         "void-return API assignment to reaper." .. bad_name
         .. "; retrying with hint")
@@ -27779,39 +28502,14 @@ function Net.try_finish_curl()
         .. "a retry.)\n\nPrevious Lua to fix:\n```lua\n"
         .. lua_code
         .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("void_return_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + void_return_retry") or "void_return_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_void_return_api_assignment",
-          "after void-return API assignment"))
-          or "Auto-retry after void-return API assignment did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "api",
+        history_content = history_content,
+        ctx_label = "void_return_retry",
+        retry_failed_key = "retry.reason.after_void_return_api_assignment",
+        retry_failed_label = "after void-return API assignment",
+        failure_message = "Auto-retry after void-return API assignment did not go through. Please resend the last message.",
+      })
       return
     end
   end
@@ -27824,7 +28522,6 @@ function Net.try_finish_curl()
       S.forbidden_track_creation_retry_used = true
       S.forbidden_track_creation_validator_retries =
         (S.forbidden_track_creation_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "api")
       Log.line("FORBIDDEN-TRACK-CREATION-RETRY",
         "script inserted tracks after prompt forbade new bus/track; retrying")
       local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
@@ -27841,40 +28538,14 @@ function Net.try_finish_curl()
         .. "fix:\n```lua\n"
         .. lua_code
         .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("forbidden_track_creation_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + forbidden_track_creation_retry")
-            or "forbidden_track_creation_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_forbidden_track_creation",
-          "after forbidden track creation"))
-          or "Auto-retry after forbidden track creation did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "api",
+        history_content = history_content,
+        ctx_label = "forbidden_track_creation_retry",
+        retry_failed_key = "retry.reason.after_forbidden_track_creation",
+        retry_failed_label = "after forbidden track creation",
+        failure_message = "Auto-retry after forbidden track creation did not go through. Please resend the last message.",
+      })
       return
     elseif forbidden_track_creation and #forbidden_track_creation > 0 then
       validator_gate_hit = true
@@ -27892,7 +28563,6 @@ function Net.try_finish_curl()
       S.track_deletion_retry_used = true
       S.track_deletion_validator_retries =
         (S.track_deletion_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "track_deletion")
       Log.line("TRACK-DELETION-RETRY",
         "script deleted tracks without a delete/clear request; retrying")
       local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
@@ -27908,40 +28578,14 @@ function Net.try_finish_curl()
         .. "mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
         .. lua_code
         .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("track_deletion_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + track_deletion_retry")
-            or "track_deletion_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_unrequested_track_deletion",
-          "after unrequested track deletion"))
-          or "Auto-retry after unrequested track deletion did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "track_deletion",
+        history_content = history_content,
+        ctx_label = "track_deletion_retry",
+        retry_failed_key = "retry.reason.after_unrequested_track_deletion",
+        retry_failed_label = "after unrequested track deletion",
+        failure_message = "Auto-retry after unrequested track deletion did not go through. Please resend the last message.",
+      })
       return
     elseif track_deletion and #track_deletion > 0 then
       validator_gate_hit = true
@@ -27959,7 +28603,6 @@ function Net.try_finish_curl()
       S.track_duplication_retry_used = true
       S.track_duplication_validator_retries =
         (S.track_duplication_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "api")
       Log.line("TRACK-DUPLICATION-RETRY",
         "track duplicate prompt created a blank/non-duplicate track; retrying")
       local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
@@ -27979,40 +28622,14 @@ function Net.try_finish_curl()
         .. "apologize, do NOT mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
         .. lua_code
         .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("track_duplication_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + track_duplication_retry")
-            or "track_duplication_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_inert_track_duplication",
-          "after inert track duplication"))
-          or "Auto-retry after inert track duplication did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "api",
+        history_content = history_content,
+        ctx_label = "track_duplication_retry",
+        retry_failed_key = "retry.reason.after_inert_track_duplication",
+        retry_failed_label = "after inert track duplication",
+        failure_message = "Auto-retry after inert track duplication did not go through. Please resend the last message.",
+      })
       return
     elseif inert_track_duplication and #inert_track_duplication > 0 then
       validator_gate_hit = true
@@ -28030,7 +28647,6 @@ function Net.try_finish_curl()
       S.forbidden_fx_retry_used = true
       S.forbidden_fx_validator_retries =
         (S.forbidden_fx_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "api")
       Log.line("FORBIDDEN-FX-RETRY",
         "script added FX after prompt forbade effects/plugins; retrying")
       local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
@@ -28045,40 +28661,14 @@ function Net.try_finish_curl()
         .. "apologize, do NOT mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
         .. lua_code
         .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("forbidden_fx_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + forbidden_fx_retry")
-            or "forbidden_fx_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_forbidden_fx_addition",
-          "after forbidden FX addition"))
-          or "Auto-retry after forbidden FX addition did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "api",
+        history_content = history_content,
+        ctx_label = "forbidden_fx_retry",
+        retry_failed_key = "retry.reason.after_forbidden_fx_addition",
+        retry_failed_label = "after forbidden FX addition",
+        failure_message = "Auto-retry after forbidden FX addition did not go through. Please resend the last message.",
+      })
       return
     elseif forbidden_fx and #forbidden_fx > 0 then
       validator_gate_hit = true
@@ -28096,7 +28686,6 @@ function Net.try_finish_curl()
       S.forbidden_fx_retry_used = true
       S.forbidden_fx_validator_retries =
         (S.forbidden_fx_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "api")
       Log.line("UNREQUESTED-INSTRUMENT-FX-RETRY",
         "script added an instrument plugin for an instrument-named track; retrying")
       local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
@@ -28112,40 +28701,14 @@ function Net.try_finish_curl()
         .. "Previous Lua to fix:\n```lua\n"
         .. lua_code
         .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("unrequested_instrument_fx_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + unrequested_instrument_fx_retry")
-            or "unrequested_instrument_fx_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_unrequested_instrument_fx",
-          "after unrequested instrument plugin"))
-          or "Auto-retry after unrequested instrument plugin did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "api",
+        history_content = history_content,
+        ctx_label = "unrequested_instrument_fx_retry",
+        retry_failed_key = "retry.reason.after_unrequested_instrument_fx",
+        retry_failed_label = "after unrequested instrument plugin",
+        failure_message = "Auto-retry after unrequested instrument plugin did not go through. Please resend the last message.",
+      })
       return
     elseif unrequested_instrument_fx and #unrequested_instrument_fx > 0 then
       validator_gate_hit = true
@@ -28165,7 +28728,6 @@ function Net.try_finish_curl()
     S.track_creation_retry_used = true
     S.track_creation_validator_retries =
       (S.track_creation_validator_retries or 0) + 1
-    Probe.add_validator_retry(S.probe_turn, "api")
     Log.line("TRACK-CREATION-RETRY",
       "track-creation prompt without InsertTrackAtIndex; retrying with hint")
     local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
@@ -28182,40 +28744,14 @@ function Net.try_finish_curl()
       .. "retry.)\n\nPrevious Lua to fix:\n```lua\n"
       .. lua_code
       .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-    if #S.history > 0 and S.history[#S.history].role == "assistant" then
-      S.history[#S.history] = nil
-    end
-    if #S.history > 0 and S.history[#S.history].role == "user" then
-      S.history[#S.history] = nil
-    end
-    S.history[#S.history+1] = { role = "user", content = history_content }
-    if S.pending_display_idx
-       and S.display_messages[S.pending_display_idx] then
-      local dmsg = S.display_messages[S.pending_display_idx]
-      local existing = dmsg.ctx_label or ""
-      if not existing:find("track_creation_retry", 1, true) then
-        dmsg.ctx_label = existing ~= ""
-          and (existing .. " + track_creation_retry")
-          or "track_creation_retry"
-      end
-    end
-    if prefs.include_snapshot and not S.pending_answer_only_followup then
-      S.pending_project  = CTX.resolve_pending_project()
-      S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-        S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-    end
-    S.status = "waiting"
-    Net._ensure_request_start_time()
-    Code.safe_write(tmp.out, "")
-    local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-      S.pending_snapshot, S.pending_attachments))
-    if not ok and reason ~= "call_cap_exceeded" then
-      Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-        "retry.reason.after_inert_track_creation_script",
-        "after inert track-creation script"))
-        or "Auto-retry after inert track-creation script did not go through. Please resend the last message.")
-    end
-    S.scroll_to_bottom = true
+    Net.fire_validator_retry({
+      kind = "api",
+      history_content = history_content,
+      ctx_label = "track_creation_retry",
+      retry_failed_key = "retry.reason.after_inert_track_creation_script",
+      retry_failed_label = "after inert track-creation script",
+      failure_message = "Auto-retry after inert track-creation script did not go through. Please resend the last message.",
+    })
     return
   end
 
@@ -28237,7 +28773,6 @@ function Net.try_finish_curl()
       S.track_name_retry_used = true
       S.track_creation_validator_retries =
         (S.track_creation_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "api")
       Log.line("TRACK-NAME-RETRY",
         "created instrument/MIDI track without P_NAME; retrying with hint")
       local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
@@ -28254,40 +28789,14 @@ function Net.try_finish_curl()
         .. "\n\nPrevious Lua to fix:\n```lua\n"
         .. lua_code
         .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("track_name_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + track_name_retry")
-            or "track_name_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_unnamed_created_track",
-          "after unnamed created track"))
-          or "Auto-retry after unnamed created track did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "api",
+        history_content = history_content,
+        ctx_label = "track_name_retry",
+        retry_failed_key = "retry.reason.after_unnamed_created_track",
+        retry_failed_label = "after unnamed created track",
+        failure_message = "Auto-retry after unnamed created track did not go through. Please resend the last message.",
+      })
       return
     end
   end
@@ -28302,7 +28811,6 @@ function Net.try_finish_curl()
       S.track_creation_index_retry_used = true
       S.track_creation_validator_retries =
         (S.track_creation_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "api")
       local finding = bad_created_track_indices[1]
       Log.line("TRACK-CREATION-INDEX-RETRY",
         "new-track GetTrack index can be nil on line "
@@ -28329,40 +28837,14 @@ function Net.try_finish_curl()
         .. "apologize, do NOT mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
         .. lua_code
         .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("track_creation_index_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + track_creation_index_retry")
-            or "track_creation_index_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_new_track_index_mismatch",
-          "after new-track index mismatch"))
-          or "Auto-retry after new-track index mismatch did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "api",
+        history_content = history_content,
+        ctx_label = "track_creation_index_retry",
+        retry_failed_key = "retry.reason.after_new_track_index_mismatch",
+        retry_failed_label = "after new-track index mismatch",
+        failure_message = "Auto-retry after new-track index mismatch did not go through. Please resend the last message.",
+      })
       return
     elseif bad_created_track_indices and #bad_created_track_indices > 0 then
       validator_gate_hit = true
@@ -28391,7 +28873,6 @@ function Net.try_finish_curl()
       S.track_index_retry_used = true
       S.track_index_validator_retries =
         (S.track_index_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "api")
       local finding = bad_track_indices[1]
       Log.line("TRACK-INDEX-RETRY",
         "literal GetTrack index mismatch on line "
@@ -28418,40 +28899,14 @@ function Net.try_finish_curl()
         .. "a retry.)\n\nPrevious Lua to fix:\n```lua\n"
         .. lua_code
         .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("track_index_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + track_index_retry")
-            or "track_index_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_literal_track_index_mismatch",
-          "after literal track-index mismatch"))
-          or "Auto-retry after literal track-index mismatch did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "api",
+        history_content = history_content,
+        ctx_label = "track_index_retry",
+        retry_failed_key = "retry.reason.after_literal_track_index_mismatch",
+        retry_failed_label = "after literal track-index mismatch",
+        failure_message = "Auto-retry after literal track-index mismatch did not go through. Please resend the last message.",
+      })
       return
     elseif bad_track_indices and #bad_track_indices > 0 then
       validator_gate_hit = true
@@ -28493,7 +28948,6 @@ function Net.try_finish_curl()
       S.target_consistency_retry_used = true
       S.target_consistency_validator_retries =
         (S.target_consistency_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "api")
       local finding = bad_target_guards[1]
       Log.line("TARGET-CONSISTENCY-RETRY",
         "numeric track target got hard name guard on line "
@@ -28519,40 +28973,14 @@ function Net.try_finish_curl()
         .. "\n\nPrevious Lua to fix:\n```lua\n"
         .. lua_code
         .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("target_consistency_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + target_consistency_retry")
-            or "target_consistency_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_numeric_target_name_guard_mismatch",
-          "after numeric target/name-guard mismatch"))
-          or "Auto-retry after numeric target/name-guard mismatch did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "api",
+        history_content = history_content,
+        ctx_label = "target_consistency_retry",
+        retry_failed_key = "retry.reason.after_numeric_target_name_guard_mismatch",
+        retry_failed_label = "after numeric target/name-guard mismatch",
+        failure_message = "Auto-retry after numeric target/name-guard mismatch did not go through. Please resend the last message.",
+      })
       return
     elseif bad_target_guards and #bad_target_guards > 0 then
       validator_gate_hit = true
@@ -28610,7 +29038,6 @@ function Net.try_finish_curl()
     if bad_folder_boundary and #bad_folder_boundary > 0
         and not S.folder_boundary_retry_used then
       S.folder_boundary_retry_used = true
-      Probe.add_validator_retry(S.probe_turn, "api")
       local finding = bad_folder_boundary[1]
       local history_content
       if finding.reason == "missing_parent_folder_track" then
@@ -28682,40 +29109,14 @@ function Net.try_finish_curl()
           .. lua_code
           .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
       end
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("folder_boundary_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + folder_boundary_retry")
-            or "folder_boundary_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_folder_boundary_mismatch",
-          "after folder-boundary mismatch"))
-          or "Auto-retry after folder-boundary mismatch did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "api",
+        history_content = history_content,
+        ctx_label = "folder_boundary_retry",
+        retry_failed_key = "retry.reason.after_folder_boundary_mismatch",
+        retry_failed_label = "after folder-boundary mismatch",
+        failure_message = "Auto-retry after folder-boundary mismatch did not go through. Please resend the last message.",
+      })
       return
     elseif bad_folder_boundary and #bad_folder_boundary > 0 then
       validator_gate_hit = true
@@ -28768,71 +29169,53 @@ function Net.try_finish_curl()
 
   -- High-confidence track-property flag validator. SetMediaTrackInfo_Value
   -- accepts numeric values; Lua booleans silently fail on flags like B_MUTE.
-  if lua_code and not S.setmedia_bool_retry_used then
+  if lua_code then
     local findings = Code.find_boolean_setmediatrackinfo_value_args
       and Code.find_boolean_setmediatrackinfo_value_args(lua_code) or nil
     if findings and findings[1] then
       local finding = findings[1]
-      S.setmedia_bool_retry_used = true
-      S.setmedia_bool_validator_retries =
-        (S.setmedia_bool_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "api")
-      Log.line("SETMEDIA-BOOL-RETRY",
-        "SetMediaTrackInfo_Value received boolean for "
-        .. tostring(finding.parm or "?") .. " on line "
-        .. tostring(finding.line or "?") .. "; retrying with numeric flag hint")
-      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: "
-        .. "Your previous reply passed Lua boolean `"
-        .. tostring(finding.bool or "true/false")
-        .. "` to `reaper.SetMediaTrackInfo_Value(..., \""
-        .. tostring(finding.parm or "B_*")
-        .. "\", ...)`. `SetMediaTrackInfo_Value` takes numeric values; "
-        .. "for track flags such as B_MUTE, B_MAINSEND, B_PHASE, and "
-        .. "similar B_/I_ properties, use `1` for on/true and `0` for "
-        .. "off/false. Preserve the user's requested tracks, names, "
-        .. "plugins, parameter values, MIDI notes, markers, routing, and "
-        .. "ordering. Only fix numeric-vs-boolean track property writes "
-        .. "unless another change is required to make the script valid. "
-        .. "Respond as if this is your FIRST reply -- do NOT apologize, "
-        .. "do NOT mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
-        .. lua_code
-        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
+      if not S.setmedia_bool_retry_used then
+        S.setmedia_bool_retry_used = true
+        S.setmedia_bool_validator_retries =
+          (S.setmedia_bool_validator_retries or 0) + 1
+        Log.line("SETMEDIA-BOOL-RETRY",
+          "SetMediaTrackInfo_Value received boolean for "
+          .. tostring(finding.parm or "?") .. " on line "
+          .. tostring(finding.line or "?") .. "; retrying with numeric flag hint")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: "
+          .. "Your previous reply passed Lua boolean `"
+          .. tostring(finding.bool or "true/false")
+          .. "` to `reaper.SetMediaTrackInfo_Value(..., \""
+          .. tostring(finding.parm or "B_*")
+          .. "\", ...)`. `SetMediaTrackInfo_Value` takes numeric values; "
+          .. "for track flags such as B_MUTE, B_MAINSEND, B_PHASE, and "
+          .. "similar B_/I_ properties, use `1` for on/true and `0` for "
+          .. "off/false. Preserve the user's requested tracks, names, "
+          .. "plugins, parameter values, MIDI notes, markers, routing, and "
+          .. "ordering. Only fix numeric-vs-boolean track property writes "
+          .. "unless another change is required to make the script valid. "
+          .. "Respond as if this is your FIRST reply -- do NOT apologize, "
+          .. "do NOT mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+          .. lua_code
+          .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        Net.fire_validator_retry({
+          kind = "api",
+          history_content = history_content,
+          ctx_label = "setmedia_bool_retry",
+          retry_failed_key = "retry.reason.after_setmedia_bool_write",
+          retry_failed_label = "after boolean SetMediaTrackInfo_Value write",
+          failure_message = "Auto-retry after boolean SetMediaTrackInfo_Value write did not go through. Please resend the last message.",
+        })
+        return
       end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("setmedia_bool_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + setmedia_bool_retry")
-            or "setmedia_bool_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_setmedia_bool_write",
-          "after boolean SetMediaTrackInfo_Value write"))
-          or "Auto-retry after boolean SetMediaTrackInfo_Value write did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
-      return
+      validator_gate_hit = true
+      Log.line("SETMEDIA-BOOL-VALIDATOR",
+        "boolean SetMediaTrackInfo_Value write persisted after retry; auto-run blocked")
+      Log.add_error((RA and RA.t and RA.t(
+        "validator.setmedia_bool_blocked", nil,
+        "The script still passes Lua true/false to reaper.SetMediaTrackInfo_Value for a track property after a retry. Auto-run is blocked; change those writes to numeric 1 or 0 before running manually."))
+        or "The script still passes Lua true/false to reaper.SetMediaTrackInfo_Value for a track property after a retry. Auto-run is blocked; change those writes to numeric 1 or 0 before running manually.")
     end
   end
 
@@ -28840,7 +29223,7 @@ function Net.try_finish_curl()
   -- changed through SetTrackSelected; writing B_SELECTED/I_SELECTED via
   -- SetMediaTrackInfo_Value can appear to work in code but fail to persist in
   -- real project state.
-  if lua_code and not S.track_selection_retry_used then
+  if lua_code then
     local stripped = lua_code
       :gsub("%-%-%[%[.-%]%]", "")
       :gsub("%-%-[^\n]*", "")
@@ -28856,15 +29239,8 @@ function Net.try_finish_curl()
     local bad_selection_bool =
       Code.find_nil_prone_settrackselected_args(stripped)
     if bad_selection_key or bad_selection_bool then
-      S.track_selection_retry_used = true
-      S.track_selection_validator_retries =
-        (S.track_selection_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "api")
       local retry_note
       if bad_selection_key then
-        Log.line("TRACK-SELECTION-RETRY",
-          "selection write via " .. tostring(bad_selection_key)
-          .. "; retrying with SetTrackSelected hint")
         retry_note = "Your previous reply used "
           .. "reaper.SetMediaTrackInfo_Value(..., \""
           .. tostring(bad_selection_key)
@@ -28882,50 +29258,46 @@ function Net.try_finish_curl()
           .. "using an explicit true/false value or comparing the variable "
           .. "to true."
       end
-      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: " .. retry_note .. " "
-        .. "Preserve the user's requested tracks, names, plugins, parameter "
-        .. "values, MIDI notes, markers, routing, and ordering. Only fix the "
-        .. "track-selection API usage unless another change is required to "
-        .. "make the script valid. Respond as if this is your FIRST reply -- "
-        .. "do NOT apologize, do NOT mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
-        .. lua_code
-        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("track_selection_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + track_selection_retry")
-            or "track_selection_retry"
+      if not S.track_selection_retry_used then
+        S.track_selection_retry_used = true
+        S.track_selection_validator_retries =
+          (S.track_selection_validator_retries or 0) + 1
+        if bad_selection_key then
+          Log.line("TRACK-SELECTION-RETRY",
+            "selection write via " .. tostring(bad_selection_key)
+            .. "; retrying with SetTrackSelected hint")
+        else
+          local finding = bad_selection_bool and bad_selection_bool[1] or {}
+          Log.line("TRACK-SELECTION-RETRY",
+            "SetTrackSelected boolean argument can be nil on line "
+            .. tostring(finding.line or "?") .. "; retrying with boolean hint")
         end
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: " .. retry_note .. " "
+          .. "Preserve the user's requested tracks, names, plugins, parameter "
+          .. "values, MIDI notes, markers, routing, and ordering. Only fix the "
+          .. "track-selection API usage unless another change is required to "
+          .. "make the script valid. Respond as if this is your FIRST reply -- "
+          .. "do NOT apologize, do NOT mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+          .. lua_code
+          .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        Net.fire_validator_retry({
+          kind = "api",
+          history_content = history_content,
+          ctx_label = "track_selection_retry",
+          retry_failed_key = "retry.reason.after_track_selection_api_write",
+          retry_failed_label = "after track-selection API write",
+          failure_message = "Auto-retry after track-selection API write did not go through. Please resend the last message.",
+        })
+        return
       end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_track_selection_api_write",
-          "after track-selection API write"))
-          or "Auto-retry after track-selection API write did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
-      return
+      validator_gate_hit = true
+      Log.line("TRACK-SELECTION-VALIDATOR",
+        "track-selection API misuse persisted after retry; auto-run blocked")
+      Log.add_error((RA and RA.t and RA.t(
+        "validator.track_selection_blocked", nil,
+        "The script still uses a fragile track-selection write after a retry. Auto-run is blocked; use reaper.SetTrackSelected(track, true/false) with a definite boolean before running manually."))
+        or "The script still uses a fragile track-selection write after a retry. Auto-run is blocked; use reaper.SetTrackSelected(track, true/false) with a definite boolean before running manually.")
     end
   end
 
@@ -28933,7 +29305,6 @@ function Net.try_finish_curl()
   -- optional when the same request also adds FX. Keep this targeted so the
   -- normal path for stronger models stays unchanged.
   if lua_code
-      and not S.exclusive_selection_retry_used
       and Code.prompt_requests_exclusive_track_selection(
         S.pending_orig_prompt) then
     local selection_provider = PROVIDERS[S.pending_provider_idx]
@@ -28943,60 +29314,42 @@ function Net.try_finish_curl()
     if Code.model_validator_enabled(selection_provider.id,
         selection_model.id, "exclusive_track_selection")
         and not Code.lua_satisfies_exclusive_track_selection(lua_code) then
-      S.exclusive_selection_retry_used = true
-      S.track_selection_validator_retries =
-        (S.track_selection_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "track_selection")
-      Log.line("EXCLUSIVE-SELECTION-RETRY",
-        "exclusive track selection requested but no clear-and-select writes found")
-      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user explicitly "
-        .. "asked for exclusive track selection with wording like "
-        .. "\"select only\". Your previous Lua performed the other action "
-        .. "but did not change track selection. Regenerate the full script. "
-        .. "You MUST clear existing track selection by looping over all "
-        .. "tracks and calling reaper.SetTrackSelected(track, false), then "
-        .. "call reaper.SetTrackSelected(target_track, true) on the requested "
-        .. "target. Preserve the requested FX/action and target. Respond as "
-        .. "if this is your FIRST reply -- do NOT apologize, do NOT mention "
-        .. "a retry.)\n\nPrevious Lua to fix:\n```lua\n"
-        .. lua_code
-        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
+      if not S.exclusive_selection_retry_used then
+        S.exclusive_selection_retry_used = true
+        S.track_selection_validator_retries =
+          (S.track_selection_validator_retries or 0) + 1
+        Log.line("EXCLUSIVE-SELECTION-RETRY",
+          "exclusive track selection requested but no clear-and-select writes found")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user explicitly "
+          .. "asked for exclusive track selection with wording like "
+          .. "\"select only\". Your previous Lua performed the other action "
+          .. "but did not change track selection. Regenerate the full script. "
+          .. "You MUST clear existing track selection by looping over all "
+          .. "tracks and calling reaper.SetTrackSelected(track, false), then "
+          .. "call reaper.SetTrackSelected(target_track, true) on the requested "
+          .. "target. Preserve the requested FX/action and target. Respond as "
+          .. "if this is your FIRST reply -- do NOT apologize, do NOT mention "
+          .. "a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+          .. lua_code
+          .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        Net.fire_validator_retry({
+          kind = "track_selection",
+          history_content = history_content,
+          ctx_label = "track_selection_retry",
+          retry_failed_key = "retry.reason.after_missing_exclusive_track_selection",
+          retry_failed_label = "after missing exclusive track selection",
+          failure_message = "Auto-retry after missing exclusive track selection did not go through. Please resend the last message.",
+        })
+        return
       end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("track_selection_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + track_selection_retry")
-            or "track_selection_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_missing_exclusive_track_selection",
-          "after missing exclusive track selection"))
-          or "Auto-retry after missing exclusive track selection did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
-      return
+      validator_gate_hit = true
+      Log.line("EXCLUSIVE-SELECTION-VALIDATOR",
+        "exclusive track-selection requirement still missing after retry; auto-run blocked")
+      Log.add_error((RA and RA.t and RA.t(
+        "validator.exclusive_track_selection_blocked", nil,
+        "The user asked for exclusive track selection, but the script still does not clearly clear other selections and select the target track after a retry. Auto-run is blocked; correct the selection writes before running manually."))
+        or "The user asked for exclusive track selection, but the script still does not clearly clear other selections and select the target track after a retry. Auto-run is blocked; correct the selection writes before running manually.")
     end
   end
 
@@ -29019,7 +29372,6 @@ function Net.try_finish_curl()
         S.bus_routing_retry_used = true
         S.bus_routing_validator_retries =
           (S.bus_routing_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "bus_routing")
         Log.line("BUS-ROUTING-RETRY",
           "bus/return routing requested but no CreateTrackSend call found")
         local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
@@ -29037,40 +29389,14 @@ function Net.try_finish_curl()
           .. "\n\nPrevious Lua to fix:\n```lua\n"
           .. lua_code
           .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("bus_routing_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + bus_routing_retry")
-              or "bus_routing_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Net._ensure_request_start_time()
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.after_missing_bus_return_sends",
-            "after missing bus/return sends"))
-            or "Auto-retry after missing bus/return sends did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "bus_routing",
+          history_content = history_content,
+          ctx_label = "bus_routing_retry",
+          retry_failed_key = "retry.reason.after_missing_bus_return_sends",
+          retry_failed_label = "after missing bus/return sends",
+          failure_message = "Auto-retry after missing bus/return sends did not go through. Please resend the last message.",
+        })
         return
       end
       validator_gate_hit = true
@@ -29100,7 +29426,6 @@ function Net.try_finish_curl()
           S.pending_orig_prompt) or nil
       if not S.sidechain_send_retry_used then
         S.sidechain_send_retry_used = true
-        Probe.add_validator_retry(S.probe_turn, "sidechain_send")
         local sidechain_sources = sidechain_req
           and type(sidechain_req.sources) == "table"
           and #sidechain_req.sources > 0
@@ -29141,40 +29466,14 @@ function Net.try_finish_curl()
           .. "\n\nPrevious Lua to fix:\n```lua\n"
           .. lua_code
           .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("sidechain_send_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + sidechain_send_retry")
-              or "sidechain_send_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Net._ensure_request_start_time()
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.after_missing_sidechain_send",
-            "after missing sidechain send"))
-            or "Auto-retry after missing sidechain send did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "sidechain_send",
+          history_content = history_content,
+          ctx_label = "sidechain_send_retry",
+          retry_failed_key = "retry.reason.after_missing_sidechain_send",
+          retry_failed_label = "after missing sidechain send",
+          failure_message = "Auto-retry after missing sidechain send did not go through. Please resend the last message.",
+        })
         return
       end
       validator_gate_hit = true
@@ -29205,7 +29504,6 @@ function Net.try_finish_curl()
           lua_code, S.pending_orig_prompt) then
       if not S.podcast_bus_retry_used then
         S.podcast_bus_retry_used = true
-        Probe.add_validator_retry(S.probe_turn, "podcast_bus")
         Log.line("PODCAST-BUS-RETRY",
           "podcast bus requested but not all named sources are routed to bus")
         local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
@@ -29223,40 +29521,14 @@ function Net.try_finish_curl()
           .. "\n\nPrevious Lua to fix:\n```lua\n"
           .. lua_code
           .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("podcast_bus_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + podcast_bus_retry")
-              or "podcast_bus_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Net._ensure_request_start_time()
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.after_incomplete_podcast_bus_routing",
-            "after incomplete podcast bus routing"))
-            or "Auto-retry after incomplete podcast bus routing did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "podcast_bus",
+          history_content = history_content,
+          ctx_label = "podcast_bus_retry",
+          retry_failed_key = "retry.reason.after_incomplete_podcast_bus_routing",
+          retry_failed_label = "after incomplete podcast bus routing",
+          failure_message = "Auto-retry after incomplete podcast bus routing did not go through. Please resend the last message.",
+        })
         return
       end
       validator_gate_hit = true
@@ -29276,7 +29548,6 @@ function Net.try_finish_curl()
       S.master_send_retry_used = true
       S.master_send_validator_retries =
         (S.master_send_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "api")
       local finding = bad_master_send[1]
       Log.line("MASTER-SEND-RETRY",
         "RemoveTrackSend category 1 used for master send on line "
@@ -29295,40 +29566,14 @@ function Net.try_finish_curl()
         .. "do NOT mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
         .. lua_code
         .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("master_send_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + master_send_retry")
-            or "master_send_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_master_send_api_misuse",
-          "after master-send API misuse"))
-          or "Auto-retry after master-send API misuse did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "api",
+        history_content = history_content,
+        ctx_label = "master_send_retry",
+        retry_failed_key = "retry.reason.after_master_send_api_misuse",
+        retry_failed_label = "after master-send API misuse",
+        failure_message = "Auto-retry after master-send API misuse did not go through. Please resend the last message.",
+      })
       return
     elseif bad_master_send and #bad_master_send > 0 then
       validator_gate_hit = true
@@ -29350,7 +29595,7 @@ function Net.try_finish_curl()
   -- changes a send pan and leaves the track pan untouched. Also catch Lua
   -- table-key slips such as `{ lead_vocal = -0.20, [drum_bus] = 0.20 }`
   -- when the table is later indexed by track handle for a D_PAN write.
-  if lua_code and not S.track_pan_retry_used then
+  if lua_code then
     local bad_track_pan =
       Code.find_track_pan_sent_as_send_pan(lua_code, S.pending_orig_prompt)
     local bad_pan_table =
@@ -29361,14 +29606,8 @@ function Net.try_finish_curl()
         or (bad_pan_table and #bad_pan_table > 0) then
       local issue = (bad_track_pan and #bad_track_pan > 0)
         and "send_pan" or "bare_table_key"
-      S.track_pan_retry_used = true
-      S.track_pan_validator_retries =
-        (S.track_pan_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "api")
       local issue_text
       if issue == "send_pan" then
-        Log.line("TRACK-PAN-RETRY",
-          "send pan used for track-pan request; retrying with D_PAN track hint")
         issue_text = "The user asked to pan one or more tracks, but your "
           .. "previous reply used reaper.SetTrackSendInfo_Value(..., "
           .. "\"D_PAN\", ...), which changes send pan only. Track pan must "
@@ -29387,50 +29626,44 @@ function Net.try_finish_curl()
           .. "and `[drum_bus] = 0.20`, or use explicit if/elseif name "
           .. "checks before writing D_PAN."
       end
-      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: "
-        .. issue_text .. " Preserve the user's requested tracks, names, "
-        .. "plugins, parameter values, MIDI notes, markers, routing, and "
-        .. "ordering. Only fix the track-pan logic unless another change "
-        .. "is required to make the script valid. Respond as if this is "
-        .. "your FIRST reply -- do NOT apologize, do NOT mention a retry.)"
-        .. "\n\nPrevious Lua to fix:\n```lua\n"
-        .. lua_code
-        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("track_pan_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + track_pan_retry") or "track_pan_retry"
+      if not S.track_pan_retry_used then
+        S.track_pan_retry_used = true
+        S.track_pan_validator_retries =
+          (S.track_pan_validator_retries or 0) + 1
+        if issue == "send_pan" then
+          Log.line("TRACK-PAN-RETRY",
+            "send pan used for track-pan request; retrying with D_PAN track hint")
+        else
+          Log.line("TRACK-PAN-RETRY",
+            "bare track-handle table key used for track pan; retrying with Lua table-key hint")
         end
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: "
+          .. issue_text .. " Preserve the user's requested tracks, names, "
+          .. "plugins, parameter values, MIDI notes, markers, routing, and "
+          .. "ordering. Only fix the track-pan logic unless another change "
+          .. "is required to make the script valid. Respond as if this is "
+          .. "your FIRST reply -- do NOT apologize, do NOT mention a retry.)"
+          .. "\n\nPrevious Lua to fix:\n```lua\n"
+          .. lua_code
+          .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        Net.fire_validator_retry({
+          kind = "api",
+          history_content = history_content,
+          ctx_label = "track_pan_retry",
+          retry_failed_key = "retry.reason.after_track_pan_api_misuse",
+          retry_failed_label = "after track-pan API misuse",
+          failure_message = "Auto-retry after track-pan API misuse did not go through. Please resend the last message.",
+        })
+        return
       end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_track_pan_api_misuse",
-          "after track-pan API misuse"))
-          or "Auto-retry after track-pan API misuse did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
-      return
+      validator_gate_hit = true
+      Log.line("TRACK-PAN-VALIDATOR",
+        "track-pan API misuse persisted after retry; auto-run blocked")
+      Log.add_error((RA and RA.t and RA.t(
+        "validator.track_pan_blocked", nil,
+        "The script still uses the wrong API or table-key shape for a track-pan request after a retry. Auto-run is blocked; write track pan with reaper.SetMediaTrackInfo_Value(track, \"D_PAN\", value) and bracket any track-handle table keys before running manually."))
+        or "The script still uses the wrong API or table-key shape for a track-pan request after a retry. Auto-run is blocked; write track pan with reaper.SetMediaTrackInfo_Value(track, \"D_PAN\", value) and bracket any track-handle table keys before running manually.")
     end
   end
 
@@ -29463,7 +29696,6 @@ function Net.try_finish_curl()
       -- as the helper / defer / api validators.
       if not S.parse_retry_used then
         S.parse_retry_used = true
-        Probe.add_validator_retry(S.probe_turn, "parse")
         Log.line("PARSE-RETRY",
           "regenerating after Lua parse error (user-invisible)")
         local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
@@ -29480,38 +29712,14 @@ function Net.try_finish_curl()
           .. "your FIRST reply -- do NOT apologize, do NOT mention a "
           .. "retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("parse_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + parse_retry") or "parse_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Net._ensure_request_start_time()
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.after_lua_parse_error", "after Lua parse error"))
-            or "Auto-retry after Lua parse error did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "parse",
+          history_content = history_content,
+          ctx_label = "parse_retry",
+          retry_failed_key = "retry.reason.after_lua_parse_error",
+          retry_failed_label = "after Lua parse error",
+          failure_message = "Auto-retry after Lua parse error did not go through. Please resend the last message.",
+        })
         return
       end
       lua_code = nil
@@ -29528,7 +29736,6 @@ function Net.try_finish_curl()
     if sandbox_forbidden and (S.sandbox_global_validator_retries or 0) < 1 then
       S.sandbox_global_validator_retries =
         (S.sandbox_global_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "sandbox_global")
       Log.line("SANDBOX-GLOBAL-RETRY",
         "forbidden globals in generated Lua (" .. tostring(sandbox_forbidden)
         .. "); retrying with hint (user-invisible)")
@@ -29548,39 +29755,14 @@ function Net.try_finish_curl()
         .. "reply -- do NOT apologize, do NOT mention a retry.)\n\n"
         .. "Previous Lua to fix:\n```lua\n" .. lua_code .. "\n```\n\n"
         .. "USER REQUEST:\n" .. sandbox_user_text
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history + 1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("sandbox_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + sandbox_retry") or "sandbox_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.for_sandbox_forbidden_globals",
-          "for sandbox-forbidden Lua APIs"))
-          or "Auto-retry for sandbox-forbidden Lua APIs did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "sandbox_global",
+        history_content = history_content,
+        ctx_label = "sandbox_retry",
+        retry_failed_key = "retry.reason.for_sandbox_forbidden_globals",
+        retry_failed_label = "for sandbox-forbidden Lua APIs",
+        failure_message = "Auto-retry for sandbox-forbidden Lua APIs did not go through. Please resend the last message.",
+      })
       return
     end
   end
@@ -29615,14 +29797,6 @@ function Net.try_finish_curl()
      and code_type == "lua" then
     typed_action_metrics.fallback_to_lua = true
   end
-  typed_action_metrics.retry_count =
-    (S.typed_action_retry_offset or 0)
-    + (S.typed_action_format_validator_retries or 0)
-    + (S.typed_action_schema_validator_retries or 0)
-    + (S.typed_action_semantic_validator_retries or 0)
-    + (S.typed_action_escalation_count or 0)
-  typed_action_metrics.escalated = S.typed_action_escalation_used == true
-  typed_action_metrics.escalation_model = S.typed_action_escalation_model
   local typed_action_semantic_block_reason = nil
 
   -- TYPED-ACTION FORMAT VALIDATOR: Typed-action output is intentionally
@@ -29638,7 +29812,6 @@ function Net.try_finish_curl()
     if (S.typed_action_format_validator_retries or 0) < 1 then
       S.typed_action_format_validator_retries =
         (S.typed_action_format_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "typed_action_format")
       Log.line("TYPED-ACTION-FORMAT-VALIDATOR",
         "valid typed-action JSON was emitted under `"
         .. tostring(typed_action_wrong_fence.label)
@@ -29658,40 +29831,14 @@ function Net.try_finish_curl()
         .. "VALID ACTION JSON FROM YOUR PREVIOUS REPLY:\n"
         .. prior_json .. "\n\nUSER REQUEST:\n"
         .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history + 1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("typed_action_format_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + typed_action_format_retry")
-            or "typed_action_format_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.for_typed_action_fence_label",
-          "for typed-action fence label"))
-          or "Auto-retry for typed-action fence label did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "typed_action_format",
+        history_content = history_content,
+        ctx_label = "typed_action_format_retry",
+        retry_failed_key = "retry.reason.for_typed_action_fence_label",
+        retry_failed_label = "for typed-action fence label",
+        failure_message = "Auto-retry for typed-action fence label did not go through. Please resend the last message.",
+      })
       return
     end
     typed_action_metrics.error = "wrong_fence_label"
@@ -29707,7 +29854,6 @@ function Net.try_finish_curl()
     if (S.typed_action_format_validator_retries or 0) < 1 then
       S.typed_action_format_validator_retries =
         (S.typed_action_format_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "typed_action_format")
       Log.line("TYPED-ACTION-FORMAT-VALIDATOR",
         "typed-action contract was active but no action block was emitted; "
         .. "retrying with contract-only correction (user-invisible)")
@@ -29732,44 +29878,23 @@ function Net.try_finish_curl()
         .. reemit_hint
         .. (retry_contract ~= "" and ("\n\n" .. retry_contract) or "")
         .. "\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history + 1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("typed_action_format_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + typed_action_format_retry")
-            or "typed_action_format_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.for_missing_typed_action_block",
-          "for missing typed-action block"))
-          or "Auto-retry for missing typed-action block did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "typed_action_format",
+        history_content = history_content,
+        ctx_label = "typed_action_format_retry",
+        retry_failed_key = "retry.reason.for_missing_typed_action_block",
+        retry_failed_label = "for missing typed-action block",
+        failure_message = "Auto-retry for missing typed-action block did not go through. Please resend the last message.",
+      })
       return
     end
     if typed_action_metrics.error == "" then
       typed_action_metrics.error = "missing_action_block"
+    end
+    if not code and Net._try_typed_action_lua_fallback(
+        "typed_action_format_retry_failed",
+        typed_action_metrics.error) then
+      return
     end
   end
 
@@ -29807,7 +29932,6 @@ function Net.try_finish_curl()
     if (S.typed_action_schema_validator_retries or 0) < 1 then
       S.typed_action_schema_validator_retries =
         (S.typed_action_schema_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "typed_action_schema")
       Log.line("TYPED-ACTION-SCHEMA-VALIDATOR",
         "invalid typed-action block (" .. schema_err
         .. "); retrying with schema correction (user-invisible)")
@@ -29836,40 +29960,14 @@ function Net.try_finish_curl()
         .. (retry_contract ~= "" and ("\n\n" .. retry_contract) or "")
         .. "\n\n"
         .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history + 1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("typed_action_schema_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + typed_action_schema_retry")
-            or "typed_action_schema_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Net._ensure_request_start_time()
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.for_typed_action_schema",
-          "for typed-action schema"))
-          or "Auto-retry for typed-action schema did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "typed_action_schema",
+        history_content = history_content,
+        ctx_label = "typed_action_schema_retry",
+        retry_failed_key = "retry.reason.for_typed_action_schema",
+        retry_failed_label = "for typed-action schema",
+        failure_message = "Auto-retry for typed-action schema did not go through. Please resend the last message.",
+      })
       return
     end
     if Net._try_escalate_typed_actions(
@@ -29924,7 +30022,6 @@ function Net.try_finish_curl()
             or 1) then
         S.typed_action_semantic_validator_retries =
           (S.typed_action_semantic_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "typed_action_semantic")
         Log.line("TYPED-ACTION-SEMANTIC-VALIDATOR",
           "typed-action plan failed semantic checks (" .. semantic_detail
           .. "); retrying with concrete correction (user-invisible)")
@@ -29972,40 +30069,14 @@ function Net.try_finish_curl()
           .. (retry_contract ~= "" and (retry_contract .. "\n\n") or "")
           .. prior_section
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("typed_action_semantic_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + typed_action_semantic_retry")
-              or "typed_action_semantic_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Net._ensure_request_start_time()
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_typed_action_semantics",
-            "for typed-action semantics"))
-            or "Auto-retry for typed-action semantics did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "typed_action_semantic",
+          history_content = history_content,
+          ctx_label = "typed_action_semantic_retry",
+          retry_failed_key = "retry.reason.for_typed_action_semantics",
+          retry_failed_label = "for typed-action semantics",
+          failure_message = "Auto-retry for typed-action semantics did not go through. Please resend the last message.",
+        })
         return
       end
       if Net._try_escalate_typed_actions(
@@ -30159,15 +30230,21 @@ function Net.try_finish_curl()
       -- round-trip once; saves it on every subsequent turn.
       S.api_ref_message = ref_content
 
-      -- Build the replacement user history content: docs + a short,
-      -- model-only nudge + the original user prompt. The nudge is
-      -- phrased so the model treats this as its FIRST attempt from the
-      -- user's perspective -- no meta-commentary about a retry, no
-      -- apology, no mention that docs was previously missing. The user
-      -- never saw the bad reply and shouldn't be confused by a reply
-      -- that explains the invisible recovery.
-      local history_content = ref_content .. "\n\n"
-        .. "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION ANY OF THIS IN "
+      -- Build the replacement user history content: a short, model-only
+      -- nudge + the original user prompt. The docs themselves are NOT
+      -- embedded here: S.api_ref_message was just pinned above, so every
+      -- build (including this retry) already carries the full reference
+      -- in the pinned-refs slot. Inlining a second copy doubled ~22 KB on
+      -- the retry AND persisted it in S.history, re-billing it on every
+      -- later turn -- contradicting the "API ref is never stored in
+      -- history" invariant. The nudge is phrased so the model treats this
+      -- as its FIRST attempt from the user's perspective -- no
+      -- meta-commentary about a retry, no apology, no mention that docs
+      -- was previously missing. The user never saw the bad reply and
+      -- shouldn't be confused by a reply that explains the invisible
+      -- recovery.
+      local history_content =
+        "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION ANY OF THIS IN "
         .. "YOUR VISIBLE REPLY: Your previous reply wrote reaper.* calls "
         .. "without first requesting <context_needed>docs</context_needed>. "
         .. "The API reference is now pinned above. Regenerate the code "
@@ -30214,34 +30291,21 @@ function Net.try_finish_curl()
         dmsg.docs_retry = true
       end
 
-      -- Match the bucket-recovery flow: refresh snapshot (cheap vs the
-      -- curl round trip) and fire the follow-up. No UI error, no
-      -- display_message append -- the next response produces the real
+      -- Match the bucket-recovery flow: fire a hidden follow-up. No UI error,
+      -- no display_message append -- the next response produces the real
       -- assistant reply.
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        -- See JSFX-intent comment on the analogous retry sites above:
-        -- carry pending_jsfx_intent across snapshot rebuilds so the trim
-        -- survives every retry path, not just the JSFX-validator's.
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.with_api_reference", "with API reference"))
-          or "Auto-retry with API reference did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        history_content = history_content,
+        ctx_label = "docs",
+        retry_failed_key = "retry.reason.with_api_reference",
+        retry_failed_label = "with API reference",
+        failure_message = "Auto-retry with API reference did not go through. Please resend the last message.",
+      })
       return
     end
     -- Docs fetch failed: keep the old block-and-surface behaviour so the
     -- user knows something is wrong and can fix it manually.
     docs_gate_hit = true
-    Probe.add_validator_retry(S.probe_turn, "docs")
     Log.line("DOCS-GATE",
       "reaper.* calls detected but CTX.docs() failed ("
       .. tostring(ref_err) .. "); auto-run blocked, message flagged")
@@ -30263,7 +30327,6 @@ function Net.try_finish_curl()
       if (S.unavailable_global_validator_retries or 0) < 1 then
         S.unavailable_global_validator_retries =
           (S.unavailable_global_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "unavailable_global")
         local lines = {}
         for _, e in ipairs(global_bad) do
           lines[#lines + 1] = "  - line " .. tostring(e.line)
@@ -30283,39 +30346,14 @@ function Net.try_finish_curl()
           .. "`repaer`, `reaperl`, or `reel`. Respond as if this is your FIRST "
           .. "reply -- do NOT apologize, do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("api_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + api_retry") or "api_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Net._ensure_request_start_time()
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_mistyped_reaper_global",
-            "for mistyped reaper global"))
-            or "Auto-retry for mistyped reaper global did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "unavailable_global",
+          history_content = history_content,
+          ctx_label = "api_retry",
+          retry_failed_key = "retry.reason.for_mistyped_reaper_global",
+          retry_failed_label = "for mistyped reaper global",
+          failure_message = "Auto-retry for mistyped reaper global did not go through. Please resend the last message.",
+        })
         return
       end
       unavailable_global_gate_hit = true
@@ -30380,7 +30418,6 @@ function Net.try_finish_curl()
     if unknown or bad_lua_calls then
       if (S.api_validator_retries or 0) < 1 then
         S.api_validator_retries = (S.api_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "api")
         -- Build per-bad-name suggestion lines for the retry hint.
         local sug_lines = {}
         for _, bad in ipairs(unknown or {}) do
@@ -30417,47 +30454,14 @@ function Net.try_finish_curl()
           .. "that prior calls were wrong, do NOT mention a retry. Just "
           .. "deliver the correct code with a normal brief description.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        -- Pop bad assistant + user turn (mirrors docs-gate scrub at line
-        -- ~22492). Without this, the retry body carries the broken code as
-        -- a prior assistant turn, which both poisons prefix caching and
-        -- contradicts the "respond as if this is your first reply" nudge.
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        -- Reflect in the pending bubble's chip so the user can see (if
-        -- they expand details) that an API retry was triggered.
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("api_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + api_retry") or "api_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          -- See JSFX-intent comment on the analogous retry sites above:
-          -- carry pending_jsfx_intent across snapshot rebuilds so the trim
-          -- survives every retry path, not just the JSFX-validator's.
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_invalid_reaper_calls",
-            "for invalid reaper.* calls"))
-            or "Auto-retry for invalid reaper.* calls did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "api",
+          history_content = history_content,
+          ctx_label = "api_retry",
+          retry_failed_key = "retry.reason.for_invalid_reaper_calls",
+          retry_failed_label = "for invalid reaper.* calls",
+          failure_message = "Auto-retry for invalid reaper.* calls did not go through. Please resend the last message.",
+        })
         return
       end
       -- Retry already used and the model STILL produced bad calls. Block
@@ -30500,7 +30504,6 @@ function Net.try_finish_curl()
       if (S.toolbar_validator_retries or 0) < 1 then
         S.toolbar_validator_retries =
           (S.toolbar_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "toolbar_action")
         local lines = {}
         for _, e in ipairs(toolbar_bad) do
           lines[#lines + 1] = "  - [" .. tostring(e.code) .. "] "
@@ -30526,39 +30529,14 @@ function Net.try_finish_curl()
           .. "apologize, do NOT mention a retry.)\n\nPrevious Lua to fix:\n"
           .. "```lua\n" .. lua_code .. "\n```\n\nUSER REQUEST:\n"
           .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("toolbar_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + toolbar_retry") or "toolbar_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Net._ensure_request_start_time()
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.after_fragile_toolbar_action_pattern",
-            "after fragile toolbar action pattern"))
-            or "Auto-retry after fragile toolbar action pattern did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "toolbar_action",
+          history_content = history_content,
+          ctx_label = "toolbar_retry",
+          retry_failed_key = "retry.reason.after_fragile_toolbar_action_pattern",
+          retry_failed_label = "after fragile toolbar action pattern",
+          failure_message = "Auto-retry after fragile toolbar action pattern did not go through. Please resend the last message.",
+        })
         return
       end
       toolbar_gate_hit = true
@@ -30589,8 +30567,12 @@ function Net.try_finish_curl()
   -- beats. Lower-tier models can otherwise "succeed" with zero notes or notes
   -- crammed near time zero. Retry once when the user's task is clearly to
   -- create MIDI content and either pattern appears.
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not S.midi_item_retry_used then
+  -- NOTE: do NOT add `and not S.midi_item_retry_used` here. The retry sets
+  -- that flag, so gating the whole block on it made the second-strike
+  -- branch below unreachable on the retried response -- persisting MIDI
+  -- misuse auto-ran silently. The `midi_item_validator_retries < 1` check
+  -- inside is what caps the retry count.
+  if lua_code and not docs_gate_hit and not validator_gate_hit then
     local prompt_l = tostring(S.pending_orig_prompt or ""):lower()
     local wants_new_midi_item =
       Code.prompt_requests_new_midi_content(S.pending_orig_prompt)
@@ -30660,7 +30642,7 @@ function Net.try_finish_curl()
         S.midi_item_retry_used = true
         S.midi_item_validator_retries =
           (S.midi_item_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn,
+        local midi_retry_kind =
           midi_issue == "plain_item" and "midi_item"
           or (midi_issue == "literal_ppq" and "midi_insertnote_ppq"
             or (midi_issue == "project_time_var" and "midi_insertnote_project_time"
@@ -30670,7 +30652,7 @@ function Net.try_finish_curl()
                   or (midi_issue == "seconds_as_qn" and "midi_seconds_as_qn"
                   or (midi_issue == "eighth_spacing" and "midi_eighth_spacing"
                     or (midi_issue == "bad_track_arg" and "midi_item_track_arg"
-                      or "midi_takeismidi_arg")))))))))
+                      or "midi_takeismidi_arg"))))))))
         local log_msg
         if midi_issue == "plain_item" then
           log_msg = "plain media item used as MIDI item; retrying with hint"
@@ -30792,39 +30774,14 @@ function Net.try_finish_curl()
           .. "Previous Lua to fix:\n```lua\n"
           .. lua_code
           .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("midi_item_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + midi_item_retry") or "midi_item_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Net._ensure_request_start_time()
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.after_midi_validator_issue",
-            "after MIDI validator issue"))
-            or "Auto-retry after MIDI validator issue did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = midi_retry_kind,
+          history_content = history_content,
+          ctx_label = "midi_item_retry",
+          retry_failed_key = "retry.reason.after_midi_validator_issue",
+          retry_failed_label = "after MIDI validator issue",
+          failure_message = "Auto-retry after MIDI validator issue did not go through. Please resend the last message.",
+        })
         return
       end
       validator_gate_hit = true
@@ -30947,7 +30904,6 @@ function Net.try_finish_curl()
         S.midi_input_retry_used = true
         S.midi_input_validator_retries =
           (S.midi_input_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "midi_input_exclusion")
         local kinds = {}
         for _, issue in ipairs(midi_input_bad) do
           kinds[#kinds + 1] = tostring(issue.kind or "unknown")
@@ -30981,40 +30937,14 @@ function Net.try_finish_curl()
           .. "retry.)\n\nPrevious Lua to fix:\n```lua\n"
           .. lua_code
           .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("midi_input_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + midi_input_retry")
-              or "midi_input_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Net._ensure_request_start_time()
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.after_midi_input_routing_issue",
-            "after MIDI input routing issue"))
-            or "Auto-retry after MIDI input routing issue did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "midi_input_exclusion",
+          history_content = history_content,
+          ctx_label = "midi_input_retry",
+          retry_failed_key = "retry.reason.after_midi_input_routing_issue",
+          retry_failed_label = "after MIDI input routing issue",
+          failure_message = "Auto-retry after MIDI input routing issue did not go through. Please resend the last message.",
+        })
         return
       end
       midi_input_gate_hit = true
@@ -31076,7 +31006,6 @@ function Net.try_finish_curl()
     if action_bad and #action_bad > 0 then
       if (S.action_validator_retries or 0) < 1 then
         S.action_validator_retries = (S.action_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "action")
         local lines, summary = {}, {}
         for _, e in ipairs(action_bad) do
           lines[#lines + 1] = "  - line " .. tostring(e.line) .. ": reaper."
@@ -31109,38 +31038,14 @@ function Net.try_finish_curl()
           .. "with a guessed ID. Respond as if this is your FIRST reply -- "
           .. "do NOT apologize, do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. action_user_text
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("action_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + action_retry") or "action_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_unverified_main_oncommand_ids",
-            "for unverified Main_OnCommand ID(s)"))
-            or "Auto-retry for unverified Main_OnCommand ID(s) did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "action",
+          history_content = history_content,
+          ctx_label = "action_retry",
+          retry_failed_key = "retry.reason.for_unverified_main_oncommand_ids",
+          retry_failed_label = "for unverified Main_OnCommand ID(s)",
+          failure_message = "Auto-retry for unverified Main_OnCommand ID(s) did not go through. Please resend the last message.",
+        })
         return
       end
       action_gate_hit = true
@@ -31183,7 +31088,6 @@ function Net.try_finish_curl()
       if (S.tempo_marker_validator_retries or 0) < 1 then
         S.tempo_marker_validator_retries =
           (S.tempo_marker_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "tempo_marker")
         local lines = {}
         for _, e in ipairs(tempo_marker_bad) do
           local source = e.source_line
@@ -31220,39 +31124,14 @@ function Net.try_finish_curl()
           .. "ask the user to confirm. Respond as if this is your FIRST reply "
           .. "-- do NOT apologize, do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. tempo_marker_user_text
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("tempo_marker_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + tempo_marker_retry")
-              or "tempo_marker_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_tempo_marker_bar_alignment",
-            "for tempo-marker bar alignment"))
-            or "Auto-retry for tempo-marker bar alignment did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "tempo_marker",
+          history_content = history_content,
+          ctx_label = "tempo_marker_retry",
+          retry_failed_key = "retry.reason.for_tempo_marker_bar_alignment",
+          retry_failed_label = "for tempo-marker bar alignment",
+          failure_message = "Auto-retry for tempo-marker bar alignment did not go through. Please resend the last message.",
+        })
         return
       end
       tempo_marker_gate_hit = true
@@ -31281,7 +31160,6 @@ function Net.try_finish_curl()
         S.explicit_seconds_marker_retry_used = true
         S.explicit_seconds_marker_validator_retries =
           (S.explicit_seconds_marker_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "explicit_seconds_marker")
         local details = {}
         for _, e in ipairs(explicit_marker_bad) do
           details[#details + 1] = tostring(e.kind) .. " " .. tostring(e.name)
@@ -31308,39 +31186,14 @@ function Net.try_finish_curl()
           .. "retry.)\n\nPrevious Lua to fix:\n```lua\n"
           .. lua_code
           .. "\n```\n\nUSER REQUEST:\n" .. explicit_marker_user_text
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("explicit_seconds_marker_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + explicit_seconds_marker_retry")
-              or "explicit_seconds_marker_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_explicit_seconds_marker",
-            "for explicit marker/region seconds"))
-            or "Auto-retry for explicit marker/region seconds did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "explicit_seconds_marker",
+          history_content = history_content,
+          ctx_label = "explicit_seconds_marker_retry",
+          retry_failed_key = "retry.reason.for_explicit_seconds_marker",
+          retry_failed_label = "for explicit marker/region seconds",
+          failure_message = "Auto-retry for explicit marker/region seconds did not go through. Please resend the last message.",
+        })
         return
       end
       validator_gate_hit = true
@@ -31362,7 +31215,6 @@ function Net.try_finish_curl()
       if (S.project_tempo_validator_retries or 0) < 1 then
         S.project_tempo_validator_retries =
           (S.project_tempo_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "project_tempo")
         Log.line("PROJECT-TEMPO-VALIDATOR",
           "prompt requested project tempo but script did not set BPM; "
           .. "retrying with hint (user-invisible)")
@@ -31380,39 +31232,14 @@ function Net.try_finish_curl()
           .. "mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
           .. lua_code
           .. "\n```\n\nUSER REQUEST:\n" .. project_tempo_user_text
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("project_tempo_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + project_tempo_retry")
-              or "project_tempo_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_project_tempo",
-            "for missing project tempo set"))
-            or "Auto-retry for missing project tempo set did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "project_tempo",
+          history_content = history_content,
+          ctx_label = "project_tempo_retry",
+          retry_failed_key = "retry.reason.for_project_tempo",
+          retry_failed_label = "for missing project tempo set",
+          failure_message = "Auto-retry for missing project tempo set did not go through. Please resend the last message.",
+        })
         return
       end
       project_tempo_gate_hit = true
@@ -31440,7 +31267,6 @@ function Net.try_finish_curl()
       if (S.loop_time_map_validator_retries or 0) < 1 then
         S.loop_time_map_validator_retries =
           (S.loop_time_map_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "loop_time_map")
         local lines = {}
         for _, e in ipairs(loop_time_map_bad) do
           lines[#lines + 1] = "  - line " .. tostring(e.line)
@@ -31476,39 +31302,14 @@ function Net.try_finish_curl()
           .. "Previous Lua to fix:\n```lua\n"
           .. lua_code
           .. "\n```\n\nUSER REQUEST:\n" .. loop_time_map_user_text
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("loop_time_map_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + loop_time_map_retry")
-              or "loop_time_map_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_loop_time_map",
-            "for loop/time-selection bar-beat time map"))
-            or "Auto-retry for loop/time-selection bar-beat time map did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "loop_time_map",
+          history_content = history_content,
+          ctx_label = "loop_time_map_retry",
+          retry_failed_key = "retry.reason.for_loop_time_map",
+          retry_failed_label = "for loop/time-selection bar-beat time map",
+          failure_message = "Auto-retry for loop/time-selection bar-beat time map did not go through. Please resend the last message.",
+        })
         return
       end
       loop_time_map_gate_hit = true
@@ -31545,7 +31346,6 @@ function Net.try_finish_curl()
       if (S.ruler_timebase_validator_retries or 0) < 1 then
         S.ruler_timebase_validator_retries =
           (S.ruler_timebase_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "ruler_timebase")
         Log.line("RULER-TIMEBASE-VALIDATOR",
           "timeline ruler display or invalid ruler-lane timebase emitted ("
           .. #ruler_timebase_bad .. " finding(s)); retrying with hint "
@@ -31569,39 +31369,14 @@ function Net.try_finish_curl()
           .. "Previous Lua to fix:\n```lua\n"
           .. lua_code
           .. "\n```\n\nUSER REQUEST:\n" .. ruler_timebase_user_text
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("ruler_timebase_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + ruler_timebase_retry")
-              or "ruler_timebase_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_ruler_timebase_display",
-            "for ruler display timebase repair"))
-            or "Auto-retry for ruler display timebase repair did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "ruler_timebase",
+          history_content = history_content,
+          ctx_label = "ruler_timebase_retry",
+          retry_failed_key = "retry.reason.for_ruler_timebase_display",
+          retry_failed_label = "for ruler display timebase repair",
+          failure_message = "Auto-retry for ruler display timebase repair did not go through. Please resend the last message.",
+        })
         return
       end
       ruler_timebase_gate_hit = true
@@ -31635,7 +31410,6 @@ function Net.try_finish_curl()
       if (S.transient_validator_retries or 0) < 1 then
         S.transient_validator_retries =
           (S.transient_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "transient")
         local lines = {}
         for _, e in ipairs(transient_bad) do
           lines[#lines + 1] = "  - line " .. tostring(e.line)
@@ -31663,38 +31437,14 @@ function Net.try_finish_curl()
           .. "falling back to a custom detector. Respond as if this is your "
           .. "FIRST reply -- do NOT apologize, do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. transient_user_text
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("transient_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + transient_retry") or "transient_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_poor_transient_stretch_marker_detector",
-            "for poor transient stretch-marker detector"))
-            or "Auto-retry for poor transient stretch-marker detector did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "transient",
+          history_content = history_content,
+          ctx_label = "transient_retry",
+          retry_failed_key = "retry.reason.for_poor_transient_stretch_marker_detector",
+          retry_failed_label = "for poor transient stretch-marker detector",
+          failure_message = "Auto-retry for poor transient stretch-marker detector did not go through. Please resend the last message.",
+        })
         return
       end
       transient_gate_hit = true
@@ -31728,7 +31478,6 @@ function Net.try_finish_curl()
       if (S.audio_sync_validator_retries or 0) < 1 then
         S.audio_sync_validator_retries =
           (S.audio_sync_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "audio_sync")
         local lines = {}
         for _, e in ipairs(audio_sync_bad) do
           lines[#lines + 1] = "  - line " .. tostring(e.line)
@@ -31757,39 +31506,14 @@ function Net.try_finish_curl()
           .. "matcher or emit a no-op script. Respond as if this is your FIRST "
           .. "reply -- do NOT apologize, do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. audio_sync_user_text
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("audio_sync_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + audio_sync_retry")
-              or "audio_sync_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_audio_sync_item_start_alignment",
-            "for item-start/take-offset alignment used as audio sync"))
-            or "Auto-retry for item-start/take-offset alignment used as audio sync did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "audio_sync",
+          history_content = history_content,
+          ctx_label = "audio_sync_retry",
+          retry_failed_key = "retry.reason.for_audio_sync_item_start_alignment",
+          retry_failed_label = "for item-start/take-offset alignment used as audio sync",
+          failure_message = "Auto-retry for item-start/take-offset alignment used as audio sync did not go through. Please resend the last message.",
+        })
         return
       end
       audio_sync_gate_hit = true
@@ -31820,7 +31544,6 @@ function Net.try_finish_curl()
       if (S.audio_accessor_nil_validator_retries or 0) < 1 then
         S.audio_accessor_nil_validator_retries =
           (S.audio_accessor_nil_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "audio_accessor_nil")
         local lines = {}
         for _, e in ipairs(audio_accessor_nil_bad) do
           lines[#lines + 1] = "  - line " .. tostring(e.line)
@@ -31853,39 +31576,14 @@ function Net.try_finish_curl()
           .. lua_code
           .. "\n```\n\n"
           .. "USER REQUEST:\n" .. audio_accessor_user_text
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("audio_accessor_nil_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + audio_accessor_nil_retry")
-              or "audio_accessor_nil_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_nil_unsafe_audio_accessor_samples",
-            "for nil-unsafe GetAudioAccessorSamples handling"))
-            or "Auto-retry for nil-unsafe GetAudioAccessorSamples handling did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "audio_accessor_nil",
+          history_content = history_content,
+          ctx_label = "audio_accessor_nil_retry",
+          retry_failed_key = "retry.reason.for_nil_unsafe_audio_accessor_samples",
+          retry_failed_label = "for nil-unsafe GetAudioAccessorSamples handling",
+          failure_message = "Auto-retry for nil-unsafe GetAudioAccessorSamples handling did not go through. Please resend the last message.",
+        })
         return
       end
       audio_accessor_nil_gate_hit = true
@@ -31918,7 +31616,6 @@ function Net.try_finish_curl()
       if (S.drum_quantize_validator_retries or 0) < 1 then
         S.drum_quantize_validator_retries =
           (S.drum_quantize_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "drum_quantize")
         local lines = {}
         for _, e in ipairs(drum_quantize_bad) do
           lines[#lines + 1] = "  - line " .. tostring(e.line)
@@ -31951,39 +31648,14 @@ function Net.try_finish_curl()
           .. "emitting a no-op script. Respond as if this is your FIRST reply "
           .. "-- do NOT apologize, do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. drum_quantize_user_text
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("drum_quantize_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + drum_quantize_retry")
-              or "drum_quantize_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_whole_item_drum_quantize",
-            "for whole-item drum quantize"))
-            or "Auto-retry for whole-item drum quantize did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "drum_quantize",
+          history_content = history_content,
+          ctx_label = "drum_quantize_retry",
+          retry_failed_key = "retry.reason.for_whole_item_drum_quantize",
+          retry_failed_label = "for whole-item drum quantize",
+          failure_message = "Auto-retry for whole-item drum quantize did not go through. Please resend the last message.",
+        })
         return
       end
       drum_quantize_gate_hit = true
@@ -32015,7 +31687,6 @@ function Net.try_finish_curl()
       if (S.drum_marker_sync_validator_retries or 0) < 1 then
         S.drum_marker_sync_validator_retries =
           (S.drum_marker_sync_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "drum_marker_sync")
         local lines = {}
         for _, e in ipairs(drum_marker_sync_bad) do
           lines[#lines + 1] = "  - line " .. tostring(e.line)
@@ -32047,39 +31718,14 @@ function Net.try_finish_curl()
           .. "Respond as if this is your FIRST reply -- do NOT apologize, do "
           .. "NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. drum_marker_sync_user_text
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("drum_marker_sync_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + drum_marker_sync_retry")
-              or "drum_marker_sync_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_unsynchronized_drum_stretch_markers",
-            "for unsynchronized drum stretch markers"))
-            or "Auto-retry for unsynchronized drum stretch markers did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "drum_marker_sync",
+          history_content = history_content,
+          ctx_label = "drum_marker_sync_retry",
+          retry_failed_key = "retry.reason.for_unsynchronized_drum_stretch_markers",
+          retry_failed_label = "for unsynchronized drum stretch markers",
+          failure_message = "Auto-retry for unsynchronized drum stretch markers did not go through. Please resend the last message.",
+        })
         return
       end
       drum_marker_sync_gate_hit = true
@@ -32117,7 +31763,6 @@ function Net.try_finish_curl()
     if arity_bad and #arity_bad > 0 then
       if (S.arity_validator_retries or 0) < 1 then
         S.arity_validator_retries = (S.arity_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "arity")
         local lines = {}
         for _, e in ipairs(arity_bad) do
           lines[#lines+1] = "  - reaper." .. e.name
@@ -32162,38 +31807,14 @@ function Net.try_finish_curl()
           .. lua_code
           .. "\n```\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("arity_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + arity_retry") or "arity_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_reaper_arity_mismatch",
-            "for reaper.* arity mismatch"))
-            or "Auto-retry for reaper.* arity mismatch did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "arity",
+          history_content = history_content,
+          ctx_label = "arity_retry",
+          retry_failed_key = "retry.reason.for_reaper_arity_mismatch",
+          retry_failed_label = "for reaper.* arity mismatch",
+          failure_message = "Auto-retry for reaper.* arity mismatch did not go through. Please resend the last message.",
+        })
         return
       end
       arity_gate_hit = true
@@ -32232,7 +31853,6 @@ function Net.try_finish_curl()
         S.media_item_label_validator_retries =
           (S.media_item_label_validator_retries or 0) + 1
         S.media_item_label_retry_used = true
-        Probe.add_validator_retry(S.probe_turn, "media_item_label")
         Log.line("MEDIA-ITEM-LABEL-VALIDATOR",
           "MediaItem P_NAME used for visible item label; retrying with hint")
         local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
@@ -32253,39 +31873,14 @@ function Net.try_finish_curl()
           .. "Previous Lua to fix:\n```lua\n"
           .. lua_code
           .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("media_item_label_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + media_item_label_retry")
-              or "media_item_label_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_media_item_label_misuse",
-            "for MediaItem item-label misuse"))
-            or "Auto-retry for MediaItem item-label misuse did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "media_item_label",
+          history_content = history_content,
+          ctx_label = "media_item_label_retry",
+          retry_failed_key = "retry.reason.for_media_item_label_misuse",
+          retry_failed_label = "for MediaItem item-label misuse",
+          failure_message = "Auto-retry for MediaItem item-label misuse did not go through. Please resend the last message.",
+        })
         return
       end
       media_item_label_gate_hit = true
@@ -32317,7 +31912,6 @@ function Net.try_finish_curl()
       if (S.sendidx_validator_retries or 0) < 1 then
         S.sendidx_validator_retries =
           (S.sendidx_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "sendidx")
         local lines = {}
         for _, e in ipairs(sendidx_bad) do
           if e.kind == "multi_assign" then
@@ -32366,38 +31960,14 @@ function Net.try_finish_curl()
           .. "returned send index variable. Respond as if this is your FIRST "
           .. "reply -- do NOT apologize, do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("sendidx_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + sendidx_retry") or "sendidx_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_ignored_createtracksend_result",
-            "for ignored CreateTrackSend result"))
-            or "Auto-retry for ignored CreateTrackSend result did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "sendidx",
+          history_content = history_content,
+          ctx_label = "sendidx_retry",
+          retry_failed_key = "retry.reason.for_ignored_createtracksend_result",
+          retry_failed_label = "for ignored CreateTrackSend result",
+          failure_message = "Auto-retry for ignored CreateTrackSend result did not go through. Please resend the last message.",
+        })
         return
       end
       sendidx_gate_hit = true
@@ -32447,7 +32017,6 @@ function Net.try_finish_curl()
       if (S.timecode_workflow_validator_retries or 0) < 1 then
         S.timecode_workflow_validator_retries =
           (S.timecode_workflow_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "timecode_workflow")
         local lines = {}
         for _, e in ipairs(workflow_bad) do
           if e.kind == "hardware_category" then
@@ -32539,39 +32108,14 @@ function Net.try_finish_curl()
           .. "Respond as if this is your FIRST reply -- do NOT apologize, do "
           .. "NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("timecode_workflow_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + timecode_workflow_retry")
-              or "timecode_workflow_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_timecode_generator_workflow_repair",
-            "for native timecode generator workflow repair"))
-            or "Auto-retry for native timecode generator workflow repair did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "timecode_workflow",
+          history_content = history_content,
+          ctx_label = "timecode_workflow_retry",
+          retry_failed_key = "retry.reason.for_timecode_generator_workflow_repair",
+          retry_failed_label = "for native timecode generator workflow repair",
+          failure_message = "Auto-retry for native timecode generator workflow repair did not go through. Please resend the last message.",
+        })
         return
       end
       timecode_workflow_gate_hit = true
@@ -32636,7 +32180,6 @@ function Net.try_finish_curl()
       if (S.stockfx_validator_retries or 0) < 1 then
         S.stockfx_validator_retries =
           (S.stockfx_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "stockfx")
         local lines = {}
         for _, e in ipairs(stockfx_bad) do
           lines[#lines + 1] = "  - line " .. tostring(e.line)
@@ -32666,38 +32209,14 @@ function Net.try_finish_curl()
           .. "Respond as if this is your FIRST reply -- do NOT apologize, do "
           .. "NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("stockfx_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + stockfx_retry") or "stockfx_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_stock_plugin_substitution",
-            "for stock plugin substitution"))
-            or "Auto-retry for stock plugin substitution did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "stockfx",
+          history_content = history_content,
+          ctx_label = "stockfx_retry",
+          retry_failed_key = "retry.reason.for_stock_plugin_substitution",
+          retry_failed_label = "for stock plugin substitution",
+          failure_message = "Auto-retry for stock plugin substitution did not go through. Please resend the last message.",
+        })
         return
       end
       stockfx_gate_hit = true
@@ -32736,7 +32255,6 @@ function Net.try_finish_curl()
       if (S.timecodefx_validator_retries or 0) < 1 then
         S.timecodefx_validator_retries =
           (S.timecodefx_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "timecodefx")
         local lines = {}
         for _, e in ipairs(timecodefx_bad) do
           lines[#lines + 1] = "  - line " .. tostring(e.line)
@@ -32776,38 +32294,14 @@ function Net.try_finish_curl()
           .. "this is your FIRST reply -- do NOT apologize, do NOT mention "
           .. "a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("timecodefx_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + timecodefx_retry") or "timecodefx_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_timecode_generator_fx_repair",
-            "for native timecode generator repair"))
-            or "Auto-retry for native timecode generator repair did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "timecodefx",
+          history_content = history_content,
+          ctx_label = "timecodefx_retry",
+          retry_failed_key = "retry.reason.for_timecode_generator_fx_repair",
+          retry_failed_label = "for native timecode generator repair",
+          failure_message = "Auto-retry for native timecode generator repair did not go through. Please resend the last message.",
+        })
         return
       end
       timecodefx_gate_hit = true
@@ -32845,7 +32339,6 @@ function Net.try_finish_curl()
       if (S.fxident_validator_retries or 0) < 1 then
         S.fxident_validator_retries =
           (S.fxident_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "fxident")
         local lines = {}
         for _, e in ipairs(fxident_bad) do
           lines[#lines + 1] = "  - line " .. tostring(e.line)
@@ -32868,38 +32361,14 @@ function Net.try_finish_curl()
           .. "Regenerate the FULL script. Respond as if this is your FIRST "
           .. "reply -- do NOT apologize, do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("fxident_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + fxident_retry") or "fxident_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_exact_fx_identifier_repair",
-            "for exact FX identifier repair"))
-            or "Auto-retry for exact FX identifier repair did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "fxident",
+          history_content = history_content,
+          ctx_label = "fxident_retry",
+          retry_failed_key = "retry.reason.for_exact_fx_identifier_repair",
+          retry_failed_label = "for exact FX identifier repair",
+          failure_message = "Auto-retry for exact FX identifier repair did not go through. Please resend the last message.",
+        })
         return
       end
       fxident_gate_hit = true
@@ -32940,7 +32409,6 @@ function Net.try_finish_curl()
       if (S.fxrecfx_validator_retries or 0) < 1 then
         S.fxrecfx_validator_retries =
           (S.fxrecfx_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "trackfx_recfx")
         local lines = {}
         for _, e in ipairs(recfx_bad) do
           lines[#lines+1] = "  - " .. tostring(e.kind or "recfx_true")
@@ -32968,38 +32436,14 @@ function Net.try_finish_curl()
           .. "explicitly asks for input FX or record FX. Respond as if this is "
           .. "your FIRST reply -- do NOT apologize, do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("fxrecfx_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + fxrecfx_retry") or "fxrecfx_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_trackfx_recfx_argument",
-            "for TrackFX_AddByName recFX argument"))
-            or "Auto-retry for TrackFX_AddByName recFX argument did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "trackfx_recfx",
+          history_content = history_content,
+          ctx_label = "fxrecfx_retry",
+          retry_failed_key = "retry.reason.for_trackfx_recfx_argument",
+          retry_failed_label = "for TrackFX_AddByName recFX argument",
+          failure_message = "Auto-retry for TrackFX_AddByName recFX argument did not go through. Please resend the last message.",
+        })
         return
       end
       fxrecfx_gate_hit = true
@@ -33052,7 +32496,6 @@ function Net.try_finish_curl()
     if unchecked and #unchecked > 0 then
       if (S.fxcheck_validator_retries or 0) < 1 then
         S.fxcheck_validator_retries = (S.fxcheck_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "fxcheck")
         local lines = {}
         for _, e in ipairs(unchecked) do
           if e.multi_assign then
@@ -33110,38 +32553,14 @@ function Net.try_finish_curl()
           .. "end. Respond as if this is your FIRST reply -- do NOT "
           .. "apologize, do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("fxcheck_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + fxcheck_retry") or "fxcheck_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_unchecked_addbyname_result",
-            "for unchecked AddByName result"))
-            or "Auto-retry for unchecked AddByName result did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "fxcheck",
+          history_content = history_content,
+          ctx_label = "fxcheck_retry",
+          retry_failed_key = "retry.reason.for_unchecked_addbyname_result",
+          retry_failed_label = "for unchecked AddByName result",
+          failure_message = "Auto-retry for unchecked AddByName result did not go through. Please resend the last message.",
+        })
         return
       end
       fxcheck_gate_hit = true
@@ -33184,7 +32603,6 @@ function Net.try_finish_curl()
     if get_bad and #get_bad > 0 then
       if (S.fxget_validator_retries or 0) < 1 then
         S.fxget_validator_retries = (S.fxget_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "fxget")
         local lines = {}
         for _, e in ipairs(get_bad) do
           lines[#lines+1] = "  - " .. e.name
@@ -33226,38 +32644,14 @@ function Net.try_finish_curl()
           .. "as if this is your FIRST reply -- do NOT apologize, do NOT "
           .. "mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("fxget_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + fxget_retry") or "fxget_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_dependent_getbyname_result",
-            "for dependent GetByName result"))
-            or "Auto-retry for dependent GetByName result did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "fxget",
+          history_content = history_content,
+          ctx_label = "fxget_retry",
+          retry_failed_key = "retry.reason.for_dependent_getbyname_result",
+          retry_failed_label = "for dependent GetByName result",
+          failure_message = "Auto-retry for dependent GetByName result did not go through. Please resend the last message.",
+        })
         return
       end
       getbyname_gate_hit = true
@@ -33299,7 +32693,6 @@ function Net.try_finish_curl()
       if (S.fxadd_getonly_validator_retries or 0) < 1 then
         S.fxadd_getonly_validator_retries =
           (S.fxadd_getonly_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "fxadd_getonly")
         local lines = {}
         for _, e in ipairs(getonly_bad) do
           lines[#lines+1] = "  - " .. e.id
@@ -33333,39 +32726,14 @@ function Net.try_finish_curl()
           .. "Respond as if this is your FIRST reply -- do NOT apologize, "
           .. "do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("fxadd_getonly_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + fxadd_getonly_retry")
-              or "fxadd_getonly_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_add_requested_getonly_fx",
-            "for add-request GetByName-only FX lookup"))
-            or "Auto-retry for add-request GetByName-only FX lookup did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "fxadd_getonly",
+          history_content = history_content,
+          ctx_label = "fxadd_getonly_retry",
+          retry_failed_key = "retry.reason.for_add_requested_getonly_fx",
+          retry_failed_label = "for add-request GetByName-only FX lookup",
+          failure_message = "Auto-retry for add-request GetByName-only FX lookup did not go through. Please resend the last message.",
+        })
         return
       end
       fxadd_getonly_gate_hit = true
@@ -33400,12 +32768,8 @@ function Net.try_finish_curl()
   -- user's "build me a chain" intent in different ways.
   local upsert_gate_hit = false
   local function _is_chain_build_prompt(t)
-    if not t or t == "" then return false end
-    local lo = t:lower()
-    for _, hint in ipairs(CTX.CHAIN_PHRASE_HINTS or {}) do
-      if lo:find(hint[1]) then return true end
-    end
-    return false
+    return CTX and CTX.prompt_indicates_chain_context
+      and CTX.prompt_indicates_chain_context(t) or false
   end
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
@@ -33418,7 +32782,6 @@ function Net.try_finish_curl()
     if upsert_bad and #upsert_bad > 0 then
       if (S.upsert_validator_retries or 0) < 1 then
         S.upsert_validator_retries = (S.upsert_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "upsert")
         local lines = {}
         for _, e in ipairs(upsert_bad) do
           if e.kind == "get_only" then
@@ -33462,38 +32825,14 @@ function Net.try_finish_curl()
           .. "FULL script NOW. Respond as if this is your FIRST reply -- "
           .. "do NOT apologize, do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("upsert_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + upsert_retry") or "upsert_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_chain_upsert_violation",
-            "for chain-upsert violation"))
-            or "Auto-retry for chain-upsert violation did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "upsert",
+          history_content = history_content,
+          ctx_label = "upsert_retry",
+          retry_failed_key = "retry.reason.for_chain_upsert_violation",
+          retry_failed_label = "for chain-upsert violation",
+          failure_message = "Auto-retry for chain-upsert violation did not go through. Please resend the last message.",
+        })
         return
       end
       upsert_gate_hit = true
@@ -33532,7 +32871,6 @@ function Net.try_finish_curl()
     if violations and #violations > 0 then
       if (S.defer_validator_retries or 0) < 1 then
         S.defer_validator_retries = (S.defer_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "defer")
         Log.line("DEFER-VALIDATOR",
           "param-touching calls outside reaper.defer (" .. #violations
           .. "): " .. tbl_concat(violations, ", ")
@@ -33577,41 +32915,14 @@ function Net.try_finish_curl()
           .. "'let me try again' or mention a retry. Just deliver the "
           .. "correct code with a normal brief description.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("defer_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + defer_retry") or "defer_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          -- See JSFX-intent comment on the analogous retry sites above:
-          -- carry pending_jsfx_intent across snapshot rebuilds so the trim
-          -- survives every retry path, not just the JSFX-validator's.
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_missing_reaper_defer_wrap",
-            "for missing reaper.defer wrap"))
-            or "Auto-retry for missing reaper.defer wrap did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "defer",
+          history_content = history_content,
+          ctx_label = "defer_retry",
+          retry_failed_key = "retry.reason.for_missing_reaper_defer_wrap",
+          retry_failed_label = "for missing reaper.defer wrap",
+          failure_message = "Auto-retry for missing reaper.defer wrap did not go through. Please resend the last message.",
+        })
         return
       end
       -- Retry already used and the model STILL has param calls outside
@@ -33653,7 +32964,6 @@ function Net.try_finish_curl()
       if (S.proq4_slope_validator_retries or 0) < 1 then
         S.proq4_slope_validator_retries =
           (S.proq4_slope_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "proq4_bell_slope")
         Log.line("PROQ4-SLOPE-VALIDATOR",
           "Pro-Q 4 Bell boost/cut missing 12 dB/oct slope ("
           .. #slope_bad .. " band(s)); retrying with hint (user-invisible)")
@@ -33675,48 +32985,25 @@ function Net.try_finish_curl()
           .. "Regenerate the FULL script. For every fresh Pro-Q 4 Bell "
           .. "boost/cut, after setting Used, Frequency, Gain, Q, and Shape "
           .. "Bell, also set Slope with `set_param_display(tr, fx, "
-          .. "slope_idx, 12)`. For Band N, slope_idx = (N - 1) * 23 + 6 "
-          .. "(Band 1 uses index 6, Band 2 uses index 29, etc.). Do NOT "
-          .. "use TrackFX_SetParamNormalized for Pro-Q 4 Slope; it is a "
+          .. "slope_idx, 12)`. Use the Slope index reported above. For "
+          .. "canonical numbered bands, Band N uses slope_idx = "
+          .. "(N - 1) * 23 + 6 (Band 1 uses index 6, Band 2 uses index "
+          .. "29, etc.). Do NOT use TrackFX_SetParamNormalized for Pro-Q "
+          .. "4 Slope; it is a "
           .. "typed display target with version-variable normalized values. "
           .. "The `set_param_display` helper is already pinned in "
           .. "`prompt_bundle:plugin_helpers`; include its local function "
           .. "definition before any call. Respond as if this is your FIRST "
           .. "reply -- do NOT apologize or mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history + 1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("proq4_slope_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + proq4_slope_retry")
-              or "proq4_slope_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_proq4_bell_slope_default",
-            "for Pro-Q 4 Bell slope default"))
-            or "Auto-retry for Pro-Q 4 Bell slope default did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "proq4_bell_slope",
+          history_content = history_content,
+          ctx_label = "proq4_slope_retry",
+          retry_failed_key = "retry.reason.for_proq4_bell_slope_default",
+          retry_failed_label = "for Pro-Q 4 Bell slope default",
+          failure_message = "Auto-retry for Pro-Q 4 Bell slope default did not go through. Please resend the last message.",
+        })
         return
       end
       proq4_slope_gate_hit = true
@@ -33758,7 +33045,6 @@ function Net.try_finish_curl()
     if (S.fx_param_scope_validator_retries or 0) < 1 then
       S.fx_param_scope_validator_retries =
         (S.fx_param_scope_validator_retries or 0) + 1
-      Probe.add_validator_retry(S.probe_turn, "fx_param_scope")
       Log.line("FX-PARAM-SCOPE-VALIDATOR",
         "add-only FX prompt emitted parameter writes; retrying")
       local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
@@ -33773,39 +33059,14 @@ function Net.try_finish_curl()
         .. "apologize or mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
         .. lua_code
         .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
-      if S.pending_display_idx
-         and S.display_messages[S.pending_display_idx] then
-        local dmsg = S.display_messages[S.pending_display_idx]
-        local existing = dmsg.ctx_label or ""
-        if not existing:find("fx_param_scope_retry", 1, true) then
-          dmsg.ctx_label = existing ~= ""
-            and (existing .. " + fx_param_scope_retry")
-            or "fx_param_scope_retry"
-        end
-      end
-      if prefs.include_snapshot and not S.pending_answer_only_followup then
-        S.pending_project  = CTX.resolve_pending_project()
-        S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-          S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-      end
-      S.status = "waiting"
-      Code.safe_write(tmp.out, "")
-      local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-        S.pending_snapshot, S.pending_attachments))
-      if not ok and reason ~= "call_cap_exceeded" then
-        Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-          "retry.reason.after_unrequested_fx_parameter_writes",
-          "after unrequested FX parameter writes"))
-          or "Auto-retry after unrequested FX parameter writes did not go through. Please resend the last message.")
-      end
-      S.scroll_to_bottom = true
+      Net.fire_validator_retry({
+        kind = "fx_param_scope",
+        history_content = history_content,
+        ctx_label = "fx_param_scope_retry",
+        retry_failed_key = "retry.reason.after_unrequested_fx_parameter_writes",
+        retry_failed_label = "after unrequested FX parameter writes",
+        failure_message = "Auto-retry after unrequested FX parameter writes did not go through. Please resend the last message.",
+      })
       return
     end
     fx_param_scope_gate_hit = true
@@ -33844,7 +33105,6 @@ function Net.try_finish_curl()
     if missing and #missing > 0 then
       if (S.helper_validator_retries or 0) < 1 then
         S.helper_validator_retries = (S.helper_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "helper")
         Log.line("HELPER-VALIDATOR",
           "helper/global calls without definitions (" .. #missing .. "): "
           .. tbl_concat(missing, ", ")
@@ -33881,41 +33141,14 @@ function Net.try_finish_curl()
           .. "FIRST reply to the user's request -- do NOT apologize, do NOT "
           .. "say 'let me try again', do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("helper_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + helper_retry") or "helper_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          -- See JSFX-intent comment on the analogous retry sites above:
-          -- carry pending_jsfx_intent across snapshot rebuilds so the trim
-          -- survives every retry path, not just the JSFX-validator's.
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_missing_helper_definitions",
-            "for missing helper definitions"))
-            or "Auto-retry for missing helper definitions did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "helper",
+          history_content = history_content,
+          ctx_label = "helper_retry",
+          retry_failed_key = "retry.reason.for_missing_helper_definitions",
+          retry_failed_label = "for missing helper definitions",
+          failure_message = "Auto-retry for missing helper definitions did not go through. Please resend the last message.",
+        })
         return
       end
       -- Retry already used and the model STILL emitted helper calls without
@@ -33963,7 +33196,6 @@ function Net.try_finish_curl()
     if int_bad and #int_bad > 0 then
       if (S.helper_int_validator_retries or 0) < 1 then
         S.helper_int_validator_retries = (S.helper_int_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "helper_int")
         local lines = {}
         for _, e in ipairs(int_bad) do
           lines[#lines+1] = "  - " .. e.name
@@ -34000,38 +33232,14 @@ function Net.try_finish_curl()
           .. "above main(). Respond as if this is your FIRST reply -- do "
           .. "NOT apologize, do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("helper_int_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + helper_int_retry") or "helper_int_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_corrupted_helper_body",
-            "for corrupted helper body"))
-            or "Auto-retry for corrupted helper body did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "helper_int",
+          history_content = history_content,
+          ctx_label = "helper_int_retry",
+          retry_failed_key = "retry.reason.for_corrupted_helper_body",
+          retry_failed_label = "for corrupted helper body",
+          failure_message = "Auto-retry for corrupted helper body did not go through. Please resend the last message.",
+        })
         return
       end
       helper_int_gate_hit = true
@@ -34115,7 +33323,6 @@ function Net.try_finish_curl()
         or jsfx_gate_hit
   end
   local function _auto_run_block_reason()
-    if not prefs.auto_run then return "auto_run_disabled" end
     if docs_gate_hit then return "docs_gate" end
     if marker_pair_gate_hit then return "marker_pair_validator" end
     if midi_input_gate_hit then return "midi_input_validator" end
@@ -34152,9 +33359,11 @@ function Net.try_finish_curl()
     if jsfx_gate_hit then return "jsfx_validator" end
     -- Defensive fallback for future gate flags added to _any_gate_hit().
     if _any_gate_hit() then return "validator_gate" end
+    if not prefs.auto_run then return "auto_run_disabled" end
     return nil
   end
-  if jsfx_code and not _any_gate_hit() then
+  if jsfx_code then
+    local prior_gate_hit_before_jsfx = _any_gate_hit()
     local findings = Code.validate_jsfx(jsfx_code, S.pending_orig_prompt or "")
     -- Pass log: prove the validator actively ran on this response, regardless
     -- of provider, so an unexpected silent-pass is distinguishable from a
@@ -34178,21 +33387,23 @@ function Net.try_finish_curl()
       do
         local seen = {}
         for _, f in ipairs(findings) do
-          if f.severity == "fatal" and not seen[f.code] then
-            seen[f.code] = true
-            code_summary[#code_summary+1] = f.code
+          local finding_code = tostring(f.code or "jsfx")
+          if f.severity == "fatal" and not seen[finding_code] then
+            seen[finding_code] = true
+            code_summary[#code_summary+1] = finding_code
           end
         end
       end
-      if (S.jsfx_validator_retries or 0) < 1 then
+      if not prior_gate_hit_before_jsfx
+         and (S.jsfx_validator_retries or 0) < 1 then
         S.jsfx_validator_retries = (S.jsfx_validator_retries or 0) + 1
-        Probe.add_validator_retry(S.probe_turn, "jsfx")
         -- Build per-finding lines for the retry hint. Only fatal findings
         -- count toward the gate; warns are advisory and listed for context.
         local fatal_lines, warn_lines = {}, {}
         for _, f in ipairs(findings) do
-          local entry = "  - [" .. f.code .. "] line " .. tostring(f.line)
-            .. ": " .. f.message
+          local entry = "  - [" .. tostring(f.code or "jsfx")
+            .. "] line " .. tostring(f.line)
+            .. ": " .. tostring(f.message or "")
           if f.severity == "fatal" then
             fatal_lines[#fatal_lines+1] = entry
           else
@@ -34247,60 +33458,39 @@ function Net.try_finish_curl()
           .. "user's request -- do NOT apologize, do NOT say 'let me try again', "
           .. "do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        if #S.history > 0 and S.history[#S.history].role == "assistant" then
-          S.history[#S.history] = nil
-        end
-        if #S.history > 0 and S.history[#S.history].role == "user" then
-          S.history[#S.history] = nil
-        end
-        S.history[#S.history+1] = { role = "user", content = history_content }
-        if S.pending_display_idx
-           and S.display_messages[S.pending_display_idx] then
-          local dmsg = S.display_messages[S.pending_display_idx]
-          local existing = dmsg.ctx_label or ""
-          if not existing:find("jsfx_retry", 1, true) then
-            dmsg.ctx_label = existing ~= ""
-              and (existing .. " + jsfx_retry") or "jsfx_retry"
-          end
-        end
-        if prefs.include_snapshot and not S.pending_answer_only_followup then
-          S.pending_project  = CTX.resolve_pending_project()
-          -- Carry the original turn's JSFX intent into the rebuilt
-          -- snapshot so the trimmed track-listing (selected only) used
-          -- on the first request stays trimmed on the retry. Otherwise
-          -- the retry would inject the full ~80-track listing on top of
-          -- the cached prefix, busting the cache rung the retry was
-          -- designed to ride for free.
-          S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-            S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-        end
-        S.status = "waiting"
-        Code.safe_write(tmp.out, "")
-        local ok, reason = Net.fire_curl(Net.build_body(Net.trimmed_history(),
-          S.pending_snapshot, S.pending_attachments))
-        if not ok and reason ~= "call_cap_exceeded" then
-          Log.add_error((RA and RA.retry_failed and RA.retry_failed(
-            "retry.reason.for_invalid_jsfx", "for invalid JSFX"))
-            or "Auto-retry for invalid JSFX did not go through. Please resend the last message.")
-        end
-        S.scroll_to_bottom = true
+        Net.fire_validator_retry({
+          kind = "jsfx",
+          history_content = history_content,
+          ctx_label = "jsfx_retry",
+          retry_failed_key = "retry.reason.for_invalid_jsfx",
+          retry_failed_label = "for invalid JSFX",
+          failure_message = "Auto-retry for invalid JSFX did not go through. Please resend the last message.",
+        })
         return
       end
-      -- Retry already used and the JSFX still fails validation. Block
-      -- auto-save + auto-run and surface diagnostic.
+      -- Retry already used, or another validator already forced a visible
+      -- correction this turn. In both cases, still block manual JSFX save/add
+      -- from silently accepting unsafe generated effect code.
       jsfx_gate_hit = true
+      local retry_used = (S.jsfx_validator_retries or 0) >= 1
+      local retry_phrase = retry_used and ", even after a retry" or ""
       Log.line("JSFX-VALIDATOR",
-        "JSFX still fails validation after retry: "
-        .. tbl_concat(code_summary, ", ") .. "; auto-run blocked")
+        "JSFX fails validation" .. retry_phrase .. ": "
+        .. tbl_concat(code_summary, ", ")
+        .. "; auto-save and auto-run blocked")
+      local message_key = retry_used
+        and "validator.jsfx_safety_blocked"
+        or "validator.jsfx_safety_blocked_no_retry"
       Log.add_error((RA and RA.t and RA.t(
-        "validator.jsfx_safety_blocked",
+        message_key,
         { codes = tbl_concat(code_summary, ", ") },
         "The model emitted JSFX that fails ReaAssist's safety/"
-          .. "syntax validator, even after a retry: "
+          .. "syntax validator" .. retry_phrase .. ": "
           .. tbl_concat(code_summary, ", ")
           .. ". Auto-save and auto-run are blocked; review the code carefully "
           .. "and fix the listed issues before saving manually."))
-        or ("The model emitted JSFX that fails ReaAssist's safety/syntax validator, even after a retry: "
+        or ("The model emitted JSFX that fails ReaAssist's safety/syntax validator"
+          .. retry_phrase .. ": "
           .. tbl_concat(code_summary, ", ")
           .. ". Auto-save and auto-run are blocked; review the code carefully and fix the listed issues before saving manually."))
     end
@@ -34317,13 +33507,14 @@ function Net.try_finish_curl()
   -- Without this, copying from the chat would produce un-injected JSFX that
   -- skips the safety layer when the user pastes it elsewhere or hand-saves.
   --
-  -- Skipped if any prior validator gate is set (the source was already going
-  -- to be blocked from auto-run; injection wouldn't change that), if there's
-  -- no jsfx_code, or if the injector itself bails on a content check.
+  -- Skipped only if the JSFX validator itself blocked the JSFX, if there's no
+  -- jsfx_code, or if the injector itself bails on a content check. Unrelated
+  -- validator gates still allow the visible JSFX to be ceiling-injected because
+  -- manual Save / Add to Track works from the displayed source.
   -- Cache the inject info so the auto-save block below (which actually
   -- knows the saved file path) can record the slot metadata.
   local ceiling_inject_info = nil
-  if jsfx_code and not _any_gate_hit() then
+  if jsfx_code and not jsfx_gate_hit then
     local injected, info_or_reason = Code.inject_output_ceiling(jsfx_code)
     if injected then
       ceiling_inject_info = info_or_reason
@@ -34376,7 +33567,9 @@ function Net.try_finish_curl()
   local diag_blocked_code = nil
   local diag_blocked_code_type = nil
   S.last_run_result = nil               -- avoid carrying manual-run evidence into this turn
+  S.lua_defer_run = nil                 -- stale deferred callbacks must not rewrite this turn
   local typed_defer = { probe_turn = S.probe_turn }
+  local lua_defer_pending = false
   typed_defer.finish = function()
     if not (typed_defer.pending and typed_defer.done) then
       return
@@ -34747,16 +33940,20 @@ function Net.try_finish_curl()
         -- Skipped when skip_run is true (risky-code gate or backup
         -- requirement); execution measurement is for auto-run only.
         Probe.mark_phase_start(S.probe_turn, "execution")
-        local run_ok = Code.run(run_lua)
-        Probe.mark_phase_end(S.probe_turn, "execution")
+        local run_ok, run_state = Code.run(run_lua)
+        lua_defer_pending = run_state == "pending"
+        if not lua_defer_pending then
+          Probe.mark_phase_end(S.probe_turn, "execution")
+        end
         S.pending_code = nil
         -- AUTO-RAN pill (V5) reflects the actual run outcome -- a
         -- compile/runtime failure should NOT show as auto-ran. Mirror
         -- the same outcome onto the per-turn run record so the UI
         -- pill and the compact-history run_status agree.
-        auto_ran_ok = (run_ok == true)
+        auto_ran_ok = (run_ok == true and not lua_defer_pending)
         if S.history[_asst_hist_idx] then
-          S.history[_asst_hist_idx].run_status = run_ok and "ran_ok" or "errored"
+          S.history[_asst_hist_idx].run_status = lua_defer_pending and "pending"
+            or (run_ok and "ran_ok" or "errored")
           S.history[_asst_hist_idx].code_bytes = #run_lua
           S.history[_asst_hist_idx].code_type  = code_type
         end
@@ -34893,6 +34090,7 @@ function Net.try_finish_curl()
       if _rs == "semantic_incomplete"
          or _rs == "blocked_midi_input_validator" then return "blocked" end
       if _rs == "manual_run" then return "manual_required" end
+      if _rs == "pending" then return "pending" end
       if _rs == "blocked_fragment" or _rs == "blocked_action_context" then
         return "blocked"
       end
@@ -34975,7 +34173,9 @@ function Net.try_finish_curl()
       end
 
       local rr = type(S.last_run_result) == "table" and S.last_run_result or nil
-      if rr and (dmsg.run_status == "ran_ok" or dmsg.run_status == "errored") then
+      if rr and (dmsg.run_status == "ran_ok"
+          or dmsg.run_status == "errored"
+          or dmsg.run_status == "pending") then
         dmsg.run_result = {}
         for k, v in pairs(rr) do dmsg.run_result[k] = v end
         dmsg.run_result.auto_ran = auto_ran_ok == true
@@ -35058,6 +34258,12 @@ function Net.try_finish_curl()
     end
   end
   typed_defer.message_idx = #S.display_messages
+  if lua_defer_pending and type(S.lua_defer_run) == "table" then
+    S.lua_defer_run.message_idx = #S.display_messages
+    S.lua_defer_run.history_idx = _asst_hist_idx
+    S.lua_defer_run.auto_ran = true
+    S.lua_defer_run.probe_turn = S.probe_turn
+  end
   typed_defer.finish()
   if code_type == "lua" and code then
     Code.record_latest_code_candidate(code, "assistant", {
@@ -35084,11 +34290,8 @@ function Net.try_finish_curl()
     if Diag.uploader_enabled and Diag.capture_current_chat then
       Diag.capture_current_chat()
     end
-    local pruned_count = 0
-    while #S.display_messages > CFG.MAX_DISPLAY_MSGS do
-      tbl_remove(S.display_messages, 1)
-      pruned_count = pruned_count + 1
-    end
+    local pruned_count = Net._prune_display_messages(CFG.MAX_DISPLAY_MSGS)
+    Net._rebase_display_message_refs(pruned_count)
     if typed_defer.message_idx and pruned_count > 0 then
       typed_defer.message_idx = typed_defer.message_idx - pruned_count
       if typed_defer.message_idx < 1 then typed_defer.message_idx = nil end
@@ -35140,7 +34343,7 @@ function Net.try_finish_curl()
   -- for non-deferred turns. Deferred typed-action param writes close the same
   -- probe from typed_defer.finish() after the REAPER defer tick reports the
   -- actual result. Probe is currently a no-op compatibility surface.
-  if S.probe_turn and not typed_defer.pending then
+  if S.probe_turn and not typed_defer.pending and not lua_defer_pending then
     Probe.end_turn(S.probe_turn, "ok")
     S.probe_turn = nil
   end
@@ -35379,8 +34582,6 @@ function RA.factory_reset_execute(opts)
   S.refocus_prompt = true
   if I18N and I18N.set_language_code then
     I18N.set_language_code("en")
-  elseif I18N then
-    I18N.active_code = "en"
   end
 
   if S and S.screen_reader_mode then
@@ -35414,6 +34615,18 @@ end
 -- runtime refactor.
 do
   local function noop() end
+  local function note_validator_retry(_, kind)
+    if S then
+      S.validator_retries_this_turn =
+        (S.validator_retries_this_turn or 0) + 1
+    end
+    if prefs and prefs.debug_logging and Log and Log.line then
+      Log.line("VALIDATOR-RETRY",
+        "kind=" .. tostring(kind or "?")
+        .. " aggregate=" .. tostring(S and S.validator_retries_this_turn or 0)
+        .. "/" .. tostring(CFG.MAX_VALIDATOR_RETRIES_PER_TURN or 3))
+    end
+  end
   Probe = {
     enabled = false,
     start_turn = function() return nil end,
@@ -35423,7 +34636,7 @@ do
     set_body_total = noop,
     add_request = noop,
     add_request_usage = noop,
-    add_validator_retry = noop,
+    add_validator_retry = note_validator_retry,
     add_fx_cache = noop,
     add_typed_action = noop,
     end_turn = noop,
@@ -35478,7 +34691,6 @@ function RA.load_i18n()
   else
     I18N = {
       fallback_code = "en",
-      active_code = "en",
       catalogs = {
         en = {
           _meta = { code = "en", source_version = 1, status = "complete" },
@@ -35666,11 +34878,9 @@ function Loop.handle_dev_signal()
     Store.clear_window_geometry()
     S._reset_window_size = true
   elseif dev_sig == "refresh_debug_log" then
-    -- Match the default-ON pattern at the prefs load site (~= "0").
-    -- Otherwise an unset ExtState would refresh OFF, contradicting the
-    -- early-release default the user actually has in memory.
+    -- Match the opt-in pattern at the prefs load site.
     prefs.debug_logging =
-      reaper.GetExtState(CFG.EXT_NS, "debug_logging") ~= "0"
+      reaper.GetExtState(CFG.EXT_NS, "debug_logging") == "1"
   elseif dev_sig == "refresh_language" then
     local code = reaper.GetExtState(CFG.EXT_NS, "language_code")
     if not (CFG and CFG.is_valid_language_code
@@ -35839,6 +35049,11 @@ function Loop.handle_ceiling_poll()
   end
 
   S._ceiling_muted_fx = S._ceiling_muted_fx or {}
+  local poll_slots
+  local function slots_for_poll()
+    if not poll_slots then poll_slots = Code.ceiling_get_slots() end
+    return poll_slots
+  end
 
   -- Refresh-and-prune pass over every tracked entry.
   --   * gmem mirror still 1 AND at least one instance is "active"
@@ -35854,7 +35069,7 @@ function Loop.handle_ceiling_poll()
   for slot, _entry in pairs(S._ceiling_muted_fx) do
     local mute_val = reaper.gmem_read(slot + Code.CEILING_GMEM_MUTE) or 0
     if mute_val >= 1 then
-      if Code.ceiling_slot_is_active(slot) then
+      if Code.ceiling_slot_is_active(slot, slots_for_poll()) then
         _entry.is_active = true
       else
         -- Stale: track muted, FX bypassed/removed, or all instances
@@ -35879,7 +35094,7 @@ function Loop.handle_ceiling_poll()
 
   -- Per-slot scan to find newly-muted FX. Iterate every tracked slot
   -- (not just currently-muted ones) so we pick up a fresh trip.
-  local slots = Code.ceiling_get_slots()
+  local slots = slots_for_poll()
   local newly_muted = false
 
   for _, e in ipairs(slots) do
@@ -35891,9 +35106,9 @@ function Loop.handle_ceiling_poll()
       -- poll started would otherwise pop a phantom alert on the next
       -- transport play. We also clear the mirror in that case so
       -- subsequent polls don't keep seeing it.
-      if Code.ceiling_slot_is_active(e.slot) then
+      if Code.ceiling_slot_is_active(e.slot, slots) then
         newly_muted = true
-        local locations = Code.ceiling_find_fx_locations(e.slot)
+        local locations = Code.ceiling_find_fx_locations(e.slot, slots)
         S._ceiling_muted_fx[e.slot] = {
           slot      = e.slot,
           file      = e.file,
@@ -35915,39 +35130,68 @@ function Loop.handle_ceiling_poll()
   end
 end
 
--- Walk every track's FX chain to find every instance of the JSFX whose
--- recorded slot matches `slot`. Returns a list of location records:
---   { track_idx (1-based, "M" for master), track_name, fx_idx (1-based),
---     fx_name }
--- The popup uses this to tell the user "Track 5 'Vocal' / FX 2: <name>"
--- per occurrence, since the same .jsfx file can be loaded on multiple
--- tracks and they ALL share one slot/_ra_muted state.
-function Code.ceiling_find_fx_locations(slot)
-  local out = {}
-  local target_file
-  for _, e in ipairs(Code.ceiling_get_slots()) do
-    if e.slot == slot then target_file = e.file; break end
+function Code.ceiling_slot_location_cache(slots)
+  slots = slots or Code.ceiling_get_slots()
+  local sig_parts = {}
+  for i, e in ipairs(slots) do
+    sig_parts[i] = tostring(e.slot or "") .. "\t" .. tostring(e.file or "")
   end
-  if not target_file then return out end
-  local fname = target_file:match("[^/\\]+$") or target_file
-  local fx_ref_low = ("reaassist/" .. fname):lower()
+  local sig = table.concat(sig_parts, "\n")
+  local state_count
+  if reaper.GetProjectStateChangeCount then
+    state_count = reaper.GetProjectStateChangeCount(0)
+  end
+  local cacheable = type(state_count) == "number"
+  local cache = S and S._ceiling_location_cache or nil
+  if cacheable and cache
+     and cache.state_count == state_count
+     and cache.slot_sig == sig then
+    return cache
+  end
+
+  local targets = {}
+  for _, e in ipairs(slots) do
+    if e.slot and e.file and e.file ~= "" then
+      local fname = e.file:match("[^/\\]+$") or e.file
+      targets[#targets + 1] = {
+        slot = e.slot,
+        fx_ref_low = ("reaassist/" .. fname):lower(),
+      }
+    end
+  end
+
+  local built = {
+    state_count = state_count,
+    slot_sig = sig,
+    locations_by_slot = {},
+  }
+  for _, target in ipairs(targets) do
+    built.locations_by_slot[target.slot] = {}
+  end
+  if #targets == 0 then
+    if cacheable and S then S._ceiling_location_cache = built end
+    return built
+  end
 
   local function walk(tr, idx_label, track_name)
     local fxc = reaper.TrackFX_GetCount(tr)
     for fi = 0, fxc - 1 do
       local _, fxname = reaper.TrackFX_GetFXName(tr, fi, "")
-      if fxname and fxname:lower():find(fx_ref_low, 1, true) then
-        out[#out + 1] = {
-          track_idx  = idx_label,
-          track_name = track_name or "",
-          fx_idx     = fi + 1,
-          fx_name    = fxname or "",
-        }
+      local fx_low = fxname and fxname:lower() or ""
+      for _, target in ipairs(targets) do
+        if fx_low:find(target.fx_ref_low, 1, true) then
+          local locs = built.locations_by_slot[target.slot]
+          locs[#locs + 1] = {
+            track_idx  = idx_label,
+            track_name = track_name or "",
+            fx_idx     = fi + 1,
+            fx_name    = fxname or "",
+          }
+        end
       end
     end
   end
 
-  -- Master track first.
   local master = reaper.GetMasterTrack(0)
   if master then
     local _, mname = reaper.GetTrackName(master, "")
@@ -35961,7 +35205,22 @@ function Code.ceiling_find_fx_locations(slot)
       walk(tr, ti + 1, tname or "")
     end
   end
-  return out
+
+  if cacheable and S then S._ceiling_location_cache = built end
+  return built
+end
+
+-- Walk every track's FX chain to find every instance of the JSFX whose
+-- recorded slot matches `slot`. Returns a list of location records:
+--   { track_idx (1-based, "M" for master), track_name, fx_idx (1-based),
+--     fx_name }
+-- The popup uses this to tell the user "Track 5 'Vocal' / FX 2: <name>"
+-- per occurrence, since the same .jsfx file can be loaded on multiple
+-- tracks and they ALL share one slot/_ra_muted state.
+function Code.ceiling_find_fx_locations(slot, slots)
+  local cache = Code.ceiling_slot_location_cache(slots)
+  -- Read-only shared cache table for the current project-state window.
+  return cache.locations_by_slot[slot] or {}
 end
 
 -- Returns true if at least one instance of the JSFX bound to this slot
@@ -35975,11 +35234,11 @@ end
 -- keep claiming the FX is muted on every replay -- which is the exact
 -- bug this addresses.
 --
--- Walks fresh FX locations (rather than relying on entry.locations
--- caches) so a moved/renamed FX is also handled correctly. The 200 ms
--- poll throttle keeps the cost negligible for typical sessions.
-function Code.ceiling_slot_is_active(slot)
-  local locs = Code.ceiling_find_fx_locations(slot)
+-- Location caches are keyed to `GetProjectStateChangeCount`, so moved or
+-- renamed FX refresh on the next project-state change without walking the
+-- whole FX graph once per tracked slot.
+function Code.ceiling_slot_is_active(slot, slots)
+  local locs = Code.ceiling_find_fx_locations(slot, slots)
   if #locs == 0 then return false end
   for _, loc in ipairs(locs) do
     local tr
@@ -36059,7 +35318,11 @@ function Loop.pump_curl_or_retry()
       S.retry_scheduled = false
       Code.safe_write(tmp.out, "")
       if S.retry_saved_body then
-        local ok, reason = Net.fire_curl(S.retry_saved_body)
+        local ok, reason = Net.fire_curl(S.retry_saved_body, {
+          provider_idx = S.retry_saved_provider_idx,
+          model_idx = S.retry_saved_model_idx,
+          thinking_idx = S.retry_saved_thinking_idx,
+        })
         if ok then
           S.status = "waiting"
         else
@@ -36507,8 +35770,11 @@ local function loop()
   -- Wait until no other curl is in flight before firing -- the tier test
   -- shares the curl plumbing and would no-op silently otherwise.
   if S.gemini_auto_retest_pending and not S.curl_pid then
-    S.gemini_auto_retest_pending = false
-    Net.fire_gemini_tier_test()
+    local p = PROVIDERS and PROVIDERS.active and PROVIDERS.active() or nil
+    if p and p.id == "google" then
+      S.gemini_auto_retest_pending = false
+      Net.fire_gemini_tier_test()
+    end
   end
 
   -- Deferred key-test: fire_key_test parked here when curl_pid was busy
@@ -36567,10 +35833,9 @@ local function loop()
     Net.try_finish_kill_pending()
   end
 
-  -- Drive the manual feedback uploader: polls in-flight POST exit/status
-  -- files and fires the on_done callback when complete. Grouped here with
-  -- the other network pollers above. Cheap when no send is in flight
-  -- (early-returns on `not in_flight`).
+  -- Drive diagnostics upload work: polls in-flight POST exit/status files and
+  -- lets the idle auto-diagnostics queue advance when no upload is active.
+  -- Grouped here with the other network pollers above.
   if Diag.uploader_enabled then Diag.tick() end
 
   -- Piggyback the once-per-session update check on the first chat-SEND in
@@ -36768,6 +36033,9 @@ function RA.pump_screen_reader_background()
     RA.write_temp_live_marker(now_hb)
   end
   Loop.pump_curl_or_retry()
+  if S.kill_pending then
+    Net.try_finish_kill_pending()
+  end
   if Diag and Diag.uploader_enabled and Diag.tick then
     Diag.tick()
   end

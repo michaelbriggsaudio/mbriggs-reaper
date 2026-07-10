@@ -328,12 +328,14 @@ I18N.catalogs = {
         "Recommended Claude default. Use None thinking. Raise effort only if a prompt struggles.",
       ["mode.model_tip.claude-opus-4-8"] =
         "Premium Claude. Use None thinking. Higher levels add cost without quality gain.",
-      ["mode.model_tip.gpt-5.4-nano"] =
-        "Cheapest GPT. Use None thinking. Simple tasks only -- pick full GPT-5.4 for complex.",
       ["mode.model_tip.gpt-5.4-mini"] =
-        "Cheap GPT. Use Low thinking. Simple tasks only -- pick full GPT-5.4 for complex.",
-      ["mode.model_tip.gpt-5.4"] =
-        "Recommended OpenAI default. Use None thinking. Reliable on simple and complex tasks.",
+        "Lowest-priced GPT. Use Low thinking. Reliable budget option; GPT-5.6 Luna None is faster at a higher price.",
+      ["mode.model_tip.gpt-5.6-luna"] =
+        "Recommended OpenAI default. Use None thinking. Best tested balance of quality, speed, and cost.",
+      ["mode.model_tip.gpt-5.6-terra"] =
+        "Higher-cost GPT-5.6. Use None thinking. Choose Terra when Luna struggles or extra quality is worth the price.",
+      ["mode.model_tip.gpt-5.6-sol"] =
+        "Premium GPT-5.6. Use None thinking. Flagship tier; higher effort added cost without a measured improvement.",
       ["mode.model_tip.gemini-3.1-flash-lite"] =
         "Cheapest Gemini. Use Low thinking. Budget pick; Flash 3.5 Minimal is stronger for scripts and edits.",
       ["mode.model_tip.gemini-3.5-flash"] =
@@ -366,30 +368,38 @@ I18N.catalogs = {
         "Simple and complex | Most expensive | Very fast | No gain over None -- use None",
       ["mode.combo_hint.anthropic.claude-opus-4-8.high"] =
         "Simple and complex | Most expensive | Very fast | Deepest reasoning but no gain -- use None",
-      ["mode.combo_hint.openai.gpt-5.4-nano.none"] =
-        "Recommended Level | Simple tasks only | Cheap | Very fast | Use full GPT-5.4 None for complex edits",
-      ["mode.combo_hint.openai.gpt-5.4-nano.low"] =
-        "Simple tasks only | Cheap | Very fast | None is faster -- pick None (default)",
-      ["mode.combo_hint.openai.gpt-5.4-nano.medium"] =
-        "Simple and some complex | Cheap | Moderate speed | Use full GPT-5.4 None for complex edits",
-      ["mode.combo_hint.openai.gpt-5.4-nano.high"] =
-        "Simple and some complex | Cheap | Slow | Use full GPT-5.4 None for complex edits",
       ["mode.combo_hint.openai.gpt-5.4-mini.none"] =
-        "Simple tasks only | Cheap | Very fast | Use full GPT-5.4 None for complex edits",
+        "Lowest cost | Very fast | Less established than Low for complex edits",
       ["mode.combo_hint.openai.gpt-5.4-mini.low"] =
-        "Recommended Level | Simple tasks only | Cheap | Very fast | Use full GPT-5.4 None for complex edits",
+        "Recommended Level | Simple and complex | Lowest cost | Validated in ReaAssist testing",
       ["mode.combo_hint.openai.gpt-5.4-mini.medium"] =
-        "Simple and complex | Mid-cost | Moderate speed | Limited evidence; full GPT-5.4 None is faster",
+        "Simple and complex | Higher output cost | Much slower | No measured gain over Low",
       ["mode.combo_hint.openai.gpt-5.4-mini.high"] =
-        "Simple and complex | Mid-cost | Moderate speed | Mini's strongest combo, but full GPT-5.4 None is faster and cleaner",
-      ["mode.combo_hint.openai.gpt-5.4.none"] =
-        "Recommended Level | Simple and complex | Mid-cost | Very fast",
-      ["mode.combo_hint.openai.gpt-5.4.low"] =
-        "Simple and complex | Mid-cost | Moderate speed | Marginal lift over None -- use None",
-      ["mode.combo_hint.openai.gpt-5.4.medium"] =
-        "Simple and complex | Higher cost | Very slow | Use only if None struggles",
-      ["mode.combo_hint.openai.gpt-5.4.high"] =
-        "Simple and complex | Higher cost | Very slow | No quality gain over None -- use None",
+        "Not recommended | Highest Mini latency and output cost | Use Low or Terra None",
+      ["mode.combo_hint.openai.gpt-5.6-luna.none"] =
+        "Recommended Level | Simple and complex | Lowest GPT-5.6 cost | Fastest tested configuration",
+      ["mode.combo_hint.openai.gpt-5.6-luna.low"] =
+        "Simple and complex | Low cost | Slower than None | No measured gain over None",
+      ["mode.combo_hint.openai.gpt-5.6-luna.medium"] =
+        "Avoid for routine work | Generated a runtime error in testing | Very slow on large code",
+      ["mode.combo_hint.openai.gpt-5.6-luna.high"] =
+        "Untested and expensive | Use None, or Terra None if a task struggles",
+      ["mode.combo_hint.openai.gpt-5.6-terra.none"] =
+        "Recommended Level | Simple and complex | Balanced cost | Fastest Terra configuration",
+      ["mode.combo_hint.openai.gpt-5.6-terra.low"] =
+        "Simple and complex | Balanced cost | Slower than None | No measured gain",
+      ["mode.combo_hint.openai.gpt-5.6-terra.medium"] =
+        "Simple and complex | Balanced cost | Slower | All tests passed, but no gain over None",
+      ["mode.combo_hint.openai.gpt-5.6-terra.high"] =
+        "Untested and expensive | Reserve for a measured hard-task improvement",
+      ["mode.combo_hint.openai.gpt-5.6-sol.none"] =
+        "Recommended Level | Simple and complex | Premium cost | Fastest Sol configuration",
+      ["mode.combo_hint.openai.gpt-5.6-sol.low"] =
+        "Simple and complex | Premium cost | Slower than None | No measured gain",
+      ["mode.combo_hint.openai.gpt-5.6-sol.medium"] =
+        "Avoid for routine work | Generated a runtime error in testing | Higher cost and latency",
+      ["mode.combo_hint.openai.gpt-5.6-sol.high"] =
+        "Untested and most expensive | Reserve for a measured quality-first need",
       ["mode.combo_hint.google.gemini-3.1-flash-lite.MINIMAL"] =
         "Simple tasks only | Cheap | Fast | Low is more reliable on complex routing",
       ["mode.combo_hint.google.gemini-3.1-flash-lite.LOW"] =
@@ -634,7 +644,7 @@ I18N.catalogs = {
       ["bug_report.debug.cleared"] = "Log cleared.",
       ["tos.title"] = "Terms of Use",
       ["tos.body"] = [=[YOUR PRIVACY
-API keys are encoded and stored locally on your machine. They are never sent to the author. Chat data is sent only to your chosen provider to fulfill your request. To provide relevant help, ReaAssist may send session data included in your prompt, such as track names, routing, and project settings. ReaAssist does not access, transmit, or create audio files. You may use a local LLM to keep all data offline and on your machine. Basic anonymous diagnostics are enabled by default and used to help improve the service. They can be turned off in Settings. The previewable manual feedback/report flows still show the exact bytes before sending.
+API keys are stored locally using reversible XOR obfuscation tied to your REAPER install path. This is not encryption and not an OS credential vault; a person or process with access to your REAPER settings and the ReaAssist source can recover the keys. They are never sent to the author. Chat data is sent only to your chosen provider to fulfill your request. To provide relevant help, ReaAssist may send session data included in your prompt, such as track names, routing, and project settings. ReaAssist does not access, transmit, or create audio files. You may use a local LLM to keep all data offline and on your machine. Basic anonymous diagnostics are enabled by default and used to help improve the service. They can be turned off in Settings. The previewable manual feedback/report flows still show the exact bytes before sending.
 
 SECURITY & SAFEGUARDS
 ReaAssist scans generated code for potentially high-risk operations, such as file system changes or shell commands, and requires your confirmation before flagged code can run. Project backups can be created before execution, and REAPER Undo history is preserved. No project changes are made without your approval.
@@ -645,6 +655,8 @@ ReaAssist is provided "as is," without warranties of any kind, express or implie
 Copyright {year} Michael Briggs. All rights reserved. ReaAssist is proprietary software; redistribution, resale, repackaging, and presenting this software as your own (modified or unmodified) are prohibited without prior written permission.
 
 By clicking "I Agree," you confirm that you have read and agree to these Terms of Use.]=],
+      ["tos.key_storage_disclosure_v2"] =
+        "KEY STORAGE\nAPI keys use reversible local obfuscation tied to the REAPER install path. They are not encrypted in an OS credential vault. Anyone who can read your REAPER settings and the ReaAssist source can recover them.",
       ["tos.agree"] = "I Agree",
       ["tos.language.label"] = "Language",
       ["tos.language.tooltip"] =
@@ -672,6 +684,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["details.field.tokens"] = "Tokens",
       ["details.field.cache"] = "Cache",
       ["details.field.api_calls"] = "API Calls",
+      ["details.field.model_calls"] = "Model Calls",
+      ["details.field.transport_retries"] = "Transport Retries",
       ["details.field.time"] = "Time",
       ["details.field.thinking"] = "Thinking",
       ["details.field.est_cost"] = "Est. Cost",
@@ -1892,6 +1906,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Opens the selected provider's API key page in your browser.",
       ["a11y.sr.api_key_note"] =
         "Saved keys are stored in REAPER's persistent settings for this install.",
+      ["a11y.sr.api_key_note_storage_v2"] =
+        "Saved keys use reversible obfuscation in REAPER's persistent settings. They are not encrypted in an OS credential vault, and someone with access to the settings and source can recover them.",
       ["a11y.sr.api_key_note.meaning"] =
         "Explains where API keys are stored.",
       ["a11y.sr.api_key_no_provider"] =
@@ -1964,6 +1980,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Contrast {value}.",
       ["a11y.sr.settings_summary_timeout"] =
         "Timeout {value}s.",
+      ["a11y.sr.settings_summary_turn_cost"] =
+        "Per-turn dollar limit {value}.",
+      ["a11y.sr.settings_summary_turn_token"] =
+        "Per-turn token limit {value}.",
       ["a11y.sr.settings_summary_diag"] =
         "Diagnostics {value}.",
       ["a11y.sr.settings_summary.meaning"] =
@@ -2475,6 +2495,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "How long ReaAssist waits before timing out a cloud-provider request.",
       ["a11y.sr.timeout_changed"] =
         "Cloud timeout changed to {value} seconds.",
+      ["a11y.sr.turn_cost_limit_changed"] =
+        "Per-turn dollar limit changed to {value}.",
+      ["a11y.sr.turn_token_limit_changed"] =
+        "Per-turn token limit changed to {value}.",
       ["a11y.sr.seconds_value"] = "{value} seconds",
       ["a11y.sr.diagnostics_off"] = "Off",
       ["a11y.sr.diagnostics_tier_changed"] =
@@ -2791,6 +2815,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Your {provider} API key isn't working. It may have expired or been entered incorrectly.\n\nClick the Settings button below to enter a new one.\n\nYou can find or create a key here:",
       ["response.api_key_storage_note"] =
         "Your key is obfuscated and locked to this REAPER install path. It will not work if copied to another machine.",
+      ["response.api_key_storage_note_v2"] =
+        "Your key was stored locally with reversible obfuscation, not OS-vault encryption. The install-path binding is why it cannot be decoded after being copied or moved.",
       ["response.credits_exhausted"] =
         "Your {provider} account has run out of credits.\n\nTo continue using ReaAssist, add funds to your account:",
       ["response.provider_overloaded"] =
@@ -2817,6 +2843,16 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Your API key doesn't have access to this model.",
       ["code.backup_failed_after_save"] =
         "Project saved, but the safety backup failed ({error}). The generated code was NOT run. Resolve the disk/permission issue and try again, or click Run manually if you want to proceed without a backup.",
+      ["code.backup_failed_run"] =
+        "Safety backup failed ({error}). The generated code was NOT run. Check the project folder, disk space, and permissions, then try again. To proceed without a backup, turn off Auto-backup in Settings and run the code again.",
+      ["code.backup_failed_auto_run"] =
+        "Auto-run was blocked because ReaAssist could not create a safety backup. Check the project folder, disk space, and permissions, then try again. To proceed without a backup, turn off Auto-backup in Settings and run the code manually.",
+      ["auto_run.blocked.relevance"] =
+        "Auto-run was blocked because the generated action did not clearly match the request and captured session. Review the target tracks, plugins, and REAPER actions before running it manually.",
+      ["code.run.no_project_change"] =
+        "No project change was detected. The script may have exited early because a target was missing or the requested state was already set. Review any message shown by the script and confirm the project result.",
+      ["a11y.sr.response_ready_no_project_change"] =
+        "Generated code finished, but no project change was detected. It may have exited early because a target was missing or the requested state was already set. Review the response and project before continuing.",
       ["code.compile_error"] =
         "Lua compile error in generated code:\n\n{error}",
       ["code.runtime_error"] =
@@ -3016,6 +3052,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.hero.breadcrumb.first_run"] = "FIRST-RUN SETTINGS",
       ["settings.first_run.intro"] =
         "Keys are obfuscated and stored locally on this machine and sent only to your chosen provider. Claude has shown the best all-around results in testing. Gemini is the only provider to offer a free tier. You may also use a local or custom LLM to keep your data fully offline and private.",
+      ["settings.first_run.intro_storage_v2"] =
+        "Keys are stored locally using reversible obfuscation, not encryption or an OS credential vault. Anyone with access to your REAPER settings and this source code can recover them. Keys are sent only to the provider or custom endpoint you configure. Claude has shown the best all-around results in testing, Gemini is the only built-in provider with a free tier, and local/custom models can keep requests on your machine.",
       ["settings.section.api_keys"] = "API KEYS",
       ["settings.section.preferences"] = "PREFERENCES",
       ["settings.section.advanced"] = "ADVANCED",
@@ -3033,6 +3071,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Paste your {provider} API key here",
       ["settings.api_key.card_tooltip"] =
         "{provider} API key. Stored locally on this machine, obfuscated, and locked to this install path for security.",
+      ["settings.api_key.card_tooltip_storage_v2"] =
+        "{provider} API key. Stored locally using reversible obfuscation tied to this REAPER install path. This is not encryption or an OS credential vault; someone with access to the settings and source can recover it.",
       ["settings.api_key.console_tooltip"] =
         "Sign up or manage your {provider} API keys on the provider's console",
       ["settings.api_key.current"] = "Current: {key}",
@@ -3041,6 +3081,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.api_key.provider.generic"] = "the provider",
       ["settings.api_key.error.install_moved"] =
         "Your REAPER install location has changed since your API key was last saved. For security, the key is locked to the install path and cannot be decoded from a different location. Please paste your API key again to continue.",
+      ["settings.api_key.error.install_moved_v2"] =
+        "Your REAPER install location changed. Because the reversible key obfuscation uses that path, the saved value cannot be decoded here. Paste the key again to continue. This path binding prevents casual copying; it is not encryption.",
       ["settings.api_key.error.in_flight_short"] =
         "Another request is in progress. Try again in a moment.",
       ["settings.api_key.error.in_flight_detail"] =
@@ -3153,6 +3195,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.custom.field.api_key_hint"] = "Paste API key...",
       ["settings.custom.tip.api_key"] =
         "The bearer token sent as 'Authorization: Bearer <key>' on every request.\n\nREQUIRED for hosted gateways: OpenRouter (sk-or-...), Groq (gsk_...), Together AI, Mistral, Fireworks, Anyscale, Cloudflare AI Gateway, etc.\n\nLEAVE BLANK for local servers (Ollama, LM Studio, llama.cpp, vLLM) that don't require auth. The Authorization header is omitted entirely in that case; some local servers reject a bare 'Bearer ' header, so empty really does mean empty.\n\nThe key is stored XOR-obfuscated and tied to this REAPER install path; copying the .ini to another machine won't work.",
+      ["settings.custom.tip.api_key_storage_v2"] =
+        "The bearer token sent as 'Authorization: Bearer <key>' on every request.\n\nREQUIRED for hosted gateways: OpenRouter (sk-or-...), Groq (gsk_...), Together AI, Mistral, Fireworks, Anyscale, Cloudflare AI Gateway, etc.\n\nLEAVE BLANK for local servers (Ollama, LM Studio, llama.cpp, vLLM) that don't require auth. The Authorization header is omitted entirely in that case; some local servers reject a bare 'Bearer ' header, so empty really does mean empty.\n\nThe key is stored locally using reversible XOR obfuscation tied to this REAPER install path. It is not encrypted in an OS credential vault; anyone with access to the settings and source can recover it.",
       ["settings.custom.warning.unencrypted"] =
         "Unencrypted connection. Credentials sent in plain text.",
       ["settings.custom.preset.local"] = "LOCAL",
@@ -3535,21 +3579,48 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Always include REAPER API reference",
       ["settings.adv.api_ref.tooltip"] =
         "Pin the REAPER Lua API reference to every request instead of letting the model fetch it on-demand. On = zero round-trips but ~10K extra tokens every turn. Off = saves tokens on non-code turns; the model fetches docs when it needs them.",
-      ["settings.adv.compact_history.label"] =
-        "Compact long chat history",
-      ["settings.adv.compact_history.tooltip"] =
-        "Replace older successful code replies with short summaries to save tokens in long sessions. The latest reply stays verbatim, and follow-up edit requests keep the full history. For Claude, ReaAssist keeps history verbatim to preserve prompt-cache savings.",
       ["settings.adv.diagnostics.label"] = "Automatic diagnostics",
       ["settings.adv.diagnostics.off"] = "Off",
       ["settings.adv.diagnostics.basic"] = "Basic",
       ["settings.adv.diagnostics.extended"] = "Extended",
       ["settings.adv.diagnostics.tooltip"] =
         "Basic anonymous diagnostics are enabled by default and can be turned off. Extended adds redacted chat, diagnostics, and log/report detail. Sent on the next launch, never during an active request.",
-      ["settings.adv.diagnostics.default_notice"] =
-        "Basic anonymous diagnostics are on by default. You can turn them off in Settings > Advanced.",
       ["settings.adv.cloud_timeout.label"] = "Cloud Timeout",
       ["settings.adv.cloud_timeout.tooltip"] =
         "How long to wait for a Claude/ChatGPT/Gemini response before timing out. Default 180s. Reasoning models on large prompts may need 300+",
+      ["settings.adv.turn_cost_limit.label"] = "Per-turn dollar limit",
+      ["settings.adv.turn_cost_limit.tooltip_v2"] =
+        "Warns before a model call when actual cost already used plus the next call's worst-case estimate would exceed this amount.",
+      ["settings.adv.turn_cost_limit.too_low_v2"] =
+        "This is below the selected model's worst-case single request (about {cost}). At this setting, every send may require confirmation.",
+      ["settings.adv.turn_token_limit.label"] = "Per-turn token limit",
+      ["settings.adv.turn_token_limit.tooltip_v2"] =
+        "Warns before a model call when tokens already used plus the next call's worst-case allowance would exceed this total.",
+      ["settings.adv.turn_token_limit.too_low_v2"] =
+        "This is below the selected model's worst-case single request (about {tokens} tokens). At this setting, every send may require confirmation.",
+      ["dialog.turn_budget.title"] = "Continue This Request?",
+      ["dialog.turn_budget.headline"] =
+        "This request would exceed a limit you set.",
+      ["dialog.turn_budget.token_body"] =
+        "Projected token use for this request: {projected} (your limit: {limit}). This next model call could use up to {next} tokens.",
+      ["dialog.turn_budget.cost_body"] =
+        "Projected cost for this request: {projected} (your limit: {limit}). This next model call could cost up to {next}.",
+      ["dialog.turn_budget.not_sent"] =
+        "No additional model request has been sent.",
+      ["dialog.turn_budget.one_call"] =
+        "If you choose Continue Anyway, ReaAssist will send only this one model call. It will ask again before any later call that would exceed a limit.",
+      ["dialog.turn_budget.continue"] = "Continue Anyway",
+      ["dialog.turn_budget.cancel"] = "Cancel Request",
+      ["a11y.sr.turn_budget.opened"] =
+        "A request limit was reached. No additional model request has been sent. Review the projected total, then choose Cancel Request or Continue Anyway.",
+      ["a11y.sr.turn_budget.cancelled"] =
+        "Request cancelled. No additional model request was sent.",
+      ["net.turn_budget.token_stop"] =
+        "Stopped before another model request. Its worst-case token allowance would put this turn at about {projected} tokens, above your {limit}-token limit.\n\nRaise the per-turn token limit in Settings > Advanced, shorten the request, or start a new chat.",
+      ["net.turn_budget.cost_stop"] =
+        "Stopped before another billable model request. Its estimated worst case would put this turn at about {projected}, above your {limit} per-turn limit.\n\nRaise the dollar limit in Settings > Advanced, choose a less expensive model, or start a new chat.",
+      ["net.turn_budget.continue_failed"] =
+        "The approved model request could not be started. Please try again.",
       ["settings.adv.fx_cache.label"] = "FX Param Cache",
       ["settings.adv.fx_cache.tooltip"] =
         "View, rescan, or remove cached plugin parameter data. Curated plugins are listed as read-only reference entries.",
@@ -4156,6 +4227,38 @@ function I18N.t(key, values, opts)
   end
   if text == nil then text = key end
   return I18N.interpolate(text, values)
+end
+
+-- Keep the candid v2 key-storage disclosure in older translated Terms bodies
+-- without rendering it as a duplicate standalone section. English is shipped
+-- in this file and already carries the current disclosure in YOUR PRIVACY.
+-- Older remote bodies can use their localized versioned disclosure until their
+-- full tos.body translation is refreshed.
+function I18N.tos_storage_disclosure_body(disclosure)
+  disclosure = tostring(disclosure or "")
+  local first_nl = disclosure:find("\n", 1, true)
+  local body = first_nl and disclosure:sub(first_nl + 1) or disclosure
+  return body:match("^%s*(.-)%s*$") or ""
+end
+
+function I18N.merge_tos_storage_disclosure(body, disclosure, language_code)
+  body = tostring(body or "")
+  if body == "" or tostring(language_code or "") == "en" then return body end
+
+  local disclosure_body = I18N.tos_storage_disclosure_body(disclosure)
+  if disclosure_body == "" or body:find(disclosure_body, 1, true) then
+    return body
+  end
+
+  -- The first paragraph contains the localized privacy heading and body. Fold
+  -- the compatibility sentence into that paragraph so it remains a single
+  -- disclosure instead of creating a fifth legal section below Copyright.
+  local first_break = body:find("\n\n", 1, true)
+  if first_break then
+    return body:sub(1, first_break - 1) .. " " .. disclosure_body
+      .. body:sub(first_break)
+  end
+  return body .. " " .. disclosure_body
 end
 
 -- Remote language cache folders are created lazily so English-only installs

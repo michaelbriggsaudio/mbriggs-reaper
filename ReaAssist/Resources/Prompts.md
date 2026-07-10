@@ -8,6 +8,7 @@
 <!--   drums          phase-safe drum editing / quantize workflow: guide tracks, range/scope questions, Dynamic Split safety, shared stretch-marker maps. -->
 <!--   jsfx           EEL2 syntax, slider declarations, DSP safety, host plumbing for .jsfx files. -->
 <!--   jsfx_dsp_cookbook  Narrow delay/reverb/modulation JSFX memory-addressing recipes. -->
+<!--   jsfx_gfx       Custom @gfx front-panel guidance for JSFX GUI, knobs, buttons, meters, and mouse-driven controls. -->
 <!--   theme          theme color change safety + ExtState backup schema for the Undo button. (The full ini_key catalog lives in API_Ref.md SECTION:theme.) -->
 
 <!-- SECTION:plugin -->
@@ -699,6 +700,9 @@ Slider declaration syntax: `sliderN:default<min,max,step>Name` on its own line n
 JSFX HOST DETAILS THAT IMPROVE REAL PLUGINS:
 - Prefer named sliders for readable generated code: `slider1:gain_db=0<-24,24,0.1>Gain (dB)`, then read `gain_db` instead of `slider1`.
 - Use enum sliders for mode choices: `slider2:mode=0<0,2,1{Sine,Triangle,Square}>Waveform`.
+- Native JSFX sliders and enum sliders appear as user-adjustable controls in REAPER's FX parameter UI. For normal custom-plugin requests, prefer these native controls over custom drawing, and say plainly that the controls will appear in REAPER's FX controls/parameter area.
+- Do not claim the JSFX has a custom GUI, knobs, buttons, or drawn sliders unless the `@gfx` section actually draws them and handles mouse interaction. Native slider declarations alone are controls, but they are not a custom-drawn `@gfx` GUI.
+- If the user explicitly asks for a custom GUI/front panel/knobs/buttons inside the plugin window, either build a small working `@gfx` interface or ask one concise design question. Never add a decorative `@gfx` panel that hides or replaces native controls without providing equivalent interactive controls.
 - Use `slider_show(slider_index, state)` when a mode exposes mutually
   exclusive groups of advanced controls. Put the visibility update in
   `@slider` (or `@block` only when it genuinely must be rechecked per block)
@@ -745,6 +749,7 @@ SAFETY (mandatory -- blown-up track/speakers otherwise):
   - FDN: N delay lines with a unitary mixing matrix on the feedback. Conservative: N=4 with a Hadamard or householder matrix scaled so the matrix's spectral radius times the feedback gain stays below 1.
   Treat L and R symmetrically unless the user explicitly asks for a stereo image / asymmetry. Simple stereo = run the same comb bank in parallel on each channel with slightly detuned delays for decorrelation; do NOT have one channel feed the other through different combs than the other channel uses for itself.
 - For shimmer / pitched-feedback / harmonized reverbs and similar effects with pitch shifters in the loop, request the `prompt_bundle:jsfx_pitch` bundle for the proven topology and stability rules.
+- For custom JSFX front panels, knobs, buttons, or drawn sliders, request the `prompt_bundle:jsfx_gfx` bundle before writing the `@gfx` section.
 - Prefer curated plugins over generated JSFX for complex DSP. Generated JSFX is reliable for simple, well-understood effects (gain trim, basic delay, biquad EQ, soft saturation, simple compressor, basic chorus). For complex effects -- shimmer / convolution reverb, granular pitch shifters, multi-band dynamics, transient designers, true convolution, FFT-based spectral effects, mastering limiters with true-peak detection -- generated JSFX often does NOT match the quality of dedicated plugins, even with the safety validator passing. When the user asks for one of these AND a suitable curated plugin is available (Pro-R 2 for reverb, Pro-L 2 for limiting, Saturn 2 for saturation, Pro-Q 4 for surgical EQ, Pro-MB for multi-band, etc.), suggest the curated plugin FIRST and offer to add it via TrackFX_AddByName + parameter setting. Generate the JSFX only if the user explicitly declines the plugin path or asks for it as a learning/experimentation exercise.
 
 HOST PLUMBING:
@@ -753,6 +758,27 @@ With track: ```jsfx block THEN ```lua block using TrackFX_AddByName(tr, "ReaAssi
 Filename derivation: 1) take the desc: value, 2) strip characters: <>:"/\|?*, 3) collapse runs of spaces to one, 4) trim leading/trailing whitespace, 5) truncate name to 60 chars (extension added on top), 6) append .jsfx. Single spaces in the name are preserved.
 Without track: only ```jsfx block.
 <!-- /SECTION:jsfx -->
+
+<!-- SECTION:jsfx_gfx -->
+JSFX CUSTOM @gfx FRONT PANEL (additive on top of prompt_bundle:jsfx):
+Use this only when the user explicitly asks for a custom GUI/front panel, knobs, buttons, drawn sliders, meters, or `@gfx`. Native JSFX sliders are usually better: they are automatable, host-visible, and appear in REAPER's FX controls. A custom `@gfx` section adds a drawn panel below/alongside those native host controls; it does not replace or hide the native slider/drop-down controls. Custom `@gfx` must add real interaction, not just decoration.
+
+CONTROL CONTRACT:
+- All `gfx_*`, `mouse_*`, and graphics framebuffer variables belong in `@gfx`; keep audio/DSP work in `@sample`/`@block` and slider-derived coefficient work in `@slider`.
+- Keep every user-adjustable parameter as a normal `sliderN:` declaration near the top so the host, automation, presets, and accessibility still work.
+- Draw custom controls from the slider variables; do not maintain a second unsynced GUI-only value.
+- Use `mouse_x`, `mouse_y`, and `mouse_cap` for hit testing. Do not invent `gfx_mouse_x` or `gfx_mouse_y`.
+- Call `gfx_getchar()` at least once per `@gfx` frame when modifier keys matter, because REAPER only reflects keyboard modifiers in `mouse_cap` after `gfx_getchar()` has been called.
+- Store a small active-control/drag state in persistent variables, update only the active slider while dragging, clamp to that slider's declared range, and call `slider_automate(sliderN)` after programmatic slider changes.
+- Put coefficient and DSP-state recompute in `@slider`, not only in `@gfx`, so host automation, presets, and custom GUI edits all drive the same DSP path.
+- For knobs, use vertical drag or click-drag distance mapped to the declared slider range; show a clear value readout. For buttons, draw a visible pressed/hover state and use mouse-down edge detection so one click triggers once.
+- For dropdown-like mode controls, prefer a native enum slider unless the user explicitly wants a drawn menu. If drawing a menu, use `gfx_showmenu()` at the control position, keep the option count small, show the active label, and update the enum slider value.
+- For wheel control, read `mouse_wheel`/`mouse_hwheel` only in `@gfx` and clear the wheel state to 0 after using it.
+- For meters, compute smoothed peak/RMS state in `@sample` or `@block`, then draw that smoothed state in `@gfx`. Do not read raw `spl0`/`spl1` directly in `@gfx` and call it a meter.
+- Keep hit boxes generous and visible. Every drawn knob/slider/button needs a label and either a value or state text.
+- Keep generated custom UIs standalone. Do not import third-party UI libraries or `.jsfx-inc` dependencies. If the user explicitly wants a specific UI library, explain that dependency and install path instead of emitting an `import` that may not resolve.
+- If a reliable custom `@gfx` would make the effect too long or brittle, say so briefly and use native JSFX sliders instead; do not claim a custom GUI was built.
+<!-- /SECTION:jsfx_gfx -->
 
 <!-- SECTION:jsfx_dsp_cookbook -->
 JSFX DELAY/REVERB MEMORY COOKBOOK (additive on top of prompt_bundle:jsfx):

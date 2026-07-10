@@ -4459,6 +4459,7 @@ end
 --   drums           phase-safe drum edit / quantize workflow
 --   jsfx            JSFX (EEL2) generation rules
 --   jsfx_dsp_cookbook  Delay/reverb/modulation JSFX memory recipes
+--   jsfx_gfx        Custom @gfx front-panel rules
 --   theme           SetThemeColor backup safety rule
 -- Each is fetched on-demand when the model emits
 -- `<context_needed>prompt_bundle:NAME</context_needed>` so the always-on
@@ -4476,6 +4477,7 @@ local PROMPT_BUNDLE_NAMES = {
   drums          = true,
   jsfx           = true,
   jsfx_dsp_cookbook = true,
+  jsfx_gfx       = true,
   jsfx_pitch     = true,
   theme          = true,
 }
@@ -7035,20 +7037,24 @@ CTX._snapshot_heavy_cache = nil
 -- Returns a list of preemption-reason strings for the debug log.
 --
 -- CHAIN_PHRASE_HINTS extends the trigger surface beyond single-keyword
--- matches: broad multi-FX phrases (e.g. "drum kit", "vocal chain", "mix
--- bus") strongly imply specific plugin types without naming them by type
--- word. When a phrase matches, the preempt loop treats each implied type
+-- matches. Inherently explicit phrases such as "vocal chain" imply specific
+-- plugin types without naming them one by one. Ambiguous target names such as
+-- "drum bus" and "mix bus" require a separate effect/processing signal so a
+-- request like "pan the drum bus" cannot pre-pin unrelated plugin references.
+-- When a phrase matches, the preempt loop treats each implied type
 -- as if its own keyword had hit, pre-pinning that type's plugin_ref + pref
 -- hint and saving the <context_needed>resolve:X</context_needed> round-trip
--- the model would otherwise emit. Each entry is {pattern, {implied_types}};
+-- the model would otherwise emit. Each entry is
+-- {pattern, {implied_types}, requires_effect_intent};
 -- only types the user actually has a pref for get pinned (the main loop
 -- iterates pref_types keys, so unconfigured types fall through naturally).
 -- Saved per matched phrase: one full API round-trip (~2s + small request
--- cost) on the common drum-kit / vocal-chain / mix-bus creation requests.
+-- cost) on common vocal-chain and explicitly requested bus/kit-processing
+-- workflows.
 local CHAIN_PHRASE_HINTS = {
-  { "drum%s+kit",         {"eq", "compressor", "gate"} },
+  { "drum%s+kit",         {"eq", "compressor", "gate"}, true },
   { "drum%s+chain",       {"eq", "compressor", "gate"} },
-  { "drum%s+bus",         {"eq", "compressor"} },
+  { "drum%s+bus",         {"eq", "compressor"}, true },
   -- Vocal-chain variants: the literal "vocal%s+chain" alone misses
   -- common phrasings like "chain of effects ... rock vocal" (observed
   -- in a turn-2 user prompt that paid a wasted resolve round-trip
@@ -7068,22 +7074,77 @@ local CHAIN_PHRASE_HINTS = {
   { "chain.-vocal", {"eq", "compressor", "deesser", "reverb"} },
   { "vocal%s+chain",      {"eq", "compressor", "deesser", "reverb"} },
   { "vocal.-chain",       {"eq", "compressor", "deesser", "reverb"} },
-  { "vocal%s+bus",        {"eq", "compressor"} },
+  { "vocal%s+bus",        {"eq", "compressor"}, true },
   { "guitar%s+chain",     {"eq", "compressor", "saturation"} },
   { "bass%s+chain",       {"eq", "compressor"} },
-  { "mix%s+bus",          {"eq", "compressor", "limiter"} },
-  { "master%s+bus",       {"eq", "compressor", "limiter"} },
+  { "mix%s+bus",          {"eq", "compressor", "limiter"}, true },
+  { "master%s+bus",       {"eq", "compressor", "limiter"}, true },
   { "mastering%s+chain",  {"eq", "compressor", "limiter"} },
   { "recording%s+chain",  {"eq", "compressor", "gate"} },
 }
 -- Exported for the chain-upsert validator retry gate in ReaAssist.lua.
 CTX.CHAIN_PHRASE_HINTS = CHAIN_PHRASE_HINTS
 
+-- True when wording around an otherwise-ambiguous track/bus phrase actually
+-- asks for multi-effect processing. Keep this deliberately narrower than the
+-- normal per-type keyword scan: "add EQ to the drum bus" already preempts EQ
+-- through the explicit `eq` hit and must not imply an unrequested compressor.
+-- Two or more explicit effect families do establish chain context even when
+-- the user does not use the literal word "chain".
+local CHAIN_EFFECT_INTENT_PATTERNS = {
+  "%f[%w]chain%f[%W]",
+  "%f[%w]effects?%f[%W]",
+  "%f[%w]plugins?%f[%W]",
+  "%f[%w]processing%f[%W]",
+  "%f[%w]process%f[%W]",
+  "%f[%w]polish%f[%W]",
+  "%f[%w]glue%f[%W]",
+}
+
+local CHAIN_EFFECT_TYPE_PATTERNS = {
+  "%f[%w]eq%f[%W]",
+  "%f[%w]equalizers?%f[%W]",
+  "%f[%w]compressors?%f[%W]",
+  "%f[%w]compression%f[%W]",
+  "%f[%w]gates?%f[%W]",
+  "%f[%w]limiters?%f[%W]",
+  "%f[%w]reverbs?%f[%W]",
+  "%f[%w]delays?%f[%W]",
+  "%f[%w]de[%- ]?essers?%f[%W]",
+  "%f[%w]saturat[%w]*%f[%W]",
+  "%f[%w]chorus%f[%W]",
+  "%f[%w]phasers?%f[%W]",
+}
+
+local function _prompt_has_chain_effect_intent(text)
+  local t = type(text) == "string" and text:lower() or ""
+  if t == "" then return false end
+  for _, pattern in ipairs(CHAIN_EFFECT_INTENT_PATTERNS) do
+    if t:find(pattern) then return true end
+  end
+  local type_hits = 0
+  for _, pattern in ipairs(CHAIN_EFFECT_TYPE_PATTERNS) do
+    if t:find(pattern) then
+      type_hits = type_hits + 1
+      if type_hits >= 2 then return true end
+    end
+  end
+  return false
+end
+
+local function _chain_phrase_matches(text, hint)
+  if type(text) ~= "string" or type(hint) ~= "table"
+      or not text:find(hint[1]) then
+    return false
+  end
+  return not hint[3] or _prompt_has_chain_effect_intent(text)
+end
+
 function CTX.prompt_indicates_chain_context(text)
   if type(text) ~= "string" or text == "" then return false end
   local t = text:lower()
   for _, hint in ipairs(CHAIN_PHRASE_HINTS) do
-    if t:find(hint[1]) then return true end
+    if _chain_phrase_matches(t, hint) then return true end
   end
   if not t:find("%f[%w]chain%f[%W]") then return false end
   return t:find("%f[%w]drum%f[%W]") ~= nil
@@ -7153,8 +7214,26 @@ local DOCS_PHRASE_HINTS = {
   { "receive from",          "routing"   },
   { "%f[%w]route%f[%W]",     "routing"   },
   { "%f[%w]routing%f[%W]",   "routing"   },
-  { "%f[%w]bus%f[%W]",       "routing"   },
-  { "%f[%w]aux%f[%W]",       "routing"   },
+  -- Bare "bus" / "aux" commonly occurs in track names ("Drum Bus") and
+  -- does not itself request routing. Keep action-bearing forms so genuine
+  -- bus/aux setup still receives the routing reference without bloating
+  -- unrelated track, color, pan, or FX requests.
+  { "create a bus",          "routing"   },
+  { "create bus",            "routing"   },
+  { "make a bus",            "routing"   },
+  { "make bus",              "routing"   },
+  { "add a bus",             "routing"   },
+  { "build a bus",           "routing"   },
+  { "set up a bus",          "routing"   },
+  { "set up bus",            "routing"   },
+  { "create an aux",         "routing"   },
+  { "create aux",            "routing"   },
+  { "make an aux",           "routing"   },
+  { "add an aux",            "routing"   },
+  { "set up an aux",         "routing"   },
+  { "set up aux",            "routing"   },
+  { "aux send",              "routing"   },
+  { "aux return",            "routing"   },
   { "return track",          "routing"   },
   { "hardware output",       "routing"   },
   -- take_fx. The phrase set covers both explicit "take FX" wording and
@@ -7366,11 +7445,12 @@ end
 -- JSFX-intent detection: returns true when the user's prompt explicitly
 -- asks for JSFX/EEL2/custom-DSP work. Intentionally narrow -- only fires on
 -- the literal "jsfx" / "eel2" / "reajs" tokens, the "@init" / "@sample"
--- section markers (which only appear in JSFX code discussions), or the
--- common phrasing "write/build/make a (custom) plugin/effect/DSP". JSFX
--- family hints (shimmer, harmonizer, etc.) alone do NOT trigger -- those
--- words apply equally to plugin tasks, and a false positive here would
--- suppress plugin_ref / api_ref injection that the user actually needed.
+-- section markers (which only appear in JSFX code discussions), or narrow
+-- authoring phrases such as "write/code/create custom plugin". Broad
+-- effect-family hints (shimmer, harmonizer, etc.) alone do NOT trigger here
+-- because those words apply equally to plugin tasks, and a false positive
+-- here would suppress plugin_ref / api_ref injection that the user actually
+-- needed.
 --
 -- Used by the send pipeline to:
 --   - Skip plugin_ref / pref / docs co-pin in the keyword loop below
@@ -7396,6 +7476,20 @@ local function _prompt_indicates_jsfx(text)
   if t:find("%f[%w]reajs%f[%W]") then return true end
   if t:find("@init") or t:find("@sample") or t:find("@gfx")
      or t:find("@slider") or t:find("@block") then return true end
+  local authoring_verb =
+       t:find("%f[%w]write%f[%W]")
+    or t:find("%f[%w]code%f[%W]")
+    or t:find("%f[%w]create%f[%W]")
+    or t:find("%f[%w]build%f[%W]")
+    or t:find("%f[%w]make%f[%W]")
+    or t:find("%f[%w]generate%f[%W]")
+    or t:find("%f[%w]program%f[%W]")
+  local custom_plugin =
+       t:find("%f[%w]custom%s+plugins?%f[%W]")
+    or t:find("%f[%w]custom%s+effects?%f[%W]")
+    or t:find("%f[%w]custom%s+dsp%f[%W]")
+    or t:find("%f[%w]audio%s+plugins?%f[%W]")
+  if authoring_verb and custom_plugin then return true end
   return false
 end
 
@@ -7420,6 +7514,19 @@ local JSFX_FAMILY_HINTS = {
   { "%f[%w]transpose",             "jsfx_pitch" },
   { "%f[%w]grain%f[%W]",           "jsfx_pitch" },
   { "%f[%w]granular",              "jsfx_pitch" },
+}
+
+local JSFX_GFX_HINTS = {
+  "@gfx",
+  "%f[%w]gui%f[%W]",
+  "%f[%w]uis?%f[%W]",
+  "front%s+panels?",
+  "custom%s+interfaces?",
+  "custom%s+uis?",
+  "%f[%w]knobs?%f[%W]",
+  "%f[%w]buttons?%f[%W]",
+  "drawn%s+sliders?",
+  "custom%s+sliders?",
 }
 
 -- Exposed for callers outside this module (Net.send, the snapshot builder).
@@ -7587,7 +7694,7 @@ function CTX.preempt_buckets_for_prompt(user_text)
   local phrase_implied = {}
   if not stock_fx_constraint and not forbids_fx_addition then
     for _, hint in ipairs(CHAIN_PHRASE_HINTS) do
-      if text:find(hint[1]) then
+      if _chain_phrase_matches(text, hint) then
         for _, t in ipairs(hint[2]) do
           if not phrase_implied[t] then phrase_implied[t] = hint[1] end
         end
@@ -7604,7 +7711,8 @@ function CTX.preempt_buckets_for_prompt(user_text)
   end
   local chain_phrase_hit = next(phrase_implied) ~= nil
   local preempt_needs_plugin_helpers =
-    chain_phrase_hit or Code.prompt_has_param_write_intent(user_text)
+    Code.prompt_has_chain_or_recipe_intent(user_text)
+    or Code.prompt_has_param_write_intent(user_text)
   local preempt_live_fx_params =
     CTX.prompt_has_fx_param_read_intent(user_text)
     or Code.prompt_has_param_write_intent(user_text)
@@ -7623,6 +7731,7 @@ function CTX.preempt_buckets_for_prompt(user_text)
       "reaper 7.65", "reaper 7.66", "reaper 7.67", "reaper 7.68",
       "reaper 7.69", "reaper 7.70", "reaper 7.71", "reaper 7.72",
       "reaper 7.73", "reaper 7.74", "reaper 7.75", "reaper 7.76",
+      "reaper 7.77",
       "left/right to grid", "envelope points",
       "midi choke", "choke group", "track grouping", "grouped razor",
       "multi-mono", "multi-stereo", "fx container", "fxoffline",
@@ -7630,6 +7739,7 @@ function CTX.preempt_buckets_for_prompt(user_text)
       "empty fx slot", "fx slot", "send slot", "empty send slot",
       "ui-ordered send", "ui ordered send", "tcp sendlist",
       "mcp sendlist", "chain_index_to_slot", "chain_slot_to_index",
+      "base64 cursor", "gfx.setcursor", "gfx_setcursor",
       "automation item mute", "mute automation item", "d_mute",
       "getsetautomationiteminfo", "gettracksendname", "addregionormarker",
       "delete all sample edits", "mono downmix", "send envelopes",
@@ -7907,6 +8017,22 @@ function CTX.preempt_buckets_for_prompt(user_text)
       if not cookbook_already and S.sticky_context[cookbook_key] then
         Log.line("PREEMPT",
           "injected " .. cookbook_key .. " (JSFX delay/reverb memory intent)")
+      end
+    end
+  end
+  local has_jsfx_context = jsfx_intent
+    or S.sticky_context["prompt_bundle:jsfx"] ~= nil
+  if has_jsfx_context then
+    for _, pattern in ipairs(JSFX_GFX_HINTS) do
+      if text:find(pattern) then
+        local gfx_key = "prompt_bundle:jsfx_gfx"
+        local gfx_already = S.sticky_context[gfx_key]
+        Net.copin_jsfx_family("jsfx_gfx", injected)
+        if not gfx_already and S.sticky_context[gfx_key] then
+          Log.line("PREEMPT",
+            "injected " .. gfx_key .. " (JSFX GUI/front-panel intent)")
+        end
+        break
       end
     end
   end

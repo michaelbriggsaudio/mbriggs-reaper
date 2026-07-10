@@ -309,6 +309,8 @@ local _DETAILS_GROUP_OF = {
   ["Tokens"]     = "usage",
   ["Cache"]      = "usage",
   ["API Calls"]  = "usage",
+  ["Model Calls"] = "usage",
+  ["Transport Retries"] = "usage",
   ["Time"]       = "cost",   -- grouped with Est. Cost so the "bill" sits together
   ["Thinking"]   = "reasoning",
   ["Est. Cost"]  = "cost",
@@ -322,6 +324,8 @@ local _DETAILS_FIELD_KEYS = {
   ["Tokens"]     = "tokens",
   ["Cache"]      = "cache",
   ["API Calls"]  = "api_calls",
+  ["Model Calls"] = "model_calls",
+  ["Transport Retries"] = "transport_retries",
   ["Time"]       = "time",
   ["Thinking"]   = "thinking",
   ["Est. Cost"]  = "est_cost",
@@ -330,7 +334,7 @@ local _DETAILS_FIELD_KEYS = {
 local _DETAILS_ROW_ORDER = {
   "Model", "Complexity",
   "Context", "FX Cache",
-  "Tokens", "Cache", "API Calls", "Time",
+  "Tokens", "Cache", "Model Calls", "Transport Retries", "API Calls", "Time",
   "Thinking",
   "Est. Cost", "Est. Total",
 }
@@ -339,10 +343,12 @@ local _DETAILS_FIELD_TOOLTIPS = {
   ["Model"]      = "Which model produced this response.",
   ["Est. Cost"]  = "Estimated cost for this exchange based on the provider's per-token pricing. May differ slightly from what the provider actually bills.",
   ["Est. Total"] = "Running total of estimated cost across every turn in this chat up to and including this one. Hidden on turn 1 since it would just match Est. Cost.",
-  ["Tokens"]     = "Input tokens / output tokens used in this exchange. Input covers your prompt plus the bundled context; output is the model's reply.",
-  ["Time"]       = "How long the model took to return its response.",
-  ["Cache"]      = "Tokens read from the prompt cache / tokens newly written to the cache this turn. Cache reads are billed at a fraction of the normal input-token rate.",
-  ["API Calls"]  = "How many round-trips to the model this turn took. 1 means a single clean request. >1 means a silent retry fired (docs auto-fetch, beta-header fallback, cache-expiration refresh, intra-turn context fetch); the Tokens / Cache / Time / Cost values reflect only the LAST request, so when this is >1 the visible numbers undercount the true work for the turn.",
+  ["Tokens"]     = "Total input tokens / output tokens reported across this exchange. Input covers your prompt plus bundled context; output includes intermediate context requests and the final reply.",
+  ["Time"]       = "Wall-clock time from send until the exchange settled, including automatic context fetches or repair follow-ups.",
+  ["Cache"]      = "Total tokens read from the prompt cache / newly written to the cache across this exchange. Cache reads are billed at a fraction of the normal input-token rate.",
+  ["API Calls"]  = "How many model round-trips this exchange took. 1 means a single clean request. A higher number can include automatic context fetches, repair follow-ups, or provider transport retries. Tokens, Cache, and Est. Cost accumulate every successful response that reports usage; failed attempts without provider usage data cannot be included. Time spans the full exchange.",
+  ["Model Calls"] = "Initial model requests plus context fetches and model/validator repair calls. Provider transport retries are counted separately.",
+  ["Transport Retries"] = "Automatic re-sends after a transient provider overload or transport failure. These are counted separately from billable model calls.",
   ["Complexity"] = "Auto-computed complexity score of your prompt (0-10). Higher = a more involved request. The parenthesised label shows which tier Auto mode picked for this turn: Fast (simple prompts), Balanced (mid-range), or Smart (complex work).",
   ["Thinking"]   = "Reasoning effort level used for this response (only relevant for models that support extended thinking).",
   ["FX Cache"]   = "Filter applied to the FX cache this turn (limits which plugins contribute to the Context bundle).",
@@ -702,6 +708,24 @@ function UI.render_float_toast(anchor_x, anchor_y, anchor_w, anchor_h)
   PopStyleColor(RA.ctx, 2)
 end
 
+-- Keep every visual run surface consistent when a requested safety backup
+-- fails. Execution has already been stopped by the caller; this helper makes
+-- that stop visible and gives the user a deliberate recovery path.
+function UI.report_backup_run_blocked(err)
+  local message = UI.t("code.backup_failed_run", {
+    error = tostring(err or "unknown_error"),
+  }, "Safety backup failed (" .. tostring(err or "unknown_error")
+    .. "). The generated code was NOT run. Check the project folder, disk "
+    .. "space, and permissions, then try again. To proceed without a backup, "
+    .. "turn off Auto-backup in Settings and run the code again.")
+  Log.add_error(message)
+  S.status = "error"
+  if UI.show_float_toast then
+    UI.show_float_toast(message, "err")
+  end
+  return message
+end
+
 
 -- Draw a unified highlight border around the whole window when a file
 -- is being dragged over any drop target. Called once per frame at the end.
@@ -847,10 +871,11 @@ end
 --
 -- Pattern: call UI.input_with_menu IMMEDIATELY after any
 -- ImGui_InputText / ImGui_InputTextWithHint / ImGui_InputTextMultiline
--- call, passing the (changed, new_value) tuple it returned. The helper
--- attaches a right-click popup to that just-rendered item and returns
--- a possibly-augmented tuple: if the user picks Paste, it returns
--- (true, clipboard_text); if Cut, (true, ""); otherwise unchanged.
+-- call, passing the (changed, new_value) tuple it returned and a stable
+-- popup id derived from that input's own label. The helper attaches a
+-- right-click popup to that just-rendered item and returns a possibly-
+-- augmented tuple: if the user picks Paste, it returns (true,
+-- clipboard_text); if Cut, (true, ""); otherwise unchanged.
 --
 -- Paste replaces the entire field rather than inserting at the cursor.
 -- Cursor-aware paste would require an InputText edit-callback to
@@ -859,10 +884,14 @@ end
 -- paste; the right-click menu is the no-keyboard fallback for cases
 -- (API keys, custom URLs, names) where the user pastes into an empty
 -- or about-to-be-replaced field anyway.
-function UI.input_with_menu(ctx, changed, new_value)
-  -- Bind the popup to the last submitted InputText item. This keeps the menu
-  -- identity stable even if rows are inserted/removed while the popup is open.
-  if ImGui.ImGui_BeginPopupContextItem(ctx) then
+function UI.input_with_menu(ctx, changed, new_value, popup_id)
+  -- Hover/open detection still uses the last submitted InputText item, while
+  -- popup_id owns the menu identity. Missing ids disable the menu rather than
+  -- falling back to ImGui's implicit item id, which can assert on id==0.
+  if popup_id == nil or popup_id == "" then
+    return changed, new_value
+  end
+  if ImGui.ImGui_BeginPopupContextItem(ctx, popup_id) then
     if ImGui.ImGui_MenuItem(ctx, UI.t("common.copy", nil, "Copy")) then
       ImGui.ImGui_SetClipboardText(ctx, new_value or "")
     end
@@ -1678,6 +1707,8 @@ function UI.chat_message_cull_key(msg, i, count, avail_w, chat_font_key,
     msg.thinking_label,
     msg.fx_cache_label,
     msg.api_calls,
+    msg.model_calls,
+    msg.transport_retries,
     msg.auto_ran,
     msg.auto_run_block_reason,
     msg.run_status,
@@ -2151,9 +2182,10 @@ function UI.open_settings(return_to)
   api_keys.saved_reply_language_idx    = prefs.reply_language_idx
   api_keys.saved_include_snapshot      = prefs.include_snapshot
   api_keys.saved_include_api_ref       = prefs.include_api_ref
-  api_keys.saved_compact_history       = prefs.compact_history
   api_keys.saved_diag_auto_tier        = prefs.diag_auto_tier
   api_keys.saved_cloud_request_timeout = prefs.cloud_request_timeout
+  api_keys.saved_turn_cost_limit_usd   = prefs.turn_cost_limit_usd
+  api_keys.saved_turn_token_limit      = prefs.turn_token_limit
 
   -- Section-open state is per Settings session; API Keys + Preferences start
   -- open, Advanced stays closed so destructive controls remain tucked away.
@@ -3323,7 +3355,12 @@ function UI.mode_model_row_v5()
   -- Descriptor by position in the current provider's model list. ImGui's
   -- MenuItem "shortcut" slot right-aligns and dims the text -- reusing it
   -- for descriptors gives us a clean two-column look without extra widgets.
-  local function model_descriptor(i, total)
+  local function model_descriptor(i, total, model)
+    local explicit = type(model) == "table"
+      and tostring(model.descriptor or "") or ""
+    if explicit == "fast" or explicit == "balanced" or explicit == "smart" then
+      return UI.t("mode.model.descriptor." .. explicit, nil, explicit)
+    end
     if total <= 1 then return nil end
     if total == 2 then
       return i == 1
@@ -3378,14 +3415,16 @@ function UI.mode_model_row_v5()
                       and S.gemini_paid_tier ~= true) or false
       local d = ""
       if not is_custom then
-        d = model_descriptor(i, total_models) or ""
+        d = model_descriptor(i, total_models, raw_m) or ""
       end
       local r
       local r_font = nil
       if locked then
         r = UI.t("mode.model.paid_only", nil, "paid only")
       elseif show_price and not is_custom then
-        r = string.rep("$", i)
+        local price_tier = math.floor(tonumber(raw_m.price_tier) or i)
+        price_tier = math.max(1, math.min(4, price_tier))
+        r = string.rep("$", price_tier)
         r_font = menu_ascii_font
       else
         r = ""
@@ -6063,6 +6102,14 @@ function Render.tos_screen()
   -- api_keys so subsequent renders skip the split unless the rendered body
   -- changes through language, year, source text, or catalog-version updates.
   local tos_text = api_keys._tos_text or api_keys.tos_text or ""
+  if I18N and I18N.merge_tos_storage_disclosure then
+    tos_text = I18N.merge_tos_storage_disclosure(tos_text, UI.t(
+      "tos.key_storage_disclosure_v2", nil,
+      "KEY STORAGE\nAPI keys use reversible local obfuscation tied to the "
+        .. "REAPER install path. They are not encrypted in an OS credential "
+        .. "vault. Anyone who can read your REAPER settings and the ReaAssist "
+        .. "source can recover them."), tos_lang)
+  end
   if not api_keys._tos_blocks
       or api_keys._tos_blocks_lang ~= tos_lang
       or api_keys._tos_blocks_text ~= tos_text then
@@ -9923,9 +9970,10 @@ local function _exit_settings_screen()
   api_keys.saved_reply_language_idx    = nil
   api_keys.saved_include_snapshot      = nil
   api_keys.saved_include_api_ref       = nil
-  api_keys.saved_compact_history       = nil
   api_keys.saved_diag_auto_tier        = nil
   api_keys.saved_cloud_request_timeout = nil
+  api_keys.saved_turn_cost_limit_usd   = nil
+  api_keys.saved_turn_token_limit      = nil
   api_keys.pending_diag_auto_tier      = nil
   api_keys.open_diag_auto_confirm      = nil
   api_keys.pending_settings_save_from_unsaved = nil
@@ -10100,12 +10148,14 @@ function Render._shared_key_screen_impl()
     ImGui.ImGui_PushTextWrapPos(RA.ctx, fr_intro_wrap)
     PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-    Text(RA.ctx, UI.t("settings.first_run.intro", nil,
-      "Keys are obfuscated and stored locally on this machine and sent "
-      .. "only to your chosen provider. Claude has shown the best all "
-      .. "around results in testing. Gemini is the only provider to "
-      .. "offer a free tier. You may also use a local or custom LLM to "
-      .. "keep your data fully offline and private."))
+    Text(RA.ctx, UI.t("settings.first_run.intro_storage_v2", nil,
+      "Keys are stored locally using reversible obfuscation, not encryption "
+      .. "or an OS credential vault. Anyone with access to your REAPER "
+      .. "settings and this source code can recover them. Keys are sent only "
+      .. "to the provider or custom endpoint you configure. Claude has shown "
+      .. "the best all-around results in testing, Gemini is the only built-in "
+      .. "provider with a free tier, and local/custom models can keep requests "
+      .. "on your machine."))
     PopStyleColor(RA.ctx)
     PopFont(RA.ctx)
     ImGui.ImGui_PopTextWrapPos(RA.ctx)
@@ -10457,7 +10507,8 @@ function Render._shared_key_screen_impl()
         -- BeginPopup/MenuItem calls become the "last item" if the popup is
         -- open, which would corrupt IsItemActive's reading of the input.
         local input_active = ImGui.ImGui_IsItemActive(RA.ctx)
-        _, new_buf = UI.input_with_menu(RA.ctx, false, new_buf)
+        _, new_buf = UI.input_with_menu(RA.ctx, false, new_buf,
+          "##frkey_ctx_" .. i)
         ImGui.ImGui_PopStyleVar(RA.ctx)
         PopFont(RA.ctx)
         PopStyleColor(RA.ctx, 2)  -- FrameBg, FrameBgHovered
@@ -10528,10 +10579,12 @@ function Render._shared_key_screen_impl()
       -- security reassurance (obfuscation + install-path lock) without
       -- taking a dedicated row. IsItemHovered after EndChild reports
       -- hover on the child window itself.
-      UI.tooltip(UI.t("settings.api_key.card_tooltip", {
+      UI.tooltip(UI.t("settings.api_key.card_tooltip_storage_v2", {
         provider = prov.label,
       }, prov.label .. " API key. Stored locally on this machine, "
-        .. "obfuscated, and locked to this install path for security."))
+        .. "using reversible obfuscation tied to this REAPER install path. "
+        .. "This is not encryption or an OS credential vault; someone with "
+        .. "access to the settings and source can recover it."))
       -- (No trailing inter-card Dummy here -- the pre-card Dummy at
       -- the top of the loop handles inter-card spacing, and the
       -- post-loop Dummy below sizes the card -> buttons gap exactly.)
@@ -10963,24 +11016,6 @@ function Render._shared_key_screen_impl()
     end
     Dummy(RA.ctx, 1, RA.SC(6))
 
-    -- Toggle: compact older successful assistant code replies in the
-    -- uncached history tail. Kept default-off until real-session
-    -- measurement says it should become the normal path.
-    do
-      local changed, new_on = UI.v5_toggle("##adv_compact_history",
-        UI.t("settings.adv.compact_history.label", nil,
-          "Compact long chat history"),
-        prefs.compact_history,
-        UI.t("settings.adv.compact_history.tooltip", nil,
-          "Replace older successful code replies with short summaries to "
-          .. "save tokens in long sessions. The latest reply stays verbatim, "
-          .. "and follow-up edit requests keep the full history. For Claude, "
-          .. "ReaAssist keeps history verbatim to preserve prompt-cache savings."),
-        inner_w)
-      if changed then prefs.compact_history = new_on end
-    end
-    Dummy(RA.ctx, 1, RA.SC(6))
-
     -- Automatic diagnostics. Basic is default-on anonymous metrics; Extended
     -- also includes redacted chat/diagnostic detail and remains opt-in.
     do
@@ -11086,6 +11121,109 @@ function Render._shared_key_screen_impl()
           .. "may need 300+"), col2_w)
       if to_changed then
         prefs.cloud_request_timeout = to_values[to_new_idx + 1]
+      end
+    end
+
+    -- Per-turn spend guardrails. These are preflight warning thresholds based on
+    -- actual usage already returned plus the active model's worst-case next
+    -- request allowance. The emergency MAX_CALLS_PER_TURN backstop remains a
+    -- separate final safeguard; these lower, user-visible limits pause
+    -- expensive continuations for explicit consent before network traffic.
+    -- Wrapped amber warning line under a per-turn limit row. Shown when the
+    -- selected limit sits below the active model's worst-case single request,
+    -- where every send may need confirmation before the first call lands.
+    local function turn_limit_warning(txt)
+      if not txt or txt == "" then return end
+      local wrap_x = GetCursorPosX(RA.ctx) + inner_w
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(10))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
+      ImGui.ImGui_PushTextWrapPos(RA.ctx, wrap_x)
+      ImGui.ImGui_TextWrapped(RA.ctx, txt)
+      ImGui.ImGui_PopTextWrapPos(RA.ctx)
+      PopStyleColor(RA.ctx)
+      PopFont(RA.ctx)
+    end
+    local turn_floor = Net and Net._turn_call_floor and Net._turn_call_floor()
+
+    Dummy(RA.ctx, 1, RA.SC(6))
+    do
+      local values = { 0.25, 0.50, 1.00, 2.00, 5.00, 10.00, 25.00, 100.00 }
+      local current = tonumber(prefs.turn_cost_limit_usd)
+        or CFG.TURN_COST_LIMIT_DEFAULT
+      local selected = 0
+      local labels = {}
+      local matched = false
+      for i, value in ipairs(values) do
+        labels[i] = str_format("$%.2f", value)
+        if value == current then selected = i - 1; matched = true end
+      end
+      -- Prefs may hold a hand-edited ExtState value matching no preset. Append
+      -- it as its own entry and select it so the dropdown shows the real limit
+      -- instead of silently displaying the first preset; picking a preset
+      -- replaces the appended entry.
+      if not matched then
+        values[#values + 1] = current
+        labels[#labels + 1] = str_format("$%.2f", current)
+        selected = #labels - 1
+      end
+      local changed, idx = UI.v5_select_row("##adv_turn_cost_limit",
+        UI.t("settings.adv.turn_cost_limit.label", nil,
+          "Per-turn dollar limit"),
+        table.concat(labels, "\0") .. "\0", selected,
+        UI.t("settings.adv.turn_cost_limit.tooltip_v2", nil,
+          "Warns before a model call when actual cost already used plus the next call's worst-case estimate would exceed this amount."),
+        inner_w)
+      if changed then prefs.turn_cost_limit_usd = values[idx + 1] end
+      if turn_floor and turn_floor.cost_limit_applies
+          and current < (turn_floor.cost or 0) then
+        local cost_str = MODELS.format_cost(turn_floor.cost)
+        turn_limit_warning(UI.t("settings.adv.turn_cost_limit.too_low_v2",
+          { cost = cost_str },
+          str_format("This is below the selected model's worst-case single request "
+            .. "(about %s). At this setting, every send may require confirmation.",
+            cost_str)))
+      end
+    end
+
+    Dummy(RA.ctx, 1, RA.SC(6))
+    do
+      local values = { 50000, 100000, 250000, 500000, 750000,
+                       1000000, 1250000, 2000000, 4000000 }
+      local current = tonumber(prefs.turn_token_limit)
+        or CFG.TURN_TOKEN_LIMIT_DEFAULT
+      local selected = 0
+      local labels = {}
+      local matched = false
+      local function token_label(value)
+        return value >= 1000000
+          and str_format("%.2gM tokens", value / 1000000)
+          or str_format("%dk tokens", math_floor(value / 1000))
+      end
+      for i, value in ipairs(values) do
+        labels[i] = token_label(value)
+        if value == current then selected = i - 1; matched = true end
+      end
+      -- Same non-preset handling as the dollar row above.
+      if not matched then
+        values[#values + 1] = current
+        labels[#labels + 1] = token_label(current)
+        selected = #labels - 1
+      end
+      local changed, idx = UI.v5_select_row("##adv_turn_token_limit",
+        UI.t("settings.adv.turn_token_limit.label", nil,
+          "Per-turn token limit"),
+        table.concat(labels, "\0") .. "\0", selected,
+        UI.t("settings.adv.turn_token_limit.tooltip_v2", nil,
+          "Warns before a model call when tokens already used plus the next call's worst-case allowance would exceed this total."),
+        inner_w)
+      if changed then prefs.turn_token_limit = values[idx + 1] end
+      if turn_floor and current < (turn_floor.tokens or 0) then
+        local tok_str = fmt_num(turn_floor.tokens)
+        turn_limit_warning(UI.t("settings.adv.turn_token_limit.too_low_v2",
+          { tokens = tok_str },
+          str_format("This is below the selected model's worst-case single request "
+            .. "(about %s tokens). At this setting, every send may require confirmation.",
+            tok_str)))
       end
     end
 
@@ -11434,14 +11572,17 @@ function Render._shared_key_screen_impl()
         if api_keys.saved_include_api_ref ~= nil then
           prefs.include_api_ref = api_keys.saved_include_api_ref
         end
-        if api_keys.saved_compact_history ~= nil then
-          prefs.compact_history = api_keys.saved_compact_history
-        end
         if api_keys.saved_diag_auto_tier ~= nil then
           prefs.diag_auto_tier = api_keys.saved_diag_auto_tier
         end
         if api_keys.saved_cloud_request_timeout then
           prefs.cloud_request_timeout = api_keys.saved_cloud_request_timeout
+        end
+        if api_keys.saved_turn_cost_limit_usd then
+          prefs.turn_cost_limit_usd = api_keys.saved_turn_cost_limit_usd
+        end
+        if api_keys.saved_turn_token_limit then
+          prefs.turn_token_limit = api_keys.saved_turn_token_limit
         end
         _exit_settings_screen()
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
@@ -11503,17 +11644,19 @@ function Render._shared_key_screen_impl()
     and prefs.include_snapshot ~= api_keys.saved_include_snapshot
   local ref_changed     = api_keys.saved_include_api_ref ~= nil
     and prefs.include_api_ref ~= api_keys.saved_include_api_ref
-  local compact_changed = api_keys.saved_compact_history ~= nil
-    and prefs.compact_history ~= api_keys.saved_compact_history
   local diag_changed    = api_keys.saved_diag_auto_tier ~= nil
     and prefs.diag_auto_tier ~= api_keys.saved_diag_auto_tier
   local to_changed      = api_keys.saved_cloud_request_timeout
     and prefs.cloud_request_timeout ~= api_keys.saved_cloud_request_timeout
+  local cost_limit_changed = api_keys.saved_turn_cost_limit_usd
+    and prefs.turn_cost_limit_usd ~= api_keys.saved_turn_cost_limit_usd
+  local token_limit_changed = api_keys.saved_turn_token_limit
+    and prefs.turn_token_limit ~= api_keys.saved_turn_token_limit
 
   local any_pref_changed = scale_changed or theme_changed
     or upd_changed or bak_changed or font_changed or lang_changed
-    or snap_changed or ref_changed or compact_changed
-    or diag_changed or to_changed
+    or snap_changed or ref_changed
+    or diag_changed or to_changed or cost_limit_changed or token_limit_changed
 
   -- has_any_key flips true if any provider is usable: a built-in with
   -- a saved key in api_key_map, OR a custom provider record (the loop
@@ -11872,14 +12015,17 @@ function Render._shared_key_screen_impl()
       if api_keys.saved_include_api_ref ~= nil then
         api_keys.saved_include_api_ref = nil
       end
-      if api_keys.saved_compact_history ~= nil then
-        api_keys.saved_compact_history = nil
-      end
       if api_keys.saved_diag_auto_tier ~= nil then
         api_keys.saved_diag_auto_tier = nil
       end
       if api_keys.saved_cloud_request_timeout then
         api_keys.saved_cloud_request_timeout = nil
+      end
+      if api_keys.saved_turn_cost_limit_usd then
+        api_keys.saved_turn_cost_limit_usd = nil
+      end
+      if api_keys.saved_turn_token_limit then
+        api_keys.saved_turn_token_limit = nil
       end
       if Store and Store.save_config then Store.save_config() end
       if first_valid_idx then
@@ -12748,7 +12894,8 @@ function Render.custom_llm_screen()
         "e.g. Ollama Local, OpenRouter, Groq"),
       edit.label)
     UI.focus_ring()
-    _, new_label = UI.input_with_menu(RA.ctx, false, new_label)
+    _, new_label = UI.input_with_menu(RA.ctx, false, new_label,
+      "##cus_label_ctx")
     _pop_input_style()
     edit.label = new_label
     UI.tooltip(UI.t("settings.custom.tip.name", nil,
@@ -12772,7 +12919,8 @@ function Render.custom_llm_screen()
       "http://localhost:11434/v1/chat/completions",
       edit.endpoint)
     UI.focus_ring()
-    _, new_endpoint = UI.input_with_menu(RA.ctx, false, new_endpoint)
+    _, new_endpoint = UI.input_with_menu(RA.ctx, false, new_endpoint,
+      "##cus_endpoint_ctx")
     _pop_input_style()
     edit.endpoint = new_endpoint
     UI.tooltip(UI.t("settings.custom.tip.endpoint", nil,
@@ -12942,21 +13090,23 @@ function Render.custom_llm_screen()
       edit.key,
       ImGui.ImGui_InputTextFlags_Password())
     UI.focus_ring()
-    _, new_custom_key = UI.input_with_menu(RA.ctx, false, new_custom_key)
+    _, new_custom_key = UI.input_with_menu(RA.ctx, false, new_custom_key,
+      "##cus_key_ctx")
     _pop_input_style()
     edit.key = new_custom_key
-    UI.tooltip(UI.t("settings.custom.tip.api_key", nil,
+    UI.tooltip(UI.t("settings.custom.tip.api_key_storage_v2", nil,
       "The bearer token sent as 'Authorization: Bearer <key>' on every "
       .. "request.\n\n"
       .. "REQUIRED for hosted gateways: OpenRouter (sk-or-...), Groq "
-      .. "(gsk_...), Together AI, Mistral, Fireworks, "
-      .. "Anyscale, Cloudflare AI Gateway, etc.\n\n"
+      .. "(gsk_...), Together AI, Mistral, Fireworks, Anyscale, "
+      .. "Cloudflare AI Gateway, etc.\n\n"
       .. "LEAVE BLANK for local servers (Ollama, LM Studio, llama.cpp, "
-      .. "vLLM) that don't require auth. The Authorization header is "
-      .. "omitted entirely in that case; some local servers reject a "
-      .. "bare 'Bearer ' header, so empty really does mean empty.\n\n"
-      .. "The key is stored XOR-obfuscated and tied to this REAPER "
-      .. "install path; copying the .ini to another machine won't work."))
+      .. "vLLM) that don't require auth. The Authorization header is omitted "
+      .. "entirely in that case; some local servers reject a bare 'Bearer ' "
+      .. "header, so empty really does mean empty.\n\n"
+      .. "The key is stored locally using reversible XOR obfuscation tied to "
+      .. "this REAPER install path. It is not encrypted in an OS credential "
+      .. "vault; anyone with access to the settings and source can recover it."))
     custom_provider_inline_msg(edit.errors.key, TK.red)
 
     ImGui.ImGui_EndChild(RA.ctx)
@@ -13099,7 +13249,8 @@ function Render.custom_llm_screen()
         UI.t("settings.custom.field.model_id_hint", nil, "qwen2.5-coder-14b"),
         row.id)
       UI.focus_ring()
-      _, new_id = UI.input_with_menu(RA.ctx, false, new_id)
+      _, new_id = UI.input_with_menu(RA.ctx, false, new_id,
+        "##cus_mid_ctx_" .. ri)
       row.id = new_id
 
       SameLine(RA.ctx, 0, row_gap)
@@ -13113,7 +13264,8 @@ function Render.custom_llm_screen()
         UI.t("settings.custom.field.notes_hint", nil, "thinking, fast..."),
         row.notes or "")
       UI.focus_ring()
-      _, new_notes = UI.input_with_menu(RA.ctx, false, new_notes)
+      _, new_notes = UI.input_with_menu(RA.ctx, false, new_notes,
+        "##cus_dnotes_ctx_" .. ri)
       row.notes = new_notes
       UI.tooltip(UI.t("settings.custom.tip.notes",
         { count = Custom.MAX_NOTES_LEN },
@@ -13310,7 +13462,8 @@ function Render.custom_llm_screen()
             "thinking, fast, creative..."),
           row.notes or "")
         UI.focus_ring()
-        _, popup_notes = UI.input_with_menu(RA.ctx, false, popup_notes)
+        _, popup_notes = UI.input_with_menu(RA.ctx, false, popup_notes,
+          "##cus_dnotes_pop_ctx_" .. ri)
         _pop_input_style()
         row.notes = popup_notes
         UI.tooltip(UI.t("settings.custom.tip.details.notes",
@@ -13340,7 +13493,8 @@ function Render.custom_llm_screen()
           local _, new = ImGui.ImGui_InputTextWithHint(RA.ctx,
             "##cus_" .. field .. "_" .. ri, hint, row[field] or "")
           UI.focus_ring()
-          _, new = UI.input_with_menu(RA.ctx, false, new)
+          _, new = UI.input_with_menu(RA.ctx, false, new,
+            "##cus_" .. field .. "_ctx_" .. ri)
           _pop_input_style()
           row[field] = new
           UI.tooltip(tip)
@@ -13391,7 +13545,8 @@ function Render.custom_llm_screen()
           "##cus_dctx_" .. ri, tostring(CUSTOM_DEFAULT_CTX),
           row.context_window or "")
         UI.focus_ring()
-        _, new_ctxw = UI.input_with_menu(RA.ctx, false, new_ctxw)
+        _, new_ctxw = UI.input_with_menu(RA.ctx, false, new_ctxw,
+          "##cus_dctx_ctx_" .. ri)
         _pop_input_style()
         row.context_window = new_ctxw
         UI.tooltip(UI.t("settings.custom.tip.details.context_window", nil,
@@ -13418,7 +13573,8 @@ function Render.custom_llm_screen()
         local _, new_eb = ImGui.ImGui_InputTextMultiline(RA.ctx,
           "##cus_deb_" .. ri, row.extra_body or "", fw, eb_h)
         UI.focus_ring()
-        _, new_eb = UI.input_with_menu(RA.ctx, false, new_eb)
+        _, new_eb = UI.input_with_menu(RA.ctx, false, new_eb,
+          "##cus_deb_ctx_" .. ri)
         _pop_input_style()
         row.extra_body = new_eb
         UI.tooltip(UI.t("settings.custom.tip.details.extra_body", nil,
@@ -13523,7 +13679,8 @@ function Render.custom_llm_screen()
     local _, new_timeout = ImGui.ImGui_InputTextWithHint(RA.ctx, "##cus_timeout",
       tostring(CUSTOM_DEFAULT_TIMEOUT), edit.timeout)
     UI.focus_ring()
-    _, new_timeout = UI.input_with_menu(RA.ctx, false, new_timeout)
+    _, new_timeout = UI.input_with_menu(RA.ctx, false, new_timeout,
+      "##cus_timeout_ctx")
     _pop_input_style()
     edit.timeout = new_timeout
     UI.tooltip(UI.t("settings.custom.tip.request_timeout", nil,
@@ -13544,7 +13701,8 @@ function Render.custom_llm_screen()
     local _, new_ctimeout = ImGui.ImGui_InputTextWithHint(RA.ctx, "##cus_ctimeout",
       tostring(Custom.DEFAULT_CONNECT), edit.connect_timeout)
     UI.focus_ring()
-    _, new_ctimeout = UI.input_with_menu(RA.ctx, false, new_ctimeout)
+    _, new_ctimeout = UI.input_with_menu(RA.ctx, false, new_ctimeout,
+      "##cus_ctimeout_ctx")
     _pop_input_style()
     edit.connect_timeout = new_ctimeout
     UI.tooltip(UI.t("settings.custom.tip.connect_timeout", nil,
@@ -13567,7 +13725,8 @@ function Render.custom_llm_screen()
         "e.g. openrouter/anthropic/   or   ollama/"),
       edit.model_prefix)
     UI.focus_ring()
-    _, new_prefix = UI.input_with_menu(RA.ctx, false, new_prefix)
+    _, new_prefix = UI.input_with_menu(RA.ctx, false, new_prefix,
+      "##cus_model_prefix_ctx")
     _pop_input_style()
     edit.model_prefix = new_prefix
     UI.tooltip(UI.t("settings.custom.tip.model_prefix", nil,
@@ -13587,7 +13746,8 @@ function Render.custom_llm_screen()
     local _, new_headers = ImGui.ImGui_InputTextMultiline(RA.ctx, "##cus_headers",
       edit.headers_text or "", adv_card_w, headers_h)
     UI.focus_ring()
-    _, new_headers = UI.input_with_menu(RA.ctx, false, new_headers)
+    _, new_headers = UI.input_with_menu(RA.ctx, false, new_headers,
+      "##cus_headers_ctx")
     _pop_input_style()
     edit.headers_text = new_headers
     UI.tooltip(UI.t("settings.custom.tip.headers", nil,
@@ -13609,7 +13769,8 @@ function Render.custom_llm_screen()
     local _, new_body = ImGui.ImGui_InputTextMultiline(RA.ctx, "##cus_body",
       edit.extra_body or "", adv_card_w, body_h)
     UI.focus_ring()
-    _, new_body = UI.input_with_menu(RA.ctx, false, new_body)
+    _, new_body = UI.input_with_menu(RA.ctx, false, new_body,
+      "##cus_body_ctx")
     _pop_input_style()
     edit.extra_body = new_body
     UI.tooltip(UI.t("settings.custom.tip.extra_body_provider", nil,
@@ -16735,9 +16896,10 @@ function Render.main_window()
       api_keys.saved_reply_language_idx   = nil
       api_keys.saved_include_snapshot     = nil
       api_keys.saved_include_api_ref      = nil
-      api_keys.saved_compact_history      = nil
       api_keys.saved_diag_auto_tier       = nil
       api_keys.saved_cloud_request_timeout = nil
+      api_keys.saved_turn_cost_limit_usd  = nil
+      api_keys.saved_turn_token_limit     = nil
       api_keys.custom_instr_loaded        = nil
       api_keys.custom_instr_return_screen = nil
       api_keys.pending_diag_auto_tier     = nil
@@ -17557,7 +17719,9 @@ function Render.main_window()
              or msg._details_fm_cache_c   ~= msg.tok_cache_create
              or msg._details_fm_thinking  ~= msg.thinking_label
              or msg._details_fm_fx_cache  ~= msg.fx_cache_label
-             or msg._details_fm_api_calls ~= msg.api_calls then
+             or msg._details_fm_api_calls ~= msg.api_calls
+             or msg._details_fm_model_calls ~= msg.model_calls
+             or msg._details_fm_transport_retries ~= msg.transport_retries then
             if msg._ctx_display_src ~= msg.ctx_label then
               msg._ctx_display_src = msg.ctx_label
               msg._ctx_display     = (msg.ctx_label
@@ -17635,6 +17799,12 @@ function Render.main_window()
             if msg.api_calls then
               field_map["API Calls"] = tostring(msg.api_calls)
             end
+            if msg.model_calls then
+              field_map["Model Calls"] = tostring(msg.model_calls)
+            end
+            if (msg.transport_retries or 0) > 0 then
+              field_map["Transport Retries"] = tostring(msg.transport_retries)
+            end
 
             -- Per-field value colour overrides. Est. Cost and Est. Total
             -- use a darkened accent -- the "receipt" lines visually weighted
@@ -17662,6 +17832,8 @@ function Render.main_window()
             msg._details_fm_thinking  = msg.thinking_label
             msg._details_fm_fx_cache  = msg.fx_cache_label
             msg._details_fm_api_calls = msg.api_calls
+            msg._details_fm_model_calls = msg.model_calls
+            msg._details_fm_transport_retries = msg.transport_retries
           end
           local field_map = msg._details_field_map
           local color_map = msg._details_color_map
@@ -18762,7 +18934,8 @@ function Render.main_window()
               "##code_" .. i, msg.code_block,
               65536, code_w - CODE_PAD * 2, content_h, 0, nil)
             if edit_font then PopFont(RA.ctx) end
-            code_changed, new_code = UI.input_with_menu(RA.ctx, code_changed, new_code)
+            code_changed, new_code = UI.input_with_menu(RA.ctx,
+              code_changed, new_code, "##code_ctx_" .. i)
             if code_changed then
               msg.code_block = new_code
               msg.lua_artifact = nil
@@ -18828,6 +19001,14 @@ function Render.main_window()
               auto_run_block_warning = UI.t(
                 "auto_run.blocked.proq4_bell_slope", nil,
                 "Auto-run blocked: Pro-Q 4 Bell boost/cut bands did not set Slope to 12 dB/oct. Review the Pro-Q 4 slope writes before running manually.")
+            elseif reason == "backup_failed" then
+              auto_run_block_warning = UI.t(
+                "code.backup_failed_auto_run", nil,
+                "Auto-run was blocked because ReaAssist could not create a safety backup. Check the project folder, disk space, and permissions, then try again. To proceed without a backup, turn off Auto-backup in Settings and run the code manually.")
+            elseif reason == "action_relevance_review" then
+              auto_run_block_warning = UI.t(
+                "auto_run.blocked.relevance", nil,
+                "Auto-run was blocked because the generated action did not clearly match the request and captured session. Review the target tracks, plugins, and REAPER actions before running it manually.")
             else
               auto_run_block_warning = UI.t(
                 "auto_run.blocked.validator", nil,
@@ -18906,20 +19087,21 @@ function Render.main_window()
                 S.risky_warn_detail = risk_warning
                 S.open_risky_warn   = true
               elseif prefs.auto_backup then
-                -- Only `berr` is consumed below; the success flag is implicit
-                -- (no err -> backup ran). Discard the first return.
                 local _, berr = Code.safety_backup()
                 if berr == "unsaved" then
                   S.backup_warn_code = msg.code_block
                   S.backup_warn_idx  = i
                   S.open_backup_warn = true
-                else
+                elseif Code.safety_backup_can_proceed(berr) then
                   S.status = "running"
                   local ok = Code.run(msg.code_block)
                   Code.apply_run_result_to_message(msg, ok, "lua",
                     msg.code_block, false)
                   if i == #S.display_messages then S.pending_code = nil end
                   S.status = ok and "idle" or "error"
+                  S.refocus_prompt = true
+                else
+                  msg.run_blocked = UI.report_backup_run_blocked(berr)
                   S.refocus_prompt = true
                 end
               else
@@ -19312,6 +19494,15 @@ function Render.main_window()
               ar_sy + AR_PAD_Y - AR_LIFT,
               ar_fg, ar_text)
             Dummy(RA.ctx, ar_w, ar_h)
+          end
+          if msg.run_status == "ran_ok"
+              and msg.observable_change_status == "unchanged" then
+            ImGui.ImGui_Spacing(RA.ctx)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
+            ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
+              "code.run.no_project_change", nil,
+              "No project change was detected. The script may have exited early because a target was missing or the requested state was already set. Review any message shown by the script and confirm the project result."))
+            PopStyleColor(RA.ctx)
           end
         end
 
@@ -19942,7 +20133,7 @@ function Render.main_window()
     -- those still resolve against the InputText, not the menu popup.
     -- Cmd+V / Ctrl+V continue to work natively for cursor-aware paste;
     -- this menu's Paste replaces the entire buffer.
-    _, new_buf = UI.input_with_menu(RA.ctx, false, new_buf)
+    _, new_buf = UI.input_with_menu(RA.ctx, false, new_buf, "##prompt_ctx")
     -- Enter (no Shift) = send; Shift+Enter = insert newline. Multiline widget
     -- inserts \n on EVERY Enter press -- when the press is without Shift we
     -- also strip that trailing \n so the sent message doesn't end with a
@@ -20282,6 +20473,140 @@ function Render.main_window()
     -- do...end scopes popup modal locals to stay under the 200-local limit.
     do -- popup modals
 
+    -- ------ Per-turn limit confirmation popup -------------------------------
+    -- The exact next request is held in memory by Net until the user makes an
+    -- explicit choice. Continue is intentionally danger-styled and never
+    -- keyboard-defaulted; Cancel Request receives initial focus and Escape also
+    -- cancels. The separate MAX_CALLS_PER_TURN runaway cap remains a hard gate.
+    local turn_budget_popup = UI.t("dialog.turn_budget.title", nil,
+      "Continue This Request?") .. "###turn_budget_confirmation"
+    if S.open_turn_budget_confirmation and S.turn_budget_confirmation then
+      ImGui.ImGui_OpenPopup(RA.ctx, turn_budget_popup)
+      S.open_turn_budget_confirmation = false
+    end
+    if S.turn_budget_confirmation then
+      local tb_pending = S.turn_budget_confirmation
+      local tb_budget = tb_pending.budget or {}
+      local tb_matched = tb_pending.matched_condition
+        or "projected_token_limit"
+      local tb_headline = UI.t("dialog.turn_budget.headline", nil,
+        "This request would exceed a limit you set.")
+      local tb_body
+      if tb_matched == "projected_cost_limit" then
+        tb_body = UI.t("dialog.turn_budget.cost_body", {
+          projected = MODELS.format_cost(tb_budget.projected_cost or 0),
+          limit = MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
+            or CFG.TURN_COST_LIMIT_DEFAULT),
+          next = MODELS.format_cost(tb_budget.next_cost or 0),
+        }, str_format(
+          "Projected cost for this request: %s (your limit: %s). This next model call could cost up to %s.",
+          MODELS.format_cost(tb_budget.projected_cost or 0),
+          MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
+            or CFG.TURN_COST_LIMIT_DEFAULT),
+          MODELS.format_cost(tb_budget.next_cost or 0)))
+      else
+        local tb_projected = fmt_num(tb_budget.projected_tokens or 0)
+        local tb_limit = fmt_num(tonumber(prefs.turn_token_limit)
+          or CFG.TURN_TOKEN_LIMIT_DEFAULT)
+        local tb_next = fmt_num(tb_budget.next_tokens or 0)
+        tb_body = UI.t("dialog.turn_budget.token_body", {
+          projected = tb_projected,
+          limit = tb_limit,
+          next = tb_next,
+        }, str_format(
+          "Projected token use for this request: %s (your limit: %s). This next model call could use up to %s tokens.",
+          tb_projected, tb_limit, tb_next))
+      end
+      local tb_not_sent = UI.t("dialog.turn_budget.not_sent", nil,
+        "No additional model request has been sent.")
+      local tb_one_call = UI.t("dialog.turn_budget.one_call", nil,
+        "If you choose Continue Anyway, ReaAssist will send only this one model call. It will ask again before any later call that would exceed a limit.")
+      local tb_w = RA.SC(520)
+      local tb_wrap_w = tb_w - RA.SC(48)
+      local tb_h = RA.SC(150)
+        + UI.measure_multiline_height(tb_headline, tb_wrap_w)
+        + UI.measure_multiline_height(tb_body, tb_wrap_w)
+        + UI.measure_multiline_height(tb_not_sent, tb_wrap_w)
+        + UI.measure_multiline_height(tb_one_call, tb_wrap_w)
+      local tb_win_x, tb_win_y = ImGui.ImGui_GetWindowPos(RA.ctx)
+      local tb_win_w, tb_win_h = ImGui.ImGui_GetWindowSize(RA.ctx)
+      local tb_max_w = math_max(tb_w, tb_win_w - RA.SC(40))
+      local tb_max_h = math_max(RA.SC(300), tb_win_h - RA.SC(40))
+      tb_h = math_min(tb_h, tb_max_h)
+      ImGui.ImGui_SetNextWindowPos(RA.ctx,
+        tb_win_x + (tb_win_w - tb_w) * 0.5,
+        tb_win_y + (tb_win_h - tb_h) * 0.5,
+        ImGui.ImGui_Cond_Appearing())
+      ImGui.ImGui_SetNextWindowSizeConstraints(RA.ctx,
+        RA.SC(400), RA.SC(250), tb_max_w, tb_max_h)
+      ImGui.ImGui_SetNextWindowSize(RA.ctx, tb_w, tb_h,
+        ImGui.ImGui_Cond_Appearing())
+      UI.push_modal_style()
+      if ImGui.ImGui_BeginPopupModal(RA.ctx, turn_budget_popup, nil,
+          ImGui.ImGui_WindowFlags_NoResize()) then
+        local tb_cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+        ImGui.ImGui_Spacing(RA.ctx)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
+        ImGui.ImGui_TextWrapped(RA.ctx, tb_headline)
+        PopStyleColor(RA.ctx)
+        ImGui.ImGui_Spacing(RA.ctx)
+        ImGui.ImGui_TextWrapped(RA.ctx, tb_body)
+        ImGui.ImGui_Spacing(RA.ctx)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+        ImGui.ImGui_TextWrapped(RA.ctx, tb_not_sent)
+        ImGui.ImGui_Spacing(RA.ctx)
+        ImGui.ImGui_TextWrapped(RA.ctx, tb_one_call)
+        PopStyleColor(RA.ctx)
+        ImGui.ImGui_Spacing(RA.ctx)
+        ImGui.ImGui_Spacing(RA.ctx)
+
+        local tb_cancel = false
+        local tb_continue = false
+        local tb_cancel_label = UI.t("dialog.turn_budget.cancel", nil,
+          "Cancel Request")
+        local tb_continue_label = UI.t("dialog.turn_budget.continue", nil,
+          "Continue Anyway")
+        local tb_cancel_w = math_max(RA.SC(104),
+          CalcTextSize(RA.ctx, tb_cancel_label) + RA.SC(28))
+        local tb_continue_w = math_max(RA.SC(136),
+          CalcTextSize(RA.ctx, tb_continue_label) + RA.SC(28))
+        local tb_gap = RA.SC(16)
+        local tb_row_w = tb_cancel_w + tb_gap + tb_continue_w
+        SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx)
+          + math_floor((tb_cw - tb_row_w) * 0.5))
+        if S.turn_budget_confirm_focus_cancel then
+          ImGui.ImGui_SetKeyboardFocusHere(RA.ctx, 0)
+          S.turn_budget_confirm_focus_cancel = false
+        end
+        if ImGui.ImGui_Button(RA.ctx, tb_cancel_label, tb_cancel_w, 0) then
+          tb_cancel = true
+        end
+        SameLine(RA.ctx, 0, tb_gap)
+        UI.push_modal_danger_btn()
+        if ImGui.ImGui_Button(RA.ctx, tb_continue_label,
+            tb_continue_w, 0) then
+          tb_continue = true
+        end
+        UI.pop_modal_danger_btn()
+        if ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
+          tb_cancel = true
+        end
+        -- No Enter shortcut: approving more spend/tokens requires an explicit
+        -- activation of Continue Anyway rather than a habitual confirmation.
+        if tb_cancel then
+          ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+          Net.cancel_turn_budget_confirmation()
+          S.refocus_prompt = true
+        elseif tb_continue then
+          ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+          Net.continue_turn_budget_confirmation()
+        end
+
+        ImGui.ImGui_EndPopup(RA.ctx)
+      end
+      UI.pop_modal_style()
+    end
+
     -- ------ Clear confirmation popup -----------------------------------------
     -- Prevents accidental wipe of conversation history by requiring explicit
     -- confirmation. Escape or Cancel dismisses without clearing.
@@ -20457,8 +20782,8 @@ function Render.main_window()
           -- one would defeat the popup's whole purpose. "unchanged"
           -- can't happen on the first backup of a freshly-saved
           -- project, but accept it defensively as success.
-          local bok, berr = Code.safety_backup()
-          if bok or berr == "unchanged" then
+          local _, berr = Code.safety_backup()
+          if Code.safety_backup_can_proceed(berr) then
             saved_now = true
           else
             ImGui.ImGui_CloseCurrentPopup(RA.ctx)
@@ -21173,7 +21498,6 @@ function Render.main_window()
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
         -- Still honour the backup-before-run preference.
         if prefs.auto_backup then
-          -- Discard the success flag; only `berr == "unsaved"` is consumed.
           local _, berr = Code.safety_backup()
           if berr == "unsaved" then
             S.backup_warn_code = S.risky_warn_code
@@ -21183,13 +21507,21 @@ function Render.main_window()
             S.risky_warn_idx    = nil
             S.risky_warn_detail = nil
             -- Control will continue through the backup modal.
-          else
+          elseif Code.safety_backup_can_proceed(berr) then
             S.status = "running"
             local ok = Code.run(S.risky_warn_code)
             Code.apply_run_result_to_message(S.display_messages[S.risky_warn_idx],
               ok, "lua", S.risky_warn_code, false)
             if S.risky_warn_idx == #S.display_messages then S.pending_code = nil end
             S.status = ok and "idle" or "error"
+            S.risky_warn_code   = nil
+            S.risky_warn_idx    = nil
+            S.risky_warn_detail = nil
+            S.refocus_prompt    = true
+          else
+            local blocked_msg = UI.report_backup_run_blocked(berr)
+            local blocked = S.display_messages[S.risky_warn_idx]
+            if blocked then blocked.run_blocked = blocked_msg end
             S.risky_warn_code   = nil
             S.risky_warn_idx    = nil
             S.risky_warn_detail = nil

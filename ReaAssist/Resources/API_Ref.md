@@ -6,8 +6,8 @@
 <!-- SECTION:core -->
 # REAPER ReaScript Lua API Reference
 
-Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.75),
-plus official Cockos changelog notes through REAPER v7.76.
+Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.77),
+plus official Cockos changelog notes through REAPER v7.77.
 Lua-only. All functions called as reaper.FunctionName().
 Use proj=0 for active project. Track/item indices in the API are 0-based.
 
@@ -53,11 +53,15 @@ REAPER installs: `if reaper.FunctionName then ... else ... end`.
 - REAPER 7.75+: `GetSetProjectInfo(0, "DIRTY", value, is_set)` can query or
   update project modified state. Use this only for explicit save-state tasks;
   never clear a dirty project just to suppress prompts.
-- REAPER 7.75+: TrackSend APIs can access mixer/TCP send and hardware-output
-  UI ordering. `GetTrackNumSends(track, 0x10000000)` returns the sparse UI list
-  size; add `0x10000000` to a send index for UI-ordered Get/Set/Remove/Name
-  access. Prefer dense category 0/1 indices unless the user specifically asks
-  about send slots or empty send positions.
+- REAPER 7.75+ TrackSend APIs can access mixer/TCP send and hardware-output
+  UI ordering; REAPER 7.77 fixed the original access semantics. In 7.77+,
+  `GetTrackNumSends(track, 0x10000000)` returns the sparse UI list size, and
+  category-based Get/Set/Remove calls use category `0x10000000` with the plain
+  UI slot index. Do not add the flag to `sendidx` for those calls. Older
+  UI-only helpers without a category argument, such as `GetTrackSendName`,
+  are different: the caller must add `0x10000000` to their single send-index
+  argument. Prefer dense category 0/1 indices unless the user specifically
+  asks about displayed send slots.
 - REAPER 7.76+: `GetSetAutomationItemInfo(env, autoitem_idx, "D_MUTE", value,
   is_set)` can query or set automation item mute state. `autoitem_idx` is
   0-based within the envelope; use `CountAutomationItems(env)` before looping.
@@ -1044,6 +1048,11 @@ Useful string keys:
   controls, and REAPER 7.75+ send-list surfaces such as `mcp.sendlist` and
   `tcp.sendlist`. May return nil with a valid `info` string for non-track hits.
 
+`gfx.setcursor(integer resource_id, string custom_cursor_name)`
+  Set a built-in or custom cursor in a gfx script. REAPER 7.77+ also accepts a
+  `base64:...` custom cursor string containing a Windows `.cur` file up to 8
+  KiB; keep a named/built-in fallback when supporting older REAPER versions.
+
 ReaImGui extension notes (only when writing an ImGui script):
 - Do not rely on `reaper.ImGui_PushButtonRepeat`; it is absent from common
   ReaImGui installs. For a hold-to-repeat button, use `reaper.ImGui_Button`
@@ -1297,10 +1306,15 @@ most general one (40012).
   Returns true if the named function exists in this REAPER version.
 
 `reaper.defer(function f)`
-  Schedule f to run next defer cycle (use for persistent script loops).
+  Schedule f to run next defer cycle. ReaAssist's direct one-shot executor
+  permits guarded callbacks but blocks self-rescheduling loops. Persistent
+  loops belong in a reviewed script the user saves and installs manually.
 
 `reaper.atexit(function f)`
-  Register cleanup function to run on script exit.
+  Register a callback for script shutdown. This is unavailable in ReaAssist's
+  direct one-shot Run/Auto-run sandbox because it escapes that run's guarded
+  lifecycle. Use it only in a persistent script the user reviews, saves, and
+  installs manually.
 
 `string reaper.get_action_context()`
   Returns: retval, filename, sectionID, commandID, mode, resolution, val.
@@ -1810,8 +1824,10 @@ end)
 
 `boolean reaper.RemoveTrackSend(MediaTrack tr, integer category, integer sendidx)`
   Remove send (0), receive (-1), or hardware output (1).
-  REAPER 7.75+: add `0x10000000` to `sendidx` for UI-ordered send/hardware-
-  output access, which may be sparse.
+  REAPER 7.77+: to remove a displayed UI-ordered send/hardware-output slot,
+  pass category `0x10000000` and the plain 0-based UI slot in `sendidx`.
+  Do not pass category 0 with `sendidx + 0x10000000`; that was affected by the
+  7.75 regression and does not remove the UI slot in 7.77.
   This does not control a track's master/parent send; use `B_MAINSEND`.
 
 `integer reaper.GetTrackNumSends(MediaTrack tr, integer category)`
@@ -1824,8 +1840,9 @@ end)
   D_VOL, D_PAN, D_PANLAW, B_MUTE, B_PHASE, B_MONO, I_SENDMODE,
   I_AUTOMODE, I_SRCCHAN, I_DSTCHAN, I_SLOT_HINT, I_MIDIFLAGS,
   P_DESTTRACK (read-only), P_SRCTRACK (read-only).
-  REAPER 7.75+: add `0x10000000` to `sendidx` to inspect UI-ordered send slots
-  in the TCP/MCP list; sparse empty slots may exist.
+  REAPER 7.77+: use category `0x10000000` and the plain UI slot index to
+  inspect the sparse UI-ordered TCP/MCP send/hardware-output list. Do not add
+  the flag to `sendidx` for this category-based API.
   `D_PAN` here is send pan. For track pan, use
   `SetMediaTrackInfo_Value(track, "D_PAN", value)`.
 
@@ -1833,6 +1850,8 @@ end)
   Set send/receive attribute.
   REAPER 7.75+: `I_SLOT_HINT` can hint the UI slot index for sends/hardware
   outputs. Prefer normal dense send indices for ordinary routing scripts.
+  In REAPER 7.77+, editing an existing UI-ordered slot uses category
+  `0x10000000` with its plain 0-based UI slot index.
 
 ### CHANNEL BIT-PACKING (I_SRCCHAN / I_DSTCHAN)
 

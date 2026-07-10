@@ -3611,11 +3611,17 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.4.3", -- public release version
+  VERSION           = "1.4.4", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
   CLOUD_TIMEOUT_MAX     = 1800,
+  TURN_COST_LIMIT_DEFAULT = 5.00, -- projected per-turn warning threshold in USD
+  TURN_COST_LIMIT_MIN     = 0.25,
+  TURN_COST_LIMIT_MAX     = 100.00,
+  TURN_TOKEN_LIMIT_DEFAULT = 1000000, -- actual prior usage + worst-case next call
+  TURN_TOKEN_LIMIT_MIN     = 50000,
+  TURN_TOKEN_LIMIT_MAX     = 4000000,
   EXTEND_BY_SECS    = 60,        -- "Extend by Ns" button bumps timeout by this many seconds per click
   EXTEND_SHOW_BEFORE_TIMEOUT = 30,  -- show the Extend button when within this many seconds of timeout
   UI_SCALE_OPTIONS   = { 0.75, 0.85, 1.0, 1.25, 1.5, 2.0 },  -- UI zoom choices
@@ -3646,7 +3652,7 @@ CFG = {
   OPENAI_THROTTLE_MAX_RETRIES = 4, -- OpenAI TPM/rate-limit throttles are often sub-minute token-bucket recoveries
   RETRY_DELAY_BASE  = 2,         -- base seconds for exponential backoff
   RETRY_JITTER_SECS = 1,         -- random retry jitter to avoid synchronized retry spikes
-  MAX_CALLS_PER_TURN = 15,       -- hard cap on POSTs in a single user turn
+  MAX_CALLS_PER_TURN = 8,        -- hard cap; Bench history's passing max is 6
                                  -- (initial send + every silent context fetch
                                  -- and validator retry combined). Trips before
                                  -- a stuck small/local model can rack up real
@@ -4115,6 +4121,7 @@ S = {
   gemini_cache_last_used  = false, -- true when the last Gemini body used cachedContent
   gemini_cache_last_create_reason = nil, -- last explicit-cache create outcome/blocker
   openai_prompt_cache_key = nil, -- persisted routing-affinity key for OpenAI prompt cache
+  openai_safety_identifier = nil, -- domain-separated hash sent only to hosted OpenAI
   last_cache_poll_time    = 0,     -- throttle for cache-create response polling
   -- Script save state
   saved_script_path = nil,
@@ -4173,6 +4180,9 @@ S = {
   _prompt_bundle_err       = nil,  -- {[name]=err_string} per-bundle error map; lazy-init
   pending_display_idx    = nil,    -- index into display_messages for current user msg
   pending_project        = nil,    -- captured project pointer at send time
+  turn_budget_confirmation = nil,  -- deferred next model call awaiting explicit consent
+  open_turn_budget_confirmation = false, -- one-shot visual-modal open request
+  turn_budget_confirm_focus_cancel = false, -- safe initial keyboard focus
   -- Resolve-type popup (Phase 5b): blocks the round when the user has no
   -- preference set for a requested plugin type. resolve_popup carries
   -- { type = "eq"|"compressor"|... } while the modal is open; nil otherwise.
@@ -4205,6 +4215,14 @@ S._turn_retry_keys = {
   context_loop_retries = true,
   validator_retries_this_turn = true,
   api_calls_this_turn = true,
+  model_calls_this_turn = true,
+  billable_model_calls_this_turn = true,
+  transport_retries_this_turn = true,
+  turn_billable_actual_cost_usd = true,
+  turn_actual_tokens = true,
+  turn_estimated_next_cost_usd = true,
+  turn_estimated_next_tokens = true,
+  turn_budget_override_once = true,
   api_validator_retries = true,
   unavailable_global_validator_retries = true,
   action_validator_retries = true,
@@ -4248,8 +4266,8 @@ S._turn_retry_keys = {
   void_return_validator_retries = true,
   void_return_retry_used = true,
   sandbox_global_validator_retries = true,
-  track_deletion_validator_retries = true,
-  track_deletion_retry_used = true,
+  action_relevance_validator_retries = true,
+  action_relevance_retry_used = true,
   forbidden_track_creation_validator_retries = true,
   forbidden_track_creation_retry_used = true,
   forbidden_fx_validator_retries = true,
@@ -4305,6 +4323,14 @@ S._turn_retry_defaults = {
   context_loop_retries = 0,
   validator_retries_this_turn = 0,
   api_calls_this_turn = 0,
+  model_calls_this_turn = 0,
+  billable_model_calls_this_turn = 0,
+  transport_retries_this_turn = 0,
+  turn_billable_actual_cost_usd = 0,
+  turn_actual_tokens = 0,
+  turn_estimated_next_cost_usd = 0,
+  turn_estimated_next_tokens = 0,
+  turn_budget_override_once = false,
   api_validator_retries = 0,
   unavailable_global_validator_retries = 0,
   action_validator_retries = 0,
@@ -4346,8 +4372,8 @@ S._turn_retry_defaults = {
   void_return_validator_retries = 0,
   void_return_retry_used = false,
   sandbox_global_validator_retries = 0,
-  track_deletion_validator_retries = 0,
-  track_deletion_retry_used = false,
+  action_relevance_validator_retries = 0,
+  action_relevance_retry_used = false,
   forbidden_track_creation_validator_retries = 0,
   forbidden_track_creation_retry_used = false,
   forbidden_fx_validator_retries = 0,
@@ -4745,7 +4771,7 @@ api_keys = {
   -- changes substantively, bump tos_version above to force re-acceptance.
   tos_text = string.format([[
 YOUR PRIVACY
-API keys are encoded and stored locally on your machine. They are never sent to the author. Chat data is sent only to your chosen provider to fulfill your request. To provide relevant help, ReaAssist may send session data included in your prompt, such as track names, routing, and project settings. ReaAssist does not access, transmit, or create audio files. You may use a local LLM to keep all data offline and on your machine. Basic anonymous diagnostics are enabled by default and used to help improve the service. They can be turned off in Settings. The previewable manual feedback/report flows still show the exact bytes before sending.
+API keys are stored locally using reversible XOR obfuscation tied to your REAPER install path. This is not encryption and not an OS credential vault; a person or process with access to your REAPER settings and the ReaAssist source can recover the keys. They are never sent to the author. Chat data is sent only to your chosen provider to fulfill your request. To provide relevant help, ReaAssist may send session data included in your prompt, such as track names, routing, and project settings. ReaAssist does not access, transmit, or create audio files. You may use a local LLM to keep all data offline and on your machine. Basic anonymous diagnostics are enabled by default and used to help improve the service. They can be turned off in Settings. The previewable manual feedback/report flows still show the exact bytes before sending.
 
 SECURITY & SAFEGUARDS
 ReaAssist scans generated code for potentially high-risk operations, such as file system changes or shell commands, and requires your confirmation before flagged code can run. Project backups can be created before execution, and REAPER Undo history is preserved. No project changes are made without your approval.
@@ -5397,7 +5423,6 @@ prefs = {
   debug_logging    = reaper.GetExtState(CFG.EXT_NS, "debug_logging")    == "1",  -- default off; verbose request/response logging is opt-in
   include_api_ref  = reaper.GetExtState(CFG.EXT_NS, "include_api_ref")  == "1",  -- default off (prompt-bundle era; request docs on-demand)
   include_snapshot = reaper.GetExtState(CFG.EXT_NS, "include_snapshot") ~= "0", -- default on
-  compact_history  = reaper.GetExtState(CFG.EXT_NS, "compact_history")  == "1", -- default off; saves tail tokens by summarizing older successful code replies
   update_check     = reaper.GetExtState(CFG.EXT_NS, "update_check")    ~= "0", -- default on
   screen_reader_concise_hints = reaper.GetExtState(CFG.EXT_NS, "screen_reader_concise_hints") == "1", -- default off
   screen_reader_text_size_idx = 1, -- Screen Reader Mode visual size; separate from main UI scale/chat font
@@ -5413,6 +5438,8 @@ prefs = {
   reply_language_idx = 1, -- 1=English; visible assistant prose language only
   language_code    = "en", -- stable BCP-47-style language code; migrated from reply_language_idx
   cloud_request_timeout = 180,  -- seconds; user-facing watchdog timeout for cloud providers (Claude/ChatGPT/Gemini). Set below from ExtState. Custom providers use their own per-provider timeout instead.
+  turn_cost_limit_usd = 5.00, -- projected prior actual cost + worst-case next call
+  turn_token_limit = 1000000, -- projected prior actual tokens + worst-case next call
   -- Testing-only: when true, a per-send timestamp is appended to the
   -- system prompt as a hidden comment so every request hashes to a new
   -- cache prefix across all three providers. Consumed as a one-shot startup
@@ -5803,6 +5830,7 @@ local function _render_request(body)
       temperature = true, system = true, systemInstruction = true,
       messages = true, contents = true, tools = true,
       prompt_cache_key = true,  -- fixed routing id; noise in the log
+      safety_identifier = true, -- opaque per-install safety id; never log it
     }
     local extras = {}
     local extra_keys = {}
@@ -6164,6 +6192,12 @@ Log.exchange_summary = function(dmsg)
   if dmsg.api_calls then
     L[#L+1] = "API calls: " .. tostring(dmsg.api_calls)
   end
+  if dmsg.model_calls then
+    L[#L+1] = "Model calls: " .. tostring(dmsg.model_calls)
+  end
+  if (dmsg.transport_retries or 0) > 0 then
+    L[#L+1] = "Transport retries: " .. tostring(dmsg.transport_retries)
+  end
   if dmsg.response_time then
     L[#L+1] = string.format("Response time: %.1fs", dmsg.response_time)
   end
@@ -6231,7 +6265,6 @@ local function _build_sysinfo()
     L[#L+1] = "Auto-backup:     " .. tostring(prefs.auto_backup)
     L[#L+1] = "Snapshot ctx:    " .. tostring(prefs.include_snapshot)
     L[#L+1] = "API ref:         " .. tostring(prefs.include_api_ref)
-    L[#L+1] = "History compact: " .. tostring(prefs.compact_history)
   end
   L[#L+1] = "Max history:     " .. tostring(CFG and CFG.MAX_HISTORY_TURNS or "?")
   -- Coerce to a strict bool so the display reads "true"/"false" instead of
@@ -6302,8 +6335,9 @@ end
 -- key_prefix_warning_only: prefix mismatch is advisory; live API test decides.
 -- key_exclude: reject keys that match this prefix (prevents cross-provider confusion).
 -- has_caching: true enables prompt-cache token display/accounting.
--- cache_write applies to Claude only; OpenAI's caching is free to write and
--- Gemini charges a separate per-hour storage fee which is not modeled here.
+-- cache_write applies to Claude and GPT-5.6+. OpenAI reports GPT-5.6 cache
+-- writes in usage.prompt_tokens_details.cache_write_tokens and bills them at
+-- 1.25x uncached input; Gemini's separate per-hour storage fee is not modeled.
 PROVIDERS = {
   {
     id            = "anthropic",
@@ -6405,43 +6439,41 @@ PROVIDERS = {
     console_label = "platform.openai.com/api-keys",
     billing_url   = "https://platform.openai.com/settings/organization/billing",
     billing_label = "platform.openai.com/settings/organization/billing",
-    default_model_idx = 3,  -- Full GPT-5.4 -- the recommended OpenAI default
+    default_model_idx = 2,  -- GPT-5.6 Luna -- best tested balance
     thinking_levels = {
       { label = "None",   value = "none"   },
       { label = "Low",    value = "low"    },
       { label = "Medium", value = "medium" },
       { label = "High",   value = "high"   },
     },
-    default_thinking_idx = 1,  -- None (full GPT-5.4 inherits this)
+    default_thinking_idx = 1,  -- None (all GPT-5.6 rows inherit this)
     -- max_output: per-model output-token ceiling. OpenAI accepts but does
     -- not require max_tokens / max_completion_tokens; we omit it from the
     -- request so the server applies its own default (= the ceiling). The
     -- value here is used for the preflight context-budget reserve only.
     -- All current GPT-5.x models share the same 128K ceiling.
     -- context_window: per-model context size used by the preflight token
-    -- gate. Per OpenAI's GPT-5.4 docs, nano and mini accept 400K input
-    -- tokens; the full GPT-5.4 accepts 1,050,000.
-    -- Surcharge tier on GPT-5.4 full: prompts above 272K input tokens are
-    -- billed at 2x input and 1.5x output for the request. The cost
-    -- display below uses the lower-tier rate; large-prompt costs will
-    -- read low until calc_cost grows tier metadata + a token-count
-    -- branch. Same approximation pattern as Gemini Pro >200K below.
-    -- default_thinking_idx (per-model override): nano defaults to
-    -- None (1) -- nano's identity is "fastest cheapest OpenAI", and
-    -- reasoning lifts at Low/Medium add latency without solving
-    -- nano's actual failure mode (multi-step DAW edits). The
-    -- per-combo explainer redirects complex work to full GPT-5.4
-    -- None instead of trying to rescue nano with more thinking. Mini
-    -- stays at Low (2) since None has been unreliable on routing/FX
-    -- tasks, and full GPT-5.4 is capable enough at None (1) that the
-    -- provider default applies.
+    -- gate. GPT-5.4 mini accepts 400K input tokens; GPT-5.6 accepts a
+    -- 922K maximum input inside its 1,050,000-token context window.
+    -- Surcharge tier on GPT-5.6: prompts above 272K input tokens are
+    -- billed at 2x input and 1.5x output for the full request. The shared
+    -- long_context_* metadata makes live totals and spend preflight apply
+    -- that tier to uncached, cache-read, cache-write, and output tokens.
+    -- GPT-5.6 cache writes are billed at 1.25x uncached input; cache reads
+    -- remain at the 90%-discounted rate. price_cache_w carries that write
+    -- rate into live usage, session totals, budget checks, and Bench.
+    -- GPT-5.4 mini remains at Low (2), its established reliable default.
+    -- Luna, Terra, and Sol use None (1): the launch probe passed every None
+    -- cell, while the only two runtime failures occurred at Medium.
     models = {
-      { label = "GPT-5.4 nano", chip_label = "NANO", id = "gpt-5.4-nano",
-        price_in = 0.20,  price_out = 1.25,  price_cache_r = 0.02,  max_output = 128000, context_window = 400000,  default_thinking_idx = 1, typed_action_max_completion = 2048 },
       { label = "GPT-5.4 mini", chip_label = "MINI", id = "gpt-5.4-mini",
-        price_in = 0.75,  price_out = 4.50,  price_cache_r = 0.075, max_output = 128000, context_window = 400000,  default_thinking_idx = 2 },
-      { label = "GPT-5.4",      chip_label = "FULL", id = "gpt-5.4",
-        price_in = 2.50,  price_out = 15.00, price_cache_r = 0.25,  max_output = 128000, context_window = 1050000 },
+        price_in = 0.75,  price_out = 4.50,  price_cache_r = 0.075, max_output = 128000, context_window = 400000,  default_thinking_idx = 2, price_tier = 1, descriptor = "fast" },
+      { label = "GPT-5.6 Luna",  chip_label = "LUNA",  id = "gpt-5.6-luna",
+        price_in = 1.00,  price_out = 6.00,  price_cache_r = 0.10, price_cache_w = 1.25,  max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 1, descriptor = "fast" },
+      { label = "GPT-5.6 Terra", chip_label = "TERRA", id = "gpt-5.6-terra",
+        price_in = 2.50,  price_out = 15.00, price_cache_r = 0.25, price_cache_w = 3.125, max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 2, descriptor = "balanced" },
+      { label = "GPT-5.6 Sol",   chip_label = "SOL",   id = "gpt-5.6-sol",
+        price_in = 5.00,  price_out = 30.00, price_cache_r = 0.50, price_cache_w = 6.25,  max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 3, descriptor = "smart" },
     },
   },
   {
@@ -7084,7 +7116,6 @@ function Store.cleanup_config_extstate(doc)
     "debug_logging",
     "include_api_ref",
     "include_snapshot",
-    "compact_history",
     "update_check",
     "screen_reader_concise_hints",
     "screen_reader_text_size_idx",
@@ -7097,6 +7128,8 @@ function Store.cleanup_config_extstate(doc)
     "reply_language_idx",
     "language_code",
     "cloud_request_timeout",
+    "turn_cost_limit_usd",
+    "turn_token_limit",
     "provider_id",
     "provider_idx",
     "win_x",
@@ -7340,7 +7373,6 @@ function Store.current_preferences()
     debug_logging         = prefs.debug_logging and true or false,
     include_api_ref       = prefs.include_api_ref and true or false,
     include_snapshot      = prefs.include_snapshot and true or false,
-    compact_history       = prefs.compact_history and true or false,
     update_check          = prefs.update_check and true or false,
     screen_reader_concise_hints =
       prefs.screen_reader_concise_hints and true or false,
@@ -7355,6 +7387,10 @@ function Store.current_preferences()
                               and CFG.current_language_code() or "en",
     cloud_request_timeout = prefs.cloud_request_timeout
                               or CFG.CLOUD_TIMEOUT_DEFAULT,
+    turn_cost_limit_usd   = prefs.turn_cost_limit_usd
+                              or CFG.TURN_COST_LIMIT_DEFAULT,
+    turn_token_limit      = prefs.turn_token_limit
+                              or CFG.TURN_TOKEN_LIMIT_DEFAULT,
   }
 end
 
@@ -7376,7 +7412,6 @@ function Store.apply_config_preferences()
   prefs.debug_logging    = Store._pref_bool("debug_logging", prefs.debug_logging)
   prefs.include_api_ref  = Store._pref_bool("include_api_ref", prefs.include_api_ref)
   prefs.include_snapshot = Store._pref_bool("include_snapshot", prefs.include_snapshot)
-  prefs.compact_history  = Store._pref_bool("compact_history", prefs.compact_history)
   prefs.update_check     = Store._pref_bool("update_check", prefs.update_check)
   prefs.screen_reader_concise_hints =
     Store._pref_bool("screen_reader_concise_hints",
@@ -7419,6 +7454,14 @@ function Store.apply_config_preferences()
     "cloud_request_timeout",
     prefs.cloud_request_timeout or CFG.CLOUD_TIMEOUT_DEFAULT,
     CFG.CLOUD_TIMEOUT_MIN, CFG.CLOUD_TIMEOUT_MAX))
+  prefs.turn_cost_limit_usd = Store._pref_number(
+    "turn_cost_limit_usd",
+    prefs.turn_cost_limit_usd or CFG.TURN_COST_LIMIT_DEFAULT,
+    CFG.TURN_COST_LIMIT_MIN, CFG.TURN_COST_LIMIT_MAX)
+  prefs.turn_token_limit = math_floor(Store._pref_number(
+    "turn_token_limit",
+    prefs.turn_token_limit or CFG.TURN_TOKEN_LIMIT_DEFAULT,
+    CFG.TURN_TOKEN_LIMIT_MIN, CFG.TURN_TOKEN_LIMIT_MAX))
   return true
 end
 
@@ -9507,6 +9550,58 @@ do
   end
 end
 
+-- One-time OpenAI model migration for the GPT-5.6 rollout. Keep GPT-5.4
+-- mini as the proven lowest-cost row, replace full GPT-5.4 with Terra (the
+-- same standard input/output price tier and the best launch-bench result),
+-- and move the retired nano row to Mini instead of silently increasing those
+-- users to GPT-5.6 pricing. New GPT-5.6 rows load their None defaults; an
+-- existing Mini thinking choice is preserved.
+do
+  if not (S and S._factory_reset_clean_boot)
+     and not Store.migration_fired("openai_gpt_56_model_v1") then
+    local doc = Store.config_doc()
+    doc.selection = type(doc.selection) == "table" and doc.selection or {}
+    doc.selection.model_id_by_provider =
+      type(doc.selection.model_id_by_provider) == "table"
+      and doc.selection.model_id_by_provider or {}
+    doc.selection.thinking_idx_by_provider_model =
+      type(doc.selection.thinking_idx_by_provider_model) == "table"
+      and doc.selection.thinking_idx_by_provider_model or {}
+
+    local old_model = doc.selection.model_id_by_provider.openai
+    if old_model == "gpt-5.4" then
+      doc.selection.model_id_by_provider.openai = "gpt-5.6-terra"
+    elseif old_model == "gpt-5.4-nano" then
+      doc.selection.model_id_by_provider.openai = "gpt-5.4-mini"
+    end
+
+    doc.selection.thinking_idx_by_provider_model["openai/gpt-5.4"] = nil
+    doc.selection.thinking_idx_by_provider_model["openai/gpt-5.4-nano"] = nil
+    reaper.DeleteExtState(CFG.EXT_NS,
+      "thinking_idx_openai_gpt-5.4", true)
+    reaper.DeleteExtState(CFG.EXT_NS,
+      "thinking_idx_openai_gpt-5.4-nano", true)
+
+    -- Legacy installs may still persist only the old 1-based picker index.
+    -- Old nano (1) and Mini (2) both land on retained Mini (1); old full (3)
+    -- lands on Terra (3). Modern model-id selections above still take priority.
+    local old_idx = tonumber(
+      reaper.GetExtState(CFG.EXT_NS, "model_idx_openai"))
+    if old_idx == 1 or old_idx == 2 then
+      reaper.SetExtState(CFG.EXT_NS, "model_idx_openai", "1", true)
+    elseif old_idx == 3 then
+      reaper.SetExtState(CFG.EXT_NS, "model_idx_openai", "3", true)
+    end
+
+    doc.migrations = type(doc.migrations) == "table" and doc.migrations or {}
+    doc.migrations.openai_gpt_56_model_v1 = true
+    local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
+    if err then
+      Store._notify_write_failure("Config.json", err)
+    end
+  end
+end
+
 -- One-time Gemini model-id migration. Gemini 3 Flash Preview is retired in
 -- favor of Gemini 3.5 Flash, so users who saved the old model id should land
 -- on the new GA Flash row instead of falling through an unknown-model default.
@@ -9606,6 +9701,35 @@ prefs.cloud_request_timeout = tonumber(
 if prefs.cloud_request_timeout < CFG.CLOUD_TIMEOUT_MIN
    or prefs.cloud_request_timeout > CFG.CLOUD_TIMEOUT_MAX then
   prefs.cloud_request_timeout = CFG.CLOUD_TIMEOUT_DEFAULT
+end
+
+prefs.turn_cost_limit_usd = tonumber(
+  reaper.GetExtState(CFG.EXT_NS, "turn_cost_limit_usd"))
+  or CFG.TURN_COST_LIMIT_DEFAULT
+if prefs.turn_cost_limit_usd < CFG.TURN_COST_LIMIT_MIN
+   or prefs.turn_cost_limit_usd > CFG.TURN_COST_LIMIT_MAX then
+  prefs.turn_cost_limit_usd = CFG.TURN_COST_LIMIT_DEFAULT
+end
+
+prefs.turn_token_limit = tonumber(
+  reaper.GetExtState(CFG.EXT_NS, "turn_token_limit"))
+  or CFG.TURN_TOKEN_LIMIT_DEFAULT
+if prefs.turn_token_limit < CFG.TURN_TOKEN_LIMIT_MIN
+   or prefs.turn_token_limit > CFG.TURN_TOKEN_LIMIT_MAX then
+  prefs.turn_token_limit = CFG.TURN_TOKEN_LIMIT_DEFAULT
+end
+-- This setting was introduced unreleased with a 1.25M default. Migrate that
+-- exact saved default once so existing development/test installs receive the
+-- product-owner-approved 1.0M default too. The sentinel preserves 1.25M as a
+-- valid deliberate choice after this one-time migration.
+if Store and Store.migration_fired and Store.set_migration_fired
+   and not Store.migration_fired("turn_token_limit_default_1m_v1") then
+  if prefs.turn_token_limit == 1250000 then
+    prefs.turn_token_limit = CFG.TURN_TOKEN_LIMIT_DEFAULT
+    reaper.SetExtState(CFG.EXT_NS, "turn_token_limit",
+      tostring(prefs.turn_token_limit), true)
+  end
+  Store.set_migration_fired("turn_token_limit_default_1m_v1")
 end
 
 -- Load ui_scale_idx (default 3 = 100%). SC() scales any pixel value by the factor.
@@ -10856,10 +10980,11 @@ end
 -- key can't be decoded and the user must re-enter it. Surface as an
 -- inline error on the API key screen.
 if S.key_install_moved then
-  api_keys.key_error = RA.t("settings.api_key.error.install_moved", nil,
-    "Your REAPER install location has changed since your API key was last saved. "
-    .. "For security, the key is locked to the install path and cannot be decoded "
-    .. "from a different location. Please paste your API key again to continue.")
+  api_keys.key_error = RA.t("settings.api_key.error.install_moved_v2", nil,
+    "Your REAPER install location changed. Because the reversible key "
+    .. "obfuscation uses that path, the saved value cannot be decoded here. "
+    .. "Paste the key again to continue. This path binding prevents casual "
+    .. "copying; it is not encryption.")
 end
 
 
@@ -10873,10 +10998,20 @@ end
 function MODELS.calc_cost(model_entry, tok_in_base, tok_cache_r, tok_cache_w, tok_out)
   if not model_entry then return 0 end
   local M = 1000000
-  return (tok_in_base  * (model_entry.price_in      or 0)
-        + tok_cache_r  * (model_entry.price_cache_r  or 0)
-        + tok_cache_w  * (model_entry.price_cache_w  or 0)
-        + tok_out      * (model_entry.price_out      or 0)) / M
+  local base = tonumber(tok_in_base) or 0
+  local read = tonumber(tok_cache_r) or 0
+  local write = tonumber(tok_cache_w) or 0
+  local output = tonumber(tok_out) or 0
+  local input_mult, output_mult = 1, 1
+  local long_threshold = tonumber(model_entry.long_context_threshold)
+  if long_threshold and (base + read + write) > long_threshold then
+    input_mult = tonumber(model_entry.long_context_input_multiplier) or 1
+    output_mult = tonumber(model_entry.long_context_output_multiplier) or 1
+  end
+  return ((base  * (model_entry.price_in      or 0)
+         + read  * (model_entry.price_cache_r or 0)
+         + write * (model_entry.price_cache_w or 0)) * input_mult
+         + output * (model_entry.price_out or 0) * output_mult) / M
 end
 
 -- MODELS.format_cost(usd) -> string like "$0.000123" or "$1.23"
@@ -11329,9 +11464,10 @@ UI.MODEL_TIPS = {
   ["claude-haiku-4-5"]               = "Cheapest Claude. Use High thinking. Sonnet None is faster for complex work.",
   ["claude-sonnet-5"]                = "Recommended Claude default. Use None thinking. Raise effort only if a prompt struggles.",
   ["claude-opus-4-8"]                = "Premium Claude. Use None thinking. Higher levels add cost without quality gain.",
-  ["gpt-5.4-nano"]                   = "Cheapest GPT. Use None thinking. Simple tasks only -- pick full GPT-5.4 for complex.",
-  ["gpt-5.4-mini"]                   = "Cheap GPT. Use Low thinking. Simple tasks only -- pick full GPT-5.4 for complex.",
-  ["gpt-5.4"]                        = "Recommended OpenAI default. Use None thinking. Reliable on simple and complex tasks.",
+  ["gpt-5.4-mini"]                   = "Lowest-priced GPT. Use Low thinking. Reliable budget option; GPT-5.6 Luna None is faster at a higher price.",
+  ["gpt-5.6-luna"]                   = "Recommended OpenAI default. Use None thinking. Best tested balance of quality, speed, and cost.",
+  ["gpt-5.6-terra"]                  = "Higher-cost GPT-5.6. Use None thinking. Choose Terra when Luna struggles or extra quality is worth the price.",
+  ["gpt-5.6-sol"]                    = "Premium GPT-5.6. Use None thinking. Flagship tier; higher effort added cost without a measured improvement.",
   ["gemini-3.1-flash-lite"]          = "Cheapest Gemini. Use Low thinking. Budget pick; Flash 3.5 Minimal is stronger for scripts and edits.",
   ["gemini-3.5-flash"]               = "Recommended Gemini default. Use Minimal thinking. Fast, strong, and bench-backed; try Low only if Minimal struggles.",
   ["gemini-3.1-pro-preview"]         = "Premium Gemini preview. Use Medium thinking. Capacity has been unreliable; Flash 3.5 Minimal is safer for coding.",
@@ -11386,23 +11522,29 @@ UI.COMBO_HINTS = {
     },
   },
   openai = {
-    ["gpt-5.4-nano"] = {
-      none   = "Recommended Level | Simple tasks only | Cheap | Very fast | Use full GPT-5.4 None for complex edits",
-      low    = "Simple tasks only | Cheap | Very fast | None is faster -- pick None (default)",
-      medium = "Simple and some complex | Cheap | Moderate speed | Use full GPT-5.4 None for complex edits",
-      high   = "Simple and some complex | Cheap | Slow | Use full GPT-5.4 None for complex edits",
-    },
     ["gpt-5.4-mini"] = {
-      none   = "Simple tasks only | Cheap | Very fast | Use full GPT-5.4 None for complex edits",
-      low    = "Recommended Level | Simple tasks only | Cheap | Very fast | Use full GPT-5.4 None for complex edits",
-      medium = "Simple and complex | Mid-cost | Moderate speed | Limited evidence; full GPT-5.4 None is faster",
-      high   = "Simple and complex | Mid-cost | Moderate speed | Mini's strongest combo, but full GPT-5.4 None is faster and cleaner",
+      none   = "Lowest cost | Very fast | Less established than Low for complex edits",
+      low    = "Recommended Level | Simple and complex | Lowest cost | Validated in ReaAssist testing",
+      medium = "Simple and complex | Higher output cost | Much slower | No measured gain over Low",
+      high   = "Not recommended | Highest Mini latency and output cost | Use Low or Terra None",
     },
-    ["gpt-5.4"] = {
-      none   = "Recommended Level | Simple and complex | Mid-cost | Very fast",
-      low    = "Simple and complex | Mid-cost | Moderate speed | Marginal lift over None -- use None",
-      medium = "Simple and complex | Higher cost | Very slow | Use only if None struggles",
-      high   = "Simple and complex | Higher cost | Very slow | No quality gain over None -- use None",
+    ["gpt-5.6-luna"] = {
+      none   = "Recommended Level | Simple and complex | Lowest GPT-5.6 cost | Fastest tested configuration",
+      low    = "Simple and complex | Low cost | Slower than None | No measured gain over None",
+      medium = "Avoid for routine work | Generated a runtime error in testing | Very slow on large code",
+      high   = "Untested and expensive | Use None, or Terra None if a task struggles",
+    },
+    ["gpt-5.6-terra"] = {
+      none   = "Recommended Level | Simple and complex | Balanced cost | Fastest Terra configuration",
+      low    = "Simple and complex | Balanced cost | Slower than None | No measured gain",
+      medium = "Simple and complex | Balanced cost | Slower | All tests passed, but no gain over None",
+      high   = "Untested and expensive | Reserve for a measured hard-task improvement",
+    },
+    ["gpt-5.6-sol"] = {
+      none   = "Recommended Level | Simple and complex | Premium cost | Fastest Sol configuration",
+      low    = "Simple and complex | Premium cost | Slower than None | No measured gain",
+      medium = "Avoid for routine work | Generated a runtime error in testing | Higher cost and latency",
+      high   = "Untested and most expensive | Reserve for a measured quality-first need",
     },
   },
   google = {
@@ -11583,11 +11725,12 @@ function UI.open_path(path)
 
   local result, _, code
   if RA.IS_WINDOWS then
-    -- Paths cannot contain literal quotes on Windows; remove shell-expansion
-    -- characters that cmd.exe would process before `start` sees the path.
-    local safe = path:gsub('[%"%%]', "")
-    if safe == "" then return false end
-    result, _, code = os.execute('start "" "' .. safe .. '"')
+    -- cmd.exe expands %VAR% even inside double quotes, and quotes cannot be
+    -- escaped portably in the `start "" "<path>"` form. A path containing % or "
+    -- would silently open the wrong location, so refuse it rather than mangle it;
+    -- CF_ShellExecute (checked above) handles such paths safely when present.
+    if path:find('[%"%%]') then return false end
+    result, _, code = os.execute('start "" "' .. path .. '"')
   elseif RA.IS_MACOS then
     result, _, code = os.execute(
       "open " .. Shell.sh_quote(path) .. " >/dev/null 2>&1 &")
@@ -17975,8 +18118,8 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
         sidechain_ducking_requires_send = true,
       },
     },
-    ["gpt-5.4-nano"] = {
-      key = "nano_simple_track_routing",
+    ["gpt-5.6-luna"] = {
+      key = "luna_practical_track_routing",
       prompt = [[
 - For simple track/routing setup, create only the requested or named tracks. Do not add helper, folder, parent, or container tracks unless the user explicitly asks for them.
 - If the user asks to "select only" a track while doing another action, the selection change is required project state. Do not skip it as "touching less"; clear existing track selection and select only the target.
@@ -18029,6 +18172,8 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
 - For short MIDI ideas, beats, patterns, chords, or pads, create one appropriately named MIDI track and one MIDI item unless the user asks for separate tracks or separate items. Put multiple drums or chords into that one item; for a drum idea, name the track with "Drum" and include common GM kick/snare notes.
 - For explicit sidechain wording like "create a send from Voiceover to Music Bed", follow those named endpoints exactly: put the compressor on the destination/ducked track and create one direct source-to-destination send feeding sidechain channels. If the prompt also names a Sidechain Comp track, create/name that track only; do not route through it, send the destination into it, disable master send, or invent a separate sidechain/helper bus unless the user explicitly says that track is the bus. For generic kick/bass ducking with no endpoints named, use Kick as source and Bass as destination.
 - Keep plugin scripts direct and small. For simple/basic/add-only plugin chains, add the requested/resolved plugins and avoid display-unit helper functions unless helper definitions are pinned and must be copied exactly.
+- Plain requests such as "add EQ and compression" are add-only when the user gives no settings, tonal goal, recipe, or starter/generic-treatment request. Insert the resolved plugins in the requested order at their defaults, check every AddByName result, and stop; do not invent settings, request fx_inspect, or use plugin helpers.
+- Track/item custom colors written through I_CUSTOMCOLOR and ColorToNative are object colors, not application-theme edits. Do not request theme or prompt_bundle:theme unless actually calling SetThemeColor.
 - For JSFX requests, return the requested ```jsfx block, not Lua/ReaScript. Preserve user-named DSP terms like allpass, buffer, grain, freeze, and width as readable identifiers or comments.
 ]],
       validators = {
@@ -18356,6 +18501,7 @@ REAPER LUA PITFALLS:
 - For MIDI notes, use MIDI PPQ positions, CreateNewMIDIItemInProj(track,...), GM drums kick 36/snare 38/closed hat 42, and REAPER note numbering C4=60.
 - For exact seconds, use exact seconds. For bars/beats/tempo math, request docs:tempo; for MIDI note work, request midi.
 - Use Main_OnCommand only for verified action IDs from provided docs/context or when the user explicitly names a known action.
+- Never Save the project, start Record, Undo, or Redo unless the current user request explicitly asks for that exact action. Creating or arming a record-ready track is not permission to start recording.
 
 PLUGIN RULES:
 - Every TrackFX_AddByName result must be checked immediately: if fx < 0 then ShowMessageBox and return.
@@ -19128,6 +19274,50 @@ function Net.build_body(msgs, snapshot, msg_attachments)
     result = Net.build_body_google(msgs, snapshot, msg_attachments)
   end
   Probe.mark_phase_end(S.probe_turn, "body_build")
+  -- Local Bench builds expose a request-context recorder. Keep this hook inert
+  -- in shipped ReaAssist, but let the Bench attribute exact included source
+  -- bytes to individual sticky buckets before Log.request attaches the body to
+  -- a cell. Matching against the assembled JSON avoids reporting stale sticky
+  -- entries that the request-specific skip policy omitted.
+  if result and BenchMode and BenchMode.record_request_context then
+    local buckets = {}
+    local function record_if_included(name, content)
+      if type(content) ~= "string" or content == "" then return end
+      if result:find(JSON.escape(content), 1, true) then
+        buckets[name] = #content
+      end
+    end
+    local sys = Net.system_prompt_text()
+    if sys then
+      local custom = Net.custom_instructions_prompt_block_for_request()
+      local base_bytes = #sys - (custom and #custom or 0)
+      if base_bytes > 0 then buckets.system_prompt = base_bytes end
+      record_if_included("custom_instructions", custom)
+    end
+    if msgs and msgs[#msgs] then
+      record_if_included("user_request", msgs[#msgs].content)
+    end
+    if not Net.answer_only_context_enabled() then
+      record_if_included("docs", S.api_ref_message)
+      record_if_included("midi", S.midi_ref_message)
+      record_if_included("theme", S.theme_ref_message)
+      for key, content in pairs(S.sticky_context or {}) do
+        record_if_included(key, content)
+      end
+    end
+    record_if_included("snapshot", snapshot)
+    local attachment_bytes = 0
+    for _, att in ipairs(msg_attachments or {}) do
+      attachment_bytes = attachment_bytes
+        + #(att.b64 or att.data or "")
+    end
+    if attachment_bytes > 0 then buckets.attachments = attachment_bytes end
+    BenchMode.record_request_context({
+      provider = p.id,
+      body_bytes = #result,
+      buckets = buckets,
+    })
+  end
   return result
 end
 
@@ -19499,12 +19689,56 @@ function Net.openai_prompt_cache_key()
   return key
 end
 
+function Net.openai_safety_identifier()
+  if type(S.openai_safety_identifier) == "string"
+     and #S.openai_safety_identifier == 64
+     and S.openai_safety_identifier:match("^[0-9a-f]+$") then
+    return S.openai_safety_identifier
+  end
+  if not RA or type(RA.sha256_hex) ~= "function" then
+    Log.line("SAFETY", "OpenAI safety identifier omitted: SHA-256 unavailable")
+    return nil
+  end
+  local cache_key = Net.openai_prompt_cache_key()
+  if type(cache_key) ~= "string" or cache_key == "" then return nil end
+  local ok, identifier = pcall(RA.sha256_hex,
+    "reaassist:openai:safety:v1:" .. cache_key)
+  if not ok or type(identifier) ~= "string" then
+    Log.line("SAFETY", "OpenAI safety identifier omitted: hash failed")
+    return nil
+  end
+  identifier = identifier:lower()
+  if #identifier ~= 64 or not identifier:match("^[0-9a-f]+$") then
+    Log.line("SAFETY", "OpenAI safety identifier omitted: invalid hash")
+    return nil
+  end
+  S.openai_safety_identifier = identifier
+  return identifier
+end
+
 function Net.build_body_openai(msgs, snapshot, msg_attachments)
   local msg_parts = {}
+  local p = PROVIDERS.active()
+  local model_id = MODELS.active_id()
+  if p.is_custom and p.model_prefix and p.model_prefix ~= "" then
+    model_id = p.model_prefix .. model_id
+  end
+  local is_openai_56 = p.id == "openai"
+    and type(model_id) == "string"
+    and model_id:match("^gpt%-5%.6") ~= nil
 
-  -- System prompt as the first message.
-  msg_parts[#msg_parts+1] = str_format(
-    '{"role":"system","content":"%s"}', JSON.escape(Net.system_prompt_text()))
+  -- GPT-5.6 explicit caching: mark the stable core system prompt and disable
+  -- the implicit latest-message breakpoint. This avoids paying a 1.25x write
+  -- premium on the changing user prompt, snapshot, and attachments. Older
+  -- models reject the new fields, so they retain automatic implicit caching.
+  if is_openai_56 then
+    msg_parts[#msg_parts+1] = str_format(
+      '{"role":"system","content":[{"type":"text","text":"%s","prompt_cache_breakpoint":{"mode":"explicit"}}]}',
+      JSON.escape(Net.system_prompt_text()))
+  else
+    msg_parts[#msg_parts+1] = str_format(
+      '{"role":"system","content":"%s"}', JSON.escape(Net.system_prompt_text()))
+  end
 
   -- Bundle the long-lived static refs (api_ref + midi_ref + theme_ref) into
   -- ONE pinned system message instead of three. OpenAI's implicit prefix
@@ -19512,8 +19746,17 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
   -- cleaner, more stable prefix. See Net.bundled_static_refs().
   local static_blob = Net.bundled_static_refs_for_request()
   if static_blob then
-    msg_parts[#msg_parts+1] = str_format(
-      '{"role":"system","content":"%s"}', JSON.escape(static_blob))
+    if is_openai_56 then
+      -- The bundled API/MIDI/theme references are the second reusable prefix.
+      -- Prompt-specific sticky plugin/context material remains after this
+      -- breakpoint so one-off context does not create avoidable cache writes.
+      msg_parts[#msg_parts+1] = str_format(
+        '{"role":"system","content":[{"type":"text","text":"%s","prompt_cache_breakpoint":{"mode":"explicit"}}]}',
+        JSON.escape(static_blob))
+    else
+      msg_parts[#msg_parts+1] = str_format(
+        '{"role":"system","content":"%s"}', JSON.escape(static_blob))
+    end
   end
 
   -- Prepend pinned sticky context (plugin_ref / pref_plugins / fx_params /
@@ -19581,10 +19824,20 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
     end
   end
 
-  local p = PROVIDERS.active()
+  local safety_identifier_field = ""
+  if p.id == "openai" then
+    local safety_identifier = Net.openai_safety_identifier()
+    if safety_identifier then
+      safety_identifier_field = str_format(
+        ',"safety_identifier":"%s"', JSON.escape(safety_identifier))
+    end
+  end
   -- reasoning_effort: top-level string on the Chat Completions API.
-  -- Valid values: "minimal" | "low" | "medium" | "high". The dropdown's "none"
-  -- entry means "do not send the field" -- omitting it disables reasoning.
+  -- Hosted OpenAI accepts "none" | "low" | "medium" | "high" (and newer
+  -- models also accept xhigh/max). Send "none" explicitly: GPT-5.6 defaults
+  -- to Medium when the field is omitted, so omission is not an off switch.
+  -- Custom-compatible providers keep the older omission behavior because
+  -- many reject OpenAI-specific reasoning values.
   -- S.thinking_override_idx (when set) wins over prefs.thinking_idx -- the
   -- length auto-retry path uses this to force "none" for one round-trip
   -- when reasoning consumed the entire output budget on the first attempt.
@@ -19611,22 +19864,20 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
      and p.thinking_levels
      and p.thinking_levels[effective_thinking_idx] then
     local val = p.thinking_levels[effective_thinking_idx].value
-    if val and val ~= "none" then
+    if val and (val ~= "none" or is_openai_56) then
       reasoning = str_format(',"reasoning_effort":"%s"', val)
     end
   end
-  -- prompt_cache_key: stable per install identifier. OpenAI's automatic
-  -- prefix caching auto-routes requests sharing this key to the same backend
-  -- worker, raising cache-hit rate on long sessions and across REAPER
-  -- restarts. The key is opaque to us and persisted in State.json.
+  -- prompt_cache_key: stable per install identifier. OpenAI cache routing uses
+  -- this together with the exact prefix, raising hit rates on long sessions
+  -- and across REAPER restarts. GPT-5.6 requires it for improved implicit or
+  -- explicit matching. The key is opaque to us and persisted in State.json.
   -- Custom-provider model prefix: OpenRouter/LiteLLM/Ollama routing gateways
   -- often require a prefix ("openrouter/anthropic/...", "ollama/...") on the
   -- model id. Stored per-provider so users don't have to type it into every
   -- model row. Empty string = no-op, matching hosted OpenAI's behaviour.
-  local model_id = MODELS.active_id()
-  if p.is_custom and p.model_prefix and p.model_prefix ~= "" then
-    model_id = p.model_prefix .. model_id
-  end
+  local cache_options_field = is_openai_56
+    and ',"prompt_cache_options":{"mode":"explicit","ttl":"30m"}' or ""
   local response_format = ""
   if p.id == "openai"
      and S.pending_typed_action_expected == true
@@ -19698,9 +19949,10 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
       model_id, tbl_concat(msg_parts, ","), reasoning, extra_suffix)
   end
   return str_format(
-    '{"model":"%s"%s,"prompt_cache_key":"%s","messages":[%s]%s%s%s}',
+    '{"model":"%s"%s,"prompt_cache_key":"%s"%s%s,"messages":[%s]%s%s%s}',
     model_id, max_tokens_field, JSON.escape(Net.openai_prompt_cache_key()),
-    tbl_concat(msg_parts, ","), reasoning, response_format, extra_suffix)
+    cache_options_field, safety_identifier_field, tbl_concat(msg_parts, ","),
+    reasoning, response_format, extra_suffix)
 end
 
 -- =============================================================================
@@ -19846,11 +20098,6 @@ end
 -- If the first entry in the slice is an assistant message (possible if an
 -- odd number of entries were removed mid-conversation), it is dropped so
 -- the API always receives a conversation starting with a user turn.
---
--- When compact_history is on, T-2 and older successful
--- assistant turns are replaced with a fixed-format summary instead of
--- the full code body. T-1 always stays verbatim. See
--- Net.assistant_attach_compact_metadata + _maybe_compact_history below.
 function Net.trimmed_history()
   local hist
   if #S.history <= CFG.MAX_HISTORY_TURNS then
@@ -19891,327 +20138,7 @@ function Net.trimmed_history()
       hist = { S.history[#S.history] }
     end
   end
-  return Net._maybe_compact_history(hist)
-end
-
--- Cheap fingerprint for compact_history summaries. Same FNV-1a 32-bit
--- as the cache-plan diagnostic; reused so a turn's history-summary
--- code-hash can be cross-referenced with cache-plan rung hashes.
--- Attached to Net (not a file-scope local) to stay under Lua 5.4's
--- 200-local-per-function limit on the top-level chunk.
-function Net._compact_hash(s)
-  if not s or s == "" then return "00000000" end
-  local h = 2166136261
-  for i = 1, #s do
-    h = (h ~ s:byte(i)) * 16777619
-    h = h & 0xFFFFFFFF
-  end
-  return string.format("%08x", h)
-end
-
-function Net._compact_history_cache_sensitive_provider()
-  if type(PROVIDERS) ~= "table"
-     or type(PROVIDERS.active) ~= "function" then
-    return nil
-  end
-  local ok, p = pcall(PROVIDERS.active)
-  if not ok or type(p) ~= "table" then return nil end
-
-  -- Anthropic's explicit `last_asst` cache rung covers the full conversation
-  -- prefix. Rewriting older assistant rows after they have already ridden that
-  -- rung trades a small token saving for a fresh cache write on every follow-up.
-  if p.id == "anthropic" then return p.id end
-  return nil
-end
-
--- Build a fixed-format structured summary for an assistant turn. Local
--- construction (no model call); deterministic; ~200-300 bytes vs the
--- 3-7K of the original code body. Schema is intentionally rigid so
--- the model can quickly skim "what was that turn?" without parsing
--- prose. See Net.assistant_attach_compact_metadata for the per-turn
--- inputs.
-function Net._build_compact_summary(info)
-  local lines = { "[ASSISTANT TURN -- COMPACTED SUMMARY]" }
-  local artifact = info.code_type or "none"
-  if artifact == nil or artifact == "" then artifact = "none" end
-  lines[#lines+1] = "artifact: " .. artifact
-  lines[#lines+1] = "status: " .. (info.run_status or "unknown")
-  if info.code_bytes and info.code_bytes > 0 then
-    local nlines = info.code_lines or 0
-    lines[#lines+1] = string.format(
-      "code: %dB / %d lines / hash:%s",
-      info.code_bytes, nlines, info.code_hash or "-")
-  end
-  if info.user_intent and info.user_intent ~= "" then
-    -- Trim long prompts to ~120 chars so the summary stays compact even
-    -- on verbose user requests. Newlines collapsed to spaces.
-    local trimmed = info.user_intent:gsub("[\r\n]+", " ")
-    if #trimmed > 120 then trimmed = trimmed:sub(1, 117) .. "..." end
-    lines[#lines+1] = "intent: " .. trimmed
-  end
-  lines[#lines+1] = "(full code body elided; ask to "
-                 .. "modify/fix the previous script to expand)"
-  return tbl_concat(lines, "\n")
-end
-
--- Attach compact-history metadata to S.history[hist_idx]. Called from
--- the canonical "turn completed successfully" site at the bottom of
--- Net.try_finish_curl. info.code is the extracted code body (lua or
--- jsfx); info.code_type is "lua" / "jsfx" / nil; info.auto_ran_ok and
--- info.was_truncated come from the response handler's locals;
--- info.user_intent is S.pending_orig_prompt (the user message that
--- triggered this turn).
---
--- compact_eligible only fires for the safe case: auto-ran-ok + a real
--- code body + not truncated + a summary that actually saves bytes.
--- Everything else (errored, manual_run, truncated, no_code,
--- gate-hit-without-retry, tiny scripts) stays verbatim so the model can
--- still see the original on a "fix that" follow-up.
-Net._COMPACT_MIN_SAVINGS = 128
-function Net.assistant_attach_compact_metadata(hist_idx, info)
-  local row = S.history and S.history[hist_idx]
-  if not row or row.role ~= "assistant" then return end
-  -- run_status is mostly set already (Code.run path / risky-gate /
-  -- truncation), but if no code was extracted at all, leave it at the
-  -- "no_code" default written at append time. info.code being non-nil
-  -- means the response had an extractable, parse-clean code block.
-  local code = info.code
-  local code_bytes, code_hash, code_lines = 0, nil, 0
-  if code and code ~= "" then
-    code_bytes = #code
-    code_hash  = Net._compact_hash(code)
-    -- Cheap line count -- newlines + 1 if last char isn't newline.
-    local nl = 0
-    for _ in code:gmatch("\n") do nl = nl + 1 end
-    code_lines = nl + (code:sub(-1) == "\n" and 0 or 1)
-  end
-  -- Code exists but auto-run never ran (prefs.auto_run off, or one of
-  -- the docs/validator/jsfx/defer/helper gates blocked the auto-run
-  -- block in try_finish_curl). The row is still "no_code" because
-  -- nothing wrote a real run_status. Upgrade to "manual_run" so the
-  -- compact-history skip-reason diagnostic tells the truth -- the row
-  -- is still ineligible for compaction either way (compact_eligible
-  -- requires "ran_ok"), so behavior is unchanged, just less misleading.
-  if code_bytes > 0 and row.run_status == "no_code" then
-    row.run_status = "manual_run"
-  end
-  row.code_bytes = code_bytes
-  row.code_hash  = code_hash
-  row.code_lines = code_lines
-  row.code_type  = info.code_type or row.code_type
-  row.truncated  = info.was_truncated or row.truncated or false
-  -- Build the summary content once, now, while the inputs are fresh.
-  -- (Re-building on every send_to_api would be wasted work since the
-  -- inputs don't change after the turn closes.)
-  row.compact_summary = Net._build_compact_summary({
-    code_type   = row.code_type,
-    run_status  = row.run_status,
-    code_bytes  = row.code_bytes,
-    code_lines  = row.code_lines,
-    code_hash   = row.code_hash,
-    user_intent = info.user_intent,
-  })
-  row.compact_savings = #(row.content or "") - #(row.compact_summary or "")
-  -- Eligibility gate. Conservative: only ran_ok turns with real code
-  -- and no truncation are safe to compact, and only when the summary is
-  -- meaningfully smaller than the original assistant content. Anything
-  -- else stays verbatim with a recorded skip reason for the [HISTORY-COMPACT]
-  -- diagnostic line.
-  if row.run_status == "ran_ok"
-     and code_bytes > 0
-     and not row.truncated
-     and row.compact_savings >= Net._COMPACT_MIN_SAVINGS then
-    row.compact_eligible = true
-    row.compact_skip_reason = nil
-  else
-    row.compact_eligible = false
-    if row.run_status == "ran_ok" and code_bytes <= 0 then
-      row.compact_skip_reason = "no_code"
-    elseif row.run_status == "ran_ok" and row.truncated then
-      row.compact_skip_reason = "truncated"
-    elseif row.run_status == "ran_ok"
-           and row.compact_savings < Net._COMPACT_MIN_SAVINGS then
-      row.compact_skip_reason = "too_small"
-    else
-      row.compact_skip_reason = row.run_status or "unknown"
-    end
-  end
-end
-
--- Conservative "modify the previous script" detector. Returns true when
--- the most recent user turn looks like a deictic reference to prior
--- code -- in which case _maybe_compact_history skips compaction
--- entirely so the model can see the full history. False positives just
--- disable savings for that turn (no correctness regression).
--- Constants attached to Net (not file-scope locals) to stay under Lua
--- 5.4's 200-local-per-function limit on the top-level chunk.
-Net._MODIFY_PRIOR_VERBS =
-  "modify|tweak|fix|change|adjust|update|revise|rework|redo|strip|remove"
-  .. "|move|swap|replace|drop|delete"
-Net._MODIFY_PRIOR_CODE_VERBS =
-  "modify|tweak|fix|change|adjust|update|revise|rework|redo|strip|remove"
-  .. "|move|swap|replace|drop|delete"
-Net._MODIFY_PRIOR_REF_NOUNS =
-  "that|it|this|previous|last|one|version|pass|result"
-Net._MODIFY_PRIOR_CODE_NOUNS = "script|code"
-Net._MODIFY_PRIOR_DIRECT_VERBS = "make|use"
-Net._MODIFY_PRIOR_DIRECT_NOUNS = "it|that|this|one"
-function Net._is_modify_prior_followup(hist)
-  -- Last role=user turn (current turn's prompt -- already in hist as
-  -- the trailing entry).
-  local last_user
-  for i = #hist, 1, -1 do
-    if hist[i].role == "user" then last_user = hist[i].content; break end
-  end
-  if not last_user or last_user == "" then return false end
-  local lo = last_user:lower()
-  local function has_word(word)
-    return lo:find("%f[%w]" .. word .. "%f[%W]") ~= nil
-  end
-  local function verb_near_noun(verbs, nouns)
-    for verb in verbs:gmatch("[^|]+") do
-      local pos = 1
-      while true do
-        local vstart, vend = lo:find("%f[%w]" .. verb .. "%f[%W]", pos)
-        if not vstart then break end
-        -- Look both directions within ~60 chars so "last script, change..."
-        -- is treated the same as "change the last script".
-        local window = lo:sub(math.max(1, vstart - 60), vend + 60)
-        for noun in nouns:gmatch("[^|]+") do
-          if window:find("%f[%w]" .. noun .. "%f[%W]") then
-            return verb .. "-" .. noun
-          end
-        end
-        pos = vend + 1
-      end
-    end
-    return nil
-  end
-  local function direct_ref(verbs, nouns)
-    for verb in verbs:gmatch("[^|]+") do
-      local pos = 1
-      while true do
-        local _vstart, vend = lo:find("%f[%w]" .. verb .. "%f[%W]", pos)
-        if not vend then break end
-        -- Tight direct-reference window so "make it brighter" hits but
-        -- "make a script that..." does not.
-        local window = lo:sub(vend + 1, vend + 18)
-        for noun in nouns:gmatch("[^|]+") do
-          if window:find("^%W*%f[%w]" .. noun .. "%f[%W]") then
-            return verb .. "-" .. noun
-          end
-        end
-        pos = vend + 1
-      end
-    end
-    return nil
-  end
-
-  local match = verb_near_noun(
-    Net._MODIFY_PRIOR_VERBS, Net._MODIFY_PRIOR_REF_NOUNS)
-  if match then return true, match end
-  match = verb_near_noun(
-    Net._MODIFY_PRIOR_CODE_VERBS, Net._MODIFY_PRIOR_CODE_NOUNS)
-  if match then return true, match end
-  match = direct_ref(
-    Net._MODIFY_PRIOR_DIRECT_VERBS, Net._MODIFY_PRIOR_DIRECT_NOUNS)
-  if match then return true, match end
-
-  -- Common natural-language correction pattern with no explicit "that/it":
-  -- "actually I want EQ before the comp", "instead, put delay after..."
-  -- These false positives only skip savings for the current send.
-  if (has_word("actually") or has_word("instead"))
-     and (has_word("before") or has_word("after")
-          or has_word("without") or has_word("instead")) then
-    return true, has_word("actually") and "actually-edit" or "instead-edit"
-  end
-  return false
-end
-
--- Apply compaction to the trimmed history slice. Default no-op (returns
--- hist unchanged); only fires when the compact_history preference is on.
--- T-1 (the last assistant row) is always preserved verbatim; T-2 and older
--- eligible rows are replaced with their compact_summary.
-function Net._maybe_compact_history(hist)
-  local compact_on
-  if prefs and prefs.compact_history ~= nil then
-    compact_on = prefs.compact_history
-  else
-    compact_on = reaper.GetExtState(CFG.EXT_NS, "compact_history") == "1"
-  end
-  if not compact_on then
-    return hist
-  end
-  local cache_sensitive_provider = Net._compact_history_cache_sensitive_provider()
-  if cache_sensitive_provider then
-    if prefs.debug_logging then
-      Log.line("HISTORY-COMPACT",
-        "skipped (preserve prompt cache for provider: "
-        .. tostring(cache_sensitive_provider) .. ")")
-    end
-    return hist
-  end
-  -- modify-prior detector short-circuits compaction entirely. False
-  -- positives only cost the savings for this one turn.
-  local is_modify, mp_match = Net._is_modify_prior_followup(hist)
-  if is_modify then
-    if prefs.debug_logging then
-      Log.line("HISTORY-COMPACT",
-        "skipped (modify-prior follow-up: " .. tostring(mp_match) .. ")")
-    end
-    return hist
-  end
-  -- Find the last assistant index in hist -- it stays verbatim.
-  local last_asst_idx = nil
-  for i = #hist, 1, -1 do
-    if hist[i].role == "assistant" then last_asst_idx = i; break end
-  end
-  local out = {}
-  local compacted, kept_asst = 0, 0
-  local skip_reasons = {}
-  for i, row in ipairs(hist) do
-    if row.role == "assistant"
-       and i ~= last_asst_idx
-       and row.compact_eligible
-       and row.compact_summary
-       and (#(row.content or "") - #(row.compact_summary or ""))
-           >= Net._COMPACT_MIN_SAVINGS then
-      out[#out+1] = { role = "assistant", content = row.compact_summary }
-      compacted = compacted + 1
-    else
-      out[#out+1] = row
-      if row.role == "assistant" then
-        kept_asst = kept_asst + 1
-        if i ~= last_asst_idx then
-          local r = row.compact_skip_reason
-          if row.compact_eligible
-             and row.compact_summary
-             and (#(row.content or "") - #(row.compact_summary or ""))
-                 < Net._COMPACT_MIN_SAVINGS then
-            r = "too_small"
-          end
-          r = r or "unknown"
-          skip_reasons[r] = (skip_reasons[r] or 0) + 1
-        end
-      end
-    end
-  end
-  if prefs.debug_logging then
-    local before, after = 0, 0
-    for _, r in ipairs(hist) do before = before + #(r.content or "") end
-    for _, r in ipairs(out)  do after  = after  + #(r.content or "") end
-    local skip_str = "none"
-    if next(skip_reasons) then
-      local parts = {}
-      for r, c in pairs(skip_reasons) do parts[#parts+1] = r .. "(" .. c .. ")" end
-      skip_str = tbl_concat(parts, ",")
-    end
-    local delta = after - before
-    Log.line("HISTORY-COMPACT", string.format(
-      "before=%dB after=%dB delta=%+dB compacted=%d kept=%d skipped=%s",
-      before, after, delta, compacted, kept_asst, skip_str))
-  end
-  return out
+  return hist
 end
 
 -- =============================================================================
@@ -20913,6 +20840,9 @@ function Net._drop_pending_history_rows()
 end
 
 function Net.cancel_active_request(probe_reason)
+  if S.turn_budget_confirmation and Net.cancel_turn_budget_confirmation then
+    return Net.cancel_turn_budget_confirmation()
+  end
   local active = S.status == "waiting"
     or S.curl_pid ~= nil
     or S.retry_scheduled == true
@@ -20953,6 +20883,9 @@ function Net.cancel_active_request(probe_reason)
   S.retry_saved_provider_idx = nil
   S.retry_saved_model_idx    = nil
   S.retry_saved_thinking_idx = nil
+  if Net._clear_turn_budget_confirmation then
+    Net._clear_turn_budget_confirmation()
+  end
   S.reset_turn_retries()
   S.scroll_to_bottom    = true
 
@@ -20969,6 +20902,9 @@ end
 function Net._abort_runaway_turn(probe_reason)
   Net._restore_pending_user_history()
   Net._restore_typed_action_escalation_model()
+  if Net._clear_turn_budget_confirmation then
+    Net._clear_turn_budget_confirmation()
+  end
   S.status               = "idle"
   S.pending_display_idx  = nil
   S.pending_orig_prompt  = nil
@@ -21080,6 +21016,288 @@ function Net._curl_failure_debug(exit_code, detail, failure_kind)
   return dbg
 end
 
+function Net._turn_call_budget(body, provider_idx, model_idx)
+  local p = PROVIDERS[provider_idx] or PROVIDERS.active() or {}
+  local m = p.models and p.models[model_idx]
+  if not m and p == PROVIDERS.active() then
+    m = MODELS[prefs.model_idx] or MODELS[1]
+  end
+  m = m or {}
+
+  local input_tokens = math_max(1,
+    Net.estimate_request_tokens_from_body(body))
+  local output_tokens = tonumber(tostring(body or ""):match(
+    '"max_completion_tokens"%s*:%s*(%d+)'))
+    or tonumber(tostring(body or ""):match(
+      '"maxOutputTokens"%s*:%s*(%d+)'))
+    or tonumber(tostring(body or ""):match(
+      '"max_tokens"%s*:%s*(%d+)'))
+    or tonumber(m.max_output)
+    or 16384
+  output_tokens = math_max(1, math_floor(output_tokens))
+
+  local next_tokens = input_tokens + output_tokens
+  local next_cost = MODELS.calc_cost(m, input_tokens, 0, 0, output_tokens)
+  local free_tier = p.id == "google" and S.gemini_paid_tier == false
+  local is_billable = not free_tier and next_cost > 0
+  local actual_cost = tonumber(S.turn_billable_actual_cost_usd) or 0
+  local actual_tokens = tonumber(S.turn_actual_tokens) or 0
+  return {
+    provider = p,
+    model = m,
+    input_tokens = input_tokens,
+    output_tokens = output_tokens,
+    next_tokens = next_tokens,
+    next_cost = next_cost,
+    is_billable = is_billable,
+    projected_cost = actual_cost + (is_billable and next_cost or 0),
+    projected_tokens = actual_tokens + next_tokens,
+    actual_cost = actual_cost,
+    actual_tokens = actual_tokens,
+  }
+end
+
+-- Worst-case single-call floor for the currently selected provider/model.
+-- The per-turn cost/token guardrails project this same worst case: a normal
+-- cloud chat request omits max_completion_tokens, so the projected output
+-- falls back to the model's max_output ceiling (128,000 on GPT-5.x, generic
+-- 16,384). A per-turn limit set below this floor stops every send before the
+-- first request can land. UI and Screen Reader read this to warn up front.
+-- Resolves the model the same way Net._turn_call_budget does.
+function Net._turn_call_floor()
+  local p = PROVIDERS[prefs.provider_idx] or PROVIDERS.active() or {}
+  local m = p.models and p.models[prefs.model_idx]
+  if not m and p == PROVIDERS.active() then
+    m = MODELS[prefs.model_idx] or MODELS[1]
+  end
+  m = m or {}
+  local input_allowance = 2000
+  local output_tokens = math_max(1, math_floor(tonumber(m.max_output) or 16384))
+  local cost = MODELS.calc_cost(m, input_allowance, 0, 0, output_tokens)
+  local free_tier = p.id == "google" and S.gemini_paid_tier == false
+  return {
+    tokens = input_allowance + output_tokens,
+    cost = cost,
+    cost_limit_applies = not free_tier and cost > 0,
+  }
+end
+
+function Net._record_turn_budget_usage(p, raw_tok_in, raw_tok_out,
+                                       tok_in_read, tok_in_create)
+  local input = tonumber(raw_tok_in) or 0
+  local output = tonumber(raw_tok_out) or 0
+  if input <= 0 and output <= 0 then return end
+  S.turn_actual_tokens = (S.turn_actual_tokens or 0) + input + output
+  if p and p.id == "google" and S.gemini_paid_tier == false then return end
+  local model_idx = S.pending_model_idx or prefs.model_idx
+  local m = p and p.models and p.models[model_idx]
+    or MODELS[model_idx] or MODELS[1]
+  local cache_read = tonumber(tok_in_read) or 0
+  local cache_create = tonumber(tok_in_create) or 0
+  local base = math_max(0, input - cache_read - cache_create)
+  S.turn_billable_actual_cost_usd =
+    (S.turn_billable_actual_cost_usd or 0)
+    + MODELS.calc_cost(m, base, cache_read, cache_create, output)
+end
+
+-- Record provider-reported usage as soon as a successful response is parsed.
+-- This must run before context/repair dispatch: those intermediate responses
+-- can return early and fire another model call, but their tokens and cost still
+-- belong to the visible exchange and the session total.
+function Net._record_display_usage(p, raw_tok_in, raw_tok_out,
+                                   tok_in_read, tok_in_create, stage)
+  local input = tonumber(raw_tok_in) or 0
+  local output = tonumber(raw_tok_out) or 0
+  if input <= 0 and output <= 0 then return nil end
+  local cache_read = tonumber(tok_in_read) or 0
+  local cache_create = tonumber(tok_in_create) or 0
+  local dmsg = S.pending_display_idx
+    and S.display_messages[S.pending_display_idx] or nil
+
+  if dmsg then
+    dmsg.tok_in = (dmsg.tok_in or 0) + input
+    dmsg.tok_out = (dmsg.tok_out or 0) + output
+    dmsg.tok_cache_read = (dmsg.tok_cache_read or 0) + cache_read
+    dmsg.tok_cache_create = (dmsg.tok_cache_create or 0) + cache_create
+  end
+
+  local model_idx = S.pending_model_idx or prefs.model_idx
+  local m = p and p.models and p.models[model_idx]
+    or MODELS[model_idx] or MODELS[1]
+  local base = math_max(0, input - cache_read - cache_create)
+  local this_cost = MODELS.calc_cost(
+    m, base, cache_read, cache_create, output)
+  local free_tier = p and p.id == "google" and S.gemini_paid_tier == false
+
+  S.session_tok_in = S.session_tok_in + input
+  S.session_tok_out = S.session_tok_out + output
+  if not free_tier then
+    S.session_cost = S.session_cost + this_cost
+  end
+
+  if dmsg then
+    dmsg.cost = (dmsg.cost or 0) + this_cost
+    if free_tier then dmsg.free_tier = true end
+    if p and p.id == "google" then
+      local gc = Net.gemini_cache_debug_state(
+        stage or "response", S.gemini_cache_last_used == true, cache_read)
+      local req_gc = S.gemini_cache_last_state
+      if type(req_gc) == "table" then
+        gc.request_status = req_gc.status
+        gc.request_reason = req_gc.reason
+        gc.request_used = req_gc.used == true
+        gc.request_create_reason = req_gc.create_reason
+      end
+      dmsg.gemini_cache = gc
+    end
+  end
+  return this_cost
+end
+
+function Net._turn_budget_error_extra(budget, matched_condition)
+  budget = budget or {}
+  local p = budget.provider or {}
+  local m = budget.model or {}
+  return {
+    error_kind = "turn_spend_budget",
+    error_debug = {
+      failure_kind = "turn_spend_budget",
+      source = "turn_spend_guardrail",
+      matched_condition = matched_condition,
+      provider_id = p.is_custom and "custom" or p.id,
+      model_id = p.is_custom and "custom" or (m.id or m.name),
+      projected_cost_usd = budget.projected_cost,
+      projected_tokens = budget.projected_tokens,
+      next_call_worst_case_cost_usd = budget.next_cost,
+      next_call_worst_case_tokens = budget.next_tokens,
+      turn_cost_limit_usd = prefs.turn_cost_limit_usd,
+      turn_token_limit = prefs.turn_token_limit,
+      model_calls_this_turn = S.model_calls_this_turn or 0,
+      billable_model_calls_this_turn = S.billable_model_calls_this_turn or 0,
+      transport_retries_this_turn = S.transport_retries_this_turn or 0,
+      api_calls_this_turn = S.api_calls_this_turn or 0,
+    },
+  }
+end
+
+function Net._clear_turn_budget_confirmation()
+  S.turn_budget_confirmation = nil
+  S.open_turn_budget_confirmation = false
+  S.turn_budget_confirm_focus_cancel = false
+  S.turn_budget_override_once = false
+end
+
+function Net._queue_turn_budget_confirmation(body, opts, budget,
+                                              matched_condition)
+  local saved_opts
+  if type(opts) == "table" then
+    saved_opts = {}
+    for key, value in pairs(opts) do saved_opts[key] = value end
+  end
+  S.turn_budget_confirmation = {
+    body = body,
+    opts = saved_opts,
+    budget = budget,
+    matched_condition = matched_condition,
+  }
+  S.open_turn_budget_confirmation = true
+  S.turn_budget_confirm_focus_cancel = true
+  S.status = "awaiting_confirmation"
+  S.scroll_to_bottom = true
+  return true, "turn_budget_confirmation"
+end
+
+function Net.continue_turn_budget_confirmation()
+  local pending = S.turn_budget_confirmation
+  if type(pending) ~= "table" or type(pending.body) ~= "string" then
+    Net._clear_turn_budget_confirmation()
+    return false, "no_turn_budget_confirmation"
+  end
+  S.turn_budget_confirmation = nil
+  S.open_turn_budget_confirmation = false
+  S.turn_budget_confirm_focus_cancel = false
+  S.turn_budget_override_once = true
+  S.status = "waiting"
+  local fired, reason = Net.fire_curl(pending.body, pending.opts)
+  if not fired then
+    S.turn_budget_override_once = false
+    if reason ~= "call_cap_exceeded" then
+      Log.add_error(RA.t("net.turn_budget.continue_failed", nil,
+        "The approved model request could not be started. Please try again."))
+      Net._abort_runaway_turn("turn_budget_continue_failed")
+    end
+  end
+  return fired, reason
+end
+
+function Net.cancel_turn_budget_confirmation()
+  local pending = S.turn_budget_confirmation
+  if type(pending) ~= "table" then
+    Net._clear_turn_budget_confirmation()
+    return false, "no_turn_budget_confirmation"
+  end
+  local budget = pending.budget or {}
+  local matched = pending.matched_condition or "projected_token_limit"
+  -- Clear the deferred body before logging or aborting so no later UI or
+  -- accessibility action can accidentally resume a cancelled request.
+  Net._clear_turn_budget_confirmation()
+  Net._turn_budget_stop(budget, matched)
+  return true, "turn_budget_cancelled"
+end
+
+function Net._turn_budget_stop(budget, matched_condition)
+  local cost_limit = tonumber(prefs.turn_cost_limit_usd)
+    or CFG.TURN_COST_LIMIT_DEFAULT
+  local token_limit = tonumber(prefs.turn_token_limit)
+    or CFG.TURN_TOKEN_LIMIT_DEFAULT
+  local message
+  if matched_condition == "projected_token_limit" then
+    local projected = UI and UI.format_number and UI.format_number(budget.projected_tokens)
+      or tostring(math_floor(budget.projected_tokens or 0))
+    local limit_str = UI and UI.format_number and UI.format_number(token_limit)
+      or tostring(math_floor(token_limit))
+    message = RA.t("net.turn_budget.token_stop",
+      { projected = projected, limit = limit_str },
+      str_format(
+        "Stopped before another model request. Its worst-case token allowance would put this turn at about %s tokens, above your %s-token limit.\n\nRaise the per-turn token limit in Settings > Advanced, shorten the request, or start a new chat.",
+        projected, limit_str))
+  else
+    local projected = MODELS.format_cost(budget.projected_cost or 0)
+    local limit_str = MODELS.format_cost(cost_limit)
+    message = RA.t("net.turn_budget.cost_stop",
+      { projected = projected, limit = limit_str },
+      str_format(
+        "Stopped before another billable model request. Its estimated worst case would put this turn at about %s, above your %s per-turn limit.\n\nRaise the dollar limit in Settings > Advanced, choose a less expensive model, or start a new chat.",
+        projected, limit_str))
+  end
+  Log.add_error(message, nil, nil, nil,
+    Net._turn_budget_error_extra(budget, matched_condition))
+  return Net._abort_runaway_turn("turn_budget")
+end
+
+function Net._preflight_turn_budget(body, provider_idx, model_idx,
+                                    is_transport_retry)
+  if is_transport_retry then return true, { transport_retry = true } end
+  local budget = Net._turn_call_budget(body, provider_idx, model_idx)
+  S.turn_estimated_next_cost_usd = budget.next_cost
+  S.turn_estimated_next_tokens = budget.next_tokens
+  if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
+    local dmsg = S.display_messages[S.pending_display_idx]
+    dmsg.next_call_worst_case_cost = budget.next_cost
+    dmsg.next_call_worst_case_tokens = budget.next_tokens
+  end
+  if budget.projected_tokens > (tonumber(prefs.turn_token_limit)
+      or CFG.TURN_TOKEN_LIMIT_DEFAULT) then
+    return false, budget, "projected_token_limit"
+  end
+  if budget.is_billable
+     and budget.projected_cost > (tonumber(prefs.turn_cost_limit_usd)
+       or CFG.TURN_COST_LIMIT_DEFAULT) then
+    return false, budget, "projected_cost_limit"
+  end
+  return true, budget
+end
+
 function Net.fire_curl(body, opts)
   -- TCP/TLS handshake timeout (seconds). Default 10 for cloud providers;
   -- per-record override for customs set below.
@@ -21099,6 +21317,7 @@ function Net.fire_curl(body, opts)
   local launch_provider_idx = (opts and opts.provider_idx) or prefs.provider_idx
   local launch_model_idx    = (opts and opts.model_idx) or prefs.model_idx
   local launch_thinking_idx = (opts and opts.thinking_idx) or prefs.thinking_idx
+  local is_transport_retry  = opts and opts.transport_retry == true
 
   -- A "turn POST" is a POST tied to the user's currently-pending display
   -- message: the initial send and every silent retry / context fetch /
@@ -21136,20 +21355,47 @@ function Net.fire_curl(body, opts)
     return Net._abort_runaway_turn("call_cap")
   end
 
+  local budget
+  if is_turn_post then
+    local allowed, matched_condition
+    allowed, budget, matched_condition = Net._preflight_turn_budget(body,
+      launch_provider_idx, launch_model_idx, is_transport_retry)
+    if S.turn_budget_override_once == true then
+      -- Consent applies to this exact launch only. Consume it before any I/O
+      -- so a failed start cannot silently carry approval into another call.
+      S.turn_budget_override_once = false
+    elseif not allowed then
+      return Net._queue_turn_budget_confirmation(body, opts, budget,
+        matched_condition)
+    end
+  end
+
   -- Per-message API-call counter. Incremented for every POST that's tied
   -- to the user's pending display message: the initial send AND any
   -- silent retries (docs-gate auto-fetch, beta-header fallback, cache-
   -- expired refresh, fx-inspect intra-turn fetches). Surfaced in the
-  -- Details box so the user can see when an "invisible" retry doubled
-  -- the work -- the cost / time fields only reflect the LAST request,
-  -- so without this counter the user has no indication that the visible
-  -- numbers are missing one or more earlier round-trips. GET is a probe
-  -- (auth check, /v1/models scan) and never a user-message API call, so
-  -- it stays out of the count.
+  -- Details box so the user can see when an "invisible" retry added work.
+  -- Tokens/cache/cost accumulate from every successful response that reports
+  -- usage, while time spans the full turn. GET is a probe (auth check,
+  -- /v1/models scan) and never a user-message API call, so it stays out of
+  -- the count.
   if is_turn_post then
     local dmsg = S.display_messages[S.pending_display_idx]
     dmsg.api_calls = (dmsg.api_calls or 0) + 1
     S.api_calls_this_turn = (S.api_calls_this_turn or 0) + 1
+    if is_transport_retry then
+      dmsg.transport_retries = (dmsg.transport_retries or 0) + 1
+      S.transport_retries_this_turn =
+        (S.transport_retries_this_turn or 0) + 1
+    else
+      dmsg.model_calls = (dmsg.model_calls or 0) + 1
+      S.model_calls_this_turn = (S.model_calls_this_turn or 0) + 1
+      if budget and budget.is_billable then
+        dmsg.billable_model_calls = (dmsg.billable_model_calls or 0) + 1
+        S.billable_model_calls_this_turn =
+          (S.billable_model_calls_this_turn or 0) + 1
+      end
+    end
     if S.probe_turn then
       S.probe_turn.posts_fired = (S.probe_turn.posts_fired or 0) + 1
     end
@@ -23400,6 +23646,7 @@ function Net.send_to_api(user_text)
           and lt:find("script", 1, true) ~= nil
           and lt:find("reaper", 1, true) ~= nil)
       or (edit_verb and edit_noun and not qna_prompt)
+      or Code.prompt_likely_needs_lua_action(user_text)
   end
   local preempted_context = nil
   if not answer_only_followup then
@@ -23662,7 +23909,7 @@ function Net.send_to_api(user_text)
   --
   -- Per-model context_window on the active model wins. Built-in providers
   -- now carry context_window on each model entry where it differs from the
-  -- 200K default (Sonnet/Opus 1M, GPT-5.4 nano/mini 400K, GPT-5.4 1.05M,
+  -- 200K default (Sonnet/Opus 1M, GPT-5.4 mini 400K, GPT-5.6 1.05M,
   -- Gemini 3.x 1,048,576, DeepSeek V4 Flash 1M); a provider-level
   -- field is honored as a fallback if a model row omits it. Custom
   -- providers always carry context_window per-model (set by the user on
@@ -23826,7 +24073,8 @@ function Net.send_to_api(user_text)
   end
 
   -- 6. Fire the API call (reuse the body already built by the preflight check).
-  if not Net.fire_curl(body) then
+  local fired, fire_reason = Net.fire_curl(body)
+  if not fired then
     -- Roll back on failure and restore the user's input so they can retry.
     S.history[#S.history]          = nil
     tbl_remove(S.display_messages, disp_idx)
@@ -23847,9 +24095,11 @@ function Net.send_to_api(user_text)
     S.pending_attachments  = nil
     S._fx_cache_events     = nil
     S.last_run_error       = _saved_last_run_error
-    Log.add_error(
-      "Couldn't send. Another request may still be in progress. "
-      .. "Wait a moment and try again.")
+    if fire_reason ~= "call_cap_exceeded" then
+      Log.add_error(
+        "Couldn't send. Another request may still be in progress. "
+        .. "Wait a moment and try again.")
+    end
     -- Probe lifecycle: turn ended at fire_curl failure. No
     -- early-return here -- the original code falls through to the
     -- shared scroll_to_bottom assignment, so we let it. The natural-
@@ -23957,6 +24207,7 @@ function Net.clear_conversation(opts)
   S.fx_inspect_already_sent    = false
   S.plugin_ref_sent            = {}
   S.pref_plugins_sent          = {}
+  Net._clear_turn_budget_confirmation()
   S.reset_turn_retries()
   S._context_reuse_hint        = nil
   S._irrelevant_context_hint   = nil
@@ -24090,6 +24341,10 @@ function RA.install_code_runtime_fallbacks(reason)
 
   function Code.safety_backup()
     return nil, "code_runtime_unavailable"
+  end
+
+  function Code.safety_backup_can_proceed(err)
+    return err == nil or err == "unchanged"
   end
 
   function Code.apply_run_result_to_message(msg)
@@ -27179,9 +27434,10 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth)
     end
     local extra = Net._provider_error_extra(p, inner_type, inner_type, api_err,
       "provider_auth_error")
-    extra.storage_note = RA.t("response.api_key_storage_note", nil,
-      "Your key is obfuscated and locked to this REAPER install path. "
-        .. "It will not work if copied to another machine.")
+    extra.storage_note = RA.t("response.api_key_storage_note_v2", nil,
+      "Your key was stored locally with reversible obfuscation, not OS-vault "
+        .. "encryption. The install-path binding is why it cannot be decoded "
+        .. "after being copied or moved.")
     Log.add_error(RA.t("response.api_key_invalid",
       { provider = p.label },
       "Your " .. p.label .. " API key isn't working. It may have expired or been "
@@ -27527,8 +27783,8 @@ function Net.try_finish_curl()
     end
     -- Tokens: OpenAI usage. prompt_tokens is the TOTAL input (including cached),
     -- and prompt_tokens_details.cached_tokens is the portion served from the
-    -- automatic prefix cache (billed at 10% of regular input). OpenAI's caching
-    -- has no separate cache-write fee, so tok_in_create stays 0.
+    -- automatic prefix cache. GPT-5.6+ also reports cache_write_tokens in the
+    -- same object; those tokens are billed at the model's 1.25x write rate.
     --
     -- DeepSeek reports cache hits at the top level of usage as
     -- prompt_cache_hit_tokens / prompt_cache_miss_tokens (not nested under
@@ -27539,12 +27795,14 @@ function Net.try_finish_curl()
     raw_tok_out   = tonumber(usage.completion_tokens) or 0
     if p.id == "deepseek" then
       tok_in_read = tonumber(usage.prompt_cache_hit_tokens) or 0
+      tok_in_create = 0
     else
       local details = type(usage.prompt_tokens_details) == "table"
                       and usage.prompt_tokens_details or {}
       tok_in_read   = tonumber(details.cached_tokens) or 0
+      tok_in_create = p.id == "openai"
+        and (tonumber(details.cache_write_tokens) or 0) or 0
     end
-    tok_in_create = 0
     -- Reasoning-token count for the length-cap error path. Lets the user see
     -- exactly how much of the cap went to internal reasoning vs visible output.
     local cdet    = type(usage.completion_tokens_details) == "table"
@@ -27680,6 +27938,15 @@ function Net.try_finish_curl()
     })
   end
 
+  -- Spend preflight for any same-turn continuation must include this call,
+  -- even when the response is only <context_needed> or an empty/repairable
+  -- result that returns before the normal visible-response accounting block.
+  Net._record_turn_budget_usage(p, raw_tok_in, raw_tok_out,
+    tok_in_read, tok_in_create)
+  Net._record_display_usage(p, raw_tok_in, raw_tok_out,
+    tok_in_read, tok_in_create,
+    (not text or text == "") and "response_empty" or "response")
+
   -- Common post-parse: clean up text.
   if text then
     text = text:gsub("\n\n\n+", "\n\n")
@@ -27690,24 +27957,6 @@ function Net.try_finish_curl()
 
   if not text or text == "" then
     Code.safe_write(tmp.log, raw)
-
-    -- Credit the failed call's tokens to the session totals. The user paid
-    -- real money for the reasoning that produced no output, and hiding it
-    -- from the running cost display would be misleading. We mirror the
-    -- success path's accounting so the dollar figure matches the bill.
-    -- Compute cost once; used for both session total and per-message stamp.
-    local fail_cost = nil
-    if (raw_tok_in or 0) > 0 or (raw_tok_out or 0) > 0 then
-      S.session_tok_in  = S.session_tok_in  + (raw_tok_in  or 0)
-      S.session_tok_out = S.session_tok_out + (raw_tok_out or 0)
-      local mi = S.pending_model_idx or prefs.model_idx
-      local mentry = MODELS[mi] or MODELS[1]
-      if mentry then
-        local base = (raw_tok_in or 0) - (tok_in_read or 0) - (tok_in_create or 0)
-        fail_cost = MODELS.calc_cost(mentry, base, tok_in_read or 0, tok_in_create or 0, raw_tok_out or 0)
-        S.session_cost = S.session_cost + fail_cost
-      end
-    end
 
     -- Empty-text-from-length auto-retry. When the model burned the full
     -- output budget on internal reasoning and emitted no visible reply
@@ -27873,26 +28122,6 @@ function Net.try_finish_curl()
     if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
       local dmsg = S.display_messages[S.pending_display_idx]
       dmsg.ctx_label = label
-      -- Write token info so the user can see what they were billed for.
-      if (raw_tok_in or 0) > 0 or (raw_tok_out or 0) > 0 then
-        dmsg.tok_in           = raw_tok_in  or 0
-        dmsg.tok_out          = raw_tok_out or 0
-        dmsg.tok_cache_read   = tok_in_read or 0
-        dmsg.tok_cache_create = tok_in_create or 0
-        dmsg.cost             = fail_cost
-      end
-      if p.id == "google" then
-        local gc = Net.gemini_cache_debug_state(
-          "response_empty", S.gemini_cache_last_used == true, tok_in_read)
-        local req_gc = S.gemini_cache_last_state
-        if type(req_gc) == "table" then
-          gc.request_status = req_gc.status
-          gc.request_reason = req_gc.reason
-          gc.request_used   = req_gc.used == true
-          gc.request_create_reason = req_gc.create_reason
-        end
-        dmsg.gemini_cache = gc
-      end
       if S.request_start_time then
         dmsg.response_time = reaper.time_precise() - S.request_start_time
       end
@@ -27934,64 +28163,6 @@ function Net.try_finish_curl()
   if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
     local dmsg = S.display_messages[S.pending_display_idx]
     if not dmsg.ctx_label then dmsg.ctx_label = prefs.include_snapshot and "snapshot" or "" end
-    if raw_tok_in > 0 or raw_tok_out > 0 then
-      -- Accumulate token / cache / cost across multiple round-trips in the
-      -- same turn. The docs-gate retry, beta-header fallback, and intra-
-      -- turn context fetches all re-enter this block; without accumulation
-      -- the visible Details tile shows ONLY the last request's metrics
-      -- and the user can't see they paid for two requests when api_calls=2.
-      -- Session totals add the raw per-call values directly so they don't
-      -- double-count the accumulated dmsg fields.
-      dmsg.tok_in           = (dmsg.tok_in           or 0) + raw_tok_in
-      dmsg.tok_out          = (dmsg.tok_out          or 0) + raw_tok_out
-      dmsg.tok_cache_read   = (dmsg.tok_cache_read   or 0) + tok_in_read
-      dmsg.tok_cache_create = (dmsg.tok_cache_create or 0) + tok_in_create
-      if p.id == "google" then
-        local gc = Net.gemini_cache_debug_state(
-          "response", S.gemini_cache_last_used == true, tok_in_read)
-        local req_gc = S.gemini_cache_last_state
-        if type(req_gc) == "table" then
-          gc.request_status = req_gc.status
-          gc.request_reason = req_gc.reason
-          gc.request_used   = req_gc.used == true
-          gc.request_create_reason = req_gc.create_reason
-        end
-        dmsg.gemini_cache = gc
-      end
-      S.session_tok_in        = S.session_tok_in  + raw_tok_in
-      S.session_tok_out       = S.session_tok_out + raw_tok_out
-      -- Cost estimation: look up model entry from the provider/model indices
-      -- that were snapshotted at send time, with a fallback linear search.
-      local tok_in_base = raw_tok_in - tok_in_read - tok_in_create
-      local mentry = nil
-      local pi = S.pending_provider_idx or prefs.provider_idx
-      local mi = S.pending_model_idx or prefs.model_idx
-      local prov = PROVIDERS[pi]
-      if prov and prov.models[mi] then
-        mentry = prov.models[mi]
-      end
-      if not mentry then
-        mentry = MODELS[mi] or MODELS[1]
-      end
-      local this_cost = MODELS.calc_cost(
-        mentry, tok_in_base, tok_in_read, tok_in_create, raw_tok_out)
-      dmsg.cost = (dmsg.cost or 0) + this_cost
-      -- Gemini Free Tier stamp: every request on the free API tier costs
-      -- the user nothing, but the token-math estimate reflects the paid
-      -- per-million rates. Record the free-tier context on the message so
-      -- downstream renderers (chat details, debug log) can frame the cost
-      -- as "would have been ~$X" instead of misleading the user into
-      -- thinking they're being billed.
-      if prov and prov.id == "google" and S.gemini_paid_tier == false then
-        dmsg.free_tier = true
-      end
-      -- Session total skips free-tier exchanges. Otherwise the session
-      -- counter in the footer would climb as if the user were paying,
-      -- undermining the "free tier" label everywhere else in the UI.
-      if not dmsg.free_tier then
-        S.session_cost = S.session_cost + this_cost
-      end
-    end
     if S.request_start_time then
       dmsg.response_time = reaper.time_precise() - S.request_start_time
       -- DO NOT nil request_start_time here. The docs-gate auto-retry below
@@ -28048,17 +28219,14 @@ function Net.try_finish_curl()
   -- Store assistant turn in history.
   S.history[#S.history+1] = { role = "assistant", content = text }
   -- Capture the row index now so per-turn run metadata writes below
-  -- (run_status, code_hash, truncated, compact_summary) all target the
+  -- (run status, validation status, and truncation state) all target the
   -- same row even if some sub-call appends a defensive history entry
-  -- between here and the end of try_finish_curl. The metadata is read
-  -- by Net.trimmed_history when the compact-history flag is on; turns
-  -- without metadata default to "no_code" / not-eligible-for-compaction.
+  -- between here and the end of try_finish_curl.
   local _asst_hist_idx = #S.history
   S.history[_asst_hist_idx].run_status = "no_code"
-  -- Snapshot the user prompt now -- the cleanup block at the end of
-  -- this function nils S.pending_orig_prompt before the compact-summary
-  -- builder runs, which would drop the intent: line from every summary.
-  local _compact_user_intent = S.pending_orig_prompt
+  -- Snapshot the user prompt for filters and sticky-context pruning below;
+  -- the cleanup block at the end nils S.pending_orig_prompt.
+  local _turn_user_intent = S.pending_orig_prompt
 
   -- Extract fenced code blocks.
   -- A response may contain both a JSFX block and a Lua block (e.g. "create this
@@ -28555,43 +28723,66 @@ function Net.try_finish_curl()
     end
   end
 
-  if lua_code and type(Code.find_unrequested_track_deletion) == "function" then
-    local track_deletion =
-      Code.find_unrequested_track_deletion(lua_code, S.pending_orig_prompt)
-    if track_deletion and #track_deletion > 0
-        and not S.track_deletion_retry_used then
-      S.track_deletion_retry_used = true
-      S.track_deletion_validator_retries =
-        (S.track_deletion_validator_retries or 0) + 1
-      Log.line("TRACK-DELETION-RETRY",
-        "script deleted tracks without a delete/clear request; retrying")
-      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous script "
-        .. "deleted tracks with reaper.DeleteTrack or a native remove-tracks "
-        .. "action, but the user did not ask to delete, clear, replace, or "
-        .. "rebuild existing tracks. Regenerate the FULL script without any "
-        .. "track-deletion calls. Create the requested tracks, items, markers, "
-        .. "regions, sends, MIDI, and FX without clearing the project first. "
-        .. "Preserve the user's requested names, order, routing, master-send "
-        .. "states, note timings, marker/region timings, and plugins. Respond "
-        .. "as if this is your FIRST reply -- do NOT apologize, do NOT "
-        .. "mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
-        .. lua_code
-        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      Net.fire_validator_retry({
-        kind = "track_deletion",
-        history_content = history_content,
-        ctx_label = "track_deletion_retry",
-        retry_failed_key = "retry.reason.after_unrequested_track_deletion",
-        retry_failed_label = "after unrequested track deletion",
-        failure_message = "Auto-retry after unrequested track deletion did not go through. Please resend the last message.",
-      })
-      return
-    elseif track_deletion and #track_deletion > 0 then
-      validator_gate_hit = true
-      Log.line("TRACK-DELETION-VALIDATOR",
-        "unrequested track deletion persisted after retry; auto-run blocked")
-      Log.add_error("The script deletes tracks even though the user did not ask to delete, clear, replace, or rebuild existing tracks. Auto-run is blocked; remove the track deletion and create the requested content without clearing the project.")
+  local action_relevance_gate_hit = false
+  if lua_code
+      and type(Code.find_action_request_relevance_violations) == "function" then
+    local relevance = Code.find_action_request_relevance_violations(
+      lua_code, S.pending_orig_prompt, S.pending_snapshot)
+    if relevance and #relevance > 0 then
+      local details, has_retryable = {}, false
+      for _, finding in ipairs(relevance) do
+        details[#details + 1] = "  - line " .. tostring(finding.line or "?")
+          .. ": " .. tostring(finding.kind or "relevance")
+          .. " (" .. tostring(finding.detail or "review required") .. ")"
+        if not finding.review_only then has_retryable = true end
+      end
+      local detail_text = tbl_concat(details, "\n")
+      if has_retryable and not S.action_relevance_retry_used then
+        S.action_relevance_retry_used = true
+        S.action_relevance_validator_retries =
+          (S.action_relevance_validator_retries or 0) + 1
+        Log.line("ACTION-RELEVANCE-RETRY",
+          "generated action did not match request/session; retrying\n"
+            .. detail_text)
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous "
+          .. "script did not stay within the user's requested action. "
+          .. "Regenerate the FULL script and perform only the requested "
+          .. "task. Do not introduce plugins the request did not ask for, "
+          .. "do not target literal track names absent from both the request "
+          .. "and SESSION CONTEXT, and do not run Save, Record, Undo, Redo, "
+          .. "transport, deletion, or global-toggle actions unless the user "
+          .. "explicitly requested that exact effect. Item removal action "
+          .. "40006 deletes selected media items; it is not track deletion. "
+          .. "Preserve every requested rename, color, pan, routing, MIDI, "
+          .. "JSFX, marker, region, timing, plugin, and parameter detail. "
+          .. "Respond as if this is your FIRST reply -- do NOT apologize "
+          .. "and do NOT mention a retry.\n\nDetected mismatch(es):\n"
+          .. detail_text .. "\n\nPrevious Lua to fix:\n"
+          .. lua_code .. "\n\nUSER REQUEST:\n"
+          .. (S.pending_orig_prompt or "")
+        Net.fire_validator_retry({
+          kind = "action_relevance",
+          history_content = history_content,
+          ctx_label = "action_relevance_retry",
+          retry_failed_key = "retry.reason.after_action_relevance",
+          retry_failed_label = "after action relevance mismatch",
+          failure_message = "Auto-retry after an action relevance mismatch did not go through. Please resend the last message.",
+        })
+        return
+      end
+
+      action_relevance_gate_hit = true
+      Log.line("ACTION-RELEVANCE-VALIDATOR",
+        "auto-run requires review\n" .. detail_text)
+      Log.add_error((RA and RA.t and RA.t(
+        "auto_run.blocked.relevance", nil,
+        "Auto-run was blocked because the generated action did not clearly "
+          .. "match the request and captured session. Review the target "
+          .. "tracks, plugins, and REAPER actions before running it manually."))
+        or "Auto-run was blocked because the generated action did not clearly "
+          .. "match the request and captured session. Review it before "
+          .. "running manually.")
     end
   end
 
@@ -29995,6 +30186,8 @@ function Net.try_finish_curl()
       semantic_ok, semantic_errors = Code.validate_typed_actions_semantics(plan, {
         profile = typed_action_profile,
         user_text = S.pending_orig_prompt or "",
+        selected_track_count = type(reaper.CountSelectedTracks) == "function"
+          and reaper.CountSelectedTracks(0) or nil,
       })
     else
       semantic_ok = false
@@ -33288,6 +33481,7 @@ function Net.try_finish_curl()
   -- flags are in scope, so adding a new gate now means updating one place.
   local function _any_gate_hit()
     return docs_gate_hit
+        or action_relevance_gate_hit
         or validator_gate_hit
         or marker_pair_gate_hit
         or action_gate_hit
@@ -33324,6 +33518,7 @@ function Net.try_finish_curl()
   end
   local function _auto_run_block_reason()
     if docs_gate_hit then return "docs_gate" end
+    if action_relevance_gate_hit then return "action_relevance_review" end
     if marker_pair_gate_hit then return "marker_pair_validator" end
     if midi_input_gate_hit then return "midi_input_validator" end
     if tempo_marker_gate_hit then return "tempo_marker_validator" end
@@ -33604,7 +33799,7 @@ function Net.try_finish_curl()
         S.history[_asst_hist_idx].code_type  = "typed_actions"
       end
       if not typed_defer.pruned then
-        Net.sticky_prune_after_plugin_success(_compact_user_intent,
+        Net.sticky_prune_after_plugin_success(_turn_user_intent,
           lua_code or code)
         typed_defer.pruned = true
       end
@@ -33671,7 +33866,7 @@ function Net.try_finish_curl()
     if typed_action_ready then
       local skip_typed = false
       if prefs.auto_backup then
-        local bok, berr = Code.safety_backup()
+        local _, berr = Code.safety_backup()
         if berr == "unsaved" then
           auto_run_block_reason = "backup_required"
           typed_action_metrics.error = "backup_required"
@@ -33683,7 +33878,7 @@ function Net.try_finish_curl()
           if S.history[_asst_hist_idx] then
             S.history[_asst_hist_idx].run_status = "manual_run"
           end
-        elseif berr == "read_error" or berr == "write_error" then
+        elseif not Code.safety_backup_can_proceed(berr) then
           auto_run_block_reason = "backup_failed"
           typed_action_metrics.error = "backup_failed"
           explanation = (RA and RA.t and RA.t(
@@ -33923,7 +34118,7 @@ function Net.try_finish_curl()
           S.history[_asst_hist_idx].run_status = "manual_run"
         end
       elseif not skip_run and prefs.auto_backup then
-        local bok, berr = Code.safety_backup()
+        local _, berr = Code.safety_backup()
         if berr == "unsaved" then
           auto_run_block_reason = "backup_required"
           S.backup_warn_code = run_lua
@@ -33933,6 +34128,21 @@ function Net.try_finish_curl()
           if S.history[_asst_hist_idx] then
             S.history[_asst_hist_idx].run_status = "manual_run"
           end
+        elseif not Code.safety_backup_can_proceed(berr) then
+          auto_run_block_reason = "backup_failed"
+          skip_run = true
+          if S.history[_asst_hist_idx] then
+            S.history[_asst_hist_idx].run_status = "manual_run"
+          end
+          Log.add_error((RA and RA.t and RA.t(
+            "code.backup_failed_run", { error = tostring(berr) },
+            "Safety backup failed (" .. tostring(berr)
+              .. "). The generated code was NOT run. Check the project "
+              .. "folder, disk space, and permissions, then try again. To "
+              .. "proceed without a backup, turn off Auto-backup in Settings "
+              .. "and run the code again."))
+            or ("Safety backup failed (" .. tostring(berr)
+              .. "). The generated code was NOT run."))
         end
       end
       if not skip_run then
@@ -33947,9 +34157,8 @@ function Net.try_finish_curl()
         end
         S.pending_code = nil
         -- AUTO-RAN pill (V5) reflects the actual run outcome -- a
-        -- compile/runtime failure should NOT show as auto-ran. Mirror
-        -- the same outcome onto the per-turn run record so the UI
-        -- pill and the compact-history run_status agree.
+        -- compile/runtime failure should NOT show as auto-ran. Mirror the
+        -- same outcome onto the per-turn run record for diagnostics.
         auto_ran_ok = (run_ok == true and not lua_defer_pending)
         if S.history[_asst_hist_idx] then
           S.history[_asst_hist_idx].run_status = lua_defer_pending and "pending"
@@ -34009,7 +34218,7 @@ function Net.try_finish_curl()
   end
   if not code and not (typed_action_metrics and typed_action_metrics.present) then
     local filtered_explanation, filtered_count =
-      Code.filter_broad_fx_param_readout(_compact_user_intent, explanation)
+      Code.filter_broad_fx_param_readout(_turn_user_intent, explanation)
     if filtered_count and filtered_count > 0 then
       explanation = filtered_explanation
       text = filtered_explanation
@@ -34066,7 +34275,7 @@ function Net.try_finish_curl()
     jsfx_saved_fx_name = jsfx_saved_fx_name_for_msg,  -- FX ref name if already saved
     ceiling_injected = ceiling_inject_info ~= nil or nil,
     ceiling_inject_info = ceiling_inject_info,
-    jsfx_user_text = jsfx_code and _compact_user_intent or nil,
+    jsfx_user_text = jsfx_code and _turn_user_intent or nil,
     code_block_present = ((code ~= nil and code ~= "")
       or (typed_action_metrics and typed_action_metrics.present == true))
       and true or false,
@@ -34272,7 +34481,7 @@ function Net.try_finish_curl()
     })
   end
   if auto_ran_ok and not typed_defer.pruned then
-    Net.sticky_prune_after_plugin_success(_compact_user_intent, lua_code or code)
+    Net.sticky_prune_after_plugin_success(_turn_user_intent, lua_code or code)
     typed_defer.pruned = true
   end
   if not typed_defer.pending then
@@ -34323,22 +34532,6 @@ function Net.try_finish_curl()
   S.request_start_time = nil
   S.status           = "idle"
   S.scroll_to_bottom = true
-  -- Build the compact-history summary for this turn. The summary IS the
-  -- compacted "content" sent for this row when it ages past T-1 and
-  -- compact_history is on. compact_eligible gates whether the
-  -- compaction substitution actually fires; only ran_ok turns with a
-  -- known code body produce a usable summary, everything else stays
-  -- verbatim so the model can still see the original on a "fix that"
-  -- follow-up.
-  if S.history[_asst_hist_idx] and S.history[_asst_hist_idx].role == "assistant" then
-    Net.assistant_attach_compact_metadata(_asst_hist_idx, {
-      code            = code,
-      code_type       = code_type,
-      auto_ran_ok     = auto_ran_ok,
-      was_truncated   = was_truncated,
-      user_intent     = _compact_user_intent,
-    })
-  end
   -- Probe lifecycle: canonical "turn completed successfully" site
   -- for non-deferred turns. Deferred typed-action param writes close the same
   -- probe from typed_defer.finish() after the REAPER defer tick reports the
@@ -34447,12 +34640,13 @@ function RA.factory_reset_execute(opts)
   prefs.debug_logging         = true
   prefs.include_api_ref       = false
   prefs.include_snapshot      = true
-  prefs.compact_history       = false
   prefs.update_check          = true
   prefs.typed_actions_opt_in  = true
   prefs.diag_auto_tier        = "basic"
   prefs.test_force_cold_cache = false
   prefs.cloud_request_timeout = CFG.CLOUD_TIMEOUT_DEFAULT
+  prefs.turn_cost_limit_usd   = CFG.TURN_COST_LIMIT_DEFAULT
+  prefs.turn_token_limit      = CFG.TURN_TOKEN_LIMIT_DEFAULT
   prefs.provider_idx          = 1
   prefs.model_idx             = 2
   prefs.thinking_idx          = 0
@@ -35322,6 +35516,7 @@ function Loop.pump_curl_or_retry()
           provider_idx = S.retry_saved_provider_idx,
           model_idx = S.retry_saved_model_idx,
           thinking_idx = S.retry_saved_thinking_idx,
+          transport_retry = true,
         })
         if ok then
           S.status = "waiting"
@@ -35373,7 +35568,11 @@ function TypedActionController.active_provider_is_usable()
 end
 
 function TypedActionController.request_is_active()
-  return S.status == "waiting" or S.curl_pid ~= nil or S.retry_scheduled == true
+  return S.status == "waiting"
+    or S.status == "awaiting_confirmation"
+    or S.curl_pid ~= nil
+    or S.retry_scheduled == true
+    or S.turn_budget_confirmation ~= nil
 end
 
 function TypedActionController.message_has_typed_actions(msg)
@@ -35491,7 +35690,7 @@ function TypedActionController.apply_typed_action_message(msg, message_idx, opts
       return false, "backup_unsaved", TypedActionController.t(
         "a11y.sr.apply_action_plan_backup_unsaved", nil,
         "Auto-backup is on, but the project has not been saved.")
-    elseif berr and berr ~= "unchanged" then
+    elseif not Code.safety_backup_can_proceed(berr) then
       return false, "backup_failed", TypedActionController.t(
         "a11y.sr.apply_action_plan_backup_failed",
         { error = tostring(berr) },
@@ -35899,26 +36098,6 @@ local function loop()
         "System prompt updated. Your custom override is unchanged; "
         .. "review the new stock prompt for changes worth merging.",
         "ok", true)  -- sticky: stays until replaced or window closes
-    end
-  end
-
-  -- One-time diagnostics disclosure for existing installs. New users see the
-  -- same default-on Basic notice in the TOS, and users who already opted out
-  -- do not need a toast about a disabled setting.
-  if Store and Store.migration_fired and Store.set_migration_fired
-     and not S._diag_default_notice_checked then
-    if Store.migration_fired("diag_auto_default_notice_v1") then
-      S._diag_default_notice_checked = true
-    elseif not api_keys.tos_is_accepted()
-        or prefs.diag_auto_tier == "off" then
-      Store.set_migration_fired("diag_auto_default_notice_v1")
-      S._diag_default_notice_checked = true
-    elseif not api_keys.screen then
-      Store.set_migration_fired("diag_auto_default_notice_v1")
-      S._diag_default_notice_checked = true
-      UI.show_float_toast(RA.t("settings.adv.diagnostics.default_notice", nil,
-        "Basic anonymous diagnostics are on by default. You can turn them off in Settings > Advanced."),
-        "ok", true)
     end
   end
 

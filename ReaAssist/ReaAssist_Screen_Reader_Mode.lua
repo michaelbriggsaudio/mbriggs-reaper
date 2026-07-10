@@ -147,7 +147,15 @@ end
 
 local function open_path(path)
   path = tostring(path or "")
-  if path == "" then return false end
+  if path == "" or path:find("[%z\r\n]") then return false end
+
+  -- Once ReaAssist.lua is loaded, keep every Screen Reader Mode path launch on
+  -- the same hardened implementation as the visual UI. This local fallback is
+  -- retained only for bootstrap/error paths that can run before UI exists.
+  if UI and UI.open_path then
+    return UI.open_path(path)
+  end
+
   if reaper.CF_ShellExecute then
     local ok, result = pcall(reaper.CF_ShellExecute, path)
     return ok and result ~= false
@@ -155,6 +163,11 @@ local function open_path(path)
   local os_name = reaper.GetOS and tostring(reaper.GetOS() or "") or ""
   local result, _, code
   if os_name:match("^Win") then
+    -- cmd.exe expands %VAR% even inside double quotes, and quotes cannot be
+    -- escaped portably in the `start "" "<path>"` form. A path containing % or "
+    -- would silently open the wrong location, so refuse it rather than mangle it;
+    -- CF_ShellExecute (checked above) handles such paths safely when present.
+    if path:find('[%"%%]') then return false end
     result, _, code = os.execute('start "" "' .. path .. '"')
   elseif os_name:match("^OSX") or os_name:match("^macOS") then
     result, _, code = os.execute(
@@ -1308,6 +1321,16 @@ function ScreenReader.response_details_text(payload)
     add(ScreenReader.t("details.label.api_calls", nil, "API Calls"),
       tostring(payload.api_calls or msg.api_calls))
   end
+  if payload.model_calls or msg.model_calls then
+    add(ScreenReader.t("details.field.model_calls", nil, "Model Calls"),
+      tostring(payload.model_calls or msg.model_calls))
+  end
+  local transport_retries = payload.transport_retries
+    or msg.transport_retries or 0
+  if transport_retries > 0 then
+    add(ScreenReader.t("details.field.transport_retries", nil,
+      "Transport Retries"), tostring(transport_retries))
+  end
   if #fields == 0 then return "" end
   return ScreenReader.reagirl_sentence(ScreenReader.t(
     "a11y.sr.response_details_prefix", nil, "Details: ")
@@ -1366,6 +1389,10 @@ function ScreenReader.payload_auto_ran(payload)
 end
 
 function ScreenReader.response_ready_ran_text(payload, long_form)
+  if payload and payload.observable_change_status == "unchanged" then
+    return ScreenReader.t("a11y.sr.response_ready_no_project_change", nil,
+      "Generated code finished, but no project change was detected. It may have exited early because a target was missing or the requested state was already set. Review the response and project before continuing.")
+  end
   local auto_ran = payload and payload.auto_ran == true
   if ScreenReader.payload_is_jsfx(payload) then
     return long_form
@@ -1559,12 +1586,8 @@ function ScreenReader.payload_blocks_manual_lua_run(payload)
     reason = block_kind ~= "" and block_kind or "validation_blocked"
   end
   if reason == "" then return false, "" end
-  if reason == "auto_run_disabled"
-      or reason == "backup_required"
-      or reason == "backup_failed"
-      or reason == "risky_code_confirmation"
-      or reason == "non_runnable_lua_artifact"
-      or reason == "manual_run_only_lua_artifact" then
+  if Code and Code.auto_run_block_reason_allows_manual_lua
+      and Code.auto_run_block_reason_allows_manual_lua(reason) then
     return false, ""
   end
   if Code and Code.auto_run_block_reason_blocks_manual_lua
@@ -1619,6 +1642,10 @@ function ScreenReader.auto_run_block_text(payload)
     end
     return ScreenReader.t("a11y.sr.auto_run_blocked_backup_failed", nil,
       "Auto-run was blocked because ReaAssist could not create a safety backup.")
+  end
+  if reason == "action_relevance_review" then
+    return ScreenReader.t("auto_run.blocked.relevance", nil,
+      "Auto-run was blocked because the generated action did not clearly match the request and captured session. Review the target tracks, plugins, and REAPER actions before running it manually.")
   end
   if reason == "risky_code_confirmation" then
     return ScreenReader.t("a11y.sr.run_code_risky", nil,
@@ -3111,8 +3138,8 @@ function ScreenReader.select_provider(menu_idx)
     return
   end
   ScreenReader.refresh_menus()
-  ScreenReader.refresh_status(ScreenReader.t("a11y.sr.provider_changed", nil,
-    "Provider changed."), true)
+  ScreenReader.refresh_status(ScreenReader.with_turn_limit_warning(
+    ScreenReader.t("a11y.sr.provider_changed", nil, "Provider changed.")), true)
 end
 
 function ScreenReader.select_model(menu_idx)
@@ -3126,8 +3153,8 @@ function ScreenReader.select_model(menu_idx)
     return
   end
   ScreenReader.refresh_menus()
-  ScreenReader.refresh_status(ScreenReader.t("a11y.sr.model_changed", nil,
-    "Model changed."), true)
+  ScreenReader.refresh_status(ScreenReader.with_turn_limit_warning(
+    ScreenReader.t("a11y.sr.model_changed", nil, "Model changed.")), true)
 end
 
 function ScreenReader.select_thinking(menu_idx)
@@ -4092,6 +4119,65 @@ function ScreenReader.cancel_run_code()
   ScreenReader.open_view("reader")
 end
 
+function ScreenReader.maybe_show_turn_budget_confirmation()
+  if not (S and S.turn_budget_confirmation) then return false end
+  if S._screen_reader_view == "turn_budget_confirm" then return true end
+  S._screen_reader_turn_budget_return_view =
+    tostring(S._screen_reader_view or "main")
+  S._screen_reader_request_active = false
+  S._screen_reader_next_request_announcement_at = nil
+  ScreenReader.focus_after_rebuild("turn_budget_cancel")
+  ScreenReader.set_status_after_rebuild(ScreenReader.t(
+    "a11y.sr.turn_budget.opened", nil,
+    "A request limit was reached. No additional model request has been sent. Review the projected total, then choose Cancel Request or Continue Anyway."), true)
+  ScreenReader.open_view("turn_budget_confirm")
+  return true
+end
+
+function ScreenReader.continue_turn_budget_confirmation()
+  local ok, reason
+  if Net and Net.continue_turn_budget_confirmation then
+    ok, reason = Net.continue_turn_budget_confirmation()
+  end
+  if not ok then
+    S._screen_reader_request_active = false
+    ScreenReader.set_status_after_rebuild(ScreenReader.t(
+      "net.turn_budget.continue_failed", nil,
+      "The approved model request could not be started. Please try again."),
+      true)
+    ScreenReader.open_view("main")
+    return false, reason
+  end
+  S._screen_reader_turn_budget_return_view = nil
+  S._screen_reader_request_active = true
+  if reaper and reaper.time_precise then
+    local now = reaper.time_precise()
+    S._screen_reader_request_started_at = now
+    S._screen_reader_next_request_announcement_at = now + 20
+  end
+  ScreenReader.set_status_after_rebuild(ScreenReader.t(
+    "a11y.sr.thinking_wait", nil,
+    "Thinking. Please wait. Responses can take up to a minute."), true)
+  ScreenReader.open_view("thinking")
+  return true
+end
+
+function ScreenReader.cancel_turn_budget_confirmation()
+  local ok
+  if Net and Net.cancel_turn_budget_confirmation then
+    ok = Net.cancel_turn_budget_confirmation()
+  end
+  S._screen_reader_request_active = false
+  S._screen_reader_next_request_announcement_at = nil
+  S._screen_reader_request_started_at = nil
+  S._screen_reader_turn_budget_return_view = nil
+  ScreenReader.set_status_after_rebuild(ScreenReader.t(
+    "a11y.sr.turn_budget.cancelled", nil,
+    "Request cancelled. No additional model request was sent."), true)
+  ScreenReader.open_view("main")
+  return ok == true
+end
+
 function ScreenReader.confirm_add_saved_script_to_actions()
   local path = S and S._screen_reader_saved_script_path or ""
   local ok, msg
@@ -4266,9 +4352,19 @@ end
 
 function ScreenReader.terms_text()
   local fallback = api_keys and api_keys.tos_text or "Terms of Use"
-  return tostring(ScreenReader.t("tos.body", {
+  local tos_lang = (I18N and I18N.lang_code and I18N.lang_code()) or "en"
+  local text = tostring(ScreenReader.t("tos.body", {
     year = os.date and os.date("%Y") or "2026",
   }, fallback))
+  if I18N and I18N.merge_tos_storage_disclosure then
+    text = I18N.merge_tos_storage_disclosure(text, ScreenReader.t(
+      "tos.key_storage_disclosure_v2", nil,
+      "KEY STORAGE\nAPI keys use reversible local obfuscation tied to the "
+        .. "REAPER install path. They are not encrypted in an OS credential "
+        .. "vault. Anyone who can read your REAPER settings and the ReaAssist "
+        .. "source can recover them."), tos_lang)
+  end
+  return text
 end
 
 function ScreenReader.has_usable_provider()
@@ -4551,13 +4647,17 @@ function ScreenReader.shortcut_send_request()
 end
 
 function ScreenReader.shortcut_run_code()
+  local view = S and S._screen_reader_view or "main"
+  if view == "turn_budget_confirm" then
+    ScreenReader.continue_turn_budget_confirmation()
+    return
+  end
   if AppController.request_is_active and AppController.request_is_active() then
     ScreenReader.shortcut_status("a11y.sr.request_already_running",
       "A request is already running.")
     return
   end
 
-  local view = S and S._screen_reader_view or "main"
   if S and S._screen_reader_view == "run_confirm" then
     ScreenReader.confirm_run_code()
     return
@@ -4620,13 +4720,17 @@ function ScreenReader.shortcut_undo()
 end
 
 function ScreenReader.shortcut_back()
+  local view = S and S._screen_reader_view or "main"
+  if view == "turn_budget_confirm" then
+    ScreenReader.cancel_turn_budget_confirmation()
+    return
+  end
   if AppController.request_is_active and AppController.request_is_active() then
     ScreenReader.shortcut_status("a11y.sr.shortcut_waiting",
       "A request is already running. Wait for it to finish or use Cancel Request.")
     return
   end
 
-  local view = S and S._screen_reader_view or "main"
   if view == "main" then
     ScreenReader.shortcut_status("a11y.sr.shortcut_back_unavailable",
       "Already on the main screen.")
@@ -5015,6 +5119,10 @@ function ScreenReader.view_title()
   if view == "terms" then
     return ScreenReader.t("tos.title", nil, "Terms of Use")
   end
+  if view == "turn_budget_confirm" then
+    return ScreenReader.t("dialog.turn_budget.title", nil,
+      "Continue This Request?")
+  end
   if view == "settings" then
     return ScreenReader.t("a11y.sr.settings_title", nil,
       "ReaAssist Screen Reader Settings")
@@ -5268,6 +5376,41 @@ function ScreenReader.open_provider_console()
   end
 end
 
+function ScreenReader.turn_limit_warning_text()
+  local floor = Net and Net._turn_call_floor and Net._turn_call_floor()
+  if not floor then return "" end
+  local warnings = {}
+  local cost_limit = tonumber(prefs and prefs.turn_cost_limit_usd)
+    or (CFG and CFG.TURN_COST_LIMIT_DEFAULT) or 5
+  if floor.cost_limit_applies and cost_limit < (floor.cost or 0) then
+    local cost_str = (MODELS and MODELS.format_cost
+      and MODELS.format_cost(floor.cost))
+      or string.format("$%.2f", floor.cost or 0)
+    warnings[#warnings + 1] = ScreenReader.t(
+      "settings.adv.turn_cost_limit.too_low_v2", { cost = cost_str },
+      "This is below the selected model's worst-case single request (about "
+        .. cost_str .. "). At this setting, every send may require confirmation.")
+  end
+  local token_limit = tonumber(prefs and prefs.turn_token_limit)
+    or (CFG and CFG.TURN_TOKEN_LIMIT_DEFAULT) or 1000000
+  if token_limit < (floor.tokens or 0) then
+    local tok_str = tostring(math.floor(floor.tokens or 0))
+    warnings[#warnings + 1] = ScreenReader.t(
+      "settings.adv.turn_token_limit.too_low_v2", { tokens = tok_str },
+      "This is below the selected model's worst-case single request (about "
+        .. tok_str .. " tokens). At this setting, every send may require confirmation.")
+  end
+  return table.concat(warnings, " ")
+end
+
+function ScreenReader.with_turn_limit_warning(message)
+  message = tostring(message or "")
+  local warning = ScreenReader.turn_limit_warning_text()
+  if warning == "" then return message end
+  if message == "" then return warning end
+  return message .. " " .. warning
+end
+
 function ScreenReader.settings_summary_text()
   local parts = {}
   parts[#parts + 1] = ScreenReader.t("a11y.sr.settings_summary_snapshot", {
@@ -5307,6 +5450,20 @@ function ScreenReader.settings_summary_text()
   parts[#parts + 1] = ScreenReader.t("a11y.sr.settings_summary_timeout", {
     value = tostring(prefs and prefs.cloud_request_timeout or ""),
   }, "Timeout " .. tostring(prefs and prefs.cloud_request_timeout or "") .. "s.")
+  local turn_cost_value = string.format("$%.2f",
+    tonumber(prefs and prefs.turn_cost_limit_usd)
+      or (CFG and CFG.TURN_COST_LIMIT_DEFAULT) or 5)
+  parts[#parts + 1] = ScreenReader.t("a11y.sr.settings_summary_turn_cost", {
+    value = turn_cost_value,
+  }, "Per-turn dollar limit " .. turn_cost_value .. ".")
+  local turn_token_value = tostring(math.floor(
+    tonumber(prefs and prefs.turn_token_limit)
+      or (CFG and CFG.TURN_TOKEN_LIMIT_DEFAULT) or 1000000))
+  parts[#parts + 1] = ScreenReader.t("a11y.sr.settings_summary_turn_token", {
+    value = turn_token_value,
+  }, "Per-turn token limit " .. turn_token_value .. ".")
+  local turn_limit_warning = ScreenReader.turn_limit_warning_text()
+  if turn_limit_warning ~= "" then parts[#parts + 1] = turn_limit_warning end
   parts[#parts + 1] = ScreenReader.t("a11y.sr.settings_summary_diag", {
     value = ScreenReader.diagnostics_tier_label(
       prefs and prefs.diag_auto_tier or "off"),
@@ -5746,6 +5903,75 @@ function ScreenReader.select_timeout(menu_idx)
     ScreenReader.set_status(ScreenReader.t("a11y.sr.timeout_changed", {
       value = tostring(value),
     }, "Cloud timeout changed to " .. tostring(value) .. " seconds."), true)
+  end
+  ScreenReader.refresh_settings_summary()
+end
+
+function ScreenReader.turn_cost_limit_menu()
+  local values = { 0.25, 0.50, 1.00, 2.00, 5.00, 10.00, 25.00, 100.00 }
+  local current = tonumber(prefs and prefs.turn_cost_limit_usd)
+    or (CFG and CFG.TURN_COST_LIMIT_DEFAULT) or 5
+  local labels, selected, matched = {}, 1, false
+  for i, value in ipairs(values) do
+    labels[i] = string.format("$%.2f", value)
+    if value == current then selected = i; matched = true end
+  end
+  -- Prefs may hold a hand-edited ExtState value matching no preset. Append it
+  -- and select it so what is announced matches the real limit.
+  if not matched then
+    values[#values + 1] = current
+    labels[#labels + 1] = string.format("$%.2f", current)
+    selected = #labels
+  end
+  return labels, values, selected
+end
+
+function ScreenReader.select_turn_cost_limit(menu_idx)
+  local ui = S and S.screen_reader_ui or nil
+  local value = ui and ui.turn_cost_limit_map
+    and ui.turn_cost_limit_map[menu_idx]
+  if not value then return end
+  prefs.turn_cost_limit_usd = value
+  if ScreenReader.save_config() then
+    local shown = string.format("$%.2f", value)
+    local msg = ScreenReader.t("a11y.sr.turn_cost_limit_changed", {
+      value = shown,
+    }, "Per-turn dollar limit changed to " .. shown .. ".")
+    ScreenReader.set_status(ScreenReader.with_turn_limit_warning(msg), true)
+  end
+  ScreenReader.refresh_settings_summary()
+end
+
+function ScreenReader.turn_token_limit_menu()
+  local values = { 50000, 100000, 250000, 500000, 750000,
+                   1000000, 1250000, 2000000, 4000000 }
+  local current = tonumber(prefs and prefs.turn_token_limit)
+    or (CFG and CFG.TURN_TOKEN_LIMIT_DEFAULT) or 1000000
+  local labels, selected, matched = {}, 1, false
+  for i, value in ipairs(values) do
+    labels[i] = tostring(value) .. " tokens"
+    if value == current then selected = i; matched = true end
+  end
+  -- Same non-preset handling as the dollar menu above.
+  if not matched then
+    values[#values + 1] = current
+    labels[#labels + 1] = tostring(current) .. " tokens"
+    selected = #labels
+  end
+  return labels, values, selected
+end
+
+function ScreenReader.select_turn_token_limit(menu_idx)
+  local ui = S and S.screen_reader_ui or nil
+  local value = ui and ui.turn_token_limit_map
+    and ui.turn_token_limit_map[menu_idx]
+  if not value then return end
+  prefs.turn_token_limit = value
+  if ScreenReader.save_config() then
+    local msg = ScreenReader.t("a11y.sr.turn_token_limit_changed", {
+      value = tostring(value),
+    }, "Per-turn token limit changed to " .. tostring(value) .. ".")
+    ScreenReader.set_status(ScreenReader.with_turn_limit_warning(msg), true)
   end
   ScreenReader.refresh_settings_summary()
 end
@@ -7127,6 +7353,34 @@ function ScreenReader.build_settings_ui()
     function(_, menu_idx) ScreenReader.select_timeout(menu_idx) end,
     "cloud_timeout")
 
+  labels, map, selected = ScreenReader.turn_cost_limit_menu()
+  ui.turn_cost_limit_map = map
+  reagirl.NextLine()
+  ui.ids.turn_cost_limit = reagirl.DropDownMenu_Add(nil, nil,
+    ScreenReader.control_width_px(260),
+    ScreenReader.t("settings.adv.turn_cost_limit.label", nil,
+      "Per-turn dollar limit"),
+    ScreenReader.caption_width_px(150),
+    ScreenReader.t("settings.adv.turn_cost_limit.tooltip", nil,
+      "Stops before another model call would exceed this projected cost."),
+    labels, selected,
+    function(_, menu_idx) ScreenReader.select_turn_cost_limit(menu_idx) end,
+    "turn_cost_limit")
+
+  labels, map, selected = ScreenReader.turn_token_limit_menu()
+  ui.turn_token_limit_map = map
+  ScreenReader.next_line_for_large_text()
+  ui.ids.turn_token_limit = reagirl.DropDownMenu_Add(nil, nil,
+    ScreenReader.control_width_px(270),
+    ScreenReader.t("settings.adv.turn_token_limit.label", nil,
+      "Per-turn token limit"),
+    ScreenReader.caption_width_px(150),
+    ScreenReader.t("settings.adv.turn_token_limit.tooltip", nil,
+      "Stops before another model call would exceed this projected token total."),
+    labels, selected,
+    function(_, menu_idx) ScreenReader.select_turn_token_limit(menu_idx) end,
+    "turn_token_limit")
+
   labels, map, selected = ScreenReader.diagnostics_menu()
   ui.diagnostics_map = map
   ScreenReader.next_line_for_large_text()
@@ -7261,8 +7515,8 @@ function ScreenReader.build_api_keys_ui()
     false, nil, "status")
 
   if setup then
-    local intro_text = ScreenReader.t("settings.first_run.intro", nil,
-      "Keys are obfuscated and stored locally on this machine and sent only to your chosen provider. Claude has shown the best all around results in testing. Gemini is the only provider to offer a free tier. You may also use a local or custom LLM to keep your data fully offline and private.")
+    local intro_text = ScreenReader.t("settings.first_run.intro_storage_v2", nil,
+      "Keys are stored locally using reversible obfuscation, not encryption or an OS credential vault. Anyone with access to your REAPER settings and this source code can recover them. Keys are sent only to the provider or custom endpoint you configure. Claude has shown the best all-around results in testing, Gemini is the only built-in provider with a free tier, and local/custom models can keep requests on your machine.")
     reagirl.NextLine()
     ui.ids.intro = reagirl.Label_Add(nil, nil,
       ScreenReader.wrap_text(intro_text, 88),
@@ -7323,8 +7577,8 @@ function ScreenReader.build_api_keys_ui()
 
   reagirl.NextLine()
   ui.ids.note = reagirl.Label_Add(nil, nil,
-    ScreenReader.t("a11y.sr.api_key_note", nil,
-      "Saved keys are stored in REAPER's persistent settings for this install."),
+    ScreenReader.t("a11y.sr.api_key_note_storage_v2", nil,
+      "Saved keys use reversible obfuscation in REAPER's persistent settings. They are not encrypted in an OS credential vault, and someone with access to the settings and source can recover them."),
     ScreenReader.t("a11y.sr.api_key_note.meaning", nil,
       "Explains where API keys are stored."),
     false, nil, "api_key_note")
@@ -9112,6 +9366,96 @@ function ScreenReader.build_reader_ui()
   return ok == 1
 end
 
+function ScreenReader.build_turn_budget_confirm_ui()
+  S.screen_reader_ui = { ids = {} }
+  local ui = S.screen_reader_ui
+  local pending = S.turn_budget_confirmation or {}
+  local budget = pending.budget or {}
+  local matched = pending.matched_condition or "projected_token_limit"
+  local body
+  if matched == "projected_cost_limit" then
+    local projected = MODELS.format_cost(budget.projected_cost or 0)
+    local limit = MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
+      or CFG.TURN_COST_LIMIT_DEFAULT)
+    local next_cost = MODELS.format_cost(budget.next_cost or 0)
+    body = ScreenReader.t("dialog.turn_budget.cost_body", {
+      projected = projected,
+      limit = limit,
+      next = next_cost,
+    }, "Projected cost for this request: " .. projected .. " (your limit: " .. limit
+      .. "). This next model call could cost up to " .. next_cost .. ".")
+  else
+    local projected = ScreenReader.format_count(budget.projected_tokens or 0)
+    local limit = ScreenReader.format_count(tonumber(prefs.turn_token_limit)
+      or CFG.TURN_TOKEN_LIMIT_DEFAULT)
+    local next_tokens = ScreenReader.format_count(budget.next_tokens or 0)
+    body = ScreenReader.t("dialog.turn_budget.token_body", {
+      projected = projected,
+      limit = limit,
+      next = next_tokens,
+    }, "Projected token use for this request: " .. projected .. " (your limit: " .. limit
+      .. "). This next model call could use up to " .. next_tokens .. " tokens.")
+  end
+  ScreenReader.begin_reagirl_ui()
+
+  ui.ids.title = reagirl.Label_Add(18, 18, ScreenReader.view_title(),
+    ScreenReader.t("a11y.sr.turn_budget.title.meaning", nil,
+      "Confirmation before exceeding a per-turn model-use limit."),
+    false, nil, "turn_budget_title")
+  reagirl.NextLine()
+  ui.ids.headline = reagirl.Label_Add(nil, nil,
+    ScreenReader.t("dialog.turn_budget.headline", nil,
+      "This request would exceed a limit you set."),
+    ScreenReader.t("a11y.sr.turn_budget.headline.meaning", nil,
+      "Explains that the next model call would exceed a configured limit."),
+    false, nil, "turn_budget_headline")
+  reagirl.NextLine()
+  ui.ids.body = reagirl.Label_Add(nil, nil, body,
+    ScreenReader.t("a11y.sr.turn_budget.body.meaning", nil,
+      "Projected request total, configured limit, and worst-case next-call allowance."),
+    false, nil, "turn_budget_body")
+  reagirl.NextLine()
+  ui.ids.not_sent = reagirl.Label_Add(nil, nil,
+    ScreenReader.t("dialog.turn_budget.not_sent", nil,
+      "No additional model request has been sent."),
+    ScreenReader.t("a11y.sr.turn_budget.not_sent.meaning", nil,
+      "Confirms that the paused model call has not been sent."),
+    false, nil, "turn_budget_not_sent")
+  reagirl.NextLine()
+  ui.ids.scope = reagirl.Label_Add(nil, nil,
+    ScreenReader.t("dialog.turn_budget.one_call", nil,
+      "If you choose Continue Anyway, ReaAssist will send only this one model call. It will ask again before any later call that would exceed a limit."),
+    ScreenReader.t("a11y.sr.turn_budget.scope.meaning", nil,
+      "Explains that approval applies to one model call only."),
+    false, nil, "turn_budget_scope")
+  reagirl.NextLine()
+  ui.ids.turn_budget_cancel = reagirl.Button_Add(nil, nil, 10, 5,
+    ScreenReader.shortcut_label(ScreenReader.t(
+      "dialog.turn_budget.cancel", nil, "Cancel Request"), "F9"),
+    ScreenReader.t("a11y.sr.turn_budget.cancel.meaning", nil,
+      "Cancels the request without sending the paused model call."),
+    function() ScreenReader.cancel_turn_budget_confirmation() end,
+    "turn_budget_cancel")
+  ui.ids.turn_budget_continue = reagirl.Button_Add(nil, nil, 18, 5,
+    ScreenReader.shortcut_label(ScreenReader.t(
+      "dialog.turn_budget.continue", nil, "Continue Anyway"), "F8"),
+    ScreenReader.t("a11y.sr.turn_budget.continue.meaning", nil,
+      "Approves and sends this one paused model call."),
+    function() ScreenReader.continue_turn_budget_confirmation() end,
+    "turn_budget_continue")
+
+  local ok = reagirl.Gui_Open("ReaAssist_Screen_Reader_Mode", true,
+    ScreenReader.view_title(),
+    ScreenReader.t("a11y.sr.window.meaning", nil,
+      "Accessible ReaAssist window for screen-reader users."),
+    760, 440, 0, nil, nil)
+  if ok == 1 then
+    ScreenReader.announce(ScreenReader.t("a11y.sr.turn_budget.opened", nil,
+      "A request limit was reached. No additional model request has been sent. Review the projected total, then choose Cancel Request or Continue Anyway."))
+  end
+  return ok == 1
+end
+
 function ScreenReader.build_run_confirm_ui()
   S.screen_reader_ui = { ids = {} }
   local ui = S.screen_reader_ui
@@ -9792,6 +10136,9 @@ function ScreenReader.build_ui()
   if view == "help" then return ScreenReader.build_help_ui() end
   if view == "credits" then return ScreenReader.build_credits_ui() end
   if view == "reader" then return ScreenReader.build_reader_ui() end
+  if view == "turn_budget_confirm" then
+    return ScreenReader.build_turn_budget_confirm_ui()
+  end
   if view == "run_confirm" then return ScreenReader.build_run_confirm_ui() end
   if view == "add_actions_confirm" then
     return ScreenReader.build_add_actions_confirm_ui()
@@ -10014,6 +10361,7 @@ function ScreenReader.loop()
   if reagirl and reagirl.Gui_IsOpen then open = reagirl.Gui_IsOpen() end
   if open == false then return ScreenReader.finish() end
   ScreenReader.maybe_start_auto_update_check()
+  ScreenReader.maybe_show_turn_budget_confirmation()
   if S._screen_reader_request_active then
     local active = AppController.pump_request()
     ScreenReader.track_update_status()
@@ -10184,6 +10532,12 @@ if type(REAASSIST_SCREEN_READER_TEST_HOOK) == "table" then
   end
   REAASSIST_SCREEN_READER_TEST_HOOK.t = function(key, values, fallback)
     return ScreenReader.t(key, values, fallback)
+  end
+  REAASSIST_SCREEN_READER_TEST_HOOK.turn_limit_warning_text = function()
+    return ScreenReader.turn_limit_warning_text()
+  end
+  REAASSIST_SCREEN_READER_TEST_HOOK.with_turn_limit_warning = function(message)
+    return ScreenReader.with_turn_limit_warning(message)
   end
   REAASSIST_SCREEN_READER_TEST_HOOK.open_feedback = function(sentiment)
     return ScreenReader.open_feedback(sentiment)
@@ -10656,7 +11010,11 @@ function AppController.cancel_request()
 end
 
 function AppController.request_is_active()
-  return S.status == "waiting" or S.curl_pid ~= nil or S.retry_scheduled == true
+  return S.status == "waiting"
+    or S.status == "awaiting_confirmation"
+    or S.curl_pid ~= nil
+    or S.retry_scheduled == true
+    or S.turn_budget_confirmation ~= nil
 end
 
 function AppController.conversation_has_content()
@@ -11077,6 +11435,8 @@ function AppController.latest_response_payload()
     response_time = request_msg and request_msg.response_time or nil,
     fx_cache_label = request_msg and request_msg.fx_cache_label or nil,
     api_calls = request_msg and request_msg.api_calls or nil,
+    model_calls = request_msg and request_msg.model_calls or nil,
+    transport_retries = request_msg and request_msg.transport_retries or nil,
   }
 end
 
@@ -11151,7 +11511,7 @@ function AppController.run_latest_code(opts)
       return false, "backup_unsaved",
         AppController.t("a11y.sr.run_code_backup_unsaved", nil,
           "Auto-backup is on, but the project has not been saved.")
-    elseif berr and berr ~= "unchanged" then
+    elseif not Code.safety_backup_can_proceed(berr) then
       return false, "backup_failed",
         AppController.t("a11y.sr.run_code_backup_failed", {
           error = tostring(berr),
@@ -11166,9 +11526,14 @@ function AppController.run_latest_code(opts)
   end
   if info.message_idx == #S.display_messages then S.pending_code = nil end
   S.status = ok and "idle" or "error"
+  local no_project_change = ok and type(S.last_run_result) == "table"
+    and S.last_run_result.observable_change_status == "unchanged"
   return ok == true, ok and nil or "run_failed",
-    ok and AppController.t("a11y.sr.run_code_ok", nil,
-      "Generated code ran.")
+    no_project_change and AppController.t(
+      "a11y.sr.response_ready_no_project_change", nil,
+      "Generated code finished, but no project change was detected. It may have exited early because a target was missing or the requested state was already set. Review the response and project before continuing.")
+      or ok and AppController.t("a11y.sr.run_code_ok", nil,
+        "Generated code ran.")
       or AppController.t("a11y.sr.run_code_failed", nil,
         "Generated code failed. Check the response and debug log.")
 end
@@ -11194,7 +11559,7 @@ function AppController.apply_latest_typed_action(opts)
       return false, "backup_unsaved", AppController.t(
         "a11y.sr.apply_action_plan_backup_unsaved", nil,
         "Auto-backup is on, but the project has not been saved.")
-    elseif berr and berr ~= "unchanged" then
+    elseif not Code.safety_backup_can_proceed(berr) then
       return false, "backup_failed", AppController.t(
         "a11y.sr.apply_action_plan_backup_failed",
         { error = tostring(berr) },

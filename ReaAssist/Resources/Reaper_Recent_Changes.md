@@ -7,6 +7,20 @@ model training cutoffs. This is not the full changelog.
 If a user asks outside this slice, do not invent details. Say the installed
 REAPER changelog is authoritative, or ask for the relevant changelog lines.
 
+## REAPER 7.77 - July 2026
+
+- ReaScript: REAPER fixed the 7.75-regression behavior for UI-ordered send
+  access and removal. Category-based Get/Set/Remove calls now use category
+  `0x10000000` with the plain sparse UI slot index; older one-index UI helpers
+  such as `GetTrackSendName()` are different, and the caller must still add
+  the flag to their single send-index argument.
+- ReaScript UI: `gfx.setcursor()` can accept a `base64:...` cursor containing a
+  Windows `.cur` file up to 8 KiB, with a named/built-in fallback advisable for
+  older REAPER versions.
+- Sends and mixer workflow: drag/drop sidechain send creation now disables the
+  MIDI send automatically. Modifier-clicking a mixer FX/send slot can also
+  toggle that slot across all selected or all visible tracks.
+
 ## REAPER 7.76 - June 2026
 
 - ReaScript: automation items can be muted/read via

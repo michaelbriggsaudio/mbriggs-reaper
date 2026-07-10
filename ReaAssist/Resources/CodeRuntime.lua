@@ -427,6 +427,23 @@ function Code.prompt_is_question_or_readonly(user_text)
     or trimmed_lt:find("^do%s+.+%s+have%s+") ~= nil
     or trimmed_lt:find("^does%s+.+%s+use%s+") ~= nil
     or trimmed_lt:find("^do%s+.+%s+use%s+") ~= nil
+  local prefaced_question = false
+  for _, prefix in ipairs({ "in", "for", "with", "on", "about", "regarding" }) do
+    if trimmed_lt:find("^" .. prefix .. "%s+.-,%s*how%s+")
+        or trimmed_lt:find("^" .. prefix .. "%s+.-,%s*what%s+")
+        or trimmed_lt:find("^" .. prefix .. "%s+.-,%s*why%s+")
+        or trimmed_lt:find("^" .. prefix .. "%s+.-,%s*where%s+")
+        or trimmed_lt:find("^" .. prefix .. "%s+.-,%s*when%s+") then
+      prefaced_question = true
+      break
+    end
+  end
+  local explicitly_prose_only =
+       trimmed_lt:find("answer only in prose", 1, true) ~= nil
+    or trimmed_lt:find("answer in prose only", 1, true) ~= nil
+    or trimmed_lt:find("do not include code", 1, true) ~= nil
+    or trimmed_lt:find("don't include code", 1, true) ~= nil
+    or trimmed_lt:find("without code", 1, true) ~= nil
   return
        trimmed_lt:find("^how%s+") ~= nil
     or trimmed_lt:find("^what%s+") ~= nil
@@ -451,6 +468,8 @@ function Code.prompt_is_question_or_readonly(user_text)
     or trimmed_lt:find("^review%s+") ~= nil
     or trimmed_lt:find("^diagnose%s+") ~= nil
     or trimmed_lt:find("^summarize%s+") ~= nil
+    or prefaced_question
+    or explicitly_prose_only
     or fx_presence_question
 end
 
@@ -4023,6 +4042,18 @@ MODEL-SCOPED MINIMAL ACTION CHECKLIST:
   after their referenced tracks/FX exist.
 ]]
 
+local _TYPED_ACTION_LUNA_TARGETING_HELP = [[
+
+LUNA TARGETING CHECKLIST:
+- When a request applies to multiple currently selected tracks, never use
+  `track.resolve` with `selected:true`. Resolve each target by exact name when
+  known, or use a distinct 1-based `selected_index` for each selected track.
+- Existing selected tracks must not also receive `track.create` or
+  `track.ensure`. Resolve each target once, then reuse that id for `track.set`,
+  `fx.add_stock`, `fx.set_param`, and `send.create`.
+- FX/plugin names are never tracks or track ids.
+]]
+
 local _TYPED_ACTION_STRICT_FENCE_HELP = [[
 
 MODEL-SCOPED ACTION FORMAT CHECKLIST:
@@ -4046,7 +4077,7 @@ local _TYPED_ACTION_PROFILE_ROUTING_HELP = {
   semantic_fast_escalate = true,
   fallback = {
     provider_id = "openai",
-    model_id = "gpt-5.4",
+    model_id = "gpt-5.6-terra",
     thinking_value = "low",
     reason = "typed_action_semantic_retry_failed",
   },
@@ -4058,7 +4089,23 @@ local _TYPED_ACTION_PROFILE_MINIMAL_PLAN_HELP = {
   semantic_retry = true,
   fallback = {
     provider_id = "openai",
-    model_id = "gpt-5.4",
+    model_id = "gpt-5.6-terra",
+    thinking_value = "none",
+    reason = "typed_action_semantic_retry_failed",
+  },
+}
+
+local _TYPED_ACTION_PROFILE_LUNA_ROUTING_HELP = {
+  key = "luna_routing_semantic_help",
+  extra_prompt = _TYPED_ACTION_ROUTING_SEMANTIC_HELP
+    .. _TYPED_ACTION_MINIMAL_PLAN_HELP
+    .. _TYPED_ACTION_LUNA_TARGETING_HELP,
+  semantic_retry = true,
+  semantic_retry_from_scratch = false,
+  semantic_max_retries = 1,
+  fallback = {
+    provider_id = "openai",
+    model_id = "gpt-5.6-terra",
     thinking_value = "none",
     reason = "typed_action_semantic_retry_failed",
   },
@@ -4077,6 +4124,7 @@ local _TYPED_ACTION_PROFILE_BASELINE_SEMANTIC = {
 }
 
 local _TYPED_ACTION_BASELINE_DESTRUCTIVE_CODES = {
+  ambiguous_selected_track = true,
   bus_send_not_unity = true,
   duplicate_track_fx = true,
   extra_inferred_return_bus_send = true,
@@ -4122,52 +4170,19 @@ local _TYPED_ACTION_PROFILES_BY_KEY = {
     semantic_retry_from_scratch = true,
     fallback = {
       provider_id = "openai",
-      model_id = "gpt-5.4",
+      model_id = "gpt-5.6-terra",
       thinking_value = "low",
       reason = "typed_action_semantic_retry_failed",
     },
   },
-  nano_complete_plan_help = {
-    key = "nano_complete_plan_help",
-    extra_prompt = _TYPED_ACTION_ROUTING_SEMANTIC_HELP .. [[
-
-MODEL-SCOPED NANO ACTION MAP:
-- Tracks are real tracks only. Never represent FX, sends, params, folders, or
-  graph words as extra `track.create`/`track.ensure` actions.
-- Create/add/make tracks -> one `track.create` per requested new track.
-- Setup/build named stacks, buses, and returns -> create those named tracks
-  unless the user says existing/ensure/if missing.
-- Selected source plus new return/bus -> `track.resolve` source,
-  `track.create` return/bus; do not use blank `track.ensure`.
-- Stock FX -> `fx.add_stock`; requested values -> `fx.set_param` using that
-  same FX id; routes -> `send.create`.
-- Folder actions only when the user asks for folders.
-- Exact N/no-extra-track requests allow only the requested real tracks; reject
-  blank "." names and plugin-looking track ids like `_eq`, `_comp`, or `_fx`.
-- Compact valid shape:
-  {"op":"track.create","id":"kick","name":"Kick","position":"end","select":false}
-  {"op":"fx.add_stock","id":"kick_eq","track":"kick","fx":"ReaEQ"}
-  {"op":"fx.set_param","fx":"bus_comp","params":{"threshold_db":-12}}
-  {"op":"send.create","id":"kick_to_bus","from":"kick","to":"bus","volume_db":0,"pan":0,"muted":false,"mode":"post_fader"}
-    ]],
-    semantic_retry = true,
-    semantic_retry_from_scratch = true,
-    semantic_max_retries = 2,
-    schema_fast_escalate = true,
-    semantic_fast_escalate = true,
-    fallback = {
-      provider_id = "openai",
-      model_id = "gpt-5.4",
-      thinking_value = "low",
-      reason = "typed_action_semantic_retry_failed",
-    },
-  },
+  luna_routing_semantic_help = _TYPED_ACTION_PROFILE_LUNA_ROUTING_HELP,
   minimal_plan_help = _TYPED_ACTION_PROFILE_MINIMAL_PLAN_HELP,
   strict_fence_help = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
 }
 
 local _TYPED_ACTION_MODEL_PROFILES = {
   openai = {
+    ["gpt-5.6-luna"] = _TYPED_ACTION_PROFILE_LUNA_ROUTING_HELP,
     ["gpt-5.4-mini"] = {
       key = "mini_routing_semantic_help",
       extra_prompt = _TYPED_ACTION_ROUTING_SEMANTIC_HELP,
@@ -4176,12 +4191,11 @@ local _TYPED_ACTION_MODEL_PROFILES = {
       semantic_fast_escalate = true,
       fallback = {
         provider_id = "openai",
-        model_id = "gpt-5.4",
+        model_id = "gpt-5.6-terra",
         thinking_value = "none",
         reason = "typed_action_semantic_retry_failed",
       },
     },
-    ["gpt-5.4-nano"] = _TYPED_ACTION_PROFILES_BY_KEY.nano_complete_plan_help,
   },
   deepseek = {
     ["deepseek-v4-flash"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
@@ -5276,6 +5290,15 @@ function Code.validate_typed_actions_semantics(plan, opts)
             .. "asked for stock FX; use fx.add_stock on the intended track")
       end
     elseif action.op == "track.resolve" and action.id then
+      local selected_track_count = tonumber(opts.selected_track_count)
+      if action.selected == true and selected_track_count
+          and selected_track_count ~= 1 then
+        errors[#errors + 1] = _typed_action_error(
+          "ambiguous_selected_track", path .. ".selected",
+          "selected:true requires exactly one selected track, but the project "
+            .. "currently has " .. tostring(selected_track_count)
+            .. "; resolve each target by exact name or distinct selected_index")
+      end
       if positional_selector_forbidden
          and type(action.selected_index) == "number" then
         errors[#errors + 1] = _typed_action_error(
@@ -5721,6 +5744,10 @@ end
 
 function Code.typed_action_semantic_retry_from_scratch(profile, detail)
   detail = tostring(detail or "")
+  if type(profile) == "table"
+     and profile.semantic_retry_from_scratch == false then
+    return false
+  end
   if type(profile) == "table"
      and profile.semantic_retry_from_scratch == true then
     return true
@@ -6515,10 +6542,16 @@ function Code.execute_typed_actions_from_text(text, opts)
     return Code._typed_action_error_result(result_code, "$",
       code or "No reaassist-actions block found", nil)
   end
+  local api = opts.api or (type(reaper) == "table" and reaper or nil)
+  local selected_track_count = nil
+  if type(api) == "table" and type(api.CountSelectedTracks) == "function" then
+    selected_track_count = api.CountSelectedTracks(0)
+  end
   local semantic_ok, semantic_errors = Code.validate_typed_actions_semantics(
     plan, {
       profile = opts.profile,
       user_text = opts.user_text or "",
+      selected_track_count = selected_track_count,
     })
   if not semantic_ok then
     return Code._typed_action_error_result("semantic_mismatch", "$.actions",
@@ -14432,9 +14465,7 @@ function Code.find_unrequested_track_deletion(lua_code, user_text)
     :gsub("%-%-[^\n]*", "")
   if not (stripped:find("reaper%.DeleteTrack%s*%(")
       or stripped:find("reaper%.Main_OnCommand%s*%(%s*40005%s*,")
-      or stripped:find("reaper%.Main_OnCommand%s*%(%s*40006%s*,")
-      or stripped:find("reaper%.Main_OnCommandEx%s*%(%s*40005%s*,")
-      or stripped:find("reaper%.Main_OnCommandEx%s*%(%s*40006%s*,")) then
+      or stripped:find("reaper%.Main_OnCommandEx%s*%(%s*40005%s*,")) then
     return nil
   end
 
@@ -14563,13 +14594,523 @@ function Code.find_unrequested_track_deletion(lua_code, user_text)
     line_no = line_no + 1
     if line:find("reaper%.DeleteTrack%s*%(")
        or line:find("reaper%.Main_OnCommand%s*%(%s*40005%s*,")
-       or line:find("reaper%.Main_OnCommand%s*%(%s*40006%s*,")
-       or line:find("reaper%.Main_OnCommandEx%s*%(%s*40005%s*,")
-       or line:find("reaper%.Main_OnCommandEx%s*%(%s*40006%s*,") then
+       or line:find("reaper%.Main_OnCommandEx%s*%(%s*40005%s*,") then
       findings[#findings + 1] = { line = line_no }
     end
   end
   return #findings > 0 and findings or nil
+end
+
+-- =============================================================================
+-- Code.find_action_request_relevance_violations
+-- =============================================================================
+-- Defense-in-depth relevance gate for generated Lua. Existing validators are
+-- deliberately precise about individual API mistakes; this layer compares the
+-- action's broad effect with the actual request and captured session instead:
+--   * literal FX additions need explicit FX/effect-family intent;
+--   * literal track targets must appear in the prompt or request-time snapshot;
+--   * high-impact native actions need matching user intent;
+--   * dynamically resolved actions always require manual review.
+--
+-- It is intentionally conservative: uncertain dynamic actions are review-only,
+-- not declared wrong, and all findings block Auto-run rather than making the
+-- script un-runnable. That keeps the safety boundary strong without preventing
+-- a user from reviewing and deliberately running a valid advanced workflow.
+
+function Code.prompt_requests_item_deletion(user_text)
+  local prompt = tostring(user_text or ""):lower():gsub("'", "")
+    :gsub("%s+", " ")
+  if prompt == "" then return false end
+  if prompt:find("do not delete", 1, true)
+      or prompt:find("dont delete", 1, true)
+      or prompt:find("without deleting", 1, true)
+      or prompt:find("do not remove", 1, true)
+      or prompt:find("dont remove", 1, true) then
+    return false
+  end
+  for _, verb in ipairs({ "delete", "remove", "clear", "wipe" }) do
+    for clause in (prompt .. "."):gmatch("([^%.;,]+)[%.;,]") do
+      local _, verb_end = clause:find("%f[%w_]" .. verb .. "%f[^%w_]")
+      if verb_end then
+        local tail = clause:sub(verb_end + 1)
+        local item_pos = tail:find("%f[%w_]items?%f[^%w_]")
+          or tail:find("%f[%w_]clips?%f[^%w_]")
+          or tail:find("media%s+items?")
+        local other_pos = tail:find("%f[%w_]tracks?%f[^%w_]")
+          or tail:find("%f[%w_]fx%f[^%w_]")
+          or tail:find("%f[%w_]plugins?%f[^%w_]")
+          or tail:find("%f[%w_]effects?%f[^%w_]")
+        if item_pos and (not other_pos or item_pos < other_pos) then
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
+function Code.find_action_request_relevance_violations(lua_code, user_text,
+                                                        snapshot)
+  if type(lua_code) ~= "string" or lua_code == "" then return nil end
+  local prompt = tostring(user_text or "")
+  local prompt_lower = prompt:lower()
+  local prompt_words = " " .. prompt_lower:gsub("[^%w]+", " ") .. " "
+  local findings, seen = {}, {}
+
+  local function add(kind, line, detail, review_only)
+    local key = tostring(kind) .. ":" .. tostring(line or 0) .. ":"
+      .. tostring(detail or "")
+    if seen[key] then return end
+    seen[key] = true
+    findings[#findings + 1] = {
+      kind = kind,
+      line = line,
+      detail = detail,
+      review_only = review_only == true,
+    }
+  end
+
+  local function mentions_number(id)
+    local id_text, pos = tostring(id), 1
+    while true do
+      local s, e = prompt:find(id_text, pos, true)
+      if not s then return false end
+      local before = s > 1 and prompt:sub(s - 1, s - 1) or ""
+      local after = e < #prompt and prompt:sub(e + 1, e + 1) or ""
+      if not before:match("%d") and not after:match("%d") then return true end
+      pos = e + 1
+    end
+  end
+
+  local function has_word(word)
+    return prompt_words:find(" " .. word .. " ", 1, true) ~= nil
+  end
+  local function has_any(words)
+    for _, word in ipairs(words) do
+      if has_word(word) then return true end
+    end
+    return false
+  end
+  local function phrase(text)
+    return prompt_lower:find(text, 1, true) ~= nil
+  end
+
+  local function high_impact_allowed(id)
+    if mentions_number(id) then return true end
+    if id == 1013 then
+      if has_word("arm") or has_word("armed") or has_word("arming") then
+        return phrase("start recording") or phrase("begin recording")
+          or has_any({ "capture", "take" })
+      end
+      return has_any({ "record", "recording", "capture" })
+    elseif id == 40026 then
+      return has_any({ "save", "saving" })
+        and has_any({ "project", "session", "rpp" })
+    elseif id == 40029 then
+      return has_any({ "undo", "revert" }) or phrase("go back")
+    elseif id == 40030 then
+      return has_any({ "redo", "reapply" })
+    elseif id == 40005 then
+      return Code.find_unrequested_track_deletion(
+        "reaper.Main_OnCommand(40005, 0)", prompt) == nil
+    elseif id == 40006 then
+      return Code.prompt_requests_item_deletion(prompt)
+    elseif id == 40364 then
+      return has_any({ "metronome", "click" })
+        and has_any({ "toggle", "enable", "disable", "turn", "on", "off" })
+    elseif id == 1007 or id == 40044 then
+      return has_any({ "play", "playback", "transport" })
+    elseif id == 1008 or id == 40073 then
+      return has_any({ "pause", "playback", "transport" })
+    elseif id == 1016 then
+      return has_any({ "stop", "playback", "transport", "recording" })
+    end
+    return true
+  end
+
+  local high_impact = {
+    [1013] = "start recording",
+    [40026] = "save the project",
+    [40029] = "undo",
+    [40030] = "redo",
+    [40005] = "delete tracks",
+    [40006] = "delete selected items",
+    [40364] = "toggle the metronome",
+    [1007] = "start playback",
+    [1008] = "pause playback",
+    [1016] = "stop transport",
+    [40044] = "toggle play/stop",
+    [40073] = "toggle play/pause",
+  }
+
+  local unrequested_track_delete =
+    Code.find_unrequested_track_deletion(lua_code, prompt)
+  for _, finding in ipairs(unrequested_track_delete or {}) do
+    add("high_impact_action", finding.line,
+      "DeleteTrack (delete tracks)", false)
+  end
+
+  local code_only = _lua_code_only_preserving_offsets(lua_code)
+  local line_no = 0
+  for line in (code_only .. "\n"):gmatch("([^\n]*)\n") do
+    line_no = line_no + 1
+    for _, fn in ipairs({ "Main_OnCommand", "Main_OnCommandEx" }) do
+      for id_text in line:gmatch(
+          "reaper%." .. fn .. "%s*%(%s*([+-]?%d+)") do
+        local id = tonumber(id_text)
+        if id and high_impact[id] and not high_impact_allowed(id) then
+          add("high_impact_action", line_no,
+            tostring(id) .. " (" .. high_impact[id] .. ")", false)
+        end
+      end
+      local variable = line:match(
+        "reaper%." .. fn .. "%s*%(%s*([%a_][%w_]*)")
+      if variable then
+        add("dynamic_action", line_no,
+          fn .. "(" .. variable .. ")", true)
+      end
+    end
+  end
+
+  local function normalize_name(value)
+    return tostring(value or ""):lower()
+      :gsub("^%s+", ""):gsub("%s+$", "")
+      :gsub("[^%w]+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  end
+  local normalized_prompt = " " .. normalize_name(prompt) .. " "
+  local session_names = {}
+  for name in tostring(snapshot or ""):gmatch("\n%d+|([^|\n]*)|%d+|%-?%d+") do
+    local normalized = normalize_name(name)
+    if normalized ~= "" then session_names[normalized] = true end
+  end
+  for name in tostring(snapshot or ""):gmatch('name "(.-)"[,%.]') do
+    local normalized = normalize_name(name)
+    if normalized ~= "" then session_names[normalized] = true end
+  end
+  local function target_is_grounded(name)
+    local normalized = normalize_name(name)
+    if normalized == "" then return true end
+    if session_names[normalized] then return true end
+    return normalized_prompt:find(" " .. normalized .. " ", 1, true) ~= nil
+  end
+  -- Names the script only WRITES as a new track's name are not lookup targets,
+  -- so they must not require prompt/snapshot grounding when the script also
+  -- creates a track. Collect names that flow into a P_NAME set: string literals
+  -- passed directly, and simple variables assigned a string literal that are
+  -- then passed as the value. Names used to FIND existing tracks (compared to
+  -- GetTrackName, or handed to find/get/resolve/target functions) are collected
+  -- elsewhere and stay checked. Scanned on raw lua_code because code_only blanks
+  -- the "P_NAME" key and the name literals themselves.
+  local creates_tracks =
+    code_only:find("reaper%.InsertTrackAtIndex%s*%(") ~= nil
+    or code_only:find("reaper%.Main_OnCommand%s*%(%s*40001%s*,") ~= nil
+    or code_only:find("reaper%.Main_OnCommandEx%s*%(%s*40001%s*,") ~= nil
+    or code_only:find("reaper%.Main_OnCommand%s*%(%s*40702%s*,") ~= nil
+    or code_only:find("reaper%.Main_OnCommandEx%s*%(%s*40702%s*,") ~= nil
+  local inserted_index_pos = {}
+  local function normalized_expr(raw)
+    return tostring(raw or ""):gsub("%s+", "")
+  end
+  for pos, raw_idx in code_only:gmatch(
+      "()reaper%.InsertTrackAtIndex%s*%(%s*([^,%)]+)") do
+    local idx = normalized_expr(raw_idx)
+    if idx ~= "" then
+      inserted_index_pos[idx] = math.min(inserted_index_pos[idx] or pos, pos)
+    end
+  end
+  local insert_selected_pos = code_only:find(
+    "reaper%.Main_OnCommand%s*%(%s*40001%s*,")
+    or code_only:find("reaper%.Main_OnCommandEx%s*%(%s*40001%s*,")
+    or code_only:find("reaper%.Main_OnCommand%s*%(%s*40702%s*,")
+    or code_only:find("reaper%.Main_OnCommandEx%s*%(%s*40702%s*,")
+  local created_track_vars = {}
+  for pos, var, raw_idx in code_only:gmatch(
+      "()local%s+([%a_][%w_]*)%s*=%s*reaper%.GetTrack%s*%(%s*[^,]+,%s*([^%)]+)%)") do
+    local insert_pos = inserted_index_pos[normalized_expr(raw_idx)]
+    if insert_pos and insert_pos < pos then created_track_vars[var] = pos end
+  end
+  if insert_selected_pos then
+    local function selection_was_redirected(from_pos, to_pos)
+      local window = code_only:sub(from_pos + 1, to_pos - 1)
+      local raw_window = lua_code:sub(from_pos + 1, to_pos - 1)
+      local function target_is_existing(raw_target, mutation_pos)
+        local target = tostring(raw_target or ""):match(
+          "^%s*([%a_][%w_]*)%s*$")
+        local created_pos = target and created_track_vars[target]
+        return not created_pos or created_pos >= mutation_pos
+      end
+      local function targets_existing_track(pattern)
+        for rel_pos, raw_target in window:gmatch(pattern) do
+          local mutation_pos = from_pos + rel_pos
+          if target_is_existing(raw_target, mutation_pos) then return true end
+        end
+        return false
+      end
+      local function i_selected_targets_existing()
+        for rel_pos, raw_target in raw_window:gmatch(
+            "()reaper%.SetMediaTrackInfo_Value%s*%(%s*([^,]+),%s*[\"']I_SELECTED[\"']") do
+          -- String contents are blanked in code_only, but offsets are preserved.
+          -- Requiring the live call prefix there prevents commented examples from
+          -- influencing the selection-flow inference.
+          if window:sub(rel_pos):find(
+              "^reaper%.SetMediaTrackInfo_Value%s*%(")
+              and target_is_existing(raw_target, from_pos + rel_pos) then
+            return true
+          end
+        end
+        return false
+      end
+      return targets_existing_track(
+          "()reaper%.SetOnlyTrackSelected%s*%(%s*([^%)]+)")
+        or targets_existing_track(
+          "()reaper%.SetTrackSelected%s*%(%s*([^,%)]*)")
+        or i_selected_targets_existing()
+    end
+    for pos, var in code_only:gmatch(
+        "()local%s+([%a_][%w_]*)%s*=%s*reaper%.GetSelectedTrack%s*%(") do
+      if insert_selected_pos < pos
+          and not selection_was_redirected(insert_selected_pos, pos) then
+        created_track_vars[var] = pos
+      end
+    end
+  end
+
+  local pname_write_names = {}
+  local function record_pname_value(raw_val)
+    raw_val = tostring(raw_val or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    local literal = raw_val:match('^"(.-)"$') or raw_val:match("^'(.-)'$")
+    if literal then
+      local n = normalize_name(literal)
+      if n ~= "" then pname_write_names[n] = true end
+      return
+    end
+    if raw_val:match("^[%a_][%w_]*$") then
+      local escaped = raw_val:gsub("(%W)", "%%%1")
+      for lit in lua_code:gmatch("%f[%w_]" .. escaped .. "%s*=%s*\"(.-)\"") do
+        local n = normalize_name(lit)
+        if n ~= "" then pname_write_names[n] = true end
+      end
+      for lit in lua_code:gmatch("%f[%w_]" .. escaped .. "%s*=%s*'(.-)'") do
+        local n = normalize_name(lit)
+        if n ~= "" then pname_write_names[n] = true end
+      end
+    end
+  end
+  for target, raw_val in lua_code:gmatch(
+      'GetSetMediaTrackInfo_String%s*%(%s*([%a_][%w_]*)%s*,%s*"P_NAME"%s*,%s*([^,]+)%s*,%s*true') do
+    if created_track_vars[target] then record_pname_value(raw_val) end
+  end
+  for target, raw_val in lua_code:gmatch(
+      "GetSetMediaTrackInfo_String%s*%(%s*([%a_][%w_]*)%s*,%s*'P_NAME'%s*,%s*([^,]+)%s*,%s*true") do
+    if created_track_vars[target] then record_pname_value(raw_val) end
+  end
+  local function add_target(name, line, may_be_created_output)
+    if may_be_created_output and creates_tracks
+        and pname_write_names[normalize_name(name)] then
+      return
+    end
+    if not target_is_grounded(name) then
+      add("literal_track_target", line, tostring(name), false)
+    end
+  end
+  local function line_for_pos(pos)
+    local _, n = lua_code:sub(1, math.max(1, pos or 1)):gsub("\n", "\n")
+    return n + 1
+  end
+
+  for pos, _, body in lua_code:gmatch(
+      "()([%w_]*track[%w_]*names?[%w_]*)%s*=%s*{(.-)}") do
+    for name in body:gmatch('"(.-)"') do
+      add_target(name, line_for_pos(pos), true)
+    end
+    for name in body:gmatch("'(.-)'") do
+      add_target(name, line_for_pos(pos), true)
+    end
+  end
+  for pos, _, name in lua_code:gmatch(
+      '()([%w_]*track[%w_]*name[%w_]*)%s*=%s*"(.-)"') do
+    add_target(name, line_for_pos(pos), true)
+  end
+  for pos, _, name in lua_code:gmatch(
+      "()([%w_]*track[%w_]*name[%w_]*)%s*=%s*'(.-)'") do
+    add_target(name, line_for_pos(pos), true)
+  end
+  for pos, fn, name in lua_code:gmatch(
+      '()([%w_]*[Tt]rack[%w_]*)%s*%(%s*"(.-)"') do
+    local lower_fn = fn:lower()
+    if lower_fn:find("find", 1, true) or lower_fn:find("get", 1, true)
+        or lower_fn:find("resolve", 1, true)
+        or lower_fn:find("target", 1, true) then
+      add_target(name, line_for_pos(pos), false)
+    end
+  end
+  for pos, fn, name in lua_code:gmatch(
+      "()([%w_]*[Tt]rack[%w_]*)%s*%(%s*'(.-)'") do
+    local lower_fn = fn:lower()
+    if lower_fn:find("find", 1, true) or lower_fn:find("get", 1, true)
+        or lower_fn:find("resolve", 1, true)
+        or lower_fn:find("target", 1, true) then
+      add_target(name, line_for_pos(pos), false)
+    end
+  end
+
+  local broad_fx_intent = has_any({
+    "fx", "plugin", "plugins", "effect", "effects", "chain", "processing",
+    "process", "sound", "tone", "jsfx", "instrument", "vsti", "sampler",
+  })
+  local family_words = {
+    eq = { "eq", "equalizer", "equaliser", "filter" },
+    compressor = { "compress", "compressor", "compression" },
+    gate = { "gate", "gating" },
+    limiter = { "limit", "limiter", "limiting" },
+    reverb = { "reverb", "verb" },
+    delay = { "delay", "echo", "slapback" },
+    instrument = { "instrument", "vsti", "synth", "sampler", "kontakt" },
+  }
+  local explicit_plugins = {
+    { prompt = "reaeq", generated = "reaeq" },
+    { prompt = "reacomp", generated = "reacomp" },
+    { prompt = "reagate", generated = "reagate" },
+    { prompt = "realimit", generated = "realimit" },
+    { prompt = "readelay", generated = "readelay" },
+    { prompt = "reaverbate", generated = "reaverbate" },
+    { prompt = "pro q", generated = "pro q" },
+    { prompt = "pro c", generated = "pro c" },
+    { prompt = "pro g", generated = "pro g" },
+    { prompt = "pro l", generated = "pro l" },
+    { prompt = "pro r", generated = "pro r" },
+    { prompt = "twin 3", generated = "twin 3" },
+    { prompt = "serum", generated = "serum" },
+    { prompt = "kontakt", generated = "kontakt" },
+  }
+  local requested_explicit = {}
+  for _, spec in ipairs(explicit_plugins) do
+    if normalized_prompt:find(" " .. spec.prompt .. " ", 1, true) then
+      requested_explicit[#requested_explicit + 1] = spec.generated
+    end
+  end
+  local function plugin_family(name)
+    local normalized = normalize_name(name)
+    if normalized:find("reaeq", 1, true) or normalized:find("pro q", 1, true)
+        or normalized:find(" eq ", 1, true) or normalized:match("^eq ") then
+      return "eq"
+    elseif normalized:find("reacomp", 1, true)
+        or normalized:find("pro c", 1, true)
+        or normalized:find("compress", 1, true) then
+      return "compressor"
+    elseif normalized:find("reagate", 1, true)
+        or normalized:find("pro g", 1, true) then
+      return "gate"
+    elseif normalized:find("realimit", 1, true)
+        or normalized:find("pro l", 1, true)
+        or normalized:find("limit", 1, true) then
+      return "limiter"
+    elseif normalized:find("reaverb", 1, true)
+        or normalized:find("pro r", 1, true)
+        or normalized:find("reverb", 1, true) then
+      return "reverb"
+    elseif normalized:find("readelay", 1, true)
+        or normalized:find("delay", 1, true)
+        or normalized:find("echo", 1, true) then
+      return "delay"
+    elseif normalized:find("vsti", 1, true)
+        or normalized:find("synth", 1, true)
+        or normalized:find("serum", 1, true)
+        or normalized:find("kontakt", 1, true)
+        or normalized:find("twin 3", 1, true) then
+      return "instrument"
+    end
+    return nil
+  end
+  -- Space-insensitive grounding: registered plugin names often join words the
+  -- user spells separately ("ValhallaSupermassive" vs "valhalla supermassive").
+  -- Match the normalized PRODUCT name, not any individual long word: vendor
+  -- tokens such as "FabFilter" or "Valhalla" are shared by sibling plugins and
+  -- must not authorize a different product. Strip parenthesized vendor metadata
+  -- and format tokens, and split CamelCase before comparing the full product.
+  local format_tokens = {
+    vst = true, vst3 = true, vst3i = true, vsti = true,
+    clap = true, au = true, js = true, x64 = true,
+  }
+  local prompt_no_space = normalized_prompt:gsub(" ", "")
+  local function product_name_grounded(raw_name)
+    local product = tostring(raw_name or "")
+      :gsub("%b()", " ")
+      :gsub("(%l)(%u)", "%1 %2")
+    product = normalize_name(product)
+    local words = {}
+    for word in product:gmatch("[%w]+") do
+      if not format_tokens[word] then words[#words + 1] = word end
+    end
+    product = table.concat(words, " ")
+    if product == "" then return false end
+    if normalized_prompt:find(" " .. product .. " ", 1, true) then return true end
+    local joined = product:gsub(" ", "")
+    return #joined >= 6 and prompt_no_space:find(joined, 1, true) ~= nil
+  end
+  local function plugin_is_grounded(name)
+    local normalized = normalize_name(name)
+    if normalized ~= ""
+        and normalized_prompt:find(" " .. normalized .. " ", 1, true) then
+      return true
+    end
+    if product_name_grounded(name) then return true end
+    if #requested_explicit > 0 then
+      for _, wanted in ipairs(requested_explicit) do
+        if normalized:find(wanted, 1, true) then return true end
+      end
+      -- Explicit-list miss: the prompt named specific plugins and this is not
+      -- one of them. Ground it only if it belongs to a plugin family the prompt
+      -- independently asked for (so "add pro q 4 and a compressor" grounds a
+      -- substituted ReaComp via the compressor family). Do not fall through to
+      -- broad_fx_intent here: a prompt naming ReaEQ that also says "another
+      -- effect" must not ground a substituted Pro-Q.
+      local family = plugin_family(name)
+      if family and has_any(family_words[family]) then return true end
+      return false
+    end
+    local family = plugin_family(name)
+    if family and has_any(family_words[family]) then return true end
+    return broad_fx_intent
+  end
+  -- code_only blanks comment and string bodies while preserving line offsets, so
+  -- a line still carrying the call prefix there is live code, not a commented-out
+  -- or in-string example. The plugin-name literal is blanked in code_only, so
+  -- read the name from the aligned raw line (same split, same line indices).
+  local function scan_fx_call(fn)
+    local live_by_line, co_index = {}, 0
+    for co_line in (code_only .. "\n"):gmatch("([^\n]*)\n") do
+      co_index = co_index + 1
+      if co_line:find("reaper%." .. fn .. "%s*%(") then
+        live_by_line[co_index] = true
+      end
+    end
+    local line_index = 0
+    for raw_line in (lua_code .. "\n"):gmatch("([^\n]*)\n") do
+      line_index = line_index + 1
+      if live_by_line[line_index] then
+        local name = raw_line:match(
+          "reaper%." .. fn .. "%s*%([^,]+,%s*\"(.-)\"")
+          or raw_line:match(
+            "reaper%." .. fn .. "%s*%([^,]+,%s*'(.-)'")
+        if name and not plugin_is_grounded(name) then
+          add("unrequested_plugin", line_index, name, false)
+        end
+      end
+    end
+  end
+  scan_fx_call("TrackFX_AddByName")
+  scan_fx_call("TakeFX_AddByName")
+
+  if #findings == 0 then return nil end
+  table.sort(findings, function(a, b)
+    if (a.line or 0) ~= (b.line or 0) then
+      return (a.line or 0) < (b.line or 0)
+    end
+    if a.kind ~= b.kind then return a.kind < b.kind end
+    return tostring(a.detail or "") < tostring(b.detail or "")
+  end)
+  return findings
 end
 
 -- =============================================================================
@@ -14658,6 +15199,18 @@ do
     { label = "global REAPER config mutation (review before running)", patterns = {
       "reaper%.SNM_Set%a+ConfigVar%s*%(",
       'reaper%s*%[%s*["\']SNM_Set%a+ConfigVar["\']%s*%]%s*%(',
+    }},
+    { label = "high-impact REAPER action (confirm before running)", patterns = {
+      "reaper%.Main_OnCommand[%w_]*%s*%(%s*1013%s*,",
+      "reaper%.Main_OnCommand[%w_]*%s*%(%s*40026%s*,",
+      "reaper%.Main_OnCommand[%w_]*%s*%(%s*40029%s*,",
+      "reaper%.Main_OnCommand[%w_]*%s*%(%s*40030%s*,",
+      "reaper%.Main_OnCommand[%w_]*%s*%(%s*40005%s*,",
+      "reaper%.Main_OnCommand[%w_]*%s*%(%s*40006%s*,",
+      "reaper%.Main_OnCommand[%w_]*%s*%(%s*40364%s*,",
+    }},
+    { label = "dynamically resolved REAPER action (confirm exact action)", patterns = {
+      "reaper%.Main_OnCommand[%w_]*%s*%(%s*[%a_][%w_]*%s*,",
     }},
     { label = "extension-state write (review namespace before running)", match = function(code, searchable)
       code = tostring(code or "")
@@ -15583,6 +16136,15 @@ end
 --   "unsaved"    - project has never been saved (no file on disk)
 --   "read_error" - could not open the source file
 --   "write_error"- could not write the backup file
+--
+-- Every caller must use Code.safety_backup_can_proceed() below rather than
+-- maintaining its own error allowlist. A missing error means the backup was
+-- created; "unchanged" means the existing diff-aware backup is still current.
+-- Every named or future/unknown error is fail-closed.
+function Code.safety_backup_can_proceed(err)
+  return err == nil or err == "unchanged"
+end
+
 function Code.safety_backup()
   local BACKUP_MAX = 10  -- maximum safety backups to keep per project
   local _, proj_path = reaper.EnumProjects(-1)
@@ -15607,8 +16169,33 @@ function Code.safety_backup()
     return false, "unchanged"
   end
 
-  local timestamp   = os.date("%Y%m%d-%H%M%S")
-  local backup_path = dir .. RA.SEP .. name .. "-SafetyBackup-" .. timestamp .. ".rpp-bak"
+  -- A wall-clock second alone can collide when two changed states are backed
+  -- up quickly, after a script reload, or from separate portable REAPER
+  -- instances touching the same project. Add millisecond, project-state,
+  -- per-process sequence, and instance components, then retain an existence
+  -- loop as a final defense. This avoids overwriting an earlier safety point
+  -- without depending on non-portable exclusive-create file modes.
+  local timestamp = os.date("%Y%m%d-%H%M%S")
+  local precise = reaper.time_precise and reaper.time_precise() or os.clock()
+  local millis = math.floor((precise % 1) * 1000)
+  S.safety_backup_sequence = (tonumber(S.safety_backup_sequence) or 0) + 1
+  local instance = tostring(S.INSTANCE_ID or "main")
+    :gsub("[^%w]", ""):sub(-6)
+  if instance == "" then instance = "main" end
+  local suffix = string.format("%03d-%06d-%03d-%s",
+    millis, cur_state % 1000000, S.safety_backup_sequence % 1000, instance)
+  local backup_base = dir .. RA.SEP .. name .. "-SafetyBackup-"
+    .. timestamp .. "-" .. suffix
+  local backup_path = backup_base .. ".rpp-bak"
+  local collision = 0
+  while reaper.file_exists(backup_path) and collision < 999 do
+    collision = collision + 1
+    backup_path = backup_base .. "-" .. tostring(collision) .. ".rpp-bak"
+  end
+  if reaper.file_exists(backup_path) then
+    Log.line("BACKUP", "Could not allocate a collision-free safety backup name")
+    return false, "write_error"
+  end
 
   -- Save current project state (including unsaved changes) directly to the
   -- backup path without touching the main .rpp. Options=0 means no template
@@ -15636,13 +16223,16 @@ function Code.safety_backup()
   -- Escape Lua magic characters in the project name so names like "Mix-v1.2"
   -- don't break the pattern and bypass the cap (causing infinite disk bloat).
   local safe_name = name:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
-  local pattern = "^" .. safe_name .. "%-SafetyBackup%-%d+%-%d+%.rpp%-bak$"
+  local legacy_pattern = "^" .. safe_name
+    .. "%-SafetyBackup%-%d+%-%d+%.rpp%-bak$"
+  local unique_pattern = "^" .. safe_name
+    .. "%-SafetyBackup%-%d+%-%d+%-%d+%-%d+%-%d+%-%w+%-?%d*%.rpp%-bak$"
   local backups = {}
   local idx = 0
   while true do
     local fn = reaper.EnumerateFiles(dir, idx)
     if not fn then break end
-    if fn:match(pattern) then
+    if fn:match(legacy_pattern) or fn:match(unique_pattern) then
       backups[#backups + 1] = fn
     end
     idx = idx + 1
@@ -15698,6 +16288,12 @@ local CODE_SANDBOX_DENIED_REAPER_APIS = {
   ExecProcess = true,
   CF_ShellExecute = true,
   BR_Win32_ShellExecute = true,
+
+  -- Lifecycle escape. Generated code may use the guarded one-shot defer shim
+  -- below, but it must not register callbacks that run during a later script
+  -- shutdown or start a persistent loop outside this run's undo/result scope.
+  atexit = true,
+  runloop = true,
 
   -- Project/file replacement. ReaAssist creates its own pre-run safety backup;
   -- generated scripts should not save/open projects or silently touch disk.
@@ -15809,8 +16405,22 @@ Code.AUTO_RUN_MANUAL_LUA_BLOCK_REASONS = {
   validator_gate = true,
 }
 
+Code.AUTO_RUN_MANUAL_LUA_REVIEW_REASONS = {
+  action_relevance_review = true,
+  auto_run_disabled = true,
+  backup_failed = true,
+  backup_required = true,
+  manual_run_only_lua_artifact = true,
+  non_runnable_lua_artifact = true,
+  risky_code_confirmation = true,
+}
+
 function Code.auto_run_block_reason_blocks_manual_lua(reason)
   return Code.AUTO_RUN_MANUAL_LUA_BLOCK_REASONS[tostring(reason or "")] == true
+end
+
+function Code.auto_run_block_reason_allows_manual_lua(reason)
+  return Code.AUTO_RUN_MANUAL_LUA_REVIEW_REASONS[tostring(reason or "")] == true
 end
 
 function Code.project_change_count()

@@ -1,5 +1,19 @@
 # ReaAssist - Changelog
 
+## v1.4.4 - 2026-07-10
+
+- **OpenAI's GPT-5.6 family is now supported.** ReaAssist adds Luna, Terra, and Sol, recommends Luna with no thinking as the best tested default, migrates older GPT-5.4 selections, and accounts for GPT-5.6 caching and long-context pricing behavior.
+
+- **Per-turn spending controls provide a safer stopping point.** Configurable token and dollar limits warn before another model call could exceed your limit, show the projected worst case, and offer a one-call override without silently continuing later calls.
+
+- **Generated edits are checked more strictly against your request.** ReaAssist catches more mismatched tracks, plugins, REAPER actions, unsafe paths, and generated-code lifecycle escapes before auto-run. Safety backups now fail closed and avoid filename collisions.
+
+- **Routing and follow-up behavior is more dependable.** Bus requests, created and selected track targeting, plugin grounding, and prefaced API questions are handled more accurately, with fewer irrelevant retries or unintended actions.
+
+- **Privacy, accessibility, and interface wording is clearer.** API-key storage is described accurately as reversible local obfuscation, OpenAI safety identifiers are pseudonymous, Screen Reader Mode handles request-limit decisions and path launching more safely, and several Terms, settings, and context-menu rough edges are polished.
+
+- **REAPER and JSFX guidance is refreshed.** The bundled references now cover REAPER 7.77, including current send behavior and cursor APIs, alongside clearer guidance for JSFX graphics panels and effect construction.
+
 ## v1.4.3 - 2026-07-05
 
 - **Generated-code safety is tighter.** ReaAssist now catches more unsafe or mismatched Lua/JSFX before auto-run, including bad track/send assumptions, Pro-Q slope mistakes, unsafe JSFX saves, time/PPQ mixups, and retry loops that previously let weak fixes through.
@@ -227,7 +241,6 @@
 - Chain-build follow-up turns ("build a vocal chain" after an earlier turn placed plugins) now pre-pin the current FX chain plus a short upsert skeleton, so the model reuses existing plugins instead of duplicating them.
 - Already-pinned `<context_needed>` re-requests are caught by a fast-path that fires the corrective hint without re-fetching the data.
 - Anthropic cache TTL frozen per-rung at 5m; the 1h-after-5m escalation that previously generated invalid_request errors on multi-turn sessions is removed.
-- Opt-in history compaction (off by default) for users running many-turn sessions.
 
 ### Prompt fidelity
 

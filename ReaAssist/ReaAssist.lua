@@ -3407,7 +3407,7 @@ end
 -- interprets as a toggle-off). Registering the relauncher as an
 -- action lazily -- at fire time, not at startup -- keeps it out of
 -- the user's Actions list for sessions where no auto-restart ever
--- happens. advance_after_rename checks the file's existence before
+-- happens. Updater._apply_finish checks the file's existence before
 -- scheduling restart so the done-view messaging can still pick the
 -- right copy ("Restarting..." vs "Close and reopen...") without
 -- touching REAPER's action registry until the restart actually fires.
@@ -3611,7 +3611,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.4.4", -- public release version
+  VERSION           = "1.4.5", -- public release version
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -3705,6 +3705,18 @@ CFG = {
   -- on slow disks or AV scanning, after which tick_native_sha falls back
   -- to the pure-Lua incremental verifier as the reliability floor.
   UPDATE_NATIVE_SHA_TIMEOUT = 15,
+  -- Watchdog for the batch payload download (transactional apply stage A).
+  -- One detached curl process fetches the whole queue from a --config
+  -- file, so the watchdog scales with queue size instead of reusing the
+  -- single-fetch UPDATE_CURL_TIMEOUT + 10 manifest watchdog: BASE covers
+  -- process spawn plus general slack, PER_FILE covers each transfer's
+  -- worst case (connect 10 s + one 15 s attempt + the bounded retry
+  -- window's extra attempt). The watchdog only bounds a hung or vanished
+  -- curl; normal completion is detected through the exit file, and slow
+  -- but progressing batches stay under it because per-transfer limits
+  -- cap each file's cost.
+  UPDATE_BATCH_WATCHDOG_BASE = 30,     -- seconds
+  UPDATE_BATCH_WATCHDOG_PER_FILE = 30, -- seconds per queued file
   FONT_DOWNLOAD_TIMEOUT = 120, -- seconds; optional CJK fonts are 4-8 MB
   LANG_DOWNLOAD_TIMEOUT = 30, -- seconds; language packs are sub-MB JSON
   -- Seconds to wait after the first idle->waiting (Send) edge before firing
@@ -4935,16 +4947,25 @@ deep_scan = {
 -- =============================================================================
 update = {
   -- State machine: idle -> checking -> verifying -> (available |
-  -- repair_available | idle); user click -> downloading -> rename_retry?
-  -- -> done; any error -> failed (with last_step / last_error stamped
-  -- by Updater._set_failure for the Update Failed dialog to read).
+  -- repair_available | idle); user click -> downloading_batch ->
+  -- verifying_download -> applying -> done; any error -> failed (with
+  -- last_step / last_error stamped by Updater._set_failure for the
+  -- Update Failed dialog to read). The three post-click states are the
+  -- transactional apply pipeline: batch-download everything to staged
+  -- .new files, verify every staged file, then journal + rename. AV-lock
+  -- rename retries happen inside "applying" (per-frame, no own state).
   state           = "idle",
   remote_version  = nil,     -- version string from manifest (e.g. "0.9.1")
   manifest        = nil,     -- parsed manifest table
-  download_queue  = {},      -- list of {filename, url, sha256} to download
-  download_idx    = 0,       -- index into download_queue (current file)
+  download_queue  = {},      -- list of {filename, url, sha256, staged} to download
+  download_idx    = 0,       -- 1-based progress pointer for the UI cells
+                             -- (staged-file count + 1 during the batch
+                             -- download, apply index during "applying")
   update_missing  = nil,     -- changed-file set from check-time SHA diff
   update_mismatched = nil,   -- for version updates (avoids post-click hash stall)
+  update_locked   = nil,     -- files unreadable at check time (AV / editor
+                             -- lock); queued defensively by the update
+                             -- purpose, ignored by the repair purpose
   applied_files   = {},      -- list of {path=dest, bak_existed=bool} for rollback;
                              -- bak_existed=false means "fresh-install add" so rollback
                              -- must delete dest (not try to restore a nonexistent .bak)
@@ -4955,12 +4976,11 @@ update = {
                              -- the user dismisses (Later, OK) or starts a new fetch (Retry)
   popup_opened    = false,   -- true once the "Update Available" popup has been shown
   force           = false,   -- true to bypass version comparison (integrity reinstall)
-  rename_failures = 0,       -- consecutive os.rename failures for AV-locked retry (initial fail = 1; each defer retry increments; gives up at 15)
-  rename_tmp      = nil,     -- tmp_path for pending rename retry
-  rename_dest     = nil,     -- dest path for pending rename retry
-  rename_bak      = nil,     -- bak path for pending rename retry
-  rename_bak_existed = false,-- true if the .bak was actually created (file existed pre-rename);
-                             -- false means "fresh install add" so rollback must not restore
+  -- Transactional apply scratch state (nil while idle):
+  --   _batch     -- stage A: {started_at, watchdog, refire_used}
+  --   _dl_verify -- stage B: staged-hash walker (mirrors _sha_diff's shape)
+  --   _journal   -- stage C: in-memory copy of the on-disk apply journal
+  --   _apply     -- stage C: {idx, prepared, bak_existed, rename_failures}
   -- Structured diagnostics stamped on every failure path so a support
   -- dump (Bug Report -> Copy Diagnostics) can attribute which step of
   -- the update/repair pipeline failed and why. Surfaced to the user via
@@ -5130,6 +5150,25 @@ do
   -- runs independently without trampling API request/response files.
   tmp.update_out  = tmp_dir .. "reaassist_update_"     .. tmp_suffix .. ".txt"
   tmp.update_exit = tmp_dir .. "reaassist_uexit_"      .. tmp_suffix .. ".txt"
+  -- Batch payload download I/O (transactional apply stage A). _cfg is the
+  -- curl --config file listing every url/output pair for the queue; _exit
+  -- receives the single exit code for the whole batch run. Separate from
+  -- tmp.update_out / _exit so batch polling never races the manifest
+  -- fetch pipeline.
+  tmp.update_batch_cfg  = tmp_dir .. "reaassist_ubcfg_"  .. tmp_suffix .. ".txt"
+  tmp.update_batch_exit = tmp_dir .. "reaassist_ubexit_" .. tmp_suffix .. ".txt"
+  -- Transactional apply journal (stage C). Deliberately NOT instance-
+  -- suffixed: it describes the shared install's in-flight apply, and the
+  -- startup recovery path must find it regardless of which instance
+  -- crashed. The owning instance id is recorded inside the file instead.
+  tmp.update_journal = tmp_dir .. "update_journal.json"
+  -- Exclusive apply lock: gates the whole download->verify->apply
+  -- pipeline so two instances sharing this install cannot clobber each
+  -- other's staging files or journal. Shared name for the same reason
+  -- as the journal; the owner id lives inside the file. Never wiped
+  -- blindly at startup (another live instance may hold it); stale locks
+  -- are reclaimed by acquire_apply_lock via the live-marker check.
+  tmp.update_lock = tmp_dir .. "update_apply.lock"
   -- Native SHA-256 verification I/O. Separate from tmp.update_out / _exit
   -- so a verify can run while the next manifest fetch is being prepared,
   -- and so polling reads never race the manifest pipeline. _in is the
@@ -5174,6 +5213,10 @@ os.remove(tmp.cache_exit)
 os.remove(tmp.cache_renew_body)
 os.remove(tmp.update_out)
 os.remove(tmp.update_exit)
+-- Batch download scratch is safe to wipe here; the apply journal is NOT
+-- removed (startup recovery below consumes and deletes it itself).
+os.remove(tmp.update_batch_cfg)
+os.remove(tmp.update_batch_exit)
 os.remove(tmp.update_sha_in)
 os.remove(tmp.update_sha_out)
 os.remove(tmp.update_sha_exit)
@@ -5267,54 +5310,110 @@ do
   end
 end
 
--- Stranded .bak sweep: the auto-update's atomic per-file swap renames
+-- Stranded .bak sweep: the auto-update's transactional apply renames
 -- each existing dest -> dest.bak before moving the new file in, then
--- removes the .bak in a post-batch cleanup pass at the bottom of
--- download_poll. When ReaAssist.lua itself is one of the updated
--- files, the script auto-restarts shortly after the swap; if the
--- restart races the cleanup pass for ReaAssist.lua's .bak, the .bak
--- gets stranded in the install dir and sits there forever (cosmetic
--- clutter, not a functional bug -- the script reads ReaAssist.lua
--- and ignores .bak). Sweep here at startup.
+-- removes the .baks after the journal reaches its committed phase. When
+-- ReaAssist.lua itself is one of the updated files, the script
+-- auto-restarts shortly after the swap; if the restart races the
+-- cleanup pass for ReaAssist.lua's .bak, the .bak gets stranded in the
+-- install dir and sits there forever (cosmetic clutter, not a
+-- functional bug -- the script reads ReaAssist.lua and ignores .bak).
+-- Also swept: stranded .new staging files (a crash during the batch
+-- download, before any journal exists, leaves them beside their live
+-- counterparts) and legacy .tmp leftovers from the pre-transactional
+-- per-file pipeline. Sweep here at startup, covering the script root
+-- plus the whole Resources/ tree (fonts/, ReEQ/ and its nested
+-- Dependencies/ receive updater files too).
 --
 -- Guards:
---   1. Only delete a .bak when its un-suffixed counterpart exists in
---      the same dir, so we never touch a user-saved hand-rolled .bak
---      that lives here without a matching live file.
---   2. Skip .bak files whose stem is in BAK_SWEEP_EXEMPT below: user
---      overrides (System_Prompt_Custom.md is documented; some users
---      keep a hand-saved .bak beside it before edits) and legacy runtime
+--   1. Only delete a .bak/.tmp/.new when its un-suffixed counterpart
+--      exists in the same dir, so we never touch a user-saved
+--      hand-rolled backup that lives here without a matching live file.
+--   2. Skip files whose stem is in the exempt set below: user overrides
+--      (System_Prompt_Custom.md is documented; some users keep a
+--      hand-saved .bak beside it before edits) and legacy runtime
 --      state (FX_Cache.json, Debug.log -- users sometimes back these up
---      before clearing). Data/ is not swept here; its .bak files are
---      store-helper recovery files, not updater leftovers.
+--      before clearing). Data/ is never swept here; its .bak/.tmp files
+--      are store-helper recovery files, not updater leftovers.
+--   3. Skip the whole sweep when an update journal exists: an
+--      interrupted apply may be pending resolution, and its .baks and
+--      .new staging files are the only recovery state. Journal recovery
+--      (which runs after the Updater module is defined, further down
+--      this file) deletes the journal once it resolves; the next launch
+--      sweeps normally. This also covers the case where ANOTHER live
+--      instance is mid-apply: its journal exists, so this launch must
+--      not touch any .bak. The .tmp sibling counts as a journal too: a
+--      crash between journal_write's remove and rename leaves only the
+--      .tmp, which journal_read adopts during recovery.
 do
-  local exempt = {
-    ["System_Prompt_Custom.md"] = true,
-    ["FX_Cache.json"]           = true,
-    ["Debug.log"]               = true,
-  }
-  local sweep_dirs = { RA.script_path, RA.RESOURCES_DIR }
-  for _, dir in ipairs(sweep_dirs) do
-    local victims = {}
-    local idx     = 0
-    while true do
-      local fn = reaper.EnumerateFiles(dir, idx)
-      if not fn then break end
-      local stem = fn:match("^(.+)%.bak$")
-      if stem and not exempt[stem]
-          and reaper.file_exists(dir .. stem) then
-        victims[#victims + 1] = fn
-      end
-      idx = idx + 1
+  local journal_pending = false
+  for _, journal_name in ipairs({
+    tmp.update_journal, tmp.update_journal .. ".tmp",
+  }) do
+    local jf = io.open(journal_name, "r")
+    if jf then
+      jf:close()
+      journal_pending = true
+      break
     end
-    for _, fn in ipairs(victims) do
-      os.remove(dir .. fn)
+  end
+  if not journal_pending then
+    local exempt = {
+      ["System_Prompt_Custom.md"] = true,
+      ["FX_Cache.json"]           = true,
+      ["Debug.log"]               = true,
+    }
+    -- Script root stays flat (Data/ and Resources/ are its only owned
+    -- subdirs and Data/ is out of bounds); Resources/ is walked
+    -- recursively. Collect each directory's subdir names fully before
+    -- recursing so REAPER's per-path enumeration cache is never
+    -- interleaved across directories.
+    local sweep_dirs = { RA.script_path }
+    local function add_tree(dir)
+      sweep_dirs[#sweep_dirs + 1] = dir
+      local subs = {}
+      local idx = 0
+      while true do
+        local sub = reaper.EnumerateSubdirectories(dir, idx)
+        if not sub then break end
+        subs[#subs + 1] = sub
+        idx = idx + 1
+      end
+      for _, sub in ipairs(subs) do
+        add_tree(dir .. sub .. RA.SEP)
+      end
+    end
+    add_tree(RA.RESOURCES_DIR)
+    for _, dir in ipairs(sweep_dirs) do
+      local victims = {}
+      local idx     = 0
+      while true do
+        local fn = reaper.EnumerateFiles(dir, idx)
+        if not fn then break end
+        local stem = fn:match("^(.+)%.bak$")
+          or fn:match("^(.+)%.tmp$")
+          or fn:match("^(.+)%.new$")
+        if stem and not exempt[stem]
+            and reaper.file_exists(dir .. stem) then
+          victims[#victims + 1] = fn
+        end
+        idx = idx + 1
+      end
+      for _, fn in ipairs(victims) do
+        os.remove(dir .. fn)
+      end
     end
   end
 end
 
 reaper.atexit(function()
   set_toolbar(false)
+  -- Release the exclusive apply lock if this instance holds it (the
+  -- helper checks ownership; a lock owned by another live instance is
+  -- left alone). Updater may be nil when the script aborted early.
+  if Updater and Updater.release_apply_lock then
+    pcall(Updater.release_apply_lock)
+  end
   -- Only clear the "running" lock if it still belongs to this instance.
   -- During auto-restart (Updater.try_auto_restart -> Main_OnCommand) the
   -- new instance has already claimed the lock by the time this atexit
@@ -5393,6 +5492,8 @@ reaper.atexit(function()
   os.remove(tmp.pid)
   os.remove(tmp.update_out)
   os.remove(tmp.update_exit)
+  os.remove(tmp.update_batch_cfg)
+  os.remove(tmp.update_batch_exit)
   -- Native SHA verify temp files; symmetric with the startup wipe so
   -- the .ps1 in particular (which embeds tmp paths) doesn't linger
   -- on disk after a graceful close.
@@ -12541,7 +12642,7 @@ end -- attachment system scope
 -- same Resources/ folder, it is loaded INSTEAD of the stock prompt. The
 -- custom file is not in the update manifest, so it survives updates and
 -- is never touched by repair. The stock file may still change across
--- updates; advance_after_rename detects that and queues a one-time toast
+-- updates; Updater._apply_finish detects that and queues a one-time toast
 -- on next launch reminding the user to review the new stock prompt.
 local SYSTEM_PROMPT
 local SYSTEM_PROMPT_IS_CUSTOM = false
@@ -15123,9 +15224,13 @@ RA.load_context()
 -- via load() so this whole block parses cleanly on older linters too.
 --
 -- Two interfaces:
---   sha256_hash(msg)              -- single-shot. Used by download_poll
---                                    where each file is small and gets
---                                    hashed once after a successful write.
+--   sha256_hash(msg)              -- single-shot. Off the per-frame hot
+--                                    path: startup journal recovery (rare
+--                                    crash-resolution) and sidecars via
+--                                    RA.sha256_hex. The apply pipeline
+--                                    itself verifies staged files with the
+--                                    native hasher (chunked pure-Lua as
+--                                    fallback), never single-shot.
 --   _SHA.create(content)          -- chunked: returns state ready for step().
 --   _SHA.step(state, max_blocks)  -- process up to N 64-byte blocks; returns
 --                                    true when state is exhausted.
@@ -15304,9 +15409,57 @@ function Updater.url_encode_path(path)
   end)
 end
 
-function Updater.url_for(filename)
-  local base = tostring(CFG.UPDATE_BASE_URL or ""):gsub("/+$", "")
+-- Build a download URL. `base` is optional: manifest fetches always use
+-- the live CFG.UPDATE_BASE_URL (mutable main, cache-busted by
+-- fire_get_to), while payload downloads pass the base returned by
+-- payload_base_url below so releases fetch from their immutable tag.
+function Updater.url_for(filename, base)
+  base = tostring(base or CFG.UPDATE_BASE_URL or ""):gsub("/+$", "")
   return base .. "/" .. Updater.url_encode_path(filename)
+end
+
+-- Payload base derivation (tag-pinned downloads). The manifest is
+-- fetched cache-busted from mutable `main`, but GitHub's raw CDN caches
+-- payload URLs for minutes, so right after a release push a fresh
+-- manifest can reference payloads the CDN still serves stale: sha_verify
+-- failures, false repair popups, and a TOCTOU when a release lands
+-- between the manifest fetch and the downloads. Fetching payloads from
+-- the release TAG removes all of that: the tag ref is immutable and, by
+-- release-flow ordering (tag pushed before main moves), resolvable by
+-- the time any manifest references its version.
+--
+-- Gates (ALL must hold, anything else falls back to today's behavior):
+--   1. manifest version is exactly three digit components -- public
+--      releases only. Four-component test-branch versions and anything
+--      malformed stay on the configured base.
+--   2. no dev update override is active (the ExtState override rewrites
+--      the base and must keep full control).
+--   3. the live base equals the LITERAL stock GitHub main base below.
+--      This must be a hardcoded literal, not a startup snapshot: the
+--      UpdateSmoke harness patches the UPDATE_BASE_URL constant in the
+--      installed source (no ExtState involved), and a snapshot would
+--      capture the patched value and derive nonexistent tag URLs for
+--      its fake candidate versions. A custom or test-branch base fails
+--      this comparison the same way. If the shipped default base ever
+--      changes, this literal must change with it; until then the gate
+--      simply stays off, which is the safe direction.
+-- The host and path template are hardcoded; only the digit-validated
+-- version string is interpolated.
+--
+-- The repair purpose uses the same derivation deliberately: a repair
+-- for version X fetches tag vX, which is immutable and is exactly the
+-- tree the manifest describing X was generated from, so repairs can no
+-- longer be poisoned by a mid-repair release or CDN propagation lag.
+function Updater.payload_base_url(manifest_version)
+  local version = tostring(manifest_version or "")
+  if version:match("^%d+%.%d+%.%d+$")
+      and CFG.UPDATE_OVERRIDE_MODE == nil
+      and CFG.UPDATE_BASE_URL == "https://raw.githubusercontent.com/"
+        .. "michaelbriggsaudio/mbriggs-reaper/main/ReaAssist" then
+    return "https://raw.githubusercontent.com/michaelbriggsaudio/"
+      .. "mbriggs-reaper/refs/tags/v" .. version .. "/ReaAssist"
+  end
+  return CFG.UPDATE_BASE_URL
 end
 
 -- Stamp a structured failure reason onto the update state so the
@@ -15322,7 +15475,7 @@ function Updater._set_failure(step, err)
 end
 
 -- True when the updater is mid-flight on a fetch, verification, download,
--- or rename. Centralises the four-state predicate that gates re-entry on
+-- or apply. Centralises the busy-state predicate that gates re-entry on
 -- force_reinstall, manual_check, the chat-piggyback check_start, and the
 -- UI's ver_busy / busy disabled-button flags. A single helper means a
 -- future state addition only needs to land in one place rather than five
@@ -15330,8 +15483,9 @@ end
 function Updater.is_busy()
   return update.state == "checking"
       or update.state == "verifying"
-      or update.state == "downloading"
-      or update.state == "rename_retry"
+      or update.state == "downloading_batch"
+      or update.state == "verifying_download"
+      or update.state == "applying"
 end
 
 function Updater.font_download_busy()
@@ -15401,6 +15555,28 @@ function RA.fire_get_to(url, out_path, exit_path, timeout, send_state, log_tag, 
   end
   timeout = timeout or CFG.UPDATE_CURL_TIMEOUT
   log_tag = log_tag or "NET"
+  -- -f (both platforms below) makes curl exit nonzero (22) on HTTP >= 400
+  -- instead of writing the error body to out_path with exit 0. Without it
+  -- a 404/500 page lands in the output file and gets misclassified
+  -- downstream as a malformed manifest or a SHA-256 mismatch; with it the
+  -- poll() error branch reports the network/server failure it actually is.
+  --
+  -- opts.retry: payload downloads opt in to bounded retries for transient
+  -- errors (timeouts, connection resets, HTTP 408/429/5xx). curl applies
+  -- --max-time PER ATTEMPT, not across the whole run (verified: 3 attempts
+  -- at --max-time 3 took ~12 s wall), so unbounded retries could blow past
+  -- the Updater.poll watchdog (UPDATE_CURL_TIMEOUT + 10 = 25 s from
+  -- send_time). --retry-max-time 5 closes the retry window instead: a
+  -- retry may only START while total elapsed time is under 5 s, so the
+  -- worst case is a retry starting just before 5 s that runs one full
+  -- 15 s attempt (~20 s), leaving ~5 s of watchdog budget for process
+  -- launch overhead. A first attempt that itself times out (15 s) already
+  -- exceeds the window and never retries, so the pure-timeout case costs
+  -- the same as before. Manifest checks stay single-attempt to keep the
+  -- once-per-session check light. --retry-connrefused is deliberately not
+  -- used: macOS system curl older than 7.52 treats it as a hard usage
+  -- error, and connection-refused failures are instant anyway.
+  local retry_flags = opts.retry and " --retry 2 --retry-max-time 5" or ""
   if RA.IS_WINDOWS then
     -- Defensive guard limited to characters that cannot legitimately
     -- appear in a valid Windows path OR a valid URL: " < > | are all
@@ -15422,10 +15598,10 @@ function RA.fire_get_to(url, out_path, exit_path, timeout, send_state, log_tag, 
       end
     end
     local cmd_line = str_format(
-      'curl -s --connect-timeout 10 --max-time %d'
+      'curl -sf --connect-timeout 10 --max-time %d%s'
       .. ' "%s" -o """%s"""'
       .. ' & call echo %%%%errorlevel%%%% > """%s"""',
-      timeout, url, out_path, exit_path)
+      timeout, retry_flags, url, out_path, exit_path)
     local ps_cmd = str_format(
       'powershell -NoProfile -WindowStyle Hidden'
       .. ' -Command "Start-Process cmd -ArgumentList \'/c %s\''
@@ -15439,9 +15615,9 @@ function RA.fire_get_to(url, out_path, exit_path, timeout, send_state, log_tag, 
     -- already blocks shell-sensitive characters, but quoting cleanly here
     -- closes the gap as defense-in-depth.
     local cmd = str_format(
-      '(curl -s --connect-timeout 10 --max-time %d'
+      '(curl -sf --connect-timeout 10 --max-time %d%s'
       .. ' %s -o %s ; echo $? > %s) &',
-      timeout, Shell.sh_quote(url), Shell.sh_quote(out_path),
+      timeout, retry_flags, Shell.sh_quote(url), Shell.sh_quote(out_path),
       Shell.sh_quote(exit_path))
     os.execute(cmd)
   end
@@ -16393,7 +16569,7 @@ end
 -- block level, so REAPER stays responsive even if every file has to be
 -- hashed in-Lua. The main loop pumps either tick_native_sha or
 -- tick_sha_diff once per frame while update.state == "verifying", same
--- shape as "checking" / "downloading" / "rename_retry".
+-- shape as "checking" / "downloading_batch" / "applying".
 --
 -- download_start (the post-Update-Now path) consumes the precomputed diff and
 -- never hashes the whole manifest synchronously on the UI thread.
@@ -16423,7 +16599,7 @@ end
 -- function each frame (tick_native_sha when s.mode == "native";
 -- tick_sha_diff when s.mode == "lua" or "lua_fallback").
 function Updater.start_sha_diff(manifest, manual, forced, purpose)
-  local diff = { missing = {}, mismatched = {} }
+  local diff = { missing = {}, mismatched = {}, locked = {} }
   local to_hash = {}            -- list of { path, entry }
   local path_to_entry = {}      -- absolute path -> entry, for native parse
 
@@ -16435,11 +16611,16 @@ function Updater.start_sha_diff(manifest, manual, forced, purpose)
       local f, open_err = io.open(path, "rb")
       if not f then
         if reaper.file_exists and reaper.file_exists(path) then
-          -- Locked: skip from diff entirely (treat as intact). See
-          -- tick_sha_diff's note about Repair-Available false positives.
+          -- Locked: tracked separately instead of dropped. The repair
+          -- purpose still treats locked as intact (transient AV / editor
+          -- locks must not cause false Repair-Available popups); the
+          -- update purpose queues locked files for download so a
+          -- persistent lock becomes an explicit apply failure instead of
+          -- a silently stale file. See _sha_diff_complete.
+          diff.locked[#diff.locked+1] = entry.name
           Log.line("UPDATE", string.format(
             "start_sha_diff preflight: %s exists but open failed: %s "
-            .. "(likely AV / editor lock; skipping from diff)",
+            .. "(likely AV / editor lock; recording as locked)",
             path, tostring(open_err)))
         else
           diff.missing[#diff.missing+1] = entry.name
@@ -16723,12 +16904,13 @@ function Updater.tick_native_sha()
     end
   end
 
-  -- Triage each preflighted file. Hold mismatched / additional_missing
-  -- in local tables so a fallback decision can discard them cleanly --
-  -- the lua fallback redoes the comparison from scratch and we don't
-  -- want partial native results leaking into its diff.
+  -- Triage each preflighted file. Hold mismatched / additional_missing /
+  -- locked in local tables so a fallback decision can discard them
+  -- cleanly -- the lua fallback redoes the comparison from scratch and we
+  -- don't want partial native results leaking into its diff.
   local mismatched = {}
   local additional_missing = {}
+  local locked = {}
   local suspicious = false
   for _, item in ipairs(s.to_hash) do
     local local_hash = hash_by_path[item.path]
@@ -16739,7 +16921,8 @@ function Updater.tick_native_sha()
     else
       -- Native produced no hash for this preflight-readable file. Triage:
       --   * file gone now: native saw a delete race -> record as missing
-      --   * file present but locked now: AV / lock race -> log + skip
+      --   * file present but locked now: AV / lock race -> record as
+      --     locked (consumed per purpose by _sha_diff_complete)
       --   * file present and readable now: native should have hashed it
       --     but didn't -- output is suspicious, fall back to lua so the
       --     whole result set gets recomputed from a known-good path.
@@ -16749,9 +16932,10 @@ function Updater.tick_native_sha()
       else
         local f = io.open(item.path, "rb")
         if not f then
+          locked[#locked+1] = item.entry.name
           Log.line("UPDATE", string.format(
             "tick_native_sha: %s preflight readable but locked now "
-            .. "(skipping from diff)", item.path))
+            .. "(recording as locked)", item.path))
         else
           f:close()
           Log.line("UPDATE", string.format(
@@ -16777,15 +16961,19 @@ function Updater.tick_native_sha()
   for _, name in ipairs(additional_missing) do
     s.diff.missing[#s.diff.missing+1] = name
   end
+  for _, name in ipairs(locked) do
+    s.diff.locked[#s.diff.locked+1] = name
+  end
   Updater._sha_diff_complete()
 end
 
 -- Switch from native mode to pure-Lua fallback. Reset the lua walker
 -- pointer so tick_sha_diff re-walks s.to_hash from the start. Intentionally
--- does NOT clear s.diff -- preflight-derived missing entries remain valid
--- (they're filesystem facts, not native-tool output) and s.diff.mismatched
--- is empty at this point because tick_native_sha only mutates it after a
--- successful triage commit.
+-- does NOT clear s.diff -- preflight-derived missing/locked entries remain
+-- valid (they're filesystem facts, not native-tool output) and
+-- s.diff.mismatched plus any triage-time locked entries are empty at this
+-- point because tick_native_sha only mutates s.diff after a successful
+-- triage commit.
 function Updater._native_to_lua_fallback()
   local s = update._sha_diff
   if not s then return end
@@ -16803,8 +16991,8 @@ end
 -- State machine:
 --   * No current file (s.cur == nil): pop the next entry from to_hash.
 --     Race-handle the rare case where preflight saw the file readable
---     but it's locked now (log + skip, mirroring start_sha_diff's
---     locked-skip behavior) and the rare nil-read race (treat as locked).
+--     but it's locked now (record in s.diff.locked, mirroring
+--     start_sha_diff) and the rare nil-read race (treat as locked).
 --   * Current file in flight: compress one tick's worth of blocks. When
 --     the state is exhausted, finalize, compare to manifest hash, append
 --     to s.diff.mismatched on miss, advance lua_idx.
@@ -16819,9 +17007,10 @@ function Updater.tick_sha_diff()
       local item = to_hash[s.lua_idx]
       local f, open_err = io.open(item.path, "rb")
       if not f then
+        s.diff.locked[#s.diff.locked+1] = item.entry.name
         Log.line("UPDATE", string.format(
           "tick_sha_diff: %s preflight readable but open failed: %s "
-          .. "(likely AV / editor lock; skipping from diff)",
+          .. "(likely AV / editor lock; recording as locked)",
           item.path, tostring(open_err)))
         s.lua_idx = s.lua_idx + 1
       else
@@ -16831,9 +17020,10 @@ function Updater.tick_sha_diff()
           s.cur = { entry = item.entry, state = _SHA.create(content) }
           break
         else
+          s.diff.locked[#s.diff.locked+1] = item.entry.name
           Log.line("UPDATE", string.format(
             "tick_sha_diff: %s opened but read returned nil "
-            .. "(treating as locked; skipping from diff)", item.path))
+            .. "(treating as locked)", item.path))
           s.lua_idx = s.lua_idx + 1
         end
       end
@@ -16890,11 +17080,22 @@ function Updater._sha_diff_complete()
     update.manifest          = manifest
     update.update_missing    = diff.missing
     update.update_mismatched = diff.mismatched
+    -- Locked files ride in their own list for the update purpose:
+    -- download_start folds them into the queue. Re-downloading a file
+    -- that might have matched anyway is harmless and cheap; the apply
+    -- stage's rename retry absorbs a transient lock, and a persistent
+    -- lock becomes an explicit "rename" failure instead of a version
+    -- bump that silently keeps old code in the locked file. Kept apart
+    -- from update_mismatched so logs and diagnostics stay truthful
+    -- (mismatched means "hashed and differed"; locked means "unreadable,
+    -- queued defensively").
+    update.update_locked     = diff.locked
     Log.line("UPDATE", string.format(
       "sha_diff complete in %.2fs: remote v%s newer than installed v%s; "
-      .. "%d file(s) differ (%d missing, %d mismatched).",
+      .. "%d file(s) differ (%d missing, %d mismatched, %d locked).",
       elapsed, tostring(manifest.version), tostring(CFG.VERSION),
-      #diff.missing + #diff.mismatched, #diff.missing, #diff.mismatched))
+      #diff.missing + #diff.mismatched + #diff.locked,
+      #diff.missing, #diff.mismatched, #diff.locked))
     if manual then S.float_toast = nil end
     if not forced and not manual then
       local snooze = Store.update_snooze()
@@ -16905,6 +17106,12 @@ function Updater._sha_diff_complete()
     return
   end
 
+  -- Repair purpose: locked files stay OUT of the repair count and the
+  -- repair queue. Transient AV / editor locks must not cause false
+  -- Repair-Available popups, and a repair that cannot read a file to
+  -- prove it broken has no business overwriting it. A genuinely
+  -- corrupted-and-locked file heals on a later check once the lock
+  -- clears (or through the update purpose above on the next release).
   local repair_count = #diff.missing + #diff.mismatched
   if repair_count > 0 then
     update.state          = "repair_available"
@@ -16915,9 +17122,9 @@ function Updater._sha_diff_complete()
     update.repair_mismatched = diff.mismatched
     Log.line("UPDATE", string.format(
       "sha_diff complete in %.2fs: version matches (%s) but %d files "
-      .. "need repair (%d missing, %d mismatched).",
+      .. "need repair (%d missing, %d mismatched; %d locked skipped).",
       elapsed, manifest.version, repair_count,
-      #diff.missing, #diff.mismatched))
+      #diff.missing, #diff.mismatched, #diff.locked))
     -- Match the "available" branch: clear the sticky "Checking..."
     -- toast so the repair popup is the sole visual feedback.
     if manual then S.float_toast = nil end
@@ -16925,7 +17132,8 @@ function Updater._sha_diff_complete()
     update.state = "idle"  -- already up to date and all files intact
     Log.line("UPDATE", string.format(
       "sha_diff complete in %.2fs: version matches (%s) and all files "
-      .. "intact.", elapsed, manifest.version))
+      .. "intact (%d locked skipped).", elapsed, manifest.version,
+      #diff.locked))
     -- Stamp the last-successful-check time so the footer's version-
     -- number tooltip can show "Up to date (checked X ago)" instead
     -- of the generic "Click to check for updates" copy. Applies to
@@ -17028,6 +17236,7 @@ function Updater.check_poll()
   -- and "1.0.0.0" compare equal even though string == would say false).
   update.update_missing = nil
   update.update_mismatched = nil
+  update.update_locked = nil
   local remote_newer = Updater.is_newer(manifest.version, CFG.VERSION)
   local remote_older = Updater.is_newer(CFG.VERSION, manifest.version)
   if remote_newer then
@@ -17146,7 +17355,7 @@ end
 
 -- Resolve a manifest filename ("Resources/X.md") to an absolute local path
 -- using the host OS separator. Centralized so the SHA-diff verifier and
--- download_poll (the write target) agree on the layout.
+-- the apply pipeline (the write target) agree on the layout.
 function Updater.local_path_for(filename)
   local rel = filename
   if RA.SEP ~= "/" then rel = rel:gsub("/", RA.SEP) end
@@ -17225,6 +17434,16 @@ function Updater.download_start()
     end
     return
   end
+  -- Exclusive apply lock, taken BEFORE any staging mutation: a second
+  -- instance sharing this install fails here instead of clobbering the
+  -- first one's staging files or journal.
+  if not Updater.acquire_apply_lock() then
+    Updater._set_failure("apply_lock",
+      "Another ReaAssist instance is applying an update on this "
+      .. "install. Let it finish, then retry.")
+    update.state = "failed"
+    return
+  end
   -- Remember which trigger started the session so the "done" view can
   -- say "Updated to vX" vs "Restored N files" accurately.
   update.action_was_repair = (update.state == "repair_available")
@@ -17253,7 +17472,21 @@ function Updater.download_start()
     update_fileset = {}
     for _, n in ipairs(update.update_missing)    do update_fileset[n] = true end
     for _, n in ipairs(update.update_mismatched) do update_fileset[n] = true end
+    -- Locked files join the update queue: their content could not be
+    -- verified at check time, so treating them as intact would let a
+    -- version bump ship with silently stale code in whichever file the
+    -- AV scanner happened to be holding. The apply stage re-downloads
+    -- and swaps them like any changed file; its rename retry absorbs a
+    -- transient lock and a persistent lock fails loudly.
+    for _, n in ipairs(update.update_locked or {}) do
+      update_fileset[n] = true
+    end
   end
+  -- Payload URLs use the tag-pinned base when the release gates allow it
+  -- (see payload_base_url). This applies to update, repair, and
+  -- bootstrap-forced queues alike; the manifest fetch that produced
+  -- update.manifest stays on the configured main base regardless.
+  local payload_base = Updater.payload_base_url(update.manifest.version)
   for _, entry in ipairs(update.manifest.files) do
     local filename, expected_hash
     if type(entry) == "table" and entry.name and entry.sha256 then
@@ -17267,12 +17500,14 @@ function Updater.download_start()
       -- "(unknown)" the empty fields would produce.
       Updater._set_failure("manifest_file",
         "Manifest entry missing required SHA-256 hash")
+      Updater.release_apply_lock()
       update.state = "failed"
       return
     end
     if not Updater.is_safe_filename(filename) then
       Updater._set_failure("manifest_file",
         "Unsafe filename in manifest: " .. tostring(filename))
+      Updater.release_apply_lock()
       update.state = "failed"
       return
     end
@@ -17282,7 +17517,7 @@ function Updater.download_start()
       if repair_fileset[filename] then
         update.download_queue[#update.download_queue+1] = {
           filename = filename,
-          url      = Updater.url_for(filename),
+          url      = Updater.url_for(filename, payload_base),
           sha256   = expected_hash,
         }
       else
@@ -17296,7 +17531,7 @@ function Updater.download_start()
       if update_fileset[filename] then
         update.download_queue[#update.download_queue+1] = {
           filename = filename,
-          url      = Updater.url_for(filename),
+          url      = Updater.url_for(filename, payload_base),
           sha256   = expected_hash,
         }
       else
@@ -17309,7 +17544,7 @@ function Updater.download_start()
       -- the UI thread; queue the file and rely on post-download SHA verify.
       update.download_queue[#update.download_queue+1] = {
         filename = filename,
-        url      = Updater.url_for(filename),
+        url      = Updater.url_for(filename, payload_base),
         sha256   = expected_hash,
       }
     end
@@ -17324,6 +17559,7 @@ function Updater.download_start()
     Log.line("UPDATE", string.format(
       "download_start: all %d manifest files already match local SHA; "
       .. "nothing to download.", update.skipped_count))
+    Updater.release_apply_lock()
     update.show_dialog = false
     update.state       = "idle"
     if UI and UI.show_float_toast then
@@ -17335,16 +17571,38 @@ function Updater.download_start()
   Log.line("UPDATE", string.format(
     "download_start: %d files to download, %d already up to date.",
     #update.download_queue, update.skipped_count))
+  -- Stage A of the transactional apply: every file downloads to a staged
+  -- `dest .. ".new"` sibling first; no live file is touched until the
+  -- whole staging set has been verified (stage B) and journaled (stage
+  -- C). Pre-create parent directories (fresh installs need the
+  -- Resources/ tree before curl can write into it) and clear any stale
+  -- staging leftovers from an interrupted prior batch.
+  for _, entry in ipairs(update.download_queue) do
+    local dest = Updater.local_path_for(entry.filename)
+    entry.staged = dest .. ".new"
+    local parent = dest:match("^(.*)[\\/][^\\/]+$")
+    if parent and parent ~= "" then
+      reaper.RecursiveCreateDirectory(parent, 0)
+    end
+    os.remove(entry.staged)
+  end
   update.download_idx = 1
-  update.state = "downloading"
-  local entry = update.download_queue[1]
-  if not Updater.fire_get(entry.url, tmp.update_out, tmp.update_exit,
-      { cache_bust = false }) then
-    Updater._set_failure("download_start", string.format(
-      "Could not start download for %s.", tostring(entry.filename)))
+  update._staged_done = 0
+  update._batch = {
+    started_at  = time_precise(),
+    refire_used = false,
+    watchdog    = CFG.UPDATE_BATCH_WATCHDOG_BASE
+                + CFG.UPDATE_BATCH_WATCHDOG_PER_FILE * #update.download_queue,
+  }
+  if not Updater.fire_batch_download(update.download_queue) then
+    update._batch = nil
+    Updater._set_failure("download_start",
+      "Could not start the update download.")
+    Updater.release_apply_lock()
     update.state = "failed"
     return
   end
+  update.state = "downloading_batch"
 end
 
 -- Rollback all successfully written files. For files that existed before
@@ -17353,8 +17611,74 @@ end
 -- to restore, and renaming a nonexistent .bak over dest silently deletes
 -- it, leaving the user with neither a working file nor a recoverable
 -- backup if the next update file fails.
+--
+-- When a journal is active (rollback mid-apply), the journal's phase is
+-- flipped to "rolling_back" and written BEFORE the first disk mutation:
+-- startup recovery completes a "rolling_back" journal in the rollback
+-- direction unconditionally, so a crash at ANY point during this
+-- function can never be misread as an interrupted apply and rolled
+-- forward over half-restored files. Each entry likewise flips to
+-- rolled_back before its dest is touched (the phase marker already
+-- forces the direction; per-entry status is informational). The journal
+-- is deleted at the end once the in-memory state has fully resolved.
+--
+-- Returns true when the rollback ran (marked and mutated, or nothing to
+-- do) and false when it bailed on the marker write. Callers MUST skip
+-- their staged-file cleanup on false: the untouched staging is part of
+-- the recovery state the bail preserves (deleting it would let the next
+-- launch's dest-hash reclassification misread an unchanged-content
+-- pending file as a landed fresh add and delete it).
 function Updater.rollback()
-  if not update.applied_files then return end
+  if not update.applied_files then return true end
+  local journal = update._journal
+  if journal then
+    -- Ownership fence, same rule as apply_tick's per-swap fence: if
+    -- the on-disk journal is no longer ours, another instance took
+    -- over after our liveness lease expired, and its state is
+    -- authoritative. Mutate nothing and bail exactly like the
+    -- marker-failure path (callers skip their staged cleanup on
+    -- false). The fence-then-write pair here (this read, then the
+    -- rolling_back marker write) is the same revalidation boundary as
+    -- the apply side's.
+    local current = Updater.journal_read()
+    if not current or current.instance ~= RA.instance_file_suffix() then
+      Log.line("UPDATE",
+        "rollback: another ReaAssist instance took over this update; "
+        .. "leaving all files untouched.")
+      update.last_error = (update.last_error or "The update failed.")
+        .. "\n\nNote: another ReaAssist instance took over this "
+        .. "update; no further files were changed by this one."
+      update._journal = nil
+      update.applied_files = {}
+      return false
+    end
+    journal.phase = "rolling_back"
+    if not Updater.journal_write(journal) then
+      -- No durable direction marker means NO disk mutation at all:
+      -- rolling back without it lets a later launch misread the
+      -- half-restored state (an unchanged-content file with a consumed
+      -- .bak reads as a landed-before-journal fresh add and would be
+      -- deleted). Leave the applied files, their .baks, the staging,
+      -- and the phase-"applying" journal exactly as they are; startup
+      -- recovery owns the rollback from here, and its own marker-write
+      -- failure defers the launch rather than mutating. A Retry click
+      -- is also safe: force_reinstall -> download_start -> apply_start
+      -- would overwrite this journal, but apply_start refuses to touch
+      -- any live file when ITS journal_write fails, which it will in
+      -- the same disk-full situation.
+      Log.line("UPDATE",
+        "rollback: could not write the rolling_back marker; leaving all "
+        .. "files and the journal untouched (startup recovery completes "
+        .. "the rollback on the next launch).")
+      update.last_error = (update.last_error or "The update failed.")
+        .. "\n\nNote: the rollback could not be recorded safely, so the "
+        .. "changed files were left in place. ReaAssist will finish "
+        .. "recovering them automatically the next time it starts."
+      update._journal = nil
+      update.applied_files = {}
+      return false
+    end
+  end
   -- Track restore failures so we can surface them via update.last_error.
   -- Rollback runs because some EARLIER step already failed, so last_step
   -- and last_error are typically already set at this point. We only
@@ -17366,7 +17690,20 @@ function Updater.rollback()
   for i = #update.applied_files, 1, -1 do
     local applied = update.applied_files[i]
     local dest = applied.path
-    os.remove(dest)
+    if journal then
+      for _, jf in ipairs(journal.files or {}) do
+        if jf.status == "applied"
+            and Updater.local_path_for(jf.name) == dest then
+          jf.status = "rolled_back"
+          break
+        end
+      end
+      -- Follows the entry fence above within the same call; a takeover
+      -- landing between the fence and this write is bounded by one
+      -- restore, tolerated by the winner's completion walk.
+      Updater.journal_write(journal)
+    end
+    local removed_ok = os.remove(dest)
     if applied.bak_existed then
       local bak_path = dest .. ".bak"
       local ok, err = os.rename(bak_path, dest)
@@ -17377,7 +17714,29 @@ function Updater.rollback()
           dest, tostring(err)))
         restore_failures[#restore_failures + 1] = dest
       end
+    elseif not removed_ok
+        and reaper.file_exists and reaper.file_exists(dest) then
+      -- Fresh-install add whose delete failed on a still-present file:
+      -- a lock. Counted so the journal is retained for the next-launch
+      -- retry below.
+      Log.line("UPDATE", string.format(
+        "rollback: could not remove fresh-install add %s (locked)",
+        dest))
+      restore_failures[#restore_failures + 1] = dest
     end
+  end
+  if journal then
+    if #restore_failures == 0 then
+      Updater.journal_delete()
+    else
+      -- Keep the journal (phase rolling_back) so the next launch's
+      -- idempotent completion retries the failed restores once the
+      -- transient lock clears.
+      Log.line("UPDATE", string.format(
+        "rollback: %d restore failure(s); journal kept so startup "
+        .. "recovery retries on the next launch.", #restore_failures))
+    end
+    update._journal = nil
   end
   update.applied_files = {}
   if #restore_failures > 0 then
@@ -17395,157 +17754,426 @@ function Updater.rollback()
       table.concat(restore_failures, ", "))
     update.last_error = (update.last_error or "(no prior error)") .. note
   end
+  return true
 end
 
--- Poll the current file download. Advances to next file or applies update.
-function Updater.download_poll()
-  local entry = update.download_queue[update.download_idx]
-  local fname = entry and entry.filename or "?"
-  local result = Updater.poll()
-  if result == "waiting" then return end
-  if result == "error" then
-    Updater._set_failure("download",
-      string.format("curl failed or timed out while fetching %s", fname))
-    Updater.rollback()
-    update.state = "failed"
-    return
+-- Quote a value for a curl --config file. Values are wrapped in double
+-- quotes (curl's config parser recognizes \\ and \" escapes inside
+-- them). Windows path separators are converted to forward slashes first
+-- (curl and the OS both accept them), so no backslash escapes are ever
+-- needed in practice; the gsub below is defense-in-depth.
+function Updater._curl_cfg_quote(value)
+  local v = tostring(value or ""):gsub("\\", "/"):gsub('"', '\\"')
+  return '"' .. v .. '"'
+end
+
+-- Launch ONE detached curl process that downloads every queued entry to
+-- its staged path, driven by a --config file (sidesteps Windows command-
+-- length limits and keeps the single-exit-file polling contract: cmd
+-- writes one exit code after the whole run). Global flags mirror
+-- fire_get_to's payload flags: -f turns HTTP >= 400 into a nonzero exit
+-- instead of an error body, and the bounded retry window absorbs
+-- transient per-transfer failures. --fail-early is deliberately absent
+-- so one failed transfer does not abandon the rest; stage B's hash pass
+-- is the per-file authority either way. Returns true if the launch was
+-- attempted, false on prerequisite failure.
+function Updater.fire_batch_download(entries)
+  os.remove(tmp.update_batch_cfg)
+  os.remove(tmp.update_batch_exit)
+  local cf, cf_err = io.open(tmp.update_batch_cfg, "wb")
+  if not cf then
+    Log.line("UPDATE", "fire_batch_download: config open failed: "
+                       .. tostring(cf_err))
+    return false
   end
-  -- Read the downloaded file and save it.
-  local f, f_err = io.open(tmp.update_out, "rb")
-  if not f then
-    Updater._set_failure("download_read",
-      string.format("Could not open downloaded %s: %s",
-                    fname, tostring(f_err)))
-    Updater.rollback()
-    update.state = "failed"
-    return
+  cf:write("silent\n")
+  cf:write("fail\n")
+  cf:write("connect-timeout = 10\n")
+  cf:write(string.format("max-time = %d\n", CFG.UPDATE_CURL_TIMEOUT))
+  cf:write("retry = 2\n")
+  cf:write("retry-max-time = 5\n")
+  for _, entry in ipairs(entries) do
+    cf:write("url = " .. Updater._curl_cfg_quote(entry.url) .. "\n")
+    cf:write("output = " .. Updater._curl_cfg_quote(entry.staged) .. "\n")
   end
-  local content = f:read("*a"); f:close()
-  if not content or #content == 0 then
-    Updater._set_failure("download_read",
-      string.format("Downloaded %s is empty.", fname))
-    Updater.rollback()
-    update.state = "failed"
-    return
-  end
-  -- Integrity checks.
-  -- SHA-256 hash verification: if the manifest provided a hash, verify it.
-  -- This is the primary integrity gate. A mismatch means the download was
-  -- corrupted or tampered with; reject the entire update.
-  if entry.sha256 then
-    local actual_hash = sha256_hash(content)
-    if actual_hash ~= entry.sha256:lower() then
-      Updater._set_failure("sha_verify", string.format(
-        "SHA-256 mismatch for %s: expected %s, got %s",
-        fname, entry.sha256:lower(), actual_hash))
-      Updater.rollback()
-      update.state = "failed"
-      return
+  cf:close()
+
+  if RA.IS_WINDOWS then
+    -- Same cmd-unsafe character guard as fire_get / fire_native_sha.
+    -- Entry URLs and staged paths already passed is_safe_filename and
+    -- live inside the install zone; the tmp paths are ours. Belt and
+    -- suspenders only.
+    for _, c in ipairs({'"', '<', '>', '|'}) do
+      if tmp.update_batch_cfg:find(c, 1, true)
+          or tmp.update_batch_exit:find(c, 1, true) then
+        Log.line("UPDATE", string.format(
+          "fire_batch_download: refusing to launch with cmd-unsafe "
+          .. "character '%s' in tmp paths", c))
+        return false
+      end
     end
-  end
-  -- Secondary sanity check: every shipped .lua file contains a
-  -- CFG.VERSION literal. Sidecars that do not otherwise need the runtime
-  -- version include a marker comment for exactly this reason. A
-  -- download that passes SHA but doesn't contain the marker has either
-  -- been intercepted (proxy injecting an HTML error page) or is some
-  -- other file entirely. Distinct step name from sha_verify so the
-  -- Update-Failed dialog can show a content-specific message instead
-  -- of the CDN-propagation copy that fits sha_verify cases.
-  if entry.filename:match("%.lua$") then
-    if not content:find("CFG.VERSION", 1, true) then
-      Updater._set_failure("content_verify", string.format(
-        "Downloaded %s is missing the CFG.VERSION marker "
-        .. "(rejected as likely-corrupt or non-ReaAssist content).",
-        fname))
-      Updater.rollback()
-      update.state = "failed"
-      return
-    end
-  end
-  -- Write to a .tmp file first, then rename. Manifest entries may include
-  -- forward-slash subpaths (e.g. "Resources/UI.lua"); the path
-  -- helper normalizes them to the platform separator. Ensure the parent
-  -- directory exists so fresh installs can create the Resources/ tree on
-  -- first update.
-  local dest = Updater.local_path_for(entry.filename)
-  local parent = dest:match("^(.*)[\\/][^\\/]+$")
-  if parent and parent ~= "" then
-    reaper.RecursiveCreateDirectory(parent, 0)
-  end
-  local tmp_path = dest .. ".tmp"
-  local bak_path = dest .. ".bak"
-  -- Write temp file. pcall-wrap the write/close so short writes, disk-
-  -- full, and permission errors propagate as failure instead of silently
-  -- shipping a truncated file.
-  local wf, open_err = io.open(tmp_path, "wb")
-  if not wf then
-    Updater._set_failure("write_open", string.format(
-      "Could not open temp file %s for write: %s",
-      tmp_path, tostring(open_err)))
-    Updater.rollback()
-    update.state = "failed"
-    return
-  end
-  local w_ok, w_err = pcall(function()
-    local ok, perr = wf:write(content)
-    if not ok then error(perr or "write returned nil", 0) end
-  end)
-  local c_ok, c_err = pcall(function()
-    local ok, perr = wf:close()
-    if not ok then error(perr or "close returned nil", 0) end
-  end)
-  if not w_ok or not c_ok then
-    Updater._set_failure("write", string.format(
-      "Write to %s failed: %s",
-      tmp_path, tostring(w_err or c_err)))
-    os.remove(tmp_path)
-    Updater.rollback()
-    update.state = "failed"
-    return
-  end
-  -- Back up current file. We must distinguish "dest does not exist
-  -- (fresh-install add)" from "dest exists but rename failed (lock,
-  -- permissions, AV scan, cloud sync, editor handle)". `os.rename`
-  -- returns nil for both, so probing existence first is the only way
-  -- to disambiguate. Misclassifying an existing-but-locked file as
-  -- fresh-install is dangerous: rollback's fresh-install branch deletes
-  -- dest, which would destroy the only intact copy when no .bak was
-  -- ever created. rename_bak_existed carries the truth into
-  -- rename_retry_poll and rollback.
-  os.remove(bak_path)
-  local dest_existed = reaper.file_exists and reaper.file_exists(dest)
-  if dest_existed then
-    local ok_bak, bak_err = os.rename(dest, bak_path)
-    if not ok_bak then
-      os.remove(tmp_path)
-      Updater._set_failure("backup", string.format(
-        "Could not back up existing file %s: %s",
-        dest, tostring(bak_err)))
-      Updater.rollback()
-      update.state = "failed"
-      return
-    end
-    update.rename_bak_existed = true
+    -- Detached via the same Start-Process cmd pattern as fire_get, so
+    -- the main thread only pays launcher startup, never a visible cmd
+    -- window, and batch_download_poll reads the exit file each frame.
+    local cmd_line = str_format(
+      'curl --config """%s"""'
+      .. ' & call echo %%%%errorlevel%%%% > """%s"""',
+      tmp.update_batch_cfg, tmp.update_batch_exit)
+    local ps_cmd = str_format(
+      'powershell -NoProfile -WindowStyle Hidden'
+      .. ' -Command "Start-Process cmd -ArgumentList \'/c %s\''
+      .. ' -WindowStyle Hidden"',
+      Shell.ps_escape(cmd_line))
+    reaper.ExecProcess(ps_cmd, 5000)
   else
-    update.rename_bak_existed = false
+    local cmd = str_format(
+      '(curl --config %s ; echo $? > %s) &',
+      Shell.sh_quote(tmp.update_batch_cfg),
+      Shell.sh_quote(tmp.update_batch_exit))
+    os.execute(cmd)
   end
-  -- Move temp to final. On Windows, Defender / AV may hold a short-lived lock
-  -- on the .tmp file immediately after close, causing rename to fail during
-  -- the scan window (~20-50ms). Instead of busy-waiting, we attempt the rename
-  -- once and defer to "rename_retry" state if it fails. The main loop will
-  -- call Updater.rename_retry_poll() on subsequent frames (~30ms apart), which
-  -- is a natural non-blocking delay that avoids stalling the UI thread.
-  local ok_mv = os.rename(tmp_path, dest)
-  if not ok_mv then
-    -- Stash rename context and defer. The next frame will retry.
-    update.rename_failures = 1
-    update.rename_tmp      = tmp_path
-    update.rename_dest     = dest
-    update.rename_bak      = bak_path
-    update.state           = "rename_retry"
+  return true
+end
+
+-- Remove every staged .new file for the current queue. Called on any
+-- failure before stage C so an aborted transaction leaves no staging
+-- litter; live files are never touched by stages A/B.
+function Updater._delete_all_staged()
+  for _, entry in ipairs(update.download_queue or {}) do
+    if entry.staged then os.remove(entry.staged) end
+  end
+end
+
+-- Shared hard-failure path for stages A/B: staged files are deleted,
+-- the failure is stamped for the Update Failed dialog, the apply lock
+-- is released, and no live file has been modified (rollback is
+-- unnecessary by construction).
+function Updater._download_verify_fail(step, err)
+  Updater._delete_all_staged()
+  update._batch     = nil
+  update._dl_verify = nil
+  Updater._set_failure(step, err)
+  Updater.release_apply_lock()
+  update.state = "failed"
+end
+
+-- Poll the in-flight batch download (stage A). Progress comes from
+-- counting staged files that exist on disk; completion from the single
+-- exit file. curl's exit code is logged but not authoritative: without
+-- --fail-early a nonzero exit only means at least one transfer failed,
+-- and stage B decides per file.
+function Updater.batch_download_poll()
+  local b = update._batch
+  if not b then
+    Updater._download_verify_fail("download_batch",
+      "batch_download_poll entered with no batch state.")
     return
   end
-  Updater.advance_after_rename(dest)
+  local staged_done = 0
+  for _, entry in ipairs(update.download_queue) do
+    if reaper.file_exists and reaper.file_exists(entry.staged) then
+      staged_done = staged_done + 1
+    end
+  end
+  update._staged_done = staged_done
+  update.download_idx = staged_done + 1
+
+  local ef = io.open(tmp.update_batch_exit, "r")
+  if ef then
+    local exit_str = ef:read("*a"); ef:close()
+    local exit_code = tonumber(exit_str:match("(%-?%d+)"))
+    if exit_code then
+      Log.line("UPDATE", string.format(
+        "batch download finished (curl exit %d, %d/%d staged files "
+        .. "present); verifying staged files.",
+        exit_code, staged_done, #update.download_queue))
+      Updater.download_verify_start()
+      return
+    end
+  end
+
+  if (time_precise() - b.started_at) > b.watchdog then
+    Updater._download_verify_fail("download_batch", string.format(
+      "The update download did not finish within %d seconds "
+      .. "(%d of %d files arrived). Check your connection and retry.",
+      math.floor(b.watchdog), staged_done, #update.download_queue))
+  end
+end
+
+-- Begin stage B: hash every staged file BEFORE any live file is
+-- touched. Prefers the native hasher subprocess (same fire/poll
+-- machinery the repair scan uses) with the budgeted chunked pure-Lua
+-- walker as fallback. Entries whose staged file is missing go straight
+-- onto the failed list for the single re-fire round.
+function Updater.download_verify_start()
+  update.state = "verifying_download"
+  local to_hash = {}
+  local failed  = {}
+  for _, entry in ipairs(update.download_queue) do
+    if reaper.file_exists and reaper.file_exists(entry.staged) then
+      to_hash[#to_hash+1] = { path = entry.staged, entry = entry }
+    else
+      failed[#failed+1] = entry
+    end
+  end
+  update._dl_verify = {
+    to_hash    = to_hash,
+    failed     = failed,        -- entries needing re-download
+    mismatch   = false,         -- true when any failure was a hash mismatch
+    ok         = {},            -- verified entries (feed the marker check)
+    lua_idx    = 1,
+    cur        = nil,
+    mode       = "lua",
+    -- The user is actively watching the update dialog here, so the
+    -- pure-Lua fallback gets the manual (higher) per-frame budget.
+    budget     = CFG.UPDATE_SHA_TIME_BUDGET_MANUAL,
+    started_at = time_precise(),
+  }
+  if #to_hash == 0 then
+    Updater._download_verify_hashes_done()
+    return
+  end
+  if Updater.fire_native_sha(to_hash) then
+    update._dl_verify.mode             = "native"
+    update._dl_verify.native_send_time = time_precise()
+  end
+end
+
+-- All staged hashes are in. Route: re-fire the failed subset once,
+-- hard-fail after the second round, or advance to the marker check and
+-- stage C when everything verified.
+function Updater._download_verify_hashes_done()
+  local v = update._dl_verify
+  if not v then return end
+  if #v.failed > 0 then
+    local names = {}
+    for i = 1, math.min(#v.failed, 6) do
+      names[#names+1] = tostring(v.failed[i].filename)
+    end
+    local name_list = table.concat(names, ", ")
+      .. (#v.failed > 6 and ", ..." or "")
+    if not update._batch.refire_used then
+      -- One bounded second chance: transient CDN staleness, a dropped
+      -- connection mid-batch, or an AV lock on a staged file all
+      -- present as missing/mismatched staged files. Delete the bad
+      -- staging outputs and re-fire ONE more batch for just those
+      -- entries; everything already verified stays staged.
+      Log.line("UPDATE", string.format(
+        "staged verify: %d file(s) failed (%s); re-firing one batch "
+        .. "for the failed subset.", #v.failed, name_list))
+      local refire = v.failed
+      for _, entry in ipairs(refire) do os.remove(entry.staged) end
+      update._batch.refire_used = true
+      update._batch.started_at  = time_precise()
+      update._batch.watchdog    = CFG.UPDATE_BATCH_WATCHDOG_BASE
+        + CFG.UPDATE_BATCH_WATCHDOG_PER_FILE * #refire
+      update._dl_verify = nil
+      if not Updater.fire_batch_download(refire) then
+        Updater._download_verify_fail("download_batch",
+          "Could not restart the update download.")
+        return
+      end
+      update.state = "downloading_batch"
+      return
+    end
+    -- Second round already used: hard fail. Step name keeps the
+    -- existing dialog copy honest: sha_verify routes to the
+    -- CDN-propagation message, download to the generic network copy.
+    local step = v.mismatch and "sha_verify" or "download"
+    Updater._download_verify_fail(step, string.format(
+      "%d file(s) failed download verification after a retry: %s",
+      #v.failed, name_list))
+    return
+  end
+  -- Every staged file hashed clean; run the CFG.VERSION marker check
+  -- over staged .lua files (one per frame, they can be MB-sized reads)
+  -- before stage C touches anything live.
+  v.phase      = "markers"
+  v.marker_idx = 1
+  v.markers    = {}
+  for _, entry in ipairs(v.ok) do
+    if tostring(entry.filename):match("%.lua$") then
+      v.markers[#v.markers+1] = entry
+    end
+  end
+end
+
+-- One frame of the staged .lua marker check. Secondary sanity check
+-- carried over from the per-file pipeline: every shipped .lua file
+-- contains a CFG.VERSION literal, so a staged file that passes SHA but
+-- lacks the marker means the manifest itself references corrupt or
+-- non-ReaAssist content; re-downloading cannot fix that, so it is a
+-- hard failure (distinct content_verify step for the dialog copy).
+function Updater._download_verify_marker_tick()
+  local v = update._dl_verify
+  if not v then return end
+  local entry = v.markers[v.marker_idx]
+  if not entry then
+    update._dl_verify = nil
+    Updater.apply_start()
+    return
+  end
+  local f, f_err = io.open(entry.staged, "rb")
+  local content = f and f:read("*a") or nil
+  if f then f:close() end
+  if not content then
+    Updater._download_verify_fail("download", string.format(
+      "Could not re-open staged %s for the content check: %s",
+      tostring(entry.filename), tostring(f_err)))
+    return
+  end
+  if not content:find("CFG.VERSION", 1, true) then
+    Updater._download_verify_fail("content_verify", string.format(
+      "Downloaded %s is missing the CFG.VERSION marker "
+      .. "(rejected as likely-corrupt or non-ReaAssist content).",
+      tostring(entry.filename)))
+    return
+  end
+  v.marker_idx = v.marker_idx + 1
+end
+
+-- One tick of stage B. Native mode polls the hasher subprocess's exit
+-- file (with the same watchdog + fallback triage the repair scan
+-- uses); lua mode compresses budgeted chunks per frame. The marker
+-- phase runs after all hashes land.
+function Updater.download_verify_tick()
+  local v = update._dl_verify
+  if not v then return end
+  if v.phase == "markers" then
+    Updater._download_verify_marker_tick()
+    return
+  end
+
+  if v.mode == "native" then
+    if v.native_send_time
+        and (time_precise() - v.native_send_time)
+            > (CFG.UPDATE_NATIVE_SHA_TIMEOUT + 5) then
+      Log.line("UPDATE", "download_verify: native watchdog timeout, "
+                         .. "falling back to pure-Lua verify")
+      v.mode    = "lua_fallback"
+      v.lua_idx = 1
+      v.cur     = nil
+      return
+    end
+    local ef = io.open(tmp.update_sha_exit, "r")
+    if not ef then return end
+    local exit_str = ef:read("*a"); ef:close()
+    local exit_code = tonumber(exit_str:match("(%d+)"))
+    if not exit_code then return end
+    if exit_code ~= 0 then
+      Log.line("UPDATE", string.format(
+        "download_verify: native hasher exited %d, "
+        .. "falling back to pure-Lua verify", exit_code))
+      v.mode    = "lua_fallback"
+      v.lua_idx = 1
+      v.cur     = nil
+      return
+    end
+    local of, of_err = io.open(tmp.update_sha_out, "rb")
+    if not of then
+      Log.line("UPDATE", "download_verify: output read failed: "
+                         .. tostring(of_err) .. ", falling back")
+      v.mode    = "lua_fallback"
+      v.lua_idx = 1
+      v.cur     = nil
+      return
+    end
+    local raw = of:read("*a"); of:close()
+    if raw:sub(1, 3) == "\239\187\191" then raw = raw:sub(4) end
+    local hash_by_path = {}
+    for line in raw:gmatch("[^\r\n]+") do
+      local hex, rest = line:match("^([0-9a-fA-F]+)[ \t]+(.+)$")
+      if hex and #hex == 64 and rest then
+        hash_by_path[rest] = hex:lower()
+      end
+    end
+    -- Triage against local tables first so a fallback decision cannot
+    -- leak partial results (same pattern as tick_native_sha).
+    local ok_entries, failed_entries = {}, {}
+    local mismatch, suspicious = false, false
+    for _, item in ipairs(v.to_hash) do
+      local local_hash = hash_by_path[item.path]
+      if local_hash then
+        if local_hash == item.entry.sha256:lower() then
+          ok_entries[#ok_entries+1] = item.entry
+        else
+          mismatch = true
+          failed_entries[#failed_entries+1] = item.entry
+        end
+      else
+        -- No native hash for a staged file we just saw on disk. Gone
+        -- now -> failed (re-download). Locked now -> failed too (these
+        -- are OUR fresh staging files; a persistent lock fails the
+        -- retry round with the AV message). Present and readable ->
+        -- suspicious output, recompute everything in pure Lua.
+        local f = io.open(item.path, "rb")
+        if f then
+          f:close()
+          suspicious = true
+          break
+        end
+        failed_entries[#failed_entries+1] = item.entry
+      end
+    end
+    if suspicious then
+      Log.line("UPDATE", "download_verify: staged file readable but "
+        .. "missing from native output; falling back to pure-Lua verify")
+      v.mode    = "lua_fallback"
+      v.lua_idx = 1
+      v.cur     = nil
+      return
+    end
+    for _, entry in ipairs(ok_entries) do v.ok[#v.ok+1] = entry end
+    for _, entry in ipairs(failed_entries) do
+      v.failed[#v.failed+1] = entry
+    end
+    v.mismatch = v.mismatch or mismatch
+    Updater._download_verify_hashes_done()
+    return
+  end
+
+  -- Pure-Lua path (mode "lua" or "lua_fallback"): budgeted chunked
+  -- hashing, one staged file in flight at a time.
+  if not v.cur then
+    while v.lua_idx <= #v.to_hash do
+      local item = v.to_hash[v.lua_idx]
+      local f = io.open(item.path, "rb")
+      local content = f and f:read("*a") or nil
+      if f then f:close() end
+      if content then
+        v.cur = { entry = item.entry, state = _SHA.create(content) }
+        break
+      end
+      -- Vanished or locked between staging and verify: fail it into
+      -- the re-fire round rather than skipping it as intact (these are
+      -- staged downloads, not user files; "unreadable" can never mean
+      -- "fine").
+      v.failed[#v.failed+1] = item.entry
+      v.lua_idx = v.lua_idx + 1
+    end
+    if not v.cur then
+      Updater._download_verify_hashes_done()
+      return
+    end
+  end
+  local tick_start = time_precise()
+  local budget = v.budget or CFG.UPDATE_SHA_TIME_BUDGET
+  local done
+  repeat
+    done = _SHA.step(v.cur.state, 16)
+    if done then break end
+  until (time_precise() - tick_start) >= budget
+  if done then
+    local local_hash = _SHA.finalize(v.cur.state)
+    if local_hash == v.cur.entry.sha256:lower() then
+      v.ok[#v.ok+1] = v.cur.entry
+    else
+      v.mismatch = true
+      v.failed[#v.failed+1] = v.cur.entry
+    end
+    v.cur     = nil
+    v.lua_idx = v.lua_idx + 1
+  end
 end
 
 -- Fire auto-restart if the download pipeline is in "done" state, the
@@ -17565,7 +18193,7 @@ end
 -- re-registers ReaAssist via AddRemoveReaScript, and fires a fresh
 -- Main_OnCommand on ReaAssist from its own context.
 --
--- advance_after_rename only sets update.restart_after when the
+-- Updater._apply_finish only sets update.restart_after when the
 -- relauncher file is present on disk, so by the time we reach this
 -- function the on-demand AddRemoveReaScript call should succeed.
 function Updater.try_auto_restart()
@@ -17601,176 +18229,943 @@ function Updater.fire_relauncher_now()
   return false
 end
 
--- Advance to the next file (or finish) after a successful rename.
-function Updater.advance_after_rename(dest)
-  -- Capture whether dest had a .bak before this apply. rollback uses the
-  -- flag to skip restore for fresh-install adds (no prior .bak to restore;
-  -- rolling back means simply deleting the newly-written dest, not renaming
-  -- a nonexistent .bak over it which would silently delete the new file).
-  update.applied_files[#update.applied_files+1] = {
-    path = dest,
-    bak_existed = (update.rename_bak_existed == true),
-  }
-  update.rename_failures = 0
-  update.rename_tmp      = nil
-  update.rename_dest     = nil
-  update.rename_bak      = nil
-  update.rename_bak_existed = false
-  if update.download_idx < #update.download_queue then
-    update.download_idx = update.download_idx + 1
-    local next_entry = update.download_queue[update.download_idx]
-    if not Updater.fire_get(next_entry.url, tmp.update_out, tmp.update_exit,
-        { cache_bust = false }) then
-      Updater._set_failure("download_start", string.format(
-        "Could not start download for %s.", tostring(next_entry.filename)))
-      Updater.rollback()
-      update.state = "failed"
-      return
+-- =============================================================================
+-- Transactional apply: journal (stage C) + startup recovery
+-- =============================================================================
+-- The journal is the crash-recovery contract for stage C. It is written
+-- BEFORE the first rename, updated after every applied file (atomic
+-- write-to-tmp-then-rename so a torn write can never corrupt it), marked
+-- committed after orphan cleanup, and deleted only after the .baks are
+-- gone. Startup recovery (resolve_journal_at_startup below) rolls an
+-- interrupted apply forward when every remaining staged file is present
+-- and hash-valid, and rolls it back otherwise, so a crash mid-batch can
+-- no longer boot a mixed release or strand its .baks.
+
+-- Exclusive apply lock. One shared lock gates the whole
+-- download->verify->apply pipeline: acquired at the top of
+-- download_start before any staging mutation, released on every
+-- terminal path (done, failed, rollback) and at exit. A stale lock
+-- (dead owner per the live-marker check) is reclaimed like a stale
+-- journal.
+--
+-- The claim is OS-atomic on both platforms, claim-then-rename flavored:
+--   * Windows: write a private instance-suffixed claim FILE carrying
+--     our id, then os.rename it onto the lock name. Windows rename
+--     refuses to clobber an existing target, so a successful rename IS
+--     the acquisition; exactly one of any number of racing claimants
+--     wins.
+--   * POSIX: mkdir a private instance-suffixed claim DIRECTORY, write
+--     the owner file INSIDE it, then os.rename the directory onto
+--     <lock>.d. rename(2) is atomic for directories and fails when the
+--     target exists non-empty, and the winner's lock directory always
+--     carries its owner file, so no ownerless shared state exists at
+--     any instant. (The shared lock dir is never empty while held, so
+--     rename(2)'s replace-an-empty-target case cannot fire against a
+--     held lock.)
+-- The wbx fast path (C fopen exclusive-create) stays ahead of both in
+-- case a future REAPER Lua accepts the mode; stock Lua 5.4 rejects it
+-- (probed once via pcall). The journal ownership verify in apply_start
+-- and the first-frame re-verify in apply_tick remain as defense in
+-- depth (e.g. against a hand-deleted lock file mid-apply), no longer
+-- as the primary guard.
+
+-- Owner id: the flat lock file (Windows rename claim / wbx fast path)
+-- or the POSIX lock directory's owner file.
+function Updater._lock_owner(path)
+  local function read_owner(p)
+    local f = io.open(p, "rb")
+    if not f then return nil end
+    local raw = f:read("*a"); f:close()
+    return raw and raw:match("inst_[%w%-_]+") or nil
+  end
+  return read_owner(path) or read_owner(path .. ".d/owner")
+end
+
+-- Remove every lock artifact: flat owner file, the POSIX lock
+-- directory (owner file first, then the now-empty dir; on Windows
+-- neither exists), and our own leftover claim file/dir. Used by stale
+-- reclaim and release.
+function Updater._lock_clear(path)
+  os.remove(path)
+  os.remove(path .. ".d/owner")
+  os.remove(path .. ".d")
+  os.remove(path .. ".claim." .. RA.instance_file_suffix())
+  local claim_dir = path .. ".d.claim." .. RA.instance_file_suffix()
+  os.remove(claim_dir .. "/owner")
+  os.remove(claim_dir)
+end
+
+function Updater._lock_try_create(path)
+  -- Returns true when this call atomically claimed the lock for us.
+  if Updater._wbx_supported == nil then
+    local probe = path .. ".probe"
+    os.remove(probe)
+    local ok, pf = pcall(io.open, probe, "wbx")
+    Updater._wbx_supported = ok and true or false
+    if ok and pf then pf:close() end
+    os.remove(probe)
+    Log.line("UPDATE", "apply lock: fopen exclusive-create "
+      .. (Updater._wbx_supported and "available" or
+          ("unavailable; using the atomic "
+           .. (RA.IS_WINDOWS and "rename claim" or "mkdir claim"))))
+  end
+  if Updater._wbx_supported then
+    local ok, f = pcall(io.open, path, "wbx")
+    if not ok or not f then return false end
+    local w_ok = pcall(function() assert(f:write(RA.instance_file_suffix())) end)
+    pcall(function() f:close() end)
+    if not w_ok then os.remove(path); return false end
+    return true
+  end
+  if RA.IS_WINDOWS then
+    -- Atomic rename claim. A crash between claim-write and rename can
+    -- strand a tiny .claim.<instance> file in Data/Temp; our own is
+    -- cleared on the next attempt and Data/Temp is disposable.
+    local claim = path .. ".claim." .. RA.instance_file_suffix()
+    os.remove(claim)
+    local f = io.open(claim, "wb")
+    if not f then return false end
+    local w_ok = pcall(function() assert(f:write(RA.instance_file_suffix())) end)
+    local c_ok = pcall(function() assert(f:close()) end)
+    if not w_ok or not c_ok then os.remove(claim); return false end
+    if not os.rename(claim, path) then
+      os.remove(claim)
+      return false
     end
-    update.state = "downloading"
-  else
-    for _, applied in ipairs(update.applied_files) do
-      os.remove(applied.path .. ".bak")
-    end
-    -- Per-version stale-file cleanup. The new manifest's removed_files
-    -- list (auto-populated by gen_manifest.py from the diff between this
-    -- release and the prior, plus carry-forward of older deletions for
-    -- users skipping versions) names files we previously shipped and no
-    -- longer do. Without this step a renamed file's old name would
-    -- linger on disk forever -- the rest of the updater only writes new
-    -- files and overwrites existing ones, never deletes. Three layers
-    -- of safety make removing user-facing files here safe:
-    --   1. Authoring layer: gen_manifest.py only ever populates this
-    --      list from prior manifests we ourselves shipped. A user-
-    --      dropped file in the install dir cannot end up there.
-    --   2. is_safe_filename: rejects path-traversal, absolute paths,
-    --      backslashes, hidden segments, and unknown extensions.
-    --   3. should_remove_orphan: enforces the "owned path" zone and the
-    --      PROTECTED_FROM_REMOVAL set (custom system prompt override,
-    --      runtime debug log, FX cache).
-    -- os.remove failures are logged but do not fail the update; the
-    -- new files are already in place, lingering orphans are cosmetic.
-    do
-      local removed = update.manifest and update.manifest.removed_files
-      if type(removed) == "table" then
-        local current_files = {}
-        for _, entry in ipairs(update.manifest.files or {}) do
-          if type(entry) == "table" and type(entry.name) == "string" then
-            current_files[entry.name] = true
-          end
-        end
-        for _, name in ipairs(removed) do
-          if Updater.should_remove_orphan(name, current_files) then
-            local path = Updater.local_path_for(name)
-            if reaper.file_exists and reaper.file_exists(path) then
-              local ok = os.remove(path)
-              Log.line("UPDATE", string.format(
-                "removed orphan %s: %s",
-                name, ok and "ok" or "failed"))
-            end
-          elseif type(name) == "string" then
-            -- Loud about rejected entries so a malformed manifest doesn't
-            -- silently get past the predicate. Only log the first ~20
-            -- chars of the name to keep the log line short on
-            -- pathological inputs.
-            Log.line("UPDATE", string.format(
-              "removed_files: refused %s (outside owned zone or "
-              .. "protected)", tostring(name):sub(1, 80)))
-          end
-        end
-      end
-    end
-    update.state   = "done"
-    update.applied = true
-    -- Active stale-stock nudge for power-user prompt overrides. If this
-    -- update modified the stock system prompt AND the user has a custom
-    -- override file in place (which the loader prefers over the stock),
-    -- set a persistent ExtState flag. The next-launch path reads it,
-    -- clears it, and shows a one-time sticky toast inviting the user to
-    -- diff the new stock prompt against their custom copy and merge any
-    -- improvements worth keeping. Persistent (3rd arg true) so it
-    -- survives the auto-restart that follows.
-    do
-      local stock_pp  = RA.RESOURCES_DIR .. "System_Prompt.md"
-      local custom_pp = RA.RESOURCES_DIR .. "System_Prompt_Custom.md"
-      local prompt_changed = false
-      for _, applied in ipairs(update.applied_files) do
-        if applied.path == stock_pp then prompt_changed = true; break end
-      end
-      if prompt_changed and reaper.file_exists(custom_pp) then
-        reaper.SetExtState(CFG.EXT_NS, "prompt_review_pending", "1", true)
-      end
-    end
-    -- Stage 3.4 auto-restart: schedule a short delay (so the user sees
-    -- the "Applied" confirmation), then re-launch the script via the
-    -- sidecar relauncher (Relaunch.lua). The relauncher re-
-    -- registers ReaAssist via AddRemoveReaScript and fires it from its
-    -- own script context, so auto-restart works regardless of how this
-    -- instance was launched. File-existence check (cheap, no action-
-    -- registry side effects) gates the restart scheduling so the done-
-    -- view message stays honest: falls back to "Close and reopen" if
-    -- the relauncher file is missing, which only happens on a broken
-    -- install. try_auto_restart does the actual AddRemoveReaScript
-    -- registration on-demand when it fires.
-    if reaper.file_exists(RELAUNCHER_PATH) then
-      update.restart_after = time_precise() + 1.5
-      update.restart_fired = false
-    else
-      update.restart_after = nil
-    end
+    return true
+  end
+  -- POSIX: claim-then-rename, directory flavored. Build a PRIVATE
+  -- instance-suffixed claim directory with the owner file already
+  -- inside it, then atomically rename it onto the shared lock
+  -- directory. rename(2) is atomic for directories and fails when the
+  -- target exists non-empty, so exactly one claimant wins, and the
+  -- winning lock directory carries its owner file from the first
+  -- instant it exists under the shared name: no ownerless window.
+  local lock_dir = path .. ".d"
+  local claim_dir = path .. ".d.claim." .. RA.instance_file_suffix()
+  os.remove(claim_dir .. "/owner")
+  os.remove(claim_dir)
+  local ok = os.execute("mkdir " .. Shell.sh_quote(claim_dir)
+    .. " 2>/dev/null")
+  if ok ~= true and ok ~= 0 then return false end
+  local f = io.open(claim_dir .. "/owner", "wb")
+  if not f then os.remove(claim_dir); return false end
+  local w_ok = pcall(function() assert(f:write(RA.instance_file_suffix())) end)
+  local c_ok = pcall(function() assert(f:close()) end)
+  if not w_ok or not c_ok then
+    os.remove(claim_dir .. "/owner")
+    os.remove(claim_dir)
+    return false
+  end
+  if not os.rename(claim_dir, lock_dir) then
+    os.remove(claim_dir .. "/owner")
+    os.remove(claim_dir)
+    return false
+  end
+  return true
+end
+
+function Updater.acquire_apply_lock()
+  local path = tmp.update_lock
+  -- Two rounds: the second exists so ONE stale lock (dead or unreadable
+  -- owner) can be reclaimed; a second failure means a live contender.
+  for _ = 1, 2 do
+    if Updater._lock_try_create(path) then return true end
+    local owner = Updater._lock_owner(path)
+    if owner == RA.instance_file_suffix() then return true end
+    if owner and RA.temp_instance_is_live(owner) then return false end
+    -- Owner-file-missing (nil owner) is treated as reclaimable. Safe:
+    -- with claim-then-rename on both platforms, a lock that exists
+    -- under the shared name always carries its owner from the instant
+    -- it appears, so an ownerless lock can only be produced by
+    -- corruption or manual tampering, never by our own protocol.
+    Log.line("UPDATE", "apply lock: reclaiming stale lock from "
+      .. tostring(owner or "unreadable owner"))
+    Updater._lock_clear(path)
+  end
+  return false
+end
+
+function Updater.release_apply_lock()
+  local path = tmp.update_lock
+  local owner = Updater._lock_owner(path)
+  -- Clear our own lock, or an unreadable one (stale-equivalent);
+  -- never another instance's.
+  if owner == nil or owner == RA.instance_file_suffix() then
+    Updater._lock_clear(path)
   end
 end
 
--- Called from the main loop when state == "rename_retry". Each call is one
--- frame (~30ms apart), providing a natural non-blocking delay between
--- attempts without busy-waiting. Ceiling is 15 attempts (~450ms): the
--- previous 5-attempt limit (~150ms total) tripped false-fails on cold
--- Windows Defender scans, which can hold a just-closed file exclusively
--- for 300-500ms. 15 covers the tail of that distribution without
--- noticeably delaying success cases (a single retry is the median).
-function Updater.rename_retry_poll()
-  if not update.rename_tmp or not update.rename_dest then
-    Updater._set_failure("rename",
-      "rename_retry_poll entered with no pending paths.")
-    update.state = "failed"
-    return
-  end
-  local ok_mv = os.rename(update.rename_tmp, update.rename_dest)
-  if ok_mv then
-    Updater.advance_after_rename(update.rename_dest)
-    return
-  end
-  update.rename_failures = update.rename_failures + 1
-  if update.rename_failures >= 15 then
-    -- Give up. Restore the backup only if one was actually created --
-    -- otherwise the destination is a fresh-install add and there is
-    -- nothing to restore. Skipping the restore in that case prevents
-    -- an empty-rename clobber that leaves neither dest nor bak.
-    if update.rename_bak_existed then
-      local ok_restore, restore_err = os.rename(update.rename_bak,
-                                                update.rename_dest)
-      if not ok_restore then
-        Log.line("UPDATE", string.format(
-          "rollback restore failed for %s: %s",
-          update.rename_dest, tostring(restore_err)))
+function Updater.journal_path()
+  return tmp.update_journal
+end
+
+-- Parse the on-disk journal. Returns the journal table, or nil when the
+-- file is absent or does not look like a journal we wrote (schema guard
+-- plus minimal shape checks; recovery treats unparseable as stale).
+--
+-- Orphaned-.tmp adoption: journal_write swaps via remove-then-rename
+-- (Windows os.rename refuses to clobber), so a crash between the two
+-- calls leaves ONLY update_journal.json.tmp, which holds a complete
+-- serialized journal. When the primary is absent but a valid .tmp
+-- exists, adopt it (rename into place, then proceed) so that crash
+-- window can no longer strand recovery state. An unparseable .tmp is
+-- left for the caller's disposal path (journal_delete removes both).
+function Updater.journal_read()
+  local path = Updater.journal_path()
+  local function parse(p)
+    local f = io.open(p, "rb")
+    if not f then return nil end
+    local raw = f:read("*a"); f:close()
+    if not raw or raw == "" then return nil end
+    local data = JSON.decode(raw)
+    if type(data) ~= "table" or data.schema ~= 1 then return nil end
+    if type(data.instance) ~= "string" then return nil end
+    if type(data.phase) ~= "string" then return nil end
+    if type(data.files) ~= "table" then return nil end
+    for _, jf in ipairs(data.files) do
+      if type(jf) ~= "table" or type(jf.name) ~= "string"
+          or type(jf.sha256) ~= "string" or type(jf.status) ~= "string" then
+        return nil
       end
-    else
-      -- Fresh-install add: no bak exists. Remove any leftover dest.
-      os.remove(update.rename_dest)
     end
-    os.remove(update.rename_tmp)
-    Updater._set_failure("rename", string.format(
-      "Could not rename downloaded file into place after %d attempts "
-      .. "(%s -> %s). Antivirus or file lock?",
-      update.rename_failures, update.rename_tmp, update.rename_dest))
-    update.rename_tmp  = nil
-    update.rename_dest = nil
-    update.rename_bak  = nil
-    update.rename_bak_existed = false
-    Updater.rollback()
-    update.state = "failed"
+    return data
   end
-  -- Otherwise stay in "rename_retry" state; next frame will try again.
+  local data = parse(path)
+  if data then return data end
+  -- Adopt the .tmp sibling only when the primary is truly ABSENT. A
+  -- present-but-unparseable primary means the .tmp (if any) is a stale
+  -- earlier snapshot; disposal handles both.
+  local pf = io.open(path, "rb")
+  if pf then pf:close(); return nil end
+  local adopted = parse(path .. ".tmp")
+  if not adopted then return nil end
+  os.rename(path .. ".tmp", path)
+  Log.line("UPDATE",
+    "journal_read: adopted orphaned journal .tmp sibling "
+    .. "(crash between journal_write's remove and rename)")
+  return adopted
+end
+
+-- Atomically (re)write the journal: serialize to a sibling temp file,
+-- then swap it in. Windows os.rename refuses to clobber, so the old
+-- journal is removed first. The swap window is lossless in BOTH failure
+-- modes: a crash between the remove and the rename leaves only the
+-- .tmp sibling, and a FAILED final rename deliberately keeps the
+-- completed .tmp on disk too. Either way journal_read adopts it and
+-- the startup sweep gate treats the .tmp as a pending journal, so
+-- recovery state can never be stranded and a torn journal can never be
+-- produced. (Only a partial .tmp from a failed write/close is ever
+-- deleted.) Returns true on success.
+function Updater.journal_write(j)
+  local path = Updater.journal_path()
+  local tmp_path = path .. ".tmp"
+  local encoded, enc_err = JSON.encode(j, "  ")
+  if not encoded then
+    Log.line("UPDATE", "journal_write: encode failed: " .. tostring(enc_err))
+    return false
+  end
+  local f, open_err = io.open(tmp_path, "wb")
+  if not f then
+    Log.line("UPDATE", "journal_write: open failed: " .. tostring(open_err))
+    return false
+  end
+  local w_ok = pcall(function()
+    assert(f:write(encoded))
+  end)
+  local c_ok = pcall(function()
+    assert(f:close())
+  end)
+  if not w_ok or not c_ok then
+    Log.line("UPDATE", "journal_write: write failed")
+    os.remove(tmp_path)
+    return false
+  end
+  os.remove(path)
+  local ok_mv, mv_err = os.rename(tmp_path, path)
+  if not ok_mv then
+    -- Keep the completed .tmp: it is a valid journal, and the adoption
+    -- path in journal_read recovers it on the next read or launch. A
+    -- double swap failure (per-file write, then rolling_back marker)
+    -- therefore still leaves the marker journal on disk instead of
+    -- erasing both copies.
+    Log.line("UPDATE", "journal_write: swap failed: " .. tostring(mv_err)
+      .. " (.tmp kept for adoption)")
+    return false
+  end
+  return true
+end
+
+function Updater.journal_delete()
+  os.remove(Updater.journal_path())
+  os.remove(Updater.journal_path() .. ".tmp")
+end
+
+-- Begin stage C. Every staged file has verified by now; from here on
+-- live files get swapped one rename pair at a time, with the journal
+-- updated after each landing so a crash at any point is recoverable.
+function Updater.apply_start()
+  update._batch = nil
+  -- Foreign-journal guard: a journal left by ANOTHER instance that is
+  -- still live means that instance is mid-apply on this shared install.
+  -- Overwriting its journal would destroy its recovery state, so fail
+  -- this attempt instead. A stale journal from a dead instance would
+  -- have been resolved by our own startup recovery; if one appeared
+  -- since (that instance crashed while we ran), replacing it is the
+  -- best available option and is logged.
+  local existing = Updater.journal_read()
+  if existing and existing.instance ~= RA.instance_file_suffix() then
+    if RA.temp_instance_is_live(existing.instance) then
+      -- Staged files are deliberately NOT deleted here: staging paths
+      -- are shared across instances, so "our" staged files may be the
+      -- live owner's verified downloads. The stranded-file sweep or the
+      -- next update run cleans any true leftovers.
+      Updater._set_failure("apply_journal",
+        "Another ReaAssist instance is applying an update on this "
+        .. "install. Let it finish, then retry.")
+      Updater.release_apply_lock()
+      update.state = "failed"
+      return
+    end
+    Log.line("UPDATE",
+      "apply_start: replacing stale journal from dead instance "
+      .. tostring(existing.instance))
+  end
+  local j = {
+    schema         = 1,
+    instance       = RA.instance_file_suffix(),
+    target_version = tostring(update.remote_version
+      or (update.manifest and update.manifest.version) or "?"),
+    phase          = "applying",
+    files          = {},
+  }
+  for _, entry in ipairs(update.download_queue) do
+    j.files[#j.files+1] = {
+      name   = entry.filename,
+      sha256 = entry.sha256,
+      status = "pending",
+    }
+  end
+  if not Updater.journal_write(j) then
+    -- No journal means no crash recovery; refuse to touch live files.
+    -- Clear any artifacts of the failed write (journal_write keeps a
+    -- completed .tmp on a swap failure so INTERRUPTED transactions stay
+    -- recoverable, but no transaction has started here: nothing was
+    -- applied and the staged files are deleted below, so an adopted
+    -- journal next launch would describe a transaction that never ran).
+    Updater.journal_delete()
+    Updater._download_verify_fail("journal_write",
+      "Could not write the update journal; no files were changed.")
+    return
+  end
+  -- Ownership verify: even under the apply lock, the fallback
+  -- (non-exclusive) lock mode leaves a small race, so re-read the
+  -- journal after writing it. If the journal on disk is not ours, the
+  -- other process won and its recovery state (and shared staging) must
+  -- not be disturbed. Back off exactly like the live-owner case.
+  local winner = Updater.journal_read()
+  if not winner or winner.instance ~= RA.instance_file_suffix() then
+    Updater._set_failure("apply_journal",
+      "Another ReaAssist instance is applying an update on this "
+      .. "install. Let it finish, then retry.")
+    Updater.release_apply_lock()
+    update.state = "failed"
+    return
+  end
+  update._journal = j
+  update._apply = {
+    idx             = 1,
+    prepared        = false,
+    bak_existed     = false,
+    rename_failures = 0,
+  }
+  update.applied_files = {}
+  update.download_idx  = 1
+  update.state = "applying"
+end
+
+-- One frame of stage C. Applies as many files as renames allow; yields
+-- (returns) whenever a staged->dest rename fails so AV scan locks get a
+-- natural ~30 ms inter-frame delay, retrying up to 15 attempts per file
+-- (same ceiling and rationale as the old rename_retry state: cold
+-- Windows Defender scans hold a just-written file for 300-500 ms).
+function Updater.apply_tick()
+  local a = update._apply
+  local j = update._journal
+  if not a or not j then
+    Updater._set_failure("apply",
+      "apply_tick entered with no apply state.")
+    Updater.release_apply_lock()
+    update.state = "failed"
+    return
+  end
+  while true do
+    local entry = update.download_queue[a.idx]
+    if not entry then
+      Updater._apply_finish()
+      return
+    end
+    local dest   = Updater.local_path_for(entry.filename)
+    local staged = entry.staged
+    local bak    = dest .. ".bak"
+    if not a.prepared then
+      -- Ownership fence: re-verify the on-disk journal is still ours
+      -- before EVERY file's destructive swap, not just once. A paused
+      -- updater whose liveness lease expired can be reclaimed by a
+      -- second instance; on resume, the other instance's on-disk state
+      -- is authoritative and nothing here may touch the disk (no
+      -- rollback, no staged cleanup, no journal deletion). This fence
+      -- also subsumes the old first-frame verify: file 1's fence runs
+      -- at the same instant, before any mutation. The fence-then-write
+      -- pair (this read, then the per-file journal_write after the
+      -- swap) is the revalidation boundary; a takeover landing between
+      -- them is bounded by one file swap, which the winner's dest-hash
+      -- reclassification tolerates (an extra applied file with a
+      -- matching hash reads as landed). Cost: one journal read per
+      -- swap, symmetric with the existing one write per swap.
+      local current = Updater.journal_read()
+      if not current or current.instance ~= RA.instance_file_suffix() then
+        update._journal = nil
+        update._apply = nil
+        Updater._set_failure("apply_takeover",
+          "Another ReaAssist instance took over this update; no "
+          .. "further files were changed.")
+        Updater.release_apply_lock()
+        update.state = "failed"
+        return
+      end
+      -- Back up the current file. Distinguish "dest does not exist
+      -- (fresh-install add)" from "dest exists but rename failed
+      -- (lock, permissions, AV scan, cloud sync, editor handle)":
+      -- os.rename returns nil for both, so probe existence first.
+      -- Misclassifying an existing-but-locked file as fresh-install is
+      -- dangerous: rollback's fresh-install branch deletes dest, which
+      -- would destroy the only intact copy when no .bak was created.
+      os.remove(bak)  -- stale leftover from an older interrupted swap
+      local dest_existed = reaper.file_exists and reaper.file_exists(dest)
+      if dest_existed then
+        local ok_bak, bak_err = os.rename(dest, bak)
+        if not ok_bak then
+          Updater._set_failure("backup", string.format(
+            "Could not back up existing file %s: %s",
+            dest, tostring(bak_err)))
+          -- A bailed (unmarked) rollback preserves staging as recovery
+          -- state; only clean it when the rollback actually ran.
+          if Updater.rollback() then
+            Updater._delete_all_staged()
+          end
+          Updater.release_apply_lock()
+          update._apply = nil
+          update.state = "failed"
+          return
+        end
+        a.bak_existed = true
+      else
+        a.bak_existed = false
+      end
+      a.prepared = true
+    end
+    local ok_mv = os.rename(staged, dest)
+    if not ok_mv then
+      a.rename_failures = a.rename_failures + 1
+      if a.rename_failures >= 15 then
+        -- Give up on this file. Restore its backup when one was
+        -- created; a failed restore is the one rollback failure mode
+        -- that needs manual attention, so it is appended to
+        -- update.last_error below (same note format rollback uses).
+        local restore_note
+        if a.bak_existed then
+          local ok_restore, restore_err = os.rename(bak, dest)
+          if not ok_restore then
+            Log.line("UPDATE", string.format(
+              "rollback restore failed for %s: %s "
+              .. "(.bak still on disk; manual recovery may be needed)",
+              dest, tostring(restore_err)))
+            restore_note = string.format(
+              "\n\nNote: rollback could not restore 1 previous file "
+              .. "(.bak file left on disk for manual recovery): %s",
+              dest)
+          end
+        end
+        Updater._set_failure("rename", string.format(
+          "Could not rename downloaded file into place after %d "
+          .. "attempts (%s -> %s). Antivirus or file lock?",
+          a.rename_failures, tostring(staged), dest))
+        if restore_note then
+          update.last_error = (update.last_error or "") .. restore_note
+        end
+        -- A bailed (unmarked) rollback preserves staging as recovery
+        -- state; only clean it when the rollback actually ran. The
+        -- current file's staged copy is covered by _delete_all_staged,
+        -- so no separate removal here.
+        if Updater.rollback() then
+          Updater._delete_all_staged()
+        end
+        Updater.release_apply_lock()
+        update._apply = nil
+        update.state = "failed"
+        return
+      end
+      -- Stay in "applying"; next frame retries this same rename.
+      return
+    end
+    -- Landed. Record for rollback, reflect into the journal, advance.
+    update.applied_files[#update.applied_files+1] = {
+      path        = dest,
+      bak_existed = a.bak_existed,
+    }
+    j.files[a.idx].status      = "applied"
+    j.files[a.idx].bak_existed = a.bak_existed
+    if not Updater.journal_write(j) then
+      -- A journal that can no longer be updated cannot guarantee
+      -- recovery for the files still pending; unwind while the
+      -- in-memory state is complete rather than pressing on.
+      Updater._set_failure("journal_write",
+        "Could not update the apply journal; the update was rolled back.")
+      -- A bailed (unmarked) rollback preserves staging as recovery
+      -- state; only clean it when the rollback actually ran.
+      if Updater.rollback() then
+        Updater._delete_all_staged()
+      end
+      Updater.release_apply_lock()
+      update._apply = nil
+      update.state = "failed"
+      return
+    end
+    a.idx             = a.idx + 1
+    a.prepared        = false
+    a.bak_existed     = false
+    a.rename_failures = 0
+    update.download_idx = a.idx
+  end
+end
+
+-- Every queued file has been renamed into place: run orphan cleanup,
+-- mark the journal committed, delete the .baks, delete the journal,
+-- then hand off to the done/auto-restart flow.
+function Updater._apply_finish()
+  -- Per-version stale-file cleanup. The new manifest's removed_files
+  -- list (auto-populated by gen_manifest.py from the diff between this
+  -- release and the prior, plus carry-forward of older deletions for
+  -- users skipping versions) names files we previously shipped and no
+  -- longer do. Without this step a renamed file's old name would
+  -- linger on disk forever -- the rest of the updater only writes new
+  -- files and overwrites existing ones, never deletes. Three layers
+  -- of safety make removing user-facing files here safe:
+  --   1. Authoring layer: gen_manifest.py only ever populates this
+  --      list from prior manifests we ourselves shipped. A user-
+  --      dropped file in the install dir cannot end up there.
+  --   2. is_safe_filename: rejects path-traversal, absolute paths,
+  --      backslashes, hidden segments, and unknown extensions.
+  --   3. should_remove_orphan: enforces the "owned path" zone and the
+  --      PROTECTED_FROM_REMOVAL set (custom system prompt override,
+  --      runtime debug log, FX cache).
+  -- os.remove failures are logged but do not fail the update; the
+  -- new files are already in place, lingering orphans are cosmetic.
+  do
+    local removed = update.manifest and update.manifest.removed_files
+    if type(removed) == "table" then
+      local current_files = {}
+      for _, entry in ipairs(update.manifest.files or {}) do
+        if type(entry) == "table" and type(entry.name) == "string" then
+          current_files[entry.name] = true
+        end
+      end
+      for _, name in ipairs(removed) do
+        if Updater.should_remove_orphan(name, current_files) then
+          local path = Updater.local_path_for(name)
+          if reaper.file_exists and reaper.file_exists(path) then
+            local ok = os.remove(path)
+            Log.line("UPDATE", string.format(
+              "removed orphan %s: %s",
+              name, ok and "ok" or "failed"))
+          end
+        elseif type(name) == "string" then
+          -- Loud about rejected entries so a malformed manifest doesn't
+          -- silently get past the predicate. Only log the first ~20
+          -- chars of the name to keep the log line short on
+          -- pathological inputs.
+          Log.line("UPDATE", string.format(
+            "removed_files: refused %s (outside owned zone or "
+            .. "protected)", tostring(name):sub(1, 80)))
+        end
+      end
+    end
+  end
+  -- Commit point: once the journal says "committed", startup recovery
+  -- treats the transaction as complete (finish cleanup, never roll
+  -- back), so the .baks are deleted only AFTER this marker lands. A
+  -- failed commit write is benign: the journal still shows "applying"
+  -- with every file applied, which recovery resolves forward to this
+  -- same cleanup.
+  local j = update._journal
+  if j then
+    j.phase = "committed"
+    Updater.journal_write(j)
+  end
+  for _, applied in ipairs(update.applied_files) do
+    os.remove(applied.path .. ".bak")
+  end
+  Updater.journal_delete()
+  update._journal = nil
+  update._apply   = nil
+  Updater.release_apply_lock()
+  update.state   = "done"
+  update.applied = true
+  -- Active stale-stock nudge for power-user prompt overrides. If this
+  -- update modified the stock system prompt AND the user has a custom
+  -- override file in place (which the loader prefers over the stock),
+  -- set a persistent ExtState flag. The next-launch path reads it,
+  -- clears it, and shows a one-time sticky toast inviting the user to
+  -- diff the new stock prompt against their custom copy and merge any
+  -- improvements worth keeping. Persistent (3rd arg true) so it
+  -- survives the auto-restart that follows.
+  do
+    local stock_pp  = RA.RESOURCES_DIR .. "System_Prompt.md"
+    local custom_pp = RA.RESOURCES_DIR .. "System_Prompt_Custom.md"
+    local prompt_changed = false
+    for _, applied in ipairs(update.applied_files) do
+      if applied.path == stock_pp then prompt_changed = true; break end
+    end
+    if prompt_changed and reaper.file_exists(custom_pp) then
+      reaper.SetExtState(CFG.EXT_NS, "prompt_review_pending", "1", true)
+    end
+  end
+  -- Stage 3.4 auto-restart: schedule a short delay (so the user sees
+  -- the "Applied" confirmation), then re-launch the script via the
+  -- sidecar relauncher (Relaunch.lua). The relauncher re-
+  -- registers ReaAssist via AddRemoveReaScript and fires it from its
+  -- own script context, so auto-restart works regardless of how this
+  -- instance was launched. File-existence check (cheap, no action-
+  -- registry side effects) gates the restart scheduling so the done-
+  -- view message stays honest: falls back to "Close and reopen" if
+  -- the relauncher file is missing, which only happens on a broken
+  -- install. try_auto_restart does the actual AddRemoveReaScript
+  -- registration on-demand when it fires.
+  if reaper.file_exists(RELAUNCHER_PATH) then
+    update.restart_after = time_precise() + 1.5
+    update.restart_fired = false
+  else
+    update.restart_after = nil
+  end
+end
+
+-- Resolve an interrupted apply at startup. Runs once, right after the
+-- Updater module is defined (it needs local_path_for plus the pure-Lua
+-- SHA block) and before the critical-file probe and remaining sidecar
+-- dofiles, so a recovered install is what the rest of startup sees.
+-- The stranded-.bak sweep near the top of the file skips itself
+-- whenever a journal exists, so nothing this function needs has been
+-- deleted by the time it runs.
+--
+-- Decision table:
+--   * no journal / unparseable journal -> nothing to do (an unparseable
+--     file, or its orphaned .tmp sibling, is deleted; without per-file
+--     statuses neither direction is safe to automate, and the next
+--     repair scan heals any drift)
+--   * owner instance still live -> another REAPER process is mid-apply
+--     on this shared install; leave everything alone this launch (the
+--     startup call site exits the script for this case)
+--   * phase "committed" -> the apply finished, only cleanup was
+--     interrupted: delete leftover .baks and staging files, delete the
+--     journal
+--   * phase "rolling_back" -> a rollback was interrupted: complete the
+--     rollback direction UNCONDITIONALLY (never roll a rolling_back
+--     journal forward). When any restore fails (transient lock), the
+--     journal is KEPT so the next launch retries the idempotent walk,
+--     and the result is "incomplete" so the caller refuses to continue
+--     loading a possibly mixed install.
+--   * phase "applying" -> roll FORWARD when every pending staged file
+--     is present and hash-valid (finish the renames); otherwise flip
+--     the phase to "rolling_back" first and complete the rollback. If
+--     the phase marker cannot be written, nothing is mutated and the
+--     launch is deferred.
+--
+-- Returns "none", "skipped", "deferred", "incomplete", "finished",
+-- "forward", or "rollback" (the startup call site exits on
+-- "skipped"/"deferred"/"incomplete").
+function Updater.resolve_journal_at_startup()
+  local j = Updater.journal_read()
+  if not j then
+    -- Distinguish "no journal" from "present but unparseable": the
+    -- latter (primary or orphaned .tmp) is deleted so a corrupt file
+    -- cannot wedge every future launch into skipping the .bak sweep.
+    for _, journal_name in ipairs({
+      Updater.journal_path(), Updater.journal_path() .. ".tmp",
+    }) do
+      local f = io.open(journal_name, "rb")
+      if f then
+        f:close()
+        Log.line("UPDATE",
+          "journal recovery: unparseable journal found; deleting it "
+          .. "(next repair scan heals any drift)")
+        Updater.journal_delete()
+        break
+      end
+    end
+    return "none"
+  end
+  if j.instance ~= RA.instance_file_suffix()
+      and RA.temp_instance_is_live(j.instance) then
+    Log.line("UPDATE", string.format(
+      "journal recovery: owner %s is live (another instance mid-apply); "
+      .. "skipping recovery and leaving the journal alone.",
+      tostring(j.instance)))
+    return "skipped"
+  end
+
+  local function path_for(name) return Updater.local_path_for(name) end
+  local function exists(path)
+    return reaper.file_exists and reaper.file_exists(path) or false
+  end
+  local function file_hash_ok(path, jf)
+    local f = io.open(path, "rb")
+    if not f then return false end
+    local content = f:read("*a"); f:close()
+    if not content then return false end
+    return sha256_hash(content) == tostring(jf.sha256):lower()
+  end
+  local function staged_hash_ok(jf)
+    return file_hash_ok(path_for(jf.name) .. ".new", jf)
+  end
+  local touched_context = false
+  for _, jf in ipairs(j.files) do
+    if jf.name == "Resources/Context.lua" then touched_context = true end
+  end
+
+  if j.phase == "committed" then
+    -- Everything applied; only the post-commit cleanup was cut short.
+    for _, jf in ipairs(j.files) do
+      os.remove(path_for(jf.name) .. ".bak")
+      os.remove(path_for(jf.name) .. ".new")
+    end
+    Updater.journal_delete()
+    Log.line("UPDATE",
+      "journal recovery: finished committed apply cleanup for v"
+      .. tostring(j.target_version))
+    return "finished"
+  end
+
+  -- Shared rollback completion for phase "rolling_back", whether the
+  -- marker was written by the runtime rollback or by this function's
+  -- own applying-phase fallback below. The phase forces the direction:
+  -- complete the rollback unconditionally, never roll forward.
+  -- Per-entry statuses flip BEFORE their mutation, so an entry's status
+  -- alone cannot say whether its restore already happened; the .bak's
+  -- presence can. Deliberately NOT hash-based: for a file whose content
+  -- is identical across versions (exactly what the locked-file update
+  -- path queues defensively), "restored" and "not restored" hash the
+  -- same, and guessing wrong deletes the only copy. The .bak is
+  -- consumed by the restoring rename, so its presence is the
+  -- unambiguous not-yet-restored signal, which also makes this walk
+  -- idempotent: a retry after a partial pass redoes only what is left.
+  local function complete_rollback()
+    local restore_failures = 0
+    for i = #j.files, 1, -1 do
+      local jf     = j.files[i]
+      local dest   = path_for(jf.name)
+      local staged = dest .. ".new"
+      local bak    = dest .. ".bak"
+      if jf.status == "pending" then
+        -- Never touched by the apply; only the apply-side mid-swap
+        -- edge (dest moved aside, rename-back failed) needs undoing.
+        if not exists(dest) and exists(bak) then
+          if not os.rename(bak, dest) then
+            restore_failures = restore_failures + 1
+            Log.line("UPDATE", string.format(
+              "journal recovery: could not restore mid-swap %s from "
+              .. "its .bak (.bak left on disk; retried next launch)",
+              dest))
+          end
+        end
+      elseif exists(bak) then
+        -- Restore not yet performed (bak unconsumed): finish it.
+        os.remove(dest)
+        if not os.rename(bak, dest) then
+          restore_failures = restore_failures + 1
+          Log.line("UPDATE", string.format(
+            "journal recovery: could not restore %s from its .bak "
+            .. "(.bak left on disk; retried next launch)", dest))
+        end
+      elseif exists(dest) and jf.bak_existed == false then
+        -- Fresh-install add whose rollback (plain delete) had not
+        -- happened yet. A failed delete on a still-present file is a
+        -- lock, so it counts as a restore failure too.
+        if not os.remove(dest) and exists(dest) then
+          restore_failures = restore_failures + 1
+          Log.line("UPDATE", string.format(
+            "journal recovery: could not remove fresh-install add %s "
+            .. "(locked; retried next launch)", dest))
+        end
+      end
+      -- else: already restored (bak consumed, or fresh add already
+      -- deleted); leave dest alone.
+      os.remove(staged)
+    end
+    -- Retention on failure: a transient lock (AV scan holding a .bak
+    -- or dest) must not cost the user their rollback. Keeping the
+    -- journal keeps the sweep gated and makes the next launch retry
+    -- this same idempotent walk; it is only deleted once every restore
+    -- has landed. (A vanished .bak is not counted as a failure: the
+    -- walk has nothing to retry for it.) An incomplete pass returns a
+    -- distinct result so the caller can refuse to continue loading a
+    -- possibly mixed install.
+    if restore_failures > 0 then
+      Updater.journal_write(j)
+      Log.line("UPDATE", string.format(
+        "journal recovery: interrupted ROLLBACK for v%s left %d "
+        .. "restore failure(s); journal kept for retry on next launch.",
+        tostring(j.target_version), restore_failures))
+      return "incomplete"
+    end
+    Updater.journal_delete()
+    Log.line("UPDATE", string.format(
+      "journal recovery: completed interrupted ROLLBACK for v%s "
+      .. "(%d files).", tostring(j.target_version), #j.files))
+    if touched_context and RA.load_context then RA.load_context() end
+    return "rollback"
+  end
+
+  if j.phase == "rolling_back" then
+    return complete_rollback()
+  end
+
+  -- Phase "applying". First, close the rename-before-journal window: a
+  -- crash between os.rename(staged, dest) and the journal write that
+  -- flips the entry to "applied" leaves a pending entry whose .new is
+  -- gone but whose dest already holds the verified new content. Detect
+  -- by hashing dest and reclassify in memory as applied, so neither
+  -- direction mishandles it: roll-forward skips it (it already landed,
+  -- and its .bak survives until the final cleanup), roll-back restores
+  -- it exactly like any journal-applied entry. The staged-absent
+  -- precondition matters: a still-staged pending file whose dest
+  -- happens to match the new hash (unchanged content queued via the
+  -- locked-file path) was never swapped and must stay pending.
+  for _, jf in ipairs(j.files) do
+    if jf.status == "pending"
+        and not exists(path_for(jf.name) .. ".new")
+        and file_hash_ok(path_for(jf.name), jf) then
+      jf.status = "applied"
+      jf.bak_existed = exists(path_for(jf.name) .. ".bak")
+      Log.line("UPDATE", string.format(
+        "journal recovery: %s landed before its journal write; "
+        .. "reclassified as applied.", jf.name))
+    end
+  end
+
+  -- Can the interrupted transaction roll forward? Only pending files
+  -- matter; applied files already hold verified content. Hashing runs
+  -- single-shot pure-Lua here (worst case a couple of seconds, once,
+  -- on the rare crash-recovery launch).
+  local can_forward = true
+  for _, jf in ipairs(j.files) do
+    if jf.status == "pending" and not staged_hash_ok(jf) then
+      can_forward = false
+      break
+    end
+  end
+
+  if can_forward then
+    for _, jf in ipairs(j.files) do
+      if jf.status == "pending" then
+        local dest   = path_for(jf.name)
+        local staged = dest .. ".new"
+        local bak    = dest .. ".bak"
+        if exists(dest) then
+          -- Normal swap: clear any stale .bak, back up the live file.
+          os.remove(bak)
+          local ok_bak = os.rename(dest, bak)
+          if not ok_bak then can_forward = false break end
+          jf.bak_existed = true
+        else
+          -- Mid-swap crash: dest already moved aside. An existing .bak
+          -- IS the old live file; keep it as the backup.
+          jf.bak_existed = exists(bak)
+        end
+        local ok_mv = os.rename(staged, dest)
+        if not ok_mv then can_forward = false break end
+        jf.status = "applied"
+        Updater.journal_write(j)
+      end
+    end
+  end
+
+  if can_forward then
+    for _, jf in ipairs(j.files) do
+      os.remove(path_for(jf.name) .. ".bak")
+      os.remove(path_for(jf.name) .. ".new")
+    end
+    Updater.journal_delete()
+    Log.line("UPDATE", string.format(
+      "journal recovery: rolled interrupted apply FORWARD to v%s "
+      .. "(%d files).", tostring(j.target_version), #j.files))
+    if touched_context and RA.load_context then RA.load_context() end
+    return "forward"
+  end
+
+  -- Roll back. Flip the phase marker FIRST: this walk mutates disk the
+  -- same way the runtime rollback does, so it carries the same crash
+  -- exposure (a crash after a restore but before any status write must
+  -- never be rolled forward by the NEXT launch). With the marker on
+  -- disk, any interruption re-enters the idempotent rolling_back
+  -- completion above. If the marker cannot be written, mutate NOTHING:
+  -- the journal and all recovery state stay exactly as found, and the
+  -- caller exits the launch cleanly ("deferred").
+  j.phase = "rolling_back"
+  if not Updater.journal_write(j) then
+    Log.line("UPDATE",
+      "journal recovery: could not write the rolling_back marker; "
+      .. "leaving the journal and all recovery state untouched "
+      .. "(recovery deferred).")
+    return "deferred"
+  end
+  Log.line("UPDATE", string.format(
+    "journal recovery: rolling interrupted apply for v%s BACK; the "
+    .. "next session check offers the update again.",
+    tostring(j.target_version)))
+  return complete_rollback()
+end
+-- close transactional apply scope
+
+-- Resolve any interrupted apply NOW, before anything further loads.
+-- Must stay ahead of the critical-file probe and the CodeRuntime / UI
+-- dofiles below; Resources/Context.lua loads earlier than this point,
+-- so resolve_journal_at_startup reloads it when the journal touched it.
+--
+-- "skipped" means another LIVE instance is mid-apply on this shared
+-- install; "deferred" means an interrupted apply needs rolling back but
+-- the rolling_back marker could not be written (disk full/permissions),
+-- so recovery mutated nothing; "incomplete" means the rollback ran but
+-- some restores failed on locked files, so the journal was kept for the
+-- next launch to retry. In all three cases, continuing to load would
+-- run a possibly mixed install, so exit cleanly instead (atexit
+-- releases the toolbar state and this instance's lock).
+do
+  local resolved = Updater.resolve_journal_at_startup()
+  if resolved == "skipped" or resolved == "deferred"
+      or resolved == "incomplete" then
+    local messages = {
+      skipped =
+        "Another ReaAssist instance is applying an update to this "
+        .. "install right now.\n\n"
+        .. "Please reopen ReaAssist in a moment, once that update "
+        .. "finishes.",
+      deferred =
+        "ReaAssist could not record its update recovery state "
+        .. "(disk full or permissions?).\n\n"
+        .. "Please free up disk space or fix permissions for the "
+        .. "ReaAssist Data folder, then reopen ReaAssist.",
+      incomplete =
+        "ReaAssist is recovering from an interrupted update, but some "
+        .. "files are still locked (antivirus scans often hold them "
+        .. "briefly).\n\n"
+        .. "Please reopen ReaAssist in a moment; recovery will finish "
+        .. "automatically.",
+    }
+    reaper.MB(messages[resolved], "ReaAssist", 0)
+    S.script_open = false
+    return
+  end
 end
 
 Net = {}
@@ -36085,7 +37480,7 @@ local function loop()
   S._prev_status = S.status
 
   -- One-time post-update nudge for power-user prompt overrides. Set by
-  -- advance_after_rename when an update changed the stock system prompt
+  -- Updater._apply_finish when an update changed the stock system prompt
   -- while a custom override was active. Fired once per loop, gated so
   -- the toast appears immediately on launch (not after a chat). The
   -- ExtState is cleared the same frame we read it so the toast never
@@ -36115,10 +37510,12 @@ local function loop()
     else
       Updater.tick_sha_diff()
     end
-  elseif update.state == "downloading" then
-    Updater.download_poll()
-  elseif update.state == "rename_retry" then
-    Updater.rename_retry_poll()
+  elseif update.state == "downloading_batch" then
+    Updater.batch_download_poll()
+  elseif update.state == "verifying_download" then
+    Updater.download_verify_tick()
+  elseif update.state == "applying" then
+    Updater.apply_tick()
   end
   -- Stage 3.4 auto-restart: fires once after the apply completes and a
   -- short grace window elapses so the user sees the "Applied" message
@@ -36257,10 +37654,12 @@ function RA.pump_screen_reader_background()
       else
         Updater.tick_sha_diff()
       end
-    elseif update.state == "downloading" then
-      Updater.download_poll()
-    elseif update.state == "rename_retry" then
-      Updater.rename_retry_poll()
+    elseif update.state == "downloading_batch" then
+      Updater.batch_download_poll()
+    elseif update.state == "verifying_download" then
+      Updater.download_verify_tick()
+    elseif update.state == "applying" then
+      Updater.apply_tick()
     end
     Updater.try_auto_restart()
   end
@@ -36500,14 +37899,23 @@ function Bootstrap.render_minimal()
   elseif update.state == "verifying" then
     status_text = Bootstrap.t("bootstrap.status.verifying_files", nil,
       "Verifying files...")
-  elseif update.state == "downloading" or update.state == "rename_retry" then
+  elseif update.state == "downloading_batch" or update.state == "applying"
+      or update.state == "verifying_download" then
     cells_total = #(update.download_queue or {})
-    -- download_idx points at the file currently being fetched (1-indexed),
-    -- not the count of completed files. Subtract one so the in-flight
-    -- file's cell stays empty until it actually lands.
+    -- download_idx is the 1-based progress pointer (staged-file count + 1
+    -- during the batch download, apply index while applying). Subtract
+    -- one so the in-flight file's cell stays empty until it lands.
     cells_done  = math.max(0, math.min((update.download_idx or 0) - 1, cells_total))
-    status_text = Bootstrap.t("bootstrap.status.downloading", nil,
-      "Downloading...")
+    if update.state == "downloading_batch" then
+      status_text = Bootstrap.t("bootstrap.status.downloading", nil,
+        "Downloading...")
+    else
+      -- Staged verify + apply both read as "verifying" here: they are
+      -- the short local half of the install, and the cell row already
+      -- carries the real progress signal.
+      status_text = Bootstrap.t("bootstrap.status.verifying_files", nil,
+        "Verifying files...")
+    end
   elseif update.state == "done" then
     cells_total = #(update.download_queue or {})
     cells_done  = cells_total
@@ -36691,7 +38099,7 @@ function Bootstrap.render_checking()
 
   local status_text = Bootstrap.t("bootstrap.status.checking_updates", nil,
     "Checking for updates...")
-  if update.state == "verifying" then
+  if update.state == "verifying" or update.state == "verifying_download" then
     status_text = Bootstrap.t("bootstrap.status.verifying_files", nil,
       "Verifying files...")
   end
@@ -36810,7 +38218,7 @@ function Bootstrap.loop()
     S.imgui_in_frame_validated = true
   end
 
-  -- Pump the Update state machine so check_poll / download_poll / retry
+  -- Pump the Update state machine so check_poll / the batch pipeline
   -- all advance during bootstrap recovery. The normal main loop does this
   -- in its dev-signal handler; we do it inline here because the normal
   -- loop never runs in bootstrap mode.
@@ -36821,8 +38229,9 @@ function Bootstrap.loop()
     else                             Updater.tick_sha_diff()
     end
   end
-  if update.state == "downloading"   then Updater.download_poll()    end
-  if update.state == "rename_retry"  then Updater.rename_retry_poll() end
+  if update.state == "downloading_batch"  then Updater.batch_download_poll()  end
+  if update.state == "verifying_download" then Updater.download_verify_tick() end
+  if update.state == "applying"           then Updater.apply_tick()           end
   -- Auto-accept: in recovery we do not show an "Update Now" confirm step.
   if update.state == "available" or update.state == "repair_available" then
     Updater.download_start()
@@ -36902,9 +38311,11 @@ function Bootstrap.loop()
       -- transitions state back to "idle" rather than "failed".
       if update.state == "failed" or update.last_error then
         Bootstrap.render_failed()
-      elseif update.state == "downloading" or update.state == "rename_retry" then
+      elseif update.state == "downloading_batch"
+          or update.state == "applying" then
         Bootstrap.render_progress()
-      elseif update.state == "checking" or update.state == "verifying" then
+      elseif update.state == "checking" or update.state == "verifying"
+          or update.state == "verifying_download" then
         Bootstrap.render_checking()
       elseif update.state == "done" then
         Bootstrap.render_done()
@@ -36943,8 +38354,9 @@ function Bootstrap.screen_reader_loop()
     if s and s.mode == "native" then Updater.tick_native_sha()
     else Updater.tick_sha_diff() end
   end
-  if update.state == "downloading" then Updater.download_poll() end
-  if update.state == "rename_retry" then Updater.rename_retry_poll() end
+  if update.state == "downloading_batch" then Updater.batch_download_poll() end
+  if update.state == "verifying_download" then Updater.download_verify_tick() end
+  if update.state == "applying" then Updater.apply_tick() end
   if update.state == "available" or update.state == "repair_available" then
     Updater.download_start()
   end
@@ -36952,13 +38364,14 @@ function Bootstrap.screen_reader_loop()
 
   do
     local key, msg
-    if update.state == "checking" or update.state == "verifying" then
+    if update.state == "checking" or update.state == "verifying"
+        or update.state == "verifying_download" then
       key = update.state
       msg = "Checking ReaAssist files for Screen Reader Mode."
-    elseif update.state == "downloading" then
+    elseif update.state == "downloading_batch" then
       key = "downloading"
       msg = "Downloading ReaAssist files for Screen Reader Mode."
-    elseif update.state == "rename_retry" then
+    elseif update.state == "applying" then
       key = "applying"
       msg = "Applying ReaAssist files for Screen Reader Mode."
     elseif update.state == "done" and update.restart_after then

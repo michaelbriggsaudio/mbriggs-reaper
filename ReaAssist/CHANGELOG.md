@@ -1,5 +1,11 @@
 # ReaAssist - Changelog
 
+## v1.4.5 - 2026-07-17
+
+- **Updates are safer and more resilient.** ReaAssist now downloads and verifies the complete update before replacing files, uses version-pinned release files, and handles locked files without silently leaving them behind.
+
+- **Interrupted updates recover automatically.** A transaction journal can finish or roll back a partially applied update on the next launch, while an apply lock keeps two ReaAssist instances from changing the same installation at once.
+
 ## v1.4.4 - 2026-07-10
 
 - **OpenAI's GPT-5.6 family is now supported.** ReaAssist adds Luna, Terra, and Sol, recommends Luna with no thinking as the best tested default, migrates older GPT-5.4 selections, and accounts for GPT-5.6 caching and long-context pricing behavior.

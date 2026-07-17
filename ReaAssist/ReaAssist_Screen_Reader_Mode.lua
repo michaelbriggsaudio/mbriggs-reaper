@@ -11062,9 +11062,10 @@ function AppController.update_status_text()
       count = tostring(count),
     }, "Repair available: " .. tostring(count) .. " file(s) need repair.")
   end
-  if state == "downloading" or state == "rename_retry" then
-    local idx = update.download_idx or 0
+  if state == "downloading_batch" or state == "verifying_download"
+      or state == "applying" then
     local total = #(update.download_queue or {})
+    local idx = math.min(update.download_idx or 0, total)
     return AppController.t("a11y.sr.update_status.applying", {
       done = tostring(idx),
       total = tostring(total),

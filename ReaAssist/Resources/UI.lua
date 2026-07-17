@@ -17052,7 +17052,9 @@ function Render.main_window()
     if #S.attachments > 0 then
       bottom_reserve = bottom_reserve + math_floor(fhs * 1.5)
     end
-    if update.state == "downloading" or update.state == "rename_retry"
+    if update.state == "downloading_batch"
+       or update.state == "verifying_download"
+       or update.state == "applying"
        or update.state == "done" then
       bottom_reserve = bottom_reserve + fhs
     end
@@ -20374,9 +20376,14 @@ function Render.main_window()
     -- Update indicator: a thin standalone line above the footer rail while a
     -- download is in progress or just completed. The old button row it used
     -- to SameLine against is gone, so this now renders on its own line.
-    if update.state == "downloading" or update.state == "rename_retry" then
+    if update.state == "downloading_batch"
+        or update.state == "verifying_download"
+        or update.state == "applying" then
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), COL.DETAIL)
-      local prog = update.download_idx .. "/" .. #update.download_queue
+      -- download_idx is the 1-based progress pointer; clamp so the strip
+      -- never reads "29/28" when every file has staged or applied.
+      local total = #update.download_queue
+      local prog = math_min(update.download_idx or 0, total) .. "/" .. total
       Text(RA.ctx, UI.t("update.strip.updating", { progress = prog },
         "Updating (" .. prog .. ")..."))
       PopStyleColor(RA.ctx)
@@ -22026,7 +22033,9 @@ function Render.main_window()
       dlg_h = RA.SC(252)
     elseif update.state == "repair_available" then
       dlg_h = RA.SC(220)
-    elseif update.state == "downloading" or update.state == "rename_retry" then
+    elseif update.state == "downloading_batch"
+        or update.state == "verifying_download"
+        or update.state == "applying" then
       dlg_h = RA.SC(210)
     elseif update.state == "done" then
       dlg_h = RA.SC(225)
@@ -22070,10 +22079,14 @@ function Render.main_window()
     local dlg_visible, dlg_open = ImGui.ImGui_Begin(RA.ctx,
       dlg_title, show_close or nil, dlg_flags)
     if dlg_visible then
-      if update.state == "downloading" or update.state == "rename_retry" then
+      if update.state == "downloading_batch"
+          or update.state == "verifying_download"
+          or update.state == "applying" then
         -- Download progress view. Mirrors the bootstrap installer's small
         -- wordmark + discrete file-cell row so the normal updater no longer
-        -- feels like a generic system prompt.
+        -- feels like a generic system prompt. The staged-verify state
+        -- reuses the downloading copy: it is the brief local tail of the
+        -- same fetch phase, and the cell row carries the real progress.
         local dlg_cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
         local queue = update.download_queue or {}
         local total = #queue
@@ -22081,7 +22094,7 @@ function Render.main_window()
                                          math_max(total, 1)))
         local done = math_max(0, math_min(idx - 1, total))
         local status_text
-        if update.state == "rename_retry" then
+        if update.state == "applying" then
           status_text = UI.t("update.progress.applying", nil,
             "Applying update...")
         else

@@ -14,6 +14,13 @@ The session-aware workflow assistant for REAPER. Reads your project, dials in pl
 - Website: [reaassist.app](https://reaassist.app)
 - Full docs: [ReaAssist/README.md](ReaAssist/README.md)
 
+### ReaClock
+
+A scalable studio clock and session display for REAPER, with configurable Clock Faces, region and marker countdowns, Action Buttons, audio metering and visualizations, independent pop-out cards, docking, Presentation mode, and a phase-accurate visual click.
+
+- Folder: [ReaClock/](ReaClock/)
+- Full docs: [ReaClock/README.md](ReaClock/README.md)
+
 ## Installation
 
 ### Via ReaPack (recommended)
@@ -28,7 +35,7 @@ The session-aware workflow assistant for REAPER. Reads your project, dials in pl
 
 ### Manual
 
-Download the package folder you want into your REAPER scripts folder. Each package is self-contained; keep its `Resources/` directory directly beside the main script. Then load the script via REAPER's Action List. See each package's README for package-specific details.
+Download the complete package folder you want into your REAPER scripts folder. Each package is self-contained; preserve all included files and subfolders in their original layout. Then load its main script through REAPER's Action List. See the package README for any specific dependencies or instructions.
 
 ## Author
 
@@ -39,4 +46,4 @@ Michael Briggs is an award-winning audio engineer and producer based in Denton, 
 
 ## License
 
-Each package in this repository is licensed individually. See the LICENSE.txt file in each package folder for terms.
+Each package in this repository is licensed individually. See `ReaAssist/LICENSE.txt` or `ReaClock/Resources/LICENSE.txt` for the applicable terms.

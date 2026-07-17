@@ -1,5 +1,5 @@
 {
-  "version": "1.4.4",
+  "version": "1.4.5",
   "removed_files": [
     "ReaAssist - Screen Reader Mode.lua",
     "ReaAssist_ScreenReaderMode.lua",
@@ -12,7 +12,7 @@
   "files": [
     {
       "name": "CHANGELOG.md",
-      "sha256": "23fadefede84ff019a362271c6248452c2f160288c9438d724340c8e8a1237fa"
+      "sha256": "c65db9017f34ea3a341fd27717ffe215acf01a819ed67f3e9748a27391c3be4c"
     },
     {
       "name": "LICENSE.txt",
@@ -24,11 +24,11 @@
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "2705d0851e515ca83fb282636bddf7ca83106d5f488205c3e156aa4ee175f26f"
+      "sha256": "cd809c63c5011bf4bd3d8a676056ac14e99038efaf9aab26d0a2c544a0678705"
     },
     {
       "name": "ReaAssist_Screen_Reader_Mode.lua",
-      "sha256": "2e0d4eee5921e4306ea7d8ffdc0de58be5bc068797ab7877b545a4512b37ea03"
+      "sha256": "5253fb699b0e7b930b2fd3fc79a1c4136cd888a4bfde58fa7f7ae952b2a29c73"
     },
     {
       "name": "Resources/API_Ref.md",
@@ -92,7 +92,7 @@
     },
     {
       "name": "Resources/UI.lua",
-      "sha256": "d824e344766f722b4d3212abfa018ddcfe8cc180ddaaa8f5a52bd8350d351bde"
+      "sha256": "5759151f7d7c0b77fd660b643eaa10c7b89b65714843fd3fcf957f9c35618d63"
     },
     {
       "name": "Resources/fonts/Inter_18pt-Bold.ttf",

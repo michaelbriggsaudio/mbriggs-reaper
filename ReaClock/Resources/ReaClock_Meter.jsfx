@@ -1,0 +1,2213 @@
+// ReaClock managed meter
+// ReaClock-Version: 1.0.0
+// ReaClock-Meter-API: 1
+// ReaClock-Meter-Build: 10
+// ReaClock-Meter-Checksum: 422FFE58
+//
+// Derived from Cockos Loudness Meter Peak/RMS/LUFS.
+// Original effect Copyright (C) 2021 and later Cockos Incorporated.
+// License: LGPL - http://www.gnu.org/licenses/lgpl.html
+// ReaClock modifications Copyright (C) 2026 Michael Briggs.
+// Modified for ReaClock on 2026-07-15.
+//
+// This derivative is free software: you can redistribute it and/or modify it
+// under the terms of the GNU Lesser General Public License as published by the
+// Free Software Foundation, version 3 of the License.
+//
+// This derivative is distributed in the hope that it will be useful, but
+// WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+// or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public
+// License for more details.
+//
+// The complete LGPLv3 and GPLv3 terms are distributed with ReaClock in
+// Resources/LICENSE.txt and are also available at
+// https://www.gnu.org/licenses/.
+
+desc: ReaClock Meter
+//tags: analysis loudness meter reaclock
+//author: Michael Briggs / ReaClock, based on Cockos
+
+out_pin:none
+
+
+slider1:cfg_reset_on_transport=1<0,1,1{off,on}>-Reset on transport start
+slider2:cfg_mono=0<0,1,1{off,on}>-Force mono analysis
+slider3:cfg_true_peak_user=0<0,1,1{off,on}>-True peak user enable
+
+slider30:out_sample_peak_current=-150<-150,24,0.01>-Sample peak current dBFS (output)
+slider31:out_sample_peak_max=-150<-150,24,0.01>-Sample peak maximum dBFS (output)
+slider32:out_true_peak_current=-150<-150,24,0.01>-True peak current dBTP (output)
+slider33:out_true_peak_max=-150<-150,24,0.01>-True peak maximum dBTP (output)
+slider34:out_rms_m_current=-150<-150,24,0.01>-RMS-M current dBFS (output)
+slider35:out_rms_m_max=-150<-150,24,0.01>-RMS-M maximum dBFS (output)
+slider36:out_rms_i_current=-150<-150,24,0.01>-RMS-I current dBFS (output)
+slider37:out_rms_i_max=-150<-150,24,0.01>-RMS-I maximum dBFS (output)
+slider38:out_lufs_m_current=-150<-150,24,0.01>-LUFS-M current (output)
+slider39:out_lufs_m_max=-150<-150,24,0.01>-LUFS-M maximum (output)
+slider40:out_lufs_s_current=-150<-150,24,0.01>-LUFS-S current (output)
+slider41:out_lufs_s_max=-150<-150,24,0.01>-LUFS-S maximum (output)
+slider42:out_lufs_i_current=-150<-150,24,0.01>-LUFS-I current (output)
+slider43:out_lufs_i_max=-150<-150,24,0.01>-LUFS-I maximum (output)
+slider44:out_lra_current=0<0,100,0.01>-LRA current LU (output)
+slider45:out_lra_max=0<0,100,0.01>-LRA maximum LU (output)
+slider46:out_reset_ack=0<0,65535,1>-Reset acknowledgement (output)
+slider47:out_valid_mask=0<0,65535,1>-Validity mask (output)
+slider48:out_heartbeat=0<0,16777215,1>-Heartbeat (output)
+slider49:out_channel_count=0<0,128,1>-Channel count (output)
+slider50:out_api_version=1<0,255,1>-Bridge API version (output)
+slider51:out_command_slot=0<0,16383,1>-Command slot (output)
+slider52:out_owner_token=1<1,16777215,1>-Command owner token (output)
+slider53:out_correlation=0<-1,1,0.0001>-Stereo correlation current (output)
+slider54:out_transport_arm_ack=0<0,65535,1>-Transport arm acknowledgement (output)
+slider55:out_measurement_epoch=0<0,65535,1>-Measurement epoch (output)
+slider56:cfg_channel_limit=0<0,128,1>-Channel limit (0=Auto)
+slider57:out_meter_build=7<0,65535,1>-Bridge build (output)
+
+options:no_meter
+options:gmem=ReaClock_Meter_v1
+
+
+@init
+
+<?
+  nch = max(max_nch,64); // maximum channel count
+  sinc_sz = 32; // true peak interpolation size
+  use_mem_sinc = sinc_sz>32;
+
+  printf("sinc_sz = %d;\n",sinc_sz);
+
+ function do_all_channels(fmt) local(p x c) global(nch) (
+   p=x=0;
+   while (x < nch) (
+     p+=1;
+     x>0 ? printf("analysis_ch > %d ? ( ",x);
+     c = x>=24 ? 8 : x>=8 ? 4 : 2;
+     loop(c,
+       printf("analysis_ch > %d ? ( ",x);
+       printf(fmt,x,x);
+       printf("); ");
+       x+=1;
+     );
+     printf("\n");
+   );
+   loop(p-1,printf(")"));
+ );
+?>
+
+// rms-i, lufs-i, lra calculated 0=during playback only, 1=always
+WANT_INTEGRATED_ALWAYS=0;
+
+COMMAND_MAGIC=52601;
+COMMAND_API=1;
+METER_BUILD=10;
+SLOT_COUNT=16384;
+SLOT_BASE=16;
+SLOT_STRIDE=8;
+TOKEN_MAX=16777215;
+HEARTBEAT_MOD=16777216;
+COUNTER_MOD=65536;
+TRUE_PEAK_LEASE_SECONDS=2;
+
+VISUAL_HEADER=131088;
+VISUAL_MAGIC=52611;
+VISUAL_API=4;
+VISUAL_SOURCE_BASE=262144;
+VISUAL_SOURCE_STRIDE=48;
+VISUAL_LANE_BASE=1048576;
+VISUAL_LANE_COUNT=64;
+VISUAL_LANE_STRIDE=73728;
+VISUAL_LANE_HEADER=64;
+VISUAL_BANK_SIZE=3072;
+VISUAL_SPECTRUM_HISTORY_OFFSET=6208;
+VISUAL_SPECTRUM_HISTORY_CAPACITY=256;
+VISUAL_SPECTRUM_HISTORY_ENTRY_SIZE=260;
+VISUAL_PROFILE_COUNT=4;
+VISUAL_LEASE_SECONDS=2;
+VISUAL_PRIME_A=16777213;
+VISUAL_PRIME_B=16777199;
+THEME_MAGIC=52621;
+THEME_BASE=7340032;
+THEME_STRIDE=16;
+
+VIS_DEMAND_LEVELS=1;
+VIS_DEMAND_WAVE=2;
+VIS_DEMAND_SPECTRUM=4;
+VIS_DEMAND_SCOPE=8;
+VIS_DEMAND_CORRELATION=16;
+
+// Descriptor codes frozen for visual API 1.
+VIS_MODE_AUTO=0;
+VIS_MODE_MONO=1;
+VIS_MODE_PAIR=2;
+VIS_MODE_ALL=3;
+VIS_QUALITY_AUTO=0;
+VIS_QUALITY_LOW=1;
+VIS_QUALITY_STANDARD=2;
+VIS_QUALITY_HIGH=3;
+VIS_QUALITY_MAXIMUM=4;
+
+// Fixed local-memory arena. The stock-derived allocator stays below this
+// range; visual buffers are never invalidated by its reset-time allocations.
+VIS_RING_BASE=65536;
+// Maximum-quality overlap can look back almost one audio block beyond an
+// 8192-sample FFT. Keep two full FFT windows per captured channel so every
+// scheduled column remains available instead of only block-aligned frames.
+VIS_RING_STRIDE=16384;
+VIS_FFT_SCRATCH=1114112;
+VIS_FFT_ACCUM=1122304;
+VIS_WINDOW_1024=1126400;
+VIS_WINDOW_2048=1127424;
+VIS_WINDOW_4096=1129472;
+VIS_WINDOW_8192=1133568;
+VIS_PROFILE_BASE=1141760;
+VIS_PROFILE_STRIDE=64;
+VIS_WAVE_ACCUM=1142016;
+VIS_WAVE_SNAPSHOT=1146112;
+VIS_SPECTRUM_SNAPSHOT=1150208;
+VIS_SCOPE_SNAPSHOT=1154304;
+VIS_LEVEL_SNAPSHOT=1156352;
+VIS_RMS_SUM=1157120;
+VIS_RMS_HISTORY=1157184;
+VIS_RMS_ROLLING=1157440;
+
+P_ACTIVE=0;
+P_LANE=1;
+P_LANE_TOKEN=2;
+P_DEMAND=3;
+P_MODE=4;
+P_CHANNEL_A=5;
+P_CHANNEL_B=6;
+P_TIMEBASE=7;
+P_FFT_CODE=8;
+P_QUALITY=9;
+P_GENERATION=10;
+P_CONTROLLER=11;
+P_EFFECTIVE_QUALITY=12;
+P_FFT_SIZE=13;
+P_WAVE_COUNT=14;
+P_SPECTRUM_COUNT=15;
+P_SCOPE_COUNT=16;
+P_LEVEL_INTERVAL=17;
+P_WAVE_INTERVAL=18;
+P_SPECTRUM_INTERVAL=19;
+P_SCOPE_INTERVAL=20;
+P_CORRELATION_INTERVAL=21;
+P_FRAME_SEQUENCE=22;
+P_ACTIVE_BANK=23;
+P_DROPPED=24;
+P_READY=25;
+P_LEVEL_SEQUENCE=26;
+P_LEVEL_TIMESTAMP=27;
+P_WAVE_SEQUENCE=28;
+P_WAVE_TIMESTAMP=29;
+P_SPECTRUM_SEQUENCE=30;
+P_SPECTRUM_TIMESTAMP=31;
+P_SCOPE_SEQUENCE=32;
+P_SCOPE_TIMESTAMP=33;
+P_CORRELATION_SEQUENCE=34;
+P_CORRELATION_TIMESTAMP=35;
+P_CORRELATION_VALUE=36;
+P_NEXT_LEVEL=37;
+P_NEXT_WAVE=38;
+P_NEXT_SPECTRUM=39;
+P_NEXT_SCOPE=40;
+P_NEXT_CORRELATION=41;
+P_WAVE_POSITION=42;
+P_WAVE_IN_BUCKET=43;
+P_WAVE_SPAN=44;
+P_WAVE_VALID=45;
+P_RESOLVED_A=46;
+P_RESOLVED_B=47;
+P_CORR_XY=48;
+P_CORR_X2=49;
+P_CORR_Y2=50;
+P_FRAME_PENDING=51;
+P_STATUS=52;
+
+VALID_SAMPLE_PEAK=1;
+VALID_TRUE_PEAK=2;
+VALID_RMS_M=4;
+VALID_RMS_I=8;
+VALID_LUFS_M=16;
+VALID_LUFS_S=32;
+VALID_LUFS_I=64;
+VALID_LRA=128;
+VALID_CORRELATION=256;
+
+FONT_SZ_MIN=12;
+FONT_SZ_MAX=16;
+// $xRRGGBB
+BG_COLOR=$x000000;
+GRID_COLOR=$x7f7f7f;
+TEXT_COLOR=$xffffff;
+PEAK_COLOR=$x3fff3f;
+PEAK_CLIP_COLOR=$xff0000;
+RMS_COLOR=$x7f7f7f;
+LUFS_COLOR=$x00bfff;
+LUFS_HIST_COLOR=$x005f7f;
+RED_COLOR=$xff0000;
+YELLOW_COLOR=$xffff00;
+MONO_COLOR=$xffa500;
+
+PEAK_METER_DECAY=0.150;
+LOUD_METER_UPDATE=0.100; // default 100ms, must be divisible into both 0.4 and 3.0
+LOUD_METER_SPEED=0.075;
+
+UI_SLIDER_MASK=(1<<15)-1;
+
+function refresh_channel_count()
+(
+  host_channel_count=max(0,min(128,floor(num_ch)));
+  requested_channel_count=max(0,min(128,floor(cfg_channel_limit)));
+  analysis_ch=requested_channel_count > 0
+    ? min(host_channel_count,requested_channel_count)
+    : host_channel_count;
+  out_channel_count=analysis_ch;
+);
+
+ext_noinit=1;
+ext_nodenorm=1;
+gfx_ext_retina=max(gfx_ext_retina,1);
+
+sliders_showing=0;
+
+NUM_BINS=1024;
+BINS_PER_DB=10;
+DB_PER_BIN=1/BINS_PER_DB;
+
+function alloc(sz) global()
+(
+  memset((this.top+=sz)-sz,0,sz);
+);
+
+function publish_command_header()
+(
+  gmem[0]=COMMAND_MAGIC;
+  gmem[1]=COMMAND_API;
+  gmem[2]=SLOT_BASE;
+  gmem[3]=SLOT_COUNT;
+  gmem[4]=SLOT_STRIDE;
+);
+
+function claim_command_slot()
+  local(candidate previous_slot previous_token)
+(
+  previous_slot=command_slot;
+  previous_token=owner_token;
+  claim_serial+=1;
+  candidate=floor((rand(SLOT_COUNT)
+    + previous_slot*131
+    + (previous_token%SLOT_COUNT)*17
+    + claim_serial*977)%SLOT_COUNT);
+  command_slot=candidate;
+  owner_token=16500000+floor((rand(277215)
+    + previous_slot*977
+    + (previous_token%277215)*17
+    + claim_serial*131)%277215);
+  command_base=SLOT_BASE+command_slot*SLOT_STRIDE;
+  gmem[command_base]=owner_token;
+
+  // A newly claimed slot can contain an old owner's request cells. Seed every
+  // seen value from the record so stale commands never reach the new instance.
+  gmem_reset_seen=floor(gmem[command_base+2])%COUNTER_MOD;
+  true_peak_lease_seen=floor(gmem[command_base+3])%COUNTER_MOD;
+  gmem_transport_arm_seen=floor(gmem[command_base+7])%COUNTER_MOD;
+  true_peak_lease_remaining=0;
+  gmem[command_base+5]=gmem_reset_seen;
+  out_reset_ack=gmem_reset_seen;
+  out_transport_arm_ack=gmem_transport_arm_seen;
+  out_command_slot=command_slot;
+  out_owner_token=owner_token;
+);
+
+function vis_mod_positive(value prime)
+(
+  value-floor(value/prime)*prime;
+);
+
+function vis_quantize(value)
+(
+  value >= 0 ? floor(value*1000+0.5) : -floor(-value*1000+0.5);
+);
+
+function vis_hash_value(value index)
+  local(q)
+(
+  q=vis_quantize(value);
+  vis_hash_a=vis_mod_positive(vis_hash_a+q,VISUAL_PRIME_A);
+  vis_hash_b=vis_mod_positive(vis_hash_b+(index+1)*q,VISUAL_PRIME_B);
+);
+
+function vis_exact_integer(value)
+(
+  value == floor(value) && value > -9007199254740992
+    && value < 9007199254740992;
+);
+
+function vis_bump(value)
+(
+  value=(floor(value)+1)%COUNTER_MOD;
+  value == 0 ? 1 : value;
+);
+
+function vis_db(value)
+(
+  value > 0 ? max(-150,min(24,log(value)*20/log(10))) : -150;
+);
+
+function vis_clamp_sample(value)
+(
+  max(-16,min(16,value));
+);
+
+function vis_profile(index)
+(
+  VIS_PROFILE_BASE+index*VIS_PROFILE_STRIDE;
+);
+
+function vis_lane_base(p)
+(
+  VISUAL_LANE_BASE+floor(p[P_LANE])*VISUAL_LANE_STRIDE;
+);
+
+function vis_lane_valid(p)
+  local(base)
+(
+  base=vis_lane_base(p);
+  gmem[base] == VISUAL_MAGIC
+    && gmem[base+1] == VISUAL_API
+    && gmem[base+2] == p[P_LANE_TOKEN]
+    && gmem[base+3] == owner_token
+    && gmem[base+4] == p[P_CONTROLLER]
+    && gmem[base+5] == p[P_GENERATION];
+);
+
+function vis_build_window(base size)
+  local(index value sum)
+(
+  index=0;
+  sum=0;
+  loop(size,
+    value=0.5-0.5*cos(2*$pi*index/(size-1));
+    base[index]=value;
+    sum+=value;
+    index+=1;
+  );
+  sum;
+);
+
+function vis_clear_rms()
+(
+  memset(VIS_RMS_HISTORY,0,256);
+  memset(VIS_RMS_ROLLING,0,64);
+  vis_rms_position=0;
+  vis_rms_filled=0;
+  vis_rms_wait_for_boundary=1;
+);
+
+function vis_clear_profile(index p reset_sequences)
+  local(level snapshot spectrum scope lane frame_sequence active_bank)
+(
+  level=VIS_LEVEL_SNAPSHOT+index*192;
+  snapshot=VIS_WAVE_SNAPSHOT+index*1024;
+  spectrum=VIS_SPECTRUM_SNAPSHOT+index*1024;
+  scope=VIS_SCOPE_SNAPSHOT+index*512;
+  memset(VIS_WAVE_ACCUM+index*1024,0,1024);
+  memset(snapshot,0,1024);
+  memset(scope,0,512);
+  memset(level,-150,192);
+  memset(spectrum,-150,1024);
+
+  lane=vis_lane_base(p);
+  vis_lane_valid(p) ? (
+    gmem[lane+12]=0;
+    gmem[lane+13]=-1;
+    gmem[lane+14]=0;
+  );
+
+  reset_sequences ? (
+    frame_sequence=floor(gmem[lane+11])%COUNTER_MOD;
+    active_bank=floor(gmem[lane+7]);
+    p[P_FRAME_SEQUENCE]=frame_sequence;
+    p[P_ACTIVE_BANK]=(active_bank == 0 || active_bank == 1) ? active_bank : 0;
+    p[P_DROPPED]=0;
+    p[P_LEVEL_SEQUENCE]=0;
+    p[P_WAVE_SEQUENCE]=0;
+    p[P_SPECTRUM_SEQUENCE]=0;
+    p[P_SCOPE_SEQUENCE]=0;
+    p[P_CORRELATION_SEQUENCE]=0;
+  );
+  p[P_READY]=0;
+  p[P_LEVEL_TIMESTAMP]=0;
+  p[P_WAVE_TIMESTAMP]=0;
+  p[P_SPECTRUM_TIMESTAMP]=0;
+  p[P_SCOPE_TIMESTAMP]=0;
+  p[P_CORRELATION_TIMESTAMP]=0;
+  p[P_CORRELATION_VALUE]=0;
+  p[P_WAVE_POSITION]=0;
+  p[P_WAVE_IN_BUCKET]=0;
+  p[P_WAVE_VALID]=0;
+  p[P_CORR_XY]=0;
+  p[P_CORR_X2]=0;
+  p[P_CORR_Y2]=0;
+  p[P_FRAME_PENDING]=0;
+  p[P_STATUS]=0;
+  p[P_NEXT_LEVEL]=vis_processed_samples+max(1,p[P_LEVEL_INTERVAL]);
+  p[P_NEXT_WAVE]=vis_processed_samples+max(1,p[P_WAVE_INTERVAL]);
+  p[P_NEXT_SPECTRUM]=vis_processed_samples+p[P_FFT_SIZE]
+    +index*max(1,p[P_SPECTRUM_INTERVAL]/max(1,vis_profile_count));
+  p[P_NEXT_SCOPE]=vis_processed_samples+max(1,p[P_SCOPE_INTERVAL]);
+  p[P_NEXT_CORRELATION]=vis_processed_samples
+    +max(1,p[P_CORRELATION_INTERVAL]);
+);
+
+function visual_initialize()
+(
+  memset(VIS_PROFILE_BASE,0,VIS_PROFILE_COUNT*VIS_PROFILE_STRIDE);
+  memset(VIS_WAVE_ACCUM,0,4096);
+  memset(VIS_WAVE_SNAPSHOT,0,4096);
+  memset(VIS_SPECTRUM_SNAPSHOT,-150,4096);
+  memset(VIS_SCOPE_SNAPSHOT,0,2048);
+  memset(VIS_LEVEL_SNAPSHOT,-150,768);
+  vis_window_sum_1024=vis_build_window(VIS_WINDOW_1024,1024);
+  vis_window_sum_2048=vis_build_window(VIS_WINDOW_2048,2048);
+  vis_window_sum_4096=vis_build_window(VIS_WINDOW_4096,4096);
+  vis_window_sum_8192=vis_build_window(VIS_WINDOW_8192,8192);
+  vis_initialized=1;
+  vis_processed_samples=0;
+  vis_ring_write=0;
+  vis_ring_filled=0;
+  vis_capture_channels=0;
+  vis_levels_active=0;
+  vis_levels_was_active=0;
+  vis_all_wave_active=0;
+  vis_all_wave_min=vis_all_wave_max=0;
+  vis_profile_count=0;
+  vis_lease_seen=-1;
+  vis_lease_remaining=0;
+  vis_bound_slot=-1;
+  vis_bound_token=-1;
+  vis_bound_controller=-1;
+  vis_clear_rms();
+);
+
+function visual_reset_all()
+  local(index p)
+(
+  vis_initialized ? (
+    vis_ring_write=0;
+    vis_ring_filled=0;
+    vis_clear_rms();
+    index=0;
+    loop(VISUAL_PROFILE_COUNT,
+      p=vis_profile(index);
+      vis_clear_profile(index,p,0);
+      index+=1;
+    );
+  );
+);
+
+function vis_deactivate_all()
+  local(index p)
+(
+  index=0;
+  loop(VISUAL_PROFILE_COUNT,
+    p=vis_profile(index);
+    p[P_ACTIVE]=0;
+    index+=1;
+  );
+  vis_profile_count=0;
+  vis_capture_channels=0;
+  vis_levels_active=0;
+  vis_levels_was_active=0;
+  vis_all_wave_active=0;
+);
+
+function vis_source_request_valid(record)
+  local(begin_generation end_generation count index cursor expected_a expected_b
+        controller)
+(
+  begin_generation=floor(gmem[record+2])%COUNTER_MOD;
+  end_generation=floor(gmem[record+3])%COUNTER_MOD;
+  count=floor(gmem[record+6]);
+  controller=gmem[record+1];
+  vis_request_valid=begin_generation > 0
+    && begin_generation == end_generation
+    && gmem[record] == owner_token
+    && vis_exact_integer(controller) && controller >= 1
+    && controller <= TOKEN_MAX
+    && count >= 1 && count <= VISUAL_PROFILE_COUNT;
+
+  vis_request_valid ? (
+    vis_hash_a=0;
+    vis_hash_b=0;
+    vis_hash_value(gmem[record],0);
+    vis_hash_value(gmem[record+1],1);
+    vis_hash_value(gmem[record+6],6);
+    index=0;
+    loop(count*10,
+      cursor=8+index;
+      vis_hash_value(gmem[record+cursor],cursor);
+      index+=1;
+    );
+    expected_a=gmem[record+4];
+    expected_b=gmem[record+5];
+    vis_request_valid=vis_hash_a == expected_a && vis_hash_b == expected_b
+      && floor(gmem[record+2])%COUNTER_MOD == begin_generation
+      && floor(gmem[record+3])%COUNTER_MOD == begin_generation;
+  );
+  vis_request_valid ? (
+    vis_request_generation=begin_generation;
+    vis_request_count=count;
+    vis_request_controller=controller;
+    vis_request_checksum_a=expected_a;
+    vis_request_checksum_b=expected_b;
+  );
+  vis_request_valid;
+);
+
+function vis_descriptors_valid(record count controller)
+  local(index descriptor lane lane_token demand mode channel_a channel_b
+        timebase fft_code quality generation lane_base
+        lane0 lane1 lane2 lane3 duplicate)
+(
+  lane0=lane1=lane2=lane3=-1;
+  index=0;
+  vis_request_valid=1;
+  loop(count,
+    descriptor=record+8+index*10;
+    lane=gmem[descriptor];
+    lane_token=gmem[descriptor+1];
+    demand=gmem[descriptor+2];
+    mode=gmem[descriptor+3];
+    channel_a=gmem[descriptor+4];
+    channel_b=gmem[descriptor+5];
+    timebase=gmem[descriptor+6];
+    fft_code=gmem[descriptor+7];
+    quality=gmem[descriptor+8];
+    generation=gmem[descriptor+9];
+    duplicate=lane == lane0 || lane == lane1 || lane == lane2 || lane == lane3;
+    vis_request_valid=vis_request_valid &&
+      vis_exact_integer(lane) && lane >= 0 && lane < VISUAL_LANE_COUNT
+      && !duplicate
+      && vis_exact_integer(lane_token) && lane_token >= 1
+      && lane_token <= TOKEN_MAX
+      && vis_exact_integer(demand) && demand >= 1 && demand <= 31
+      && vis_exact_integer(mode) && mode >= VIS_MODE_AUTO && mode <= VIS_MODE_ALL
+      && vis_exact_integer(channel_a) && channel_a >= -1 && channel_a < 64
+      && vis_exact_integer(channel_b) && channel_b >= -1 && channel_b < 64
+      && vis_exact_integer(timebase) && timebase >= 0 && timebase <= 4
+      && vis_exact_integer(fft_code) && fft_code >= 0 && fft_code <= 3
+      && vis_exact_integer(quality) && quality >= VIS_QUALITY_AUTO
+      && quality <= VIS_QUALITY_MAXIMUM
+      && vis_exact_integer(generation) && generation >= 1
+      && generation < COUNTER_MOD;
+    mode == VIS_MODE_MONO ? vis_request_valid=vis_request_valid
+      && channel_a >= 0 && channel_a < analysis_ch;
+    mode == VIS_MODE_PAIR ? vis_request_valid=vis_request_valid
+      && channel_a >= 0 && channel_a < analysis_ch
+      && channel_b >= 0 && channel_b < analysis_ch;
+    lane_base=VISUAL_LANE_BASE+lane*VISUAL_LANE_STRIDE;
+    vis_request_valid ? vis_request_valid=
+      gmem[lane_base] == VISUAL_MAGIC
+        && gmem[lane_base+1] == VISUAL_API
+        && gmem[lane_base+2] == lane_token
+        && gmem[lane_base+3] == owner_token
+        && gmem[lane_base+4] == controller
+        && gmem[lane_base+5] == generation;
+    index == 0 ? lane0=lane;
+    index == 1 ? lane1=lane;
+    index == 2 ? lane2=lane;
+    index == 3 ? lane3=lane;
+    index+=1;
+  );
+  vis_request_valid;
+);
+
+function vis_profile_apply(index record descriptor count controller)
+  local(p lane lane_token demand mode channel_a channel_b timebase fft_code
+        quality generation effective requested_fft fft_size wave_count
+        spectrum_count scope_count level_rate wave_rate spectrum_rate corr_rate
+        time_ms resolved_a resolved_b changed)
+(
+  p=vis_profile(index);
+  lane=floor(gmem[descriptor]);
+  lane_token=gmem[descriptor+1];
+  demand=floor(gmem[descriptor+2]);
+  mode=floor(gmem[descriptor+3]);
+  channel_a=floor(gmem[descriptor+4]);
+  channel_b=floor(gmem[descriptor+5]);
+  timebase=floor(gmem[descriptor+6]);
+  fft_code=floor(gmem[descriptor+7]);
+  quality=floor(gmem[descriptor+8]);
+  generation=floor(gmem[descriptor+9]);
+
+  effective=quality == VIS_QUALITY_AUTO
+    ? (count == 1 ? VIS_QUALITY_HIGH
+      : count == 2 ? VIS_QUALITY_STANDARD : VIS_QUALITY_LOW) : quality;
+  requested_fft=fft_code == 0 ? 1024 : fft_code == 1 ? 2048
+    : fft_code == 2 ? 4096 : 8192;
+  fft_size=effective == VIS_QUALITY_LOW ? 1024
+    : effective == VIS_QUALITY_STANDARD ? min(2048,requested_fft)
+    : requested_fft;
+  wave_count=effective == VIS_QUALITY_LOW ? 128 : 256;
+  spectrum_count=effective == VIS_QUALITY_LOW ? 96
+    : effective == VIS_QUALITY_STANDARD ? 128
+    : effective == VIS_QUALITY_MAXIMUM ? 1024 : 512;
+  scope_count=wave_count;
+  level_rate=effective == VIS_QUALITY_LOW ? 20 : 30;
+  wave_rate=effective == VIS_QUALITY_LOW ? 15 : 30;
+  spectrum_rate=effective == VIS_QUALITY_LOW ? 10
+    : effective == VIS_QUALITY_STANDARD ? 20
+    : effective == VIS_QUALITY_MAXIMUM ? 240 : 30;
+  corr_rate=effective >= VIS_QUALITY_HIGH ? 20 : 10;
+  time_ms=timebase == 0 ? 10 : timebase == 1 ? 25
+    : timebase == 2 ? 50 : timebase == 3 ? 100 : 250;
+
+  mode == VIS_MODE_MONO ? (
+    resolved_a=channel_a;
+    resolved_b=channel_a;
+  ) : mode == VIS_MODE_PAIR ? (
+    resolved_a=channel_a;
+    resolved_b=channel_b;
+  ) : (
+    resolved_a=0;
+    resolved_b=analysis_ch > 1 ? 1 : 0;
+  );
+
+  changed=p[P_ACTIVE] != 1 || p[P_LANE] != lane
+    || p[P_LANE_TOKEN] != lane_token || p[P_DEMAND] != demand
+    || p[P_MODE] != mode || p[P_CHANNEL_A] != channel_a
+    || p[P_CHANNEL_B] != channel_b || p[P_TIMEBASE] != timebase
+    || p[P_FFT_CODE] != fft_code || p[P_QUALITY] != quality
+    || p[P_GENERATION] != generation || p[P_CONTROLLER] != controller
+    || p[P_FFT_SIZE] != fft_size || p[P_RESOLVED_A] != resolved_a
+    || p[P_RESOLVED_B] != resolved_b;
+
+  p[P_ACTIVE]=1;
+  p[P_LANE]=lane;
+  p[P_LANE_TOKEN]=lane_token;
+  p[P_DEMAND]=demand;
+  p[P_MODE]=mode;
+  p[P_CHANNEL_A]=channel_a;
+  p[P_CHANNEL_B]=channel_b;
+  p[P_TIMEBASE]=timebase;
+  p[P_FFT_CODE]=fft_code;
+  p[P_QUALITY]=quality;
+  p[P_GENERATION]=generation;
+  p[P_CONTROLLER]=controller;
+  p[P_EFFECTIVE_QUALITY]=effective;
+  p[P_FFT_SIZE]=fft_size;
+  p[P_WAVE_COUNT]=wave_count;
+  p[P_SPECTRUM_COUNT]=spectrum_count;
+  p[P_SCOPE_COUNT]=scope_count;
+  p[P_LEVEL_INTERVAL]=max(1,floor(srate/level_rate));
+  p[P_WAVE_INTERVAL]=max(1,floor(srate/wave_rate));
+  p[P_SPECTRUM_INTERVAL]=max(1,floor(srate/spectrum_rate));
+  p[P_SCOPE_INTERVAL]=max(1,floor(srate/wave_rate));
+  p[P_CORRELATION_INTERVAL]=max(1,floor(srate/corr_rate));
+  p[P_WAVE_SPAN]=max(1,floor(srate*time_ms/1000/wave_count));
+  p[P_RESOLVED_A]=resolved_a;
+  p[P_RESOLVED_B]=resolved_b;
+  changed ? (
+    vis_clear_profile(index,p,1);
+    vis_ring_filled=0;
+  );
+  p;
+);
+
+function vis_source_still_current()
+(
+  vis_source_record >= VISUAL_SOURCE_BASE
+    && gmem[vis_source_record] == owner_token
+    && gmem[vis_source_record+1] == vis_request_controller
+    && floor(gmem[vis_source_record+2])%COUNTER_MOD == vis_request_generation
+    && floor(gmem[vis_source_record+3])%COUNTER_MOD == vis_request_generation
+    && gmem[vis_source_record+4] == vis_request_checksum_a
+    && gmem[vis_source_record+5] == vis_request_checksum_b
+    && floor(gmem[vis_source_record+6]) == vis_request_count;
+);
+
+function vis_refresh_request()
+  local(header_ok record count lease_sequence index descriptor p required)
+(
+  header_ok=gmem[VISUAL_HEADER] == VISUAL_MAGIC
+    && gmem[VISUAL_HEADER+1] == VISUAL_API
+    && gmem[VISUAL_HEADER+2] == VISUAL_SOURCE_BASE
+    && gmem[VISUAL_HEADER+3] == VISUAL_SOURCE_STRIDE
+    && gmem[VISUAL_HEADER+4] == VISUAL_LANE_BASE
+    && gmem[VISUAL_HEADER+5] == VISUAL_LANE_COUNT
+    && gmem[VISUAL_HEADER+6] == VISUAL_LANE_STRIDE
+    && gmem[VISUAL_HEADER+7] == VISUAL_BANK_SIZE;
+  record=VISUAL_SOURCE_BASE+command_slot*VISUAL_SOURCE_STRIDE;
+  vis_source_record=record;
+  header_ok && vis_source_request_valid(record)
+      && vis_descriptors_valid(record,vis_request_count,vis_request_controller) ? (
+    command_slot != vis_bound_slot || owner_token != vis_bound_token
+        || vis_request_controller != vis_bound_controller ? (
+      vis_bound_slot=command_slot;
+      vis_bound_token=owner_token;
+      vis_bound_controller=vis_request_controller;
+      vis_lease_seen=-1;
+      vis_lease_remaining=0;
+      vis_deactivate_all();
+    );
+    lease_sequence=floor(gmem[record+7])%COUNTER_MOD;
+    lease_sequence != vis_lease_seen ? (
+      vis_lease_seen=lease_sequence;
+      vis_lease_remaining=VISUAL_LEASE_SECONDS*srate;
+    );
+    vis_lease_remaining=max(0,vis_lease_remaining-samplesblock);
+    vis_lease_remaining > 0 ? (
+      count=vis_request_count;
+      vis_profile_count=count;
+      index=0;
+      loop(count,
+        descriptor=record+8+index*10;
+        vis_profile_apply(index,record,descriptor,count,vis_request_controller);
+        index+=1;
+      );
+      loop(VISUAL_PROFILE_COUNT-count,
+        p=vis_profile(index);
+        p[P_ACTIVE]=0;
+        index+=1;
+      );
+
+      vis_levels_active=0;
+      vis_all_wave_active=0;
+      vis_capture_channels=0;
+      index=0;
+      loop(count,
+        p=vis_profile(index);
+        (floor(p[P_DEMAND])&VIS_DEMAND_LEVELS) != 0
+          ? vis_levels_active=1;
+        (floor(p[P_DEMAND])&VIS_DEMAND_WAVE) != 0
+            && p[P_MODE] == VIS_MODE_ALL ? vis_all_wave_active=1;
+        (floor(p[P_DEMAND])&(VIS_DEMAND_WAVE|VIS_DEMAND_SPECTRUM
+            |VIS_DEMAND_SCOPE|VIS_DEMAND_CORRELATION)) != 0 ? (
+          required=max(p[P_RESOLVED_A],p[P_RESOLVED_B])+1;
+          (floor(p[P_DEMAND])&(VIS_DEMAND_WAVE|VIS_DEMAND_SPECTRUM)) != 0
+              && p[P_MODE] == VIS_MODE_ALL
+            ? required=max(required,min(64,analysis_ch));
+          vis_capture_channels=max(vis_capture_channels,required);
+        );
+        index+=1;
+      );
+      vis_levels_active && !vis_levels_was_active ? vis_clear_rms();
+      vis_levels_was_active=vis_levels_active;
+    ) : vis_deactivate_all();
+  ) : (
+    vis_lease_remaining=max(0,vis_lease_remaining-samplesblock);
+    vis_deactivate_all();
+  );
+);
+
+function vis_snapshot_levels(index p)
+  local(base channels denominator rms index2)
+(
+  base=VIS_LEVEL_SNAPSHOT+index*192;
+  channels=min(64,max(0,floor(analysis_ch)));
+  denominator=max(1,vis_rms_filled*win_len);
+  index2=0;
+  loop(channels,
+    rms=vis_rms_filled > 0
+      ? sqrt(max(0,VIS_RMS_ROLLING[index2]/denominator)) : 0;
+    base[104-40+index2]=vis_db(rms);
+    index2+=1;
+  );
+<?
+  x=0;
+  loop(64,
+    printf("  channels > %d ? base[%d]=vis_db(ch%d.sample_pkval);\n",x,x,x);
+    printf("  channels > %d ? base[%d]=vis_db(ch%d.sample_hipkval);\n",x,128+x,x);
+    x+=1;
+  );
+?>
+);
+
+function vis_snapshot_wave(index p)
+  local(count valid leading output bucket position source target accum snapshot
+        value_index)
+(
+  count=floor(p[P_WAVE_COUNT]);
+  accum=VIS_WAVE_ACCUM+index*1024;
+  snapshot=VIS_WAVE_SNAPSHOT+index*1024;
+  valid=min(count,p[P_WAVE_VALID]+(p[P_WAVE_IN_BUCKET] > 0 ? 1 : 0));
+  leading=count-valid;
+  output=0;
+  loop(count,
+    output < leading ? (
+      snapshot[output*4]=0;
+      snapshot[output*4+1]=0;
+      snapshot[output*4+2]=0;
+      snapshot[output*4+3]=0;
+    ) : (
+      position=output-leading;
+      bucket=(p[P_WAVE_POSITION]-valid+1+position+count*4)%count;
+      value_index=bucket*4;
+      target=output*4;
+      snapshot[target]=vis_clamp_sample(accum[value_index]);
+      snapshot[target+1]=vis_clamp_sample(accum[value_index+1]);
+      snapshot[target+2]=vis_clamp_sample(accum[value_index+2]);
+      snapshot[target+3]=vis_clamp_sample(accum[value_index+3]);
+    );
+    output+=1;
+  );
+);
+
+function vis_snapshot_scope(index p)
+  local(count available output back ring_index a_base b_base snapshot divisor)
+(
+  count=floor(p[P_SCOPE_COUNT]);
+  available=min(vis_ring_filled,max(count,floor(srate/30)));
+  snapshot=VIS_SCOPE_SNAPSHOT+index*512;
+  a_base=VIS_RING_BASE+floor(p[P_RESOLVED_A])*VIS_RING_STRIDE;
+  b_base=VIS_RING_BASE+floor(p[P_RESOLVED_B])*VIS_RING_STRIDE;
+  divisor=max(1,count-1);
+  output=0;
+  loop(count,
+    back=floor((count-1-output)*max(0,available-1)/divisor);
+    ring_index=(vis_ring_write-1-back+VIS_RING_STRIDE)%VIS_RING_STRIDE;
+    snapshot[output*2]=vis_clamp_sample(a_base[ring_index]);
+    snapshot[output*2+1]=vis_clamp_sample(b_base[ring_index]);
+    output+=1;
+  );
+);
+
+function vis_fill_fft(channel size window end_back)
+  local(index ring_index source)
+(
+  source=VIS_RING_BASE+channel*VIS_RING_STRIDE;
+  index=0;
+  loop(size,
+    ring_index=(vis_ring_write-end_back-size+index+VIS_RING_STRIDE)%VIS_RING_STRIDE;
+    VIS_FFT_SCRATCH[index]=source[ring_index]*window[index];
+    index+=1;
+  );
+);
+
+function vis_add_fft(size)
+  local(index real_value imag_value)
+(
+  fft_real(VIS_FFT_SCRATCH,size);
+  fft_permute(VIS_FFT_SCRATCH,size/2);
+  index=0;
+  loop(size/2,
+    real_value=VIS_FFT_SCRATCH[index*2];
+    imag_value=VIS_FFT_SCRATCH[index*2+1];
+    VIS_FFT_ACCUM[index]+=real_value*real_value+imag_value*imag_value;
+    index+=1;
+  );
+);
+
+function vis_snapshot_spectrum(index p end_back)
+  local(size count window window_sum channel channels a b output min_bin max_bin
+        band_start band_end band_cursor band_count band_energy band_peak energy
+        log_min log_span magnitude value snapshot valid)
+(
+  size=floor(p[P_FFT_SIZE]);
+  count=floor(p[P_SPECTRUM_COUNT]);
+  size == 1024 ? (
+    window=VIS_WINDOW_1024;
+    window_sum=vis_window_sum_1024;
+  ) : size == 2048 ? (
+    window=VIS_WINDOW_2048;
+    window_sum=vis_window_sum_2048;
+  ) : size == 4096 ? (
+    window=VIS_WINDOW_4096;
+    window_sum=vis_window_sum_4096;
+  ) : (
+    window=VIS_WINDOW_8192;
+    window_sum=vis_window_sum_8192;
+  );
+  memset(VIS_FFT_ACCUM,0,size/2);
+  a=floor(p[P_RESOLVED_A]);
+  b=floor(p[P_RESOLVED_B]);
+  p[P_MODE] == VIS_MODE_ALL ? (
+    channels=min(64,max(1,floor(analysis_ch)));
+    channel=0;
+    loop(channels,
+      vis_fill_fft(channel,size,window,end_back);
+      vis_add_fft(size);
+      channel+=1;
+    );
+  ) : (
+    vis_fill_fft(a,size,window,end_back);
+    vis_add_fft(size);
+    b != a ? (
+      vis_fill_fft(b,size,window,end_back);
+      vis_add_fft(size);
+    );
+  );
+
+  snapshot=VIS_SPECTRUM_SNAPSHOT+index*1024;
+  min_bin=max(1,20*size/srate);
+  max_bin=size/2-1;
+  log_min=log(min_bin);
+  log_span=log(max_bin)-log_min;
+  output=0;
+  valid=1;
+  loop(count,
+    band_start=count > 1
+      ? floor(exp(log_min+max(0,output-0.5)*log_span/(count-1))) : floor(min_bin);
+    band_end=count > 1
+      ? floor(exp(log_min+min(count-1,output+0.5)*log_span/(count-1))) : floor(min_bin);
+    band_start=max(1,min(max_bin,band_start));
+    band_end=max(band_start,min(max_bin,band_end));
+    band_cursor=band_start;
+    band_count=0;
+    band_energy=0;
+    band_peak=0;
+    loop(band_end-band_start+1,
+      energy=max(0,VIS_FFT_ACCUM[band_cursor]);
+      band_energy+=energy;
+      band_peak=max(band_peak,energy);
+      band_count+=1;
+      band_cursor+=1;
+    );
+    // Preserve narrow harmonics without turning broad-band energy into solid blocks.
+    magnitude=sqrt(max(0,band_peak*0.65
+      +(band_energy/max(1,band_count))*0.35))/max(1,window_sum);
+    value=vis_db(magnitude);
+    value == value && value > -1000000 && value < 1000000 ? (
+      snapshot[output]=value;
+    ) : (
+      snapshot[output]=-150;
+      valid=0;
+    );
+    output+=1;
+  );
+  valid;
+);
+
+function vis_history_quantize(value)
+(
+  max(0,min(4095,floor((max(-150,min(13.8,value))+150)*25+0.5)));
+);
+
+function vis_publish_spectrum_history(index p)
+  local(lane sequence write_index valid_count entry count snapshot cursor
+        packed_count q0 q1 q2 q3 packed)
+(
+  vis_lane_valid(p) ? (
+    lane=vis_lane_base(p);
+    sequence=floor(p[P_SPECTRUM_SEQUENCE])%COUNTER_MOD;
+    write_index=(floor(gmem[lane+13])+1)%VISUAL_SPECTRUM_HISTORY_CAPACITY;
+    valid_count=min(VISUAL_SPECTRUM_HISTORY_CAPACITY,
+      max(0,floor(gmem[lane+14]))+1);
+    entry=lane+VISUAL_SPECTRUM_HISTORY_OFFSET
+      +write_index*VISUAL_SPECTRUM_HISTORY_ENTRY_SIZE;
+    count=floor(p[P_SPECTRUM_COUNT]);
+    snapshot=VIS_SPECTRUM_SNAPSHOT+index*1024;
+    gmem[entry]=sequence;
+    gmem[entry+1]=count;
+    gmem[entry+2]=p[P_FFT_SIZE];
+    cursor=0;
+    packed_count=floor((count+3)/4);
+    loop(packed_count,
+      q0=vis_history_quantize(snapshot[cursor*4]);
+      q1=vis_history_quantize(snapshot[cursor*4+1]);
+      q2=vis_history_quantize(snapshot[cursor*4+2]);
+      q3=vis_history_quantize(snapshot[cursor*4+3]);
+      packed=q0+q1*4096+q2*16777216+q3*68719476736;
+      gmem[entry+3+cursor]=packed;
+      cursor+=1;
+    );
+    gmem[entry+VISUAL_SPECTRUM_HISTORY_ENTRY_SIZE-1]=sequence;
+    vis_lane_valid(p) ? (
+      gmem[lane+13]=write_index;
+      gmem[lane+14]=valid_count;
+      gmem[lane+12]=sequence;
+    );
+  );
+);
+
+function vis_publish_frame(index p)
+  local(lane bank_index bank sequence ready channels wave_count spectrum_count
+        scope_count level snapshot spectrum scope cursor value)
+(
+  vis_lane_valid(p) && vis_source_still_current() ? (
+    lane=vis_lane_base(p);
+    bank_index=1-floor(p[P_ACTIVE_BANK]);
+    bank=lane+VISUAL_LANE_HEADER+bank_index*VISUAL_BANK_SIZE;
+    sequence=vis_bump(p[P_FRAME_SEQUENCE]);
+    ready=floor(p[P_READY]);
+    channels=min(64,max(1,floor(analysis_ch)));
+    wave_count=(ready&VIS_DEMAND_WAVE) != 0 ? floor(p[P_WAVE_COUNT]) : 0;
+    spectrum_count=(ready&VIS_DEMAND_SPECTRUM) != 0
+      ? floor(p[P_SPECTRUM_COUNT]) : 0;
+    scope_count=(ready&VIS_DEMAND_SCOPE) != 0 ? floor(p[P_SCOPE_COUNT]) : 0;
+    level=VIS_LEVEL_SNAPSHOT+index*192;
+    snapshot=VIS_WAVE_SNAPSHOT+index*1024;
+    spectrum=VIS_SPECTRUM_SNAPSHOT+index*1024;
+    scope=VIS_SCOPE_SNAPSHOT+index*512;
+
+    gmem[bank]=sequence;
+    gmem[bank+4]=ready;
+    gmem[bank+5]=srate;
+    gmem[bank+6]=channels;
+    gmem[bank+7]=floor(out_measurement_epoch)%COUNTER_MOD;
+    gmem[bank+8]=floor(vis_processed_samples)%HEARTBEAT_MOD;
+    gmem[bank+9]=floor(p[P_EFFECTIVE_QUALITY]);
+    gmem[bank+10]=cfg_mono >= 0.5;
+    gmem[bank+11]=p[P_LEVEL_SEQUENCE];
+    gmem[bank+12]=p[P_LEVEL_TIMESTAMP];
+    gmem[bank+13]=p[P_WAVE_SEQUENCE];
+    gmem[bank+14]=p[P_WAVE_TIMESTAMP];
+    gmem[bank+15]=wave_count;
+    gmem[bank+16]=p[P_SPECTRUM_SEQUENCE];
+    gmem[bank+17]=p[P_SPECTRUM_TIMESTAMP];
+    gmem[bank+18]=spectrum_count;
+    gmem[bank+19]=p[P_FFT_SIZE];
+    gmem[bank+20]=p[P_SCOPE_SEQUENCE];
+    gmem[bank+21]=p[P_SCOPE_TIMESTAMP];
+    gmem[bank+22]=scope_count;
+    gmem[bank+23]=p[P_CORRELATION_SEQUENCE];
+    gmem[bank+24]=p[P_CORRELATION_TIMESTAMP];
+    gmem[bank+25]=max(-1,min(1,p[P_CORRELATION_VALUE]));
+    gmem[bank+26]=p[P_STATUS];
+    gmem[bank+27]=p[P_DROPPED];
+    gmem[bank+28]=p[P_MODE];
+    gmem[bank+29]=p[P_RESOLVED_A];
+    gmem[bank+30]=p[P_RESOLVED_B];
+    gmem[bank+31]=p[P_GENERATION];
+    gmem[bank+32]=p[P_LANE_TOKEN];
+    gmem[bank+33]=owner_token;
+    gmem[bank+34]=p[P_CONTROLLER];
+    gmem[bank+35]=VISUAL_API;
+
+    (ready&VIS_DEMAND_LEVELS) != 0 ? (
+      cursor=0;
+      loop(channels,
+        gmem[bank+40+cursor]=level[cursor];
+        gmem[bank+104+cursor]=level[64+cursor];
+        gmem[bank+168+cursor]=level[128+cursor];
+        cursor+=1;
+      );
+    );
+    cursor=0;
+    loop(wave_count*4,
+      gmem[bank+256+cursor]=snapshot[cursor];
+      cursor+=1;
+    );
+    cursor=0;
+    loop(spectrum_count,
+      gmem[bank+1280+cursor]=spectrum[cursor];
+      cursor+=1;
+    );
+    cursor=0;
+    loop(scope_count*2,
+      gmem[bank+2304+cursor]=scope[cursor];
+      cursor+=1;
+    );
+
+    vis_hash_a=0;
+    vis_hash_b=0;
+    cursor=4;
+    loop(32,
+      vis_hash_value(gmem[bank+cursor],cursor);
+      cursor+=1;
+    );
+    (ready&VIS_DEMAND_LEVELS) != 0 ? (
+      cursor=0;
+      loop(channels,
+        vis_hash_value(gmem[bank+40+cursor],40+cursor);
+        vis_hash_value(gmem[bank+104+cursor],104+cursor);
+        vis_hash_value(gmem[bank+168+cursor],168+cursor);
+        cursor+=1;
+      );
+    );
+    cursor=0;
+    loop(wave_count*4,
+      vis_hash_value(gmem[bank+256+cursor],256+cursor);
+      cursor+=1;
+    );
+    cursor=0;
+    loop(spectrum_count,
+      vis_hash_value(gmem[bank+1280+cursor],1280+cursor);
+      cursor+=1;
+    );
+    cursor=0;
+    loop(scope_count*2,
+      vis_hash_value(gmem[bank+2304+cursor],2304+cursor);
+      cursor+=1;
+    );
+    gmem[bank+2]=vis_hash_a;
+    gmem[bank+3]=vis_hash_b;
+    gmem[bank+1]=sequence;
+
+    vis_lane_valid(p) && vis_source_still_current() ? (
+      p[P_FRAME_SEQUENCE]=sequence;
+      p[P_ACTIVE_BANK]=bank_index;
+      gmem[lane+7]=bank_index;
+      gmem[lane+8]=ready;
+      gmem[lane+9]=p[P_STATUS];
+      gmem[lane+10]=p[P_DROPPED];
+      gmem[lane+11]=sequence;
+      gmem[lane+6]=sequence;
+    ) : (
+      p[P_DROPPED]+=1;
+    );
+  ) : p[P_DROPPED]+=1;
+  p[P_FRAME_PENDING]=0;
+);
+
+function vis_process_profile(index)
+  local(p demand now coefficient spectrum_iterations spectrum_end_back)
+(
+  p=vis_profile(index);
+  p[P_ACTIVE] == 1 && vis_lane_valid(p) ? (
+    demand=floor(p[P_DEMAND]);
+    now=vis_processed_samples;
+    (demand&VIS_DEMAND_LEVELS) != 0 && vis_rms_filled > 0
+        && now >= p[P_NEXT_LEVEL] ? (
+      vis_snapshot_levels(index,p);
+      p[P_LEVEL_SEQUENCE]=vis_bump(p[P_LEVEL_SEQUENCE]);
+      p[P_LEVEL_TIMESTAMP]=floor(now)%HEARTBEAT_MOD;
+      p[P_READY]=floor(p[P_READY])|VIS_DEMAND_LEVELS;
+      p[P_FRAME_PENDING]=1;
+      p[P_NEXT_LEVEL]=now+p[P_LEVEL_INTERVAL];
+    );
+    (demand&VIS_DEMAND_WAVE) != 0 && vis_ring_filled > 0
+        && now >= p[P_NEXT_WAVE] ? (
+      vis_snapshot_wave(index,p);
+      p[P_WAVE_SEQUENCE]=vis_bump(p[P_WAVE_SEQUENCE]);
+      p[P_WAVE_TIMESTAMP]=floor(now)%HEARTBEAT_MOD;
+      p[P_READY]=floor(p[P_READY])|VIS_DEMAND_WAVE;
+      p[P_FRAME_PENDING]=1;
+      p[P_NEXT_WAVE]=now+p[P_WAVE_INTERVAL];
+    );
+    spectrum_iterations=0;
+    while ((demand&VIS_DEMAND_SPECTRUM) != 0
+        && now >= p[P_NEXT_SPECTRUM]
+        && spectrum_iterations < VISUAL_SPECTRUM_HISTORY_CAPACITY) (
+      spectrum_end_back=max(0,floor(now-p[P_NEXT_SPECTRUM]));
+      vis_ring_filled >= p[P_FFT_SIZE]+spectrum_end_back ? (
+        vis_snapshot_spectrum(index,p,spectrum_end_back) ? (
+          p[P_STATUS]=0;
+          p[P_SPECTRUM_SEQUENCE]=vis_bump(p[P_SPECTRUM_SEQUENCE]);
+          p[P_SPECTRUM_TIMESTAMP]=floor(p[P_NEXT_SPECTRUM])%HEARTBEAT_MOD;
+          p[P_READY]=floor(p[P_READY])|VIS_DEMAND_SPECTRUM;
+          p[P_FRAME_PENDING]=1;
+          vis_publish_spectrum_history(index,p);
+        ) : p[P_STATUS]=1;
+      );
+      p[P_NEXT_SPECTRUM]+=p[P_SPECTRUM_INTERVAL];
+      spectrum_iterations+=1;
+    );
+    (demand&VIS_DEMAND_SPECTRUM) != 0 && now >= p[P_NEXT_SPECTRUM] ? (
+      p[P_DROPPED]+=1;
+      p[P_NEXT_SPECTRUM]=now+p[P_SPECTRUM_INTERVAL];
+    );
+    (demand&VIS_DEMAND_SCOPE) != 0 && vis_ring_filled > 0
+        && now >= p[P_NEXT_SCOPE] ? (
+      vis_snapshot_scope(index,p);
+      p[P_SCOPE_SEQUENCE]=vis_bump(p[P_SCOPE_SEQUENCE]);
+      p[P_SCOPE_TIMESTAMP]=floor(now)%HEARTBEAT_MOD;
+      p[P_READY]=floor(p[P_READY])|VIS_DEMAND_SCOPE;
+      p[P_FRAME_PENDING]=1;
+      p[P_NEXT_SCOPE]=now+p[P_SCOPE_INTERVAL];
+    );
+    (demand&VIS_DEMAND_CORRELATION) != 0
+        && now >= p[P_NEXT_CORRELATION] ? (
+      coefficient=p[P_CORR_X2] > 0.000000000000000001
+          && p[P_CORR_Y2] > 0.000000000000000001
+        ? p[P_CORR_XY]/sqrt(p[P_CORR_X2]*p[P_CORR_Y2]) : 0;
+      p[P_CORRELATION_VALUE]=max(-1,min(1,coefficient));
+      p[P_CORR_XY]=p[P_CORR_X2]=p[P_CORR_Y2]=0;
+      p[P_CORRELATION_SEQUENCE]=vis_bump(p[P_CORRELATION_SEQUENCE]);
+      p[P_CORRELATION_TIMESTAMP]=floor(now)%HEARTBEAT_MOD;
+      p[P_READY]=floor(p[P_READY])|VIS_DEMAND_CORRELATION;
+      p[P_FRAME_PENDING]=1;
+      p[P_NEXT_CORRELATION]=now+p[P_CORRELATION_INTERVAL];
+    );
+    p[P_FRAME_PENDING] ? vis_publish_frame(index,p);
+  );
+);
+
+function vis_finish_rms_block()
+  local(history old_value new_value)
+(
+<?
+  x=0;
+  loop(64,
+    printf("  analysis_ch > %d ? (history=VIS_RMS_HISTORY+%d*4+vis_rms_position; old_value=history[0]; new_value=ch%d.ch_rms_sum; history[0]=new_value; VIS_RMS_ROLLING[%d]+=new_value-old_value;);\n",x,x,x,x);
+    x+=1;
+  );
+?>
+  vis_rms_position=(vis_rms_position+1)%4;
+  vis_rms_filled=min(4,vis_rms_filled+1);
+);
+
+function vis_capture_profile_sample(index)
+  local(p demand a b left right wave_left wave_right all_wave accum bucket)
+(
+  p=vis_profile(index);
+  p[P_ACTIVE] == 1 ? (
+    demand=floor(p[P_DEMAND]);
+    a=floor(p[P_RESOLVED_A]);
+    b=floor(p[P_RESOLVED_B]);
+    left=VIS_RING_BASE+a*VIS_RING_STRIDE+vis_ring_write;
+    right=VIS_RING_BASE+b*VIS_RING_STRIDE+vis_ring_write;
+    left=left[0];
+    right=right[0];
+    (demand&VIS_DEMAND_WAVE) != 0 ? (
+      all_wave=p[P_MODE] == VIS_MODE_ALL;
+      wave_left=all_wave ? vis_all_wave_min : left;
+      wave_right=all_wave ? vis_all_wave_max : right;
+      accum=VIS_WAVE_ACCUM+index*1024;
+      bucket=floor(p[P_WAVE_POSITION])*4;
+      p[P_WAVE_IN_BUCKET] == 0 ? (
+        accum[bucket]=wave_left;
+        accum[bucket+1]=all_wave ? wave_right : wave_left;
+        accum[bucket+2]=all_wave ? wave_left : wave_right;
+        accum[bucket+3]=wave_right;
+      ) : (
+        accum[bucket]=min(accum[bucket],wave_left);
+        accum[bucket+1]=max(accum[bucket+1],all_wave ? wave_right : wave_left);
+        accum[bucket+2]=min(accum[bucket+2],all_wave ? wave_left : wave_right);
+        accum[bucket+3]=max(accum[bucket+3],wave_right);
+      );
+      p[P_WAVE_IN_BUCKET]+=1;
+      p[P_WAVE_IN_BUCKET] >= p[P_WAVE_SPAN] ? (
+        p[P_WAVE_VALID]=min(p[P_WAVE_COUNT],p[P_WAVE_VALID]+1);
+        p[P_WAVE_POSITION]=(p[P_WAVE_POSITION]+1)%p[P_WAVE_COUNT];
+        p[P_WAVE_IN_BUCKET]=0;
+      );
+    );
+    (demand&VIS_DEMAND_CORRELATION) != 0 ? (
+      p[P_CORR_XY]+=left*right;
+      p[P_CORR_X2]+=left*left;
+      p[P_CORR_Y2]+=right*right;
+    );
+  );
+);
+
+function visual_process_block()
+  local(index)
+(
+  vis_processed_samples+=samplesblock;
+  vis_refresh_request();
+  vis_lease_remaining > 0 ? (
+    index=0;
+    loop(vis_profile_count,
+      vis_process_profile(index);
+      index+=1;
+    );
+  );
+);
+
+function visual_process_sample()
+  local(index)
+(
+  vis_levels_active && win_pos == 0 ? (
+    vis_rms_wait_for_boundary ? vis_rms_wait_for_boundary=0
+      : vis_finish_rms_block();
+  );
+
+  vis_capture_channels > 0 ? (
+    vis_all_wave_active ? vis_all_wave_min=vis_all_wave_max=spl0;
+<?
+  x=0;
+  loop(64,
+    x == 0 ? (
+      printf("    vis_capture_channels > 0 ? VIS_RING_BASE[vis_ring_write]=spl0;\n");
+    ) : (
+      printf("    vis_capture_channels > %d ? (VIS_RING_BASE[%d*VIS_RING_STRIDE+vis_ring_write]=spl%d; vis_all_wave_active ? (vis_all_wave_min=min(vis_all_wave_min,spl%d); vis_all_wave_max=max(vis_all_wave_max,spl%d);););\n",x,x,x,x,x);
+    );
+    x+=1;
+  );
+?>
+    index=0;
+    loop(vis_profile_count,
+      vis_capture_profile_sample(index);
+      index+=1;
+    );
+    vis_ring_write=(vis_ring_write+1)%VIS_RING_STRIDE;
+    vis_ring_filled=min(VIS_RING_STRIDE,vis_ring_filled+1);
+  );
+);
+
+// sinc filter for true peak
+function sinc_gen_val() global(srate sinc_sz) local(sincpos windowpos) instance(slice_pos) (
+  windowpos = (2.0 * $pi / sinc_sz) * slice_pos;
+  sincpos = $pi * (slice_pos - sinc_sz * .5);
+  slice_pos += 1;
+  (0.53836 - cos(windowpos)*0.46164) * sin(sincpos) / sincpos;
+);
+
+function sinc_gen_slice(cs, o*) instance(sinc_gen_val slice_pos) local(x) global(sinc_sz) (
+  slice_pos = cs;
+<?
+  use_mem_sinc ? (
+    printf("o.v = alloc(sinc_sz);  loop(x=0;sinc_sz, o.v[x] = sinc_gen_val(); x+=1); ");
+  ) : (
+    loop(x=0;sinc_sz, printf("o.v%02d = sinc_gen_val();%s",x,(x&3)==3?"\n": " "); x += 1)
+  );
+?>
+);
+
+function sinc_init() global(srate) instance(sinc_gen_slice) (
+  sinc_gen_slice(srate < 96000 ? .25 : .5,this.s1);
+  srate < 96000 ? (
+    sinc_gen_slice(.5, this.s2);
+    sinc_gen_slice(.75, this.s3);
+  );
+);
+
+<?
+ function emit_sinc(hist, t) (
+   use_mem_sinc ? (
+    printf("abs(mem_multiply_sum(%s.v,%s.h,sinc_sz))",t,hist);
+   ) : (
+     printf("abs(");
+     loop(x=0;sinc_sz, printf("%s.h%02d * %s.v%02d%s",hist,x,t,x,x==sinc_sz-1?"":(x&3)==3?" +\n":" + "); x+=1);
+     printf(")");
+   );
+ );
+?>
+
+function init(chidx)
+(
+  this.chan=chidx;
+  this.wt = chidx < 3 || analysis_ch < 6 ? 1 : chidx == 3 ? 0 : sqrt(2);
+  this.f1p1=this.f1p2=this.f2p1=this.f2p2=0;
+  this.sample_pkval=this.sample_hipkval=0;
+  this.true_pkval=this.true_hipkval=0;
+  this.ch_lufs_sum=this.ch_rms_sum=0;
+  <?
+    use_mem_sinc ? (
+      printf("this.h = alloc(sinc_sz);\n");
+    ) : (
+      loop(x=0;sinc_sz, printf("this.h%02d =%s",x,x==sinc_sz-1 ? " 0" : (x&7)==7 ? "\n" : " "); x+=1);
+    );
+  ?>
+);
+
+function decay()
+(
+  this.sample_pkval *= pk_decay;
+  this.true_pkval *= pk_decay;
+);
+
+function reset_true_peak()
+(
+  this.true_pkval=this.true_hipkval=0;
+  <?
+    use_mem_sinc ? (
+      printf("memset(this.h,0,sinc_sz);");
+    ) : (
+      loop(x=0;sinc_sz, printf("this.h%02d=0;%s",x,(x&7)==7 ? "\n" : " "); x+=1);
+    );
+  ?>
+);
+
+function proc(lspl)
+  local(sample_value true_value f1p0 f2p0)
+  instance(wt ch_rms_sum ch_lufs_sum sample_pkval sample_hipkval
+           true_pkval true_hipkval
+           f1p1 f1p2 f2p1 f2p2)
+  global(f1a1 f1a2 f1b0 f1b1 f1b2
+         f2a1 f2a2 f2b0 f2b1 f2b2
+         srate effective_true_peak true_peak_window_ready
+         lval rval win_pos sinc_sz
+         sample_peak_current sample_peak_max
+         true_peak_current true_peak_max
+         sinc.s1* sinc.s2* sinc.s3*
+         )
+(
+  sample_value=abs(lspl);
+  sample_value>sample_pkval ? sample_pkval=sample_value;
+  sample_value>sample_hipkval ? sample_hipkval=sample_value;
+  sample_peak_current=max(sample_peak_current,sample_value);
+  sample_peak_max=max(sample_peak_max,sample_value);
+
+  effective_true_peak ? (
+    <?
+      use_mem_sinc ? (
+        printf("mem_insert_shuffle(this.h, sinc_sz, lspl);");
+      ) : (
+        loop(x=sinc_sz-1;sinc_sz-1, printf("this.h%02d = this.h%02d;%s",x,x-1, (x&3)==0 ? "\n" : " "); x-= 1; );
+        printf(" this.h00 = lspl;");
+      );
+    ?>
+    true_value = max(
+        abs(this.h<? printf(use_mem_sinc ? "[%d]" : "%02d",sinc_sz/2) ?> ),
+        <? emit_sinc("this","sinc.s1") ?>
+       );
+    srate < 96000 ? true_value=max(true_value,
+      max(<? emit_sinc("this","sinc.s2") ?>,<? emit_sinc("this","sinc.s3") ?>));
+    true_peak_window_ready ? (
+      true_value>true_pkval ? true_pkval=true_value;
+      true_value>true_hipkval ? true_hipkval=true_value;
+      true_peak_current=max(true_peak_current,true_value);
+      true_peak_max=max(true_peak_max,true_value);
+    );
+  );
+
+  win_pos == 0 ? ch_rms_sum=ch_lufs_sum=0;
+
+  rval += (ch_rms_sum += lspl*lspl);
+
+  lspl *= wt;
+
+  f1p0=lspl-f1a1*f1p1-f1a2*f1p2;
+  lspl=f1b0*f1p0+f1b1*f1p1+f1b2*f1p2;
+  f1p2=f1p1;
+  f1p1=f1p0;
+
+  f2p0=lspl-f2a1*f2p1-f2a2*f2p2;
+  lspl=f2b0*f2p0+f2b1*f2p1+f2b2*f2p2;
+  f2p2=f2p1;
+  f2p1=f2p0;
+
+  lval += (ch_lufs_sum += lspl*lspl);
+);
+
+function init_lufs_filters()
+  local(Vh Vb db f0 Q K a0)
+  global(f1a1 f1a2 f1b0 f1b1 f1b2
+         f2a1 f2a2 f2b0 f2b1 f2b2 srate)
+(
+  // f1,f2 could be combined into a 5th order filter
+
+  db=3.999843853973347;
+  f0=1681.974450955533;
+  Q=0.7071752369554196;
+  K=tan($pi*f0/srate);
+  Vh=pow(10, db/20);
+  Vb=pow(Vh, 0.4996667741545416);
+  a0=1+K/Q+K*K;
+  f1a1=2*(K*K-1)/a0;
+  f1a2=(1-K/Q+K*K)/a0;
+  f1b0=(Vh+Vb*K/Q+K*K)/a0;
+  f1b1=2*(K*K-Vh)/a0;
+  f1b2=(Vh-Vb*K/Q+K*K)/a0;
+
+  f0=38.13547087602444;
+  Q=0.5003270373238773;
+  K=tan($pi*f0/srate);
+  f2a1=2*(K*K-1)/(1+K/Q+K*K);
+  f2a2=(1-K/Q+K*K)/(1+K/Q+K*K);
+  f2b0=1;
+  f2b1=-2;
+  f2b2=1;
+);
+
+function clamp_db(value)
+(
+  max(-150,min(24,value));
+);
+
+function amplitude_to_db(value)
+(
+  value > 0 ? clamp_db(log(value)*20/log(10)) : -150;
+);
+
+function meter_db(value, mono_adjust)
+(
+  clamp_db(value+mono_adjust);
+);
+
+function reset_true_peak_state()
+(
+  true_peak_current=true_peak_max=0;
+  true_peak_warmup_samples=0;
+  true_peak_window_ready=0;
+  true_peak_valid=0;
+  out_true_peak_current=out_true_peak_max=-150;
+  <? do_all_channels("ch%d.reset_true_peak(); "); ?>;
+);
+
+function publish_numeric_outputs()
+  local(mono_adjust correlation_available)
+(
+  mono_adjust=cfg_mono ? -3 : 0;
+  correlation_available=correlation_valid && analysis_ch >= 2 && !cfg_mono;
+
+  out_sample_peak_current=sample_peak_valid ? amplitude_to_db(sample_peak_current) : -150;
+  out_sample_peak_max=sample_peak_valid ? amplitude_to_db(sample_peak_max) : -150;
+  out_true_peak_current=true_peak_valid ? amplitude_to_db(true_peak_current) : -150;
+  out_true_peak_max=true_peak_valid ? amplitude_to_db(true_peak_max) : -150;
+  out_rms_m_current=rms_m_valid ? meter_db(rms_m_db,mono_adjust) : -150;
+  out_rms_m_max=rms_m_valid ? meter_db(rms_m_db_max,mono_adjust) : -150;
+  out_rms_i_current=rms_i_valid ? meter_db(rms_i_db,mono_adjust) : -150;
+  out_rms_i_max=rms_i_valid ? meter_db(rms_i_db_max,mono_adjust) : -150;
+  out_lufs_m_current=lufs_m_valid ? meter_db(lufs_m_db,mono_adjust) : -150;
+  out_lufs_m_max=lufs_m_valid ? meter_db(lufs_m_db_max,mono_adjust) : -150;
+  out_lufs_s_current=lufs_s_valid ? meter_db(lufs_s_db,mono_adjust) : -150;
+  out_lufs_s_max=lufs_s_valid ? meter_db(lufs_s_db_max,mono_adjust) : -150;
+  out_lufs_i_current=lufs_i_valid ? meter_db(lufs_i_db,mono_adjust) : -150;
+  out_lufs_i_max=lufs_i_valid ? meter_db(lufs_i_db_max,mono_adjust) : -150;
+  out_lra_current=lra_valid ? max(0,min(100,lra_db_diff)) : 0;
+  out_lra_max=lra_valid ? max(0,min(100,lra_db_max)) : 0;
+  out_correlation=correlation_available ? max(-1,min(1,correlation_value)) : 0;
+
+  out_valid_mask=
+      (sample_peak_valid ? VALID_SAMPLE_PEAK : 0)
+    + (true_peak_valid ? VALID_TRUE_PEAK : 0)
+    + (rms_m_valid ? VALID_RMS_M : 0)
+    + (rms_i_valid ? VALID_RMS_I : 0)
+    + (lufs_m_valid ? VALID_LUFS_M : 0)
+    + (lufs_s_valid ? VALID_LUFS_S : 0)
+    + (lufs_i_valid ? VALID_LUFS_I : 0)
+    + (lra_valid ? VALID_LRA : 0)
+    + (correlation_available ? VALID_CORRELATION : 0);
+);
+
+function Reset(advance_epoch)
+(
+  init_lufs_filters();
+
+  alloc.top=0;
+  sinc.sinc_init();
+
+  m_win_cnt=0.4/LOUD_METER_UPDATE;
+  s_win_cnt=3/LOUD_METER_UPDATE;
+
+  win_pos=0;
+  win_cnt=0;
+  win_len=max(1,(LOUD_METER_UPDATE*srate)|0);
+  i_win_len=1/(m_win_cnt*win_len);
+  i_win_len2=1/(s_win_cnt*win_len);
+
+  rms_m_sum=0;
+  rms_m_db=rms_m_db_max=-150;
+  rms_i_sum=0;
+  rms_i_sum_cnt=0;
+  rms_i_db=rms_i_db_max=-150;
+
+  lufs_m_sum=0;
+  lufs_m_db=lufs_m_db_max=-150;
+  lufs_s_sum=0;
+  lufs_s_db=lufs_s_db_max=-150;
+  lufs_a_sum=0;
+  lufs_a_sum_cnt=0;
+  lufs_b_sum=0;
+  lufs_b_sum_cnt=0;
+  lufs_i_db=lufs_i_db_max=-150;
+  lra_db_diff=lra_db_max=0;
+  lra_db_hi=lra_db_lo=0;
+
+  cur_buf=0;
+  cur_buf2=0;
+  rms_buf=alloc(m_win_cnt);
+  lufs_buf=alloc(m_win_cnt);
+  lufs_buf2=alloc(s_win_cnt);
+  lufs_a_hist=alloc(2*NUM_BINS);
+  lufs_b_hist=alloc(NUM_BINS);
+
+  sample_peak_current=sample_peak_max=0;
+  true_peak_current=true_peak_max=0;
+  true_peak_warmup_samples=0;
+  true_peak_window_ready=0;
+  corr_xy=corr_x2=corr_y2=0;
+  correlation_value=0;
+
+  sample_peak_valid=true_peak_valid=0;
+  rms_m_valid=rms_i_valid=0;
+  lufs_m_valid=lufs_s_valid=lufs_i_valid=0;
+  lra_valid=correlation_valid=0;
+
+  out_sample_peak_current=out_sample_peak_max=-150;
+  out_true_peak_current=out_true_peak_max=-150;
+  out_rms_m_current=out_rms_m_max=-150;
+  out_rms_i_current=out_rms_i_max=-150;
+  out_lufs_m_current=out_lufs_m_max=-150;
+  out_lufs_s_current=out_lufs_s_max=-150;
+  out_lufs_i_current=out_lufs_i_max=-150;
+  out_lra_current=out_lra_max=0;
+  out_correlation=0;
+  out_valid_mask=0;
+
+  <? do_all_channels("ch%d.init(%d); "); ?>;
+
+  advance_epoch ? out_measurement_epoch=(floor(out_measurement_epoch)+1)%COUNTER_MOD;
+  visual_reset_all();
+);
+
+publish_command_header();
+out_api_version=COMMAND_API;
+out_meter_build=METER_BUILD;
+out_heartbeat=0;
+refresh_channel_count();
+out_measurement_epoch=0;
+effective_true_peak=0;
+transport_run_active=0;
+gui_reset_request=0;
+gui_reset_seen=0;
+claim_command_slot();
+visual_initialize();
+Reset(0);
+publish_numeric_outputs();
+last_analysis_ch=analysis_ch;
+last_sr=srate;
+last_cfg_mono=cfg_mono;
+
+
+@block
+
+publish_command_header();
+gmem[command_base] != owner_token ? claim_command_slot();
+refresh_channel_count();
+
+out_heartbeat=(floor(out_heartbeat)+1)%HEARTBEAT_MOD;
+gmem[command_base+1]=out_heartbeat;
+out_api_version=COMMAND_API;
+out_meter_build=METER_BUILD;
+
+transport_state=floor(play_state);
+transport_running=(transport_state&(1|4)) != 0;
+transport_state == 0 ? transport_run_active=0;
+local_run_start=transport_running && !transport_run_active;
+
+reset_request=floor(gmem[command_base+2])%COUNTER_MOD;
+manual_reset_pending=reset_request != gmem_reset_seen;
+gui_reset_snapshot=floor(gui_reset_request)%COUNTER_MOD;
+gui_reset_pending=gui_reset_snapshot != gui_reset_seen;
+transport_arm=floor(gmem[command_base+7])%COUNTER_MOD;
+transport_arm_pending=transport_running
+  && transport_arm != gmem_transport_arm_seen;
+
+true_peak_lease_request=floor(gmem[command_base+3])%COUNTER_MOD;
+true_peak_lease_request != true_peak_lease_seen ? (
+  true_peak_lease_seen=true_peak_lease_request;
+  (floor(gmem[command_base+4])&1) != 0 ? (
+    true_peak_lease_remaining=TRUE_PEAK_LEASE_SECONDS*srate;
+  ) : (
+    true_peak_lease_remaining=0;
+  );
+);
+true_peak_lease_remaining=max(0,true_peak_lease_remaining-samplesblock);
+next_effective_true_peak=cfg_true_peak_user >= 0.5
+  || true_peak_lease_remaining > 0;
+true_peak_state_changed=next_effective_true_peak != effective_true_peak;
+effective_true_peak=next_effective_true_peak;
+
+channel_or_rate_changed=
+  (analysis_ch > 0 && analysis_ch != last_analysis_ch) || srate != last_sr;
+automatic_reset_pending=cfg_reset_on_transport >= 0.5
+  && (local_run_start || transport_arm_pending);
+reset_needed=channel_or_rate_changed
+  || manual_reset_pending
+  || gui_reset_pending
+  || automatic_reset_pending;
+
+reset_needed ? Reset(1) : true_peak_state_changed ? reset_true_peak_state();
+
+manual_reset_pending ? (
+  gmem_reset_seen=reset_request;
+  out_reset_ack=reset_request;
+  gmem[command_base+5]=reset_request;
+  gmem[command_base+6]=out_heartbeat;
+);
+
+// The standalone editor runs on the UI thread. It only publishes a one-shot
+// request; the audio thread performs every buffer reset through this arbiter.
+gui_reset_pending ? gui_reset_seen=gui_reset_snapshot;
+
+// Consume a stopped-generation arm on its first running block even if the user
+// disabled automatic reset after ReaClock wrote the arm.
+transport_arm_pending ? (
+  gmem_transport_arm_seen=transport_arm;
+  out_transport_arm_ack=transport_arm;
+);
+
+transport_running ? transport_run_active=1;
+last_analysis_ch=analysis_ch;
+last_sr=srate;
+
+cfg_mono != last_cfg_mono ? (
+  correlation_valid=0;
+  correlation_value=0;
+  corr_xy=corr_x2=corr_y2=0;
+  last_cfg_mono=cfg_mono;
+);
+
+publish_numeric_outputs();
+
+pk_decay=pow(0.5,samplesblock/srate/PEAK_METER_DECAY);
+sample_peak_current*=pk_decay;
+true_peak_current*=pk_decay;
+<? do_all_channels("ch%d.decay(); "); ?>;
+visual_process_block();
+
+@sample
+
+rval=lval=0;
+
+win_pos == 0 ? corr_xy=corr_x2=corr_y2=0;
+analysis_ch >= 2 && !cfg_mono ? (
+  corr_xy+=spl0*spl1;
+  corr_x2+=spl0*spl0;
+  corr_y2+=spl1*spl1;
+);
+
+effective_true_peak ? (
+  true_peak_warmup_samples+=1;
+  true_peak_window_ready=true_peak_warmup_samples >= sinc_sz;
+) : (
+  true_peak_window_ready=0;
+);
+
+<? do_all_channels("ch%d.proc(spl%d); "); ?>;
+
+analysis_ch > 0 ? sample_peak_valid=1;
+analysis_ch > 0 && true_peak_window_ready ? true_peak_valid=1;
+
+(win_pos += 1) >= win_len ? (
+  win_pos=0;
+  win_cnt += 1;
+
+  prev_rval=rms_buf[cur_buf];
+  rms_buf[cur_buf]=rval;
+
+  prev_lval=lufs_buf[cur_buf];
+  lufs_buf[cur_buf]=lval;
+
+  prev_lval2=lufs_buf2[cur_buf2];
+  lufs_buf2[cur_buf2]=lval;
+
+  (cur_buf += 1) >= m_win_cnt ? cur_buf=0;
+  (cur_buf2 += 1) >= s_win_cnt ? cur_buf2=0;
+
+  rms_m_sum += (rval-prev_rval)*i_win_len;
+  lufs_m_sum += (lval-prev_lval)*i_win_len;
+  lufs_s_sum += (lval-prev_lval2)*i_win_len2;
+
+  WANT_INTEGRATED_ALWAYS || transport_running ? (
+    rms_i_sum += rms_m_sum;
+    rms_i_sum_cnt += 1;
+    rms_i_sum > 0 && rms_i_sum_cnt >= m_win_cnt ? (
+      rms_i_db=log(rms_i_sum/rms_i_sum_cnt)*10/log(10);
+      rms_i_db_max=max(rms_i_db_max,rms_i_db);
+      rms_i_valid=1;
+    ) : (
+      rms_i_db=-150;
+    );
+  );
+
+  rms_m_sum > 0 && win_cnt >= m_win_cnt ? (
+    rms_m_db=log(rms_m_sum)*10/log(10);
+    rms_m_db_max=max(rms_m_db_max,rms_m_db);
+    rms_m_valid=1;
+  ) : (
+    rms_m_db=-150;
+  );
+
+  lufs_m_sum > 0 && win_cnt >= m_win_cnt ? (
+    lufs_m_db=-0.691+log(lufs_m_sum)*10/log(10);
+    lufs_m_db_max=max(lufs_m_db_max,lufs_m_db);
+    lufs_m_valid=1;
+
+    a = WANT_INTEGRATED_ALWAYS || transport_running
+      ? ((lufs_m_db+70)*BINS_PER_DB)|0 : -1;
+    a >= 0 ? (
+      a >= NUM_BINS ? a=NUM_BINS-1;
+      lufs_a_sum += lufs_m_sum;
+      lufs_a_sum_cnt += 1;
+      lufs_a_hist[2*a] += 1;
+      lufs_a_hist[2*a+1] += lufs_m_sum;
+
+      lufs_a_db=-0.691+log(lufs_a_sum/lufs_a_sum_cnt)*10/log(10);
+      lufs_a_gate=((lufs_a_db-10+70)*BINS_PER_DB)|0;
+      lufs_i_sum=0;
+      lufs_i_cnt=0;
+      bin=max(lufs_a_gate,0);
+      loop(NUM_BINS-bin,
+        lufs_i_cnt += lufs_a_hist[2*bin];
+        lufs_i_sum += lufs_a_hist[2*bin+1];
+        bin += 1;
+      );
+      lufs_i_db=lufs_i_sum > 0 ? -0.691+log(lufs_i_sum/lufs_i_cnt)*10/log(10) : -100;
+      lufs_i_sum > 0 ? (
+        lufs_i_db_max=max(lufs_i_db_max,lufs_i_db);
+        lufs_i_valid=1;
+      );
+    );
+  ) : (
+    lufs_m_db=-150;
+  );
+
+  lufs_s_sum > 0 && win_cnt >= s_win_cnt ? (
+    lufs_s_db=-0.691+log(lufs_s_sum)*10/log(10);
+    lufs_s_db_max=max(lufs_s_db_max,lufs_s_db);
+    lufs_s_valid=1;
+
+    b = WANT_INTEGRATED_ALWAYS || transport_running
+      ? ((lufs_s_db+70)*BINS_PER_DB)|0 : -1;
+    b >= 0 ? (
+      b >= NUM_BINS ? b=NUM_BINS-1;
+      lufs_b_sum += lufs_s_sum;
+      lufs_b_sum_cnt += 1;
+      lufs_b_hist[b] += 1;
+
+      lufs_b_db=-0.691+log(lufs_b_sum/lufs_b_sum_cnt)*10/log(10);
+      lufs_b_gate=((lufs_b_db-20+70)*BINS_PER_DB)|0;
+
+      lra_cnt=0;
+      bin=max(lufs_b_gate,0);
+      loop(NUM_BINS-bin,
+        lra_cnt += lufs_b_hist[bin];
+        bin += 1;
+      );
+      lra_cnt >= 20 ? (
+        lra_cnt_lo=lra_cnt_hi=0;
+        bin=lufs_b_gate;
+        while(bin < NUM_BINS && lra_cnt_lo < lra_cnt*0.10)
+        (
+          lra_cnt_lo += lufs_b_hist[bin];
+          bin += 1;
+        );
+        bin_lo=bin-1;
+        bin=NUM_BINS-1;
+        while(bin >= lufs_b_gate && lra_cnt_hi < lra_cnt*0.05)
+        (
+          lra_cnt_hi += lufs_b_hist[bin];
+          bin -= 1;
+        );
+        bin_hi=bin+1;
+        lra_db_lo=bin_lo*DB_PER_BIN-70;
+        lra_db_hi=bin_hi*DB_PER_BIN-70;
+        lra_db_diff = lra_db_hi-lra_db_lo;
+        lra_db_max=max(lra_db_max,lra_db_diff);
+        lra_valid=1;
+      );
+    );
+  ) : (
+    lufs_s_db=-150;
+  );
+
+  analysis_ch >= 2 && !cfg_mono
+    && corr_x2 > 0.000000000000000001
+    && corr_y2 > 0.000000000000000001 ? (
+      correlation_value=max(-1,min(1,corr_xy/sqrt(corr_x2*corr_y2)));
+      correlation_valid=1;
+  );
+);
+
+visual_process_sample();
+
+
+@gfx 430 430
+
+function ui_clamp(value)
+(
+  max(0,min(1,value));
+);
+
+function ui_mix(left right amount)
+(
+  left+(right-left)*amount;
+);
+
+function ui_rgb24(red green blue)
+(
+  // gfx_clear uses the native packed BGR order; gfx_set remains RGB.
+  (floor(ui_clamp(blue)*255)<<16)
+    | (floor(ui_clamp(green)*255)<<8)
+    | floor(ui_clamp(red)*255);
+);
+
+function ui_color(red green blue alpha)
+(
+  gfx_set(ui_clamp(red),ui_clamp(green),ui_clamp(blue),ui_clamp(alpha));
+);
+
+function ui_blend_color(amount)
+(
+  ui_color(ui_mix(ui_bg_r,ui_text_r,amount),
+    ui_mix(ui_bg_g,ui_text_g,amount),
+    ui_mix(ui_bg_b,ui_text_b,amount),1);
+);
+
+function draw_right(text right y)
+  local(width height)
+(
+  gfx_measurestr(text,width,height);
+  gfx_x=right-width;
+  gfx_y=y;
+  gfx_drawstr(text);
+);
+
+function draw_metric(label current_value maximum_value mask suffix y)
+  local(valid row_hovered)
+(
+  valid=(floor(out_valid_mask)&mask) != 0;
+  row_hovered=mouse_x >= pad && mouse_x <= gfx_w-pad
+    && mouse_y >= y-row_pad && mouse_y < y+row_height-row_pad;
+  row_hovered ? (
+    ui_blend_color(ui_light ? 0.08 : 0.10);
+    gfx_rect(pad,y-row_pad,gfx_w-pad*2,row_height-row_gap,1);
+  );
+
+  ui_blend_color(0.76);
+  gfx_x=pad;
+  gfx_y=y;
+  gfx_drawstr(label);
+
+  valid ? (
+    ui_color(ui_text_r,ui_text_g,ui_text_b,1);
+    sprintf(#current_text,"%.1f %s",current_value,suffix);
+    sprintf(#maximum_text,"%.1f %s",maximum_value,suffix);
+  ) : (
+    ui_blend_color(0.42);
+    strcpy(#current_text,"--");
+    strcpy(#maximum_text,"--");
+  );
+  draw_right(#current_text,current_right,y);
+  draw_right(#maximum_text,maximum_right,y);
+
+  ui_blend_color(0.14);
+  gfx_line(pad,y+row_height-row_gap,gfx_w-pad,y+row_height-row_gap);
+);
+
+function build_channel_menu(maximum selected)
+  local(index)
+(
+  strcpy(#channel_menu,selected <= 0 ? "!Auto" : "Auto");
+  index=1;
+  loop(maximum,
+    sprintf(#channel_item,selected == index ? "|!%d" : "|%d",index);
+    strcat(#channel_menu,#channel_item);
+    index+=1;
+  );
+);
+
+ui_scale=gfx_ext_retina > 1 ? 1.35 : 1;
+font_size=max(13,min(16,min(gfx_w/28,gfx_h/26)))*ui_scale;
+small_font_size=max(10,font_size-2*ui_scale);
+gfx_setfont(1,"Arial",font_size);
+body_height=gfx_texth;
+gfx_setfont(2,"Arial",font_size+6*ui_scale);
+title_height=gfx_texth;
+gfx_setfont(3,"Arial",small_font_size);
+small_height=gfx_texth;
+narrow_layout=gfx_w < 390*ui_scale;
+compact_height=gfx_h < 320*ui_scale;
+very_compact_height=gfx_h < (narrow_layout ? 340 : 275)*ui_scale;
+ultra_compact_height=gfx_h < 245*ui_scale;
+hide_column_headers=gfx_h < 210*ui_scale;
+
+// ReaClock publishes its three user-selected theme colors into a record owned
+// by this exact meter instance. If ReaClock is closed, the fallback palette is
+// intentionally calm and the last published record remains available.
+ui_bg_r=0.063; ui_bg_g=0.094; ui_bg_b=0.137;
+ui_text_r=0.933; ui_text_g=0.953; ui_text_b=0.984;
+ui_accent_r=0.373; ui_accent_g=0.561; ui_accent_b=0.910;
+theme_record=THEME_BASE+floor(out_command_slot)*THEME_STRIDE;
+theme_valid=floor(gmem[theme_record]) == THEME_MAGIC
+  && gmem[theme_record+1] == owner_token;
+theme_valid ? (
+  ui_bg_r=ui_clamp(gmem[theme_record+3]);
+  ui_bg_g=ui_clamp(gmem[theme_record+4]);
+  ui_bg_b=ui_clamp(gmem[theme_record+5]);
+  ui_text_r=ui_clamp(gmem[theme_record+6]);
+  ui_text_g=ui_clamp(gmem[theme_record+7]);
+  ui_text_b=ui_clamp(gmem[theme_record+8]);
+  ui_accent_r=ui_clamp(gmem[theme_record+9]);
+  ui_accent_g=ui_clamp(gmem[theme_record+10]);
+  ui_accent_b=ui_clamp(gmem[theme_record+11]);
+);
+ui_luma=ui_bg_r*0.2126+ui_bg_g*0.7152+ui_bg_b*0.0722;
+ui_light=ui_luma > 0.45;
+ui_accent_luma=ui_accent_r*0.2126+ui_accent_g*0.7152+ui_accent_b*0.0722;
+gfx_clear=ui_rgb24(ui_bg_r,ui_bg_g,ui_bg_b);
+
+pad=16*ui_scale;
+row_pad=3*ui_scale;
+row_gap=4*ui_scale;
+button_width=80*ui_scale;
+button_height=28*ui_scale;
+button_x=gfx_w-pad-button_width;
+button_y=12*ui_scale;
+channel_width=button_width;
+channel_height=24*ui_scale;
+channel_x=button_x;
+channel_label_y=button_y+button_height+7*ui_scale;
+channel_y=channel_label_y+small_height+3*ui_scale;
+ultra_compact_height ? (
+  channel_x=button_x-channel_width-8*ui_scale;
+  channel_y=button_y;
+);
+button_inside=mouse_x >= button_x && mouse_x <= button_x+button_width
+  && mouse_y >= button_y && mouse_y <= button_y+button_height;
+channel_inside=mouse_x >= channel_x && mouse_x <= channel_x+channel_width
+  && mouse_y >= channel_y && mouse_y <= channel_y+channel_height;
+left_down=(mouse_cap&1) != 0;
+left_pressed=left_down && !last_left_down;
+left_released=!left_down && last_left_down;
+
+left_pressed ? (
+  reset_button_armed=button_inside;
+  channel_button_armed=channel_inside;
+);
+reset_button_armed && left_down && !button_inside ? reset_button_armed=0;
+channel_button_armed && left_down && !channel_inside ? channel_button_armed=0;
+left_released ? (
+  reset_button_armed && button_inside ? (
+    gui_reset_request=(floor(gui_reset_request)+1)%COUNTER_MOD;
+  );
+  channel_button_armed && channel_inside ? (
+    available_channels=max(0,min(128,floor(host_channel_count)));
+    selected_channels=max(0,min(available_channels,floor(cfg_channel_limit)));
+    build_channel_menu(available_channels,selected_channels);
+    gfx_x=channel_x;
+    gfx_y=channel_y+channel_height;
+    channel_choice=gfx_showmenu(#channel_menu);
+    channel_choice > 0 ? (
+      next_channel_limit=channel_choice-1;
+      next_channel_limit != floor(cfg_channel_limit) ? (
+        cfg_channel_limit=next_channel_limit;
+        slider_automate(cfg_channel_limit);
+        sliderchange(-1);
+      );
+    );
+  );
+  reset_button_armed=0;
+  channel_button_armed=0;
+);
+last_left_down=left_down;
+
+gfx_setfont(2);
+ui_color(ui_text_r,ui_text_g,ui_text_b,1);
+gfx_x=pad;
+gfx_y=14*ui_scale;
+gfx_drawstr("ReaClock Meter");
+
+button_mix=reset_button_armed ? 0.42 : button_inside ? 0.34 : 0.20;
+button_r=ui_mix(ui_bg_r,ui_accent_r,button_mix);
+button_g=ui_mix(ui_bg_g,ui_accent_g,button_mix);
+button_b=ui_mix(ui_bg_b,ui_accent_b,button_mix);
+button_luma=button_r*0.2126+button_g*0.7152+button_b*0.0722;
+ui_color(button_r,button_g,button_b,1);
+gfx_rect(button_x,button_y,button_width,button_height,1);
+ui_color(ui_accent_r,ui_accent_g,ui_accent_b,0.88);
+gfx_rect(button_x,button_y,button_width,button_height,0);
+button_luma > 0.55 ? ui_color(0.04,0.05,0.06,1) : ui_color(0.98,0.99,1,1);
+gfx_setfont(3);
+gfx_x=button_x;
+gfx_y=button_y;
+floor(gui_reset_request)%COUNTER_MOD != floor(gui_reset_seen)%COUNTER_MOD ? (
+  gfx_drawstr("RESET...",1|4,button_x+button_width,button_y+button_height);
+) : (
+  gfx_drawstr("RESET",1|4,button_x+button_width,button_y+button_height);
+);
+
+gfx_setfont(3);
+!ultra_compact_height ? (
+  ui_blend_color(0.58);
+  gfx_x=channel_x;
+  gfx_y=channel_label_y;
+  gfx_drawstr("CHANNELS");
+);
+
+channel_mix=channel_button_armed ? 0.42 : channel_inside ? 0.34 : 0.14;
+channel_r=ui_mix(ui_bg_r,ui_accent_r,channel_mix);
+channel_g=ui_mix(ui_bg_g,ui_accent_g,channel_mix);
+channel_b=ui_mix(ui_bg_b,ui_accent_b,channel_mix);
+ui_color(channel_r,channel_g,channel_b,1);
+gfx_rect(channel_x,channel_y,channel_width,channel_height,1);
+ui_color(ui_accent_r,ui_accent_g,ui_accent_b,0.72);
+gfx_rect(channel_x,channel_y,channel_width,channel_height,0);
+ui_color(ui_text_r,ui_text_g,ui_text_b,0.92);
+floor(cfg_channel_limit) <= 0 ? strcpy(#channel_value,"AUTO")
+  : sprintf(#channel_value,"%d",floor(out_channel_count));
+gfx_x=channel_x+8*ui_scale;
+gfx_y=channel_y;
+gfx_drawstr(#channel_value,0|4,channel_x+channel_width-18*ui_scale,
+  channel_y+channel_height);
+caret_x=channel_x+channel_width-9*ui_scale;
+caret_y=channel_y+channel_height*0.5;
+gfx_triangle(caret_x-3*ui_scale,caret_y-2*ui_scale,
+  caret_x+3*ui_scale,caret_y-2*ui_scale,
+  caret_x,caret_y+2*ui_scale);
+
+note_y=button_y+button_height+12*ui_scale;
+narrow_layout ? note_y=channel_y+channel_height+12*ui_scale;
+!very_compact_height ? (
+  note_step=small_height+(compact_height ? 2 : 4)*ui_scale;
+  ui_blend_color(0.58);
+  gfx_x=pad;
+  gfx_y=note_y;
+  gfx_drawstr("Companion for ReaClock cards. Audio passes through unchanged.");
+  gfx_x=pad;
+  gfx_y=note_y+note_step;
+  gfx_drawstr("This does not affect your audio path or make any changes.");
+  compact_height ? (
+    note_bottom=note_y+note_step+small_height;
+    header_y=max(note_bottom+6*ui_scale,channel_y+channel_height+4*ui_scale);
+  ) : (
+    gfx_x=pad;
+    gfx_y=note_y+note_step*2;
+    gfx_drawstr("Remove this FX if you no longer use ReaClock.");
+    note_bottom=note_y+note_step*2+small_height;
+    header_y=note_bottom+12*ui_scale;
+  );
+) : (
+  header_y=channel_y+channel_height+4*ui_scale;
+);
+current_right=max(pad+200*ui_scale,gfx_w*0.72);
+maximum_right=gfx_w-pad;
+!hide_column_headers ? (
+  ui_color(ui_accent_r,ui_accent_g,ui_accent_b,1);
+  draw_right("CURRENT",current_right,header_y);
+  draw_right("MAX",maximum_right,header_y);
+  ui_blend_color(0.18);
+  gfx_line(pad,header_y+small_height+5*ui_scale,
+    gfx_w-pad,header_y+small_height+5*ui_scale);
+  row_y=header_y+small_height+(compact_height ? 10 : 12)*ui_scale;
+) : (
+  row_y=channel_y+channel_height+6*ui_scale;
+);
+footer_y=gfx_h-10*ui_scale;
+available_height=max(1,footer_y-row_y-8*ui_scale);
+gfx_setfont(1);
+row_height=max(body_height+(compact_height ? 1 : 3)*ui_scale,
+  min(28*ui_scale,available_height/9));
+
+draw_metric("Sample Peak",out_sample_peak_current,out_sample_peak_max,
+  VALID_SAMPLE_PEAK,"dBFS",row_y);
+row_y+=row_height;
+draw_metric("True Peak",out_true_peak_current,out_true_peak_max,
+  VALID_TRUE_PEAK,"dBTP",row_y);
+row_y+=row_height;
+draw_metric("RMS-M",out_rms_m_current,out_rms_m_max,
+  VALID_RMS_M,"dBFS",row_y);
+row_y+=row_height;
+draw_metric("RMS-I",out_rms_i_current,out_rms_i_max,
+  VALID_RMS_I,"dBFS",row_y);
+row_y+=row_height;
+draw_metric("LUFS-M",out_lufs_m_current,out_lufs_m_max,
+  VALID_LUFS_M,"LUFS",row_y);
+row_y+=row_height;
+draw_metric("LUFS-S",out_lufs_s_current,out_lufs_s_max,
+  VALID_LUFS_S,"LUFS",row_y);
+row_y+=row_height;
+draw_metric("LUFS-I",out_lufs_i_current,out_lufs_i_max,
+  VALID_LUFS_I,"LUFS",row_y);
+row_y+=row_height;
+draw_metric("LRA",out_lra_current,out_lra_max,
+  VALID_LRA,"LU",row_y);
+row_y+=row_height;
+
+row_hovered=mouse_x >= pad && mouse_x <= gfx_w-pad
+  && mouse_y >= row_y-row_pad && mouse_y < row_y+row_height-row_pad;
+row_hovered ? (
+  ui_blend_color(ui_light ? 0.08 : 0.10);
+  gfx_rect(pad,row_y-row_pad,gfx_w-pad*2,row_height-row_gap,1);
+);
+ui_blend_color(0.76);
+gfx_x=pad;
+gfx_y=row_y;
+gfx_drawstr("Correlation");
+(floor(out_valid_mask)&VALID_CORRELATION) != 0 ? (
+  ui_color(ui_text_r,ui_text_g,ui_text_b,1);
+  sprintf(#correlation_text,"%+.3f",out_correlation);
+) : (
+  ui_blend_color(0.42);
+  strcpy(#correlation_text,"--");
+);
+draw_right(#correlation_text,current_right,row_y);
+
+gfx_getchar();

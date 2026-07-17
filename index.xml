@@ -56,27 +56,19 @@ After installing, run the action "Script: ReaAssist.lua" from REAPER's Action Li
         <link rel="website" href="https://github.com/michaelbriggsaudio/mbriggs-reaper">GitHub Repository</link>
         <link rel="website" href="https://reaassist.app">ReaAssist Website</link>
       </metadata>
-      <version name="1.4.4" author="Michael Briggs" time="2026-07-10T21:58:01Z">
+      <version name="1.4.5" author="Michael Briggs" time="2026-07-17T18:57:01Z">
         <changelog><![CDATA[
-- OpenAI's GPT-5.6 family is now supported. ReaAssist adds Luna, Terra, and Sol, recommends Luna with no thinking as the best tested default, migrates older GPT-5.4 selections, and accounts for GPT-5.6 caching and long-context pricing behavior.
+- Updates are safer and more resilient. ReaAssist now downloads and verifies the complete update before replacing files, uses version-pinned release files, and handles locked files without silently leaving them behind.
 
-- Per-turn spending controls provide a safer stopping point. Configurable token and dollar limits warn before another model call could exceed your limit, show the projected worst case, and offer a one-call override without silently continuing later calls.
-
-- Generated edits are checked more strictly against your request. ReaAssist catches more mismatched tracks, plugins, REAPER actions, unsafe paths, and generated-code lifecycle escapes before auto-run. Safety backups now fail closed and avoid filename collisions.
-
-- Routing and follow-up behavior is more dependable. Bus requests, created and selected track targeting, plugin grounding, and prefaced API questions are handled more accurately, with fewer irrelevant retries or unintended actions.
-
-- Privacy, accessibility, and interface wording is clearer. API-key storage is described accurately as reversible local obfuscation, OpenAI safety identifiers are pseudonymous, Screen Reader Mode handles request-limit decisions and path launching more safely, and several Terms, settings, and context-menu rough edges are polished.
-
-- REAPER and JSFX guidance is refreshed. The bundled references now cover REAPER 7.77, including current send behavior and cursor APIs, alongside clearer guidance for JSFX graphics panels and effect construction.
+- Interrupted updates recover automatically. A transaction journal can finish or roll back a partially applied update on the next launch, while an apply lock keeps two ReaAssist instances from changing the same installation at once.
         ]]></changelog>
-        <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.4.4</source>
-        <source main="main" file="ReaAssist_Screen_Reader_Mode.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist_Screen_Reader_Mode.lua?v=1.4.4</source>
-        <source file="manifest.json">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/manifest.json?v=1.4.4</source>
-        <source file="CHANGELOG.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/CHANGELOG.md?v=1.4.4</source>
+        <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.4.5</source>
+        <source main="main" file="ReaAssist_Screen_Reader_Mode.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist_Screen_Reader_Mode.lua?v=1.4.5</source>
+        <source file="manifest.json">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/manifest.json?v=1.4.5</source>
+        <source file="CHANGELOG.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/CHANGELOG.md?v=1.4.5</source>
         <source file="LICENSE.txt">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/LICENSE.txt?v=1.0.4</source>
         <source file="README.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/README.md?v=1.4.1</source>
-        <source file="Resources/UI.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/UI.lua?v=1.4.4</source>
+        <source file="Resources/UI.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/UI.lua?v=1.4.5</source>
         <source file="Resources/CodeRuntime.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/CodeRuntime.lua?v=1.4.4</source>
         <source file="Resources/Context.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Context.lua?v=1.4.4</source>
         <source file="Resources/Relaunch.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Relaunch.lua?v=1.4.3</source>
@@ -99,6 +91,91 @@ After installing, run the action "Script: ReaAssist.lua" from REAPER's Action Li
         <source file="Resources/fonts/JetBrainsMono-Regular.ttf">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/fonts/JetBrainsMono-Regular.ttf?v=1.0.3</source>
         <source file="Resources/fonts/JetBrainsMono-Medium.ttf">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/fonts/JetBrainsMono-Medium.ttf?v=1.0.3</source>
         <source file="Resources/fonts/lucide.ttf">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/fonts/lucide.ttf?v=1.2.0</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="ReaClock">
+    <reapack name="ReaClock.lua" type="script" desc="ReaClock - Custom Studio Clock for REAPER">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0\fnil Sans-Serif;}}
+\fs22
+ReaClock is a scalable studio clock and session display for REAPER. It combines an across-the-room position readout with configurable Clock Faces, regions and markers, technical information, Action Buttons, audio metering and visualizations, and a phase-accurate visual click.\par
+\par
+\b Highlights\b0\par
+\par
+- Project-, region-, or time-selection-relative position in time, beats, frames, seconds, or samples.\par
+- Zero to twenty customizable card rows with one to six cards per row, six-unit card widths, drag-and-drop editing, and reusable Clock Faces.\par
+- Separate current/next region and next-marker cards, signed countdowns, progress, transport, tempo, and technical project/audio information.\par
+- Numeric loudness/peak/RMS metering plus level, history, waveform, spectrum, spectrogram, vectorscope, and phase-correlation visualizations.\par
+- Searchable Main-section Action Buttons with custom labels and live toggle state in the face, independent pop-outs, and Presentation.\par
+- Nine coordinated styles, custom colors, optional background images, installed-font selection, docking, independent card pop-outs, and per-visualization fullscreen viewing.\par
+- Human-readable JSON settings with backup recovery and a fresh schema.\par
+\par
+\b Requirements\b0\par
+\par
+- REAPER on Windows, macOS, or Linux\par
+- ReaImGui 0.10 or newer\par
+\par
+Provided free by Michael Briggs Mastering.\par
+}]]></description>
+        <link rel="website" href="https://github.com/michaelbriggsaudio/mbriggs-reaper">GitHub Repository</link>
+        <link rel="website" href="https://michaelbriggsmastering.com">Michael Briggs Mastering</link>
+      </metadata>
+      <version name="1.0.0" author="Michael Briggs" time="2026-07-17T03:39:29Z">
+        <changelog><![CDATA[
+- Initial release.
+- Consolidated the card right-click menu into a compact, screen-safe hierarchy with a **Change Content** chooser that pairs common-content shortcuts with the complete categorized library; direct title, long-text, Alignment, Row Height, and Card Width controls; a **Row** submenu for adding above, adding below, or removing; and contextual **Meter Actions**. The same bounded content taxonomy now powers card replacement and both add-card surfaces, with keyboard coverage for its tallest nested categories at compact window heights.
+- Rebuilt **Card Details** as the complete per-card workspace. Its searchable Type picker filters every content type, numeric meter, and visualization as the user types; Height and Width use precise segmented controls; Alignment uses direct left/center/right icons; and source, custom-token, display, reset, and focus-recovery behavior stay together in one scroll-safe window.
+- Rebalanced Metering Card Details into Source and Display on the left with Meter View, Meter Controls, and Project Cleanup on the right. Dynamic authored heights keep ordinary numeric and full Spectrogram configurations visible without a scrollbar while retaining a bounded fallback on smaller screens.
+- Made Settings and Card Details persistent auxiliary tool windows that remain above the clock, and made reopening an existing Card Details window explicitly focus and reassert it instead of silently leaving it behind the main face.
+- Added **Action Button** cards for one-click Main-section REAPER actions and scripts in normal and Presentation views. Users can paste numeric or named command IDs, search every installed Main action/script, keep the live action name as the default label, or supply custom button text; persistent toggles mirror their live on/off state while momentary actions keep ordinary click feedback, and focus clicks, presentation drags, and customization double-clicks are guarded from accidental execution.
+- Kept all live Metering visualizations rendering in Edit mode beneath the normal row/card controls, including balanced clipping so one visualization cannot affect later rows or edit affordances.
+- Let the persistent Fullscreen, Edit, and Settings icons recede farther when ReaClock is neither focused nor hovered, while preserving quick focus/hover recovery and the existing optional fade preference.
+- Split upcoming cues into explicit **Next Region**, **Next Region Countdown**, **Next Marker**, and **Next Marker Countdown** content types and tokens, with Region-based cards as fresh-install defaults and no secondary Cue Source setting.
+- Expanded Custom Template with every numeric LUFS, RMS, Peak, True Peak, and Loudness Range token. Templates that use meter values expose a source workspace and request only the readings they reference.
+- Added first-class independent pop-out cards with saved geometry and configuration, Move to Pop-Out, New Pop-Out Card, Return to Face, close/reopen management, visible limit/no-room feedback, and meter-source cleanup protection without forcing a duplicate on the main face.
+- Added a per-card fullscreen control for live visualizations. The transient borderless monitor view uses the same card and stream, exits with its control or Escape, suppresses normal card chrome/tooltips, and never creates a second configuration.
+- Rebuilt the Spectrogram's high-end path against the supplied MiniMeters reference and exposed its primary controls independently: 1024/2048/4096/8192 FFT, Mel/Log/Linear frequency scale, Sharper/Sharp/Classic definition, and -12.00 to +12.00 dB tilt. Fresh cards use the supplied 4096/Mel/Sharper/+4.50 dB configuration. Maximum quality adds 1024 source bins, 60 Hz publication, a 2x 120-column-per-second by 2048-row texture, bounded missing-column reconstruction, a blacker noise floor, and symmetric local spectral contrast; it remains an explicit CPU-intensive opt-in outside Auto.
+- Unified authored popups with the redesigned Settings language: menus and token pickers now share its theme-derived labels, subtle borders, corner geometry, control padding, and interaction rhythm across light and dark styles.
+- Added a direct **Project Title** card plus `{project_title}` and fetch-gated `{author}` custom-template tokens. Removed the low-value REAPER version, ReaImGui version, operating-system, and clock-refresh cards and tokens before the first release.
+- Added a consistent Lucide icon system with a 7 KB ReaClock-specific bundled font. The bottom utility bar now uses matching Presentation, Edit/Done, and Settings icons; meter reset/setup, card add/remove/reorder, row reorder, and source-choice affordances use the same visual language with text and drawn fallbacks if the icon font is unavailable.
+- Added a persistent **Channels** selector to the ReaClock Meter companion. It defaults to **Auto** and can limit numeric and visual analysis to the first N channels, with choices capped by the live host-channel count. The companion now declares no audio output pins and operates as a receive-only analyzer.
+- Organized every packaged support file except the README directly under `Resources`, leaving a clean package root with only `ReaClock.lua`, `README.md`, and the resources folder. Consolidated the ReaClock, meter, GNU, and font legal material into one complete `Resources/LICENSE.txt`.
+- Added an immediate, theme-aware first-use source chooser for Monitoring FX or the selected track, with automatic card binding, clickable setup recovery, and exact-instance reuse.
+- Added the ReaClock Meter to the ReaPack package as a managed source under `Resources`. ReaClock silently deploys and maintains the active copy at `Effects/ReaClock/ReaClock_Meter.jsfx`.
+- Added a packaged fallback copy and automatic companion repair. ReaClock now validates the exact API, build, and content checksum at startup and before adding a source, restores missing, older, or damaged Effects copies without another prompt, and never silently downgrades a newer companion.
+- Automatic companion repair now reloads every online ReaClock Meter in place across Monitoring FX and all open project tabs, preserving the FX identity, settings, enabled state, chain position, open-window state, and card bindings. REAPER may mark affected project tabs modified, but ReaClock never saves them automatically. Compatible same-API meters keep displaying readings while an update is pending, and an offline instance reloads after it is enabled.
+- Fixed explicit odd channel limits so numeric loudness, peak, and RMS analysis uses exactly the selected first N channels rather than the next internal processing batch, and added compact-height companion layouts for unusually small FX windows.
+- Added an always-available **Settings > Metering** page with ReaPack companion status, active-source diagnostics, and explicit undoable cleanup for unused ordinary-track meters.
+- Split the card menu into focused **Metering** and **Visualizations** categories: Metering contains the numeric LUFS, RMS, Peak, and Loudness Range choices, while Visualizations contains Level Meters, Loudness History, Waveform, Spectrum Analyzer, Spectrogram, Vectorscope, and Phase Correlation.
+- Added built-in **Metering** and **Visualizations** Clock Faces with purpose-designed card proportions, shared low-overhead visual streams, remembered project-aware source selection, and one-step source setup for every card in the face.
+- Numeric meter cards now leave the reading area blank until valid audio arrives instead of showing a waiting placeholder; setup and error states remain explicit.
+- Redesigned the companion JSFX interface with separate title, guidance, column, reading, and status regions; right-aligned values; responsive spacing; and live matching to ReaClock's background, text, and highlight colors.
+- Added project-aware metering sources, multiple simultaneous track meters, and persistent Monitoring FX reuse.
+- Added current/session and maximum LUFS, LRA, RMS, sample Peak, and True Peak cards with transport-start reset, acknowledged manual reset, and a reset-enabled card icon.
+- Added multichannel Level Meters, Loudness History, Waveform, Spectrum Analyzer, Spectrogram, Vectorscope, and Phase Correlation cards with demand-driven shared visual streams and Auto/Low/Standard/High quality controls.
+- Made Auto visual quality smoother for a single live view while retaining automatic CPU scaling for denser visualization faces, and fixed quality changes that could leave a replaced stream permanently marked unstable.
+- Smoothed live visual motion between source updates: Spectrogram history now uses the selected quality's real 10/20/30 Hz analysis cadence, keeps the configured time span, and scrolls fractionally between columns; Waveform buffers blend lightly instead of snapping. Settings dropdowns now follow live theme changes, including light themes.
+- Raised the opt-in Maximum Spectrogram to 240 real overlapping FFT columns per second, a native 1024-row history texture, and a cached linear-time Mel/Log/Linear renderer. The new atomic bridge preserves real columns between UI frames, the 4096 / Mel / Sharper / +4.50 dB MiniMeters-style controls remain the fresh defaults, and the UI continues to label Maximum as CPU intensive.
+- Made Factory Reset remove ReaClock's entire owned settings container and relaunch through the true first-run path, so saved window geometry, backups, unknown future settings, and nested settings data cannot survive an incomplete reset list.
+- Added active-project-tab isolation so background project tabs are never polled or rendered as the current project's source.
+- Expanded Clock Faces from four to twenty rows, added optional independent width/height resizing, and made floating windows fit oversized saved or moved layouts inside the current monitor's work area without clipping.
+- Made Presentation mode truly full-screen: its borderless canvas now covers the current monitor edge-to-edge with the selected style gradient and optional background image while keeping the complete face undistorted, centered, and vertically positionable.
+- Added card double-click customization and a per-card **Show card title** toggle, with hidden titles giving their space back to the card value or visualization.
+- Made tooltips calmer and easier to scan with a brief hover delay, quick fade transitions, and compact multi-line wrapping at approximately 300 px.
+- Simplified Waveform and Spectrogram cards by removing their small status captions, and made resettable meter cards stay blank during reset instead of showing a reset acknowledgment label.
+- Changed fresh-install and slider-reset defaults to 100% gradient strength and 50% card background opacity.
+- Canonicalized live visual-view sharing so irrelevant waveform and FFT settings no longer create duplicate source profiles, while keeping the companion API's four-view-per-source ceiling and surfacing a clear 4-of-4 editor/card explanation when it is reached.
+        ]]></changelog>
+        <source main="main" file="ReaClock.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/reaclock-v1.0.0/ReaClock/ReaClock.lua</source>
+        <source file="Resources/ChivoMono-Regular.ttf">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/reaclock-v1.0.0/ReaClock/Resources/ChivoMono-Regular.ttf</source>
+        <source file="Resources/Roboto-Regular.ttf">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/reaclock-v1.0.0/ReaClock/Resources/Roboto-Regular.ttf</source>
+        <source file="Resources/Roboto-Bold.ttf">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/reaclock-v1.0.0/ReaClock/Resources/Roboto-Bold.ttf</source>
+        <source file="Resources/lucide.ttf">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/reaclock-v1.0.0/ReaClock/Resources/lucide.ttf</source>
+        <source file="Resources/CHANGELOG.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/reaclock-v1.0.0/ReaClock/Resources/CHANGELOG.md</source>
+        <source file="README.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/reaclock-v1.0.0/ReaClock/README.md</source>
+        <source file="Resources/LICENSE.txt">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/reaclock-v1.0.0/ReaClock/Resources/LICENSE.txt</source>
+        <source file="Resources/ReaClock_Meter.jsfx">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/reaclock-v1.0.0/ReaClock/Resources/ReaClock_Meter.jsfx</source>
       </version>
     </reapack>
   </category>

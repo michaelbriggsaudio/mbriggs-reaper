@@ -1,5 +1,5 @@
 {
-  "version": "1.4.5",
+  "version": "1.4.6",
   "removed_files": [
     "ReaAssist - Screen Reader Mode.lua",
     "ReaAssist_ScreenReaderMode.lua",
@@ -12,7 +12,7 @@
   "files": [
     {
       "name": "CHANGELOG.md",
-      "sha256": "c65db9017f34ea3a341fd27717ffe215acf01a819ed67f3e9748a27391c3be4c"
+      "sha256": "a880e3ccf27e2970f1415555dbfad0d053a8b311b669874a51a95e90efb21b05"
     },
     {
       "name": "LICENSE.txt",
@@ -24,7 +24,7 @@
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "cd809c63c5011bf4bd3d8a676056ac14e99038efaf9aab26d0a2c544a0678705"
+      "sha256": "14d20f9c69df73406e1eb55e46d15cf21c96ff709a218c64bd950b381f69a30f"
     },
     {
       "name": "ReaAssist_Screen_Reader_Mode.lua",

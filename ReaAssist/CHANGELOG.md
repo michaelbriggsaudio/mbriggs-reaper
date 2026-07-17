@@ -1,5 +1,9 @@
 # ReaAssist - Changelog
 
+## v1.4.6 - 2026-07-17
+
+- Testing the new update system.
+
 ## v1.4.5 - 2026-07-17
 
 - **Updates are safer and more resilient.** ReaAssist now downloads and verifies the complete update before replacing files, uses version-pinned release files, and handles locked files without silently leaving them behind.

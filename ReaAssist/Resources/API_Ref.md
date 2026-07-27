@@ -6,8 +6,8 @@
 <!-- SECTION:core -->
 # REAPER ReaScript Lua API Reference
 
-Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.77),
-plus official Cockos changelog notes through REAPER v7.77.
+Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.78),
+plus official Cockos changelog notes through REAPER v7.78.
 Lua-only. All functions called as reaper.FunctionName().
 Use proj=0 for active project. Track/item indices in the API are 0-based.
 
@@ -35,16 +35,45 @@ REAPER installs: `if reaper.FunctionName then ... else ... end`.
   Prefer it over AddProjectMarker/AddProjectMarker2 when you need to reference
   the created marker/region.
 - REAPER 7.74+: `integer reaper.set_config_var_string(string name, string value, integer persist)`.
-  Advanced config write helper. It changes REAPER ini/config variables in
-  memory; persist=1 writes a global preference and persist=2 writes a project
-  default when the returned type matches. Use only for explicit settings tasks.
+  Advanced config write helper. Return value 0 means failure, 1 identifies a
+  global preference, and 2 identifies a project-default setting. The change is
+  made in memory; REAPER writes it to reaper.ini only when the returned type
+  equals the requested `persist` value (1 global, 2 project default). Check
+  `local returned_type = reaper.set_config_var_string(...)` and treat the write
+  as persisted only when `returned_type == persist`. Use only for explicit
+  settings tasks; never imply that persist=2 is supported for every variable.
+  Both matching persistence modes are written to `reaper.ini`; return type 2
+  describes a project-default setting, not a write to the current `.RPP` file.
+  Do not invent a concrete config-variable key for an explanatory example.
+  Use a neutral guarded helper and let the caller supply a documented key:
+  ```lua
+  local function set_config_checked(name, value, persist)
+    if not reaper.set_config_var_string then
+      return false, "REAPER 7.74 or newer is required"
+    end
+    if persist ~= 1 and persist ~= 2 then
+      return false, "persist must be 1 (global) or 2 (project default)"
+    end
+    local returned_type = reaper.set_config_var_string(name, value, persist)
+    if returned_type == 0 then
+      return false, "configuration variable was rejected"
+    end
+    if returned_type ~= persist then
+      return false, "changed in memory, but not persisted as requested"
+    end
+    return true
+  end
+  ```
 - REAPER 7.74+: `reaper.Main_openProject("fxoffline:C:\\path\\file.rpp")`
   opens a project with all FX offline. `GetSetProjectInfo(0, "READONLY", 1,
   true)` can temporarily mark the active project read-only without changing
   filesystem attributes.
 - REAPER 7.74+: `boolean retval, string buf = reaper.TrackFX_FormatParamValueNormalized(track, fx, param, value)`
   and the `TakeFX_` equivalent return the formatted string directly in Lua; do
-  not pass a dummy output string argument.
+  not pass a dummy output string argument. For the first FX on a guarded track,
+  use its zero-based index directly and capture both returns:
+  `local ok, formatted = reaper.TrackFX_FormatParamValueNormalized(track, 0, 0, 0.5)`.
+  Do not call `TrackFX_GetByName` with an empty name to locate the first FX.
 - REAPER 7.75+: `TrackFX_GetNamedConfigParm(track, fx, "chain_index_to_slot")`
   maps a dense FX-chain index to its displayed TCP/MCP FX slot. For the reverse
   direction, call `TrackFX_GetNamedConfigParm(track, slot, "chain_slot_to_index")`;
@@ -55,12 +84,17 @@ REAPER installs: `if reaper.FunctionName then ... else ... end`.
   never clear a dirty project just to suppress prompts.
 - REAPER 7.75+ TrackSend APIs can access mixer/TCP send and hardware-output
   UI ordering; REAPER 7.77 fixed the original access semantics. In 7.77+,
-  `GetTrackNumSends(track, 0x10000000)` returns the sparse UI list size, and
-  category-based Get/Set/Remove calls use category `0x10000000` with the plain
+  `GetTrackNumSends(track, 0x10000000)` returns the sparse UI list size.
+  `reaper.RemoveTrackSend(track, 0x10000000, 3)` removes displayed UI send slot
+  4 (the plain slot index is zero-based). This differs from dense category 0
+  send indices and from `GetTrackSendName`, whose single index must include the
+  category flag. Category-based Get/Set/Remove calls use category `0x10000000`
+  with the plain
   UI slot index. Do not add the flag to `sendidx` for those calls. Older
   UI-only helpers without a category argument, such as `GetTrackSendName`,
   are different: the caller must add `0x10000000` to their single send-index
-  argument. Prefer dense category 0/1 indices unless the user specifically
+  argument; displayed slot 4 is `GetTrackSendName(track, 0x10000003, "")`.
+  Prefer dense category 0/1 indices unless the user specifically
   asks about displayed send slots.
 - REAPER 7.76+: `GetSetAutomationItemInfo(env, autoitem_idx, "D_MUTE", value,
   is_set)` can query or set automation item mute state. `autoitem_idx` is
@@ -70,7 +104,9 @@ REAPER installs: `if reaper.FunctionName then ... else ... end`.
   2=multiple files, 3=directory. `extension_list` uses pipe-separated pairs
   like `Text files|*.txt|Audio files|*.wav;*.aiff|All files|*.*`, or empty for
   the default; do not use NUL-separated Win32 filter strings. GetUserFileNameForRead
-  is superseded and is only an older fallback for existing-file selection.
+  is superseded and is only an older fallback for existing-file selection. This
+  core entry completely covers the current native picker; do not request
+  `docs_extended` before using `GetUserFileName`.
 - REAPER 7.70+: `GetEnvelopeInfo_Value(env, "I_DISPLAYEDCOLOR")` reads the
   actual displayed envelope color. For marker/region objects,
   `GetRegionOrMarkerInfo_Value(..., "I_DISPLAYEDCOLOR")` reads displayed color.
@@ -217,6 +253,12 @@ if cmd ~= 0 then reaper.Main_OnCommand(cmd, 0) end
 
 ## RETURN VALUE UNPACKING
 
+`GetTrack`, `GetSelectedTrack`, `GetSelectedTrack2`, and
+`GetMediaItem_Track` each return exactly one `MediaTrack` handle. Assign it
+directly (`local tr = reaper.GetTrack(0, idx)`); never write
+`local _, tr = reaper.GetTrack(...)`, which discards the handle and leaves
+`tr` nil.
+
 ```lua
 -- Many REAPER functions return multiple values. The first is often a boolean
 -- "retval" indicating success. Always check it when it matters:
@@ -274,10 +316,17 @@ MIDI channels and `1..16` mean only that channel. The physical input index is
 from `GetMIDIInputName`; physical input `63` means all MIDI devices, and `62`
 means the virtual MIDI keyboard. A single track input can select one physical
 MIDI device or all devices. It cannot represent "all MIDI devices except X".
+Exact all-device examples: all MIDI devices on all channels is
+`4096 + (63 * 32) + 0 = 6112`; all MIDI devices on channel 1 is
+`4096 + (63 * 32) + 1 = 6113`. Bare `4096` is physical input index 0 on all
+channels, not all MIDI devices.
 Do not invent `P_MIDI_MAP`, comma-separated device maps, or `4096 + 256` for
 record-input filtering. For an all-except-device workflow, create helper input
 tracks for the allowed devices and route their MIDI to the target track, or ask
 the user to set the exclusion manually in REAPER.
+Arm a track with `reaper.SetMediaTrackInfo_Value(track, "I_RECARM", 1)`.
+`B_RECARM` is not a valid track property. For a newly created record-ready MIDI
+track, set `I_RECINPUT` and `I_RECMON` first, then set `I_RECARM` last.
 
 I_FOLDERDEPTH is a folder-depth delta: 1 starts a folder, 0 keeps the current
 depth, -1 closes one folder after this track, and lower negative values close
@@ -432,10 +481,12 @@ ADDBYNAME vs GETBYNAME (read first -- the most common FX-script bug):
   fully initialized in the same execution frame, and GetNumParams returns nil.
 - Function name is `GetNumParams`, NOT `GetParamCount` (common hallucination).
 
-Check the returned index immediately, before any `reaper.defer` block. A
-success-direction-only guard like `if fx >= 0 then ... end` with no else is
-the silent-skip anti-pattern: when the FX fails to load the script reports
-"OK" while the user sees a missing or broken effect chain.
+Complete every failure-prone `AddByName` call and its failure return before
+opening a manual undo block. Once `Undo_BeginBlock` has run, every exit path
+must reach `Undo_EndBlock`. When the FX add is followed by deferred parameter
+changes, let the add complete first and place the later parameter changes in
+their own balanced deferred undo block; do not open an undo block before
+`AddByName` and return from its failure branch without closing it.
 
 ```lua
   local fx = reaper.TrackFX_AddByName(tr, "ReaEQ", false, -1)
@@ -447,26 +498,6 @@ the silent-skip anti-pattern: when the FX fails to load the script reports
   reaper.defer(function()
     local n = reaper.TrackFX_GetNumParams(tr, fx)
     -- set params here
-  end)
-```
-
-For chains, check every plugin before the deferred parameter edits:
-
-```lua
-  local eq = reaper.TrackFX_AddByName(tr, "VST: ReaEQ (Cockos)", false, -1)
-  if eq < 0 then
-    reaper.ShowMessageBox("Failed to add ReaEQ.", "ReaAssist", 0)
-    return
-  end
-
-  local comp = reaper.TrackFX_AddByName(tr, "VST: ReaComp (Cockos)", false, -1)
-  if comp < 0 then
-    reaper.ShowMessageBox("Failed to add ReaComp.", "ReaAssist", 0)
-    return
-  end
-
-  reaper.defer(function()
-    -- parameter work on eq and comp here
   end)
 ```
 
@@ -514,7 +545,24 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
 
 `string buf reaper.TrackFX_GetParamSectionName(MediaTrack track, integer fx, integer param)`
   REAPER 7.67+. Get the VST3 unit / CLAP module / parameter section name for
-  a parameter when the plug-in exposes one. May return an empty string.
+  a parameter when the plug-in exposes one. May return an empty string. Guard
+  the versioned API before calling it: if
+  `not reaper.TrackFX_GetParamSectionName`, show one user-facing message and
+  return rather than attempting a fallback action or synthesizing a section.
+  Parameter inspection is deferred: after validating the track and first FX,
+  put `TrackFX_GetNumParams`, `TrackFX_GetParamName`, and
+  `TrackFX_GetParamSectionName` inside the same callback:
+  ```lua
+  local function report_params()
+    local count = reaper.TrackFX_GetNumParams(track, 0)
+    for param = 0, count - 1 do
+      local _, name = reaper.TrackFX_GetParamName(track, 0, param, "")
+      local section = reaper.TrackFX_GetParamSectionName(track, 0, param)
+      reaper.ShowConsoleMsg(name .. ": " .. (section ~= "" and section or "(none)") .. "\n")
+    end
+  end
+  reaper.defer(report_params)
+  ```
 
 `boolean retval, string buf reaper.TrackFX_GetNamedConfigParm(MediaTrack track, integer fx, string parmname)`
   Read plug-in/chain metadata. Useful keys include `pdc`, `in_pin_X`,
@@ -536,7 +584,11 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
 
 `boolean retval, string buf reaper.TrackFX_FormatParamValueNormalized(MediaTrack track, integer fx, integer param, number value)`
   REAPER 7.74+. Format a normalized value as the FX would display it. Lua
-  returns the formatted string directly; do not pass a dummy output buffer.
+  returns `retval, formatted_string` directly; capture both values and do not
+  pass a dummy output buffer. To format parameter 0 of the first FX after a
+  `TrackFX_GetCount(track) > 0` guard:
+  `local ok, formatted = reaper.TrackFX_FormatParamValueNormalized(track, 0, 0, 0.5)`.
+  The first FX is index 0; do not use `TrackFX_GetByName(track, "", false)`.
   Works only for FX that support Cockos VST extensions.
 
 `boolean reaper.TrackFX_GetOpen(MediaTrack track, integer fx)`
@@ -581,7 +633,7 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
 
 ```lua
 -- NOTE: Plugin-specific parameter layouts (ReaEQ, ReaComp, etc.) are documented
--- in Plugin_Ref.md. Do not guess param indices or value scales for curated
+-- in Plugin_Pack.md. Do not guess param indices or value scales for curated
 -- plugins -- always consult that reference.
 ```
 
@@ -928,7 +980,8 @@ Useful string keys:
   `Text files|*.txt|Audio files|*.wav;*.aiff|All files|*.*`, or empty for
   default filters. Do not use NUL-separated Win32 filter strings. In directory
   mode, `extension_list` is ignored. `initial_file_or_path` can be an extension
-  like `.txt` to set the default extension.
+  like `.txt` to set the default extension. This core entry is complete for the
+  current native picker; use it directly without requesting `docs_extended`.
 
 `boolean retval, string filenameNeed4096 reaper.GetUserFileNameForRead(string filenameNeed4096, string title, string defext)`
   Older open-file picker. Superseded by GetUserFileName in REAPER 7.70+.
@@ -977,8 +1030,9 @@ Useful string keys:
   REAPER 7.74+. Advanced config write helper. Returns 0 on failure, 1 for a
   global preference, or 2 for a project setting. If `persist` is the matching
   type (1 global preference, 2 project default), REAPER writes the value to
-  `reaper.ini`. Prefer safer project/extstate APIs unless the user explicitly
-  asks to change a REAPER preference/config variable.
+  `reaper.ini`. Type 2 does not mean the value is written to the current `.RPP`.
+  Prefer safer project/extstate APIs unless the user explicitly asks to change
+  a REAPER preference/config variable.
 
 ## COLORS
 
@@ -1117,11 +1171,6 @@ else
 end
 ```
 
-For drum-hit/transient stretch-marker requests, prefer REAPER's built-in
-Dynamic Split / transient-detection actions found by action-list text. Do not
-substitute a simple Lua energy-threshold detector unless the user explicitly
-asks for a custom approximation; it tends to add markers on decays and bleed.
-
 ### SMPTE/LTC/MTC TIMECODE GENERATOR
 
 SMPTE/LTC/MTC timecode generation is native REAPER action/item work, not an FX
@@ -1190,9 +1239,8 @@ Detailed drum-edit rules live in `prompt_bundle:drums`; request/use that bundle
 before code for drum edit, quantize, tighten, snap, transient, or Dynamic Split
 tasks. This extended API bucket only carries API signposts:
 
-- Prefer REAPER's native Dynamic Split / transient actions found by Action List
-  lookup. Do not substitute a custom `GetAudioAccessorSamples` threshold detector
-  unless the user explicitly asks for that approximation.
+- Native transient discovery: use the Dynamic Split Action List pattern above
+  and follow the AUDIO ACCESSORS custom-detector boundary.
 - For existing stretch-marker quantize, use `GetTakeStretchMarker` +
   `SnapToGrid` or `docs:tempo` bar/grid math + `SetTakeStretchMarker`, preserving
   source positions through a shared guide-hit map.
@@ -1234,7 +1282,9 @@ EDITING
   40026   File: Save project
   40012   Item: Split items at edit or play cursor
   40061   Item: Split items at time selection
-  40362   Item: Glue items
+  40289   Item: Unselect (clear selection of) all items
+  40362   Item: Glue items, ignoring time selection
+  42432   Item: Glue items within time selection
   40548   Item: Heal splits in items
   40006   Item: Remove items (delete selected items)
   40057   Edit: Copy items/tracks/envelope points (depending on focus)
@@ -1255,6 +1305,11 @@ TRACKS
   40296   Track: Select all tracks
   40769   Unselect (clear selection of) all tracks/items/envelope points
 
+PROJECT
+  40860   Close current project tab
+    This action can discard or prompt for unsaved project changes. Use it only
+    for an explicit close-project request and require confirmation before run.
+
 TIME / VIEW
   40020   Time selection: Remove (unselect) time selection and loop points
   40625   Time selection: Set start point
@@ -1269,6 +1324,15 @@ MIDI EDITOR (use MIDIEditor_OnCommand, not Main_OnCommand, with these IDs)
   40051   Edit: Insert note at edit cursor
   40659   Correct overlapping notes
 ```
+
+For requests that explicitly say "within time selection," use 42432, not
+40362. Select only the intended target items that overlap the non-empty time
+selection before running it; REAPER preserves material outside the selection
+by splitting boundary-crossing items. If SESSION CONTEXT shows
+`Time selection: none`, do not create one: leave the project unchanged and
+tell the user to make a time selection first. If fewer than two target items
+overlap, leave the project unchanged and explain that there is nothing to
+combine.
 
 ```lua
 -- Pattern: split selected items at the edit cursor and group them
@@ -1352,6 +1416,27 @@ end
 <!-- SECTION:items -->
 ## MEDIA ITEMS
 
+### GLUE ACTIONS AND TIME-SELECTION SEMANTICS
+
+Verified with `kbd_getTextFromCmd` in REAPER 7.77:
+
+- `40362` = `Item: Glue items, ignoring time selection`
+- `42432` = `Item: Glue items within time selection`
+- `40289` = `Item: Unselect (clear selection of) all items`
+
+For a request to glue items "within time selection," select only the target
+items that overlap the non-empty time selection, then call
+`reaper.Main_OnCommand(42432, 0)` directly. Do not use 40362, and do not
+enumerate the Action List for this verified action. REAPER splits
+boundary-crossing items and preserves their material outside the selection.
+If SESSION CONTEXT shows `Time selection: none`, do not create one: leave the
+project unchanged and tell the user to make a time selection first.
+If fewer than two target items overlap, leave the project unchanged and explain
+that there is nothing to combine. Preserve unrelated item selections: record
+their item handles, clear selection with the verified `40289` action, run the
+glue, then restore those unrelated selections without deselecting the new glued
+item.
+
 `MediaItem reaper.AddMediaItemToTrack(MediaTrack tr)`
   Create a new media item on the track.
   Do NOT use this to create a MIDI item for notes. It creates a plain item
@@ -1381,6 +1466,7 @@ end
   B_MUTE, B_LOOPSRC, B_UISEL, C_LOCK,
   D_VOL (0=-inf, 1=+0dB, 2=+6dB), D_POSITION, D_LENGTH, D_SNAPOFFSET,
   D_FADEINLEN, D_FADEOUTLEN, D_FADEINDIR, D_FADEOUTDIR,
+  C_FADEINSHAPE, C_FADEOUTSHAPE (integer 0..6; 0=linear),
   I_GROUPID (0=no group), I_CURTAKE,
   I_CUSTOMCOLOR (ColorToNative(r,g,b)|0x1000000),
   I_LASTY, I_LASTH (read-only px), P_TRACK (read-only).
@@ -1399,6 +1485,30 @@ end
 
 `boolean reaper.SetMediaItemSelected(MediaItem item, boolean sel)`
   Select or deselect an item.
+
+`boolean retval, string str reaper.GetItemStateChunk(MediaItem item, string str, boolean isundo)`
+  Get the complete RPPXML state of an item. `isundo` is a performance/caching
+  hint. Use with SetItemStateChunk when a true duplicate must preserve every
+  take, take FX/envelope, stretch marker, source offset, and item setting.
+
+`boolean reaper.SetItemStateChunk(MediaItem item, string str, boolean isundo)`
+  Set the complete RPPXML state of an item. Returns true on success. When
+  cloning a chunk into a newly added item, replace every item/take GUID in the
+  cloned chunk with a separate fresh GUID so the duplicate does not reuse the
+  source object's identity. `reaper.genGuid("")` already returns the braces;
+  do not add another pair. Use a replacement callback so every matched GUID is
+  generated separately:
+
+```lua
+local function freshen_item_chunk_guids(chunk)
+  return (chunk:gsub("([\r\n]%s*I?GUID%s+){[^}\r\n]+}", function(prefix)
+    return prefix .. reaper.genGuid("")
+  end))
+end
+```
+
+Call `freshen_item_chunk_guids(chunk)` before SetItemStateChunk. The `I?GUID`
+pattern covers both item `IGUID` lines and take `GUID` lines.
 
 `boolean reaper.IsMediaItemSelected(MediaItem item)`
   Returns true if selected.
@@ -1576,6 +1686,16 @@ inspect, filter, or programmatically pick which items go in which group.
 
 `TrackEnvelope reaper.GetTrackEnvelopeByName(MediaTrack track, string envname)`
   Get envelope by name.
+
+TARGET RESOLUTION RULE (existing named track/envelope):
+- When the request or live session names an existing track, resolve only that
+  track. If the named track is missing, show a clear message and return; do not
+  create a replacement track unless the user explicitly asked for one.
+- If `GetTrackEnvelopeByName` returns nil, show a clear message and return. Do
+  not use `Main_OnCommand`, `NamedCommandLookup`, SWS toggle actions, or
+  unrelated track-property writes to synthesize the envelope. The state-chunk
+  visibility pattern below applies only after you already have a valid envelope
+  handle.
 
 `TrackEnvelope reaper.GetTrackEnvelopeByChunkName(MediaTrack track, string chunkname)`
   Get envelope by chunk name (e.g. "<VOLENV", "<PANENV").
@@ -1843,6 +1963,12 @@ end)
   REAPER 7.77+: use category `0x10000000` and the plain UI slot index to
   inspect the sparse UI-ordered TCP/MCP send/hardware-output list. Do not add
   the flag to `sendidx` for this category-based API.
+  `I_SENDMODE`: 0=post-fader, 1=pre-FX, 2=deprecated post-FX,
+  3=post-FX and 8=pre-receive. Pre-receive is available in REAPER 7.78+
+  and is not supported for hardware outputs. It sends media and monitoring
+  before the destination track's receives, which supports feedback-safe
+  routing such as sending MIDI to a sampler and receiving audio back on the
+  same track.
   `D_PAN` here is send pan. For track pan, use
   `SetMediaTrackInfo_Value(track, "D_PAN", value)`.
 
@@ -1911,6 +2037,17 @@ reaper.SetMediaTrackInfo_Value(src, "B_MAINSEND", 0)           -- no master/main
 
 `reaper.SetCurrentBPM(ReaProject proj, number bpm, boolean wantUndo)`
   Set project tempo.
+
+`number start, number end reaper.GetSet_LoopTimeRange2(ReaProject proj, boolean isSet, boolean isLoop, number start, number end, boolean allowautoseek)`
+  Project-aware loop/time-selection range API. After converting bar/beat
+  endpoints to seconds, set loop points directly with
+  `reaper.GetSet_LoopTimeRange2(0, true, true, start_time, end_time, false)`.
+  Use `isLoop=false` only when the request specifically asks for the time
+  selection rather than loop points. Do not use a numeric `Main_OnCommand`
+  toggle to create the range; this direct call is deterministic and does not
+  depend on the current repeat state. Setting loop points is not permission to
+  enable repeat playback: unless the user explicitly says to enable repeat,
+  do not call `Main_OnCommand`, `GetSetRepeat`, or `GetSetRepeatEx` afterward.
 
 `boolean reaper.SetTempoTimeSigMarker(ReaProject proj, integer ptidx, number timepos, integer measurepos, number beatpos, number bpm, integer timesig_num, integer timesig_denom, boolean lineartempochange)`
   Set a tempo marker. ptidx=-1 to add new.
@@ -2386,6 +2523,32 @@ Default to appending the destination track unless the user explicitly asks for a
 position. When iterating source items, use `reaper.CountTrackMediaItems(track)`;
 do NOT invent `GetTrackNumMediaItems`.
 
+## EXACT BAR-RANGE CREATION (use this path for musical positions)
+
+When the user asks to create new musical content at a stated BPM, set that BPM
+even if the project snapshot already shows the same value. For "bar 1 to bar 2"
+in 4/4, project bar 1 starts at QN 0 and bar 2 starts at QN 4; do not reinterpret
+those bar labels as 2 to 4 seconds. Use `qnIn=true`, then convert project QN to
+PPQ for the note:
+
+```lua
+  reaper.SetCurrentBPM(0, 120, true)
+  local item = reaper.CreateNewMIDIItemInProj(dest, 0, 4, true)
+  local take = reaper.GetActiveTake(item)
+  if not take or not reaper.TakeIsMIDI(take) then return end
+  local ppq_start = reaper.MIDI_GetPPQPosFromProjQN(take, 0)
+  local ppq_end = reaper.MIDI_GetPPQPosFromProjQN(take, 1) -- one beat
+  reaper.MIDI_InsertNote(take, false, false, ppq_start, ppq_end,
+    0, 48, 100, false)
+```
+
+`reaper.SetCurrentBPM(ReaProject proj, number bpm, boolean wantUndo)`
+
+`boolean reaper.SetMediaItemSelected(MediaItem item, boolean selected)`
+
+  Select or deselect the MediaItem that contains a MIDI take. Passing `true` is
+  appropriate when the newly created MIDI item should remain selected.
+
 ## VALUE RANGES (memorize these)
 
 ```
@@ -2505,6 +2668,10 @@ the take's entire event list as one binary string of MIDI bytes
 parsing/building the raw byte format yourself. Reach for it only when the
 DisableSort loop is actually the bottleneck; the simple loop is fine for
 typical user requests.
+
+REAPER 7.78+: MIDI setting APIs automatically mark the relevant tracks dirty
+for undo. `MarkTrackItemsDirty(track, item)` also correctly handles pooled
+MIDI items across tracks.
 
 ## FUNCTION SIGNATURES
 
@@ -2843,7 +3010,7 @@ local r, g, b = reaper.ColorFromNative(native)
 
 - SetThemeColor changes are TEMPORARY. After applying color changes, add this exact note: 'These changes are temporary and will reset if you reload your theme. Use the Undo button to revert, or click the "Save Theme" button under the code block above to make them permanent.'
 - Do NOT include restore/undo code in your response. REAPER's built-in undo doesn't track theme changes; the Undo button reads the ExtState backups automatically. Only output the code that APPLIES the requested changes.
-- Keys ending in `_drawmode` are blend mode flags, not colors. Do not set RGB values on them.
+- Any entry described as a "draw mode" is a blend/alpha-mode flag, not a color. These entries take REAPER blend/alpha mode integers; never write RGB values to them.
 - Some keys have no visible effect depending on the active theme's image assets.
 
 ## COLOR KEYS

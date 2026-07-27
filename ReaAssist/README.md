@@ -18,15 +18,17 @@ ReaAssist is a session-aware workflow assistant for REAPER. Describe what you wa
 
 ReaAssist is a workflow and automation tool, not a generative creative tool. It does not produce audio, music, samples, lyrics, melodies, or any other creative content. It does not make artistic decisions for you. Its job is to translate workflow steps you already know you want into the script code or plugin configuration that performs them, faster than you would write the code yourself.
 
-## Privacy and local models
+## Provider access and advanced local models
 
-In addition to cloud providers, ReaAssist supports custom provider endpoints and local models running on your own machine via OpenAI-compatible servers (Ollama, LM Studio, llama.cpp, and similar). Point ReaAssist at a localhost endpoint and your project context, prompts, and responses never leave your computer. Useful when you cannot or prefer not to send session data to a cloud provider, or when you want to keep working offline.
+For the most reliable results, use one of ReaAssist's tested API providers: Claude, OpenAI, Gemini, or DeepSeek. Consumer chat subscriptions are separate from provider API access and cannot be used as ReaAssist credentials. You need a provider API key and, where required, API billing or credit.
+
+Local models and custom endpoints remain available as an advanced option through compatible OpenAI-style servers such as Ollama, LM Studio, llama.cpp, and vLLM. ReaAssist does not guarantee compatibility, performance, or result quality for these setups. Capable local models may require powerful hardware, and custom online endpoints still send requests to the service you configure.
 
 ## Requirements
 
 - REAPER 7.0 or later
 - ReaImGui extension (install via ReaPack from the ReaTeam Extensions repository)
-- An API key from one of the supported cloud providers (Claude, ChatGPT, Gemini, DeepSeek), or a local / custom-endpoint setup as described above
+- A provider API key from Claude, OpenAI, Gemini, or DeepSeek. Consumer chat subscriptions cannot be used. Advanced users may instead configure a compatible local or custom endpoint as described above.
 - Screen Reader Mode additionally requires [OSARA](https://osara.reaperaccessibility.com)
 
 ## Installation

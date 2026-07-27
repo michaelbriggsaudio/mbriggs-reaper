@@ -7,13 +7,30 @@ model training cutoffs. This is not the full changelog.
 If a user asks outside this slice, do not invent details. Say the installed
 REAPER changelog is authoritative, or ask for the relevant changelog lines.
 
+## REAPER 7.78 - July 2026
+
+- Sends: a new pre-receive send mode can send media and monitoring to a
+  destination before that track's receives, avoiding feedback loops in
+  workflows such as sending MIDI to a sampler and receiving its audio back on
+  the same track. In ReaScript, `I_SENDMODE=8` selects pre-receive for normal
+  sends; hardware outputs do not support it.
+- ReaScript and MIDI: `MarkTrackItemsDirty()` now handles pooled MIDI items
+  across tracks correctly, and MIDI setting APIs automatically mark the
+  relevant tracks dirty for undo.
+- Paths and timecode: Preferences paths can use relative paths, which is
+  especially useful for portable installs. Project start can also use a
+  fractional-frame offset, and video follows that offset.
+
 ## REAPER 7.77 - July 2026
 
 - ReaScript: REAPER fixed the 7.75-regression behavior for UI-ordered send
   access and removal. Category-based Get/Set/Remove calls now use category
   `0x10000000` with the plain sparse UI slot index; older one-index UI helpers
   such as `GetTrackSendName()` are different, and the caller must still add
-  the flag to their single send-index argument.
+  the flag to their single send-index argument. Example: displayed UI send
+  slot 4 is plain zero-based slot index 3, so remove it with
+  `reaper.RemoveTrackSend(track, 0x10000000, 3)`; this is not a dense send
+  index and the flag is not added numerically to the third argument.
 - ReaScript UI: `gfx.setcursor()` can accept a `base64:...` cursor containing a
   Windows `.cur` file up to 8 KiB, with a named/built-in fallback advisable for
   older REAPER versions.
@@ -70,7 +87,11 @@ REAPER changelog is authoritative, or ask for the relevant changelog lines.
   `GetSetProjectInfo(..., "READONLY", ...)` project state, extended
   `Main_openProject` with the `fxoffline:` prefix, and fixed Lua
   `TrackFX_FormatParamValueNormalized` / `TakeFX_FormatParamValueNormalized`
-  formatting and signatures.
+  formatting and signatures. `set_config_var_string` returns 0 on failure, 1
+  for a global preference, or 2 for a project-default setting. A requested
+  persist value is honored only when it matches that returned type; persist=2
+  is not universally valid. Matching persistence is written to `reaper.ini`;
+  return type 2 does not mean a write to the current `.RPP` file.
 - Sample editing: REAPER added vertical sample-edit drawing modifiers, all-
   channel sample edit actions, better medium-zoom display, and clearer failure
   messages/tooltips for sample editing.

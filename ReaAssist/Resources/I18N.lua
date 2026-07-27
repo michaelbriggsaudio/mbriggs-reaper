@@ -326,8 +326,8 @@ I18N.catalogs = {
         "Cheapest Claude. Use High thinking. Sonnet None is faster for complex work.",
       ["mode.model_tip.claude-sonnet-5"] =
         "Recommended Claude default. Use None thinking. Raise effort only if a prompt struggles.",
-      ["mode.model_tip.claude-opus-4-8"] =
-        "Premium Claude. Use None thinking. Higher levels add cost without quality gain.",
+      ["mode.model_tip.claude-opus-5"] =
+        "Premium Claude. Use None thinking. Best tested Opus 5 balance of quality, speed, and cost.",
       ["mode.model_tip.gpt-5.4-mini"] =
         "Lowest-priced GPT. Use Low thinking. Reliable budget option; GPT-5.6 Luna None is faster at a higher price.",
       ["mode.model_tip.gpt-5.6-luna"] =
@@ -360,14 +360,14 @@ I18N.catalogs = {
         "Simple and complex | Promo mid-cost | Very slow | Use only if None struggles",
       ["mode.combo_hint.anthropic.claude-sonnet-5.high"] =
         "Avoid long prompts | Promo mid-cost | Very slow (hits timeouts) | Use None or Opus None",
-      ["mode.combo_hint.anthropic.claude-opus-4-8.none"] =
-        "Recommended Level | Simple and complex (top quality) | Most expensive | Very fast",
-      ["mode.combo_hint.anthropic.claude-opus-4-8.low"] =
-        "Simple and complex | Most expensive | Very fast | No gain over None -- use None",
-      ["mode.combo_hint.anthropic.claude-opus-4-8.medium"] =
-        "Simple and complex | Most expensive | Very fast | No gain over None -- use None",
-      ["mode.combo_hint.anthropic.claude-opus-4-8.high"] =
-        "Simple and complex | Most expensive | Very fast | Deepest reasoning but no gain -- use None",
+      ["mode.combo_hint.anthropic.claude-opus-5.none"] =
+        "Recommended Level | Simple and complex (top quality) | Most expensive | Fastest tested",
+      ["mode.combo_hint.anthropic.claude-opus-5.low"] =
+        "Simple and complex | Most expensive | Slower | Runtime failure in testing -- use None",
+      ["mode.combo_hint.anthropic.claude-opus-5.medium"] =
+        "Simple and complex | Most expensive | Slowest tested | No quality gain over None -- use None",
+      ["mode.combo_hint.anthropic.claude-opus-5.high"] =
+        "Simple and complex | Most expensive | Untested | Use None; Medium added no measured quality gain",
       ["mode.combo_hint.openai.gpt-5.4-mini.none"] =
         "Lowest cost | Very fast | Less established than Low for complex edits",
       ["mode.combo_hint.openai.gpt-5.4-mini.low"] =
@@ -1150,7 +1150,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.api_keys.meaning"] =
         "Opens accessible API key setup and testing.",
       ["a11y.sr.custom_providers.meaning"] =
-        "Opens accessible local and custom provider management.",
+        "Opens advanced local and custom provider management. Compatibility and result quality are not guaranteed.",
       ["a11y.sr.custom_instructions.meaning"] =
         "Opens accessible controls for custom instructions.",
       ["a11y.sr.help.meaning"] =
@@ -1537,8 +1537,13 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.settings_title.meaning"] =
         "Settings for ReaAssist Screen Reader Mode.",
       ["a11y.sr.api_keys_title"] = "ReaAssist API Keys",
+      ["a11y.sr.provider_setup_title"] = "ReaAssist Provider Setup",
       ["a11y.sr.api_keys_title.meaning"] =
         "API key setup for ReaAssist Screen Reader Mode.",
+      ["a11y.sr.api_access_help.meaning"] =
+        "Opens the manual section about creating provider API keys.",
+      ["a11y.sr.advanced_providers_note.meaning"] =
+        "Explains that local and custom providers are advanced and their compatibility and result quality are not guaranteed.",
       ["a11y.sr.custom_providers_title.meaning"] =
         "Accessible local and custom provider management.",
       ["a11y.sr.custom_providers_summary.meaning"] =
@@ -1550,7 +1555,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.custom_providers_summary"] =
         "{count} custom provider(s): {providers}{more}.",
       ["a11y.sr.custom_providers_note"] =
-        "Edit JSON, save it, then Load Edit File. Save provider keys from API Keys.",
+        "Advanced only. Compatibility and result quality are not guaranteed. Edit JSON, save it, then Load Edit File. Save provider keys from Provider Setup.",
       ["a11y.sr.custom_providers_note.meaning"] =
         "Explains the accessible custom providers workflow.",
       ["a11y.sr.custom_providers_open_file"] =
@@ -1884,9 +1889,9 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.cancel.meaning"] =
         "Cancels this action and returns to the previous screen.",
       ["a11y.sr.api_key_saved_status"] =
-        "{provider} API key is saved.",
+        "{provider} key is saved.",
       ["a11y.sr.api_key_missing_status"] =
-        "{provider} API key is not saved.",
+        "{provider} key is not saved.",
       ["a11y.sr.api_key_status.meaning"] =
         "Tells whether the selected provider has a saved API key.",
       ["a11y.sr.api_key_input"] = "New API Key",
@@ -1906,8 +1911,6 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Opens the selected provider's API key page in your browser.",
       ["a11y.sr.api_key_note"] =
         "Saved keys are stored in REAPER's persistent settings for this install.",
-      ["a11y.sr.api_key_note_storage_v2"] =
-        "Saved keys use reversible obfuscation in REAPER's persistent settings. They are not encrypted in an OS credential vault, and someone with access to the settings and source can recover them.",
       ["a11y.sr.api_key_note.meaning"] =
         "Explains where API keys are stored.",
       ["a11y.sr.api_key_no_provider"] =
@@ -1938,6 +1941,9 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.back_to_settings"] = "Back to Settings",
       ["a11y.sr.back_to_settings.meaning"] =
         "Returns to the settings screen.",
+      ["a11y.sr.back_to_api_keys"] = "Back to Provider Setup",
+      ["a11y.sr.back_to_api_keys.meaning"] =
+        "Returns to provider API key setup.",
       ["a11y.sr.visual_switch_title"] =
         "Open Visual Interface?",
       ["a11y.sr.visual_switch_title.meaning"] =
@@ -2581,6 +2587,26 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "The model re-requested context that was already provided. Try rephrasing your request, or switch to a different model.",
       ["response.resume_failed"] =
         "Couldn't resume the request after your selection. Please try sending the message again.",
+      ["net.cap.call"] =
+        "Stopped after {calls} API calls in one turn to avoid runaway cost. {hint}",
+      ["net.cap.call.hint_haiku"] =
+        "Try Sonnet 5 or Opus 5 for this request.",
+      ["net.cap.call.hint_gemini"] =
+        "Try Gemini 3.1 Pro for this request.",
+      ["net.cap.call.hint_openai"] =
+        "Try a non-mini OpenAI model for this request.",
+      ["net.cap.call.hint_small"] =
+        "This often happens with smaller or local models -- try a higher-tier model.",
+      ["net.cap.call.hint_flagship"] =
+        "Unusual on a flagship model. Try starting a new chat or rephrasing. If it repeats, please use Help -> {help}.",
+      ["net.cap.validator_retry"] =
+        "No project changes were run. ReaAssist stopped when the automatic repair budget was exhausted to avoid runaway cost. Start a new chat or try another model. If it happens again, please use Help -> {help}.",
+      ["net.cap.validator_retry_streak"] =
+        "No project changes were run. The automatic repair budget failed again on consecutive turns. Rephrasing is unlikely to help. Please use Help -> {help}; starting a new chat or choosing another model may work around it.",
+      ["net.cap.validator_retry_candidate_review"] =
+        "The latest blocked draft is included below for review only. It did not pass validation, and this message cannot run it.",
+      ["net.cap.context_fetch"] =
+        "No project changes were run. The model kept asking for additional project details after {cap} context fetches, so ReaAssist stopped to avoid runaway cost. Start a new chat or try another model. If it happens again, please use Help -> {help}.",
       ["retry.failed"] =
         "Auto-retry {reason} did not go through. Please resend the last message.",
       ["retry.reason.after_empty_length_capped_reply"] =
@@ -2621,6 +2647,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "after track-pan API misuse",
       ["retry.reason.after_lua_parse_error"] =
         "after Lua parse error",
+      ["retry.reason.after_unsafe_item_duplication"] =
+        "after unsafe item duplication",
       ["retry.reason.for_sandbox_forbidden_globals"] =
         "for sandbox-forbidden Lua APIs",
       ["retry.reason.for_typed_action_fence_label"] =
@@ -2691,6 +2719,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "for corrupted helper body",
       ["retry.reason.for_invalid_jsfx"] =
         "for invalid JSFX",
+      ["retry.reason.for_internal_output_leak"] =
+        "for internal output cleanup",
+      ["validator.internal_output_leak_blocked"] =
+        "The model repeatedly returned internal ReaAssist processing details instead of a safe user-facing answer. ReaAssist discarded those replies and did not run any project changes. Please resend the request or try another model.",
       ["validator.track_creation_index_blocked"] =
         "The script appears to fetch a newly-created track with a GetTrack index that does not exist yet. Auto-run is blocked; review and correct the InsertTrackAtIndex/GetTrack pairing before running manually.",
       ["validator.track_index_blocked"] =
@@ -2733,6 +2765,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "The script calls TakeIsMIDI with a MediaItem instead of a MediaItem_Take. Auto-run is blocked because this crashes at runtime. Get the active take from the item first.",
       ["validator.midi_input_filter_blocked"] =
         "The script does not safely implement the requested MIDI input-device filter. REAPER cannot encode 'all MIDI devices except one named device' as a single track I_RECINPUT value, and the generated Lua still uses an unsupported map or only lists devices. Auto-run is blocked; use a name-matched helper-track workaround or set a single named input directly.",
+      ["validator.record_arm_property_blocked"] =
+        "The script still uses `B_RECARM` after an automatic correction attempt. `B_RECARM` is not a valid REAPER track property, so auto-run is blocked. Use `I_RECARM` for track record arming while preserving the requested audio or MIDI input and mode.",
       ["validator.action_id_blocked"] =
         "The model emitted unverified numeric REAPER action ID(s), even after a retry: {ids}. Main_OnCommand accepts any integer, so this can silently run the wrong action or do nothing. Auto-run is blocked; confirm the exact Action List ID or rewrite the script with direct REAPER API calls before running it.",
       ["validator.tempo_marker_alignment_blocked"] =
@@ -2764,21 +2798,31 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["validator.timecode_generator_fx_blocked"] =
         "The model tried to insert/generate SMPTE/LTC/MTC timecode as an FX plugin, even after a retry: {plugins}. Auto-run is blocked; use REAPER's native timecode generator action/item workflow and route outputs explicitly.",
       ["validator.fx_identifier_drift_blocked"] =
-        "The model stripped exact preferred plugin identifier(s), even after a retry: {plugins}. Auto-run is blocked; review and edit the code before clicking Run manually.",
+        "The model used plugin identifier(s) that do not match the exact installed identifiers, even after a retry: {plugins}. Auto-run is blocked; review and edit the code before clicking Run manually.",
+      ["validator.item_duplication_blocked"] =
+        "The script does not safely duplicate the complete media item state with fresh item/take identities. Auto-run is blocked; regenerate it before running.",
       ["validator.fx_addbyname_unchecked_blocked"] =
         "The model wrote TrackFX_AddByName / TakeFX_AddByName without checking the result, even after a retry: {vars}. If the plugin fails to load the script will silently report success. Auto-run is blocked; review and edit the code before clicking Run manually.",
       ["validator.fx_getbyname_silent_skip_blocked"] =
         "The model wrote TrackFX_GetByName / TakeFX_GetByName dependent parameter code with no failure path, even after a retry: {vars}. If the FX is missing the script will silently report success without changing the requested plugin. Auto-run is blocked; review and edit the code before clicking Run manually.",
+      ["validator.existing_fx_replacement_blocked"] =
+        "The model tried to add a replacement for an effect the user explicitly said was already present, even after a retry: {vars}. Auto-run is blocked because that fallback can conceal a targeting error or create a duplicate. Review and remove the same-effect AddByName fallback before running manually.",
       ["validator.chain_upsert_blocked"] =
         "The model wrote chain-build code with an upsert pairing violation, even after a retry. Each plugin in the chain needs both a GetByName (reuse) and an AddByName (add if missing) call. Auto-run is blocked; review and edit the code before clicking Run manually.",
       ["validator.defer_plugin_params_blocked"] =
         "The model emitted plugin parameter calls ({calls}) outside a reaper.defer() block, even after a retry. Some VST3 plugins silently ignore parameter changes that arrive in the same execution frame as TrackFX_AddByName; the script may appear to run successfully but produce no audible change. Auto-run is blocked; review the code and wrap the param calls in reaper.defer(function() ... end) before clicking Run manually.",
+      ["validator.musical_enum_guess_blocked"] =
+        "The generated key/scale edit still guessed a raw plugin parameter value after automatic repair. ReaAssist did not run it because that can select the wrong named scale. Ask ReaAssist to regenerate the edit with display-verified enum matching before running it manually.",
+      ["auto_run.blocked.musical_enum"] =
+        "Auto-run blocked: the generated key or scale edit guessed a raw plugin value instead of verifying the named choice. Ask ReaAssist to regenerate it before running manually.",
       ["validator.fx_param_scope_blocked"] =
         "The model wrote plugin parameter changes even though the request only asked to add/load the FX. Auto-run is blocked because those extra parameter writes may change the sound beyond the user's request. Review and remove the TrackFX_SetParam*/TakeFX_SetParam* lines before running manually.",
+      ["validator.reeq_gain_mapping_blocked"] =
+        "The generated ReaEQ gain edit still used an unsafe parameter mapping after automatic repair. ReaAssist did not run it. Ask ReaAssist to regenerate the edit, or review the displayed-value calculation and helper use before running it manually.",
       ["validator.missing_helper_definitions_blocked"] =
         "The model called helper/global function(s) without including their definitions, even after a retry: {helpers}. These are not REAPER built-ins, so the script will crash at runtime when they are reached. Auto-run is blocked; define each helper before its first call or replace it with direct REAPER API calls before running manually.",
       ["validator.helper_integrity_blocked"] =
-        "The model rewrote bundled helper function body in a way that drops a safety guard, even after a retry: {helpers}. The corrupted helper would crash at runtime inside reaper.defer. Auto-run is blocked; review and edit the code before clicking Run manually, or paste the helper definition verbatim from prompt_bundle:plugin_helpers.",
+        "The generated script still contains an unsafe parameter helper after automatic repair: {helpers}. ReaAssist did not run it. Ask ReaAssist to regenerate it, or review the script before running it manually.",
       ["validator.jsfx_safety_blocked"] =
         "The model emitted JSFX that fails ReaAssist's safety/syntax validator, even after a retry: {codes}. Auto-save and auto-run are blocked; review the code carefully and fix the listed issues before saving manually.",
       ["validator.sandbox_api_blocked"] =
@@ -2813,12 +2857,18 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can wait and retry later.",
       ["response.api_key_invalid"] =
         "Your {provider} API key isn't working. It may have expired or been entered incorrectly.\n\nClick the Settings button below to enter a new one.\n\nYou can find or create a key here:",
+      ["response.local_save_actions_help"] =
+        "Use {save} beneath the generated code and choose a filename. If the full file browser opens, you can also choose a location; otherwise the basic prompt saves the script in REAPER's Scripts folder. When prompted, choose {add}. Then open REAPER's Actions list, find the saved script, select it, and use Add... under Shortcuts for selected action to press the key you want.",
+      ["response.local_save_actions_help_sr"] =
+        "Use {save}. ReaAssist saves the Lua script in REAPER's Scripts/ReaAssist folder and adds it to the Actions list automatically. Then open REAPER's Actions list, find the saved script, select it, and use Add... under Shortcuts for selected action to press the key you want.",
       ["response.api_key_storage_note"] =
         "Your key is obfuscated and locked to this REAPER install path. It will not work if copied to another machine.",
       ["response.api_key_storage_note_v2"] =
         "Your key was stored locally with reversible obfuscation, not OS-vault encryption. The install-path binding is why it cannot be decoded after being copied or moved.",
       ["response.credits_exhausted"] =
         "Your {provider} account has run out of credits.\n\nTo continue using ReaAssist, add funds to your account:",
+      ["response.credits_exhausted_no_link"] =
+        "Your {provider} account has run out of credits.\n\nCheck that provider's billing and usage limits to continue.",
       ["response.provider_overloaded"] =
         "The servers are busy right now. Wait a moment and try again; this usually clears up quickly.",
       ["response.provider_internal_error"] =
@@ -2836,7 +2886,9 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["response.provider_busy"] =
         "The provider service is busy right now. This is a provider-side capacity issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and the provider still failed. Wait a moment and try again, or switch models for this request.",
       ["response.google_quota_exhausted"] =
-        "Your Google account has exhausted its Gemini quota.\n\nIf you're on the free tier, you may need to enable billing. If you're on a paid plan, add funds or check your usage limits:",
+        "Google reported that your {provider} quota allocation is exhausted.\n\nCheck the account's API usage limits and billing status:",
+      ["response.google_quota_unknown"] =
+        "Google returned RESOURCE_EXHAUSTED without enough structured quota detail to tell whether this is temporary throttling or an exhausted account allocation.\n\nWait a minute and try again. If it continues, check your Google API usage limits and billing status.",
       ["response.google_model_not_found"] =
         "That model doesn't seem to exist anymore. Try picking a different one.",
       ["response.google_permission_denied"] =
@@ -2849,6 +2901,18 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Auto-run was blocked because ReaAssist could not create a safety backup. Check the project folder, disk space, and permissions, then try again. To proceed without a backup, turn off Auto-backup in Settings and run the code manually.",
       ["auto_run.blocked.relevance"] =
         "Auto-run was blocked because the generated action did not clearly match the request and captured session. Review the target tracks, plugins, and REAPER actions before running it manually.",
+      ["code.run.no_parameter_change"] =
+        "No parameter value change was detected. The requested value may already have been set or the write was a no-op. Confirm the displayed plugin value before continuing.",
+      ["code.run.partial_parameter_change"] =
+        "Some parameter targets did not finish with a verified new value ({changed} of {total} changed). Confirm the unchanged or restored plugin values before continuing.",
+      ["code.run.parameter_returned_to_initial"] =
+        "Parameter probing finished at the original value. The requested state may already have been set, or a helper restored it after failing verification. Review any message shown by the script and confirm the displayed plugin value.",
+      ["a11y.sr.response_ready_no_parameter_change"] =
+        "Generated code finished, but no parameter value change was detected. The requested value may already have been set or the write was a no-op. Confirm the displayed plugin value before continuing.",
+      ["a11y.sr.response_ready_partial_parameter_change"] =
+        "Generated code finished, but some parameter targets did not finish with a verified new value. {changed} of {total} targets changed. Confirm the unchanged or restored plugin values before continuing.",
+      ["a11y.sr.response_ready_parameter_returned_to_initial"] =
+        "Generated code finished with the parameter at its original value. The requested state may already have been set, or a helper restored it after failing verification. Review the response and confirm the displayed plugin value before continuing.",
       ["code.run.no_project_change"] =
         "No project change was detected. The script may have exited early because a target was missing or the requested state was already set. Review any message shown by the script and confirm the project result.",
       ["a11y.sr.response_ready_no_project_change"] =
@@ -3045,16 +3109,22 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.chat_language.tooltip"] =
         "Assistant replies and newly localized local reply surfaces use this language. Code, diagnostics, plugin names, and REAPER API names stay unchanged.",
       ["settings.badge.beta"] = "Beta",
-      ["settings.hero.subtitle.reentry"] = "Configure API keys & preferences.",
+      ["settings.hero.subtitle.reentry"] =
+        "Configure providers, models, and preferences.",
       ["settings.hero.subtitle.first_run"] =
-        "Add at least one API key to get started.",
+        "Connect a provider to get started.",
       ["settings.hero.breadcrumb.reentry"] = "SETTINGS",
       ["settings.hero.breadcrumb.first_run"] = "FIRST-RUN SETTINGS",
-      ["settings.first_run.intro"] =
-        "Keys are obfuscated and stored locally on this machine and sent only to your chosen provider. Claude has shown the best all-around results in testing. Gemini is the only provider to offer a free tier. You may also use a local or custom LLM to keep your data fully offline and private.",
-      ["settings.first_run.intro_storage_v2"] =
-        "Keys are stored locally using reversible obfuscation, not encryption or an OS credential vault. Anyone with access to your REAPER settings and this source code can recover them. Keys are sent only to the provider or custom endpoint you configure. Claude has shown the best all-around results in testing, Gemini is the only built-in provider with a free tier, and local/custom models can keep requests on your machine.",
-      ["settings.section.api_keys"] = "API KEYS",
+      ["settings.first_run.intro_access_v1"] =
+        "ReaAssist connects directly to a model provider using an API key. Chat subscriptions are separate and cannot be used. For the most reliable results, use one of the tested providers below.",
+      ["settings.first_run.provider_guidance_v1"] =
+        "Not sure which provider to pick? Claude has shown the best all-around results in ReaAssist testing. Gemini offers a provider-managed free tier.",
+      ["settings.first_run.storage_disclosure_v3"] =
+        "Keys are stored locally using reversible obfuscation, not encryption or an OS credential vault. Anyone with access to your REAPER settings and this source code can recover them. Keys are sent only to the provider or custom endpoint you configure.",
+      ["settings.first_run.api_access_link"] = "How to get API access",
+      ["settings.first_run.api_access_link_tooltip"] =
+        "Open the manual section about creating provider API keys.",
+      ["settings.section.api_keys"] = "PROVIDER API KEYS",
       ["settings.section.preferences"] = "PREFERENCES",
       ["settings.section.advanced"] = "ADVANCED",
       ["settings.status.active"] = "Active",
@@ -3063,18 +3133,18 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.status.testing"] = "TESTING",
       ["settings.toast.saved"] = "Settings saved",
       ["settings.toast.saved_need_key"] =
-        "Settings saved. Add an API key or custom provider to continue.",
+        "Settings saved. Add a provider API key or configure an advanced local or custom provider to continue.",
       ["settings.error.need_key_or_custom"] =
-        "Please enter at least one valid API key, or configure a custom provider.",
+        "Add a valid provider API key or configure an advanced local or custom provider.",
       ["settings.api_key.placeholder"] = "Paste API key...",
       ["settings.api_key.tooltip"] =
-        "Paste your {provider} API key here",
+        "Paste your {provider} key here",
       ["settings.api_key.card_tooltip"] =
         "{provider} API key. Stored locally on this machine, obfuscated, and locked to this install path for security.",
       ["settings.api_key.card_tooltip_storage_v2"] =
-        "{provider} API key. Stored locally using reversible obfuscation tied to this REAPER install path. This is not encryption or an OS credential vault; someone with access to the settings and source can recover it.",
+        "{provider} key. Stored locally using reversible obfuscation tied to this REAPER install path. This is not encryption or an OS credential vault; someone with access to the settings and source can recover it.",
       ["settings.api_key.console_tooltip"] =
-        "Sign up or manage your {provider} API keys on the provider's console",
+        "Sign up for or manage {provider} keys on the provider's console",
       ["settings.api_key.current"] = "Current: {key}",
       ["settings.api_key.toast.validated"] = "API key validated",
       ["settings.api_key.provider.custom"] = "Custom LLM",
@@ -3132,16 +3202,20 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.api.test_keys.tooltip"] =
         "Verify all API keys (stored or newly pasted) and recheck Gemini account status",
       ["settings.api.custom_providers.label"] = "Local & Custom Providers",
+      ["settings.api.custom_providers.advanced_label"] =
+        "Advanced: Local & Custom Providers",
       ["settings.api.custom_providers.tooltip"] =
-        "Manage OpenAI-compatible providers: local servers (Ollama, LM Studio, llama.cpp, vLLM) and online gateways (OpenRouter, Groq, Together AI, Mistral, etc.)",
+        "Connect a compatible local server or custom endpoint. ReaAssist does not guarantee compatibility or result quality, and capable local models may require powerful hardware.",
+      ["settings.api.custom_providers.caveat"] =
+        "Advanced only. ReaAssist does not guarantee compatibility or result quality, and capable local models may require powerful hardware.",
       ["settings.custom.list.subtitle"] = "Local & Custom Providers",
       ["settings.custom.list.breadcrumb"] = "LOCAL & CUSTOM PROVIDERS",
       ["settings.custom.privacy"] =
-        "Running a local model keeps every session fully offline.\nNo data leaves your machine. Ideal for confidential or high-value client work.",
+        "Local servers can keep requests on your machine or network, depending on your setup.\nCustom online endpoints still send data to that service.",
       ["settings.custom.compat"] =
-        "Register any number of OpenAI-compatible endpoints: local servers (Ollama, LM Studio, llama.cpp, vLLM) and online gateways (OpenRouter, Groq, Together AI, Mistral, etc.).",
+        "Advanced setup for compatible local servers and custom endpoints. Compatibility, speed, and available features vary by model, server, and hardware.",
       ["settings.custom.experimental"] =
-        "Experimental feature. Not fully tuned, and cost estimates may be inaccurate.",
+        "ReaAssist does not guarantee compatibility, performance, cost estimates, or result quality for local and custom models.",
       ["settings.custom.add_provider"] = "+  Add Provider",
       ["settings.custom.add_provider.tooltip"] =
         "Configure a new OpenAI-compatible endpoint (local or hosted)",
@@ -3218,7 +3292,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.custom.header.model_id"] = "MODEL IDENTIFIER",
       ["settings.custom.header.notes"] = "NOTES",
       ["settings.custom.tip.header.model_id"] =
-        "The model name as your server expects it (e.g. qwen2.5-coder-14b, kimi-k2.6, claude-opus-4-8). Open Details to set prices, context, the same notes tag shown next to it, and extra JSON body fields.",
+        "The model name as your server expects it (e.g. qwen2.5-coder-14b, kimi-k2.6, claude-opus-5). Open Details to set prices, context, the same notes tag shown next to it, and extra JSON body fields.",
       ["settings.custom.tip.header.notes"] =
         "Optional short tag appended to the model id in the main-screen model dropdown, so rows that share an id but differ in tuning (thinking on/off, temperature, etc.) are distinguishable at a glance.",
       ["settings.custom.field.model_id_hint"] = "qwen2.5-coder-14b",
@@ -3266,7 +3340,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.custom.tip.details.price_out"] =
         "Cost per million output tokens. For reasoning models this usually includes hidden thinking tokens as part of the completion, so a long thinking pass charges at the output rate even when the visible reply is short.",
       ["settings.custom.tip.details.context_window"] =
-        "Maximum combined input + output token capacity for this model. The preflight check warns if a pending send would overflow this window. Kimi k2.6 = 262144, Claude Opus 4.8 = 1000000, most local 8B models = 8192.",
+        "Maximum combined input + output token capacity for this model. The preflight check warns if a pending send would overflow this window. Kimi k2.6 = 262144, Claude Opus 5 = 1000000, most local 8B models = 8192.",
       ["settings.custom.tip.details.extra_body"] =
         "A JSON object merged into the outgoing chat-completions body. Overrides any same-named keys set in the provider-level Extra Body field. Use for vendor-specific knobs that don't map to the OpenAI schema.\n\nExamples:\n  Kimi, GLM:        {\"thinking\":{\"type\":\"disabled\"}}\n  Qwen3:            {\"enable_thinking\":false}\n  OpenRouter:       {\"reasoning\":{\"effort\":\"high\"}}\n  LiteLLM-Anthropic: {\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":1024}}\n  Any OpenAI-compat: {\"temperature\":0.3,\"top_p\":0.9}\n\nMust be a valid JSON object (wrapped in {...}), not an array or scalar. Validated on Save.",
       ["settings.custom.tip.duplicate_model"] = "Duplicate this model row",
@@ -3411,7 +3485,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Add a blank row for a custom plugin type",
       ["settings.pref_plugins.rescan.tooltip"] = "Rescan this plugin",
       ["settings.pref_plugins.rescan.curated_tooltip"] =
-        "Curated reference used. Rescan not needed. Plugin params are documented in Plugin_Ref.md and injected directly when this type is mentioned.",
+        "Curated profile used. Rescan not needed. Plugin parameters are documented in the bundled profile pack and injected directly when this type is mentioned.",
       ["settings.pref_plugins.toast.fill_first"] =
         "Fill in type and plugin name first",
       ["settings.pref_plugins.toast.no_match"] =
@@ -3498,7 +3572,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.fx_cache.section.builtin"] = "BUILT-IN REFERENCES",
       ["settings.fx_cache.builtin.label"] = "Built-in reference",
       ["settings.fx_cache.builtin.tooltip"] =
-        "Curated parameter docs live in Resources/Plugin_Ref.md. The assistant uses those directly. No scan needed and none can be triggered.",
+        "Curated parameter guidance lives in the bundled profile pack. The assistant uses it directly. No scan needed and none can be triggered.",
       ["settings.fx_cache.status.failed_temp_track"] =
         "Failed to create temporary track.",
       ["settings.fx_cache.toast.rescan_failed"] = "Rescan failed",
@@ -3584,7 +3658,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.adv.diagnostics.basic"] = "Basic",
       ["settings.adv.diagnostics.extended"] = "Extended",
       ["settings.adv.diagnostics.tooltip"] =
-        "Basic anonymous diagnostics are enabled by default and can be turned off. Extended adds redacted chat, diagnostics, and log/report detail. Sent on the next launch, never during an active request.",
+        "Basic anonymous diagnostics are enabled by default and can be turned off. Basic includes the selected ReaAssist language, language-pack version, interface mode and fixed-category counts for errors, outcomes, recovery, prompt mode and cache use, without chat text or names. Extended adds redacted chat, diagnostics and log/report detail. Sent on the next launch, never during an active request.",
       ["settings.adv.cloud_timeout.label"] = "Cloud Timeout",
       ["settings.adv.cloud_timeout.tooltip"] =
         "How long to wait for a Claude/ChatGPT/Gemini response before timing out. Default 180s. Reasoning models on large prompts may need 300+",
@@ -3652,11 +3726,11 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.footer.save_disabled_validating"] =
         "Key validation in progress...",
       ["settings.footer.save_disabled_need_key"] =
-        "Enter at least one API key to save",
+        "Add a provider API key or configure an advanced local or custom provider to continue",
       ["settings.footer.save_tooltip"] = "Save all staged changes  (Enter)",
       ["settings.footer.save_continue"] = "Save & Continue",
       ["settings.footer.save_continue_tooltip"] =
-        "Save your key(s) and continue to ReaAssist  (Enter)",
+        "Save your provider setup and continue to ReaAssist  (Enter)",
       ["settings.footer.help_tooltip"] =
         "Open the Help & Tips page (includes Report a Bug and Credits)",
       ["local.footer.free_reply"] = "ReaAssist local free reply.",

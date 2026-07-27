@@ -4696,6 +4696,51 @@ end
 -- handler runs.
 UI._popup_was_open = false
 
+-- shared prompt submission start
+UI.PROMPT_INPUT_MAX_BYTES = 8191
+
+function UI.can_send_prompt()
+  local prompt = tostring(S.input_buf or "")
+  local attachments = type(S.attachments) == "table" and S.attachments or {}
+  if #prompt > UI.PROMPT_INPUT_MAX_BYTES then
+    return false, "prompt_too_long"
+  end
+  if UI._popup_was_open then return false, "popup_open" end
+  if S.status ~= "idle" and S.status ~= "error" then
+    return false, "request_busy"
+  end
+  if deep_scan and deep_scan.active then return false, "deep_scan_active" end
+  if not prompt:match("%S") and #attachments == 0 then
+    return false, "prompt_empty"
+  end
+  local provider = PROVIDERS and PROVIDERS.active and PROVIDERS.active()
+  local needs_key = not (provider and provider.is_custom)
+  if S.api_key == nil and needs_key then return false, "api_key_missing" end
+  if not (Attach and Attach.all_encoded and Attach.all_encoded()) then
+    return false, "attachments_pending"
+  end
+  return true, ""
+end
+
+function UI.submit_prompt(input_source)
+  local can_send, reason = UI.can_send_prompt()
+  if not can_send then return false, reason end
+  local attachments = type(S.attachments) == "table" and S.attachments or {}
+  local trimmed = tostring(S.input_buf or ""):match("^%s*(.-)%s*$") or ""
+  if trimmed == "" and #attachments > 0 then
+    trimmed = UI.t("prompt.default_attachment", nil,
+      "Please analyze the attached file(s).")
+  end
+  S.input_buf = ""
+  if Net.log_plugin_test_gui_send then
+    Net.log_plugin_test_gui_send(trimmed, input_source or "prompt")
+  end
+  Net.send_to_api(trimmed)
+  S.refocus_prompt = true
+  return true, ""
+end
+-- shared prompt submission end
+
 -- Returns true if the user just triggered a "go back one screen" action
 -- this frame -- Escape key OR mouse back button (MB4, index 3). ImGui
 -- exposes up to 5 mouse buttons (0=Left, 1=Right, 2=Middle, 3=Back,
@@ -7341,8 +7386,7 @@ function Render.bug_report_screen()
             UI.t("bug_report.debug.save_dialog_title", nil,
               "Save ReaAssist Debug Log"),
             default_dir, default_name,
-            "Log files (.log)\0*.log\0Text files (.txt)\0*.txt\0All files\0*.*\0",
-            false)
+            "Log files (.log)\0*.log\0Text files (.txt)\0*.txt\0All files\0*.*\0")
           if ret == 1 and path and path ~= "" then
             if not path:match("%.log$") and not path:match("%.txt$") then
               path = path .. ".log"
@@ -10087,9 +10131,9 @@ function Render._shared_key_screen_impl()
   -- Cancel button in the pinned footer bar below.
   local hero_subtitle = is_reentry
     and UI.t("settings.hero.subtitle.reentry", nil,
-      "Configure API keys & preferences.")
+      "Configure providers, models, and preferences.")
     or  UI.t("settings.hero.subtitle.first_run", nil,
-      "Add at least one API key to get started.")
+      "Connect a provider to get started.")
   -- Distinct breadcrumb on first-run so the page's context reads at a
   -- glance (same SETTINGS surface, but this is the initial setup pass).
   local hero_breadcrumb = (is_reentry
@@ -10137,25 +10181,47 @@ function Render._shared_key_screen_impl()
   -- Disable all inputs while a validation request is in flight.
   ImGui.ImGui_BeginDisabled(RA.ctx, api_keys.key_validating)
 
-  -- First-run intro block: one consolidated paragraph above the API
-  -- KEYS section label. Leads with the trust reassurance (most
-  -- important at the moment the user is about to paste a secret),
-  -- then a soft nudge toward Claude (best all-around results) or
-  -- Gemini (only provider with a free tier), closing with the local
-  -- / custom option for offline privacy.
+  -- First-run intro block: make the API requirement and subscription
+  -- boundary explicit, pair API-access help with tested-provider guidance,
+  -- then disclose key storage immediately before the credential cards.
   if not is_reentry then
     local fr_intro_wrap = GetCursorPosX(RA.ctx) + inner_w - RA.SC(8)
     ImGui.ImGui_PushTextWrapPos(RA.ctx, fr_intro_wrap)
     PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
+    Text(RA.ctx, UI.t("settings.first_run.intro_access_v1", nil,
+      "ReaAssist connects directly to a model provider using an API key. "
+      .. "Chat subscriptions are separate and cannot be used. For the most "
+      .. "reliable results, use one of the tested providers below."))
+    PopStyleColor(RA.ctx)
+    Dummy(RA.ctx, 1, RA.SC(4))
+    UI.inline_link_sentence("{link}",
+      UI.t("settings.first_run.api_access_link", nil,
+        "How to get API access"),
+      "first_run_api_access",
+      function()
+        UI.open_url("https://reaassist.app/manual/#getting-an-api-key")
+      end,
+      {
+        link_col = TK.accent,
+        always_underline = not api_keys.key_validating,
+      })
+    UI.tooltip(UI.t("settings.first_run.api_access_link_tooltip", nil,
+      "Open the manual section about creating provider API keys."))
+    Dummy(RA.ctx, 1, RA.SC(2))
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-    Text(RA.ctx, UI.t("settings.first_run.intro_storage_v2", nil,
+    Text(RA.ctx, UI.t("settings.first_run.provider_guidance_v1", nil,
+      "Not sure which provider to pick? Claude has shown the best all-around "
+      .. "results in ReaAssist testing. Gemini offers a provider-managed "
+      .. "free tier."))
+    PopStyleColor(RA.ctx)
+    Dummy(RA.ctx, 1, RA.SC(7))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+    Text(RA.ctx, UI.t("settings.first_run.storage_disclosure_v3", nil,
       "Keys are stored locally using reversible obfuscation, not encryption "
       .. "or an OS credential vault. Anyone with access to your REAPER "
       .. "settings and this source code can recover them. Keys are sent only "
-      .. "to the provider or custom endpoint you configure. Claude has shown "
-      .. "the best all-around results in testing, Gemini is the only built-in "
-      .. "provider with a free tier, and local/custom models can keep requests "
-      .. "on your machine."))
+      .. "to the provider or custom endpoint you configure."))
     PopStyleColor(RA.ctx)
     PopFont(RA.ctx)
     ImGui.ImGui_PopTextWrapPos(RA.ctx)
@@ -10167,10 +10233,11 @@ function Render._shared_key_screen_impl()
   -- open since the user's whole job here is to enter a key.
   if is_reentry then
     api_keys.section_open.api = UI.v5_section_label(
-      UI.t("settings.section.api_keys", nil, "API KEYS"),
+      UI.t("settings.section.api_keys", nil, "PROVIDER API KEYS"),
       api_keys.section_open.api)
   else
-    UI.v5_section_label(UI.t("settings.section.api_keys", nil, "API KEYS"))
+    UI.v5_section_label(UI.t("settings.section.api_keys", nil,
+      "PROVIDER API KEYS"))
   end
 
   if (is_reentry and api_keys.section_open.api) or not is_reentry then
@@ -10205,6 +10272,7 @@ function Render._shared_key_screen_impl()
       any_card_drawn = true
 
       local cur_key = S.api_key_map[prov.id]
+      local setup_label = prov.setup_label or prov.label
 
       -- Match the V5 option-row palette (toggles / select rows / nav
       -- row below) so the API cards read as the same surface tone.
@@ -10269,7 +10337,7 @@ function Render._shared_key_screen_impl()
       -- doesn't need the extra weight that the section header carries.
       PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
-      Text(RA.ctx, prov.label)
+      Text(RA.ctx, setup_label)
       PopStyleColor(RA.ctx)
       PopFont(RA.ctx)
 
@@ -10369,9 +10437,9 @@ function Render._shared_key_screen_impl()
         ImGui.ImGui_SetMouseCursor(RA.ctx, ImGui.ImGui_MouseCursor_Hand())
       end
       UI.tooltip(UI.t("settings.api_key.console_tooltip",
-        { provider = prov.label },
-        "Sign up or manage your " .. prov.label
-          .. " API keys on the provider's console"))
+        { provider = setup_label },
+        "Sign up for or manage " .. setup_label
+          .. " keys on the provider's console"))
       do
         local bx1, by1 = ImGui.ImGui_GetItemRectMin(RA.ctx)
         local bx2, by2 = ImGui.ImGui_GetItemRectMax(RA.ctx)
@@ -10514,8 +10582,8 @@ function Render._shared_key_screen_impl()
         PopStyleColor(RA.ctx, 2)  -- FrameBg, FrameBgHovered
         UI.focus_ring()
         api_keys.key_bufs[i] = new_buf
-        UI.tooltip(UI.t("settings.api_key.tooltip", { provider = prov.label },
-          "Paste your " .. prov.label .. " API key here"))
+        UI.tooltip(UI.t("settings.api_key.tooltip", { provider = setup_label },
+          "Paste your " .. setup_label .. " key here"))
 
         -- Tab / Shift+Tab: jump to the next/previous provider card whose
         -- key input is still showing (no stored key yet). Forward tab past
@@ -10580,8 +10648,8 @@ function Render._shared_key_screen_impl()
       -- taking a dedicated row. IsItemHovered after EndChild reports
       -- hover on the child window itself.
       UI.tooltip(UI.t("settings.api_key.card_tooltip_storage_v2", {
-        provider = prov.label,
-      }, prov.label .. " API key. Stored locally on this machine, "
+        provider = setup_label,
+      }, setup_label .. " key. Stored locally on this machine, "
         .. "using reversible obfuscation tied to this REAPER install path. "
         .. "This is not encryption or an OS credential vault; someone with "
         .. "access to the settings and source can recover it."))
@@ -10593,7 +10661,8 @@ function Render._shared_key_screen_impl()
 
   PopStyleColor(RA.ctx, 5)  -- Text, InputTextCursor, FrameBg x3
 
-  -- Provider actions: Test API Keys + Configure Local / Custom LLM.
+  -- Provider actions: keep tested API providers first, with the advanced
+  -- local/custom destination beside them as a clearly labeled secondary path.
   -- SC(7) gives a ~15px visual gap from the last card's bottom to the
   -- button row top (gap = 2 * ItemSpacing + SC(7) = 8 + 7 = 15).
   Dummy(RA.ctx, 1, RA.SC(7))
@@ -10614,12 +10683,8 @@ function Render._shared_key_screen_impl()
 
     local test_label = UI.t("settings.api.test_keys.label", nil,
       "Test API Keys")
-    -- Rendered via UI.v5_nav_row (centered label + chevron block) so it
-    -- signals "opens a different page" with the same glyph + chrome as
-    -- the Preferred Plugins nav row, while still pairing on one line
-    -- with the Test API Keys action button next to it.
-    local cllm_label = UI.t("settings.api.custom_providers.label", nil,
-      "Local & Custom Providers")
+    local cllm_label = UI.t("settings.api.custom_providers.advanced_label", nil,
+      "Advanced: Local & Custom Providers")
     local custom_count = 0
     for _, pk in ipairs(PROVIDERS) do
       if pk.is_custom then custom_count = custom_count + 1 end
@@ -10627,13 +10692,17 @@ function Render._shared_key_screen_impl()
     if custom_count > 0 then
       cllm_label = cllm_label .. " (" .. custom_count .. ")"
     end
-    local test_btn_w = CalcTextSize(RA.ctx, test_label) + RA.SC(24)
+    local test_btn_natural_w = CalcTextSize(RA.ctx, test_label) + RA.SC(24)
     -- v5_nav_row needs: label_w + gap(SC(8)) + chevron(SC(4)) + 2*pad(SC(24))
-    local cllm_btn_w = CalcTextSize(RA.ctx, cllm_label) + RA.SC(36)
-    local pair_gap   = RA.SC(8)
-    local pair_w     = test_btn_w + pair_gap + cllm_btn_w
-    SetCursorPosX(RA.ctx,
-      GetCursorPosX(RA.ctx) + math_max(math_floor((inner_w - pair_w) * 0.5), 0))
+    local cllm_btn_natural_w = CalcTextSize(RA.ctx, cllm_label) + RA.SC(36)
+    local pair_gap = RA.SC(8)
+    local pair_w = test_btn_natural_w + pair_gap + cllm_btn_natural_w
+    local stack_actions = pair_w > inner_w
+    local test_btn_w = math_min(inner_w, test_btn_natural_w)
+    local cllm_btn_w = math_min(inner_w, cllm_btn_natural_w)
+    local action_group_w = stack_actions and test_btn_w or pair_w
+    SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx)
+      + math_max(math_floor((inner_w - action_group_w) * 0.5), 0))
 
     -- Test API Keys: verifies all stored keys sequentially, then shows the
     -- results popup. Enabled if any provider has either a stored key OR a
@@ -10713,12 +10782,20 @@ function Render._shared_key_screen_impl()
     UI.tooltip(UI.t("settings.api.test_keys.tooltip", nil,
       "Verify all API keys (stored or newly pasted) and recheck Gemini account status"))
 
-    SameLine(RA.ctx, 0, pair_gap)
+    if stack_actions then
+      -- Preserve full localized labels at narrow widths instead of squeezing
+      -- or clipping either control. Normal-width English stays side by side.
+      Dummy(RA.ctx, 1, RA.SC(5))
+      SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx)
+        + math_max(math_floor((inner_w - cllm_btn_w) * 0.5), 0))
+    else
+      SameLine(RA.ctx, 0, pair_gap)
+    end
     if UI.v5_nav_row("##open_cllm_settings", cllm_label,
         UI.t("settings.api.custom_providers.tooltip", nil,
-          "Manage any number of OpenAI-compatible providers: local "
-          .. "servers (Ollama, LM Studio, llama.cpp, vLLM) and online "
-          .. "gateways (OpenRouter, Groq, Together AI, Mistral, etc.)"),
+          "Connect a compatible local server or custom endpoint. ReaAssist "
+          .. "does not guarantee compatibility or result quality, and capable "
+          .. "local models may require powerful hardware."),
         cllm_btn_w, custom_count > 0) then
       -- Remember which screen opened Custom Providers so its Save / Back
       -- can route correctly: first-run back-out drops the user directly
@@ -10729,10 +10806,11 @@ function Render._shared_key_screen_impl()
     end
 
     -- Close the V5 secondary-button style stack pushed at the start of
-    -- this do-block.
-    PopStyleColor(RA.ctx, 5)               -- Text, Border, Button, ButtonHovered, ButtonActive
-    ImGui.ImGui_PopStyleVar(RA.ctx, 3)     -- FrameBorderSize, FrameRounding, FramePadding
+    -- this do-block after both provider actions have rendered.
+    PopStyleColor(RA.ctx, 5)
+    ImGui.ImGui_PopStyleVar(RA.ctx, 3)
     PopFont(RA.ctx)
+
   end
   end -- API KEYS collapsible section
   ImGui.ImGui_EndDisabled(RA.ctx)  -- pair for BeginDisabled(key_validating) above;
@@ -11031,9 +11109,11 @@ function Render._shared_key_screen_impl()
         }, cur,
         UI.t("settings.adv.diagnostics.tooltip", nil,
           "Basic anonymous diagnostics are enabled by default and can be "
-          .. "turned off. Extended adds redacted chat, diagnostics, and "
-          .. "log/report detail. Sent on the next launch, never during "
-          .. "an active request."),
+          .. "turned off. Basic includes fixed-category counts for errors, "
+          .. "outcomes, recovery, prompt mode, and cache use, without chat "
+          .. "text or names. Extended adds redacted chat, diagnostics, and "
+          .. "log/report detail. Sent on the next launch, never during an "
+          .. "active request."),
         inner_w)
       if changed then
         local next_tier = (idx == 1) and "basic"
@@ -11322,7 +11402,7 @@ function Render._shared_key_screen_impl()
     if UI.v5_nav_row("##adv_fx_cache", fx_cache_label,
         UI.t("settings.adv.fx_cache.tooltip", nil,
           "View, rescan, or remove cached plugin parameter data. "
-          .. "Curated plugins (those with a Plugin_Ref.md section) are "
+          .. "Curated plugins (those with a bundled profile) are "
           .. "also listed here as read-only entries for reference."),
         b_fx_w) then
       api_keys.screen = "fx_cache"
@@ -11851,7 +11931,8 @@ function Render._shared_key_screen_impl()
             and UI.t("settings.footer.save_disabled_validating", nil,
               "Key validation in progress...")
             or UI.t("settings.footer.save_disabled_need_key", nil,
-              "Enter at least one API key to save"))
+              "Add a provider API key or configure an advanced local or "
+              .. "custom provider to continue"))
         end
       else
         UI.tooltip(UI.t("settings.footer.save_tooltip", nil,
@@ -11922,10 +12003,11 @@ function Render._shared_key_screen_impl()
             and UI.t("settings.footer.save_disabled_validating", nil,
               "Key validation in progress...")
             or UI.t("settings.footer.save_disabled_need_key", nil,
-              "Enter at least one API key to save"))
+              "Add a provider API key or configure an advanced local or "
+              .. "custom provider to continue"))
         else
           UI.tooltip(UI.t("settings.footer.save_continue_tooltip", nil,
-            "Save your key(s) and continue to ReaAssist  (Enter)"))
+            "Save your provider setup and continue to ReaAssist  (Enter)"))
         end
       end
 
@@ -12092,11 +12174,13 @@ function Render._shared_key_screen_impl()
         api_keys.custom_edit  = nil
         S.api_key             = nil
         UI.show_float_toast(UI.t("settings.toast.saved_need_key", nil,
-          "Settings saved. Add an API key or custom provider to continue."),
+          "Settings saved. Add a provider API key or configure an advanced "
+          .. "local or custom provider to continue."),
           "ok", true)
       else
         api_keys.key_error = UI.t("settings.error.need_key_or_custom", nil,
-          "Please enter at least one valid API key, or configure a custom provider.")
+          "Add a valid provider API key or configure an advanced local or "
+          .. "custom provider.")
       end
     end
   end
@@ -12298,23 +12382,24 @@ function Render.custom_providers_screen()
   PushFont(RA.ctx, FONT.inter_semi, RA.SC(12))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
   UI.text_multiline(UI.t("settings.custom.privacy", nil,
-    "Running a local model keeps every session fully offline.\n"
-    .. "No data leaves your machine. Ideal for confidential or high-value client work."))
+    "Local servers can keep requests on your machine or network, depending "
+    .. "on your setup.\nCustom online endpoints still send data to that service."))
   PopStyleColor(RA.ctx)
   PopFont(RA.ctx)
   Dummy(RA.ctx, 1, RA.SC(6))
   PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
   UI.text_multiline(UI.t("settings.custom.compat", nil,
-    "Register any number of OpenAI-compatible endpoints: local servers "
-    .. "(Ollama, LM Studio, llama.cpp, vLLM) and online gateways "
-    .. "(OpenRouter, Groq, Together AI, Mistral, etc.)."))
+    "Advanced setup for compatible local servers and custom endpoints. "
+    .. "Compatibility, speed, and available features vary by model, server, "
+    .. "and hardware."))
   PopStyleColor(RA.ctx)
   Dummy(RA.ctx, 1, RA.SC(4))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),
     UI.lerp_u32(TK.amber, TK.text_muted, 0.5))
   UI.text_multiline(UI.t("settings.custom.experimental", nil,
-    "Experimental feature. Not fully tuned, and cost estimates may be inaccurate."))
+    "ReaAssist does not guarantee compatibility, performance, cost estimates, "
+    .. "or result quality for local and custom models."))
   PopStyleColor(RA.ctx)
   PopFont(RA.ctx)
   ImGui.ImGui_PopTextWrapPos(RA.ctx)
@@ -12737,8 +12822,8 @@ function Render.custom_llm_screen()
   PushFont(RA.ctx, FONT.inter_semi, RA.SC(12))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
   UI.text_multiline(UI.t("settings.custom.privacy", nil,
-    "Running a local model keeps every session fully offline. No data "
-    .. "leaves your machine. Ideal for confidential or high-value client work."))
+    "Local servers can keep requests on your machine or network, depending "
+    .. "on your setup. Custom online endpoints still send data to that service."))
   PopStyleColor(RA.ctx)
   PopFont(RA.ctx)
   Dummy(RA.ctx, 1, RA.SC(6))
@@ -12746,9 +12831,9 @@ function Render.custom_llm_screen()
   PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
   UI.text_multiline(UI.t("settings.custom.compat", nil,
-    "Point ReaAssist at any OpenAI-compatible endpoint: a local "
-    .. "server (Ollama, LM Studio, llama.cpp, vLLM) or an online "
-    .. "gateway (OpenRouter, Groq, Together AI, Mistral, etc.)."))
+    "Advanced setup for compatible local servers and custom endpoints. "
+    .. "Compatibility, speed, and available features vary by model, server, "
+    .. "and hardware."))
   PopStyleColor(RA.ctx)
   Dummy(RA.ctx, 1, RA.SC(4))
   -- Domain-specific size advisory: ReaAssist's worst failure mode with
@@ -12784,7 +12869,8 @@ function Render.custom_llm_screen()
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),
     UI.lerp_u32(TK.amber, TK.text_muted, 0.5))
   UI.text_multiline(UI.t("settings.custom.experimental", nil,
-    "Experimental feature. Not fully tuned, and cost estimates may be inaccurate."))
+    "ReaAssist does not guarantee compatibility, performance, cost estimates, "
+    .. "or result quality for local and custom models."))
   PopStyleColor(RA.ctx)
   PopFont(RA.ctx)
   ImGui.ImGui_PopTextWrapPos(RA.ctx)
@@ -13159,7 +13245,7 @@ function Render.custom_llm_screen()
     Text(RA.ctx, UI.t("settings.custom.header.model_id", nil, "MODEL IDENTIFIER"))
     UI.tooltip(UI.t("settings.custom.tip.header.model_id", nil,
       "The model name as your server expects it (e.g. qwen2.5-coder-14b, "
-      .. "kimi-k2.6, claude-opus-4-8). Open Details to set prices, context, "
+      .. "kimi-k2.6, claude-opus-5). Open Details to set prices, context, "
       .. "the same notes tag shown next to it, and extra JSON body fields."))
     SameLine(RA.ctx, 0, 0)
     ImGui.ImGui_SetCursorPosX(RA.ctx, hdr_x0 + id_w + row_gap)
@@ -13552,7 +13638,7 @@ function Render.custom_llm_screen()
         UI.tooltip(UI.t("settings.custom.tip.details.context_window", nil,
           "Maximum combined input + output token capacity for this "
           .. "model. The preflight check warns if a pending send would "
-          .. "overflow this window. Kimi k2.6 = 262144, Claude Opus 4.8 = "
+          .. "overflow this window. Kimi k2.6 = 262144, Claude Opus 5 = "
           .. "1000000, most local 8B models = 8192."))
 
         Dummy(RA.ctx, 1, RA.SC(10))
@@ -14750,7 +14836,7 @@ function Render.preferred_plugins_screen()
 
       -- Per-row Rescan: commits this row's type->ident mapping and scans
       -- just that one plugin. Disabled for plugins with a curated section
-      -- in Plugin_Ref.md -- their params are documented and preempt routes
+      -- in Plugin_Pack.md -- their params are documented and preempt routes
       -- through plugin_ref:<Name>, so a Rescan would burn seconds producing
       -- data that's never read.
       local row_scan_busy =
@@ -14770,7 +14856,7 @@ function Render.preferred_plugins_screen()
         if row_is_curated then
           UI.tooltip(UI.t("settings.pref_plugins.rescan.curated_tooltip", nil,
             "Curated reference used. Rescan not needed. "
-            .. "Plugin params are documented in Plugin_Ref.md and injected "
+            .. "Plugin parameters are documented in the bundled profile pack and injected "
             .. "directly when this type is mentioned."))
         else
           UI.tooltip(UI.t("settings.pref_plugins.rescan.tooltip", nil,
@@ -15741,7 +15827,7 @@ function Render.fx_cache_screen()
 
   -- Collect two lists:
   --   plugin_ids  = live-scanned, non-curated (user-scannable entries)
-  --   curated_ids = plugins with a curated Plugin_Ref.md section that the
+  --   curated_ids = plugins with a curated Plugin_Pack.md section that the
   --                 user has set as a preference (read-only display). Also
   --                 includes any curated plugin that was live-scanned before
   --                 the Rescan disable was added.
@@ -16288,7 +16374,7 @@ function Render.fx_cache_screen()
 
   ----------------------------------------------------------------
   -- BUILT-IN REFERENCES section (only when user has curated picks).
-  -- Docs live in Plugin_Ref.md and the assistant uses them directly,
+  -- Guidance lives in Plugin_Pack.md and the assistant uses it directly,
   -- so rescans never apply. Read-only display with a quiet right-side
   -- "Built-in reference" label.
   ----------------------------------------------------------------
@@ -16337,7 +16423,7 @@ function Render.fx_cache_screen()
         if ImGui.ImGui_IsItemHovered(RA.ctx) then
           UI.tooltip(UI.t("settings.fx_cache.builtin.tooltip", nil,
             "Curated parameter docs live in "
-            .. "Resources/Plugin_Ref.md. The assistant uses those "
+            .. "the bundled profile pack. The assistant uses it "
             .. "directly. No scan needed and none can be triggered."))
         end
       end
@@ -18338,6 +18424,8 @@ function Render.main_window()
                   prefs.thinking_idx = new_idx
                 end
                 msg.recovery_used = true
+                msg.recovery_action = "lower_thinking"
+                msg.recovery_dispatch = "settings_changed"
               end
               UI.tooltip(UI.t("message.lower_thinking.tooltip", nil,
                 "Reduce reasoning depth so more budget goes to the visible reply."))
@@ -18362,6 +18450,7 @@ function Render.main_window()
                   end
                 end
                 if last_user_text then
+                  msg.recovery_action = "retry_same_model"
                   Net.send_to_api(last_user_text)
                 end
               end
@@ -18411,14 +18500,18 @@ function Render.main_window()
                 end
                 if ok then
                   msg.recovery_used = true
+                  msg.recovery_action = "retry_same_model"
                   local sent, send_err = Net.resend_saved_prompt(
                     msg.recovery_prompt, msg.recovery_attachments)
+                  msg.recovery_dispatch = sent and "sent" or "send_failed"
                   if not sent then
                     UI.show_float_toast(send_err
                       or UI.t("message.resend_failed", nil,
                         "Could not resend message"), "err")
                   end
                 else
+                  msg.recovery_action = "retry_same_model"
+                  msg.recovery_dispatch = "switch_failed"
                   UI.show_float_toast(err
                     or UI.t("message.switch_failed", nil,
                       "Could not switch models"), "err")
@@ -18443,14 +18536,18 @@ function Render.main_window()
                   msg.fallback_provider_id, msg.fallback_model_id)
                 if ok then
                   msg.recovery_used = true
+                  msg.recovery_action = "switch_fallback"
                   local sent, send_err = Net.resend_saved_prompt(
                     msg.recovery_prompt, msg.recovery_attachments)
+                  msg.recovery_dispatch = sent and "sent" or "send_failed"
                   if not sent then
                     UI.show_float_toast(send_err
                       or UI.t("message.resend_failed", nil,
                         "Could not resend message"), "err")
                   end
                 else
+                  msg.recovery_action = "switch_fallback"
+                  msg.recovery_dispatch = "switch_failed"
                   UI.show_float_toast(err
                     or UI.t("message.switch_failed", nil,
                       "Could not switch models"), "err")
@@ -18969,6 +19066,15 @@ function Render.main_window()
           local is_lua = (msg.code_type or "lua") == "lua"
           local lua_artifact = nil
           local run_blocked = false
+          local profile_guard_run_blocked = is_lua
+            and (msg.auto_run_block_reason == "plugin_profile_guard_validator"
+              or msg.auto_run_block_reason
+                == "fx_param_provenance_validator")
+            and not msg.auto_ran
+          local profile_guard_block_message = profile_guard_run_blocked
+            and UI.t("code.plugin_profile_guard_blocked", nil,
+              "ReaAssist blocked Run because it could not verify the plug-in parameter mapping. Adjust take/item FX manually. For track FX, ask ReaAssist to regenerate the script.")
+            or nil
           if is_lua then
             if msg._lua_artifact_src ~= msg.code_block then
               msg.lua_artifact = Code.classify_lua_artifact(msg.code_block,
@@ -18980,6 +19086,7 @@ function Render.main_window()
               and (not lua_artifact.runnable
                 or lua_artifact.manual_run_only == true)
               or false
+            run_blocked = run_blocked or profile_guard_run_blocked
           end
 
           -- Risky-code warning. Scan BEFORE rendering buttons so the warning
@@ -19003,14 +19110,25 @@ function Render.main_window()
               auto_run_block_warning = UI.t(
                 "auto_run.blocked.proq4_bell_slope", nil,
                 "Auto-run blocked: Pro-Q 4 Bell boost/cut bands did not set Slope to 12 dB/oct. Review the Pro-Q 4 slope writes before running manually.")
+            elseif reason == "proq4_mapping_validator" then
+              auto_run_block_warning = UI.t(
+                "auto_run.blocked.proq4_mapping", nil,
+                "Auto-run blocked: one or more Pro-Q 4 normalized values did not match the stated frequency, gain, or Q. Do not run this script manually; resend the request so ReaAssist can regenerate exact values.")
+            elseif reason == "proq4_parameter_contract_validator" then
+              auto_run_block_warning = UI.t(
+                "auto_run.blocked.proq4_parameter_contract", nil,
+                "Auto-run blocked: the Pro-Q 4 script had an incorrect value mapping or fresh-band slope. Do not run this script manually; resend the request so ReaAssist can regenerate it.")
             elseif reason == "backup_failed" then
               auto_run_block_warning = UI.t(
                 "code.backup_failed_auto_run", nil,
                 "Auto-run was blocked because ReaAssist could not create a safety backup. Check the project folder, disk space, and permissions, then try again. To proceed without a backup, turn off Auto-backup in Settings and run the code manually.")
             elseif reason == "action_relevance_review" then
-              auto_run_block_warning = UI.t(
+              auto_run_block_warning = msg.manual_review_reason or UI.t(
                 "auto_run.blocked.relevance", nil,
                 "Auto-run was blocked because the generated action did not clearly match the request and captured session. Review the target tracks, plugins, and REAPER actions before running it manually.")
+            elseif reason == "plugin_profile_guard_validator"
+                or reason == "fx_param_provenance_validator" then
+              auto_run_block_warning = nil
             else
               auto_run_block_warning = UI.t(
                 "auto_run.blocked.validator", nil,
@@ -19020,7 +19138,8 @@ function Render.main_window()
           if run_blocked then
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
             ImGui.ImGui_TextWrapped(RA.ctx,
-              Code.lua_artifact_block_message(lua_artifact))
+              profile_guard_block_message
+                or Code.lua_artifact_block_message(lua_artifact))
             PopStyleColor(RA.ctx)
           elseif msg.run_blocked then
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
@@ -19078,7 +19197,8 @@ function Render.main_window()
             if ImGui.ImGui_Button(RA.ctx, run_label .. "##run_" .. i,
                 action_btn_w(run_label, RA.SC(70), RA.SC(92)), 0) then
               if run_blocked then
-                msg.run_blocked = Code.lua_artifact_block_message(lua_artifact)
+                msg.run_blocked = profile_guard_block_message
+                  or Code.lua_artifact_block_message(lua_artifact)
                 Log.add_error(msg.run_blocked)
                 if i == #S.display_messages then S.pending_code = nil end
                 S.refocus_prompt = true
@@ -19097,6 +19217,7 @@ function Render.main_window()
                 elseif Code.safety_backup_can_proceed(berr) then
                   S.status = "running"
                   local ok = Code.run(msg.code_block)
+                  Code.bind_pending_deferred_run(i, nil, false, nil)
                   Code.apply_run_result_to_message(msg, ok, "lua",
                     msg.code_block, false)
                   if i == #S.display_messages then S.pending_code = nil end
@@ -19109,6 +19230,7 @@ function Render.main_window()
               else
                 S.status = "running"
                 local ok = Code.run(msg.code_block)
+                Code.bind_pending_deferred_run(i, nil, false, nil)
                 Code.apply_run_result_to_message(msg, ok, "lua",
                   msg.code_block, false)
                 if i == #S.display_messages then S.pending_code = nil end
@@ -19117,11 +19239,12 @@ function Render.main_window()
               end
             end
             UI.tooltip(run_blocked
-              and (lua_artifact and lua_artifact.manual_run_only
-                and UI.t("code.run.manual_context.tooltip", nil,
-                  "Install/run this from its REAPER toolbar action context")
-                or UI.t("code.run.fragment.tooltip", nil,
-                  "This block is a fragment or patch, not a runnable script"))
+              and (profile_guard_block_message
+                or (lua_artifact and lua_artifact.manual_run_only
+                  and UI.t("code.run.manual_context.tooltip", nil,
+                    "Install/run this from its REAPER toolbar action context")
+                  or UI.t("code.run.fragment.tooltip", nil,
+                    "This block is a fragment or patch, not a runnable script")))
               or UI.t("code.run.tooltip", nil,
                 "Execute this code in REAPER"))
             PopStyleColor(RA.ctx, 4)  -- Run: Button/Hovered/Active/Text
@@ -19498,12 +19621,35 @@ function Render.main_window()
             Dummy(RA.ctx, ar_w, ar_h)
           end
           if msg.run_status == "ran_ok"
-              and msg.observable_change_status == "unchanged" then
+              and (msg.parameter_change_status == "partially_changed"
+                or msg.parameter_change_status == "unchanged"
+                or msg.parameter_change_status == "returned_to_initial"
+                or (msg.parameter_change_status ~= "changed"
+                  and msg.observable_change_status == "unchanged")) then
             ImGui.ImGui_Spacing(RA.ctx)
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
-            ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
-              "code.run.no_project_change", nil,
-              "No project change was detected. The script may have exited early because a target was missing or the requested state was already set. Review any message shown by the script and confirm the project result."))
+            if msg.parameter_change_status == "partially_changed" then
+              ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
+                "code.run.partial_parameter_change", {
+                  changed = msg.parameter_change_evidence
+                    and msg.parameter_change_evidence.changed_target_count or 0,
+                  total = msg.parameter_change_evidence
+                    and msg.parameter_change_evidence.target_count or 0,
+                },
+                "Some parameter targets did not finish with a verified new value ({changed} of {total} changed). Confirm the unchanged or restored plugin values before continuing."))
+            elseif msg.parameter_change_status == "unchanged" then
+              ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
+                "code.run.no_parameter_change", nil,
+                "No parameter value change was detected. The requested value may already have been set or the write was a no-op. Confirm the displayed plugin value before continuing."))
+            elseif msg.parameter_change_status == "returned_to_initial" then
+              ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
+                "code.run.parameter_returned_to_initial", nil,
+                "Parameter probing finished at the original value. The requested state may already have been set, or a helper restored it after failing verification. Review any message shown by the script and confirm the displayed plugin value."))
+            else
+              ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
+                "code.run.no_project_change", nil,
+                "No project change was detected. The script may have exited early because a target was missing or the requested state was already set. Review any message shown by the script and confirm the project result."))
+            end
             PopStyleColor(RA.ctx)
           end
         end
@@ -20038,12 +20184,20 @@ function Render.main_window()
     local BTN_SEND       = V5_BTN_SEND
     local BTN_GAP        = V5_BTN_GAP
     local KEYCAP_GUTTER  = V5_KEYCAP_GUTTER
-    local INPUT_BUF_SIZE = 8192
+    local INPUT_BUF_SIZE = UI.PROMPT_INPUT_MAX_BYTES + 1
 
     -- Auto-focus the input field when the window first opens or when
     -- returning from help/overlay screens so Enter works immediately.
-    if ImGui.ImGui_IsWindowAppearing(RA.ctx) or S.refocus_prompt then
+    local suppress_test_focus =
+      tostring(reaper.GetResourcePath and reaper.GetResourcePath() or "")
+        :lower() == "c:\\reaper - test"
+      and tostring(reaper.GetExtState(
+        CFG.EXT_NS, "plugin_test_background_mode") or "") == "1"
+    if (ImGui.ImGui_IsWindowAppearing(RA.ctx) or S.refocus_prompt)
+        and not suppress_test_focus then
       ImGui.ImGui_SetKeyboardFocusHere(RA.ctx, 0)
+      S.refocus_prompt = false
+    elseif suppress_test_focus then
       S.refocus_prompt = false
     end
 
@@ -20274,11 +20428,7 @@ function Render.main_window()
     local attachments_ready = Attach.all_encoded()
     -- Custom providers may run without an API key, so the key check is waived.
     local needs_key = not PROVIDERS.active().is_custom
-    local can_send  = (S.status == "idle" or S.status == "error")
-                      and not deep_scan.active
-                      and (has_input or #S.attachments > 0)
-                      and (S.api_key ~= nil or not needs_key)
-                      and attachments_ready
+    local can_send = UI.can_send_prompt()
 
     -- V5 send button: square, accent-filled, white send-arrow glyph drawn
     -- via the draw list. Positioned flush with the visual card's right edge
@@ -20326,15 +20476,8 @@ function Render.main_window()
     -- Note: UI.pressable() intentionally skipped -- its 2px top strip reads
     -- as an errant horizontal line on this filled rounded square. Press
     -- feedback comes from Col_ButtonActive (deeper tint) instead.
-    if send_clicked or (enter_pressed and can_send) then
-      local trimmed = S.input_buf:match("^%s*(.-)%s*$")
-      if trimmed == "" and #S.attachments > 0 then
-        trimmed = UI.t("prompt.default_attachment", nil,
-          "Please analyze the attached file(s).")
-      end
-      S.input_buf = ""
-      Net.send_to_api(trimmed)
-      S.refocus_prompt = true
+    if send_clicked or enter_pressed then
+      UI.submit_prompt("prompt")
     end
     ImGui.ImGui_PopStyleVar(RA.ctx)       -- FrameRounding (send button)
     PopStyleColor(RA.ctx, 4)
@@ -20818,6 +20961,7 @@ function Render.main_window()
         end
         S.status = "running"
         local ok = Code.run(S.backup_warn_code)
+        Code.bind_pending_deferred_run(S.backup_warn_idx, nil, false, nil)
         Code.apply_run_result_to_message(S.display_messages[S.backup_warn_idx],
           ok, "lua", S.backup_warn_code, false)
         if S.backup_warn_idx == #S.display_messages then S.pending_code = nil end
@@ -21254,7 +21398,7 @@ function Render.main_window()
       -- custom-name field (others) stays the eye-lead.
       --
       -- Stock fallback data comes from the FALLBACK CHAINS block in
-      -- Plugin_Ref.md -- single source of truth. See Code.get_stock_fallback.
+      -- Plugin_Pack.md -- single source of truth. See Code.get_stock_fallback.
       local rsv_stock = Code.get_stock_fallback(rsv_type)
       local rsv_stock_display = rsv_stock and rsv_stock.label
       local cancel_label, do_cancel = nil, false
@@ -21308,7 +21452,7 @@ function Render.main_window()
           -- permanent must explicitly set it on the Preferred Plugins page.
           -- This keeps the popup firing on future generic requests so users
           -- don't silently end up on a stock-only setup without intent.
-          -- The Plugin_Ref section key is passed through so the LLM gets
+          -- The Plugin_Pack section key is passed through so the LLM gets
           -- curated param data on the resume turn.
           Log.line("RESOLVE",
             "user fell back to " .. rsv_stock.add
@@ -21517,6 +21661,7 @@ function Render.main_window()
           elseif Code.safety_backup_can_proceed(berr) then
             S.status = "running"
             local ok = Code.run(S.risky_warn_code)
+            Code.bind_pending_deferred_run(S.risky_warn_idx, nil, false, nil)
             Code.apply_run_result_to_message(S.display_messages[S.risky_warn_idx],
               ok, "lua", S.risky_warn_code, false)
             if S.risky_warn_idx == #S.display_messages then S.pending_code = nil end
@@ -21537,6 +21682,7 @@ function Render.main_window()
         else
           S.status = "running"
           local ok = Code.run(S.risky_warn_code)
+          Code.bind_pending_deferred_run(S.risky_warn_idx, nil, false, nil)
           Code.apply_run_result_to_message(S.display_messages[S.risky_warn_idx],
             ok, "lua", S.risky_warn_code, false)
           if S.risky_warn_idx == #S.display_messages then S.pending_code = nil end
@@ -22526,8 +22672,11 @@ function UI.inline_link_sentence(sentence, link_label, id, on_click, opts)
   end
   ImGui.ImGui_PopStyleVar(RA.ctx, 2)
   PopStyleColor(RA.ctx, 4)
-  if ImGui.ImGui_IsItemHovered(RA.ctx) then
+  local link_hovered = ImGui.ImGui_IsItemHovered(RA.ctx)
+  if link_hovered then
     ImGui.ImGui_SetMouseCursor(RA.ctx, ImGui.ImGui_MouseCursor_Hand())
+  end
+  if opts.always_underline or link_hovered then
     local dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
     local ul_y = link_sy + ImGui.ImGui_GetTextLineHeight(RA.ctx) - 1
     ImGui.ImGui_DrawList_AddLine(dl, link_sx, ul_y, link_sx + link_w,

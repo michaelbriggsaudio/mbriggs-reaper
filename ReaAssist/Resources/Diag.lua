@@ -39,7 +39,7 @@ end
 -- Constants
 -- ============================================================================
 Diag.SCHEMA_VERSION    = 2
-Diag.PAYLOAD_REVISION  = 3
+Diag.PAYLOAD_REVISION  = 5
 Diag.PAYLOAD_CAP_BYTES = 1024 * 1024     -- 1 MB server-side cap (manual feedback)
 -- Bug-report tier carries the full Advanced Log inline as a JSON string.
 -- Logs are auto-pruned to MAX_LOG_TURNS (40) at write time, but each turn can
@@ -82,6 +82,47 @@ Diag.CACHE_STATE_VOCABULARY  = { "hit", "miss", "created", "invalidated",
                                   "create_failed", "not_supported", "unknown" }
 Diag.RETRY_REASON_VOCABULARY = { "validator", "docs_gate", "plugin_helper", "semantic",
                                   "http_5xx", "timeout", "rate_limit" }
+Diag.ERROR_KIND_VOCABULARY = {
+  "curl_exit", "watchdog_timeout", "provider_auth_error",
+  "insufficient_quota", "provider_throttle", "provider_capacity",
+  "provider_api_error", "model_no_usable_answer", "json_decode_error",
+  "runtime_error", "validated_inert", "local_answer_available_but_not_used",
+  "validator_blocked", "context_loop", "unknown",
+}
+Diag.FAILURE_STAGE_VOCABULARY = {
+  "provider", "response", "validation", "execution", "unknown",
+}
+Diag.TERMINAL_OUTCOME_VOCABULARY = {
+  "answer_complete", "answer_truncated", "answer_empty",
+  "run_succeeded_changed", "run_succeeded_unchanged",
+  "run_succeeded_unverified", "run_failed", "run_blocked",
+  "manual_run_required", "pending", "unknown",
+}
+Diag.RECOVERY_ACTION_VOCABULARY = {
+  "lower_thinking", "retry_same_model", "switch_fallback", "unknown",
+}
+Diag.RECOVERY_DISPATCH_VOCABULARY = {
+  "settings_changed", "sent", "send_failed", "switch_failed", "unknown",
+}
+Diag.PROMPT_MODE_VOCABULARY = {
+  "local_answer", "model_answer", "generated_lua", "generated_jsfx",
+  "typed_actions", "unknown",
+}
+Diag.CACHE_DISPOSITION_VOCABULARY = {
+  "no_api_call", "cache_hit", "cache_created", "mixed", "uncached",
+  "unknown",
+}
+Diag.CONTEXT_REQUEST_CLASS_VOCABULARY = {
+  "base", "contextual", "retry", "local", "unknown",
+}
+Diag.LANGUAGE_CODE_VOCABULARY = {
+  "en", "es", "fr", "de", "it", "pt", "nl", "pl", "sv", "cs",
+  "ro", "tr", "ru", "uk", "zh-Hans", "zh-Hant", "ja", "ko", "vi",
+  "id", "qps-ploc", "unknown",
+}
+Diag.INTERFACE_MODE_VOCABULARY = {
+  "visual", "screen_reader", "unknown",
+}
 local EXT_NS             = "reaassist"
 local EXT_KEY_INSTALL_ID = "feedback_install_id"
 
@@ -453,6 +494,21 @@ function Diag.redact(s)
   s = s:gsub("([?&][Kk][Ee][Yy]=)[^%s&\"']+", "%1***")
   s = s:gsub("([?&][Tt][Oo][Kk][Ee][Nn]=)[^%s&\"']+", "%1***")
 
+  -- Provider account identifiers can appear in error bodies and optional
+  -- provider headers even when no credential is present. Redact email-shaped
+  -- account labels plus OpenAI organization and project identifiers. Explicit
+  -- bug-report contact fields bypass this function by design.
+  if s:find("@", 1, true) then
+    s = s:gsub("[A-Za-z0-9%._%+%-]+@[A-Za-z0-9%.%-]+%.[A-Za-z][A-Za-z]+",
+      "<email>")
+  end
+  s = s:gsub("%f[%w]org%-[A-Za-z0-9]+", function(m)
+    return #m >= 20 and "org-***" or m
+  end)
+  s = s:gsub("%f[%w]proj_[A-Za-z0-9]+", function(m)
+    return #m >= 20 and "proj_***" or m
+  end)
+
   -- 4. Home paths
   s = _redact_file_paths(s)
   s = s:gsub("([A-Za-z]:[/\\][Uu]sers[/\\])[^/\\%s\"']+", "%1<user>")
@@ -462,17 +518,17 @@ function Diag.redact(s)
   -- 5. Diagnostic-report install paths. The Diag.build_report output
   -- includes lines like:
   --   Log file:               C:\REAPER\Scripts\...\Debug.log
-  --   Plugin_Ref.md:          MISSING at C:\REAPER\Scripts\...\Plugin_Ref.md
+  --   Plugin_Pack.md:         MISSING at C:\REAPER\Scripts\...\Plugin_Pack.md
   -- These are full install paths that the home-path rule above can't
   -- catch when REAPER is installed outside C:\Users (or under /opt etc.
   -- on POSIX). Reduce both to just the basename / a marker -- the
   -- analyst still learns "logging is on, file name is Debug.log" or
-  -- "Plugin_Ref.md is missing", without leaking install topology.
+  -- "Plugin_Pack.md is missing", without leaking install topology.
   s = s:gsub("(Log file:%s+)([^\n\r]*)", function(prefix, path)
     local name = path:match("[^/\\]*$")
     return prefix .. (name ~= "" and name or path)
   end)
-  s = s:gsub("(Plugin_Ref%.md:%s+MISSING) at [^\n\r]+", "%1 (path scrubbed)")
+  s = s:gsub("(Plugin_Pack%.md:%s+MISSING) at [^\n\r]+", "%1 (path scrubbed)")
 
   -- 6. Reuse Log.scrub_url_secrets if present
   if type(Log) == "table" and type(Log.scrub_url_secrets) == "function" then
@@ -655,14 +711,19 @@ function Diag.normalize_error_kind(raw, debug)
     return "provider_auth_error"
   end
   if k == "insufficient_quota" or k == "credit_balance_error"
-     or k == "resource_exhausted_billing" or k:find("quota", 1, true)
+     or k == "resource_exhausted_billing"
+     or k == "resource_exhausted_allocation"
      or k:find("credit", 1, true) or k:find("billing", 1, true) then
     return "insufficient_quota"
   end
   if k == "provider_throttle" or k == "rate_limit_error"
      or k == "rate_limit_exceeded" or k == "resource_exhausted"
+     or k == "resource_exhausted_temporary"
      or k == "429" then
     return "provider_throttle"
+  end
+  if k == "resource_exhausted_unknown" then
+    return "provider_api_error"
   end
   if k == "provider_capacity" or k == "overloaded_error"
      or k == "overloaded" or k == "server_error"
@@ -758,6 +819,13 @@ local function _turn_run_result(msg, err_kind, redact_content)
   put("validation_status", msg.validation_status, true)
   put("validation_block_kind", msg.validation_block_kind, true)
   put("auto_run_block_reason", msg.auto_run_block_reason, true)
+  if msg.manual_review_reason ~= nil
+     and out.manual_review_reason == nil then
+    out.manual_review_reason = redact_content
+      and Diag.redact(tostring(msg.manual_review_reason or ""))
+      or tostring(msg.manual_review_reason or "")
+    has = true
+  end
   put("assistant_response_status", msg.assistant_response_status, true)
   if msg.code_block_present ~= nil and out.code_block_present == nil then
     out.code_block_present = msg.code_block_present == true
@@ -770,6 +838,10 @@ local function _turn_run_result(msg, err_kind, redact_content)
   put("observable_change_status", msg.observable_change_status, true)
   if msg.change_evidence ~= nil and out.change_evidence == nil then
     out.change_evidence = _redact_payload_value(msg.change_evidence)
+    has = true
+  end
+  if msg.validation_trace ~= nil and out.validation_trace == nil then
+    out.validation_trace = _redact_payload_value(msg.validation_trace)
     has = true
   end
   if msg.runtime_error ~= nil and out.runtime_error == nil then
@@ -817,16 +889,28 @@ local function _turn_to_table(msg, redact_content)
     if msg.validation_block_kind ~= nil then
       t.validation_block_kind = tostring(msg.validation_block_kind or "")
     end
+    if msg.validation_trace ~= nil then
+      t.validation_trace = _redact_payload_value(msg.validation_trace)
+    end
     if msg.selected_count_guard ~= nil then
       t.selected_count_guard = _redact_payload_value(msg.selected_count_guard)
     end
     if msg.auto_run_block_reason ~= nil then
       t.auto_run_block_reason = tostring(msg.auto_run_block_reason or "")
     end
+    if msg.manual_review_reason ~= nil then
+      t.manual_review_reason = redact_content
+        and Diag.redact(tostring(msg.manual_review_reason or ""))
+        or tostring(msg.manual_review_reason or "")
+    end
     if msg.auto_ran      ~= nil then t.auto_ran      = msg.auto_ran end
     if msg.truncated     ~= nil then t.truncated     = msg.truncated end
     if msg.docs_gate_hit ~= nil then t.docs_gate_hit = msg.docs_gate_hit end
     if msg.api_calls     ~= nil then t.api_calls     = msg.api_calls end
+    if msg.failed_request_latency_ms ~= nil then
+      t.failed_request_latency_ms = math.max(0,
+        math.floor((tonumber(msg.failed_request_latency_ms) or 0) + 0.5))
+    end
     if msg.tok_in        ~= nil then t.tok_in        = msg.tok_in end
     if msg.tok_out       ~= nil then t.tok_out       = msg.tok_out end
     if msg.tok_cache_read   ~= nil then t.tok_cache_read   = msg.tok_cache_read end
@@ -840,6 +924,12 @@ local function _turn_to_table(msg, redact_content)
     end
     if msg.recovery_used ~= nil then
       t.recovery_used = msg.recovery_used == true
+    end
+    if msg.recovery_action ~= nil then
+      t.recovery_action = tostring(msg.recovery_action or "")
+    end
+    if msg.recovery_dispatch ~= nil then
+      t.recovery_dispatch = tostring(msg.recovery_dispatch or "")
     end
     if msg.fallback_provider_id ~= nil then
       local fallback_provider_id =
@@ -939,6 +1029,18 @@ local PROVIDER_VOCAB     = _vocab_set(Diag.PROVIDER_VOCABULARY)
 local MODEL_TIER_VOCAB   = _vocab_set(Diag.MODEL_TIER_VOCABULARY)
 local BUCKET_TYPE_VOCAB  = _vocab_set(Diag.BUCKET_TYPE_VOCABULARY)
 local BUCKET_STATE_VOCAB = _vocab_set(Diag.BUCKET_STATE_VOCABULARY)
+local ERROR_KIND_VOCAB = _vocab_set(Diag.ERROR_KIND_VOCABULARY)
+local FAILURE_STAGE_VOCAB = _vocab_set(Diag.FAILURE_STAGE_VOCABULARY)
+local TERMINAL_OUTCOME_VOCAB = _vocab_set(Diag.TERMINAL_OUTCOME_VOCABULARY)
+local RECOVERY_ACTION_VOCAB = _vocab_set(Diag.RECOVERY_ACTION_VOCABULARY)
+local RECOVERY_DISPATCH_VOCAB = _vocab_set(Diag.RECOVERY_DISPATCH_VOCABULARY)
+local PROMPT_MODE_VOCAB = _vocab_set(Diag.PROMPT_MODE_VOCABULARY)
+local CACHE_DISPOSITION_VOCAB =
+  _vocab_set(Diag.CACHE_DISPOSITION_VOCABULARY)
+local CONTEXT_REQUEST_CLASS_VOCAB =
+  _vocab_set(Diag.CONTEXT_REQUEST_CLASS_VOCABULARY)
+local LANGUAGE_CODE_VOCAB = _vocab_set(Diag.LANGUAGE_CODE_VOCABULARY)
+local INTERFACE_MODE_VOCAB = _vocab_set(Diag.INTERFACE_MODE_VOCABULARY)
 
 local function _coarsen(v, vocab, fallback)
   v = type(v) == "string" and v or fallback or "unknown"
@@ -1079,6 +1181,47 @@ local function _safe_try(fn, fallback)
   return fallback
 end
 
+function Diag.client_context()
+  local language_code = _safe_try(function()
+    if type(CFG) == "table"
+        and type(CFG.current_language_code) == "function" then
+      return CFG.current_language_code()
+    end
+    if type(I18N) == "table" and type(I18N.lang_code) == "function" then
+      return I18N.lang_code()
+    end
+  end, "unknown")
+  language_code = _coarsen(language_code, LANGUAGE_CODE_VOCAB, "unknown")
+
+  local language_pack_version = _safe_try(function()
+    if type(I18N) ~= "table"
+        or type(I18N.load_catalog) ~= "function" then
+      return nil
+    end
+    local catalog = I18N.load_catalog(language_code)
+    local meta = type(catalog) == "table" and catalog._meta or nil
+    return type(meta) == "table" and meta.source_version or nil
+  end, "unknown")
+  language_pack_version = tostring(language_pack_version or "unknown")
+  if #language_pack_version > 32
+      or not language_pack_version:match("^[%w%._%-]+$") then
+    language_pack_version = "unknown"
+  end
+
+  local interface_mode = "unknown"
+  if type(S) == "table" then
+    interface_mode = S.screen_reader_mode == true
+      and "screen_reader" or "visual"
+  end
+  interface_mode = _coarsen(interface_mode, INTERFACE_MODE_VOCAB, "unknown")
+
+  return {
+    language_code = language_code,
+    language_pack_version = language_pack_version,
+    interface_mode = interface_mode,
+  }
+end
+
 local function _environment_summary()
   local fx_cache_size = _safe_try(function()
     if type(FXCache) == "table" and type(FXCache.load) == "function" then
@@ -1118,7 +1261,7 @@ local function _environment_summary()
        or RA.RESOURCES_DIR == "" then
       return false
     end
-    local f = io.open(RA.RESOURCES_DIR .. "Plugin_Ref.md", "rb")
+    local f = io.open(RA.RESOURCES_DIR .. "Plugin_Pack.md", "rb")
     if f then f:close(); return true end
     return false
   end, false)
@@ -1143,7 +1286,7 @@ local function _environment_summary()
     imgui_version = imgui_version,
     fx_cache_size = fx_cache_size,
     installed_fx_count = fx_cache_size,
-    fx_cache_schema_version = 1,
+    fx_cache_schema_version = 2,
     plugin_ref_present = plugin_ref_present == true,
     plugin_ref_schema_version = plugin_ref_present and 1 or nil,
     preferred_plugins_count = preferred_plugins_count,
@@ -1219,8 +1362,11 @@ local function _metrics_summary()
   local token_in = (type(S) == "table" and tonumber(S.session_tok_in)) or 0
   local token_out = (type(S) == "table" and tonumber(S.session_tok_out)) or 0
   local cache_read, cache_create, api_call_count, latency_vals = 0, 0, 0, {}
+  local failed_request_latency_ms = 0
   local context_features, bucket_counts, bucket_states = {}, {}, {}
+  local context_request_tokens, context_request_counts = {}, {}
   local network_by_provider, cache_by_provider = {}, {}
+  local google_explicit_cache_used = false
   local validator_pass, validator_fail, validator_autofix, ceiling_inject =
     0, 0, 0, 0
   local rule_failures = {}
@@ -1231,6 +1377,18 @@ local function _metrics_summary()
   local typed_action_validation_fail_count = 0
   local typed_action_execute_fail_count = 0
   local typed_action_to_lua_fallback_count = 0
+  local validator_retry_event_count = 0
+  -- Capped traces remain a useful subset of the successful-turn validation
+  -- traces now recorded separately on each repaired response.
+  local capped_validator_retry_event_count = 0
+  local capped_context_fetch_event_count = 0
+  local context_loop_count = 0
+  local generated_refresh_recovered_count = 0
+  local recovery_offered_count = 0
+  local error_kind_counts, failure_stage_counts = {}, {}
+  local terminal_outcome_counts, recovery_action_counts = {}, {}
+  local recovery_dispatch_counts, prompt_mode_counts = {}, {}
+  local cache_disposition_counts = {}
   local typed_action_parse_errors = {
     invalid_json = true,
     invalid_json_shape = true,
@@ -1252,19 +1410,195 @@ local function _metrics_summary()
     provider_api_error = true,
   }
   local network_error_count = 0
+  local function fixed_key(value, vocab)
+    return _coarsen(tostring(value or ""):lower(), vocab, "unknown")
+  end
+  local function context_request_class(label)
+    label = tostring(label or ""):lower()
+    if label == "" or label == "base" or label == "none" then
+      return "base"
+    end
+    if label:find("retry", 1, true) then return "retry" end
+    if label:find("local", 1, true) then return "local" end
+    return "contextual"
+  end
+  local function message_run_status(m)
+    local rr = type(m.run_result) == "table" and m.run_result or nil
+    return tostring(m.run_status or (rr and rr.run_status) or "")
+  end
+  local function message_validation_status(m)
+    local rr = type(m.run_result) == "table" and m.run_result or nil
+    return tostring(m.validation_status
+      or (rr and rr.validation_status) or "")
+  end
+  local function message_change_status(m)
+    local rr = type(m.run_result) == "table" and m.run_result or nil
+    return tostring(m.observable_change_status
+      or (rr and rr.observable_change_status) or "")
+  end
+  local function failure_stage(m, err_kind)
+    if network_error_kinds[err_kind] then return "provider" end
+    local response_status = tostring(m.assistant_response_status or "")
+    if err_kind == "model_no_usable_answer" or err_kind == "json_decode_error"
+       or err_kind == "context_loop"
+       or response_status == "truncated" or response_status == "empty"
+       or m.truncated == true then
+      return "response"
+    end
+    local validation_status = message_validation_status(m)
+    if err_kind == "validator_blocked" or validation_status == "failed"
+       or validation_status == "blocked" then
+      return "validation"
+    end
+    local run_status = message_run_status(m)
+    if err_kind == "runtime_error" or err_kind == "validated_inert"
+       or run_status == "errored" then
+      return "execution"
+    end
+    return "unknown"
+  end
+  local function terminal_outcome(m)
+    local run_status = message_run_status(m)
+    if run_status == "ran_ok"
+       or (type(m.typed_actions) == "table"
+         and m.typed_actions.executed == true) then
+      local change_status = message_change_status(m)
+      if change_status == "changed" then return "run_succeeded_changed" end
+      if change_status == "unchanged" then return "run_succeeded_unchanged" end
+      return "run_succeeded_unverified"
+    end
+    if run_status == "errored" or run_status == "provider_failed" then
+      return "run_failed"
+    end
+    local validation_status = message_validation_status(m)
+    if run_status:find("^blocked") or validation_status == "failed"
+       or validation_status == "blocked" then
+      return "run_blocked"
+    end
+    if run_status == "manual_run" or validation_status == "manual_required" then
+      return "manual_run_required"
+    end
+    if run_status == "pending" or validation_status == "pending" then
+      return "pending"
+    end
+    local response_status = tostring(m.assistant_response_status or "")
+    if response_status == "truncated" or m.truncated == true then
+      return "answer_truncated"
+    end
+    if response_status == "empty" then return "answer_empty" end
+    if response_status == "complete" or m.role == "assistant" then
+      return "answer_complete"
+    end
+    return "unknown"
+  end
+  local function prompt_mode(m)
+    if m.local_answer == true or m.provider_call_avoided == true then
+      return "local_answer"
+    end
+    local ta = type(m.typed_actions) == "table" and m.typed_actions or nil
+    local code_type = tostring(m.code_type
+      or (type(m.generated_code) == "table" and m.generated_code.code_type)
+      or "")
+    if (ta and ta.present == true) or code_type == "typed_actions" then
+      return "typed_actions"
+    end
+    if code_type == "jsfx" then return "generated_jsfx" end
+    if code_type == "lua" or m.code_block_present == true
+       or (type(m.code_block) == "string" and m.code_block ~= "") then
+      return "generated_lua"
+    end
+    if m.role == "assistant" then return "model_answer" end
+    return "unknown"
+  end
+  local function cache_disposition(m)
+    if m.provider_call_avoided == true then return "no_api_call" end
+    local calls = tonumber(m.api_calls)
+    if calls == nil then return "unknown" end
+    if calls <= 0 then return "no_api_call" end
+    local read = tonumber(m.tok_cache_read) or 0
+    local created = tonumber(m.tok_cache_create) or 0
+    if read > 0 and created > 0 then return "mixed" end
+    if read > 0 then return "cache_hit" end
+    if created > 0 then return "cache_created" end
+    return "uncached"
+  end
   local msgs = (type(S) == "table" and type(S.display_messages) == "table")
                and S.display_messages or {}
   for _, m in ipairs(msgs) do
     if type(m) == "table" then
       local err_kind = Diag.normalize_error_kind(m.error_kind, m.error_debug)
+      if err_kind then
+        err_kind = fixed_key(err_kind, ERROR_KIND_VOCAB)
+        _inc(error_kind_counts, err_kind, 1)
+        _inc(failure_stage_counts,
+          fixed_key(failure_stage(m, err_kind), FAILURE_STAGE_VOCAB), 1)
+      end
       if network_error_kinds[err_kind] then
         network_error_count = network_error_count + 1
+      end
+      if m.role == "assistant" then
+        _inc(terminal_outcome_counts,
+          fixed_key(terminal_outcome(m), TERMINAL_OUTCOME_VOCAB), 1)
+        _inc(prompt_mode_counts,
+          fixed_key(prompt_mode(m), PROMPT_MODE_VOCAB), 1)
+        _inc(cache_disposition_counts,
+          fixed_key(cache_disposition(m), CACHE_DISPOSITION_VOCAB), 1)
+        local loop_debug = type(m.error_debug) == "table" and m.error_debug or nil
+        if loop_debug and (loop_debug.context_loop == true
+            or loop_debug.failure_kind == "context_loop") then
+          context_loop_count = context_loop_count + 1
+        end
+        local run_result = type(m.run_result) == "table" and m.run_result or nil
+        if run_result then
+          local recovered = tonumber(run_result.generated_refresh_recovery_count)
+          if not recovered and run_result.generated_refresh_recovered == true then
+            recovered = 1
+          end
+          generated_refresh_recovered_count =
+            generated_refresh_recovered_count + (recovered or 0)
+        end
+      end
+      if m.recovery ~= nil or m.recovery_kind ~= nil then
+        recovery_offered_count = recovery_offered_count + 1
+      end
+      if m.recovery_action ~= nil or m.recovery_used == true then
+        _inc(recovery_action_counts,
+          fixed_key(m.recovery_action, RECOVERY_ACTION_VOCAB), 1)
+      end
+      if m.recovery_dispatch ~= nil or m.recovery_used == true then
+        _inc(recovery_dispatch_counts,
+          fixed_key(m.recovery_dispatch, RECOVERY_DISPATCH_VOCAB), 1)
       end
       cache_read = cache_read + (tonumber(m.tok_cache_read) or 0)
       cache_create = cache_create + (tonumber(m.tok_cache_create) or 0)
       api_call_count = api_call_count + (tonumber(m.api_calls) or 0)
       if tonumber(m.response_time) then
         latency_vals[#latency_vals + 1] = math.floor(tonumber(m.response_time) * 1000)
+      end
+      local failed_latency = tonumber(m.failed_request_latency_ms)
+      if not failed_latency and type(m.error_debug) == "table" then
+        local elapsed = tonumber(m.error_debug.request_elapsed_s)
+        if elapsed then failed_latency = elapsed * 1000 end
+      end
+      if failed_latency and failed_latency > failed_request_latency_ms then
+        failed_request_latency_ms = math.floor(failed_latency + 0.5)
+      end
+      if type(m.gemini_cache) == "table"
+         and (m.gemini_cache.request_used == true
+           or m.gemini_cache.used == true) then
+        google_explicit_cache_used = true
+      end
+      if type(m.model_call_usage) == "table" then
+        for _, usage in ipairs(m.model_call_usage) do
+          if type(usage) == "table" then
+            local label = fixed_key(
+              context_request_class(usage.context_label),
+              CONTEXT_REQUEST_CLASS_VOCAB)
+            _inc(context_request_counts, label, 1)
+            _inc(context_request_tokens, label,
+              tonumber(usage.input_tokens) or 0)
+          end
+        end
       end
       if type(m.ctx_label) == "string" and m.ctx_label ~= "" then
         for part in m.ctx_label:gmatch("[^%+]+") do
@@ -1293,6 +1627,50 @@ local function _metrics_summary()
       elseif m.docs_gate_hit == true then
         validator_fail = validator_fail + 1
         _inc(rule_failures, "docs_gate_failed", 1)
+      end
+      local successful_retry_events = type(m.validation_trace) == "table"
+        and type(m.validation_trace.events) == "table"
+        and m.validation_trace.events or nil
+      if successful_retry_events then
+        for _, event in ipairs(successful_retry_events) do
+          if type(event) == "table" then
+            validator_retry_event_count = validator_retry_event_count + 1
+            local retry_kind = tostring(event.kind or "unspecified")
+            _inc(rule_failures, "retry_" .. retry_kind, 1)
+            if event.repair_request_fired == true then
+              validator_autofix = validator_autofix + 1
+            end
+          end
+        end
+      end
+      local retry_events = type(m.error_debug) == "table"
+        and type(m.error_debug.validator_retry_events) == "table"
+        and m.error_debug.validator_retry_events or nil
+      if retry_events then
+        for _, event in ipairs(retry_events) do
+          if type(event) == "table" then
+            capped_validator_retry_event_count =
+              capped_validator_retry_event_count + 1
+            validator_retry_event_count = validator_retry_event_count + 1
+            local retry_kind = tostring(event.kind or "unspecified")
+            _inc(rule_failures, "retry_" .. retry_kind, 1)
+            if event.repair_request_fired == true then
+              validator_autofix = validator_autofix + 1
+            end
+          end
+        end
+      end
+      local context_events = type(m.error_debug) == "table"
+        and type(m.error_debug.context_fetch_events) == "table"
+        and m.error_debug.context_fetch_events or nil
+      if context_events then
+        for _, event in ipairs(context_events) do
+          if type(event) == "table" then
+            capped_context_fetch_event_count =
+              capped_context_fetch_event_count + 1
+            _inc(bucket_states, "refetched", 1)
+          end
+        end
       end
       if m.ceiling_injected == true then
         ceiling_inject = ceiling_inject + 1
@@ -1341,14 +1719,45 @@ local function _metrics_summary()
   local max_latency = #latency_vals > 0 and latency_vals[#latency_vals] or 0
   local network_entry = { ok = #latency_vals, error_count = network_error_count }
   if provider_id ~= "unknown" then network_by_provider[provider_id] = network_entry end
-  if (provider_id == "anthropic" or provider_id == "openai") and (cache_read > 0 or cache_create > 0) then
+  if provider_id == "anthropic" then
     cache_by_provider[provider_id] = {
       read_tokens = cache_read,
       create_tokens = cache_create,
+      cache_mode = "explicit",
+      implicit_cache_available = false,
+      explicit_cache_eligible = true,
+      explicit_cache_active = api_call_count > 0,
+      cache_create_reporting = "provider_reported",
+      cache_create_expected = api_call_count > 0,
+    }
+  elseif provider_id == "openai" then
+    cache_by_provider[provider_id] = {
+      read_tokens = cache_read,
+      create_tokens = cache_create,
+      cache_mode = "implicit",
+      implicit_cache_available = true,
+      explicit_cache_eligible = false,
+      explicit_cache_active = false,
+      cache_create_reporting = "not_reported",
+      cache_create_expected = false,
     }
   elseif provider_id == "google" then
+    local paid = type(S) == "table" and S.gemini_paid_tier == true
+    local explicit_configured = paid and type(S.gemini_cache_name) == "string"
+      and S.gemini_cache_name ~= ""
     cache_by_provider[provider_id] = {
-      explicit_cache_create_ok = (type(S) == "table" and S.gemini_cache_name) and 1 or 0,
+      read_tokens = cache_read,
+      create_tokens = cache_create,
+      cache_mode = google_explicit_cache_used and "explicit" or "implicit",
+      implicit_cache_available = true,
+      explicit_cache_eligible = paid,
+      explicit_cache_configured = explicit_configured,
+      explicit_cache_active = google_explicit_cache_used,
+      cache_create_reporting = "not_reported_per_turn",
+      cache_create_expected = false,
+      tier_state = paid and "paid"
+        or (type(S) == "table" and S.gemini_paid_tier == false)
+          and "free" or "unknown",
     }
   end
   return {
@@ -1363,6 +1772,7 @@ local function _metrics_summary()
     },
     api_call_count = api_call_count,
     cost_total_usd = (type(S) == "table" and tonumber(S.session_cost)) or 0,
+    failed_request_latency_ms = failed_request_latency_ms,
     price_table_version = Diag.PRICE_TABLE_VERSION,
     latency_ms = {
       p50 = pct(0.50),
@@ -1380,10 +1790,15 @@ local function _metrics_summary()
       features_used = context_features,
       bucket_counts_by_type = bucket_counts,
       bucket_state_counts = bucket_states,
+      request_input_tokens_by_context_label = context_request_tokens,
+      request_count_by_context_label = context_request_counts,
     },
     cache = {
-      stable_prefix_tokens_est = cache_read,
-      cache_control_count = cache_create > 0 and 1 or 0,
+      observed_cache_read_tokens = cache_read,
+      observed_cache_create_tokens = cache_create,
+      cache_control_count = provider_id == "google"
+        and google_explicit_cache_used and 1
+        or (provider_id == "anthropic" and api_call_count > 0 and 1 or 0),
       by_provider = cache_by_provider,
     },
     network = {
@@ -1402,7 +1817,19 @@ local function _metrics_summary()
       typed_action_validation_fail_count = typed_action_validation_fail_count,
       typed_action_execute_fail_count = typed_action_execute_fail_count,
       typed_action_to_lua_fallback_count = typed_action_to_lua_fallback_count,
-      context_loop_count = (type(S) == "table" and tonumber(S.context_loop_retries)) or 0,
+      validator_retry_event_count = validator_retry_event_count,
+      capped_validator_retry_event_count = capped_validator_retry_event_count,
+      capped_context_fetch_event_count = capped_context_fetch_event_count,
+      context_loop_count = context_loop_count,
+      generated_refresh_recovered_count = generated_refresh_recovered_count,
+      recovery_offered_count = recovery_offered_count,
+      error_kind_counts = error_kind_counts,
+      failure_stage_counts = failure_stage_counts,
+      terminal_outcome_counts = terminal_outcome_counts,
+      recovery_action_counts = recovery_action_counts,
+      recovery_dispatch_counts = recovery_dispatch_counts,
+      prompt_mode_counts = prompt_mode_counts,
+      cache_disposition_counts = cache_disposition_counts,
     },
   }
 end
@@ -1488,6 +1915,7 @@ function Diag.assemble_auto_payload(tier)
   local provider_id = _provider_class(p)
   local model_id = _active_model_id()
   local now = os.time()
+  local client_context = Diag.client_context()
   local payload = {
     schema_version       = Diag.SCHEMA_VERSION,
     payload_revision     = Diag.PAYLOAD_REVISION,
@@ -1504,6 +1932,9 @@ function Diag.assemble_auto_payload(tier)
     app_version          = (type(CFG) == "table" and CFG.VERSION) or "unknown",
     release_channel      = _release_channel(),
     tos_version_accepted = _tos_version_accepted(),
+    language_code        = client_context.language_code,
+    language_pack_version = client_context.language_pack_version,
+    interface_mode       = client_context.interface_mode,
     reaper_version       = _safe_try(function() return reaper.GetAppVersion() end, "unknown"),
     os                   = _detect_os(),
     provider             = provider_id,
@@ -1619,6 +2050,7 @@ function Diag.assemble_auto_ping_payload()
   local provider_id = _provider_class(p)
   local model_id = _active_model_id()
   local now = os.time()
+  local client_context = Diag.client_context()
   local payload = {
     schema_version       = Diag.SCHEMA_VERSION,
     payload_revision     = Diag.PAYLOAD_REVISION,
@@ -1635,6 +2067,9 @@ function Diag.assemble_auto_ping_payload()
     app_version          = (type(CFG) == "table" and CFG.VERSION) or "unknown",
     release_channel      = _release_channel(),
     tos_version_accepted = _tos_version_accepted(),
+    language_code        = client_context.language_code,
+    language_pack_version = client_context.language_pack_version,
+    interface_mode       = client_context.interface_mode,
     reaper_version       = _safe_try(function() return reaper.GetAppVersion() end, "unknown"),
     os                   = _detect_os(),
     provider             = provider_id,
@@ -1713,6 +2148,7 @@ function Diag.begin_draft(target_idx)
     end
   end
   local custom_instructions = _custom_instructions_context()
+  local client_context = Diag.client_context()
 
   return {
     event_id             = uuidv4(),
@@ -1725,6 +2161,9 @@ function Diag.begin_draft(target_idx)
     app_version          = (type(CFG) == "table" and CFG.VERSION) or "unknown",
     release_channel      = _release_channel(),
     tos_version_accepted = _tos_version_accepted(),
+    language_code        = client_context.language_code,
+    language_pack_version = client_context.language_pack_version,
+    interface_mode       = client_context.interface_mode,
     os                   = _detect_os(),
     reaper_version       = reaper_version,
     provider             = provider_id,
@@ -1765,6 +2204,9 @@ function Diag.assemble_payload(draft, comment, flags)
     app_version          = draft.app_version,
     release_channel      = draft.release_channel or _release_channel(),
     tos_version_accepted = draft.tos_version_accepted or _tos_version_accepted(),
+    language_code        = draft.language_code,
+    language_pack_version = draft.language_pack_version,
+    interface_mode       = draft.interface_mode,
     os                   = draft.os,
     reaper_version       = draft.reaper_version,
     provider             = draft.provider,
@@ -2072,6 +2514,7 @@ function Diag.begin_bug_report_draft()
       attachment_kind  = "chat"
     end
   end
+  local client_context = Diag.client_context()
 
   return {
     event_id                 = uuidv4(),
@@ -2084,6 +2527,9 @@ function Diag.begin_bug_report_draft()
     app_version              = (type(CFG) == "table" and CFG.VERSION) or "unknown",
     release_channel          = _release_channel(),
     tos_version_accepted     = _tos_version_accepted(),
+    language_code            = client_context.language_code,
+    language_pack_version    = client_context.language_pack_version,
+    interface_mode           = client_context.interface_mode,
     os                       = _detect_os(),
     reaper_version           = reaper_version,
     provider                 = provider_id,
@@ -2139,6 +2585,9 @@ function Diag.assemble_bug_report_payload(draft, comment, name, email)
     app_version          = draft.app_version,
     release_channel      = draft.release_channel or _release_channel(),
     tos_version_accepted = draft.tos_version_accepted or _tos_version_accepted(),
+    language_code        = draft.language_code,
+    language_pack_version = draft.language_pack_version,
+    interface_mode       = draft.interface_mode,
     os                   = draft.os,
     reaper_version       = draft.reaper_version,
     provider             = draft.provider,

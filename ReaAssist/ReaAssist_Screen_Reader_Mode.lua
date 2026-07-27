@@ -1389,7 +1389,27 @@ function ScreenReader.payload_auto_ran(payload)
 end
 
 function ScreenReader.response_ready_ran_text(payload, long_form)
-  if payload and payload.observable_change_status == "unchanged" then
+  if payload and payload.parameter_change_status == "partially_changed" then
+    return ScreenReader.t(
+      "a11y.sr.response_ready_partial_parameter_change", {
+        changed = payload.parameter_change_evidence
+          and payload.parameter_change_evidence.changed_target_count or 0,
+        total = payload.parameter_change_evidence
+          and payload.parameter_change_evidence.target_count or 0,
+      },
+      "Generated code finished, but some parameter targets did not finish with a verified new value. {changed} of {total} targets changed. Confirm the unchanged or restored plugin values before continuing.")
+  end
+  if payload and payload.parameter_change_status == "unchanged" then
+    return ScreenReader.t("a11y.sr.response_ready_no_parameter_change", nil,
+      "Generated code finished, but no parameter value change was detected. The requested value may already have been set or the write was a no-op. Confirm the displayed plugin value before continuing.")
+  end
+  if payload and payload.parameter_change_status == "returned_to_initial" then
+    return ScreenReader.t(
+      "a11y.sr.response_ready_parameter_returned_to_initial", nil,
+      "Generated code finished with the parameter at its original value. The requested state may already have been set, or a helper restored it after failing verification. Review the response and confirm the displayed plugin value before continuing.")
+  end
+  if payload and payload.parameter_change_status ~= "changed"
+      and payload.observable_change_status == "unchanged" then
     return ScreenReader.t("a11y.sr.response_ready_no_project_change", nil,
       "Generated code finished, but no project change was detected. It may have exited early because a target was missing or the requested state was already set. Review the response and project before continuing.")
   end
@@ -1627,6 +1647,10 @@ function ScreenReader.auto_run_block_text(payload)
     return ScreenReader.t("auto_run.blocked.proq4_bell_slope", nil,
       "Auto-run blocked: Pro-Q 4 Bell boost/cut bands did not set Slope to 12 dB/oct. Review the Pro-Q 4 slope writes before running manually.")
   end
+  if reason == "musical_enum_validator" then
+    return ScreenReader.t("auto_run.blocked.musical_enum", nil,
+      "Auto-run blocked: the generated key or scale edit guessed a raw plugin value instead of verifying the named choice. Ask ReaAssist to regenerate it before running manually.")
+  end
   if reason == "backup_required" then
     if ScreenReader.payload_is_typed_action(payload) then
       return ScreenReader.t("typed_actions.status.backup_required", nil,
@@ -1644,8 +1668,10 @@ function ScreenReader.auto_run_block_text(payload)
       "Auto-run was blocked because ReaAssist could not create a safety backup.")
   end
   if reason == "action_relevance_review" then
-    return ScreenReader.t("auto_run.blocked.relevance", nil,
-      "Auto-run was blocked because the generated action did not clearly match the request and captured session. Review the target tracks, plugins, and REAPER actions before running it manually.")
+    return tostring(payload.manual_review_reason or "")
+      ~= "" and tostring(payload.manual_review_reason)
+      or ScreenReader.t("auto_run.blocked.relevance", nil,
+        "Auto-run was blocked because the generated action did not clearly match the request and captured session. Review the target tracks, plugins, and REAPER actions before running it manually.")
   end
   if reason == "risky_code_confirmation" then
     return ScreenReader.t("a11y.sr.run_code_risky", nil,
@@ -1857,10 +1883,12 @@ function ScreenReader.set_dropdown_items(id, labels, selected)
   end
 end
 
-function ScreenReader.menu_from_provider_items()
+function ScreenReader.menu_from_provider_items(opts)
+  opts = opts or {}
   local labels, map, selected = {}, {}, 1
   for _, item in ipairs(AppController.provider_items({
     include_unconfigured = true,
+    setup_labels = opts.setup_labels == true,
   })) do
     local label = item.label
     if not item.configured then
@@ -2867,7 +2895,9 @@ end
 function ScreenReader.refresh_menus()
   local ui = S and S.screen_reader_ui or nil
   if not (ui and ui.ids) then return end
-  local labels, map, selected = ScreenReader.menu_from_provider_items()
+  local labels, map, selected = ScreenReader.menu_from_provider_items({
+    setup_labels = S._screen_reader_view == "api_keys",
+  })
   ui.provider_map = map
   ScreenReader.set_dropdown_items(ui.ids.provider, labels, selected)
   labels, map, selected = ScreenReader.menu_from_model_items()
@@ -4387,22 +4417,24 @@ end
 
 function ScreenReader.open_api_keys_setup()
   if api_keys then api_keys.is_reentry = false end
+  S._screen_reader_custom_provider_return = nil
   ScreenReader.set_status_after_rebuild(ScreenReader.t(
     "settings.hero.subtitle.first_run", nil,
-    "Add at least one API key to get started."), true)
+    "Connect a provider to get started."), true)
   ScreenReader.focus_after_rebuild({ "api_key_input", "api_key_provider" })
   ScreenReader.open_view("api_keys")
 end
 
 function ScreenReader.open_api_keys_settings()
   if api_keys then api_keys.is_reentry = true end
+  S._screen_reader_custom_provider_return = nil
   ScreenReader.open_view("api_keys")
 end
 
 function ScreenReader.continue_from_api_keys()
   if not ScreenReader.has_usable_provider() then
     ScreenReader.set_status(ScreenReader.t("settings.hero.subtitle.first_run",
-      nil, "Add at least one API key to get started."), true)
+      nil, "Connect a provider to get started."), true)
     return
   end
   if api_keys then api_keys.is_reentry = false end
@@ -4450,6 +4482,38 @@ function ScreenReader.open_manual()
       "Opening the ReaAssist manual.")
     or ScreenReader.t("a11y.sr.manual_open_failed", nil,
       "Could not open the ReaAssist manual."), true)
+end
+
+function ScreenReader.open_api_access_help()
+  local url = "https://reaassist.app/manual/#getting-an-api-key"
+  local ok = UI and UI.open_url and UI.open_url(url)
+  if not ok then ok = open_url(url) end
+  ScreenReader.set_status(ok
+    and ScreenReader.t("a11y.sr.manual_opened", nil,
+      "Opening the ReaAssist manual.")
+    or ScreenReader.t("a11y.sr.manual_open_failed", nil,
+      "Could not open the ReaAssist manual."), true)
+end
+
+function ScreenReader.open_custom_providers_from_api_keys()
+  S._screen_reader_custom_provider_return = "api_keys"
+  ScreenReader.focus_after_rebuild("custom_providers_open_file")
+  ScreenReader.open_view("custom_providers")
+end
+
+function ScreenReader.open_custom_providers_from_settings()
+  S._screen_reader_custom_provider_return = nil
+  ScreenReader.open_view("custom_providers")
+end
+
+function ScreenReader.return_from_custom_providers()
+  if S._screen_reader_custom_provider_return == "api_keys" then
+    S._screen_reader_custom_provider_return = nil
+    ScreenReader.focus_after_rebuild("advanced_custom_providers")
+    ScreenReader.open_view("api_keys")
+  else
+    ScreenReader.open_view("settings")
+  end
 end
 
 function ScreenReader.help_text()
@@ -4739,6 +4803,9 @@ function ScreenReader.shortcut_back()
       "Accept or decline the terms before using Screen Reader Mode shortcuts.")
   elseif view == "api_keys" and ScreenReader.api_keys_setup_active() then
     ScreenReader.continue_from_api_keys()
+  elseif view == "custom_providers"
+      and S._screen_reader_custom_provider_return == "api_keys" then
+    ScreenReader.return_from_custom_providers()
   elseif view == "run_confirm" then
     ScreenReader.cancel_run_code()
   elseif view == "reader" then
@@ -5137,8 +5204,11 @@ function ScreenReader.view_title()
       "ReaAssist Update Available")
   end
   if view == "api_keys" then
-    return ScreenReader.t("a11y.sr.api_keys_title", nil,
-      "ReaAssist API Keys")
+    if ScreenReader.api_keys_setup_active() then
+      return ScreenReader.t("a11y.sr.provider_setup_title", nil,
+        "ReaAssist Provider Setup")
+    end
+    return ScreenReader.t("a11y.sr.api_keys_title", nil, "ReaAssist API Keys")
   end
   if view == "custom_providers" then
     return ScreenReader.t("settings.custom.list.subtitle", nil,
@@ -5245,16 +5315,18 @@ end
 
 function ScreenReader.api_key_status_text()
   local status = AppController.active_provider_key_status()
-  local label = status and status.label or ScreenReader.t(
+  local provider = status and status.provider or nil
+  local label = provider and (provider.setup_label or status.label)
+    or status and status.label or ScreenReader.t(
     "a11y.controller.provider.unknown", nil, "unknown provider")
   if status and status.configured then
     return ScreenReader.t("a11y.sr.api_key_saved_status", {
       provider = label,
-    }, label .. " API key is saved.")
+    }, label .. " key is saved.")
   end
   return ScreenReader.t("a11y.sr.api_key_missing_status", {
     provider = label,
-  }, label .. " API key is not saved.")
+  }, label .. " key is not saved.")
 end
 
 function ScreenReader.api_key_input_text()
@@ -6633,7 +6705,7 @@ function ScreenReader.fx_cache_table_text()
   end
   if #curated > 0 then
     lines[#lines + 1] = ""
-    lines[#lines + 1] = "# Built-in references from Plugin_Ref.md"
+    lines[#lines + 1] = "# Built-in references from the bundled profile pack"
     for _, ident in ipairs(curated) do
       lines[#lines + 1] = ident .. " | built-in reference"
     end
@@ -7162,11 +7234,12 @@ function ScreenReader.build_settings_ui()
     function() ScreenReader.open_api_keys_settings() end,
     "api_keys")
   ui.ids.custom_providers = reagirl.Button_Add(nil, nil, 10, 5,
-    ScreenReader.t("settings.api.custom_providers.label", nil,
-      "Local & Custom Providers"),
+    ScreenReader.t("settings.api.custom_providers.advanced_label", nil,
+      "Advanced: Local & Custom Providers"),
     ScreenReader.t("a11y.sr.custom_providers.meaning", nil,
-      "Opens accessible local and custom provider management."),
-    function() ScreenReader.open_view("custom_providers") end,
+      "Opens advanced local and custom provider management. Compatibility "
+      .. "and result quality are not guaranteed."),
+    function() ScreenReader.open_custom_providers_from_settings() end,
     "custom_providers")
   ui.ids.custom_instructions = reagirl.Button_Add(nil, nil, 10, 5,
     ScreenReader.t("settings.custom_instructions.label", nil,
@@ -7390,7 +7463,11 @@ function ScreenReader.build_settings_ui()
       "Automatic diagnostics"),
     ScreenReader.caption_width_px(140),
     ScreenReader.t("settings.adv.diagnostics.tooltip", nil,
-      "Basic anonymous diagnostics are enabled by default and can be turned off."),
+      "Basic anonymous diagnostics are enabled by default and can be turned "
+      .. "off. Basic includes the selected ReaAssist language, language-pack "
+      .. "version, interface mode and fixed-category counts for errors, "
+      .. "outcomes, recovery, prompt mode and cache use, "
+      .. "without chat text or names."),
     labels, selected,
     function(_, menu_idx) ScreenReader.select_diagnostics_tier(menu_idx) end,
     "diagnostics_tier")
@@ -7515,16 +7592,46 @@ function ScreenReader.build_api_keys_ui()
     false, nil, "status")
 
   if setup then
-    local intro_text = ScreenReader.t("settings.first_run.intro_storage_v2", nil,
-      "Keys are stored locally using reversible obfuscation, not encryption or an OS credential vault. Anyone with access to your REAPER settings and this source code can recover them. Keys are sent only to the provider or custom endpoint you configure. Claude has shown the best all-around results in testing, Gemini is the only built-in provider with a free tier, and local/custom models can keep requests on your machine.")
+    local intro_text = ScreenReader.t("settings.first_run.intro_access_v1", nil,
+      "ReaAssist connects directly to a model provider using an API key. Chat subscriptions are separate and cannot be used. For the most reliable results, use one of the tested providers below.")
     reagirl.NextLine()
     ui.ids.intro = reagirl.Label_Add(nil, nil,
       ScreenReader.wrap_text(intro_text, 88),
       intro_text,
       false, nil, "api_key_intro")
+
+    reagirl.NextLine()
+    ui.ids.api_access_help = reagirl.Button_Add(nil, nil, 10, 5,
+      ScreenReader.t("settings.first_run.api_access_link", nil,
+        "How to get API access"),
+      ScreenReader.t("a11y.sr.api_access_help.meaning", nil,
+        "Opens the manual section about creating provider API keys."),
+      function() ScreenReader.open_api_access_help() end,
+      "api_access_help")
+
+    local guidance_text = ScreenReader.t(
+      "settings.first_run.provider_guidance_v1", nil,
+      "Not sure which provider to pick? Claude has shown the best all-around results in ReaAssist testing. Gemini offers a provider-managed free tier.")
+    reagirl.NextLine()
+    ui.ids.provider_guidance = reagirl.Label_Add(nil, nil,
+      ScreenReader.wrap_text(guidance_text, 88),
+      guidance_text,
+      false, nil, "api_key_provider_guidance")
   end
 
-  local labels, map, selected = ScreenReader.menu_from_provider_items()
+  local storage_text = ScreenReader.t(
+    "settings.first_run.storage_disclosure_v3", nil,
+    "Keys are stored locally using reversible obfuscation, not encryption or an OS credential vault. Anyone with access to your REAPER settings and this source code can recover them. Keys are sent only to the provider or custom endpoint you configure.")
+  reagirl.NextLine()
+  ui.ids.note = reagirl.Label_Add(nil, nil,
+    ScreenReader.wrap_text(storage_text, 88),
+    ScreenReader.t("a11y.sr.api_key_note.meaning", nil,
+      "Explains where API keys are stored."),
+    false, nil, "api_key_note")
+
+  local labels, map, selected = ScreenReader.menu_from_provider_items({
+    setup_labels = true,
+  })
   ui.provider_map = map
   reagirl.NextLine()
   ui.ids.provider = reagirl.DropDownMenu_Add(nil, nil, 250,
@@ -7575,13 +7682,25 @@ function ScreenReader.build_api_keys_ui()
     function() ScreenReader.open_provider_console() end,
     "open_key_page")
 
+  local advanced_text = ScreenReader.t(
+    "settings.api.custom_providers.caveat", nil,
+    "Advanced only. ReaAssist does not guarantee compatibility or result quality, and capable local models may require powerful hardware.")
   reagirl.NextLine()
-  ui.ids.note = reagirl.Label_Add(nil, nil,
-    ScreenReader.t("a11y.sr.api_key_note_storage_v2", nil,
-      "Saved keys use reversible obfuscation in REAPER's persistent settings. They are not encrypted in an OS credential vault, and someone with access to the settings and source can recover them."),
-    ScreenReader.t("a11y.sr.api_key_note.meaning", nil,
-      "Explains where API keys are stored."),
-    false, nil, "api_key_note")
+  ui.ids.advanced_note = reagirl.Label_Add(nil, nil,
+    ScreenReader.wrap_text(advanced_text, 88),
+    ScreenReader.t("a11y.sr.advanced_providers_note.meaning", nil,
+      "Explains that local and custom providers are advanced and their compatibility and result quality are not guaranteed."),
+    false, nil, "advanced_providers_note")
+
+  reagirl.NextLine()
+  ui.ids.advanced_custom_providers = reagirl.Button_Add(nil, nil, 10, 5,
+    ScreenReader.t("settings.api.custom_providers.advanced_label", nil,
+      "Advanced: Local & Custom Providers"),
+    ScreenReader.t("a11y.sr.custom_providers.meaning", nil,
+      "Opens advanced local and custom provider management. Compatibility "
+      .. "and result quality are not guaranteed."),
+    function() ScreenReader.open_custom_providers_from_api_keys() end,
+    "advanced_custom_providers")
 
   reagirl.NextLine()
   if setup then
@@ -7602,7 +7721,10 @@ function ScreenReader.build_api_keys_ui()
       ScreenReader.t("a11y.sr.back_to_main", nil, "Back to Main"),
       ScreenReader.t("a11y.sr.back_to_main.meaning", nil,
         "Returns to the main ReaAssist screen."),
-      function() ScreenReader.open_view("main") end,
+      function()
+        S._screen_reader_custom_provider_return = nil
+        ScreenReader.open_view("main")
+      end,
       "back_to_main")
   end
   ui.ids.close = reagirl.Button_Add(nil, nil, 10, 5,
@@ -7617,13 +7739,14 @@ function ScreenReader.build_api_keys_ui()
     ScreenReader.view_title(),
     ScreenReader.t("a11y.sr.window.meaning", nil,
       "Accessible ReaAssist window for screen-reader users."),
-    820, setup and 560 or 500, 0, nil, nil)
+    820, setup and 720 or 610, 0, nil, nil)
   return ok == 1
 end
 
 function ScreenReader.build_custom_providers_ui()
   S.screen_reader_ui = { ids = {} }
   local ui = S.screen_reader_ui
+  local return_to_api_keys = S._screen_reader_custom_provider_return == "api_keys"
   ScreenReader.begin_reagirl_ui()
 
   ui.ids.title = reagirl.Label_Add(18, 18, ScreenReader.view_title(),
@@ -7643,10 +7766,11 @@ function ScreenReader.build_custom_providers_ui()
       "Summary of saved local and custom providers."),
     false, nil, "custom_providers_summary")
 
+  local custom_note = ScreenReader.t("a11y.sr.custom_providers_note", nil,
+    "Advanced only. Compatibility and result quality are not guaranteed. Edit JSON, save it, then Load Edit File. Save provider keys from Provider Setup.")
   reagirl.NextLine()
   ui.ids.note = reagirl.Label_Add(nil, nil,
-    ScreenReader.t("a11y.sr.custom_providers_note", nil,
-      "Edit JSON, save it, then Load Edit File. Save provider keys from API Keys."),
+    ScreenReader.wrap_text(custom_note, 92),
     ScreenReader.t("a11y.sr.custom_providers_note.meaning", nil,
       "Explains the accessible custom providers workflow."),
     false, nil, "custom_providers_note")
@@ -7693,22 +7817,40 @@ function ScreenReader.build_custom_providers_ui()
     ScreenReader.t("a11y.sr.api_keys", nil, "API Keys"),
     ScreenReader.t("a11y.sr.custom_providers_api_keys.meaning", nil,
       "Opens API key setup. Select a loaded custom provider there to save its key."),
-    function() ScreenReader.open_api_keys_settings() end,
+    function()
+      if return_to_api_keys then
+        ScreenReader.focus_after_rebuild("advanced_custom_providers")
+        ScreenReader.open_view("api_keys")
+      else
+        ScreenReader.open_api_keys_settings()
+      end
+    end,
     "custom_providers_api_keys")
 
   reagirl.NextLine()
   ui.ids.back = reagirl.Button_Add(nil, nil, 22, 5,
-    ScreenReader.back_label("a11y.sr.back_to_settings", "Back to Settings"),
-    ScreenReader.t("a11y.sr.back_to_settings.meaning", nil,
-      "Returns to the settings screen."),
-    function() ScreenReader.open_view("settings") end,
-    "back_to_settings")
-  ui.ids.main = reagirl.Button_Add(nil, nil, 18, 5,
-    ScreenReader.t("a11y.sr.back_to_main", nil, "Back to Main"),
-    ScreenReader.t("a11y.sr.back_to_main.meaning", nil,
-      "Returns to the main ReaAssist screen."),
-    function() ScreenReader.open_view("main") end,
-    "back_to_main")
+    return_to_api_keys
+      and ScreenReader.back_label("a11y.sr.back_to_api_keys",
+        "Back to Provider Setup")
+      or ScreenReader.back_label("a11y.sr.back_to_settings", "Back to Settings"),
+    return_to_api_keys
+      and ScreenReader.t("a11y.sr.back_to_api_keys.meaning", nil,
+        "Returns to provider API key setup.")
+      or ScreenReader.t("a11y.sr.back_to_settings.meaning", nil,
+        "Returns to the settings screen."),
+    function() ScreenReader.return_from_custom_providers() end,
+    return_to_api_keys and "back_to_api_keys" or "back_to_settings")
+  if not (return_to_api_keys and ScreenReader.api_keys_setup_active()) then
+    ui.ids.main = reagirl.Button_Add(nil, nil, 18, 5,
+      ScreenReader.t("a11y.sr.back_to_main", nil, "Back to Main"),
+      ScreenReader.t("a11y.sr.back_to_main.meaning", nil,
+        "Returns to the main ReaAssist screen."),
+      function()
+        S._screen_reader_custom_provider_return = nil
+        ScreenReader.open_view("main")
+      end,
+      "back_to_main")
+  end
   ui.ids.close = reagirl.Button_Add(nil, nil, 10, 5,
     ScreenReader.close_label(),
     ScreenReader.t("a11y.sr.close.meaning", nil,
@@ -10728,7 +10870,8 @@ function AppController.provider_items(opts)
           and tostring(S.api_key_map[p.id]) ~= "")
     end
     if configured or opts.include_unconfigured then
-      local label = p.label or p.id or ("Provider " .. tostring(i))
+      local label = (opts.setup_labels and p.setup_label)
+        or p.label or p.id or ("Provider " .. tostring(i))
       if p.id == "google" and S.gemini_paid_tier == false then
         label = label .. " (Free)"
       end
@@ -11418,6 +11561,7 @@ function AppController.latest_response_payload()
     undo_sent = AppController.message_undo_sent(msg),
     can_undo = AppController.message_can_undo_generated_action(msg),
     auto_run_block_reason = msg and msg.auto_run_block_reason or nil,
+    manual_review_reason = msg and msg.manual_review_reason or nil,
     validation_status = msg and msg.validation_status or nil,
     validation_block_kind = msg and msg.validation_block_kind or nil,
     local_answer = msg and msg.local_answer == true,
@@ -11521,16 +11665,38 @@ function AppController.run_latest_code(opts)
   end
   S.status = "running"
   local ok = Code and Code.run and Code.run(info.code)
+  if Code and Code.bind_pending_deferred_run then
+    Code.bind_pending_deferred_run(info.message_idx, nil, false, nil)
+  end
   if Code and Code.apply_run_result_to_message then
     Code.apply_run_result_to_message(info.message_obj, ok, "lua",
       info.code, false)
   end
   if info.message_idx == #S.display_messages then S.pending_code = nil end
   S.status = ok and "idle" or "error"
+  local parameter_change_status =
+    ok and type(S.last_run_result) == "table"
+      and S.last_run_result.parameter_change_status or nil
   local no_project_change = ok and type(S.last_run_result) == "table"
+    and parameter_change_status ~= "changed"
     and S.last_run_result.observable_change_status == "unchanged"
   return ok == true, ok and nil or "run_failed",
-    no_project_change and AppController.t(
+    parameter_change_status == "partially_changed" and AppController.t(
+      "a11y.sr.response_ready_partial_parameter_change", {
+        changed = S.last_run_result.parameter_change_evidence
+          and S.last_run_result.parameter_change_evidence
+            .changed_target_count or 0,
+        total = S.last_run_result.parameter_change_evidence
+          and S.last_run_result.parameter_change_evidence.target_count or 0,
+      },
+      "Generated code finished, but some parameter targets did not finish with a verified new value. {changed} of {total} targets changed. Confirm the unchanged or restored plugin values before continuing.")
+      or parameter_change_status == "unchanged" and AppController.t(
+      "a11y.sr.response_ready_no_parameter_change", nil,
+      "Generated code finished, but no parameter value change was detected. The requested value may already have been set or the write was a no-op. Confirm the displayed plugin value before continuing.")
+      or parameter_change_status == "returned_to_initial" and AppController.t(
+        "a11y.sr.response_ready_parameter_returned_to_initial", nil,
+        "Generated code finished with the parameter at its original value. The requested state may already have been set, or a helper restored it after failing verification. Review the response and confirm the displayed plugin value before continuing.")
+      or no_project_change and AppController.t(
       "a11y.sr.response_ready_no_project_change", nil,
       "Generated code finished, but no project change was detected. It may have exited early because a target was missing or the requested state was already set. Review the response and project before continuing.")
       or ok and AppController.t("a11y.sr.run_code_ok", nil,

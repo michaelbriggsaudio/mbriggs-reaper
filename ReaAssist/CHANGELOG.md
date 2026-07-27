@@ -1,5 +1,21 @@
 # ReaAssist - Changelog
 
+## v1.4.7 - 2026-07-27
+
+- **Built-in plug-in support is broader and more dependable.** The new scalable profile pack replaces the earlier single reference and provides validated guidance for 24 plug-ins, with stronger handling for existing effects, exact aliases, parameter names, ranges, and formatted values.
+
+- **Generated REAPER edits are checked more thoroughly.** ReaAssist now catches more target mismatches, unsafe or guessed plug-in writes, item-redistribution ambiguity, JSFX pitch and topology mistakes, project lifecycle issues, and malformed repair attempts before code can run.
+
+- **Claude Opus has been upgraded to Opus 5.** Anthropic reports stronger reasoning, coding, bug finding, sustained tool use, and self-verification, with more than double Opus 4.8's Frontier-Bench performance at a lower cost per task. In ReaAssist's 20-prompt comparison with thinking set to None, Opus 5 completed 20/20 prompts versus 19/20, averaged 13.96 seconds versus 15.50 seconds, and cost slightly less. Standard API pricing remains $5 per million input tokens and $25 per million output tokens. For ReaAssist users, this means better tested reliability on complex REAPER requests without a higher per-token price.
+
+- **Provider setup and recovery are clearer.** First-run setup better explains API access and local or custom providers, Gemini quota failures now distinguish temporary throttling from exhausted allocation, and saved-key errors are more actionable.
+
+- **Diagnostics and accessible workflows are more useful.** Basic anonymous diagnostics now identify the selected ReaAssist language, language-pack version, and Visual or Screen Reader interface mode without including chat text or names. Screen Reader parameter announcements and diagnostic text handling are also more reliable.
+
+- **Welcome to all of our new Brazilian users.** Portuguese (Brazil) translations have been reviewed throughout and improved for more natural, accurate wording.
+
+- **REAPER guidance is refreshed through version 7.78.** Bundled references include the latest relevant ReaScript and workflow changes, alongside more focused prompt context for plug-in and project-edit requests.
+
 ## v1.4.6 - 2026-07-17
 
 - Testing the new update system.

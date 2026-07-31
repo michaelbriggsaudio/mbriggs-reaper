@@ -39,7 +39,7 @@ end
 -- Constants
 -- ============================================================================
 Diag.SCHEMA_VERSION    = 2
-Diag.PAYLOAD_REVISION  = 5
+Diag.PAYLOAD_REVISION  = 6
 Diag.PAYLOAD_CAP_BYTES = 1024 * 1024     -- 1 MB server-side cap (manual feedback)
 -- Bug-report tier carries the full Advanced Log inline as a JSON string.
 -- Logs are auto-pruned to MAX_LOG_TURNS (40) at write time, but each turn can
@@ -75,19 +75,46 @@ Diag.BUCKET_TYPE_VOCABULARY  = { "session", "docs", "docs_section", "api_ref", "
                                   "fx_inspect", "fx_list", "fx_chains", "track_flags",
                                   "prompt_bundle", "resolve", "preempt_hint", "sticky_pointer" }
 Diag.BUCKET_STATE_VOCABULARY = { "included", "pinned", "already_pinned", "deduped",
-                                  "skipped", "failed", "invalid_request" }
+                                  "refetched", "skipped", "failed", "invalid_request" }
 Diag.CACHE_TYPE_VOCABULARY   = { "anthropic_prompt_cache", "openai_prompt_cache",
                                   "gemini_explicit_cache", "unknown" }
 Diag.CACHE_STATE_VOCABULARY  = { "hit", "miss", "created", "invalidated",
                                   "create_failed", "not_supported", "unknown" }
-Diag.RETRY_REASON_VOCABULARY = { "validator", "docs_gate", "plugin_helper", "semantic",
-                                  "http_5xx", "timeout", "rate_limit" }
+Diag.RETRY_REASON_VOCABULARY = {
+  "validator", "docs_gate", "plugin_helper", "semantic", "context_fetch",
+  "response_shape", "provider_capacity", "http_5xx", "timeout", "rate_limit",
+  "length", "empty", "action", "action_relevance", "api", "arity",
+  "audio_accessor_nil", "audio_sync", "bus_routing", "context_needed", "defer",
+  "drum_marker_sync", "drum_quantize", "existing_fx_add",
+  "explicit_seconds_marker", "fx_param_provenance", "fx_param_scope",
+  "fxadd_getonly", "fxcheck", "fxget", "fxident", "helper", "helper_int",
+  "internal_output_leak", "item_chunk_guid", "jsfx",
+  "literal_name_word_removal", "loop_time_map", "manual_only_plugin",
+  "marker_pair", "media_item_label", "midi_input_exclusion",
+  "midi_receive_identity", "midi_record_mode", "musical_enum", "parse",
+  "plugin_profile_guard", "podcast_bus", "project_tempo",
+  "proq4_parameter_contract", "reeq_gain_mapping", "region_marker",
+  "ruler_timebase", "sandbox_global", "sendidx", "sidechain_send", "stockfx",
+  "tempo_marker", "timecode_workflow", "timecodefx", "token_limit",
+  "toolbar_action", "track_selection", "trackfx_recfx", "transient",
+  "typed_action_format", "typed_action_schema", "typed_action_semantic",
+  "unavailable_global", "upsert", "unknown",
+}
+Diag.REQUEST_STATUS_VOCABULARY = {
+  "sent", "retry_scheduled", "succeeded", "failed", "cancelled", "local", "unknown",
+}
 Diag.ERROR_KIND_VOCABULARY = {
   "curl_exit", "watchdog_timeout", "provider_auth_error",
   "insufficient_quota", "provider_throttle", "provider_capacity",
   "provider_api_error", "model_no_usable_answer", "json_decode_error",
   "runtime_error", "validated_inert", "local_answer_available_but_not_used",
-  "validator_blocked", "context_loop", "unknown",
+  "validator_blocked", "context_loop", "diag_auto_write_failed",
+  "runaway_call_cap", "runaway_context_fetch_cap",
+  "runaway_validator_retry_cap", "runtime_busy", "semantic_unsafe",
+  "turn_spend_budget", "unknown",
+}
+Diag.ADVISORY_KIND_VOCABULARY = {
+  "unknown_effect_same_cycle_param_write", "unknown",
 }
 Diag.FAILURE_STAGE_VOCABULARY = {
   "provider", "response", "validation", "execution", "unknown",
@@ -840,8 +867,9 @@ local function _turn_run_result(msg, err_kind, redact_content)
     out.change_evidence = _redact_payload_value(msg.change_evidence)
     has = true
   end
-  if msg.validation_trace ~= nil and out.validation_trace == nil then
-    out.validation_trace = _redact_payload_value(msg.validation_trace)
+  local raw_validation_trace = msg.validation_trace or out.validation_trace
+  if raw_validation_trace ~= nil then
+    out.validation_trace = Diag.sanitize_validation_trace(raw_validation_trace)
     has = true
   end
   if msg.runtime_error ~= nil and out.runtime_error == nil then
@@ -861,7 +889,15 @@ local function _turn_to_table(msg, redact_content)
   if msg.ts          then t.ts          = msg.ts end
   if msg.intent_tag  then t.intent_tag  = msg.intent_tag end
   if msg.docs_retry  ~= nil then t.docs_retry = msg.docs_retry end
-  if msg.ctx_label   ~= nil then t.ctx_label   = tostring(msg.ctx_label or "") end
+  if msg.ctx_label ~= nil then
+    t.context_class = Diag.normalize_context_class(msg.ctx_label)
+    t.ctx_label = t.context_class
+    local buckets = Diag.context_bucket_types(msg.ctx_label)
+    if #buckets > 0 then t.context_buckets = buckets end
+  end
+  if type(msg.request_status) == "table" then
+    t.request_status = Diag.sanitize_request_status(msg.request_status)
+  end
   if msg.role == "assistant" then
     local provider_id = _safe_turn_provider_id(msg.provider_id)
     if msg.provider_id ~= nil then t.provider_id = provider_id end
@@ -890,7 +926,7 @@ local function _turn_to_table(msg, redact_content)
       t.validation_block_kind = tostring(msg.validation_block_kind or "")
     end
     if msg.validation_trace ~= nil then
-      t.validation_trace = _redact_payload_value(msg.validation_trace)
+      t.validation_trace = Diag.sanitize_validation_trace(msg.validation_trace)
     end
     if msg.selected_count_guard ~= nil then
       t.selected_count_guard = _redact_payload_value(msg.selected_count_guard)
@@ -916,11 +952,9 @@ local function _turn_to_table(msg, redact_content)
     if msg.tok_cache_read   ~= nil then t.tok_cache_read   = msg.tok_cache_read end
     if msg.tok_cache_create ~= nil then t.tok_cache_create = msg.tok_cache_create end
     if msg.cost          ~= nil then t.cost          = msg.cost end
-    if msg.recovery      ~= nil then t.recovery      = msg.recovery end
-    if msg.recovery_kind ~= nil then
-      t.recovery_kind = tostring(msg.recovery_kind or "")
-    elseif msg.recovery ~= nil then
-      t.recovery_kind = tostring(msg.recovery or "")
+    if msg.recovery_kind ~= nil or msg.recovery ~= nil then
+      t.retry_reason = Diag.normalize_retry_reason(
+        msg.recovery_kind or msg.recovery)
     end
     if msg.recovery_used ~= nil then
       t.recovery_used = msg.recovery_used == true
@@ -970,12 +1004,10 @@ local function _turn_to_table(msg, redact_content)
       t.local_retry_escalation = msg.local_retry_escalation
     end
     if msg.hidden ~= nil then t.hidden = msg.hidden end
-    local err_kind = _normalize_error_kind(msg.error_kind, msg.error_debug)
+    local err_kind = Diag.safe_error_kind(msg.error_kind, msg.error_debug)
     if err_kind ~= nil then t.error_kind = err_kind end
     if msg.error_debug   ~= nil then
-      t.error_debug = redact_content
-        and _redact_payload_value(msg.error_debug)
-        or msg.error_debug
+      t.error_debug = Diag.sanitize_error_debug(msg.error_debug)
     end
     local run_result = _turn_run_result(msg, err_kind, redact_content)
     if run_result ~= nil then t.run_result = run_result end
@@ -1039,13 +1071,285 @@ local CACHE_DISPOSITION_VOCAB =
   _vocab_set(Diag.CACHE_DISPOSITION_VOCABULARY)
 local CONTEXT_REQUEST_CLASS_VOCAB =
   _vocab_set(Diag.CONTEXT_REQUEST_CLASS_VOCABULARY)
+local RETRY_REASON_VOCAB = _vocab_set(Diag.RETRY_REASON_VOCABULARY)
+local REQUEST_STATUS_VOCAB = _vocab_set(Diag.REQUEST_STATUS_VOCABULARY)
 local LANGUAGE_CODE_VOCAB = _vocab_set(Diag.LANGUAGE_CODE_VOCABULARY)
 local INTERFACE_MODE_VOCAB = _vocab_set(Diag.INTERFACE_MODE_VOCABULARY)
+local ADVISORY_KIND_VOCAB = _vocab_set(Diag.ADVISORY_KIND_VOCABULARY)
 
 local function _coarsen(v, vocab, fallback)
   v = type(v) == "string" and v or fallback or "unknown"
   if vocab[v] then return v end
   return fallback or "unknown"
+end
+
+function Diag.safe_error_kind(raw, debug)
+  local normalized = Diag.normalize_error_kind(raw, debug)
+  if normalized == nil then return nil end
+  return _coarsen(tostring(normalized):lower(), ERROR_KIND_VOCAB, "unknown")
+end
+
+function Diag.normalize_context_class(label)
+  label = tostring(label or ""):lower()
+  if label == "" or label == "base" or label == "none" then return "base" end
+  if label:find("retry", 1, true) then return "retry" end
+  if label:find("local", 1, true) then return "local" end
+  return "contextual"
+end
+
+function Diag.context_bucket_types(label)
+  local out, seen = {}, {}
+  for part in tostring(label or ""):gmatch("[^%+]+") do
+    local key = (part:match("^%s*(.-)%s*$") or ""):lower()
+    key = key:match("^([^:]+)") or key
+    key = key:gsub("%s+", "_")
+    if key == "snapshot" or key == "base" then key = "session" end
+    if key == "pref" or key == "preferred" then key = "preferred_plugins" end
+    if BUCKET_TYPE_VOCAB[key] and not seen[key] then
+      seen[key] = true
+      out[#out + 1] = key
+    end
+  end
+  return out
+end
+
+function Diag.normalize_retry_reason(value)
+  local s = tostring(value or ""):lower():gsub("[%s%-]+", "_")
+  if RETRY_REASON_VOCAB[s] then return s end
+  if s:find("docs", 1, true) then return "docs_gate" end
+  if s:find("helper", 1, true) or s:find("plugin", 1, true) then
+    return "plugin_helper"
+  end
+  if s:find("semantic", 1, true) then return "semantic" end
+  if s:find("context", 1, true) or s:find("resolve", 1, true) then
+    return "context_fetch"
+  end
+  if s:find("shape", 1, true) or s:find("json", 1, true) then
+    return "response_shape"
+  end
+  if s:find("rate", 1, true) or s:find("throttle", 1, true)
+     or s:find("429", 1, true) then
+    return "rate_limit"
+  end
+  if s:find("timeout", 1, true) or s:find("timed_out", 1, true)
+     or s:find("watchdog", 1, true) then
+    return "timeout"
+  end
+  if s:find("capacity", 1, true) or s:find("overload", 1, true)
+     or s:find("unavailable", 1, true) then
+    return "provider_capacity"
+  end
+  if s:find("http_5", 1, true) or s:match("^5%d%d$") then return "http_5xx" end
+  if s:find("length", 1, true) or s:find("token_limit", 1, true)
+     or s:find("out_of_tokens", 1, true) then
+    return "length"
+  end
+  if s:find("empty", 1, true) then return "empty" end
+  if s:find("retry", 1, true) or s:find("validator", 1, true)
+     or s:find("repair", 1, true) then
+    return "validator"
+  end
+  return "unknown"
+end
+
+function Diag.normalize_request_status(value)
+  local s = tostring(value or ""):lower():gsub("[%s%-]+", "_")
+  if REQUEST_STATUS_VOCAB[s] then return s end
+  if s:find("retry", 1, true) or s == "waiting" then return "retry_scheduled" end
+  if s == "complete" or s == "completed" or s == "success" then return "succeeded" end
+  if s == "error" or s == "errored" then return "failed" end
+  return "unknown"
+end
+
+function Diag.sanitize_request_status(status)
+  if type(status) ~= "table" then return nil end
+  local out = {
+    state = Diag.normalize_request_status(status.state or status.status),
+    retry_count = math.max(0, math.floor(tonumber(status.retry_count) or 0)),
+    retry_max = math.max(0, math.floor(tonumber(status.retry_max) or 0)),
+  }
+  local reasons, seen = {}, {}
+  local function add_reason(value)
+    local reason = Diag.normalize_retry_reason(value)
+    if reason ~= "unknown" and not seen[reason] then
+      seen[reason] = true
+      reasons[#reasons + 1] = reason
+    end
+  end
+  if type(status.retry_reasons) == "table" then
+    for _, value in ipairs(status.retry_reasons) do add_reason(value) end
+  end
+  add_reason(status.retry_reason or status.last_retry_reason)
+  if #reasons > 0 then out.retry_reasons = reasons end
+  if status.error_kind ~= nil then
+    out.error_kind = Diag.safe_error_kind(status.error_kind) or "unknown"
+  end
+  return out
+end
+
+function Diag.sanitize_retry_event(event, fallback_index, retry_class)
+  if type(event) ~= "table" then return nil end
+  local reason = Diag.normalize_retry_reason(
+    event.retry_reason or event.kind or event.ctx_label or retry_class)
+  if reason == "unknown" then
+    reason = Diag.normalize_retry_reason(retry_class or "validator")
+  end
+  local out = {
+    index = math.max(1, math.floor(tonumber(event.index) or fallback_index or 1)),
+    kind = reason,
+    retry_reason = reason,
+    retry_class = retry_class or event.retry_class,
+    api_calls_before_retry = math.max(0,
+      math.floor(tonumber(event.api_calls_before_retry) or 0)),
+    model_calls_before_retry = math.max(0,
+      math.floor(tonumber(event.model_calls_before_retry) or 0)),
+  }
+  if event.context_class ~= nil or event.ctx_label ~= nil
+     or event.context_label ~= nil then
+    out.context_class = Diag.normalize_context_class(
+      event.context_class or event.ctx_label or event.context_label)
+  end
+  if event.repair_request_fired ~= nil then
+    out.repair_request_fired = event.repair_request_fired == true
+  end
+  if type(event.findings) == "table" then
+    out.findings = {}
+    for i, finding in ipairs(event.findings) do
+      if i > 8 then break end
+      if type(finding) == "table" then
+        out.findings[#out.findings + 1] = {
+          kind = "validator_finding",
+          detail = Diag.redact(tostring(finding.detail or "")),
+          line = tonumber(finding.line),
+          review_only = finding.review_only == true,
+        }
+      end
+    end
+    if #out.findings == 0 then out.findings = nil end
+  end
+  if type(event.candidate) == "table" then
+    local code_type = tostring(event.candidate.code_type or "unknown"):lower()
+    if code_type ~= "lua" and code_type ~= "jsfx"
+       and code_type ~= "typed_actions" and code_type ~= "response_text"
+       and code_type ~= "empty_response" then
+      code_type = "unknown"
+    end
+    out.candidate = {
+      code_type = code_type,
+      byte_count = math.max(0, math.floor(tonumber(event.candidate.byte_count) or 0)),
+      content_hash = event.candidate.content_hash,
+      content_hash_scope = event.candidate.content_hash_scope,
+      excerpt = Diag.redact(tostring(event.candidate.excerpt or "")),
+      excerpt_bytes = math.max(0,
+        math.floor(tonumber(event.candidate.excerpt_bytes) or 0)),
+      excerpt_truncated = event.candidate.excerpt_truncated == true or nil,
+    }
+  end
+  return out
+end
+
+function Diag.sanitize_validation_trace(trace)
+  if type(trace) ~= "table" then return nil end
+  local out = {
+    retry_count = math.max(0, math.floor(tonumber(trace.retry_count) or 0)),
+    repair_request_fired = trace.repair_request_fired == true,
+    candidate_comparison = _coarsen(
+      tostring(trace.candidate_comparison or ""):lower(),
+      { changed = true, identical = true, unavailable = true }, "unavailable"),
+    candidate_changed = trace.candidate_changed,
+    final_candidate_hash = trace.final_candidate_hash,
+    final_candidate_hash_scope = trace.final_candidate_hash_scope,
+  }
+  if type(trace.events) == "table" then
+    out.events = {}
+    for i, event in ipairs(trace.events) do
+      if i > 8 then break end
+      local safe = Diag.sanitize_retry_event(event, i, "validator")
+      if safe then out.events[#out.events + 1] = safe end
+    end
+    if #out.events == 0 then out.events = nil end
+  end
+  if type(trace.call_usage) == "table" then
+    out.call_usage = {}
+    for i, usage in ipairs(trace.call_usage) do
+      if i > 8 then break end
+      if type(usage) == "table" then
+        local stage = tostring(usage.stage or "response"):lower()
+        if stage:find("retry", 1, true) then stage = "retry"
+        elseif stage:find("context", 1, true) then stage = "context"
+        elseif stage:find("valid", 1, true) then stage = "validator"
+        elseif stage ~= "response" then stage = "unknown" end
+        out.call_usage[#out.call_usage + 1] = {
+          call_index = math.max(1, math.floor(tonumber(usage.call_index) or i)),
+          stage = stage,
+          provider_id = _safe_turn_provider_id(usage.provider_id),
+          input_tokens = math.max(0, math.floor(tonumber(usage.input_tokens) or 0)),
+          output_tokens = math.max(0, math.floor(tonumber(usage.output_tokens) or 0)),
+          cache_read_tokens = math.max(0,
+            math.floor(tonumber(usage.cache_read_tokens) or 0)),
+          cache_create_tokens = math.max(0,
+            math.floor(tonumber(usage.cache_create_tokens) or 0)),
+          uncached_input_tokens = math.max(0,
+            math.floor(tonumber(usage.uncached_input_tokens) or 0)),
+          context_class = Diag.normalize_context_class(usage.context_label),
+        }
+      end
+    end
+    if #out.call_usage == 0 then out.call_usage = nil end
+  end
+  if type(trace.advisories) == "table" then
+    out.advisories = {}
+    for i, advisory in ipairs(trace.advisories) do
+      if i > 8 then break end
+      if type(advisory) == "table" then
+        out.advisories[#out.advisories + 1] = {
+          kind = _coarsen(tostring(advisory.kind or ""):lower(),
+            ADVISORY_KIND_VOCAB, "unknown"),
+          line = tonumber(advisory.line),
+          review_only = advisory.review_only == true,
+        }
+      end
+    end
+    if #out.advisories == 0 then out.advisories = nil end
+  end
+  return out
+end
+
+function Diag.sanitize_error_debug(debug)
+  if type(debug) ~= "table" then return _redact_payload_value(debug) end
+  local out = _redact_payload_value(debug)
+  if out.ctx_label ~= nil or out.context_label ~= nil then
+    out.context_class = Diag.normalize_context_class(
+      out.ctx_label or out.context_label)
+    out.ctx_label = nil
+    out.context_label = nil
+  end
+  if out.recovery_kind ~= nil then
+    out.retry_reason = Diag.normalize_retry_reason(out.recovery_kind)
+    out.recovery_kind = nil
+  end
+  if out.retry_reason ~= nil then
+    out.retry_reason = Diag.normalize_retry_reason(out.retry_reason)
+  end
+  if type(debug.validator_retry_events) == "table" then
+    local events = {}
+    for i, event in ipairs(debug.validator_retry_events) do
+      if i > 8 then break end
+      local safe = Diag.sanitize_retry_event(event, i, "validator")
+      if safe then events[#events + 1] = safe end
+    end
+    out.validator_retry_events = #events > 0 and events or nil
+  end
+  if type(debug.context_fetch_events) == "table" then
+    local events = {}
+    for i, event in ipairs(debug.context_fetch_events) do
+      if i > 8 then break end
+      local safe = Diag.sanitize_retry_event(event, i, "context_fetch")
+      if safe then events[#events + 1] = safe end
+    end
+    out.context_fetch_events = #events > 0 and events or nil
+  end
+  return out
 end
 
 local function _inc(map, key, amount)
@@ -1378,6 +1682,7 @@ local function _metrics_summary()
   local typed_action_execute_fail_count = 0
   local typed_action_to_lua_fallback_count = 0
   local validator_retry_event_count = 0
+  local transport_retry_count = 0
   -- Capped traces remain a useful subset of the successful-turn validation
   -- traces now recorded separately on each repaired response.
   local capped_validator_retry_event_count = 0
@@ -1414,13 +1719,7 @@ local function _metrics_summary()
     return _coarsen(tostring(value or ""):lower(), vocab, "unknown")
   end
   local function context_request_class(label)
-    label = tostring(label or ""):lower()
-    if label == "" or label == "base" or label == "none" then
-      return "base"
-    end
-    if label:find("retry", 1, true) then return "retry" end
-    if label:find("local", 1, true) then return "local" end
-    return "contextual"
+    return Diag.normalize_context_class(label)
   end
   local function message_run_status(m)
     local rr = type(m.run_result) == "table" and m.run_result or nil
@@ -1486,6 +1785,7 @@ local function _metrics_summary()
       return "answer_truncated"
     end
     if response_status == "empty" then return "answer_empty" end
+    if response_status == "error" then return "unknown" end
     if response_status == "complete" or m.role == "assistant" then
       return "answer_complete"
     end
@@ -1510,13 +1810,18 @@ local function _metrics_summary()
     if m.role == "assistant" then return "model_answer" end
     return "unknown"
   end
-  local function cache_disposition(m)
+  local function request_metric(m, request, key)
+    local value = m and m[key]
+    if value == nil and request then value = request[key] end
+    return tonumber(value)
+  end
+  local function cache_disposition(m, request)
     if m.provider_call_avoided == true then return "no_api_call" end
-    local calls = tonumber(m.api_calls)
+    local calls = request_metric(m, request, "api_calls")
     if calls == nil then return "unknown" end
     if calls <= 0 then return "no_api_call" end
-    local read = tonumber(m.tok_cache_read) or 0
-    local created = tonumber(m.tok_cache_create) or 0
+    local read = request_metric(m, request, "tok_cache_read") or 0
+    local created = request_metric(m, request, "tok_cache_create") or 0
     if read > 0 and created > 0 then return "mixed" end
     if read > 0 then return "cache_hit" end
     if created > 0 then return "cache_created" end
@@ -1524,8 +1829,16 @@ local function _metrics_summary()
   end
   local msgs = (type(S) == "table" and type(S.display_messages) == "table")
                and S.display_messages or {}
+  local pending_request
   for _, m in ipairs(msgs) do
     if type(m) == "table" then
+      local paired_request
+      if m.role == "user" then
+        pending_request = m
+      elseif m.role == "assistant" then
+        paired_request = pending_request
+        pending_request = nil
+      end
       local err_kind = Diag.normalize_error_kind(m.error_kind, m.error_debug)
       if err_kind then
         err_kind = fixed_key(err_kind, ERROR_KIND_VOCAB)
@@ -1542,7 +1855,8 @@ local function _metrics_summary()
         _inc(prompt_mode_counts,
           fixed_key(prompt_mode(m), PROMPT_MODE_VOCAB), 1)
         _inc(cache_disposition_counts,
-          fixed_key(cache_disposition(m), CACHE_DISPOSITION_VOCAB), 1)
+          fixed_key(cache_disposition(m, paired_request),
+            CACHE_DISPOSITION_VOCAB), 1)
         local loop_debug = type(m.error_debug) == "table" and m.error_debug or nil
         if loop_debug and (loop_debug.context_loop == true
             or loop_debug.failure_kind == "context_loop") then
@@ -1601,25 +1915,16 @@ local function _metrics_summary()
         end
       end
       if type(m.ctx_label) == "string" and m.ctx_label ~= "" then
-        for part in m.ctx_label:gmatch("[^%+]+") do
-          local raw_key = (part:match("^%s*(.-)%s*$") or ""):gsub("%s+", "_")
-          local key = _coarsen(raw_key, BUCKET_TYPE_VOCAB, nil)
-          if raw_key == "helper_retry" then
-            plugin_helper_retry_count = plugin_helper_retry_count + 1
-            validator_autofix = validator_autofix + 1
-          elseif raw_key == "typed_action_semantic_retry" then
-            semantic_retry_count = semantic_retry_count + 1
-            validator_autofix = validator_autofix + 1
-          elseif raw_key == "typed_action_format_retry"
-              or raw_key == "typed_action_schema_retry" then
-            validator_autofix = validator_autofix + 1
-          end
-          if key ~= "unknown" then
-            _inc(context_features, key, 1)
-            _inc(bucket_counts, key, 1)
-            _inc(bucket_states, "included", 1)
-          end
+        for _, key in ipairs(Diag.context_bucket_types(m.ctx_label)) do
+          _inc(context_features, key, 1)
+          _inc(bucket_counts, key, 1)
+          _inc(bucket_states, "included", 1)
         end
+      end
+      if type(m.request_status) == "table"
+         and (m.role == "user" or paired_request == nil) then
+        transport_retry_count = transport_retry_count
+          + math.max(0, math.floor(tonumber(m.request_status.retry_count) or 0))
       end
       if m.docs_retry == true then
         docs_retry_count = docs_retry_count + 1
@@ -1635,8 +1940,15 @@ local function _metrics_summary()
         for _, event in ipairs(successful_retry_events) do
           if type(event) == "table" then
             validator_retry_event_count = validator_retry_event_count + 1
-            local retry_kind = tostring(event.kind or "unspecified")
+            local retry_kind = Diag.normalize_retry_reason(
+              event.retry_reason or event.kind)
+            if retry_kind == "unknown" then retry_kind = "validator" end
             _inc(rule_failures, "retry_" .. retry_kind, 1)
+            if retry_kind == "plugin_helper" then
+              plugin_helper_retry_count = plugin_helper_retry_count + 1
+            elseif retry_kind == "semantic" then
+              semantic_retry_count = semantic_retry_count + 1
+            end
             if event.repair_request_fired == true then
               validator_autofix = validator_autofix + 1
             end
@@ -1652,8 +1964,15 @@ local function _metrics_summary()
             capped_validator_retry_event_count =
               capped_validator_retry_event_count + 1
             validator_retry_event_count = validator_retry_event_count + 1
-            local retry_kind = tostring(event.kind or "unspecified")
+            local retry_kind = Diag.normalize_retry_reason(
+              event.retry_reason or event.kind)
+            if retry_kind == "unknown" then retry_kind = "validator" end
             _inc(rule_failures, "retry_" .. retry_kind, 1)
+            if retry_kind == "plugin_helper" then
+              plugin_helper_retry_count = plugin_helper_retry_count + 1
+            elseif retry_kind == "semantic" then
+              semantic_retry_count = semantic_retry_count + 1
+            end
             if event.repair_request_fired == true then
               validator_autofix = validator_autofix + 1
             end
@@ -1681,7 +2000,9 @@ local function _metrics_summary()
           or ta.fallback_to_lua) then
         local err = tostring(ta.error or "")
         local retry_count = tonumber(ta.retry_count) or 0
-        if retry_count > 0 then validator_autofix = validator_autofix + retry_count end
+        if retry_count > 0 and not successful_retry_events then
+          validator_autofix = validator_autofix + retry_count
+        end
         if ta.fallback_to_lua == true then
           typed_action_to_lua_fallback_count =
             typed_action_to_lua_fallback_count + 1
@@ -1818,6 +2139,7 @@ local function _metrics_summary()
       typed_action_execute_fail_count = typed_action_execute_fail_count,
       typed_action_to_lua_fallback_count = typed_action_to_lua_fallback_count,
       validator_retry_event_count = validator_retry_event_count,
+      transport_retry_count = transport_retry_count,
       capped_validator_retry_event_count = capped_validator_retry_event_count,
       capped_context_fetch_event_count = capped_context_fetch_event_count,
       context_loop_count = context_loop_count,

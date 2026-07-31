@@ -1,5 +1,21 @@
 # ReaAssist - Changelog
 
+## v1.4.8 - 2026-07-31
+
+- **ReaAssist now offers tested and certified support for 45 plug-ins.** The expanded collection includes the current AutoTune release and Auto-Key 2, the full Ozone 12 component suite, soothe2 and soothe3, Soundtoys Decapitator and EchoBoy, ValhallaDelay and ValhallaVintageVerb, RC-20 Retro Color, and FabFilter Pro-C 2. ReaAssist can make more plug-in changes confidently while protecting controls that should stay untouched. It also recognizes when Melodyne needs hands-on editor work and provides safe guidance for completing it.
+
+- **GPT-5.6 Luna is now an exceptional value for everyday ReaAssist work.** OpenAI has cut Luna's prices by 80 percent. Input falls from $1 to $0.20, output from $6 to $1.20, cached input from $0.10 to $0.02, and cache writes from $1.25 to $0.25 per million tokens. A request using 100,000 input tokens and 10,000 output tokens drops from about $0.16 to just $0.032. That is also about 73 percent less than the same request on GPT-5.4 Mini, which cost about $0.12. GPT-5.4 Mini has been removed from ReaAssist, and saved Mini selections move automatically to Luna with thinking set to None. Luna matched Mini's tested pass rate while delivering lower latency, a much larger context window, and a substantially lower price.
+
+- **GPT-5.6 Terra is cheaper too.** OpenAI reduced Terra pricing by 20 percent. Input falls from $2.50 to $2, output from $15 to $12, cached input from $0.25 to $0.20, and cache writes from $3.125 to $2.50 per million tokens. Terra remains an easy step up when a difficult request needs more capability than Luna.
+
+- **Gemini Flash 3.6 delivers better tested results with lower output costs.** Flash 3.6 replaces Flash 3.5 as ReaAssist's recommended Gemini model, and saved selections move automatically while keeping Minimal thinking. Input remains $1.50 per million tokens, while output falls from $9 to $7.50, a 16.7 percent reduction. A request using 100,000 input tokens and 10,000 output tokens drops from about $0.24 to $0.225. With 50,000 output tokens, it drops from $0.60 to $0.525. ReaAssist testing also found better reliability and faster responses than Flash 3.5 at the same thinking level.
+
+- **Long conversations do a better job of staying on track.** ReaAssist keeps a compact record of the important requirements from earlier messages, remembers completed work, and resumes smoothly after you choose a preferred plug-in. Complex requests can continue without losing the original goal or repeating finished steps.
+
+- **More REAPER edits should land correctly the first time.** Stronger safeguards cover MIDI recording and output routing, track sends, existing plug-ins, structured edits, undo cleanup, and workflows that require hands-on editor interaction. Recovery is also more dependable when a request needs another attempt.
+
+- **The whole experience received another polish pass.** Diagnostics recover and export more reliably, Screen Reader wording is clearer, Spanish translations sound more natural, and remotely delivered language packs are ready for safer updates.
+
 ## v1.4.7 - 2026-07-27
 
 - **Built-in plug-in support is broader and more dependable.** The new scalable profile pack replaces the earlier single reference and provides validated guidance for 24 plug-ins, with stronger handling for existing effects, exact aliases, parameter names, ranges, and formatted values.

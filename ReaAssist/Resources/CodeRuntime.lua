@@ -514,6 +514,48 @@ function Code._localized_action_intent_text(user_text)
     { "compresores", "compressors" }, { "compresor", "compressor" },
     { "reverberacao", "reverb" },
     { "reverberacion", "reverb" },
+    { "vozes", "vocals" }, { "voz", "vocal" },
+    { "vocais", "vocals" },
+    { "sincronizacao", "timing" }, { "sincronizar", "align" },
+    { "alinhamento", "timing" }, { "alinhar", "align" },
+    { "afinacao", "pitch correction" }, { "afinar", "pitch correction" },
+    { "entonacao", "pitch correction" },
+    { "niveis", "levels" }, { "nivel", "level" },
+    { "ganhos", "gains" }, { "ganho", "gain" },
+    { "integrada", "integrated" }, { "integrado", "integrated" },
+    { "pico", "peak" }, { "picos", "peaks" },
+    { "corrija", "adjust" }, { "corrigir", "adjust" },
+    { "reduza", "lower" }, { "reduzir", "lower" },
+    { "diminua", "lower" }, { "diminuir", "lower" },
+    { "aumente", "raise" }, { "aumentar", "raise" },
+    { "ideal", "ideal" }, { "adequado", "ideal" },
+    { "adecuado", "ideal" },
+  }) do
+    text = text:gsub("%f[%w]" .. pair[1] .. "%f[%W]", pair[2])
+  end
+  -- Localized follow-ups commonly use conjugations that an exact word table
+  -- cannot enumerate safely. Keep this stem pass limited to action and effect
+  -- words, then require the normal action/object predicates downstream.
+  for _, pair in ipairs({
+    { "configur[%a]*", "configure" },
+    { "ajust[%a]*", "adjust" },
+    { "modific[%a]*", "modify" },
+    { "cambi[%a]*", "change" },
+    { "aplic[%a]*", "apply" },
+    { "agreg[%a]*", "add" },
+    { "anad[%a]*", "add" },
+    { "insert[%a]*", "insert" },
+    { "complement[%a]*", "plugin" },
+    { "efect[%a]*", "effect" },
+    { "ecualiz[%a]*", "eq" },
+    { "compres[%a]*", "compressor" },
+    { "reverber[%a]*", "reverb" },
+    { "limit[%a]*", "limiter" },
+    { "sincroni[%a]*", "align" },
+    { "alinh[%a]*", "align" },
+    { "afin[%a]*", "pitch correction" },
+    { "entonaci[%a]*", "pitch correction" },
+    { "entonac[%a]*", "pitch correction" },
   }) do
     text = text:gsub("%f[%w]" .. pair[1] .. "%f[%W]", pair[2])
   end
@@ -4694,7 +4736,7 @@ local _TYPED_ACTION_MODEL_PROFILES = {
     ["claude-haiku-4-5"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
   },
   google = {
-    ["gemini-3.5-flash"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
+    ["gemini-3.6-flash"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
     ["gemini-3.1-flash-lite"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
   },
 }
@@ -7396,9 +7438,8 @@ end -- close typed action validator scope
 -- Validating against the live table flags exactly the calls that would
 -- fail at runtime on this machine.
 --
--- Common failure mode caught: weaker models (Gemini Flash 3.5, Kimi k2.6,
--- smaller Claude variants) sometimes emit plausible-sounding but
--- non-existent names like "GetProjectMarkerByIndex" (real function is
+-- Common failure mode caught: some lower-cost models emit plausible-sounding
+-- but non-existent names like "GetProjectMarkerByIndex" (real function is
 -- "EnumProjectMarkers") even when docs is pinned. The runtime sandbox
 -- catches these as "attempt to call a nil value" but the user sees a
 -- crash instead of a corrected reply.
@@ -9772,6 +9813,594 @@ function Code.find_master_send_remove_misuse(lua_code)
   return violations
 end
 
+function Code.find_unsafe_literal_name_word_removal(lua_code, user_text)
+  if type(lua_code) ~= "string" or lua_code == "" then return nil end
+  local raw_request = tostring(user_text or ""):lower()
+  local literal = raw_request:match(
+    "%f[%w]remove%s+the%s+word%s+[\"']?([%a]+)")
+    or raw_request:match("%f[%w]delete%s+the%s+word%s+[\"']?([%a]+)")
+    or raw_request:match("%f[%w]strip%s+the%s+word%s+[\"']?([%a]+)")
+  if not literal then
+    local request = Code._localized_action_intent_text(user_text)
+    literal = request:match(
+      "%f[%w]remove%s+the%s+word%s+[\"']?([%a]+)")
+      or request:match("%f[%w]delete%s+the%s+word%s+[\"']?([%a]+)")
+      or request:match("%f[%w]strip%s+the%s+word%s+[\"']?([%a]+)")
+  end
+  if not literal or literal == "" then return nil end
+
+  local source = lua_code
+  literal = literal:lower()
+  local removal_pos = nil
+  local unsafe_removal_pos = nil
+  local saw_literal_removal = false
+  local has_boundaries = true
+  local cleans_spaces = false
+  local cleans_underscores = false
+  local cleans_hyphens = false
+  local has_left_trim = false
+  local has_right_trim = false
+  local scan_pos = 1
+  while true do
+    local call_pos, open_pos = source:find(":gsub%s*%(", scan_pos)
+    if not call_pos then break end
+    local args, close_pos = Code._parse_lua_call_args(source, open_pos)
+    local pattern = args and args[1]
+      and args[1]:match("^%s*[\"'](.-)[\"']%s*$") or nil
+    local replacement = args and args[2]
+      and args[2]:match("^%s*[\"'](.-)[\"']%s*$") or nil
+    if pattern and replacement ~= nil then
+      local bounded_word = pattern:match(
+        "^%%f%[%%w%]([%a]+)%%f%[%%W%]$")
+      if replacement == "" and (pattern:lower() == literal
+          or (bounded_word and bounded_word:lower() == literal)) then
+        saw_literal_removal = true
+        removal_pos = removal_pos or call_pos
+        if pattern:lower() == literal then
+          has_boundaries = false
+          unsafe_removal_pos = unsafe_removal_pos or call_pos
+        end
+      end
+
+      if replacement == "%1" and pattern == "^%s*(.-)%s*$" then
+        has_left_trim = true
+        has_right_trim = true
+      elseif replacement == "" or replacement == " " then
+        local repeated = pattern:find("+", 1, true) ~= nil
+        local char_class = pattern:find("[", 1, true) ~= nil
+          and pattern:find("]", 1, true) ~= nil
+        if repeated and pattern:find("%s", 1, true) then
+          cleans_spaces = true
+        end
+        if pattern == "_" or pattern == "_+"
+            or (repeated and char_class
+              and pattern:find("_", 1, true)) then
+          cleans_underscores = true
+        end
+        if pattern == "-" or pattern == "%-"
+            or pattern == "-+" or pattern == "%-+"
+            or (repeated and char_class
+              and (pattern:find("%-", 1, true)
+                or pattern:find("-", 1, true))) then
+          cleans_hyphens = true
+        end
+        if pattern == "^%s+" then has_left_trim = true end
+        if pattern == "%s+$" then has_right_trim = true end
+        local left_class = pattern:match("^%^(%b[])%+$")
+        local right_class = pattern:match("^(%b[])%+%$$")
+        if left_class and left_class:find("%s", 1, true) then
+          has_left_trim = true
+        end
+        if right_class and right_class:find("%s", 1, true) then
+          has_right_trim = true
+        end
+      end
+    end
+    scan_pos = (close_pos or open_pos) + 1
+  end
+  scan_pos = 1
+  while true do
+    local call_pos, open_pos = source:find(":match%s*%(", scan_pos)
+    if not call_pos then break end
+    local args, close_pos = Code._parse_lua_call_args(source, open_pos)
+    local pattern = args and args[1]
+      and args[1]:match("^%s*[\"'](.-)[\"']%s*$") or nil
+    if pattern == "^%s*(.-)%s*$" then
+      has_left_trim = true
+      has_right_trim = true
+    end
+    scan_pos = (close_pos or open_pos) + 1
+  end
+  if not saw_literal_removal then return nil end
+
+  local has_delimiter_cleanup = cleans_spaces and cleans_underscores
+    and cleans_hyphens and has_left_trim and has_right_trim
+  local lower = source:lower()
+  local function trim_guard_expr(value)
+    return tostring(value or ""):match("^%s*(.-)%s*$") or ""
+  end
+  local function strip_guard_parens(value)
+    local expr = trim_guard_expr(value)
+    while expr:sub(1, 1) == "(" and expr:sub(-1) == ")" do
+      local depth, quote, wraps = 0, nil, true
+      local i = 1
+      while i <= #expr do
+        local c = expr:sub(i, i)
+        if quote then
+          if c == "\\" then
+            i = i + 1
+          elseif c == quote then
+            quote = nil
+          end
+        elseif c == "\"" or c == "'" then
+          quote = c
+        elseif c == "(" then
+          depth = depth + 1
+        elseif c == ")" then
+          depth = depth - 1
+          if depth == 0 and i < #expr then
+            wraps = false
+            break
+          end
+        end
+        i = i + 1
+      end
+      if not wraps or depth ~= 0 then break end
+      expr = trim_guard_expr(expr:sub(2, -2))
+    end
+    return expr
+  end
+  local function split_guard_boolean(value, operator)
+    local parts, depth, quote = {}, 0, nil
+    local start_pos, i, found = 1, 1, false
+    while i <= #value do
+      local c = value:sub(i, i)
+      if quote then
+        if c == "\\" then
+          i = i + 1
+        elseif c == quote then
+          quote = nil
+        end
+      elseif c == "\"" or c == "'" then
+        quote = c
+      elseif c == "(" then
+        depth = depth + 1
+      elseif c == ")" then
+        depth = math.max(0, depth - 1)
+      elseif depth == 0 and value:sub(i, i + #operator - 1) == operator then
+        local before = value:sub(i - 1, i - 1)
+        local after = value:sub(i + #operator, i + #operator)
+        if (before == "" or not before:match("[%w_]"))
+            and (after == "" or not after:match("[%w_]")) then
+          parts[#parts + 1] = trim_guard_expr(value:sub(start_pos, i - 1))
+          start_pos = i + #operator
+          i = start_pos - 1
+          found = true
+        end
+      end
+      i = i + 1
+    end
+    if not found then return nil end
+    parts[#parts + 1] = trim_guard_expr(value:sub(start_pos))
+    return parts
+  end
+  local function guaranteed_nonempty_variables(value)
+    local expr = strip_guard_parens(value)
+    local alternatives = split_guard_boolean(expr, "or")
+    if alternatives then
+      local common = guaranteed_nonempty_variables(alternatives[1])
+      for i = 2, #alternatives do
+        local branch = guaranteed_nonempty_variables(alternatives[i])
+        for name in pairs(common) do
+          if not branch[name] then common[name] = nil end
+        end
+      end
+      return common
+    end
+    local requirements = split_guard_boolean(expr, "and")
+    if requirements then
+      local combined = {}
+      for _, requirement in ipairs(requirements) do
+        for name in pairs(guaranteed_nonempty_variables(requirement)) do
+          combined[name] = true
+        end
+      end
+      return combined
+    end
+    local name = expr:match('^([%a_][%w_]*)%s*~=%s*""$')
+      or expr:match("^([%a_][%w_]*)%s*~=%s*''$")
+      or expr:match("^#%s*([%a_][%w_]*)%s*>%s*0$")
+    return name and { [name] = true } or {}
+  end
+  local has_empty_guard = false
+  for condition in lower:gmatch("if%s+([^\r\n]-)%s+then") do
+    if next(guaranteed_nonempty_variables(condition)) then
+      has_empty_guard = true
+      break
+    end
+  end
+  if not has_empty_guard then
+    local empty_scan_pos = 1
+    while true do
+      local _, empty_if_end, empty_var = lower:find(
+        "if%s+([%a_][%w_]*)%s*==%s*[\"']%s*[\"']%s+then",
+        empty_scan_pos)
+      if not empty_if_end then break end
+      local branch_end = lower:find("%f[%w]end%f[%W]", empty_if_end + 1)
+        or (#lower + 1)
+      local branch = lower:sub(empty_if_end + 1, branch_end - 1)
+      if branch:find("%f[%w]return%f[%W]")
+          or branch:find(
+            "%f[%w]" .. empty_var .. "%f[%W]%s*=%s*[%a_][%w_]*") then
+        has_empty_guard = true
+        break
+      end
+      local goto_label = branch:match("%f[%w]goto%s+([%a_][%w_]*)")
+      if goto_label then
+        local p_name_pos = lower:find("[\"']p_name[\"']", branch_end + 1)
+        local label_pos = lower:find(
+          "::%s*" .. goto_label .. "%s*::", branch_end + 1)
+        if p_name_pos and label_pos and label_pos > p_name_pos then
+          has_empty_guard = true
+          break
+        end
+      end
+      empty_scan_pos = empty_if_end + 1
+    end
+  end
+  if not has_empty_guard then
+    local function parse_conditional_fallback(rhs)
+      local patterns = {
+        '^%(%s*([%a_][%w_]*)%s*~=%s*""%s+and%s+'
+          .. '([%a_][%w_]*)%s*%)%s+or%s+(.+)$',
+        "^%(%s*([%a_][%w_]*)%s*~=%s*''%s+and%s+"
+          .. "([%a_][%w_]*)%s*%)%s+or%s+(.+)$",
+        '^([%a_][%w_]*)%s*~=%s*""%s+and%s+'
+          .. '([%a_][%w_]*)%s+or%s+(.+)$',
+        "^([%a_][%w_]*)%s*~=%s*''%s+and%s+"
+          .. "([%a_][%w_]*)%s+or%s+(.+)$",
+      }
+      for _, pattern in ipairs(patterns) do
+        local tested, kept, fallback = rhs:match(pattern)
+        if tested then return tested, kept, trim_guard_expr(fallback) end
+      end
+      return nil
+    end
+    local function fallback_is_nonempty(value, guarded_name)
+      local identifier = value:match("^([%a_][%w_]*)$")
+      if identifier then return identifier ~= guarded_name end
+      local literal = value:match('^"(.*)"$') or value:match("^'(.*)'$")
+      return literal ~= nil and literal:find("%S") ~= nil
+    end
+    for line in lower:gmatch("[^\r\n]+") do
+      local assigned, rhs = line:match(
+        "^%s*([%a_][%w_]*)%s*=%s*(.-)%s*$")
+      local tested, kept, fallback
+      if rhs then
+        tested, kept, fallback = parse_conditional_fallback(rhs)
+      end
+      if assigned and assigned == tested and tested == kept
+          and fallback_is_nonempty(fallback, tested) then
+        has_empty_guard = true
+        break
+      end
+    end
+  end
+  if has_boundaries and has_delimiter_cleanup and has_empty_guard then
+    return nil
+  end
+  return {{
+    kind = "unsafe_literal_name_word_removal",
+    line = Code._lua_line_for_pos(source,
+      unsafe_removal_pos or removal_pos),
+    missing_boundaries = not has_boundaries,
+    missing_delimiter_cleanup = not has_delimiter_cleanup,
+    missing_empty_guard = not has_empty_guard,
+  }}
+end
+
+function Code.prompt_requests_midi_receive_change(user_text)
+  local lt = Code._localized_action_intent_text(user_text)
+  if not lt:find("%f[%w]midi%f[%W]") then return false end
+  return lt:find("%f[%w]receive%f[%W]") ~= nil
+    or lt:find("%f[%w]receives%f[%W]") ~= nil
+    or lt:find("midi input", 1, true) ~= nil
+    or lt:find("input routing", 1, true) ~= nil
+end
+
+function Code.find_midi_receive_identity_misuse(lua_code, user_text)
+  if type(lua_code) ~= "string" or lua_code == ""
+      or not Code.prompt_requests_midi_receive_change(user_text) then
+    return nil
+  end
+  local source = lua_code
+  local findings = {}
+  local function trimmed(value)
+    return tostring(value or ""):match("^%s*(.-)%s*$") or ""
+  end
+  local block_tokens = {}
+  local masked_parts = {}
+  local token_pos = 1
+  if type(Code.tokenize_lua) == "function" then
+    for _, token in ipairs(Code.tokenize_lua(source) or {}) do
+      local text = token.text or ""
+      if token.type == "str" or token.type == "com" then
+        masked_parts[#masked_parts + 1] = text:gsub("[^\r\n]", " ")
+      else
+        masked_parts[#masked_parts + 1] = text
+      end
+      if token.type ~= "ws" and token.type ~= "str"
+          and token.type ~= "com" then
+        block_tokens[#block_tokens + 1] = {
+          text = text,
+          pos = token_pos,
+        }
+      end
+      token_pos = token_pos + #text
+    end
+  else
+    masked_parts[1] = source
+    for word_pos, word in source:gmatch("()([%a_][%w_]*)") do
+      block_tokens[#block_tokens + 1] = { text = word, pos = word_pos }
+    end
+  end
+  local masked = table.concat(masked_parts)
+  local function matching_loop_end(body_start)
+    local depth = 1
+    for _, token in ipairs(block_tokens) do
+      if token.pos >= body_start then
+        local word = token.text
+        if word == "do" or word == "function" or word == "if"
+            or word == "repeat" then
+          depth = depth + 1
+        elseif word == "end" or word == "until" then
+          depth = depth - 1
+          if depth == 0 then return token.pos end
+        end
+      end
+    end
+    return #source + 1
+  end
+  local direct_loops = {}
+  local collected_loops = {}
+  if type(Code.tokenize_lua) == "function" then
+    for token_index, token in ipairs(block_tokens) do
+      if token.text == "for" then
+        local index_token = block_tokens[token_index + 1]
+        local equals_token = block_tokens[token_index + 2]
+        if index_token and index_token.text:match("^[%a_][%w_]*$")
+            and equals_token and equals_token.text == "=" then
+          local do_token = nil
+          for scan_index = token_index + 3, #block_tokens do
+            local candidate = block_tokens[scan_index]
+            if candidate.text == "for" or candidate.text == "end" then break end
+            if candidate.text == "do" then
+              do_token = candidate
+              break
+            end
+          end
+          if do_token then
+            local header_tail = masked:sub(
+              equals_token.pos + 1, do_token.pos - 1)
+            if header_tail:match(
+                "%-%s*1%s*,%s*0%s*,%s*%-1%s*$") then
+              local body_start = do_token.pos + #do_token.text
+              direct_loops[#direct_loops + 1] = {
+                index = index_token.text,
+                body_start = body_start,
+                body_end = matching_loop_end(body_start),
+              }
+            end
+          end
+        end
+      end
+    end
+  else
+    -- Production loads the tokenizer. Keep this reduced-capability fallback
+    -- conservative by recognizing a descending header only when its start
+    -- bound ends on the same line as the equals sign.
+    local loop_scan_pos = 1
+    while true do
+      local loop_pos, header_end, index_name, body_start = masked:find(
+        "for%s+([%a_][%w_]*)%s*=%s*[^\r\n]-%-%s*1%s*,%s*0%s*,%s*%-1%s+do()",
+        loop_scan_pos)
+      if not loop_pos then break end
+      direct_loops[#direct_loops + 1] = {
+        index = index_name,
+        body_start = body_start,
+        body_end = matching_loop_end(body_start),
+      }
+      loop_scan_pos = header_end + 1
+    end
+  end
+  local loop_scan_pos = 1
+  while true do
+    local loop_pos, _, index_name, list_name, body_start = masked:find(
+      "for%s+([%a_][%w_]*)%s*=%s*#([%a_][%w_]*)%s*,%s*1%s*,%s*%-1%s+do()",
+      loop_scan_pos)
+    if not loop_pos then break end
+    collected_loops[#collected_loops + 1] = {
+      index = index_name,
+      list = list_name,
+      body_start = body_start,
+      body_end = matching_loop_end(body_start),
+    }
+    loop_scan_pos = body_start
+  end
+  local function removal_has_descending_iteration(call_pos, index_expr)
+    local compact_index = index_expr:gsub("%s+", "")
+    for _, loop in ipairs(direct_loops) do
+      if call_pos >= loop.body_start and call_pos < loop.body_end
+          and compact_index == loop.index then
+        return true
+      end
+    end
+    for _, loop in ipairs(collected_loops) do
+      if call_pos >= loop.body_start and call_pos < loop.body_end then
+        local direct_index = loop.list .. "[" .. loop.index .. "]"
+        if compact_index == direct_index then return true end
+        local prefix = source:sub(loop.body_start, call_pos - 1)
+        local escaped_list = loop.list:gsub("(%W)", "%%%1")
+        local escaped_index = loop.index:gsub("(%W)", "%%%1")
+        for hoisted in prefix:gmatch(
+            "local%s+([%a_][%w_]*)%s*<%s*const%s*>%s*=%s*"
+              .. escaped_list .. "%s*%[%s*" .. escaped_index .. "%s*%]") do
+          if compact_index == hoisted then return true end
+        end
+        for hoisted in prefix:gmatch(
+            "local%s+([%a_][%w_]*)%s*=%s*" .. escaped_list
+              .. "%s*%[%s*" .. escaped_index .. "%s*%]") do
+          if compact_index == hoisted then return true end
+        end
+      end
+    end
+    return false
+  end
+  local has_source_identity = source:find("[\"']P_SRCTRACK[\"']") ~= nil
+  local has_audio_identity = source:find("[\"']I_SRCCHAN[\"']") ~= nil
+    and source:find("==%s*%-1") ~= nil
+  local has_midi_identity = source:find("[\"']I_MIDIFLAGS[\"']") ~= nil
+    and (source:find("&%s*31") ~= nil
+      or source:find("%%%s*32") ~= nil)
+  local remove_scan_pos = 1
+  while true do
+    local remove_pos, remove_open_pos = source:find(
+      "reaper%.RemoveTrackSend%s*%(", remove_scan_pos)
+    if not remove_pos then break end
+    local args, close_pos = Code._parse_lua_call_args(source, remove_open_pos)
+    local has_receive_category = trimmed(args and args[2]) == "-1"
+    local has_descending_receive_loop = args and args[3]
+      and removal_has_descending_iteration(remove_pos, trimmed(args[3])) or false
+    if not (has_receive_category and has_descending_receive_loop
+        and has_source_identity and has_audio_identity and has_midi_identity) then
+      findings[#findings + 1] = {
+        kind = "unsafe_midi_receive_identity",
+        line = Code._lua_line_for_pos(source, remove_pos),
+        missing_receive_category = not has_receive_category,
+        missing_descending_iteration = not has_descending_receive_loop,
+        missing_source_identity = not has_source_identity,
+        missing_audio_identity = not has_audio_identity,
+        missing_midi_identity = not has_midi_identity,
+      }
+    end
+    remove_scan_pos = (close_pos or remove_open_pos) + 1
+  end
+
+  local function assignments_before(call_pos)
+    local assignments = {}
+    local prefix = source:sub(1, math.max(0, call_pos - 1)) .. "\n"
+    for raw_line in prefix:gmatch("([^\n]*)\n") do
+      local line = raw_line:gsub("\r$", ""):gsub("%s+%-%-.*$", "")
+      local name, rhs = line:match(
+        "^%s*local%s+([%a_][%w_]*)%s*<%s*const%s*>%s*=%s*(.-)%s*$")
+      if not name then
+        name, rhs = line:match(
+          "^%s*local%s+([%a_][%w_]*)%s*=%s*(.-)%s*$")
+      end
+      if not name then
+        name, rhs = line:match(
+          "^%s*([%a_][%w_]*)%s*=%s*(.-)%s*$")
+      end
+      if name and rhs and rhs ~= "" then assignments[name] = rhs end
+    end
+    return assignments
+  end
+  local function resolve_bare_assignment(value_expr, assignments)
+    local current = trimmed(value_expr)
+    local visited = {}
+    for _ = 1, 4 do
+      local name = current:match("^([%a_][%w_]*)$")
+      if not name then return current, false end
+      if visited[name] then return current, true end
+      visited[name] = true
+      local rhs = assignments[name]
+      if not rhs then return current, true end
+      current = trimmed(rhs)
+    end
+    return current, current:match("^[%a_][%w_]*$") ~= nil
+  end
+  local function expression_has_integer_flags(value_expr, assignments)
+    if value_expr:find("math%.floor%s*%(") then return true end
+    for name in value_expr:gmatch("[%a_][%w_]*") do
+      local resolved = resolve_bare_assignment(name, assignments)
+      if resolved:find("math%.floor%s*%(") then return true end
+    end
+    return false
+  end
+
+  local flags_scan_pos = 1
+  while true do
+    local flags_pos, flags_open_pos = source:find(
+      "reaper%.SetTrackSendInfo_Value%s*%(", flags_scan_pos)
+    if not flags_pos then break end
+    local args, close_pos = Code._parse_lua_call_args(source, flags_open_pos)
+    local parm = args and args[4]
+      and args[4]:match("^%s*[\"'](.-)[\"']%s*$") or nil
+    if parm == "I_MIDIFLAGS" then
+      local assignments = assignments_before(flags_pos)
+      local value_expr, unresolved = resolve_bare_assignment(
+        args and args[5] or "", assignments)
+      local has_integer_flags = expression_has_integer_flags(
+        value_expr, assignments)
+      local disables_source = value_expr:find("|%s*31%f[^%d]") ~= nil
+      local channel_literal = value_expr:match("|%s*(%d+)%f[^%d]")
+      local or_pos = value_expr:find("|", 1, true)
+      local low_value_expr = or_pos and value_expr:sub(or_pos + 1) or ""
+      local has_masked_low_value = low_value_expr:find("&%s*31") ~= nil
+      local masked_channel_write =
+        value_expr:find("&%s*~%s*31") ~= nil
+        and ((channel_literal and tonumber(channel_literal) <= 16)
+          or has_masked_low_value)
+      local safe_write = has_integer_flags
+        and (disables_source or masked_channel_write)
+      local direct_literal = value_expr:match("^[%+%-]?%d+$") ~= nil
+      local provably_unsafe = direct_literal
+        or (channel_literal ~= nil and not safe_write)
+      if not safe_write and provably_unsafe and not unresolved then
+        findings[#findings + 1] = {
+          kind = "overwrites_packed_midi_flags",
+          line = Code._lua_line_for_pos(source, flags_pos),
+        }
+      end
+    end
+    flags_scan_pos = (close_pos or flags_open_pos) + 1
+  end
+  return #findings > 0 and findings or nil
+end
+
+function Code.find_effect_initialization_advisories(lua_code)
+  if type(lua_code) ~= "string" or lua_code == "" then return nil end
+  local source = lua_code
+  local add_pos = source:find("reaper%.TrackFX_AddByName%s*%(")
+  if not add_pos or not source:find("reaper%.TrackFX_SetParam") then return nil end
+  if Code.find_param_calls_outside_defer(lua_code) then return nil end
+
+  local stock = {
+    reaeq = true, reacomp = true, readelay = true, reaverbate = true,
+    reagate = true, realimit = true, reapitch = true, reatune = true,
+    reaxcomp = true, reacontrolmidi = true,
+  }
+  local saw_unknown = false
+  local pos = 1
+  while true do
+    local first, open_pos = source:find("reaper%.TrackFX_AddByName%s*%(", pos)
+    if not first then break end
+    local args, close_pos = Code._parse_lua_call_args(source, open_pos)
+    local name = args and args[2] and args[2]:match("^%s*[\"'](.-)[\"']%s*$")
+    local bare_name = name and name:lower():gsub("^.-:%s*", "") or ""
+    bare_name = bare_name:gsub("%s*%b()%s*$", "")
+    local key = bare_name:gsub("[^%a%d]", "")
+    if key == "" or not stock[key] then saw_unknown = true; break end
+    pos = (close_pos or open_pos) + 1
+  end
+  if not saw_unknown then return nil end
+  return {{
+    kind = "unknown_effect_same_cycle_param_write",
+    line = Code._lua_line_for_pos(source, add_pos),
+    review_only = true,
+  }}
+end
+
 function Code.prompt_requests_track_pan(user_text)
   local lt = tostring(user_text or ""):lower():gsub("%s+", " ")
   if lt == "" then return false end
@@ -9833,6 +10462,77 @@ function Code.prompt_needs_reaverb_control_clarification(user_text)
     or lt:find("%f[%w]make%f[%W]") ~= nil
     or lt:find("%f[%w]set%f[%W]") ~= nil
     or lt:find("%f[%w]use%f[%W]") ~= nil
+end
+
+function Code.prompt_needs_loudness_bundle_clarification(user_text)
+  local lt = Code._localized_action_intent_text(user_text)
+  if lt == "" then return false end
+  if not (Code.prompt_likely_needs_lua_action
+      and Code.prompt_likely_needs_lua_action(user_text)) then
+    return false
+  end
+  local has_lufs = lt:find("%f[%w]lufs%f[%W]") ~= nil
+    or (lt:find("%f[%w]integrated%f[%W]") ~= nil
+      and lt:find("%f[%w]loudness%f[%W]") ~= nil)
+  local has_peak_unit = lt:find("%f[%w]dbfs%f[%W]") ~= nil
+    or (lt:find("%f[%w]peak%f[%W]") ~= nil
+      and lt:find("%f[%w]db%f[%W]") ~= nil)
+  if not has_lufs or not has_peak_unit then return false end
+
+  local numeric_count = 0
+  for _ in lt:gmatch("[%+%-]?%d+[%.,]?%d*") do
+    numeric_count = numeric_count + 1
+  end
+  local has_measurement_source =
+       lt:find("%f[%w]measure%f[%W]") ~= nil
+    or lt:find("%f[%w]measured%f[%W]") ~= nil
+    or lt:find("%f[%w]analyze%f[%W]") ~= nil
+    or lt:find("%f[%w]render%f[%W]") ~= nil
+    or lt:find("%f[%w]rendered%f[%W]") ~= nil
+  if has_measurement_source and numeric_count >= 2 then return false end
+  return true, {
+    kind = numeric_count < 2 and "mixed_units" or "measurement_required",
+    numeric_count = numeric_count,
+  }
+end
+
+function Code.prompt_needs_vocal_edit_clarification(user_text)
+  local lt = Code._localized_action_intent_text(user_text)
+  if lt == "" then return false end
+  if not (Code.prompt_likely_needs_lua_action
+      and Code.prompt_likely_needs_lua_action(user_text)) then
+    return false
+  end
+  local has_vocal = lt:find("%f[%w]vocal%f[%W]") ~= nil
+    or lt:find("%f[%w]vocals%f[%W]") ~= nil
+  local has_pitch = lt:find("pitch%s+correction") ~= nil
+    or lt:find("%f[%w]pitch%f[%W]") ~= nil
+    or lt:find("%f[%w]tune%f[%W]") ~= nil
+    or lt:find("%f[%w]tuning%f[%W]") ~= nil
+  local has_level_goal = lt:find("%f[%w]level%f[%W]") ~= nil
+    or lt:find("%f[%w]levels%f[%W]") ~= nil
+    or lt:find("%f[%w]gain%f[%W]") ~= nil
+    or lt:find("%f[%w]ideal%f[%W]") ~= nil
+  if not (has_vocal and has_pitch and has_level_goal) then return false end
+
+  local has_target = lt:find("%f[%w]selected%f[%W]") ~= nil
+    or lt:find("%f[%w]track%f[%W]") ~= nil
+    or lt:find("%f[%w]tracks%f[%W]") ~= nil
+    or lt:find("[\"'][^\"']+[\"']") ~= nil
+  local has_method = lt:find("%f[%w]plugin%f[%W]") ~= nil
+    or lt:find("%f[%w]effect%f[%W]") ~= nil
+    or lt:find("%f[%w]stretch%f[%W]") ~= nil
+    or lt:find("%f[%w]manual%f[%W]") ~= nil
+    or lt:find("%f[%w]reatune%f[%W]") ~= nil
+    or lt:find("%f[%w]autotune%f[%W]") ~= nil
+  local has_value = lt:find("[%+%-]?%d+[%.,]?%d*%s*[dD][bB]") ~= nil
+    or lt:find("[%+%-]?%d+[%.,]?%d*%s*%%") ~= nil
+  if has_target and has_method and has_value then return false end
+  return true, {
+    missing_target = not has_target,
+    missing_method = not has_method,
+    missing_value = not has_value,
+  }
 end
 
 function Code.find_track_pan_sent_as_send_pan(lua_code, user_text)
@@ -10752,6 +11452,298 @@ function Code.find_midi_input_device_filter_misuse(lua_code, user_text)
       "script only lists MIDI inputs instead of applying the requested filter")
   end
 
+  if #findings == 0 then return nil end
+  return findings
+end
+
+function Code.find_midi_record_mode_output_misuse(lua_code, user_text)
+  if type(lua_code) ~= "string" or lua_code == "" then return nil end
+  local stripped
+  if type(Code.tokenize_lua) == "function" then
+    local parts = {}
+    for _, token in ipairs(Code.tokenize_lua(lua_code) or {}) do
+      parts[#parts + 1] = token.type == "com"
+        and _blank_non_newlines(token.text) or token.text
+    end
+    stripped = table.concat(parts)
+  else
+    stripped = lua_code:gsub("%-%-[^\n]*", _blank_non_newlines)
+  end
+  local assignments = {}
+  for line in stripped:gmatch("[^\r\n]+") do
+    local name, expr = line:match(
+      "^%s*local%s+([%a_][%w_]*)%s*=%s*(.-)%s*$")
+    if not name then
+      name, expr = line:match("^%s*([%a_][%w_]*)%s*=%s*(.-)%s*$")
+    end
+    if name and expr and expr:sub(1, 1) ~= "=" then
+      assignments[name] = Code._lua_trim_expr(expr)
+    end
+  end
+
+  local function resolve_number(expr)
+    local seen = {}
+    local value = Code._lua_trim_expr(expr)
+    for _ = 1, 5 do
+      while value:match("^%b()$") do value = value:sub(2, -2) end
+      local number = tonumber(value)
+      if number ~= nil then return number end
+      local name = value:match("^([%a_][%w_]*)$")
+      if not name or seen[name] or assignments[name] == nil then return nil end
+      seen[name] = true
+      value = Code._lua_trim_expr(assignments[name])
+    end
+    return nil
+  end
+
+  local calls = {}
+  local pos = 1
+  while true do
+    local first, open_pos = stripped:find(
+      "reaper%.SetMediaTrackInfo_Value%s*%(", pos)
+    if not first then break end
+    local args, close_pos = Code._parse_lua_call_args(stripped, open_pos)
+    if args and args[1] and args[2] and args[3] then
+      calls[#calls + 1] = {
+        first = first,
+        line = Code._lua_line_for_pos(stripped, first),
+        target = Code._lua_trim_expr(args[1]):gsub("%s+", ""),
+        parm = Code._lua_trim_expr(args[2]):match("^[\"']([%w_]+)[\"']$"),
+        value_expr = Code._lua_trim_expr(args[3]),
+      }
+    end
+    pos = (close_pos or open_pos) + 1
+  end
+
+  local midi_input_targets = {}
+  for _, call in ipairs(calls) do
+    if call.parm == "I_RECINPUT" then
+      local value = resolve_number(call.value_expr)
+      local compact = call.value_expr:gsub("%s+", "")
+      if (value and value >= 4096)
+          or compact:find("4096", 1, true)
+          or compact:find("GetMIDIInputName", 1, true) then
+        midi_input_targets[call.target] = true
+      end
+    end
+  end
+
+  local raw_lines = {}
+  for line in (lua_code .. "\n"):gmatch("(.-)\r?\n") do
+    raw_lines[#raw_lines + 1] = line
+  end
+  local function adjacent_comment_supports_midi(line_no)
+    for index = math.max(1, line_no - 1), line_no do
+      local comment = tostring(raw_lines[index] or ""):match("%-%-(.*)$")
+      local lower = comment and comment:lower() or ""
+      if lower:find("midi", 1, true)
+          and (lower:find("overdub", 1, true)
+            or lower:find("replace", 1, true)
+            or lower:find("record", 1, true)) then
+        return true
+      end
+    end
+    return false
+  end
+
+  local request_has_midi = Code.prompt_has_midi_workflow_intent(user_text or "")
+  local request_lower = tostring(user_text or ""):lower()
+  local function terms_match_gap(line, first, second, plain, gap_ok)
+    local first_from = 1
+    while true do
+      local first_start, first_end = line:find(first, first_from, plain)
+      if not first_start then break end
+      local second_from = 1
+      while true do
+        local second_start, second_end = line:find(second, second_from, plain)
+        if not second_start then break end
+        local gap, gap_text = 0, ""
+        if first_end < second_start then
+          gap = second_start - first_end - 1
+          gap_text = line:sub(first_end + 1, second_start - 1)
+        elseif second_end < first_start then
+          gap = first_start - second_end - 1
+          gap_text = line:sub(second_end + 1, first_start - 1)
+        end
+        if gap <= 24 and (not gap_ok
+            or gap_ok(gap_text or "", first_end < second_start)) then
+          return true
+        end
+        second_from = math.max(second_end + 1, second_start + 1)
+      end
+      first_from = math.max(first_end + 1, first_start + 1)
+    end
+    return false
+  end
+  local function terms_are_near(line, first, second, plain)
+    return terms_match_gap(line, first, second, plain, nil)
+  end
+  local english_direct_gap_words = {
+    a = true, an = true, the = true,
+    this = true, that = true, these = true, those = true,
+    its = true, my = true, your = true, our = true, their = true,
+    his = true, her = true, s = true,
+    stereo = true, mono = true, main = true, master = true,
+    track = true, tracks = true, audio = true, midi = true,
+    hardware = true, software = true, virtual = true,
+    instrument = true, synth = true, synthesizer = true,
+    processed = true, wet = true, dry = true, direct = true,
+    summed = true, multichannel = true, channel = true,
+    left = true, right = true, selected = true, current = true,
+    full = true, final = true, internal = true, external = true,
+    pre = true, post = true, fader = true, fx = true, bus = true,
+  }
+  local english_reverse_gap_words = {
+    to = true, ["for"] = true, be = true, being = true,
+    should = true, is = true, was = true,
+  }
+  local function english_gap_is_direct_object(gap, record_before_output)
+    if gap:find("[,;:%.%!%?&/]") then return false end
+    local allowed = record_before_output
+      and english_direct_gap_words or english_reverse_gap_words
+    local count = 0
+    for word in gap:gmatch("[a-z]+") do
+      count = count + 1
+      if not allowed[word] or count > 6 then return false end
+    end
+    return true
+  end
+  local function latin_gap_has_no_clause_connector(gap)
+    if gap:find("[,;:%.%!%?&/]") then return false end
+    for word in gap:gmatch("[a-z]+") do
+      if word == "and" or word == "then" or word == "also"
+          or word == "send" or word == "route" or word == "y"
+          or word == "luego" or word == "e" or word == "então"
+          or word == "et" or word == "puis" or word == "und"
+          or word == "dann" then
+        return false
+      end
+    end
+    return true
+  end
+  local function output_precedes_record_with_particles(gap, record_before_output,
+      particles)
+    if record_before_output then return false end
+    local rest = gap:gsub("%s+", "")
+    for _, particle in ipairs(particles) do
+      while true do
+        local start_pos, end_pos = rest:find(particle, 1, true)
+        if not start_pos then break end
+        rest = rest:sub(1, start_pos - 1) .. rest:sub(end_pos + 1)
+      end
+    end
+    return rest == ""
+  end
+  local function line_explicitly_records_output(line)
+    if terms_match_gap(line, "%f[%a]record%a*%f[^%a]",
+        "%f[%a]output%a*%f[^%a]", false,
+        english_gap_is_direct_object) then
+      return true
+    end
+    local localized_pairs = {
+      { "graba", "salida" },
+      { "grava", "saída" },
+      { "grava", "saÍda" },
+      { "grava", "saida" },
+      { "enregistr", "sortie" },
+      { "aufnehm", "ausgang" },
+      { "aufnahme", "ausgang" },
+    }
+    for _, pair in ipairs(localized_pairs) do
+      if terms_match_gap(line, pair[1], pair[2], true,
+          latin_gap_has_no_clause_connector) then
+        return true
+      end
+    end
+    if terms_match_gap(line, "録音", "出力", true,
+        function(gap, record_before_output)
+          return output_precedes_record_with_particles(gap,
+            record_before_output, { "を", "の" })
+        end) then
+      return true
+    end
+    if terms_match_gap(line, "녹음", "출력", true,
+        function(gap, record_before_output)
+          return output_precedes_record_with_particles(gap,
+            record_before_output, { "을", "를", "의" })
+        end) then
+      return true
+    end
+    -- Chinese word order varies across short requests. Keep this as a bounded
+    -- proximity check until native-language fixtures define a safer grammar.
+    if terms_are_near(line, "录音", "输出", true)
+        or terms_are_near(line, "錄音", "輸出", true) then
+      return true
+    end
+    return false
+  end
+  local explicitly_records_output = false
+  for line in (request_lower .. "\n"):gmatch("(.-)\r?\n") do
+    if line_explicitly_records_output(line) then
+      explicitly_records_output = true
+      break
+    end
+  end
+  local explicitly_requests_midi_mode =
+    request_lower:find("%f[%w]overdub%f[%W]")
+      or request_lower:find(
+        "%f[%w]replace%f[%W]%s+%f[%w]mode%f[%W]")
+      or request_lower:find(
+        "%f[%w]replace%f[%W]%s+%f[%w]record%a*%f[^%a]")
+  if not explicitly_requests_midi_mode then
+    for _, term in ipairs({
+      "sobregrab", "sobregrav", "superposition",
+      "オーバーダブ", "重ね録り", "置き換え録音",
+      "叠录", "疊錄", "오버더빙", "대체 녹음",
+    }) do
+      if request_lower:find(term, 1, true) then
+        explicitly_requests_midi_mode = true
+        break
+      end
+    end
+  end
+  if not explicitly_requests_midi_mode then
+    for line in (request_lower .. "\n"):gmatch("(.-)\r?\n") do
+      if terms_are_near(line, "%f[%w]midi%f[%W]",
+          "%f[%w]replace%f[%W]", false)
+          or terms_are_near(line, "record mode",
+            "%f[%w]replace%f[%W]", false) then
+        explicitly_requests_midi_mode = true
+        break
+      end
+    end
+  end
+  local output_modes = {
+    [1] = "stereo output",
+    [3] = "stereo output with latency compensation",
+    [4] = "MIDI output",
+    [5] = "mono output",
+    [6] = "mono output with latency compensation",
+  }
+  local findings = {}
+  for _, call in ipairs(calls) do
+    if call.parm == "I_RECMODE" then
+      local value = resolve_number(call.value_expr)
+      local label = value and output_modes[value] or nil
+      local comment_support = adjacent_comment_supports_midi(call.line)
+      local target_support = midi_input_targets[call.target] == true
+      if label
+          and not (explicitly_records_output and not explicitly_requests_midi_mode)
+          and (request_has_midi or target_support or comment_support) then
+        findings[#findings + 1] = {
+          kind = "midi_record_mode_output_value",
+          line = call.line,
+          mode = value,
+          mode_label = label,
+          target = call.target,
+          request_midi = request_has_midi,
+          target_midi_input = target_support,
+          adjacent_comment = comment_support,
+          source = tostring(raw_lines[call.line] or ""):match("^%s*(.-)%s*$"),
+        }
+      end
+    end
+  end
   if #findings == 0 then return nil end
   return findings
 end
@@ -11883,6 +12875,163 @@ function Code.find_unsafe_item_duplication(lua_code, user_text)
   return nil
 end
 
+Code.MANUAL_ONLY_PLUGIN_POLICIES = {
+  melodyne = {
+    key = "melodyne",
+    display_name = "Melodyne",
+    vendor = "Celemony",
+  },
+}
+
+-- Some plug-ins cannot be automated safely through ordinary TrackFX or TakeFX
+-- calls even when their host-exposed parameters appear simple. Match these
+-- products independently of the installed format so VST3 and Audio Unit names
+-- receive the same policy.
+function Code.manual_only_plugin_policy(value)
+  local text = tostring(value or ""):lower()
+  if text:find("%f[%w]melodyne%f[%W]") then
+    return Code.MANUAL_ONLY_PLUGIN_POLICIES.melodyne
+  end
+  return nil
+end
+
+-- Treat a protected product mention as targeted unless it is a narrow,
+-- declarative project-state observation. This keeps the safety policy closed
+-- for new action wording while allowing an unrelated edit in another clause.
+function Code.prompt_targets_manual_only_plugin(user_text)
+  local text = tostring(user_text or ""):lower():gsub("%s+", " ")
+  if not Code.manual_only_plugin_policy(text) then return nil end
+  text = text:gsub("%s+and%s+", "\n")
+    :gsub("%s+then%s+", "\n")
+    :gsub("%s+but%s+", "\n")
+  local clauses = {}
+  for clause in text:gmatch("[^,;%.%!%?\n]+") do
+    clauses[#clauses+1] = clause
+  end
+  for index, clause in ipairs(clauses) do
+    local policy = Code.manual_only_plugin_policy(clause)
+    if policy then
+      local state = clause:match("^%s*melodyne%s+is%s+([%w%-]+)")
+      local observation = clause:find("^%s*i%s+have%s+.-%f[%w]melodyne%f[%W]")
+        or clause:find("^%s*there%s+is%s+.-%f[%w]melodyne%f[%W]")
+        or state == "open" or state == "on"
+        or state == "inserted" or state == "loaded"
+      if not observation then return policy end
+      local other_effect_target = false
+      for later = index + 1, #clauses do
+        local next_clause = tostring(clauses[later] or "")
+        if next_clause:find("%f[%w]it%f[%W]")
+            or next_clause:find("%f[%w]that%f[%W]")
+            or next_clause:find("%f[%w]this%f[%W]")
+            or next_clause:find("%f[%w]the%s+plug%-in%f[%W]")
+            or next_clause:find("%f[%w]pitch%f[%W]")
+            or next_clause:find("%f[%w]tun")
+            or next_clause:find("%f[%w]formant%f[%W]")
+            or next_clause:find("%f[%w]note%f[%W]")
+            or next_clause:find("%f[%w]phrase%f[%W]") then
+          return policy
+        end
+        for family in pairs(Code.PLUGIN_FAMILY_INTENT_PATTERNS or {}) do
+          if Code.prompt_expresses_plugin_family_intent(next_clause, family) then
+            other_effect_target = true
+            break
+          end
+        end
+        if not other_effect_target
+            and type(CTX) == "table"
+            and type(CTX.explicit_plugin_profile_matches) == "function" then
+          for _, matched in pairs(
+              CTX.explicit_plugin_profile_matches(next_clause) or {}) do
+            if matched then
+              other_effect_target = true
+              break
+            end
+          end
+        end
+      end
+      if not other_effect_target then return policy end
+    end
+  end
+  return nil
+end
+
+function Code.manual_only_plugin_guidance(policy)
+  policy = policy or Code.MANUAL_ONLY_PLUGIN_POLICIES.melodyne
+  return "MELODYNE MANUAL-ONLY POLICY (VST3 AND AUDIO UNIT):\n"
+    .. "ReaAssist may inspect current host-visible values and open an existing "
+    .. "Melodyne window. It must not add, delete, move, copy, bypass, take "
+    .. "offline, select presets for, or write parameters to Melodyne through "
+    .. "ReaScript. Use this short response order:\n"
+    .. "1. Start with: I did not make any project changes.\n"
+    .. "2. State that Melodyne is manual-only in ReaAssist for both VST3 and "
+    .. "Audio Unit (AU).\n"
+    .. "3. If Melodyne is missing, say: Insert the installed VST3 or Audio Unit "
+    .. "(AU) version manually as the first Track FX through REAPER's ARA "
+    .. "workflow.\n"
+    .. "4. Tell the user to open the Melodyne editor and perform the requested "
+    .. "edit there. Name a control only when its identity is verified in the "
+    .. "available context.\n"
+    .. "Do not claim that only one plug-in format supports ARA. Never substitute "
+    .. "ReaPitch, ReaTune, or another effect."
+end
+
+function Code.manual_only_plugin_runtime_message(policy, operation)
+  policy = policy or Code.MANUAL_ONLY_PLUGIN_POLICIES.melodyne
+  return "ReaAssist blocked " .. tostring(operation or "this operation")
+    .. " for " .. tostring(policy.display_name or "this plug-in")
+    .. " before any project change. Its ARA state and Undo behavior are not "
+    .. "safe enough for ReaScript automation. Insert it manually as the first "
+    .. "Track FX and make the requested edit in its editor."
+end
+
+-- Return generated-code operations that conflict with a manual-only product.
+-- Prompt identity catches index-based writes whose code contains no plug-in
+-- string. Code identity catches direct insertion even when the original prompt
+-- is unavailable during a later manual Run.
+function Code.find_manual_only_plugin_operations(lua_code, user_text)
+  if type(lua_code) ~= "string" or lua_code == "" then return nil end
+  local stripped = lua_code:gsub("%-%-%[%[.-%]%]", "")
+    :gsub("%-%-[^\n]*", "")
+  local prompt_policy = Code.prompt_targets_manual_only_plugin(user_text)
+  local code_policy = Code.manual_only_plugin_policy(stripped)
+  local policy = prompt_policy or code_policy
+  if not policy then return nil end
+
+  local findings = {}
+  local function add(api, pos, reason)
+    findings[#findings + 1] = {
+      api = api,
+      line = Code._lua_line_for_pos and Code._lua_line_for_pos(stripped, pos)
+        or 1,
+      reason = reason,
+      policy_key = policy.key,
+    }
+  end
+  local pos = 1
+  while true do
+    local first, last, family, operation = stripped:find(
+      "reaper%.([%a]+FX)_([%a_][%w_]*)%s*%(", pos)
+    if not first then break end
+    local api = family .. "_" .. operation
+    local disallowed = (family == "TrackFX" or family == "TakeFX")
+      and (operation == "AddByName"
+      or operation == "Delete"
+      or operation == "CopyToTrack"
+      or operation == "CopyToTake"
+      or operation == "NavigatePresets"
+      or (operation:find("^Set") ~= nil and operation ~= "SetOpen"))
+    if disallowed then add(api, first, "manual_only_plugin_mutation") end
+    pos = math.max(last + 1, first + 1)
+  end
+
+  if prompt_policy and Code.lua_has_fx_param_writes
+      and Code.lua_has_fx_param_writes(stripped) and #findings == 0 then
+    add("parameter_helper", 1, "manual_only_plugin_parameter_write")
+  end
+  if #findings == 0 then return nil end
+  return findings
+end
+
 function Code.prompt_forbids_new_track_creation(user_text)
   local lt = tostring(user_text or ""):lower()
   if lt == "" then return false end
@@ -12137,6 +13286,10 @@ end
 function Code.prompt_likely_needs_lua_action(user_text)
   local lt = Code._localized_action_intent_text(user_text)
   if lt == "" then return false end
+  if type(Code.manual_only_plugin_policy) == "function"
+      and Code.prompt_targets_manual_only_plugin(user_text) then
+    return false
+  end
   if Code.prompt_is_question_or_readonly
       and Code.prompt_is_question_or_readonly(user_text) then
     return false
@@ -12188,10 +13341,12 @@ function Code.prompt_likely_needs_lua_action(user_text)
     "add", "adjust", "arm", "change", "clean up", "close", "configure", "create",
     "insert", "make", "modify", "move", "mute", "name", "pan", "put",
     "route", "select", "set", "set up", "solo", "tweak", "use",
+    "align", "apply", "lower", "raise",
   }
   local object_words = {
-    "track", "tracks", "fx", "plugin", "eq", "compressor", "reverb",
-    "delay", "bus", "send", "marker", "region", "midi", "item",
+    "track", "tracks", "fx", "plugin", "effect", "eq", "compressor", "reverb",
+    "delay", "limiter", "vocal", "vocals", "pitch correction", "timing",
+    "level", "levels", "loudness", "lufs", "bus", "send", "marker", "region", "midi", "item",
     "project", "session", "tab",
     "folder", "folders", "reaeq", "reacomp", "readelay", "reaverbate",
     "reagate", "realimit",
@@ -13433,6 +14588,11 @@ Code.PLUGIN_FAMILY_INTENT_PATTERNS = {
     "compress", "%f[%w]dynamics%f[%W]", "%f[%w]threshold%f[%W]",
     "%f[%w]ratio%f[%W]", "%f[%w]glue%f[%W]", "%f[%w]leveler%f[%W]",
   },
+  -- Currently used only to release an unrelated Melodyne-following clause.
+  -- Review this generic wording before adding the key to another classifier.
+  multiband_compressor = {
+    "multiband", "multi%-band",
+  },
   delay = {
     "%f[%w]delay%f[%W]", "%f[%w]echo%f[%W]", "%f[%w]slap%f[%W]",
     "%f[%w]slapback%f[%W]",
@@ -13448,7 +14608,29 @@ Code.PLUGIN_FAMILY_INTENT_PATTERNS = {
   limiter = {
     "%f[%w]limit%f[%W]", "%f[%w]limiter%f[%W]",
     "%f[%w]limiting%f[%W]", "%f[%w]ceiling%f[%W]",
-    "%f[%w]loudness%f[%W]",
+    -- Maximizer wording deliberately counts as limiter intent across the
+    -- existing stock-substitution and action-relevance validators.
+    "%f[%w]loudness%f[%W]", "maximiz",
+  },
+  -- These additional family keys currently release an unrelated effect clause
+  -- after a declarative Melodyne mention. Existing stock-substitution and
+  -- action-relevance classifiers do not emit these keys. Review their generic
+  -- wording before adding any of them to those classifiers.
+  deesser = {
+    "de%-esser", "de%s+esser", "%f[%w]deesser%f[%W]",
+  },
+  saturation = {
+    "saturat", "%f[%w]exciter%f[%W]", "%f[%w]distort",
+    "%f[%w]drive%f[%W]",
+  },
+  chorus = {
+    "%f[%w]chorus%f[%W]",
+  },
+  phaser = {
+    "%f[%w]phaser%f[%W]",
+  },
+  pitch_shift = {
+    "pitch%s+shift",
   },
   instrument = {
     "%f[%w]instrument%f[%W]", "%f[%w]vsti%f[%W]",
@@ -16780,6 +17962,7 @@ local _HELPER_CALL_ALLOWED_GLOBALS = {
   assert = true, collectgarbage = true, error = true, getmetatable = true,
   ipairs = true, next = true, pairs = true, pcall = true, print = true,
   reaassist_resolve_profile_params = true,
+  reaassist_schedule_autokey_send_reset = true,
   rawequal = true, rawget = true, rawlen = true, rawset = true,
   select = true, setmetatable = true, tonumber = true, tostring = true,
   type = true, xpcall = true,
@@ -18411,7 +19594,8 @@ function Code.find_action_request_relevance_violations(
   end
   for _, receipt in ipairs(authorized_plugin_profiles or {}) do
     if type(receipt) == "table"
-       and receipt.validation_state == "validated"
+       and (receipt.validation_state == "validated"
+         or receipt.validation_state == "approved_stock_pending")
        and receipt.injected == true then
       local identifier = normalize_name(receipt.identifier)
       if identifier ~= "" then
@@ -19962,9 +21146,10 @@ local function sandbox_reaper_denied_reason(key)
   return nil
 end
 
-local function sandbox_api_proxy(api, overrides, label)
+local function sandbox_api_proxy(api, overrides, label, dynamic_override)
   overrides = overrides or {}
   label = label or "api"
+  local dynamic_cache = {}
   return setmetatable(overrides, {
     __index = function(_, key)
       if label == "reaper" then
@@ -19974,7 +21159,16 @@ local function sandbox_api_proxy(api, overrides, label)
             .. " is not available in ReaAssist's generated-code sandbox", 2)
         end
       end
-      return api and api[key] or nil
+      if dynamic_cache[key] ~= nil then return dynamic_cache[key] end
+      local value = api and api[key] or nil
+      if dynamic_override then
+        local wrapped = dynamic_override(key, value)
+        if wrapped ~= nil then
+          dynamic_cache[key] = wrapped
+          return wrapped
+        end
+      end
+      return value
     end,
     __newindex = function(_, key)
       error(tostring(label) .. "." .. tostring(key)
@@ -20032,6 +21226,7 @@ Code.AUTO_RUN_MANUAL_LUA_BLOCK_REASONS = {
   jsfx_wrong_artifact_validator = true,
   loop_time_map_validator = true,
   marker_pair_validator = true,
+  manual_only_plugin_validator = true,
   media_item_label_validator = true,
   midi_input_validator = true,
   record_arm_property_validator = true,
@@ -20063,6 +21258,7 @@ Code.AUTO_RUN_MANUAL_LUA_REVIEW_REASONS = {
   backup_failed = true,
   backup_required = true,
   manual_run_only_lua_artifact = true,
+  midi_record_mode_review = true,
   non_runnable_lua_artifact = true,
   risky_code_confirmation = true,
 }
@@ -20238,7 +21434,8 @@ function Code.register_plugin_profile_code(code, receipts)
   local copied = {}
   for _, receipt in ipairs(receipts) do
     if type(receipt) == "table"
-       and receipt.validation_state == "validated"
+       and (receipt.validation_state == "validated"
+         or receipt.validation_state == "approved_stock_pending")
        and receipt.injected == true then
       local item = {}
       for field, value in pairs(receipt) do item[field] = value end
@@ -20387,7 +21584,8 @@ function Code.plugin_profile_target_validation(track, fx, receipts,
 
   for _, receipt in ipairs(receipts) do
     if type(receipt) == "table"
-       and receipt.validation_state == "validated"
+       and (receipt.validation_state == "validated"
+         or receipt.validation_state == "approved_stock_pending")
        and receipt.injected == true
        and receipt.product_key then
       local profile_key = CTX.plugin_profile_key(receipt.product_key)
@@ -21859,6 +23057,34 @@ function Code.run(code)
     return false
   end
 
+  local manual_only_findings =
+    type(Code.find_manual_only_plugin_operations) == "function"
+      and Code.find_manual_only_plugin_operations(code) or nil
+  if manual_only_findings and #manual_only_findings > 0 then
+    local policy = Code.manual_only_plugin_policy(code)
+    local msg = Code.manual_only_plugin_runtime_message(
+      policy, "generated plug-in automation")
+    local block_debug = {
+      failure_kind = "validator_blocked",
+      source = "manual_only_plugin_runtime_preflight",
+      validation_block_kind = "manual_only_plugin_validator",
+      findings = manual_only_findings,
+      generated_code_bytes = #code,
+    }
+    Log.line("SCRIPT", "Blocked manual-only plug-in automation")
+    Log.add_error(msg, nil, nil, nil,
+      { error_kind = "validator_blocked", error_debug = block_debug })
+    S.last_run_error = msg
+    S.last_run_result = Code.build_run_result("lua", code,
+      "blocked_manual_only_plugin", "blocked", {
+        validation_block_kind = "manual_only_plugin_validator",
+        error_kind = "validator_blocked",
+        error_debug = block_debug,
+        runtime_error = msg,
+      })
+    return false
+  end
+
   local forbidden = type(Code.scan_forbidden_sandbox_globals) == "function"
     and Code.scan_forbidden_sandbox_globals(code) or nil
   if forbidden then
@@ -21932,6 +23158,9 @@ function Code.run(code)
   local function profile_track_fx_staging_eligible()
     if type(profile_receipts) ~= "table" or #profile_receipts == 0 then
       return false, "no_profile_receipt"
+    end
+    if code:find("reaassist_schedule_autokey_send_reset", 1, true) then
+      return false, "autokey_momentary_send"
     end
     if not code:find("TrackFX_SetParam", 1, true)
        or code:find("TakeFX_", 1, true) then
@@ -22101,6 +23330,7 @@ function Code.run(code)
     param_write_authorization = param_write_authorization or {},
     generated_refresh_balance = 0,
     generated_refresh_recovery_count = 0,
+    autokey_send_reset_pending = false,
   }
 
   if type(reaper.EnumProjects) == "function" then
@@ -22432,6 +23662,9 @@ function Code.run(code)
     return true
   end
 
+  local record_runtime_error
+  local finish_deferred_lua_run
+
   local function commit_profile_fx_stage()
     if defer_state.profile_fx_stage_committed then return true end
     if not defer_state.profile_fx_stage_project then return true end
@@ -22456,6 +23689,13 @@ function Code.run(code)
     local block_started = false
     local refresh_held = false
     local committed = false
+    local has_delayed_readback = false
+    for _, witness in pairs(defer_state.parameter_writes) do
+      if witness.delayed_readback == true then
+        has_delayed_readback = true
+        break
+      end
+    end
     local ok, commit_err = pcall(function()
       reaper.PreventUIRefresh(1)
       refresh_held = true
@@ -22506,15 +23746,18 @@ function Code.run(code)
             staged_write.parameter_index, staged_write.final_normalized)
         end
       end
-      reaper.Undo_EndBlock2(project,
-        inner_undo_label or "ReaAssist", 2)
-      block_open = false
+      if not has_delayed_readback then
+        reaper.Undo_EndBlock2(project,
+          inner_undo_label or "ReaAssist", 2)
+        block_open = false
+      end
       committed = true
     end)
     if refresh_held then reaper.PreventUIRefresh(-1) end
-    if block_open then
+    if block_open and not (ok and committed and has_delayed_readback) then
       pcall(reaper.Undo_EndBlock2, project,
         inner_undo_label or "ReaAssist", 2)
+      block_open = false
     end
     if not ok or not committed then
       if block_started then
@@ -22524,9 +23767,14 @@ function Code.run(code)
       return false, tostring(commit_err or "profile_fx_commit_failed")
     end
 
+    local delayed_witnesses = {}
     for _, witness in pairs(defer_state.parameter_writes) do
       local entry = witness.stage_entry
       if entry and witness.final_normalized ~= nil then
+        if witness.delayed_readback == true then
+          delayed_witnesses[#delayed_witnesses + 1] = witness
+          goto continue_commit_witness
+        end
         local target_track = resolve_profile_target_track(entry)
         local actual = target_track and reaper.TrackFX_GetParamNormalized(
           target_track, entry.committed_fx, witness.parameter_index) or nil
@@ -22553,11 +23801,89 @@ function Code.run(code)
             tostring(witness.final_normalized), tostring(actual),
             tostring(witness.final_formatted),
             tostring(actual_formatted)))
+          if block_open then
+            pcall(reaper.Undo_EndBlock2, project,
+              inner_undo_label or "ReaAssist", 2)
+            block_open = false
+          end
           pcall(reaper.Undo_DoUndo2, project)
           cleanup_profile_fx_stage()
           return false, "committed_parameter_verification_failed"
         end
       end
+      ::continue_commit_witness::
+    end
+    if #delayed_witnesses > 0 then
+      defer_state.profile_fx_stage_committed = true
+      defer_state.pending = defer_state.pending + 1
+      local function verify_delayed_commit()
+        local verified, verify_err = pcall(function()
+          reaper.SelectProjectInstance(project)
+          for _, witness in ipairs(delayed_witnesses) do
+            local entry = witness.stage_entry
+            local target_track = resolve_profile_target_track(entry)
+            local actual = target_track and reaper.TrackFX_GetParamNormalized(
+              target_track, entry.committed_fx, witness.parameter_index) or nil
+            if actual == nil
+               or math.abs(actual - witness.final_normalized) > 0.0000001 then
+              error("delayed_parameter_verification_failed product="
+                .. tostring(witness.plugin_product_key or "")
+                .. " parameter=" .. tostring(witness.parameter_name or "")
+                .. " index=" .. tostring(witness.parameter_index)
+                .. " expected=" .. tostring(witness.final_normalized)
+                .. " actual=" .. tostring(actual))
+            end
+          end
+        end)
+        if block_open then
+          local close_ok, close_err = pcall(reaper.Undo_EndBlock2, project,
+            inner_undo_label or "ReaAssist", 2)
+          block_open = false
+          if not close_ok then
+            verified = false
+            verify_err = "delayed_undo_close_failed:" .. tostring(close_err)
+          end
+        end
+        if not verified then
+          pcall(reaper.Undo_DoUndo2, project)
+          defer_state.failed = true
+        end
+        local cleanup_ok, cleanup_err = cleanup_profile_fx_stage()
+        if not cleanup_ok then
+          if verified then pcall(reaper.Undo_DoUndo2, project) end
+          verified = false
+          verify_err = "stage_cleanup_failed:" .. tostring(cleanup_err)
+          defer_state.failed = true
+        end
+        if verified then show_committed_profile_fx() end
+        defer_state.pending = math.max(0, defer_state.pending - 1)
+        if not verified and type(record_runtime_error) == "function" then
+          record_runtime_error(
+            "ReaAssist could not verify a delayed plug-in parameter write: "
+              .. tostring(verify_err),
+            false, nil, "plugin_profile_staging_delayed_verification")
+        end
+        if type(finish_deferred_lua_run) == "function" then
+          finish_deferred_lua_run()
+        end
+      end
+      local scheduled, schedule_err = pcall(reaper.defer,
+        verify_delayed_commit)
+      if not scheduled then
+        defer_state.pending = math.max(0, defer_state.pending - 1)
+        if block_open then
+          pcall(reaper.Undo_EndBlock2, project,
+            inner_undo_label or "ReaAssist", 2)
+          block_open = false
+        end
+        pcall(reaper.Undo_DoUndo2, project)
+        cleanup_profile_fx_stage()
+        return false, "delayed_verification_schedule_failed:"
+          .. tostring(schedule_err)
+      end
+      Log.line("SCRIPT", "Scheduled one-frame verification for delayed "
+        .. "profile parameter readback")
+      return true, "pending"
     end
     defer_state.profile_fx_stage_committed = true
     local cleanup_ok, cleanup_err = cleanup_profile_fx_stage()
@@ -22587,6 +23913,66 @@ function Code.run(code)
     local key = text:gsub("[^%w]+", " ")
       :gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
     return key ~= "" and key or text
+  end
+
+  local function manual_only_fx_policy(kind, target_ref, fx)
+    local getter = kind == "take" and reaper.TakeFX_GetFXName
+      or reaper.TrackFX_GetFXName
+    if type(getter) ~= "function" then return nil end
+    local ok, first, second = pcall(getter, target_ref, fx, "")
+    if not ok then return nil end
+    local loaded_name = type(second) == "string" and second
+      or (type(first) == "string" and first or nil)
+    return Code.manual_only_plugin_policy(loaded_name)
+  end
+
+  local function manual_only_chain_policy(kind, target_ref)
+    local counter = kind == "take" and reaper.TakeFX_GetCount
+      or reaper.TrackFX_GetCount
+    if type(counter) ~= "function" then return nil end
+    local ok, count = pcall(counter, target_ref)
+    if not ok then return nil end
+    for fx = 0, (tonumber(count) or 0) - 1 do
+      local policy = manual_only_fx_policy(kind, target_ref, fx)
+      if policy then return policy end
+    end
+    return nil
+  end
+
+  local function refuse_manual_only(policy, operation, level)
+    if policy then
+      error(Code.manual_only_plugin_runtime_message(policy, operation),
+        level or 3)
+    end
+  end
+
+  local function guard_manual_only_fx(kind, target_ref, fx, operation, level)
+    refuse_manual_only(
+      manual_only_fx_policy(kind, target_ref, fx), operation, level)
+  end
+
+  local function guard_manual_only_chain(kind, target_ref, operation, level)
+    refuse_manual_only(
+      manual_only_chain_policy(kind, target_ref), operation, level)
+  end
+
+  local function guarded_dynamic_reaper_api(key, api)
+    if type(api) ~= "function" then return nil end
+    local kind, operation = tostring(key):match("^(TrackFX)_(.+)$")
+    if kind then kind = "track" end
+    if not kind then
+      kind, operation = tostring(key):match("^(TakeFX)_(.+)$")
+      if kind then kind = "take" end
+    end
+    if not kind then return nil end
+    local mutates = operation == "NavigatePresets"
+      or (operation:find("^Set") ~= nil and operation ~= "SetOpen")
+    if not mutates then return nil end
+    return function(target_ref, fx, ...)
+      guard_manual_only_fx(kind, target_ref, fx,
+        tostring(key), 2)
+      return api(target_ref, fx, ...)
+    end
   end
 
   local function validate_profile_write_target(kind, target_ref, fx, pidx,
@@ -22748,6 +24134,8 @@ function Code.run(code)
 
   defer_state.record_parameter_write = function(kind, target_ref, fx, pidx,
       getter, setter, value, caller_line, value_is_normalized)
+    guard_manual_only_fx(kind, target_ref, fx,
+      tostring(kind) .. " FX parameter write", 3)
     validate_profile_write_target(
       kind, target_ref, fx, pidx, caller_line)
     local write_target, write_fx = target_ref, fx
@@ -22809,6 +24197,21 @@ function Code.run(code)
              > 0.0000001 then
           entry.changed_during = true
         end
+      end
+    end
+    if stage_entry and value_is_normalized then
+      local requested = tonumber(value)
+      local initial = tonumber(entry.initial_normalized)
+      local observed = tonumber(entry.final_normalized)
+      if requested ~= nil and initial ~= nil
+         and math.abs(requested - initial) > 0.0000001
+         and (observed == nil
+           or math.abs(observed - initial) <= 0.0000001) then
+        entry.delayed_readback = true
+        entry.final_normalized = requested
+        entry.final_formatted = nil
+        entry.changed_during = true
+        write_final_normalized = requested
       end
     end
     if stage_entry then
@@ -22882,7 +24285,7 @@ function Code.run(code)
     defer_state.apply_completed_result()
   end
 
-  local function record_runtime_error(run_err, instruction_timeout,
+  record_runtime_error = function(run_err, instruction_timeout,
       instruction_count, source)
     recover_generated_refresh()
     local err_str, short, user_msg =
@@ -22935,7 +24338,7 @@ function Code.run(code)
     })
   end
 
-  local function finish_deferred_lua_run()
+  finish_deferred_lua_run = function()
     if defer_state.pending > 0 then return end
     recover_generated_refresh()
     close_run_undo()
@@ -22951,6 +24354,7 @@ function Code.run(code)
             .. tostring(call_ok and commit_err or commit_ok),
           false, nil, "plugin_profile_staging_commit")
       end
+      if defer_state.pending > 0 then return end
     else
       cleanup_profile_fx_stage()
     end
@@ -22992,6 +24396,312 @@ function Code.run(code)
         run_result = completed_result,
       })
     end
+  end
+
+  -- Auto-Key's Send parameter is a momentary broadcast. The installed build
+  -- ignores an immediate On/Off pair, while leaving the parameter On prevents
+  -- a reliable later trigger. Keep its required timing and unconditional reset
+  -- inside the guarded runtime instead of asking generated Lua to run a sleep
+  -- loop or a persistent defer chain.
+  code_env.reaassist_schedule_autokey_send_reset = function(track, fx, pidx,
+      hold_ms, approved_receiver_count, receivers)
+    if defer_state.in_callback ~= true then
+      return nil, "Auto-Key Send scheduling must run inside reaper.defer"
+    end
+    if defer_state.profile_fx_staging_enabled then
+      return nil, "Auto-Key Send cannot run through isolated FX staging"
+    end
+    if defer_state.autokey_send_reset_pending then
+      return nil, "only one Auto-Key Send pulse is allowed per action"
+    end
+    if type(reaper.defer) ~= "function"
+       or type(reaper.time_precise) ~= "function"
+       or type(reaper.TrackFX_GetFXName) ~= "function"
+       or type(reaper.TrackFX_GetFXGUID) ~= "function"
+       or type(reaper.TrackFX_GetParamNormalized) ~= "function"
+       or type(reaper.TrackFX_SetParamNormalized) ~= "function"
+       or type(reaper.TrackFX_GetFormattedParamValue) ~= "function" then
+      return nil, "required Auto-Key Send runtime APIs are unavailable"
+    end
+
+    local send_index = tonumber(pidx)
+    local hold = tonumber(hold_ms)
+    local approved = tonumber(approved_receiver_count)
+    if not send_index or send_index % 1 ~= 0 or send_index < 0
+       or not hold or hold < 250 or hold > 1000
+       or not approved or approved % 1 ~= 0 or approved < 1
+       or type(receivers) ~= "table" or #receivers ~= approved then
+      return nil, "invalid Auto-Key Send schedule or receiver approval"
+    end
+
+    local send_target_key = profile_target_key("track", track, fx)
+    local send_resolution = defer_state.profile_resolutions[send_target_key]
+    local send_spec = send_resolution
+      and send_resolution.indices[send_index] or nil
+    if not send_resolution or send_resolution.product_key ~= "auto-key-2"
+       or not send_spec
+       or profile_parameter_label_key(send_spec.expected_name) ~= "send" then
+      return nil, "Auto-Key Send was not resolved by its validated profile"
+    end
+    local initial_send = tonumber(
+      reaper.TrackFX_GetParamNormalized(track, fx, send_index))
+    if not initial_send or initial_send > 0.0000001 then
+      return nil, "Auto-Key Send must be Off before the pulse starts"
+    end
+
+    local active_project = reaper.EnumProjects(-1, "")
+    if not active_project then return nil, "active project unavailable" end
+    if type(reaper.ValidatePtr2) == "function"
+       and not reaper.ValidatePtr2(active_project, track, "MediaTrack*") then
+      return nil, "Auto-Key is not in the active project"
+    end
+
+    local actual_receivers = {}
+    local container_seen = false
+    local function inspect_track(project, candidate_track)
+      if not candidate_track then return end
+      local function inspect_fx(candidate_fx)
+        local name_ok, loaded_name =
+          reaper.TrackFX_GetFXName(candidate_track, candidate_fx, "")
+        if not name_ok then return end
+        if type(reaper.TrackFX_GetNamedConfigParm) == "function" then
+          local count_ok, count_text = reaper.TrackFX_GetNamedConfigParm(
+            candidate_track, candidate_fx, "container_count")
+          if count_ok and (tonumber(count_text) or 0) > 0 then
+            container_seen = true
+          end
+        end
+        local name_key = tostring(loaded_name or ""):lower()
+          :gsub("[^%w]+", "")
+        if name_key:find("autotune", 1, true) then
+          actual_receivers[#actual_receivers + 1] = {
+            project = project,
+            track = candidate_track,
+            fx = candidate_fx,
+            loaded_name = tostring(loaded_name or ""),
+          }
+        end
+      end
+      for candidate_fx = 0, reaper.TrackFX_GetCount(candidate_track) - 1 do
+        inspect_fx(candidate_fx)
+      end
+      if type(reaper.TrackFX_GetRecCount) == "function" then
+        for candidate_fx = 0,
+            reaper.TrackFX_GetRecCount(candidate_track) - 1 do
+          inspect_fx(0x1000000 + candidate_fx)
+        end
+      end
+    end
+    local project_index = 0
+    while true do
+      local project = reaper.EnumProjects(project_index, "")
+      if not project then break end
+      inspect_track(project, reaper.GetMasterTrack(project))
+      for track_index = 0, reaper.CountTracks(project) - 1 do
+        inspect_track(project, reaper.GetTrack(project, track_index))
+      end
+      project_index = project_index + 1
+    end
+    if container_seen then
+      return nil, "Auto-Key Send is blocked while an FX container may hide an undisclosed receiver"
+    end
+    if #actual_receivers ~= approved then
+      return nil, "Auto-Key Send detected " .. tostring(#actual_receivers)
+        .. " compatible AutoTune receiver(s) across open project tabs, but "
+        .. tostring(approved) .. " were disclosed and approved"
+    end
+
+    local checks = {}
+    local receiver_seen = {}
+    for receiver_index, receiver in ipairs(receivers) do
+      if type(receiver) ~= "table" then
+        return nil, "invalid AutoTune receiver at position " .. receiver_index
+      end
+      local receiver_track = receiver.track
+      local receiver_fx = tonumber(receiver.fx)
+      local key_index = tonumber(receiver.key_index)
+      local scale_index = tonumber(receiver.scale_index)
+      local expected_key = tostring(receiver.expected_key or "")
+      local expected_scale = tostring(receiver.expected_scale or "")
+      if not receiver_track or not receiver_fx or receiver_fx % 1 ~= 0
+         or not key_index or key_index % 1 ~= 0
+         or not scale_index or scale_index % 1 ~= 0
+         or expected_key == "" or expected_scale == "" then
+        return nil, "invalid AutoTune receiver details at position "
+          .. receiver_index
+      end
+      local matched = nil
+      for actual_index, actual in ipairs(actual_receivers) do
+        if actual.project == active_project
+           and actual.track == receiver_track and actual.fx == receiver_fx then
+          if receiver_seen[actual_index] then
+            return nil, "AutoTune receiver list contains a duplicate"
+          end
+          receiver_seen[actual_index] = true
+          matched = actual
+          break
+        end
+      end
+      if not matched then
+        return nil, "an approved AutoTune receiver is missing from the active "
+          .. "project, or another open project contains an undisclosed receiver"
+      end
+      local receiver_target_key =
+        profile_target_key("track", receiver_track, receiver_fx)
+      local receiver_resolution =
+        defer_state.profile_resolutions[receiver_target_key]
+      local key_spec = receiver_resolution
+        and receiver_resolution.indices[key_index] or nil
+      local scale_spec = receiver_resolution
+        and receiver_resolution.indices[scale_index] or nil
+      if not receiver_resolution
+         or receiver_resolution.product_key ~= "autotune"
+         or not key_spec or not scale_spec
+         or profile_parameter_label_key(key_spec.expected_name) ~= "key"
+         or profile_parameter_label_key(scale_spec.expected_name) ~= "scale" then
+        return nil, "an AutoTune receiver lacks validated Key and Scale mappings"
+      end
+      checks[#checks + 1] = {
+        track = receiver_track,
+        fx = receiver_fx,
+        fx_guid = reaper.TrackFX_GetFXGUID(receiver_track, receiver_fx),
+        key_index = key_index,
+        scale_index = scale_index,
+        expected_key = expected_key,
+        expected_scale = expected_scale,
+      }
+    end
+    if #checks ~= #actual_receivers then
+      return nil, "every detected AutoTune receiver must be disclosed and approved"
+    end
+
+    defer_state.autokey_send_reset_pending = true
+    defer_state.pending = defer_state.pending + 1
+    local deadline = reaper.time_precise() + hold / 1000
+    local verify_deadline = nil
+    local reset_done = false
+    local completed = false
+    local traceback = debug and debug.traceback or tostring
+
+    local function complete(ok, runtime_err)
+      if completed then return end
+      completed = true
+      defer_state.autokey_send_reset_pending = false
+      defer_state.pending = math.max(0, defer_state.pending - 1)
+      if not ok then
+        if not defer_state.failed then
+          defer_state.failed = true
+          record_runtime_error(runtime_err, false, nil,
+            "autokey_send_reset")
+        else
+          Log.line("SCRIPT", "Auto-Key Send reset also failed: "
+            .. tostring(runtime_err))
+        end
+      end
+      if defer_state.pending == 0 then close_run_undo() end
+      finish_deferred_lua_run()
+    end
+
+    local function reset_send()
+      local reset_ok, reset_err = xpcall(function()
+        defer_state.record_parameter_write("track", track, fx, send_index,
+          reaper.TrackFX_GetParamNormalized,
+          reaper.TrackFX_SetParamNormalized, 0.0, nil, true)
+        local final_send = tonumber(
+          reaper.TrackFX_GetParamNormalized(track, fx, send_index))
+        if not final_send or final_send > 0.0000001 then
+          error("Auto-Key Send did not return to Off")
+        end
+      end, traceback)
+      if not reset_ok then
+        complete(false, reset_err)
+        return false
+      end
+      reset_done = true
+      verify_deadline = reaper.time_precise() + 2.0
+      return true
+    end
+
+    local function receivers_match()
+      for _, check in ipairs(checks) do
+        if type(reaper.ValidatePtr2) == "function"
+           and not reaper.ValidatePtr2(
+             active_project, check.track, "MediaTrack*") then
+          return false, "AutoTune receiver track changed during Send"
+        end
+        if reaper.TrackFX_GetFXGUID(check.track, check.fx) ~= check.fx_guid then
+          return false, "AutoTune receiver identity changed during Send"
+        end
+        local _, key_display = reaper.TrackFX_GetFormattedParamValue(
+          check.track, check.fx, check.key_index, "")
+        local _, scale_display = reaper.TrackFX_GetFormattedParamValue(
+          check.track, check.fx, check.scale_index, "")
+        local actual_key = tostring(key_display or ""):lower()
+          :gsub("^%s+", ""):gsub("%s+$", "")
+        local actual_scale = tostring(scale_display or ""):lower()
+          :gsub("^%s+", ""):gsub("%s+$", "")
+        if actual_key ~= check.expected_key:lower()
+           or actual_scale ~= check.expected_scale:lower() then
+          return false, "AutoTune receiver did not accept the confirmed key and scale"
+        end
+      end
+      return true
+    end
+
+    local function tick()
+      if completed then return end
+      local now = reaper.time_precise()
+      if not reset_done and now >= deadline then
+        local write_key = "track\31" .. tostring(track) .. "\31"
+          .. tostring(fx) .. "\31" .. tostring(send_index)
+        local write_entry = defer_state.parameter_writes[write_key]
+        local was_armed = write_entry and write_entry.changed_during == true
+          and (tonumber(write_entry.final_normalized) or 0) > 0.5
+        if not reset_send() then return end
+        if not was_armed then
+          complete(false, "Auto-Key Send was not armed before its guarded reset")
+          return
+        end
+      end
+      if reset_done then
+        local matched, match_err = receivers_match()
+        if matched then
+          complete(true)
+          return
+        end
+        if now >= verify_deadline then
+          complete(false, match_err)
+          return
+        end
+      end
+      local scheduled, schedule_err = pcall(reaper.defer, tick)
+      if not scheduled then
+        if not reset_done then reset_send() end
+        complete(false, schedule_err)
+      end
+    end
+
+    local scheduled, schedule_err = pcall(reaper.defer, tick)
+    if not scheduled then
+      defer_state.autokey_send_reset_pending = false
+      defer_state.pending = math.max(0, defer_state.pending - 1)
+      return nil, "could not schedule the Auto-Key Send reset: "
+        .. tostring(schedule_err)
+    end
+    local armed, arm_err = xpcall(function()
+      defer_state.record_parameter_write("track", track, fx, send_index,
+        reaper.TrackFX_GetParamNormalized,
+        reaper.TrackFX_SetParamNormalized, 1.0, nil, true)
+      local _, send_display = reaper.TrackFX_GetFormattedParamValue(
+        track, fx, send_index, "")
+      if tostring(send_display) ~= "On" then
+        error("Auto-Key Send did not turn On")
+      end
+    end, traceback)
+    if not armed then
+      return nil, "could not arm Auto-Key Send: " .. tostring(arm_err)
+    end
+    return true
   end
 
   -- Wrap `reaper` so user-facing calls (dialogs, console output) are logged
@@ -23074,6 +24784,13 @@ function Code.run(code)
         caller and caller.currentline or nil, true)
     end,
     TrackFX_AddByName = function(tr, name, rec_fx, instantiate)
+      local requested_policy = Code.manual_only_plugin_policy(name)
+      local mode = tonumber(instantiate)
+      if mode ~= 0 then
+        refuse_manual_only(requested_policy, "TrackFX_AddByName", 2)
+        guard_manual_only_chain("track", tr,
+          "FX insertion on a track containing Melodyne", 2)
+      end
       if not defer_state.profile_fx_staging_enabled then
         return reaper.TrackFX_AddByName(tr, name, rec_fx, instantiate)
       end
@@ -23081,7 +24798,6 @@ function Code.run(code)
         error("isolated profile staging supports normal track FX only", 2)
       end
       local staged = find_profile_stage_by_name(tr, name)
-      local mode = tonumber(instantiate)
       if staged and mode ~= nil and mode >= 0 then
         return staged.proxy_fx
       end
@@ -23111,6 +24827,12 @@ function Code.run(code)
       return entry.proxy_fx
     end,
     TrackFX_GetByName = function(tr, name, instantiate)
+      if instantiate then
+        refuse_manual_only(Code.manual_only_plugin_policy(name),
+          "TrackFX_GetByName insertion", 2)
+        guard_manual_only_chain("track", tr,
+          "FX insertion on a track containing Melodyne", 2)
+      end
       if not defer_state.profile_fx_staging_enabled then
         return reaper.TrackFX_GetByName(tr, name, instantiate)
       end
@@ -23183,6 +24905,29 @@ function Code.run(code)
       end
       entry.show_flag = show_flag
     end,
+    TrackFX_Delete = function(tr, fx)
+      guard_manual_only_chain("track", tr,
+        "FX deletion on a track containing Melodyne", 2)
+      return reaper.TrackFX_Delete(tr, fx)
+    end,
+    TrackFX_CopyToTrack = function(
+        source_track, source_fx, target_track, target_fx, is_move)
+      guard_manual_only_chain("track", source_track,
+        "FX copy or move on a track containing Melodyne", 2)
+      guard_manual_only_chain("track", target_track,
+        "FX copy or move on a track containing Melodyne", 2)
+      return reaper.TrackFX_CopyToTrack(
+        source_track, source_fx, target_track, target_fx, is_move)
+    end,
+    TrackFX_CopyToTake = function(
+        source_track, source_fx, target_take, target_fx, is_move)
+      guard_manual_only_chain("track", source_track,
+        "FX copy or move on a track containing Melodyne", 2)
+      guard_manual_only_chain("take", target_take,
+        "FX copy or move on a take containing Melodyne", 2)
+      return reaper.TrackFX_CopyToTake(
+        source_track, source_fx, target_take, target_fx, is_move)
+    end,
     TrackFX_SetParam = function(tr, fx, pidx, value)
       local caller = debug.getinfo(2, "l")
       return defer_state.record_parameter_write("track", tr, fx, pidx,
@@ -23201,6 +24946,48 @@ function Code.run(code)
       return defer_state.record_parameter_write("take", take, fx, pidx,
         reaper.TakeFX_GetParamNormalized, reaper.TakeFX_SetParam, value,
         caller and caller.currentline or nil)
+    end,
+    TakeFX_AddByName = function(take, name, instantiate)
+      local mode = tonumber(instantiate)
+      if mode ~= 0 then
+        refuse_manual_only(Code.manual_only_plugin_policy(name),
+          "TakeFX_AddByName", 2)
+        guard_manual_only_chain("take", take,
+          "FX insertion on a take containing Melodyne", 2)
+      end
+      return reaper.TakeFX_AddByName(take, name, instantiate)
+    end,
+    TakeFX_GetByName = function(take, name, instantiate)
+      if instantiate then
+        refuse_manual_only(Code.manual_only_plugin_policy(name),
+          "TakeFX_GetByName insertion", 2)
+        guard_manual_only_chain("take", take,
+          "FX insertion on a take containing Melodyne", 2)
+      end
+      return reaper.TakeFX_GetByName(take, name, instantiate)
+    end,
+    TakeFX_Delete = function(take, fx)
+      guard_manual_only_chain("take", take,
+        "FX deletion on a take containing Melodyne", 2)
+      return reaper.TakeFX_Delete(take, fx)
+    end,
+    TakeFX_CopyToTrack = function(
+        source_take, source_fx, target_track, target_fx, is_move)
+      guard_manual_only_chain("take", source_take,
+        "FX copy or move on a take containing Melodyne", 2)
+      guard_manual_only_chain("track", target_track,
+        "FX copy or move on a track containing Melodyne", 2)
+      return reaper.TakeFX_CopyToTrack(
+        source_take, source_fx, target_track, target_fx, is_move)
+    end,
+    TakeFX_CopyToTake = function(
+        source_take, source_fx, target_take, target_fx, is_move)
+      guard_manual_only_chain("take", source_take,
+        "FX copy or move on a take containing Melodyne", 2)
+      guard_manual_only_chain("take", target_take,
+        "FX copy or move on a take containing Melodyne", 2)
+      return reaper.TakeFX_CopyToTake(
+        source_take, source_fx, target_take, target_fx, is_move)
     end,
     Main_OnCommand = function(command_id, flag)
       if tonumber(command_id) == 40860 then close_run_undo() end
@@ -23231,7 +25018,7 @@ function Code.run(code)
       end
       return 0
     end,
-  }, "reaper")
+  }, "reaper", guarded_dynamic_reaper_api)
   code_env.reaper = reaper_shim
 
   if Log.enabled() then
@@ -23341,6 +25128,19 @@ function Code.run(code)
         .. tostring(commit_call_ok and commit_err or commit_ok),
       false, nil, "plugin_profile_staging_commit")
     return false
+  end
+  if defer_state.pending > 0 then
+    S.lua_defer_run = defer_state
+    S.last_run_result = Code.build_run_result("lua", code,
+      "pending", "pending", {
+        deferred = true,
+        deferred_pending = true,
+      })
+    Code.plugin_test_runtime_event("run_pending", {
+      code_sha256 = Code.plugin_profile_code_key(code),
+      run_result = S.last_run_result,
+    })
+    return true, "pending"
   end
   local change_count_after = Code.project_change_count()
   S.last_run_result = Code.build_run_result("lua", code,

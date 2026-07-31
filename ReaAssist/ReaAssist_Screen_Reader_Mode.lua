@@ -9,9 +9,9 @@ local sep = package.config:sub(1, 1)
 local title = "ReaAssist - Screen Reader Mode"
 local ext_ns = "reaassist"
 local osara_url = "https://osara.reaperaccessibility.com/snapshots/"
-local reagirl_url = "https://reaassist.app/vendor/reagirl/1.3/reagirl.lua"
+local reagirl_url = "https://reaassist.app/vendor/reagirl/1.3-ra2/reagirl.lua"
 local reagirl_sha256 =
-  "0c2ab56c38cd8613430c78f920ad8246b28de37e134a750a51d7161b10cf6fdf"
+  "d93e291ea448741dd7baaa9fd01fe11c808ff8ea528b38f1340cc29464a9bf44"
 local reagirl_min_bytes = 1000000
 local reagirl_max_bytes = 2 * 1024 * 1024
 local reagirl_timeout = 120
@@ -997,6 +997,10 @@ function ScreenReader.run_status_label(status)
       "a11y.sr.run_status.blocked_sandbox_api",
       "Code uses a blocked API",
     },
+    blocked_manual_only_plugin = {
+      "a11y.sr.run_status.blocked",
+      "Code was blocked for safety",
+    },
     errored = { "a11y.sr.run_status.errored", "Code run failed" },
     local_answer = { "a11y.sr.run_status.local_answer", "Answered locally" },
     manual_run = {
@@ -1650,6 +1654,10 @@ function ScreenReader.auto_run_block_text(payload)
   if reason == "musical_enum_validator" then
     return ScreenReader.t("auto_run.blocked.musical_enum", nil,
       "Auto-run blocked: the generated key or scale edit guessed a raw plugin value instead of verifying the named choice. Ask ReaAssist to regenerate it before running manually.")
+  end
+  if reason == "midi_record_mode_review" then
+    return ScreenReader.t("validator.midi_record_mode_review", nil,
+      "The script still assigns an output-recording I_RECMODE value to a MIDI recording workflow after an automatic correction attempt. Automatic execution is paused because that mode can record track output instead of the requested MIDI behavior. Review the code before using Run. MIDI overdub is 7 and MIDI replace is 8.")
   end
   if reason == "backup_required" then
     if ScreenReader.payload_is_typed_action(payload) then
@@ -2798,12 +2806,13 @@ function ScreenReader.feedback_comment_dialog()
   if not (reaper and reaper.GetUserInputs) then return nil, "unavailable" end
   local fb = ScreenReader.feedback_state()
   if not fb then return end
+  local input_separator = string.char(31)
   local ok, accepted, text = pcall(reaper.GetUserInputs,
     ScreenReader.t("a11y.sr.feedback_comment_dialog_title", nil,
       "Response Feedback"),
     1,
     ScreenReader.t("a11y.sr.feedback_comment_dialog_caption", nil,
-      "Feedback comment") .. ",extrawidth=300",
+      "Feedback comment") .. ",extrawidth=300,separator=" .. input_separator,
     ScreenReader.feedback_comment())
   if not ok then return nil, accepted end
   if not accepted then return false, "" end
@@ -3224,8 +3233,12 @@ function ScreenReader.send_current_prompt()
       "No prompt was entered."), true)
     return
   end
-  local ok, err = AppController.send_prompt(prompt)
+  local ok, err, handling = AppController.send_prompt(prompt)
   if not ok then
+    if handling == "surfaced" then
+      ScreenReader.handle_response_ready()
+      return
+    end
     local msg
     if err == "provider_not_configured" then
       msg = ScreenReader.t("a11y.sr.provider_not_configured", nil,
@@ -3234,9 +3247,8 @@ function ScreenReader.send_current_prompt()
       msg = ScreenReader.t("a11y.sr.send_state_attachments", nil,
         "Send unavailable: attachments are still encoding.")
     else
-      msg = ScreenReader.t("a11y.sr.send_failed", {
-        error = tostring(err or "unknown error"),
-      }, "Could not send request: " .. tostring(err or "unknown error"))
+      msg = ScreenReader.t("a11y.sr.send_failed_generic", nil,
+        "Could not send request. Please try again.")
     end
     ScreenReader.set_status(msg, true)
     return
@@ -3997,9 +4009,13 @@ function ScreenReader.undo_latest_typed_action(next_view)
 end
 
 function ScreenReader.request_lua_for_action_plan(next_view, opts)
-  local ok, msg = AppController.request_lua_for_latest_typed_action
+  local ok, msg, handling = AppController.request_lua_for_latest_typed_action
     and AppController.request_lua_for_latest_typed_action(opts or {})
   if not ok then
+    if handling == "surfaced" then
+      ScreenReader.handle_response_ready()
+      return
+    end
     ScreenReader.set_status(msg or ScreenReader.t(
       "a11y.sr.request_lua_unavailable", nil,
       "Could not request the Lua/ReaScript version."), true)
@@ -8353,8 +8369,79 @@ function ScreenReader.response_ready_window_height(opts)
     add_preview(opts.prose, 84, opts.has_code and 2 or 6)
   end
   if opts.feedback then lines = lines + 2 end
+  if opts.recovery then lines = lines + 2 end
   local height = 150 + (lines * 34)
   return math.min(600, math.max(300, height))
+end
+
+function ScreenReader.begin_recovery_request()
+  S._screen_reader_request_active = true
+  S._screen_reader_last_msg_idx = #S.display_messages
+  if reaper and reaper.time_precise then
+    local now = reaper.time_precise()
+    S._screen_reader_request_started_at = now
+    S._screen_reader_next_request_announcement_at = now + 20
+  else
+    S._screen_reader_request_started_at = nil
+    S._screen_reader_next_request_announcement_at = nil
+  end
+  ScreenReader.refresh_actions()
+  ScreenReader.set_status_after_rebuild(ScreenReader.t(
+    "a11y.sr.thinking_wait", nil,
+    "Thinking. Please wait. Responses can take up to a minute."), true)
+  ScreenReader.open_view("thinking")
+end
+
+function ScreenReader.dispatch_recovery_action(payload, action)
+  local msg = payload and payload.message or nil
+  local ok, _, handling = false, nil, nil
+  if Net and Net.dispatch_recovery then
+    ok, _, handling = Net.dispatch_recovery(msg, action)
+  end
+  if ok then
+    ScreenReader.begin_recovery_request()
+    return
+  end
+  if handling == "surfaced" then
+    ScreenReader.handle_response_ready()
+    return
+  end
+  local fallback_key = msg and msg.recovery_dispatch == "switch_failed"
+    and "message.switch_failed" or "message.resend_failed"
+  local fallback = msg and msg.recovery_dispatch == "switch_failed"
+    and "Could not switch models" or "Could not resend message"
+  ScreenReader.set_status(ScreenReader.t(fallback_key, nil, fallback), true)
+end
+
+function ScreenReader.ask_provider_for_local_answer(payload)
+  local msg = payload and payload.message or nil
+  if not (msg and msg.llm_retry_prompt and Net and Net.ask_model_instead) then
+    ScreenReader.set_status(ScreenReader.t("message.send_failed", nil,
+      "Could not send request. Please try again."), true)
+    return
+  end
+  msg.local_llm_requested = true
+  msg.local_retry_available = false
+  local ok, sent, _, send_handling = pcall(Net.ask_model_instead,
+    msg.llm_retry_prompt)
+  if not ok then
+    Log.add_error(ScreenReader.t("message.send_failed", nil,
+      "Could not send request. Please try again."), nil, nil, nil,
+      Net._send_exception_extra("screen_reader_ask_model", sent))
+    send_handling = "surfaced"
+  end
+  if not ok or sent ~= true then
+    msg.local_llm_requested = false
+    msg.local_retry_available = true
+    if send_handling == "surfaced" then
+      ScreenReader.handle_response_ready()
+    else
+      ScreenReader.set_status(ScreenReader.t("message.send_failed", nil,
+        "Could not send request. Please try again."), true)
+    end
+    return
+  end
+  ScreenReader.begin_recovery_request()
 end
 
 function ScreenReader.build_response_ready_ui()
@@ -8384,6 +8471,13 @@ function ScreenReader.build_response_ready_ui()
     and AppController.feedback_available()
     and AppController.feedback_target_available
     and AppController.feedback_target_available(payload)
+  local recovery_actions = Net and Net.recovery_actions
+    and Net.recovery_actions(payload and payload.message) or {}
+  local local_provider_available = payload and payload.local_answer
+    and payload.local_retry_available ~= false
+    and not payload.local_llm_requested
+    and payload.llm_retry_prompt and payload.llm_retry_prompt ~= ""
+    and (S.status == "idle" or S.status == "error")
   local function add_response_prose(id_prefix)
     if has_code then
       reagirl.NextLine()
@@ -8472,6 +8566,36 @@ function ScreenReader.build_response_ready_ui()
   end
 
   reagirl.NextLine()
+  for _, action in ipairs(recovery_actions) do
+    ui.ids["recovery_" .. action.id] = reagirl.Button_Add(nil, nil,
+      action.id == "switch_fallback" and 28 or 22, 5,
+      action.label,
+      action.id == "switch_fallback"
+        and ScreenReader.t("a11y.sr.recovery.switch_resend.meaning", {
+          label = payload.fallback_label or "the fallback model",
+        }, "Switches to the fallback model, saves that selection and resends the original message.")
+        or ScreenReader.t("a11y.sr.recovery.retry_same_model.meaning", nil,
+          "Resends the original message with the model recorded on this error."),
+      function()
+        ScreenReader.dispatch_recovery_action(payload, action.id)
+      end,
+      "recovery_" .. action.id)
+  end
+  if local_provider_available then
+    local active_provider = PROVIDERS and PROVIDERS.active
+      and PROVIDERS.active() or nil
+    local provider_label = active_provider
+      and tostring(active_provider.label or active_provider.id or "") or ""
+    if provider_label == "" then provider_label = "the provider" end
+    ui.ids.ask_provider = reagirl.Button_Add(nil, nil, 28, 5,
+      ScreenReader.t("local.footer.ask_provider_instead", {
+        provider = provider_label,
+      }, "Ask " .. provider_label .. " instead."),
+      ScreenReader.t("local.footer.ask_provider_tooltip", nil,
+        "Send the same prompt to the selected provider."),
+      function() ScreenReader.ask_provider_for_local_answer(payload) end,
+      "ask_provider")
+  end
   if has_code then
     if ScreenReader.payload_can_undo(payload) then
       ui.ids.undo_edit = reagirl.Button_Add(nil, nil, 14, 5,
@@ -8615,6 +8739,7 @@ function ScreenReader.build_response_ready_ui()
       has_code = has_code,
       has_prose = has_prose,
       feedback = feedback_available,
+      recovery = #recovery_actions > 0 or local_provider_available,
     }), 0, nil, nil)
   ScreenReader.refresh_actions()
   return ok == 1
@@ -11139,12 +11264,17 @@ function AppController.send_prompt(prompt)
   if not AppController.active_provider_is_usable() then
     return false, "provider_not_configured"
   end
-  local ok, err = pcall(Net.send_to_api, prompt)
-  if not ok then
-    Log.add_error("Accessible request failed: " .. tostring(err))
-    return false, tostring(err)
+  local call_ok, sent, send_err, send_handling = pcall(Net.send_to_api, prompt)
+  if not call_ok then
+    Log.add_error(AppController.t("a11y.sr.send_failed_generic", nil,
+      "Could not send request. Please try again."), nil, nil, nil,
+      Net._send_exception_extra("screen_reader_send_prompt", sent))
+    return false, "send_exception", "surfaced"
   end
-  return true
+  if sent ~= true then
+    return false, send_err or "send_failed", send_handling
+  end
+  return true, nil, nil
 end
 
 function AppController.cancel_request()
@@ -11535,6 +11665,12 @@ function AppController.latest_response_payload()
       model_label = nil,
       ctx_label = nil,
       thinking_label = nil,
+      recovery = nil,
+      recovery_kind = nil,
+      recovery_note = nil,
+      local_retry_available = false,
+      local_llm_requested = false,
+      llm_retry_prompt = nil,
     }
   end
   local code = AppController.generated_code_text(msg)
@@ -11571,6 +11707,18 @@ function AppController.latest_response_payload()
       or (msg and msg.model_label) or nil,
     ctx_label = request_msg and request_msg.ctx_label or nil,
     thinking_label = request_msg and request_msg.thinking_label or nil,
+    recovery = msg and msg.recovery or nil,
+    recovery_kind = msg and msg.recovery_kind or nil,
+    recovery_note = msg and msg.recovery_note or nil,
+    recovery_prompt = msg and msg.recovery_prompt or nil,
+    recovery_attachments = msg and msg.recovery_attachments or nil,
+    model_id = msg and msg.model_id or nil,
+    fallback_provider_id = msg and msg.fallback_provider_id or nil,
+    fallback_model_id = msg and msg.fallback_model_id or nil,
+    fallback_label = msg and msg.fallback_label or nil,
+    local_retry_available = msg and msg.local_retry_available ~= false or false,
+    local_llm_requested = msg and msg.local_llm_requested == true or false,
+    llm_retry_prompt = msg and msg.llm_retry_prompt or nil,
     tok_in = request_msg and request_msg.tok_in or nil,
     tok_out = request_msg and request_msg.tok_out or nil,
     tok_cache_read = request_msg and request_msg.tok_cache_read or nil,
@@ -11719,6 +11867,22 @@ function AppController.apply_latest_typed_action(opts)
       "a11y.sr.apply_action_plan_already_applied", nil,
       "This structured edit has already been run.")
   end
+  if AppController.request_is_active() then
+    return false, "request_active", AppController.t(
+      "a11y.sr.request_already_running", nil,
+      "A request is already running.")
+  end
+  if msg.run_status == "pending"
+      or (msg.typed_actions and msg.typed_actions.deferred_pending == true) then
+    return false, "pending", AppController.t(
+      "a11y.sr.apply_action_plan_pending", nil,
+      "Structured edit is running.")
+  end
+  if not (Code and type(Code.execute_typed_actions_from_text) == "function") then
+    return false, "executor_unavailable", AppController.t(
+      "typed_actions.error.executor_unavailable", nil,
+      "Structured edit executor is unavailable.")
+  end
   if prefs and prefs.auto_backup and not opts.skip_backup
       and Code and Code.safety_backup then
     local _, berr = Code.safety_backup()
@@ -11749,6 +11913,9 @@ function AppController.apply_latest_typed_action(opts)
   local function apply_result(done_ok, exec_result)
     local completed_result = exec_result
       and (exec_result.result or exec_result) or nil
+    local applied_now = completed_result
+      and type(completed_result.action_results) == "table"
+      and #completed_result.action_results > 0
     msg.auto_run_block_reason = nil
     msg.typed_actions = msg.typed_actions or { present = true }
     msg.typed_actions.deferred_pending = nil
@@ -11758,6 +11925,8 @@ function AppController.apply_latest_typed_action(opts)
     end
     if done_ok then
       msg.auto_ran = false
+      msg.typed_action_undo_clicked = nil
+      msg.screen_reader_undo_clicked = nil
       msg.run_status = "ran_ok"
       msg.validation_status = "passed"
       msg.validation_block_kind = nil
@@ -11778,6 +11947,10 @@ function AppController.apply_latest_typed_action(opts)
     else
       local err = exec_result and exec_result.code or "execution_failed"
       msg.auto_ran = false
+      if applied_now then
+        msg.typed_action_undo_clicked = nil
+        msg.screen_reader_undo_clicked = nil
+      end
       msg.run_status = "errored"
       msg.validation_status = "failed"
       msg.validation_block_kind = err

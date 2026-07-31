@@ -1728,6 +1728,9 @@ function UI.chat_message_cull_key(msg, i, count, avail_w, chat_font_key,
     msg.screen_reader_undo_clicked,
     msg.recovery,
     msg.recovery_used,
+    msg.recovery_consumed,
+    msg.recovery_dispatch,
+    msg.recovery_note,
     msg.recovery_prompt,
     msg.fallback_provider_id,
     msg.fallback_model_id,
@@ -3973,15 +3976,17 @@ function UI.footer_rail_v5()
   local y_mid = sy + ROW_H * 0.5
 
   -- Footer text metrics are entirely invariant per UI scale. Without this
-  -- cache, every screen's footer rail re-pushed two fonts and called
-  -- CalcTextSize four times per frame for "M", "by ", "Michael Briggs
-  -- Mastering", and the version string -- pure waste at 60 fps. Cache
+  -- cache, every screen's footer rail re-pushed fonts and called
+  -- CalcTextSize four times per frame for "M", the localized author prefix,
+  -- "Michael Briggs Mastering", and the version string. Cache
   -- key bundles the font sizes and active language font key since a UI scale
   -- or CJK font change drops new values into all of them simultaneously.
   UI._footer_metrics = UI._footer_metrics or {}
-  local footer_by_label = "by"
+  local footer_by_label = UI.t("footer.by", nil, "by") .. " "
   local footer_author_label = "Michael Briggs Mastering"
   local footer_inter_font = UI.brand_font("inter_reg") or FONT.inter_reg
+  local footer_by_font = UI.font_for_language_text(footer_by_label)
+    or footer_inter_font
   local footer_mono_font = UI.brand_font("mono_reg") or FONT.mono_reg
   local footer_font_key = UI.active_chat_font_key and UI.active_chat_font_key()
     or "inter"
@@ -3990,9 +3995,12 @@ function UI.footer_rail_v5()
   local _fm = UI._footer_metrics[_fm_key]
   if not _fm then
     _fm = {}
+    PushFont(RA.ctx, footer_by_font, TXT_SZ)
+    _, _fm.th_by = CalcTextSize(RA.ctx, "M")
+    _fm.by_w = CalcTextSize(RA.ctx, footer_by_label)
+    PopFont(RA.ctx)
     PushFont(RA.ctx, footer_inter_font, TXT_SZ)
     _, _fm.th_inter = CalcTextSize(RA.ctx, "M")
-    _fm.by_w   = CalcTextSize(RA.ctx, footer_by_label)
     _fm.name_w = CalcTextSize(RA.ctx, footer_author_label)
     PopFont(RA.ctx)
     PushFont(RA.ctx, footer_mono_font, MONO_SZ)
@@ -4002,8 +4010,10 @@ function UI.footer_rail_v5()
     UI._footer_metrics[_fm_key] = _fm
   end
   local th_inter = _fm.th_inter
+  local th_by    = _fm.th_by
   local th_mono  = _fm.th_mono
   local y_inter = math_floor(y_mid - th_inter * 0.5)
+  local y_by    = math_floor(y_mid - th_by    * 0.5)
   local y_mono  = math_floor(y_mid - th_mono  * 0.5)
   local y_icon  = math_floor(y_mid - ICON_SZ  * 0.5)
 
@@ -4012,8 +4022,8 @@ function UI.footer_rail_v5()
   local name_w = _fm.name_w
   local left_x = sx + PAD_X
 
-  PushFont(RA.ctx, footer_inter_font, TXT_SZ)
-  ImGui.ImGui_DrawList_AddText(dl, left_x, y_inter, TK.text_faint,
+  PushFont(RA.ctx, footer_by_font, TXT_SZ)
+  ImGui.ImGui_DrawList_AddText(dl, left_x, y_by, TK.text_faint,
     footer_by_label)
   PopFont(RA.ctx)
 
@@ -18281,7 +18291,22 @@ function Render.main_window()
             msg.local_llm_requested = true
             msg.local_retry_available = false
             if Net and Net.ask_model_instead then
-              Net.ask_model_instead(msg.llm_retry_prompt)
+              local call_ok, sent, _, send_handling =
+                pcall(Net.ask_model_instead, msg.llm_retry_prompt)
+              if not call_ok then
+                Log.add_error(UI.t("message.send_failed", nil,
+                  "Could not send request. Please try again."), nil, nil, nil,
+                  Net._send_exception_extra("visual_ask_model", sent))
+                send_handling = "surfaced"
+              end
+              if not call_ok or sent ~= true then
+                msg.local_llm_requested = false
+                msg.local_retry_available = true
+                if send_handling ~= "surfaced" then
+                  UI.show_float_toast(UI.t("message.send_failed", nil,
+                    "Could not send request. Please try again."), "err")
+                end
+              end
             end
           end
           if ImGui.ImGui_EndDisabled then ImGui.ImGui_EndDisabled(RA.ctx) end
@@ -18465,14 +18490,9 @@ function Render.main_window()
           end
         end
 
-        if msg.recovery == "google_model_capacity" then
-          local can_retry = msg.recovery_prompt
-            and msg.recovery_prompt ~= ""
-            and (S.status == "idle" or S.status == "error")
-          local can_switch = msg.fallback_provider_id
-            and msg.fallback_model_id
-            and (S.status == "idle" or S.status == "error")
-          if can_retry or can_switch then
+        local recovery_actions = Net and Net.recovery_actions
+          and Net.recovery_actions(msg) or {}
+        if #recovery_actions > 0 then
             ImGui.ImGui_Spacing(RA.ctx)
             PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 1)
             PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(),   RA.SC(4))
@@ -18485,84 +18505,42 @@ function Render.main_window()
             local SEC_BG  = TK.card_hover
             local SEC_HOV = UI.lerp_u32(TK.card_hover, TK.accent_ui, 0.25)
             local SEC_ACT = UI.lerp_u32(TK.card_hover, TK.accent_ui, 0.45)
-            if can_retry then
-              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        ACC_BG)
-              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), ACC_HOV)
-              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  ACC_ACT)
-              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.accent_text)
-              if ImGui.ImGui_Button(RA.ctx,
-                  UI.t("message.retry", nil, "Retry Message")
-                  .. "##google_capacity_retry_" .. i, 0, 0) then
-                local ok, err = true, nil
-                if msg.provider_id and msg.model_id then
-                  ok, err = PROVIDERS.switch_to_model(msg.provider_id,
-                    msg.model_id)
-                end
-                if ok then
-                  msg.recovery_used = true
-                  msg.recovery_action = "retry_same_model"
-                  local sent, send_err = Net.resend_saved_prompt(
-                    msg.recovery_prompt, msg.recovery_attachments)
-                  msg.recovery_dispatch = sent and "sent" or "send_failed"
-                  if not sent then
-                    UI.show_float_toast(send_err
-                      or UI.t("message.resend_failed", nil,
-                        "Could not resend message"), "err")
+            for action_idx, action in ipairs(recovery_actions) do
+              if action_idx > 1 then Dummy(RA.ctx, 1, RA.SC(6)) end
+              local primary = action.primary == true
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),
+                primary and ACC_BG or SEC_BG)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(),
+                primary and ACC_HOV or SEC_HOV)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),
+                primary and ACC_ACT or SEC_ACT)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),
+                primary and TK.accent_text or TK.text_muted)
+              if ImGui.ImGui_Button(RA.ctx, action.label
+                  .. "##recovery_" .. i .. "_" .. action.id, 0, 0) then
+                local ok, _, handling = Net.dispatch_recovery(msg, action.id)
+                if not ok then
+                  local fallback_key = msg.recovery_dispatch == "switch_failed"
+                    and "message.switch_failed" or "message.resend_failed"
+                  local fallback_text = msg.recovery_dispatch == "switch_failed"
+                    and "Could not switch models" or "Could not resend message"
+                  if handling ~= "surfaced" then
+                    UI.show_float_toast(
+                      UI.t(fallback_key, nil, fallback_text), "err")
                   end
-                else
-                  msg.recovery_action = "retry_same_model"
-                  msg.recovery_dispatch = "switch_failed"
-                  UI.show_float_toast(err
-                    or UI.t("message.switch_failed", nil,
-                      "Could not switch models"), "err")
                 end
               end
-              UI.tooltip(UI.t("message.retry_same_model.tooltip", nil,
-                "Retry the same prompt on the same Gemini model."))
-              PopStyleColor(RA.ctx, 4)
-            end
-            if can_switch then
-              if can_retry then Dummy(RA.ctx, 1, RA.SC(6)) end
-              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        SEC_BG)
-              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), SEC_HOV)
-              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  SEC_ACT)
-              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.text_muted)
-              local label = UI.t("message.switch_to", {
-                label = msg.fallback_label or "the fallback model",
-              }, "Switch to " .. (msg.fallback_label or "the fallback model"))
-                .. "##google_capacity_switch_" .. i
-              if ImGui.ImGui_Button(RA.ctx, label, 0, 0) then
-                local ok, err = PROVIDERS.switch_to_model(
-                  msg.fallback_provider_id, msg.fallback_model_id)
-                if ok then
-                  msg.recovery_used = true
-                  msg.recovery_action = "switch_fallback"
-                  local sent, send_err = Net.resend_saved_prompt(
-                    msg.recovery_prompt, msg.recovery_attachments)
-                  msg.recovery_dispatch = sent and "sent" or "send_failed"
-                  if not sent then
-                    UI.show_float_toast(send_err
-                      or UI.t("message.resend_failed", nil,
-                        "Could not resend message"), "err")
-                  end
-                else
-                  msg.recovery_action = "switch_fallback"
-                  msg.recovery_dispatch = "switch_failed"
-                  UI.show_float_toast(err
-                    or UI.t("message.switch_failed", nil,
-                      "Could not switch models"), "err")
-                end
-              end
-              UI.tooltip(UI.t("message.switch_resend.tooltip", {
-                  label = msg.fallback_label or "the fallback model",
-                },
-                "Switch Gemini to the fallback model and resend the original message."))
+              UI.tooltip(action.tooltip)
               PopStyleColor(RA.ctx, 4)
             end
             PopFont(RA.ctx)
             PopStyleColor(RA.ctx, 1) -- Border
             ImGui.ImGui_PopStyleVar(RA.ctx, 3)
-          end
+        end
+        if msg.recovery_note and msg.recovery_note ~= "" then
+          ImGui.ImGui_Spacing(RA.ctx)
+          UI.selectable_text(msg.recovery_note,
+            "##recovery_note_" .. i, avail_w - 8, COL.DETAIL)
         end
 
         -- Optional storage disclaimer (shown on welcome/key-entry messages).
@@ -18740,14 +18718,14 @@ function Render.main_window()
             ImGui.ImGui_SetCursorScreenPos(RA.ctx, ta_sx, ta_y2)
 
             local ar = msg.typed_actions.action_results
-            local can_undo = msg.auto_ran
+            local can_undo = (msg.auto_ran
               or msg.run_status == "ran_ok"
-              or (msg.run_status == "errored" and type(ar) == "table" and #ar > 0)
+              or (msg.run_status == "errored" and type(ar) == "table" and #ar > 0))
+              and not TypedActionController.message_undo_sent(msg)
             local can_apply = type(plan_text) == "string"
               and plan_text ~= ""
               and msg.typed_actions.valid == true
               and not can_undo
-              and not msg.typed_action_undo_clicked
               and not msg.typed_action_lua_requested
               and msg.run_status ~= "pending"
               and not (msg.typed_actions.deferred_pending == true)
@@ -18813,11 +18791,12 @@ function Render.main_window()
               if ImGui.ImGui_Button(RA.ctx,
                   request_lua_label .. "##ta_request_lua_" .. i,
                   request_lua_w, 0) then
-                local ok_req, req_msg = TypedActionController
+                local ok_req, req_msg, req_handling = TypedActionController
                   and TypedActionController.request_lua_for_typed_action_message
                   and TypedActionController.request_lua_for_typed_action_message(
                     msg, i, { skip_undo = true })
-                if not ok_req and UI.show_float_toast then
+                if not ok_req and req_handling ~= "surfaced"
+                    and UI.show_float_toast then
                   UI.show_float_toast(req_msg or UI.t(
                     "a11y.sr.request_lua_unavailable", nil,
                     "Could not request the Lua/ReaScript version."), "err")
@@ -18859,10 +18838,10 @@ function Render.main_window()
                   UI.t("typed_actions.undo_lua", nil,
                     "Undo and Request Lua") .. "##ta_undo_lua_" .. i,
                   0, 0) then
-                local ok_req, req_msg = TypedActionController
+                local ok_req, req_msg, req_handling = TypedActionController
                   and TypedActionController.request_lua_for_typed_action_message
                   and TypedActionController.request_lua_for_typed_action_message(msg, i)
-                if not ok_req then
+                if not ok_req and req_handling ~= "surfaced" then
                   UI.show_float_toast(req_msg or UI.t(
                     "typed_actions.no_original_prompt", nil,
                     "Could not find the original prompt"), "err")
@@ -19126,6 +19105,10 @@ function Render.main_window()
               auto_run_block_warning = msg.manual_review_reason or UI.t(
                 "auto_run.blocked.relevance", nil,
                 "Auto-run was blocked because the generated action did not clearly match the request and captured session. Review the target tracks, plugins, and REAPER actions before running it manually.")
+            elseif reason == "midi_record_mode_review" then
+              auto_run_block_warning = msg.manual_review_reason or UI.t(
+                "validator.midi_record_mode_review", nil,
+                "The script still assigns an output-recording I_RECMODE value to a MIDI recording workflow after an automatic correction attempt. Automatic execution is paused because that mode can record track output instead of the requested MIDI behavior. Review the code before using Run. MIDI overdub is 7 and MIDI replace is 8.")
             elseif reason == "plugin_profile_guard_validator"
                 or reason == "fx_param_provenance_validator" then
               auto_run_block_warning = nil
@@ -21078,7 +21061,7 @@ function Render.main_window()
             Log.line("RESOLVE",
               "user installed ReEQ from popup -- resuming")
             ImGui.ImGui_CloseCurrentPopup(RA.ctx)
-            Net.resolve_popup_resume("ReEQ")
+            Net.resolve_popup_resume("ReEQ", true)
           else
             S.resolve_popup_error = UI.t("dialog.resolve.install_failed",
               { error = err or UI.t("dialog.ceiling.unknown", nil,
@@ -21315,65 +21298,72 @@ function Render.main_window()
           end
         end
         if ident then
-          FXCache.set_preferred_type(rsv_type, ident)
-          Log.line("RESOLVE", "user chose \""
-            .. (picked_via_enter and "[enter] " or "")
-            .. (typed ~= "" and typed or ident)
-            .. "\" -> " .. ident
-            .. " (saved as preferred_types." .. rsv_type .. ")")
-          ImGui.ImGui_CloseCurrentPopup(RA.ctx)
-          -- Stash the popup type for resolve_popup_resume (which reads it
-          -- before clearing). We need to clear S.resolve_popup BEFORE the
-          -- scan kicks off so the chat status falls through from the
-          -- "Waiting for your X selection..." line to the deep-scan
-          -- progress display -- otherwise a slow deep scan (some CLAP
-          -- plugins hit ~150s on first scan) looks like the script froze.
-          local popup_snapshot = S.resolve_popup
-          S.resolve_popup        = nil
-          S.resolve_popup_text   = ""
-          S.resolve_popup_error  = nil
-          S.resolve_popup_matches     = {}
-          S.resolve_popup_sel         = 0
-          S.resolve_popup_last_filter = nil
-          S.resolve_popup_refocus     = false
-          -- Kick off a parameter scan before resuming so the follow-up turn
-          -- sees real param data for the newly-picked plugin (instead of the
-          -- LLM guessing parameter names). The rescan is 2-phase: phase 1
-          -- inserts the plugin on a hidden temp track here, phase 2 runs one
-          -- frame later from the main loop. We stash the ident in
-          -- S.resolve_pending_resume; the main loop fires resolve_popup_resume
-          -- once fx_cache_ui.rescan.active clears.
-          -- Skip the rescan when the plugin is already cache-hot. Covers
-          -- the common case of re-picking the same preferred plugin in
-          -- a later session (or the same session) and avoids re-loading
-          -- + probing a plugin we already know the params of. Double-add
-          -- has also been observed to trigger plugin-level crashes on a
-          -- handful of VST3s (Valhalla VintageVerb, specifically) that
-          -- are perfectly stable under a single load + manual use but
-          -- crash on rapid add/probe cycles. Skipping when cached avoids
-          -- the whole class of trigger. If params are stale (plugin
-          -- updated), user can force a fresh scan via FX Cache > Rescan.
-          local cached = FXCache.get_plugin(ident)
-          local is_cache_hot = cached and cached.params and #cached.params > 0
-          if is_cache_hot then
-            Log.line("RESOLVE", "skipping rescan -- " .. ident
-              .. " already cached (" .. #cached.params .. " params)")
-            S.resolve_popup = popup_snapshot
-            Net.resolve_popup_resume(ident)
-          elseif not fx_cache_ui.rescan.active and not deep_scan.active then
-            CTX.fx_cache_rescan_start(ident, false)
-            S.resolve_pending_resume = ident
-            S.resolve_pending_type   = popup_snapshot and popup_snapshot.type or nil
-            S.status = "waiting"
-            Log.line("RESOLVE", "scanning " .. ident
-              .. " before resume (so params land in cache)")
+          local save_err = FXCache.set_preferred_type(rsv_type, ident)
+          if save_err then
+            S.resolve_popup_error = tostring(save_err)
+            Log.line("RESOLVE", "preferred choice save failed for "
+              .. tostring(rsv_type) .. ": " .. tostring(save_err))
           else
-            -- A scan is already in flight; skip and resume immediately.
-            -- Rare edge case, not worth blocking the user over.
-            Log.line("RESOLVE", "scan already active -- resuming without scan")
-            -- Re-stash for resolve_popup_resume since we just cleared it.
-            S.resolve_popup = popup_snapshot
-            Net.resolve_popup_resume(ident)
+            Log.line("RESOLVE", "user chose \""
+              .. (picked_via_enter and "[enter] " or "")
+              .. (typed ~= "" and typed or ident)
+              .. "\" -> " .. ident
+              .. " (saved as preferred_types." .. rsv_type .. ")")
+            ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+            -- Stash the popup type for resolve_popup_resume (which reads it
+            -- before clearing). We need to clear S.resolve_popup BEFORE the
+            -- scan kicks off so the chat status falls through from the
+            -- "Waiting for your X selection..." line to the deep-scan
+            -- progress display -- otherwise a slow deep scan (some CLAP
+            -- plugins hit ~150s on first scan) looks like the script froze.
+            local popup_snapshot = S.resolve_popup
+            S.resolve_popup        = nil
+            S.resolve_popup_text   = ""
+            S.resolve_popup_error  = nil
+            S.resolve_popup_matches     = {}
+            S.resolve_popup_sel         = 0
+            S.resolve_popup_last_filter = nil
+            S.resolve_popup_refocus     = false
+            -- Kick off a parameter scan before resuming so the follow-up turn
+            -- sees real param data for the newly-picked plugin (instead of the
+            -- LLM guessing parameter names). The rescan is 2-phase: phase 1
+            -- inserts the plugin on a hidden temp track here, phase 2 runs one
+            -- frame later from the main loop. We stash the ident in
+            -- S.resolve_pending_resume; the main loop fires resolve_popup_resume
+            -- once fx_cache_ui.rescan.active clears.
+            -- Skip the rescan when the plugin is already cache-hot. Covers
+            -- the common case of re-picking the same preferred plugin in
+            -- a later session (or the same session) and avoids re-loading
+            -- + probing a plugin we already know the params of. Double-add
+            -- has also been observed to trigger plugin-level crashes on a
+            -- handful of VST3s (Valhalla VintageVerb, specifically) that
+            -- are perfectly stable under a single load + manual use but
+            -- crash on rapid add/probe cycles. Skipping when cached avoids
+            -- the whole class of trigger. If params are stale (plugin
+            -- updated), user can force a fresh scan via FX Cache > Rescan.
+            local cached = FXCache.get_plugin(ident)
+            local is_cache_hot = cached and cached.params and #cached.params > 0
+            if is_cache_hot then
+              Log.line("RESOLVE", "skipping rescan -- " .. ident
+                .. " already cached (" .. #cached.params .. " params)")
+              S.resolve_popup = popup_snapshot
+              Net.resolve_popup_resume(ident, true)
+            elseif not fx_cache_ui.rescan.active and not deep_scan.active then
+              CTX.fx_cache_rescan_start(ident, false)
+              S.resolve_pending_resume = ident
+              S.resolve_pending_type   = popup_snapshot and popup_snapshot.type or nil
+              S.resolve_pending_saved_choice = true
+              S.status = "waiting"
+              Log.line("RESOLVE", "scanning " .. ident
+                .. " before resume (so params land in cache)")
+            else
+              -- A scan is already in flight; skip and resume immediately.
+              -- Rare edge case, not worth blocking the user over.
+              Log.line("RESOLVE", "scan already active -- resuming without scan")
+              -- Re-stash for resolve_popup_resume since we just cleared it.
+              S.resolve_popup = popup_snapshot
+              Net.resolve_popup_resume(ident, true)
+            end
           end
         end
       end
@@ -21458,7 +21448,7 @@ function Render.main_window()
             "user fell back to " .. rsv_stock.add
             .. " for type=" .. rsv_type
             .. " this turn only (not saved; popup will fire again)")
-          Net.resolve_popup_resume(rsv_stock.ref)
+          Net.resolve_popup_resume(rsv_stock.ref, false, true)
         else
           -- No stock fallback for this type (saturation, chorus, phaser,
           -- deesser, pitch_correction, custom): full abort. Tear down the
@@ -21476,12 +21466,22 @@ function Render.main_window()
           S.pending_attachments  = nil
           S.pending_project      = nil
           S.pending_code         = nil
+          S.pending_resolves          = {}
+          S.pending_plugin_ref_names  = {}
+          S.pending_pref_plugin_types = {}
+          S.resolve_pending_resume = nil
+          S.resolve_pending_type = nil
+          S.resolve_pending_saved_choice = false
+          S.resolve_resume_guard_type = nil
           S.resolve_popup        = nil
           S.resolve_popup_text   = ""
           S.resolve_popup_error  = nil
           S.status               = "idle"
           S.refocus_prompt       = true
           S.scroll_to_bottom     = true
+          if Net._finish_probe_turn then
+            Net._finish_probe_turn(S.probe_turn, "resolve_popup_cancelled")
+          end
           Log.line("RESOLVE",
             "popup cancelled (no stock fallback for " .. rsv_type
             .. ") -- turn aborted")

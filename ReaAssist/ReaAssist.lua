@@ -482,7 +482,7 @@ InstallerGfx.STRINGS = {
     ["status.downloading_installing"] = "Descargando e instalando {name}...",
     ["status.running"] = "Iniciando instalación...",
     ["status.downloading"] = "Descargando desde GitHub...",
-    ["status.verifying"] = "Verificando suma...",
+    ["status.verifying"] = "Verificando la suma de comprobación...",
     ["status.installing"] = "Instalando en UserPlugins...",
     ["status.preparing_next"] = "Preparando la siguiente dependencia...",
     ["status.done"] = "Listo.",
@@ -522,7 +522,7 @@ InstallerGfx.STRINGS = {
     ["done.step1.multi"] =
       "1.  Cierra y reabre REAPER para cargar las nuevas extensiones.",
     ["done.step2"] =
-      "2.  Abre Actions (atajo '?').",
+      "2.  Abre la lista de acciones (atajo '?').",
     ["done.step3"] =
       "3.  Busca 'ReaAssist' y ejecútalo.",
     ["error.title"] = "Instalación fallida",
@@ -535,7 +535,7 @@ InstallerGfx.STRINGS = {
     ["error.download"] =
       "No se pudo descargar {name} desde GitHub (curl {code}).\nRevisa tu conexión e inténtalo de nuevo.",
     ["error.verify"] =
-      "El checksum SHA-256 no coincide para {asset}.\nEsperado: {expected}...\nObtenido: {actual}...",
+      "La suma de comprobación SHA-256 de {asset} no coincide.\nEsperada: {expected}...\nObtenida: {actual}...",
     ["error.install"] = "Instalación fallida: {detail}",
     ["error.empty_queue"] = "La cola de instalación estaba vacía.",
     ["error.unsafe_path"] =
@@ -3611,7 +3611,10 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.4.7", -- public release version
+  VERSION           = "1.4.8", -- public release version
+  -- Keep this assignment inside the first 8 KiB. The startup compatibility
+  -- probe reads only that prefix before deciding whether bootstrap repair is required.
+  DIAG_PAYLOAD_REVISION = 6, -- required Resources/Diag.lua compatibility revision
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -3639,6 +3642,8 @@ CFG = {
   SCREEN_READER_TEXT_SIZE_FACTORS = { 1.0, 1.2, 1.45, 1.7 },
   MAX_HISTORY_TURNS = 6,         -- sliding window size (keep even)
   HISTORY_TRIM_HYSTERESIS = 2,   -- when over cap, drop below MAX so the API prefix does not slide every turn
+  TASK_CONTEXT_MAX_BYTES = 2048, -- compact older-request requirements carried across the sliding history window
+  TASK_CONTEXT_RECENT_REQUESTS = 10, -- eligible omitted requests; lets completed tasks age out of long chats
   MAX_DISPLAY_MSGS  = 120,       -- soft cap on display_messages; oldest pruned
   MAX_CACHED_PARAMS = 80,        -- per-plugin cap in scan_fx_params / scan_fx_params_deep_body / _estimate_deep_probes (cache file size + LLM context budget)
   WIN_W             = 600,       -- initial window width (user can resize)
@@ -3648,7 +3653,7 @@ CFG = {
   CUSTOM_INSTRUCTIONS_READ_LIMIT = 100000, -- external/manual file safety cap
   POLL_THROTTLE     = 0.1,       -- min interval between poll-loop file checks
   MAX_RETRIES       = 3,         -- max auto-retries on transient overload failures
-  GEMINI_OVERLOAD_MAX_RETRIES = 1, -- fail fast on Gemini 503 high-demand windows; offer Flash 3.5 recovery instead of long hidden waits
+  GEMINI_OVERLOAD_MAX_RETRIES = 1, -- fail fast on Gemini 503 high-demand windows; offer Flash 3.6 recovery instead of long hidden waits
   OPENAI_THROTTLE_MAX_RETRIES = 4, -- OpenAI TPM/rate-limit throttles are often sub-minute token-bucket recoveries
   RETRY_DELAY_BASE  = 2,         -- base seconds for exponential backoff
   RETRY_JITTER_SECS = 1,         -- random retry jitter to avoid synchronized retry spikes
@@ -4194,6 +4199,7 @@ S = {
   track_flags_already_sent = false,
   midi_already_sent      = false,
   pref_plugins_sent        = {},   -- set of pref-plugin types sent this turn (per-type dedup)
+  pref_plugins_unresolved  = {},   -- requested pref types that returned no saved preference
   theme_already_sent     = false,
   fx_inspect_sent         = {},     -- normalized names successfully pinned this turn
   prompt_bundle_sent       = {},   -- set of prompt-bundle names sent in this session (per-name, NOT reset per turn -- bundles are system-prompt content and stay pinned until Clear)
@@ -4215,7 +4221,13 @@ S = {
   -- to call ImGui.OpenPopup (must be invoked from the render pass).
   resolve_popup          = nil,
   open_resolve_popup     = false,
+  resolve_pending_resume = nil,
   resolve_pending_type   = nil,    -- popup type stashed by typed-pick (since popup state is cleared early so the "Waiting for selection" UI clears during the scan)
+  resolve_pending_saved_choice = false,
+  resolve_resume_guard_type = nil,
+  approved_stock_fallback_refs = nil,
+  turn_only_stock_sticky_keys = {},
+  turn_only_stock_approved_refs = nil,
   resolve_popup_text     = "",    -- text-field buffer for custom plugin name
   resolve_popup_error    = nil,   -- inline error message (install-failed, no-match)
   -- Autocomplete (Phase 5d): list of top matches for the current buffer.
@@ -4238,6 +4250,8 @@ S.cmd_id = CMD_ID
 
 S._turn_retry_keys = {
   context_loop_retries = true,
+  context_reuse_hint_retries = true,
+  unsupported_context_token_retries = true,
   context_fetches_this_turn = true,
   context_fetch_events_this_turn = true,
   validator_retries_this_turn = true,
@@ -4298,6 +4312,7 @@ S._turn_retry_keys = {
   reeq_gain_validator_retries = true,
   plugin_profile_guard_validator_retries = true,
   fx_param_provenance_validator_retries = true,
+  manual_only_plugin_validator_retries = true,
   internal_output_leak_validator_retries = true,
   helper_validator_retries = true,
   void_return_validator_retries = true,
@@ -4340,10 +4355,14 @@ S._turn_retry_keys = {
   track_pan_retry_used = true,
   master_send_validator_retries = true,
   master_send_retry_used = true,
+  midi_receive_identity_validator_retries = true,
+  literal_name_word_validator_retries = true,
   midi_item_validator_retries = true,
   midi_item_retry_used = true,
   midi_input_validator_retries = true,
   midi_input_retry_used = true,
+  midi_record_mode_validator_retries = true,
+  midi_record_mode_retry_used = true,
   media_item_label_validator_retries = true,
   media_item_label_retry_used = true,
   bare_lua_retry_used = true,
@@ -4360,6 +4379,8 @@ S._turn_retry_keys = {
 
 S._turn_retry_defaults = {
   context_loop_retries = 0,
+  context_reuse_hint_retries = 0,
+  unsupported_context_token_retries = 0,
   context_fetches_this_turn = 0,
   context_fetch_events_this_turn = nil,
   validator_retries_this_turn = 0,
@@ -4418,6 +4439,7 @@ S._turn_retry_defaults = {
   reeq_gain_validator_retries = 0,
   plugin_profile_guard_validator_retries = 0,
   fx_param_provenance_validator_retries = 0,
+  manual_only_plugin_validator_retries = 0,
   internal_output_leak_validator_retries = 0,
   helper_validator_retries = 0,
   void_return_validator_retries = 0,
@@ -4460,10 +4482,14 @@ S._turn_retry_defaults = {
   track_pan_retry_used = false,
   master_send_validator_retries = 0,
   master_send_retry_used = false,
+  midi_receive_identity_validator_retries = 0,
+  literal_name_word_validator_retries = 0,
   midi_item_validator_retries = 0,
   midi_item_retry_used = false,
   midi_input_validator_retries = 0,
   midi_input_retry_used = false,
+  midi_record_mode_validator_retries = 0,
+  midi_record_mode_retry_used = false,
   media_item_label_validator_retries = 0,
   media_item_label_retry_used = false,
   bare_lua_retry_used = false,
@@ -4532,7 +4558,9 @@ if S.screen_reader_startup_intent and not S.screen_reader_mode then
   if reaper.osara_outputMessage then
     pcall(reaper.osara_outputMessage, msg)
   else
-    reaper.ShowMessageBox(msg, "ReaAssist - Screen Reader Mode", 0)
+    reaper.ShowMessageBox(msg, RA.early_t(
+      "ReaAssist - Screen Reader Mode",
+      "ReaAssist - Modo de lector de pantalla"), 0)
   end
 end
 
@@ -6327,6 +6355,9 @@ Log.exchange_summary = function(dmsg)
   if dmsg.ctx_label then
     L[#L+1] = "Context: " .. dmsg.ctx_label
   end
+  if dmsg.request_status_text then
+    L[#L+1] = "Request: " .. dmsg.request_status_text
+  end
   if dmsg.tok_in then
     L[#L+1] = string.format("Tokens: %d in / %d out",
       dmsg.tok_in, dmsg.tok_out or 0)
@@ -6598,7 +6629,7 @@ PROVIDERS = {
     console_label = "platform.openai.com/api-keys",
     billing_url   = "https://platform.openai.com/settings/organization/billing",
     billing_label = "platform.openai.com/settings/organization/billing",
-    default_model_idx = 2,  -- GPT-5.6 Luna -- best tested balance
+    default_model_idx = 1,  -- GPT-5.6 Luna -- best tested balance
     thinking_levels = {
       { label = "None",   value = "none"   },
       { label = "Low",    value = "low"    },
@@ -6612,8 +6643,8 @@ PROVIDERS = {
     -- value here is used for the preflight context-budget reserve only.
     -- All current GPT-5.x models share the same 128K ceiling.
     -- context_window: per-model context size used by the preflight token
-    -- gate. GPT-5.4 mini accepts 400K input tokens; GPT-5.6 accepts a
-    -- 922K maximum input inside its 1,050,000-token context window.
+    -- gate. GPT-5.6 accepts a 922K maximum input inside its
+    -- 1,050,000-token context window.
     -- Surcharge tier on GPT-5.6: prompts above 272K input tokens are
     -- billed at 2x input and 1.5x output for the full request. The shared
     -- long_context_* metadata makes live totals and spend preflight apply
@@ -6621,16 +6652,15 @@ PROVIDERS = {
     -- GPT-5.6 cache writes are billed at 1.25x uncached input; cache reads
     -- remain at the 90%-discounted rate. price_cache_w carries that write
     -- rate into live usage, session totals, budget checks, and Bench.
-    -- GPT-5.4 mini remains at Low (2), its established reliable default.
     -- Luna, Terra, and Sol use None (1): the launch probe passed every None
-    -- cell, while the only two runtime failures occurred at Medium.
+    -- cell, while the only two runtime failures occurred at Medium. Luna is
+    -- the default because it matched Mini's tested pass rate with lower
+    -- latency and cost.
     models = {
-      { label = "GPT-5.4 mini", chip_label = "MINI", id = "gpt-5.4-mini",
-        price_in = 0.75,  price_out = 4.50,  price_cache_r = 0.075, max_output = 128000, context_window = 400000,  default_thinking_idx = 2, price_tier = 1, descriptor = "fast" },
       { label = "GPT-5.6 Luna",  chip_label = "LUNA",  id = "gpt-5.6-luna",
-        price_in = 1.00,  price_out = 6.00,  price_cache_r = 0.10, price_cache_w = 1.25,  max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 1, descriptor = "fast" },
+        price_in = 0.20,  price_out = 1.20,  price_cache_r = 0.02, price_cache_w = 0.25,  max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 1, descriptor = "fast" },
       { label = "GPT-5.6 Terra", chip_label = "TERRA", id = "gpt-5.6-terra",
-        price_in = 2.50,  price_out = 15.00, price_cache_r = 0.25, price_cache_w = 3.125, max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 2, descriptor = "balanced" },
+        price_in = 2.00,  price_out = 12.00, price_cache_r = 0.20, price_cache_w = 2.50,  max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 2, descriptor = "balanced" },
       { label = "GPT-5.6 Sol",   chip_label = "SOL",   id = "gpt-5.6-sol",
         price_in = 5.00,  price_out = 30.00, price_cache_r = 0.50, price_cache_w = 6.25,  max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 3, descriptor = "smart" },
     },
@@ -6676,19 +6706,18 @@ PROVIDERS = {
     -- token input window.
     -- default_thinking_idx (per-model override): Flash Lite defaults
     -- to Low (2) -- Flash Lite at Minimal misses on complex routing
-    -- while Low handles both simple and complex reliably. Flash 3.5
-    -- defaults to Minimal (1): local ReaAssist probes showed Minimal
-    -- matching or beating Low for common requests while staying faster
-    -- and avoiding billed thinking tokens. Pro 3.1 inherits the provider
-    -- Medium default.
+    -- while Low handles both simple and complex reliably. Flash 3.6
+    -- defaults to Minimal (1): the ReaAssist comparison showed better
+    -- pass rate, latency, and cost than Flash 3.5 at the same level.
+    -- Pro 3.1 inherits the provider Medium default.
     -- Pro is "Medium if exposed, but not recommended" -- the long-
     -- context surcharge tier + the cost of every Pro turn make it
     -- the wrong daily-driver pick.
     models = {
       { label = "Flash Lite 3.1", chip_label = "FLASH LITE", id = "gemini-3.1-flash-lite",
         price_in = 0.25,  price_out = 1.50, price_cache_r = 0.025, is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 2 },
-      { label = "Flash 3.5",      chip_label = "FLASH",      id = "gemini-3.5-flash",
-        price_in = 1.50,  price_out = 9.00, price_cache_r = 0.15,  is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 1 },
+      { label = "Flash 3.6",      chip_label = "FLASH",      id = "gemini-3.6-flash",
+        price_in = 1.50,  price_out = 7.50, price_cache_r = 0.15,  is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 1 },
       { label = "Pro 3.1",        chip_label = "PRO",        id = "gemini-3.1-pro-preview",
         price_in = 2.00,  price_out = 12.00, price_cache_r = 0.20, paid_only = true,   max_output = 65536, context_window = 1048576 },
     },
@@ -7306,6 +7335,7 @@ function Store.cleanup_config_extstate(doc)
     "anthropic_opus_5_model_v1",
     "google_flash_35_model_v1",
     "google_flash_35_minimal_default_v1",
+    "google_flash_36_model_v1",
     "update_check_default_on_v1",
   }
   if PROVIDERS then
@@ -9757,12 +9787,10 @@ do
   end
 end
 
--- One-time OpenAI model migration for the GPT-5.6 rollout. Keep GPT-5.4
--- mini as the proven lowest-cost row, replace full GPT-5.4 with Terra (the
--- same standard input/output price tier and the best launch-bench result),
--- and move the retired nano row to Mini instead of silently increasing those
--- users to GPT-5.6 pricing. New GPT-5.6 rows load their None defaults; an
--- existing Mini thinking choice is preserved.
+-- One-time OpenAI model migration for the GPT-5.6 rollout. Full GPT-5.4 moves
+-- to Terra. Retired nano and Mini selections move to Luna, whose current price
+-- and tested performance make it the default. GPT-5.6 rows load their None
+-- defaults, so thinking choices tuned for the retired rows are discarded.
 do
   if not (S and S._factory_reset_clean_boot)
      and not Store.migration_fired("openai_gpt_56_model_v1") then
@@ -9778,30 +9806,45 @@ do
     local old_model = doc.selection.model_id_by_provider.openai
     if old_model == "gpt-5.4" then
       doc.selection.model_id_by_provider.openai = "gpt-5.6-terra"
-    elseif old_model == "gpt-5.4-nano" then
-      doc.selection.model_id_by_provider.openai = "gpt-5.4-mini"
+    elseif old_model == "gpt-5.4-nano"
+        or old_model == "gpt-5.4-mini" then
+      doc.selection.model_id_by_provider.openai = "gpt-5.6-luna"
     end
 
     doc.selection.thinking_idx_by_provider_model["openai/gpt-5.4"] = nil
     doc.selection.thinking_idx_by_provider_model["openai/gpt-5.4-nano"] = nil
+    doc.selection.thinking_idx_by_provider_model["openai/gpt-5.4-mini"] = nil
     reaper.DeleteExtState(CFG.EXT_NS,
       "thinking_idx_openai_gpt-5.4", true)
     reaper.DeleteExtState(CFG.EXT_NS,
       "thinking_idx_openai_gpt-5.4-nano", true)
+    reaper.DeleteExtState(CFG.EXT_NS,
+      "thinking_idx_openai_gpt-5.4-mini", true)
 
     -- Legacy installs may still persist only the old 1-based picker index.
-    -- Old nano (1) and Mini (2) both land on retained Mini (1); old full (3)
-    -- lands on Terra (3). Modern model-id selections above still take priority.
+    -- Old nano (1) and Mini (2) both land on Luna (1); old full (3) lands on
+    -- Terra (2). A saved model id takes priority and also handles a GPT-5.6
+    -- selection whose original rollout sentinel was never recorded.
     local old_idx = tonumber(
       reaper.GetExtState(CFG.EXT_NS, "model_idx_openai"))
-    if old_idx == 1 or old_idx == 2 then
+    local selected_model = doc.selection.model_id_by_provider.openai
+    if selected_model == "gpt-5.6-luna" then
+      reaper.SetExtState(CFG.EXT_NS, "model_idx_openai", "1", true)
+    elseif selected_model == "gpt-5.6-terra" then
+      reaper.SetExtState(CFG.EXT_NS, "model_idx_openai", "2", true)
+    elseif selected_model == "gpt-5.6-sol" then
+      reaper.SetExtState(CFG.EXT_NS, "model_idx_openai", "3", true)
+    elseif old_idx == 1 or old_idx == 2 then
       reaper.SetExtState(CFG.EXT_NS, "model_idx_openai", "1", true)
     elseif old_idx == 3 then
-      reaper.SetExtState(CFG.EXT_NS, "model_idx_openai", "3", true)
+      reaper.SetExtState(CFG.EXT_NS, "model_idx_openai", "2", true)
     end
 
     doc.migrations = type(doc.migrations) == "table" and doc.migrations or {}
     doc.migrations.openai_gpt_56_model_v1 = true
+    -- Fresh upgrades already use the three-row catalog mapping above. Mark the
+    -- follow-up migration complete so its four-row index conversion is skipped.
+    doc.migrations.openai_gpt_56_luna_default_v2 = true
     local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
     if err then
       Store._notify_write_failure("Config.json", err)
@@ -9809,14 +9852,101 @@ do
   end
 end
 
--- One-time Gemini model-id migration. Gemini 3 Flash Preview is retired in
--- favor of Gemini 3.5 Flash, so users who saved the old model id should land
--- on the new GA Flash row instead of falling through an unknown-model default.
+-- One-time OpenAI follow-up migration for installations that already ran the
+-- original four-row GPT-5.6 rollout. Mini moves to Luna None. Existing Luna,
+-- Terra, and Sol selections keep their model while their stored picker indexes
+-- shift to the new three-row catalog.
+do
+  if not (S and S._factory_reset_clean_boot)
+     and not Store.migration_fired("openai_gpt_56_luna_default_v2") then
+    local doc = Store.config_doc()
+    doc.selection = type(doc.selection) == "table" and doc.selection or {}
+    doc.selection.model_id_by_provider =
+      type(doc.selection.model_id_by_provider) == "table"
+      and doc.selection.model_id_by_provider or {}
+    doc.selection.thinking_idx_by_provider_model =
+      type(doc.selection.thinking_idx_by_provider_model) == "table"
+      and doc.selection.thinking_idx_by_provider_model or {}
+
+    local selected_model = doc.selection.model_id_by_provider.openai
+    if selected_model == "gpt-5.4-mini" then
+      selected_model = "gpt-5.6-luna"
+      doc.selection.model_id_by_provider.openai = selected_model
+    end
+    doc.selection.thinking_idx_by_provider_model["openai/gpt-5.4-mini"] = nil
+    reaper.DeleteExtState(CFG.EXT_NS,
+      "thinking_idx_openai_gpt-5.4-mini", true)
+
+    local old_idx = tonumber(
+      reaper.GetExtState(CFG.EXT_NS, "model_idx_openai"))
+    if selected_model == "gpt-5.6-luna" then
+      reaper.SetExtState(CFG.EXT_NS, "model_idx_openai", "1", true)
+    elseif selected_model == "gpt-5.6-terra" then
+      reaper.SetExtState(CFG.EXT_NS, "model_idx_openai", "2", true)
+    elseif selected_model == "gpt-5.6-sol" then
+      reaper.SetExtState(CFG.EXT_NS, "model_idx_openai", "3", true)
+    elseif old_idx == 1 or old_idx == 2 then
+      reaper.SetExtState(CFG.EXT_NS, "model_idx_openai", "1", true)
+    elseif old_idx == 3 then
+      reaper.SetExtState(CFG.EXT_NS, "model_idx_openai", "2", true)
+    elseif old_idx == 4 then
+      reaper.SetExtState(CFG.EXT_NS, "model_idx_openai", "3", true)
+    end
+
+    doc.migrations = type(doc.migrations) == "table" and doc.migrations or {}
+    doc.migrations.openai_gpt_56_luna_default_v2 = true
+    local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
+    if err then
+      Store._notify_write_failure("Config.json", err)
+    end
+  end
+end
+
+-- One-time Gemini 3.6 Flash migration. Move saved Flash 3.5 and older Flash
+-- Preview selections to the current Flash row. Clear only the retired models'
+-- thinking keys so Flash 3.6 loads its Minimal default while other Gemini
+-- selections and thinking choices remain unchanged. Mark the two older Gemini
+-- migrations at the same time so direct upgrades need one config write.
 -- Write the targeted selection patch directly instead of calling
 -- Store.save_config() here; provider/model prefs are not fully populated until
 -- MODELS.refresh below, and save_config would rebuild selection too early.
--- Drop the retired per-model thinking key so the new row loads its own
--- default rather than inheriting a preference tuned for the preview model.
+do
+  if not (S and S._factory_reset_clean_boot)
+     and not Store.migration_fired("google_flash_36_model_v1") then
+    local doc = Store.config_doc()
+    doc.selection = type(doc.selection) == "table" and doc.selection or {}
+    doc.selection.model_id_by_provider =
+      type(doc.selection.model_id_by_provider) == "table"
+      and doc.selection.model_id_by_provider or {}
+    doc.selection.thinking_idx_by_provider_model =
+      type(doc.selection.thinking_idx_by_provider_model) == "table"
+      and doc.selection.thinking_idx_by_provider_model or {}
+    local old_model = doc.selection.model_id_by_provider.google
+    if old_model == "gemini-3.5-flash"
+       or old_model == "gemini-3-flash-preview" then
+      doc.selection.model_id_by_provider.google = "gemini-3.6-flash"
+    end
+    doc.selection.thinking_idx_by_provider_model[
+      "google/gemini-3.5-flash"] = nil
+    doc.selection.thinking_idx_by_provider_model[
+      "google/gemini-3-flash-preview"] = nil
+    reaper.DeleteExtState(CFG.EXT_NS,
+      "thinking_idx_google_gemini-3.5-flash", true)
+    reaper.DeleteExtState(CFG.EXT_NS,
+      "thinking_idx_google_gemini-3-flash-preview", true)
+    doc.migrations = type(doc.migrations) == "table" and doc.migrations or {}
+    doc.migrations.google_flash_35_model_v1 = true
+    doc.migrations.google_flash_35_minimal_default_v1 = true
+    doc.migrations.google_flash_36_model_v1 = true
+    local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
+    if err then
+      Store._notify_write_failure("Config.json", err)
+    end
+  end
+end
+
+-- Legacy Gemini Preview migration kept for marker compatibility. The historic
+-- marker name remains unchanged, but any defensive run now targets Flash 3.6.
 do
   if not (S and S._factory_reset_clean_boot)
      and not Store.migration_fired("google_flash_35_model_v1") then
@@ -9830,7 +9960,7 @@ do
       and doc.selection.thinking_idx_by_provider_model or {}
     if doc.selection.model_id_by_provider.google
        == "gemini-3-flash-preview" then
-      doc.selection.model_id_by_provider.google = "gemini-3.5-flash"
+      doc.selection.model_id_by_provider.google = "gemini-3.6-flash"
     end
     doc.selection.thinking_idx_by_provider_model[
       "google/gemini-3-flash-preview"] = nil
@@ -11671,13 +11801,12 @@ UI.MODEL_TIPS = {
   ["claude-haiku-4-5"]               = "Cheapest Claude. Use High thinking. Sonnet None is faster for complex work.",
   ["claude-sonnet-5"]                = "Recommended Claude default. Use None thinking. Raise effort only if a prompt struggles.",
   ["claude-opus-5"]                  = "Premium Claude. Use None thinking. Best tested Opus 5 balance of quality, speed, and cost.",
-  ["gpt-5.4-mini"]                   = "Lowest-priced GPT. Use Low thinking. Reliable budget option; GPT-5.6 Luna None is faster at a higher price.",
   ["gpt-5.6-luna"]                   = "Recommended OpenAI default. Use None thinking. Best tested balance of quality, speed, and cost.",
   ["gpt-5.6-terra"]                  = "Higher-cost GPT-5.6. Use None thinking. Choose Terra when Luna struggles or extra quality is worth the price.",
   ["gpt-5.6-sol"]                    = "Premium GPT-5.6. Use None thinking. Flagship tier; higher effort added cost without a measured improvement.",
-  ["gemini-3.1-flash-lite"]          = "Cheapest Gemini. Use Low thinking. Budget pick; Flash 3.5 Minimal is stronger for scripts and edits.",
-  ["gemini-3.5-flash"]               = "Recommended Gemini default. Use Minimal thinking. Fast, strong, and bench-backed; try Low only if Minimal struggles.",
-  ["gemini-3.1-pro-preview"]         = "Premium Gemini preview. Use Medium thinking. Capacity has been unreliable; Flash 3.5 Minimal is safer for coding.",
+  ["gemini-3.1-flash-lite"]          = "Cheapest Gemini. Use Low thinking. Budget pick; Flash 3.6 Minimal is stronger for scripts and edits.",
+  ["gemini-3.6-flash"]               = "Recommended Gemini default. Use Minimal thinking. Best tested balance for scripts and edits; try Low only if Minimal struggles.",
+  ["gemini-3.1-pro-preview"]         = "Premium Gemini preview. Use Medium thinking. Capacity has been unreliable; Flash 3.6 Minimal is safer for coding.",
   ["deepseek-v4-flash"]              = "Cheapest combo in the lineup. Use Non-Thinking. Strong cheap pick.",
 }
 
@@ -11729,12 +11858,6 @@ UI.COMBO_HINTS = {
     },
   },
   openai = {
-    ["gpt-5.4-mini"] = {
-      none   = "Lowest cost | Very fast | Less established than Low for complex edits",
-      low    = "Recommended Level | Simple and complex | Lowest cost | Validated in ReaAssist testing",
-      medium = "Simple and complex | Higher output cost | Much slower | No measured gain over Low",
-      high   = "Not recommended | Highest Mini latency and output cost | Use Low or Terra None",
-    },
     ["gpt-5.6-luna"] = {
       none   = "Recommended Level | Simple and complex | Lowest GPT-5.6 cost | Fastest tested configuration",
       low    = "Simple and complex | Low cost | Slower than None | No measured gain over None",
@@ -11758,18 +11881,18 @@ UI.COMBO_HINTS = {
     ["gemini-3.1-flash-lite"] = {
       MINIMAL = "Simple tasks only | Cheap | Fast | Low is more reliable on complex routing",
       LOW     = "Recommended Level | Simple and complex | Cheap | Fast",
-      MEDIUM  = "Simple and complex | Cheap | Slow | Flash 3.5 Minimal is usually better value",
-      HIGH    = "Avoid complex prompts | Cheap | Very slow | Runtime-error risk; pick Flash Lite Low or Flash 3.5 Minimal",
+      MEDIUM  = "Simple and complex | Cheap | Slow | Flash 3.6 Minimal is usually better value",
+      HIGH    = "Avoid complex prompts | Cheap | Very slow | Runtime-error risk; pick Flash Lite Low or Flash 3.6 Minimal",
     },
-    ["gemini-3.5-flash"] = {
-      MINIMAL = "Recommended Level | Simple and common scripts | Fastest Flash 3.5 | Lowest cost",
-      LOW     = "Use if Minimal struggles | More thinking tokens | Slower | No bench win over Minimal",
+    ["gemini-3.6-flash"] = {
+      MINIMAL = "Recommended Level | Simple and complex | Best tested Flash balance | Fast",
+      LOW     = "Use if Minimal struggles | More thinking tokens | Slower | Minimal is the tested default",
       MEDIUM  = "Complex code/debugging only | Higher cost | Much slower | Try Minimal first, then Low",
       HIGH    = "Hard reasoning only | Highest Flash cost | Slowest | Avoid for routine ReaAssist work",
     },
     ["gemini-3.1-pro-preview"] = {
-      LOW     = "Not recommended | Capacity-prone preview | Mid-cost | Underuses Pro -- use Flash 3.5 if 503s appear",
-      MEDIUM  = "Model default | Premium reasoning when available | Capacity-prone preview | Use Flash 3.5 for coding",
+      LOW     = "Not recommended | Capacity-prone preview | Mid-cost | Underuses Pro -- use Flash 3.6 if 503s appear",
+      MEDIUM  = "Model default | Premium reasoning when available | Capacity-prone preview | Use Flash 3.6 for coding",
       HIGH    = "Not recommended | Capacity-prone preview | Mid-cost | Marginal lift over Medium",
     },
   },
@@ -12775,7 +12898,7 @@ local function load_system_prompt()
           "Could not load system prompt file:\n" .. prompt_path
           .. "\n\nPlease make sure System_Prompt.md is in the "
           .. "Resources/ subfolder next to ReaAssist.lua.",
-          "No se pudo cargar el archivo de prompt del sistema:\n" .. prompt_path
+          "No se pudo cargar el archivo de instrucciones del sistema:\n" .. prompt_path
           .. "\n\nComprueba que System_Prompt.md esté en la subcarpeta "
           .. "Resources/ junto a ReaAssist.lua."),
         "ReaAssist", 0)
@@ -14545,12 +14668,26 @@ function Log.add_error(msg, link_url, link_label, recovery, extra)
   S.status             = "error"
   S.send_time          = nil
   S.request_start_time = nil
+  if type(Net) == "table"
+     and type(Net._set_pending_request_status) == "function" then
+    Net._set_pending_request_status("failed",
+      recovery or (type(extra) == "table" and extra.recovery_kind), {
+        error_kind = type(extra) == "table" and extra.error_kind or nil,
+      })
+  end
+  local pending_request = S.pending_display_idx
+    and S.display_messages[S.pending_display_idx] or nil
   local entry = {
     role       = "assistant",
     content    = Log.scrub_url_secrets(msg),
     link_url   = link_url,
     link_label = link_label,
     recovery   = recovery,
+    request_status = pending_request
+      and type(pending_request.request_status) == "table"
+      and type(Diag) == "table"
+      and type(Diag.sanitize_request_status) == "function"
+      and Diag.sanitize_request_status(pending_request.request_status) or nil,
   }
   if recovery == "token_limit" or recovery == "google_model_capacity" then
     local p = PROVIDERS.active()
@@ -14866,6 +15003,9 @@ function Diag.build_report(opts)
       -- Include exchange details when available (context sent, tokens, cost).
       local details = {}
       if m.ctx_label   then details[#details + 1] = "context: " .. m.ctx_label end
+      if m.request_status_text then
+        details[#details + 1] = "request: " .. m.request_status_text
+      end
       if m.model_label then details[#details + 1] = "model: " .. m.model_label end
       if m.error_kind  then details[#details + 1] = "error: " .. m.error_kind end
       if m.tok_in      then details[#details + 1] = "in: " .. m.tok_in end
@@ -16610,9 +16750,10 @@ function LangPacks.label_for_code(code, base_label)
     and I18N.remote_index.languages[tostring(code or "")]
   local cfg_lang = CFG and CFG.language_for_code
     and CFG.language_for_code(code)
-  local label = tostring((type(lang) == "table" and lang.english_label)
-    or (type(cfg_lang) == "table" and (cfg_lang.label_en
-      or cfg_lang.prompt_name))
+  local label = tostring((type(lang) == "table" and (lang.native_label
+      or lang.english_label))
+    or (type(cfg_lang) == "table" and (cfg_lang.label_native
+      or cfg_lang.label_en or cfg_lang.prompt_name))
     or base_label or code or "")
   if status == "download" then
     return label
@@ -20085,19 +20226,6 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
         action_requires_lua = true,
       },
     },
-    ["gpt-5.4-mini"] = {
-      key = "mini_practical_action_defaults",
-      prompt = [[
-- Prefer a runnable script for ordinary safe ReaScript action requests. Do not ask for setup details when the request has a practical default.
-- Only when the request is solely to format a known normalized value through `TrackFX_FormatParamValueNormalized` or `TakeFX_FormatParamValueNormalized`, use the pinned core formatting contract directly and do not request `prompt_bundle:plugin`, `plugin_ref`, `fx_params`, or `fx_inspect` solely for that formatting call. If the task also identifies, adds, selects, or configures a plugin or parameter, request whatever plugin context that separate work requires.
-- For "ready to record" track creation, create the track, arm it, enable monitoring if appropriate, leave it selected, and use the current/default input unless the user asks for a specific hardware input.
-- For short MIDI idea or pattern requests, create a new appropriately named MIDI track and item by default. Do not ask which track to use unless the user explicitly says to use an existing or selected track.
-]],
-      validators = {
-        action_requires_lua = true,
-        region_requires_region_flag = true,
-      },
-    },
   },
   anthropic = {
     ["*"] = {
@@ -20794,6 +20922,75 @@ function Net.sticky_unset(key)
   end
 end
 
+-- Remove the complete pref: family containing one type. A preferred bucket can
+-- bundle several slash-separated types, so removing only pref:<type> leaves a
+-- stale compound pin behind. Return the family in its original stable order so
+-- popup resume can refill valid siblings without changing cache ordering.
+function Net.preferred_plugin_type_key(type_key)
+  if CTX and type(CTX.preferred_plugin_type_key) == "function" then
+    return CTX.preferred_plugin_type_key(type_key)
+  end
+  return tostring(type_key or ""):lower():match("^%s*(.-)%s*$") or ""
+end
+
+function Net._reset_preferred_turn_state()
+  for _, key in ipairs(S.turn_only_stock_sticky_keys or {}) do
+    Net.sticky_unset(key)
+  end
+  S.turn_only_stock_sticky_keys = {}
+  S.turn_only_stock_approved_refs = nil
+  S.pref_plugins_sent = {}
+  S.pref_plugins_unresolved = {}
+  S.resolve_resume_guard_type = nil
+  S.approved_stock_fallback_refs = nil
+end
+
+function Net.sticky_pref_family_invalidate(type_key)
+  local wanted = Net.preferred_plugin_type_key(type_key)
+  if wanted == "" then return {} end
+  local keys, family, family_seen, key_seen = {}, {}, {}, {}
+  local function capture(key)
+    if key_seen[key] then return end
+    local names = tostring(key or ""):match("^pref:(.+)$")
+    if not names then return end
+    local members, contains = {}, false
+    for name in names:gmatch("[^/]+") do
+      name = Net.preferred_plugin_type_key(name)
+      if name ~= "" then
+        members[#members+1] = name
+        if name == wanted then contains = true end
+      end
+    end
+    if not contains then return end
+    key_seen[key] = true
+    keys[#keys+1] = key
+    for _, name in ipairs(members) do
+      if not family_seen[name] then
+        family_seen[name] = true
+        family[#family+1] = name
+      end
+    end
+  end
+  for _, key in ipairs(S.sticky_context_order or {}) do capture(key) end
+  local remaining = {}
+  for key in pairs(S.sticky_context or {}) do
+    if not key_seen[key] then remaining[#remaining+1] = key end
+  end
+  table.sort(remaining)
+  for _, key in ipairs(remaining) do capture(key) end
+  for _, key in ipairs(keys) do
+    Net.sticky_unset(key)
+    if S.sticky_context_age then S.sticky_context_age[key] = nil end
+  end
+  S.pref_plugins_sent = S.pref_plugins_sent or {}
+  S.pref_plugins_unresolved = S.pref_plugins_unresolved or {}
+  for _, name in ipairs(family) do
+    S.pref_plugins_sent[name] = nil
+    S.pref_plugins_unresolved[name] = nil
+  end
+  return family
+end
+
 function Net.sticky_key_mentioned_in_prompt(key, lower_prompt)
   local ident = key and key:match("^[^:]+:(.+)$")
   if not ident or lower_prompt == "" then return false end
@@ -21367,20 +21564,37 @@ function Net.build_body(msgs, snapshot, msg_attachments)
   -- turn's body_build phase total.
   Probe.mark_phase_start(S.probe_turn, "body_build")
   local p = PROVIDERS.active()
-  local result
-  if p.id == "anthropic" then
-    result = Net.build_body_anthropic(msgs, snapshot, msg_attachments)
-  elseif p.id == "openai" or p.id == "deepseek" or p.is_custom then
-    -- Custom providers always speak the OpenAI Chat Completions schema (the
-    -- de-facto standard for OSS servers like Ollama, LM Studio, vLLM).
-    -- DeepSeek shares this branch -- it is OpenAI-compatible at the wire
-    -- level, with thinking expressed via extra_body (see the
-    -- deepseek_extra_body branch in build_body_openai itself).
-    result = Net.build_body_openai(msgs, snapshot, msg_attachments)
-  elseif p.id == "google" then
-    result = Net.build_body_google(msgs, snapshot, msg_attachments)
-  end
+  local task_row, task_original, task_meta =
+    Net.task_context_inject_for_build(msgs)
+  local ok, result = xpcall(function()
+    if p.id == "anthropic" then
+      return Net.build_body_anthropic(msgs, snapshot, msg_attachments)
+    elseif p.id == "openai" or p.id == "deepseek" or p.is_custom then
+      -- Custom providers always speak the OpenAI Chat Completions schema (the
+      -- de-facto standard for OSS servers like Ollama, LM Studio, vLLM).
+      -- DeepSeek shares this branch -- it is OpenAI-compatible at the wire
+      -- level, with thinking expressed via extra_body (see the
+      -- deepseek_extra_body branch in build_body_openai itself).
+      return Net.build_body_openai(msgs, snapshot, msg_attachments)
+    elseif p.id == "google" then
+      return Net.build_body_google(msgs, snapshot, msg_attachments)
+    end
+  end, function(err)
+    if debug and debug.traceback then return debug.traceback(err, 2) end
+    return tostring(err)
+  end)
+  if task_row then task_row.content = task_original end
   Probe.mark_phase_end(S.probe_turn, "body_build")
+  if not ok then error(result, 0) end
+  if task_meta and S.pending_display_idx
+     and S.display_messages[S.pending_display_idx] then
+    local dmsg = S.display_messages[S.pending_display_idx]
+    dmsg.task_context_bytes = task_meta.bytes
+    dmsg.task_context_source_requests = task_meta.source_requests
+    dmsg.task_context_included_requests = task_meta.included_requests
+    dmsg.task_context_shortened_requests = task_meta.shortened_requests
+    dmsg.task_context_elided_requests = task_meta.elided_requests
+  end
   -- Local Bench builds expose a request-context recorder. Keep this hook inert
   -- in shipped ReaAssist, but let the Bench attribute exact included source
   -- bytes to individual sticky buckets before Log.request attaches the body to
@@ -21401,7 +21615,11 @@ function Net.build_body(msgs, snapshot, msg_attachments)
       if base_bytes > 0 then buckets.system_prompt = base_bytes end
       record_if_included("custom_instructions", custom)
     end
-    if msgs and msgs[#msgs] then
+    if task_original then
+      -- The temporary task-context insertion can split the original row, so
+      -- contiguous body matching cannot account for it after restoration.
+      buckets.user_request = #task_original
+    elseif msgs and msgs[#msgs] then
       record_if_included("user_request", msgs[#msgs].content)
     end
     if not Net.answer_only_context_enabled() then
@@ -21419,6 +21637,9 @@ function Net.build_body(msgs, snapshot, msg_attachments)
         + #(att.b64 or att.data or "")
     end
     if attachment_bytes > 0 then buckets.attachments = attachment_bytes end
+    if task_meta and task_meta.bytes > 0 then
+      buckets.task_context = task_meta.bytes
+    end
     BenchMode.record_request_context({
       provider = p.id,
       body_bytes = #result,
@@ -21975,16 +22196,24 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
       reasoning = str_format(',"reasoning_effort":"%s"', val)
     end
   end
-  -- prompt_cache_key: stable per install identifier. OpenAI cache routing uses
-  -- this together with the exact prefix, raising hit rates on long sessions
-  -- and across REAPER restarts. GPT-5.6 requires it for improved implicit or
-  -- explicit matching. The key is opaque to us and persisted in State.json.
+  -- prompt_cache_key: stable per install identifier. Hosted OpenAI cache
+  -- routing uses this together with the exact prefix, raising hit rates on
+  -- long sessions and across REAPER restarts. GPT-5.6 requires it for improved
+  -- implicit or explicit matching. Keep the automatic field out of Custom
+  -- request bodies, where an OpenAI-compatible endpoint may reject it. A user
+  -- can still add a vendor-supported field explicitly through extra_body.
   -- Custom-provider model prefix: OpenRouter/LiteLLM/Ollama routing gateways
   -- often require a prefix ("openrouter/anthropic/...", "ollama/...") on the
   -- model id. Stored per-provider so users don't have to type it into every
   -- model row. Empty string = no-op, matching hosted OpenAI's behaviour.
   local cache_options_field = is_openai_56
     and ',"prompt_cache_options":{"mode":"explicit","ttl":"30m"}' or ""
+  local prompt_cache_key_field = ""
+  if p.id == "openai" then
+    prompt_cache_key_field = str_format(
+      ',"prompt_cache_key":"%s"',
+      JSON.escape(Net.openai_prompt_cache_key()))
+  end
   local response_format = ""
   if p.id == "openai"
      and S.pending_typed_action_expected == true
@@ -22056,10 +22285,10 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
       model_id, tbl_concat(msg_parts, ","), reasoning, extra_suffix)
   end
   return str_format(
-    '{"model":"%s"%s,"prompt_cache_key":"%s"%s%s,"messages":[%s]%s%s%s}',
-    model_id, max_tokens_field, JSON.escape(Net.openai_prompt_cache_key()),
-    cache_options_field, safety_identifier_field, tbl_concat(msg_parts, ","),
-    reasoning, response_format, extra_suffix)
+    '{"model":"%s"%s%s%s%s,"messages":[%s]%s%s%s}',
+    model_id, max_tokens_field, prompt_cache_key_field, cache_options_field,
+    safety_identifier_field, tbl_concat(msg_parts, ","), reasoning,
+    response_format, extra_suffix)
 end
 
 -- =============================================================================
@@ -22398,6 +22627,229 @@ function Net.retry_user_request_context()
     .. "\n\nLatest user reply / option selection:\n" .. current
 end
 
+-- Preserve substantive requirements that fell outside the sliding history
+-- window. The block is attached only while a provider body is serialized and
+-- is removed immediately afterward by Net.build_body. This keeps S.history
+-- byte-exact for display, caching, retries, and later turns.
+function Net._task_context_normalize(text)
+  local normalized = sanitize_utf8(tostring(text or ""))
+    :gsub("\r\n", "\n")
+    :gsub("\r", "\n")
+    :gsub("%s+", " ")
+    :gsub("^%s+", "")
+    :gsub("%s+$", "")
+  return normalized
+end
+
+function Net._task_context_utf8_prefix(text, max_bytes)
+  text = sanitize_utf8(tostring(text or ""))
+  max_bytes = math_max(0, math_floor(tonumber(max_bytes) or 0))
+  if #text <= max_bytes then return text end
+  local cut = max_bytes
+  while cut > 0 do
+    local next_byte = str_byte(text, cut + 1)
+    if not next_byte or next_byte < 128 or next_byte > 191 then break end
+    cut = cut - 1
+  end
+  return text:sub(1, cut)
+end
+
+function Net._task_context_utf8_suffix(text, max_bytes)
+  text = sanitize_utf8(tostring(text or ""))
+  max_bytes = math_max(0, math_floor(tonumber(max_bytes) or 0))
+  if #text <= max_bytes then return text end
+  local first = #text - max_bytes + 1
+  while first <= #text do
+    local first_byte = str_byte(text, first)
+    if not first_byte or first_byte < 128 or first_byte > 191 then break end
+    first = first + 1
+  end
+  return text:sub(first)
+end
+
+function Net._task_context_middle_clip(text, max_bytes)
+  text = Net._task_context_normalize(text)
+  max_bytes = math_max(0, math_floor(tonumber(max_bytes) or 0))
+  if #text <= max_bytes then return text, false end
+  local marker = " [...] "
+  if max_bytes <= #marker + 2 then
+    return Net._task_context_utf8_prefix(text, max_bytes), true
+  end
+  local usable = max_bytes - #marker
+  local left = math_floor(usable / 2)
+  local right = usable - left
+  return Net._task_context_utf8_prefix(text, left)
+    .. marker .. Net._task_context_utf8_suffix(text, right), true
+end
+
+function Net._task_context_empty_meta()
+  return {
+    bytes = 0,
+    source_requests = 0,
+    included_requests = 0,
+    shortened_requests = 0,
+    elided_requests = 0,
+  }
+end
+
+function Net._task_context_skip_current_turn()
+  if Net.answer_only_context_enabled() or S.pending_starter_card_key then
+    return true
+  end
+  return type(Code) == "table"
+    and type(Code.prompt_requests_reusable_action_script) == "function"
+    and Code.prompt_requests_reusable_action_script(
+      S.pending_orig_prompt or "") == true
+end
+
+function Net.task_context_build(msgs)
+  local meta = Net._task_context_empty_meta()
+  if type(msgs) ~= "table" or #msgs == 0
+     or type(S.history) ~= "table" or #S.history == 0
+     or Net._task_context_skip_current_turn() then
+    return nil, meta
+  end
+
+  local first_history_index
+  for i, row in ipairs(S.history) do
+    if row == msgs[1] then
+      first_history_index = i
+      break
+    end
+  end
+  if not first_history_index or first_history_index <= 1 then
+    return nil, meta
+  end
+
+  local seen = {}
+  for _, row in ipairs(msgs) do
+    if row and row.role == "user" then
+      local request = Net._task_context_normalize(
+        Net._retry_extract_user_request(row.content))
+      if request ~= "" then seen[request:lower()] = true end
+    end
+  end
+
+  local omitted = {}
+  for i = 1, first_history_index - 1 do
+    local row = S.history[i]
+    if row and row.role == "user" then
+      local request = Net._task_context_normalize(
+        Net._retry_extract_user_request(row.content))
+      local key = request:lower()
+      if Net._retry_request_is_substantive(request, "") and not seen[key] then
+        seen[key] = true
+        omitted[#omitted + 1] = request
+      end
+    end
+  end
+  meta.source_requests = #omitted
+  if #omitted == 0 then return nil, meta end
+
+  local selected = {}
+  local selected_indexes = {}
+  -- Limit eligibility to recent omitted requests so requirements from a
+  -- completed task do not remain pinned throughout an unrelated long chat.
+  local recent_limit = math_max(5,
+    math_floor(tonumber(CFG.TASK_CONTEXT_RECENT_REQUESTS) or 10))
+  local eligible_start = math_max(1, #omitted - recent_limit + 1)
+  local function select_index(index)
+    if index >= eligible_start and index <= #omitted
+       and not selected_indexes[index] then
+      selected_indexes[index] = true
+      selected[#selected + 1] = { index = index, text = omitted[index] }
+    end
+  end
+  select_index(eligible_start)
+  select_index(eligible_start + 1)
+  select_index(#omitted - 2)
+  select_index(#omitted - 1)
+  select_index(#omitted)
+  table.sort(selected, function(a, b) return a.index < b.index end)
+
+  local header = "CUMULATIVE TASK CONTEXT (older user requirements from trimmed history):\n"
+  local rule = "\nLater included user requests override conflicting older requirements."
+  local function assemble()
+    local lines = { header }
+    for _, item in ipairs(selected) do
+      lines[#lines + 1] = "- " .. item.text .. "\n"
+    end
+    local elided = #omitted - #selected
+    lines[#lines + 1] = rule
+    if elided > 0 then
+      lines[#lines + 1] = " " .. tostring(elided)
+        .. " additional unique older request"
+        .. (elided == 1 and " was" or "s were") .. " elided."
+    end
+    return tbl_concat(lines)
+  end
+
+  local max_bytes = math_max(256,
+    math_floor(tonumber(CFG.TASK_CONTEXT_MAX_BYTES) or 2048))
+  local block = assemble()
+  while #block > max_bytes and #selected > 0 do
+    local longest_index, longest_bytes = nil, 0
+    for i, item in ipairs(selected) do
+      if #item.text > longest_bytes and #item.text > 128 then
+        longest_index, longest_bytes = i, #item.text
+      end
+    end
+    if not longest_index then break end
+    local excess = #block - max_bytes
+    local target = math_max(128, longest_bytes - math_max(excess, 16))
+    local clipped, did_clip = Net._task_context_middle_clip(
+      selected[longest_index].text, target)
+    selected[longest_index].text = clipped
+    if did_clip then selected[longest_index].shortened = true end
+    block = assemble()
+  end
+  while #block > max_bytes and #selected > 1 do
+    table.remove(selected, math_floor((#selected + 1) / 2))
+    block = assemble()
+  end
+  if #block > max_bytes then
+    block = Net._task_context_utf8_prefix(block, max_bytes)
+  end
+
+  meta.bytes = #block
+  meta.included_requests = #selected
+  meta.elided_requests = #omitted - #selected
+  for _, item in ipairs(selected) do
+    if item.shortened then
+      meta.shortened_requests = meta.shortened_requests + 1
+    end
+  end
+  return block, meta
+end
+
+function Net.task_context_inject_for_build(msgs)
+  local block, meta = Net.task_context_build(msgs)
+  if not block then return nil, nil, meta end
+  local moving_row
+  for i = #msgs, 1, -1 do
+    if msgs[i] and msgs[i].role == "user" then
+      moving_row = msgs[i]
+      break
+    end
+  end
+  if not moving_row or type(moving_row.content) ~= "string" then
+    return nil, nil, Net._task_context_empty_meta()
+  end
+  local marker = "USER REQUEST:"
+  local search_at, marker_start = 1, nil
+  while true do
+    local found = moving_row.content:find(marker, search_at, true)
+    if not found then break end
+    marker_start = found
+    search_at = found + #marker
+  end
+  if not marker_start then return nil, nil, Net._task_context_empty_meta() end
+  local original = moving_row.content
+  moving_row.content = original:sub(1, marker_start - 1)
+    .. block .. "\n\n" .. original:sub(marker_start)
+  return moving_row, original, meta
+end
+
 function Net.midi_input_findings_are_arm_only(kinds)
   local only_invalid_arm = type(kinds) == "table" and #kinds > 0
   for _, kind in ipairs(kinds or {}) do
@@ -22485,6 +22937,46 @@ function Net.midi_input_block_copy(kinds, semantic_only)
       .. "blocked; use a name-matched helper-track workaround or set a "
       .. "single named input directly.",
     meta
+end
+
+function Net.midi_record_mode_retry_guidance(findings)
+  local modes = {}
+  for _, finding in ipairs(findings or {}) do
+    modes[#modes + 1] = tostring(finding.mode or "?")
+      .. " (" .. tostring(finding.mode_label or "output mode") .. ")"
+  end
+  return "Your previous Lua assigns an output-recording I_RECMODE value "
+    .. "inside a MIDI recording workflow: " .. tbl_concat(modes, ", ")
+    .. ". Use the user's requested record behavior. The exact I_RECMODE "
+    .. "values are 0=input, 1=stereo output, 2=none, 3=stereo output "
+    .. "with latency compensation, 4=MIDI output, 5=mono output, 6=mono "
+    .. "output with latency compensation, 7=MIDI overdub, and 8=MIDI "
+    .. "replace. Preserve the requested input, monitoring, arming, and "
+    .. "track targeting. Respond as if this is your FIRST reply. Do not "
+    .. "mention a retry or this internal note."
+end
+
+function Net.midi_record_mode_review_copy(findings)
+  local modes = {}
+  for _, finding in ipairs(findings or {}) do
+    modes[#modes + 1] = tostring(finding.mode or "?")
+      .. " (" .. tostring(finding.mode_label or "output mode") .. ")"
+  end
+  local fallback = "The script still assigns an output-recording I_RECMODE "
+    .. "value to a MIDI recording workflow after an automatic correction "
+    .. "attempt: " .. tbl_concat(modes, ", ") .. ". Automatic execution "
+    .. "is paused because that mode can record track output instead of the "
+    .. "requested MIDI behavior. Review the code before using Run. MIDI "
+    .. "overdub is 7 and MIDI replace is 8."
+  return "validator.midi_record_mode_review", fallback, {
+    failure_kind = "semantic_review",
+    source = "midi_record_mode_validator",
+    validation_block_kind = "midi_record_mode_review",
+    run_status = "manual_run",
+    validation_status = "manual_required",
+    error_kind = "semantic_unsafe",
+    log_source = "MIDI-RECORD-MODE-VALIDATOR",
+  }
 end
 
 -- Referential numbered option selections (for example "option 3" or a
@@ -22766,14 +23258,26 @@ end
 --     historical cap shape of `true or nil` is preserved.
 function Net._copy_retry_event(event, fallback_index, opts)
   opts = opts or {}
+  local retry_reason = type(Diag) == "table"
+    and type(Diag.normalize_retry_reason) == "function"
+    and Diag.normalize_retry_reason(event.retry_reason or event.kind
+      or event.ctx_label or opts.retry_class) or "unknown"
+  if retry_reason == "unknown" and type(Diag) == "table"
+     and type(Diag.normalize_retry_reason) == "function" then
+    retry_reason = Diag.normalize_retry_reason(opts.retry_class or "validator")
+  end
   local copy = {
     index = tonumber(event.index) or fallback_index,
-    kind = tostring(event.kind or opts.kind_default or "unspecified"),
-    ctx_label = event.ctx_label and tostring(event.ctx_label) or nil,
+    kind = retry_reason,
+    retry_reason = retry_reason,
+    context_class = event.ctx_label and type(Diag) == "table"
+      and type(Diag.normalize_context_class) == "function"
+      and Diag.normalize_context_class(event.ctx_label) or nil,
     api_calls_before_retry = tonumber(event.api_calls_before_retry) or 0,
     model_calls_before_retry = tonumber(event.model_calls_before_retry) or 0,
   }
-  if opts.retry_class then copy.retry_class = opts.retry_class end
+  copy.retry_class = opts.retry_class == "context" and "context_fetch"
+    or "validator"
   if opts.repair_boolean then
     copy.repair_request_fired = event.repair_request_fired == true
   else
@@ -22785,7 +23289,7 @@ function Net._copy_retry_event(event, fallback_index, opts)
       if finding_index > 8 then break end
       if type(finding) == "table" then
         copy.findings[#copy.findings + 1] = {
-          kind = tostring(finding.kind or "validator_finding"),
+          kind = "validator_finding",
           detail = tostring(finding.detail or ""),
           line = tonumber(finding.line),
           review_only = finding.review_only == true,
@@ -22793,6 +23297,9 @@ function Net._copy_retry_event(event, fallback_index, opts)
       end
     end
     if #copy.findings == 0 then copy.findings = nil end
+  end
+  if event.reuse_hint_only ~= nil then
+    copy.reuse_hint_only = event.reuse_hint_only == true
   end
   if type(event.candidate) == "table" then
     copy.candidate = {
@@ -22868,8 +23375,9 @@ function Net._validation_trace_for_turn(final_candidate_text)
           cache_read_tokens = tonumber(usage.cache_read_tokens) or 0,
           cache_create_tokens = tonumber(usage.cache_create_tokens) or 0,
           uncached_input_tokens = tonumber(usage.uncached_input_tokens) or 0,
-          context_label = usage.context_label
-            and tostring(usage.context_label) or nil,
+          context_class = type(Diag) == "table"
+            and type(Diag.normalize_context_class) == "function"
+            and Diag.normalize_context_class(usage.context_label) or "unknown",
         }
       end
     end
@@ -22999,6 +23507,40 @@ function Net.try_local_read_answer(user_text, attachments, probe_turn)
   if not answer then return false end
   return Net._emit_local_answer(user_text, answer, probe_turn, {
     ctx_label = "local_read",
+  })
+end
+
+function Net.try_local_session_overview(user_text, attachments, probe_turn)
+  if attachments then return false end
+  if not (I18N and I18N.lang_code and I18N.has_key and I18N.t) then
+    return false
+  end
+  if not (CTX and CTX.local_read_session_overview) then return false end
+  local language_code = I18N.lang_code()
+  if language_code ~= "en" and language_code ~= "pt" then return false end
+  local required_keys = {
+    "home.card.session_awareness.prompt",
+    "response.local_session_overview.body",
+    "response.local_session_overview.selected",
+    "local.tempo",
+    "session.unsaved",
+    "local.footer.ask_provider_instead",
+    "local.footer.ask_provider_tooltip",
+  }
+  for _, key in ipairs(required_keys) do
+    if not I18N.has_key(language_code, key) then return false end
+  end
+  local card_prompt = I18N.t("home.card.session_awareness.prompt", nil,
+    { code = language_code })
+  if tostring(user_text or "") ~= card_prompt then return false end
+  local answer = CTX.local_read_session_overview(S.pending_project, {
+    t = function(key, values)
+      return I18N.t(key, values, { code = language_code })
+    end,
+  })
+  if not answer or answer == "" then return false end
+  return Net._emit_local_answer(user_text, answer, probe_turn, {
+    ctx_label = "local_session_overview",
   })
 end
 
@@ -23208,6 +23750,38 @@ function Net.try_local_reaverb_clarification(user_text, attachments, probe_turn)
   })
 end
 
+function Net.try_local_loudness_bundle_clarification(user_text, attachments,
+    probe_turn)
+  if attachments then return false end
+  local needs = Code.prompt_needs_loudness_bundle_clarification(user_text)
+  if not needs then return false end
+  local answer = RA.t("response.local_loudness_bundle_clarification", nil,
+    "I can set an explicit track-fader dB target and a dBFS peak ceiling "
+      .. "once each has its own value. Integrated LUFS requires a loudness "
+      .. "measurement or render result; it cannot be inferred from a fader "
+      .. "setting. Which tracks and fader dB changes should I use, what dBFS "
+      .. "ceiling should I set, and should I measure the rendered result for "
+      .. "the LUFS target?")
+  return Net._emit_local_answer(user_text, answer, probe_turn, {
+    ctx_label = "local_loudness_clarification",
+  })
+end
+
+function Net.try_local_vocal_edit_clarification(user_text, attachments,
+    probe_turn)
+  if attachments then return false end
+  local needs = Code.prompt_needs_vocal_edit_clarification(user_text)
+  if not needs then return false end
+  local answer = RA.t("response.local_vocal_edit_clarification", nil,
+    "Which vocal tracks should I edit, should timing be aligned with stretch "
+      .. "markers or item edits, which pitch-correction method should I use, "
+      .. "and what measurable level target do you want, such as peak dBFS, "
+      .. "RMS, or LUFS?")
+  return Net._emit_local_answer(user_text, answer, probe_turn, {
+    ctx_label = "local_vocal_edit_clarification",
+  })
+end
+
 function Net.try_local_selected_track_rename_count_guard(user_text, attachments,
     probe_turn)
   if attachments then return false end
@@ -23242,7 +23816,21 @@ function Net.ask_model_instead(user_text)
   S.skip_local_answer_once = true
   -- Escalation keeps request bookkeeping, but reuses the original visible turn.
   S.suppress_user_display_once = true
-  return Net.send_to_api(user_text)
+  local call_ok, sent, reason, handling =
+    pcall(Net.send_to_api, user_text, { force_provider = true })
+  if not call_ok then
+    S.skip_local_answer_once = nil
+    S.suppress_user_display_once = nil
+    Log.add_error(RA.t("message.send_failed", nil,
+      "Could not send request. Please try again."), nil, nil, nil,
+      Net._send_exception_extra("ask_model_instead", sent))
+    return false, "send_exception", "surfaced"
+  end
+  if sent ~= true then
+    S.skip_local_answer_once = nil
+    S.suppress_user_display_once = nil
+  end
+  return sent, reason, handling
 end
 
 function Net._try_escalate_typed_actions(reason_code, detail)
@@ -23626,6 +24214,25 @@ function Net._debug_scrub(s)
   return Log.scrub_url_secrets(s)
 end
 
+function Net._send_exception_extra(source, err)
+  local detail = Net._debug_scrub(tostring(err or "unknown send exception"))
+  if #detail > 2048 then
+    detail = type(Diag) == "table"
+      and type(Diag._utf8_safe_prefix_bytes) == "function"
+      and Diag._utf8_safe_prefix_bytes(detail, 2048)
+      or detail:sub(1, 2048)
+  end
+  return {
+    error_kind = "runtime_error",
+    run_status = "request_error",
+    error_debug = {
+      failure_kind = "send_exception",
+      source = tostring(source or "send"),
+      detail = detail,
+    },
+  }
+end
+
 function Net._debug_endpoint(p, endpoint)
   if not endpoint or endpoint == "" then return nil end
   if p and p.is_custom then return "(custom endpoint redacted)" end
@@ -23777,6 +24384,45 @@ function Net._record_turn_budget_usage(p, raw_tok_in, raw_tok_out,
   S.turn_billable_actual_cost_usd =
     (S.turn_billable_actual_cost_usd or 0)
     + MODELS.calc_cost(m, base, cache_read, cache_create, output)
+end
+
+function Net._set_pending_request_status(state, retry_reason, opts)
+  local dmsg = S.pending_display_idx
+    and S.display_messages[S.pending_display_idx] or nil
+  if not dmsg then return nil end
+  opts = opts or {}
+  local status = type(dmsg.request_status) == "table"
+    and dmsg.request_status or { retry_count = 0, retry_max = 0 }
+  status.state = type(Diag) == "table"
+    and type(Diag.normalize_request_status) == "function"
+    and Diag.normalize_request_status(state) or tostring(state or "unknown")
+  status.retry_count = math_max(tonumber(status.retry_count) or 0,
+    tonumber(opts.retry_count) or tonumber(S.retry_count) or 0)
+  status.retry_max = math_max(tonumber(status.retry_max) or 0,
+    tonumber(opts.retry_max) or tonumber(S.retry_max) or 0)
+  if retry_reason ~= nil then
+    local reason = type(Diag) == "table"
+      and type(Diag.normalize_retry_reason) == "function"
+      and Diag.normalize_retry_reason(retry_reason) or "unknown"
+    if reason ~= "unknown" then
+      status.retry_reasons = status.retry_reasons or {}
+      local seen = false
+      for _, existing in ipairs(status.retry_reasons) do
+        if existing == reason then seen = true break end
+      end
+      if not seen then status.retry_reasons[#status.retry_reasons + 1] = reason end
+    end
+  end
+  if opts.error_kind ~= nil then
+    status.error_kind = Net.normalize_error_kind(opts.error_kind)
+  end
+  dmsg.request_status = status
+  if opts.display_text ~= nil then
+    dmsg.request_status_text = opts.display_text
+  elseif opts.clear_display_text then
+    dmsg.request_status_text = nil
+  end
+  return status
 end
 
 -- Record provider-reported usage as soon as a successful response is parsed.
@@ -26194,23 +26840,39 @@ end
   --   5. Preflight token estimation: abort with a friendly error if the request
   --      would exceed the model's context window (UTF-8-aware rough heuristic).
 --   6. Fire curl. The snapshot is injected by Net.build_body(), not stored in S.history.
-function Net.send_to_api(user_text)
+function Net.send_to_api(user_text, opts)
+  opts = type(opts) == "table" and opts or {}
   if not RA.code_runtime_loaded() then
-    return RA.fail_code_runtime_unavailable("before sending", "idle")
+    RA.fail_code_runtime_unavailable("before sending", "idle")
+    return false, "code_runtime_unavailable", "surfaced"
   end
   if not RA.context_loaded() then
-    return RA.fail_context_unavailable("before sending", "idle")
+    RA.fail_context_unavailable("before sending", "idle")
+    return false, "context_unavailable", "surfaced"
   end
+  local attachment_override = opts.attachments ~= nil
+  local send_attachments = attachment_override and opts.attachments
+    or S.attachments
+  if type(send_attachments) ~= "table" then send_attachments = {} end
   local starter_card_key =
-    Net.informational_starter_key(user_text, S.attachments)
+    Net.informational_starter_key(user_text, send_attachments)
   if not starter_card_key and CTX.prepare_plugin_profiles_for_prompt then
     local preparation_started =
       CTX.prepare_plugin_profiles_for_prompt(user_text, function()
-        local ok_resume, resume_err = pcall(Net.send_to_api, user_text)
+        local ok_resume, resumed, _, resume_handling =
+          pcall(Net.send_to_api, user_text, opts)
         if not ok_resume then
           S.status = "idle"
-          Log.add_error("Plugin profile preparation resume failed: "
-            .. tostring(resume_err))
+          Log.line("PLUGIN_PROFILE", "request resume raised an error: "
+            .. tostring(Net._debug_scrub(tostring(resumed))))
+          Log.add_error(RA.t("response.preparation_resume_failed", nil,
+            "Couldn't resume the request after preparation. Please try sending the message again."),
+            nil, nil, nil,
+            Net._send_exception_extra("plugin_profile_resume", resumed))
+        elseif resumed ~= true and resume_handling ~= "surfaced" then
+          S.status = "idle"
+          Log.add_error(RA.t("response.preparation_resume_failed", nil,
+            "Couldn't resume the request after preparation. Please try sending the message again."))
         end
       end)
     if preparation_started then
@@ -26263,6 +26925,7 @@ function Net.send_to_api(user_text)
     CTX._plugin_profile_last_trace
   S.reset_turn_retries()
   S._context_reuse_hint    = nil
+  S._unsupported_context_hint = nil
   S._irrelevant_context_hint = nil
   S._timecode_context_hint = nil
   S._jsfx_context_hint = nil
@@ -26272,7 +26935,7 @@ function Net.send_to_api(user_text)
   S.fx_chains_already_sent = false
   S.track_flags_already_sent = false
   S.midi_already_sent      = false
-  S.pref_plugins_sent      = {}
+  Net._reset_preferred_turn_state()
   S.theme_already_sent     = false
   S.fx_inspect_sent        = {}
   -- Defensive: clear any leftover deferred-assemble state from a cancelled
@@ -26295,8 +26958,8 @@ function Net.send_to_api(user_text)
   S.retry_saved_thinking_idx = nil
 
   -- Capture current attachments and clear the queue before any early returns.
-  local msg_attachments = #S.attachments > 0 and S.attachments or nil
-  S.attachments = {}
+  local msg_attachments = #send_attachments > 0 and send_attachments or nil
+  if not attachment_override then S.attachments = {} end
 
   -- Warn if PDFs are attached to a provider that doesn't support them.
   if msg_attachments and PROVIDERS.active().id == "openai" then
@@ -26317,7 +26980,8 @@ function Net.send_to_api(user_text)
 
   -- 1b. Capture the active project.
   S.pending_project = reaper.EnumProjects(-1)
-  local skip_local_answer = S.skip_local_answer_once
+  local skip_local_answer = opts.force_provider == true
+    or S.skip_local_answer_once
   S.skip_local_answer_once = nil
   if not skip_local_answer
       and Net.try_local_jsfx_capability_overview(user_text, msg_attachments,
@@ -26326,6 +26990,11 @@ function Net.send_to_api(user_text)
   end
   if not skip_local_answer
       and Net.try_local_save_actions_help(user_text, msg_attachments,
+        probe_turn) then
+    return true
+  end
+  if not skip_local_answer
+      and Net.try_local_session_overview(user_text, msg_attachments,
         probe_turn) then
     return true
   end
@@ -26339,6 +27008,16 @@ function Net.send_to_api(user_text)
   end
   if not skip_local_answer
       and Net.try_local_reaverb_clarification(user_text, msg_attachments,
+        probe_turn) then
+    return true
+  end
+  if not skip_local_answer
+      and Net.try_local_loudness_bundle_clarification(user_text,
+        msg_attachments, probe_turn) then
+    return true
+  end
+  if not skip_local_answer
+      and Net.try_local_vocal_edit_clarification(user_text, msg_attachments,
         probe_turn) then
     return true
   end
@@ -27006,6 +27685,11 @@ function Net.send_to_api(user_text)
     role           = "user",
     content        = S.pending_orig_prompt or user_text,
     ctx_label      = ctx_label,
+    request_status = {
+      state = "sent",
+      retry_count = 0,
+      retry_max = CFG.MAX_RETRIES,
+    },
     model_label    = PROVIDERS.active().label .. " " .. (function()
       -- Fall back to MODELS[1] (or "?") when MODELS[prefs.model_idx] is
       -- nil. Indexing nil here used to throw on a custom provider whose
@@ -27038,8 +27722,8 @@ function Net.send_to_api(user_text)
   --
   -- Per-model context_window on the active model wins. Built-in providers
   -- now carry context_window on each model entry where it differs from the
-  -- 200K default (Sonnet/Opus 1M, GPT-5.4 mini 400K, GPT-5.6 1.05M,
-  -- Gemini 3.x 1,048,576, DeepSeek V4 Flash 1M); a provider-level
+  -- 200K default (Sonnet/Opus 1M, GPT-5.6 1.05M, Gemini 3.x 1,048,576,
+  -- DeepSeek V4 Flash 1M); a provider-level
   -- field is honored as a fallback if a model row omits it. Custom
   -- providers always carry context_window per-model (set by the user on
   -- the API Keys page from each loaded model's actual server-side limit;
@@ -27166,7 +27850,9 @@ function Net.send_to_api(user_text)
     S.status    = "error"
     S.send_time = nil
     S.input_buf = user_text
-    if msg_attachments then S.attachments = msg_attachments end
+    if msg_attachments and not attachment_override then
+      S.attachments = msg_attachments
+    end
     -- Clear the pending_* / event-tracking state populated earlier in this
     -- function (lines ~16555-16585) so a context-needed handler firing later
     -- doesn't pick up stale snapshot/project/prompt from a turn that never
@@ -27198,7 +27884,7 @@ function Net.send_to_api(user_text)
     S.scroll_to_bottom = true
     -- Probe lifecycle: turn aborted before any HTTP traffic.
     Net._finish_probe_turn(probe_turn, "aborted")
-    return
+    return false, "token_budget_exceeded", "surfaced"
   end
 
   -- 6. Fire the API call (reuse the body already built by the preflight check).
@@ -27211,7 +27897,9 @@ function Net.send_to_api(user_text)
     S.status    = "error"
     S.send_time = nil
     S.input_buf = user_text
-    if msg_attachments then S.attachments = msg_attachments end
+    if msg_attachments and not attachment_override then
+      S.attachments = msg_attachments
+    end
     -- Clear pending_* / event-tracking state and restore last_run_error;
     -- mirrors the token-budget rollback above.
     S.pending_orig_prompt  = nil
@@ -27230,11 +27918,11 @@ function Net.send_to_api(user_text)
         "Couldn't send. Another request may still be in progress. "
         .. "Wait a moment and try again.")
     end
-    -- Probe lifecycle: turn ended at fire_curl failure. No
-    -- early-return here -- the original code falls through to the
-    -- shared scroll_to_bottom assignment, so we let it. The natural-
-    -- end Probe.end_turn below is idempotent and a no-op after this.
+    -- Probe lifecycle: turn ended at fire_curl failure. Return a real
+    -- dispatch result so recovery callers do not report a handled failure as
+    -- a successful resend.
     Net._finish_probe_turn(probe_turn, "error")
+    return false, fire_reason or "send_failed", "surfaced"
   end
 
   S.scroll_to_bottom = true
@@ -27244,19 +27932,112 @@ function Net.send_to_api(user_text)
   -- handle stays alive on S.probe_turn and is ended at the canonical
   -- "turn completed successfully" site inside Net.try_finish_curl.
   -- Error/cancel exit paths close it at their own branch points.
+  return true, "accepted"
 end
 
 function Net.resend_saved_prompt(user_text, attachments)
   user_text = tostring(user_text or ""):match("^%s*(.-)%s*$")
-  if user_text == "" then return false, "No saved message to resend." end
-  local queued = S.attachments or {}
-  S.attachments = type(attachments) == "table" and attachments or {}
-  local ok, err = pcall(Net.send_to_api, user_text)
-  S.attachments = queued
-  if not ok then
-    return false, tostring(err or "Could not resend the message.")
+  local saved_attachments = type(attachments) == "table" and #attachments > 0
+  if user_text == "" and not saved_attachments then
+    return false, "no_saved_prompt", "boundary"
   end
-  return true
+  local call_ok, sent, send_err, send_handling = pcall(Net.send_to_api, user_text, {
+    attachments = type(attachments) == "table" and attachments or {},
+    force_provider = true,
+  })
+  if not call_ok then
+    Log.add_error(RA.t("message.resend_failed", nil,
+      "Could not resend message"), nil, nil, nil,
+      Net._send_exception_extra("resend_saved_prompt", sent))
+    return false, "send_exception", "surfaced"
+  end
+  if sent ~= true then
+    return false, send_err or "send_failed", send_handling or "boundary"
+  end
+  return true, nil, nil
+end
+
+function Net.recovery_actions(msg)
+  local actions = {}
+  local has_prompt = type(msg) == "table"
+    and tostring(msg.recovery_prompt or "") ~= ""
+  local has_attachments = type(msg) == "table"
+    and type(msg.recovery_attachments) == "table"
+    and #msg.recovery_attachments > 0
+  if type(msg) ~= "table"
+      or not (has_prompt or has_attachments)
+      or (S.status ~= "idle" and S.status ~= "error") then
+    return actions
+  end
+  if msg.recovery == "google_model_capacity"
+      and msg.fallback_provider_id and msg.fallback_model_id then
+    actions[#actions + 1] = {
+      id = "switch_fallback",
+      primary = true,
+      label = RA.t("message.switch_to", {
+        label = msg.fallback_label or "the fallback model",
+      }, "Switch to " .. tostring(msg.fallback_label or "the fallback model")),
+      tooltip = RA.t("message.switch_resend.tooltip", {
+        label = msg.fallback_label or "the fallback model",
+      }, "Switch to the fallback model and resend the original message."),
+    }
+  end
+  if msg.recovery == "google_model_capacity"
+      or msg.recovery == "request_timeout" then
+    actions[#actions + 1] = {
+      id = "retry_same_model",
+      primary = #actions == 0,
+      label = RA.t("message.retry_same_model", nil, "Retry Same Model"),
+      tooltip = RA.t("message.retry_same_model.tooltip", nil,
+        "Resend the original message with the model recorded on this error."),
+    }
+  end
+  return actions
+end
+
+function Net.dispatch_recovery(msg, action)
+  if type(msg) ~= "table" then
+    return false, "recovery_unavailable", "boundary"
+  end
+  action = tostring(action or "")
+  msg.recovery_action = action
+  local provider_id, model_id, model_label
+  if action == "switch_fallback" then
+    provider_id = msg.fallback_provider_id
+    model_id = msg.fallback_model_id
+    model_label = msg.fallback_label or model_id
+  elseif action == "retry_same_model" then
+    provider_id = msg.provider_id
+    model_id = msg.model_id
+    model_label = msg.model_label or model_id
+  else
+    return false, "recovery_action_unavailable", "boundary"
+  end
+  if provider_id and model_id then
+    local switched, switch_err = PROVIDERS.switch_to_model(provider_id, model_id)
+    if not switched then
+      msg.recovery_dispatch = "switch_failed"
+      msg.recovery_dispatch_error = tostring(switch_err or "switch_failed")
+      return false, "switch_failed", "boundary"
+    end
+  end
+  local sent, send_err, send_handling = Net.resend_saved_prompt(msg.recovery_prompt,
+    msg.recovery_attachments)
+  if not sent then
+    msg.recovery_dispatch = "send_failed"
+    return false, send_err, send_handling
+  end
+  msg.recovery_dispatch = "sent"
+  msg.recovery_consumed = true
+  if msg.recovery == "google_model_capacity" then
+    msg.recovery_used = true
+  end
+  model_label = tostring(model_label or "the selected model")
+  msg.recovery_note = RA.t("message.recovery.sent_with_model", {
+    label = model_label,
+  }, "Message resent with " .. model_label .. ". " .. model_label
+    .. " is now selected for future messages.")
+  return true, nil, nil
 end
 
 -- =============================================================================
@@ -27337,10 +28118,11 @@ function Net.clear_conversation(opts)
   S.theme_already_sent         = false
   S.fx_inspect_sent            = {}
   S.plugin_ref_sent            = {}
-  S.pref_plugins_sent          = {}
+  Net._reset_preferred_turn_state()
   Net._clear_turn_budget_confirmation()
   S.reset_turn_retries()
   S._context_reuse_hint        = nil
+  S._unsupported_context_hint  = nil
   S._irrelevant_context_hint   = nil
   S._timecode_context_hint     = nil
   S._jsfx_context_hint         = nil
@@ -27369,6 +28151,10 @@ function Net.clear_conversation(opts)
   -- Resolve popup state (could be open mid-clear; close it cleanly)
   S.resolve_popup             = nil
   S.open_resolve_popup        = false
+  S.resolve_pending_resume    = nil
+  S.resolve_pending_type      = nil
+  S.resolve_pending_saved_choice = false
+  S.resolve_resume_guard_type = nil
   S.resolve_popup_text        = ""
   S.resolve_popup_error       = nil
   S.resolve_popup_matches     = {}
@@ -27922,9 +28708,10 @@ function Net.process_response_buckets(text)
   -- turn's fetch). We still need to fire a follow-up turn -- the model's
   -- response so far is just the context_needed tag, not code -- but we
   -- don't fetch anything new. The reinforcement hint tells the model the
-  -- data is already available and nudges it to write code. Weak models
-  -- (GPT-5 mini, Flash 3.5) hit this path routinely after preempt injection.
+  -- data is already available and nudges it to write code. Smaller models
+  -- can hit this path routinely after preempt injection.
   local wants_preempt_hint = false
+  local context_reuse_only = false
   local wants_prompt_bundle = false
   local pref_plugin_types = {}  -- type keys for preferred_plugins scoped bucket
   local fx_filter_names   = {}  -- plugin names to match; populated from the colon payload
@@ -28175,13 +28962,27 @@ function Net.process_response_buckets(text)
       local hkw = (tok:match("^([^:]+)") or ""):match("^%s*(.-)%s*$"):lower()
       prev_scoped_kw = continuation_scopes[hkw] and hkw or nil
     elseif prev_scoped_kw and not recognised_keywords[tok:lower()] then
-      if prev_scoped_kw ~= "resolve" or VALID_RESOLVE_TYPES[tok:lower()] then
+      if prev_scoped_kw == "resolve" then
+        local continuation_type = Net.preferred_plugin_type_key(tok)
+        if VALID_RESOLVE_TYPES[continuation_type] then
+          raw_tokens[i] = prev_scoped_kw .. ":" .. continuation_type
+        end
+      else
         raw_tokens[i] = prev_scoped_kw .. ":" .. tok
       end
       -- prev_scoped_kw stays live so "plugin_ref:A, B, C" all expand.
     else
       prev_scoped_kw = nil
     end
+  end
+
+  -- Keep the canonical request list before the already-pinned prepass. An
+  -- all-reuse response replaces raw_tokens with an empty kept table, but the
+  -- loop guard still needs the original tokens if the model repeats that
+  -- response after its one bounded reuse hint.
+  local requested_context_tokens = {}
+  for _, tok in ipairs(raw_tokens) do
+    requested_context_tokens[#requested_context_tokens + 1] = tok
   end
 
   -- Pre-pass: drop tokens whose data is already in pinned context. The
@@ -28242,8 +29043,9 @@ function Net.process_response_buckets(text)
         return (S.plugin_ref_sent and S.plugin_ref_sent[payload] == true)
           or (S.sticky_context and S.sticky_context["plugin_ref:" .. payload] ~= nil)
       elseif (kw == "preferred_plugins" or kw == "pref") and payload ~= "" then
-        return (S.pref_plugins_sent and S.pref_plugins_sent[payload] == true)
-          or (S.sticky_context and S.sticky_context["pref:" .. payload] ~= nil)
+        local pref_key = Net.preferred_plugin_type_key(payload)
+        return (S.pref_plugins_sent and S.pref_plugins_sent[pref_key] == true)
+          or (S.sticky_context and S.sticky_context["pref:" .. pref_key] ~= nil)
       elseif kw == "fx_list" and payload ~= "" then
         local fl_key = "fx_list:" .. CTX.fx_filter_key({ payload })
         return S.sticky_context and S.sticky_context[fl_key] ~= nil
@@ -28403,9 +29205,10 @@ function Net.process_response_buckets(text)
       last_scoped = nil
     elseif kw == "preferred_plugins" or kw == "pref" then
       last_scoped = kw
-      if payload ~= "" and not S.pref_plugins_sent[payload] then
+      local pref_key = Net.preferred_plugin_type_key(payload)
+      if pref_key ~= "" and not S.pref_plugins_sent[pref_key] then
         wants_pref_plugins = true
-        pref_plugin_types[#pref_plugin_types+1] = payload
+        pref_plugin_types[#pref_plugin_types+1] = pref_key
       elseif payload == "" then
         unsupported_context_tokens[#unsupported_context_tokens+1] = tok
       end
@@ -28463,7 +29266,7 @@ function Net.process_response_buckets(text)
       -- Supported types must match the set the system prompt is allowed to
       -- emit (see System_Prompt.md "resolve:Type bucket").
       last_scoped = nil
-      local rtype = payload:lower()
+      local rtype = Net.preferred_plugin_type_key(payload)
       if not VALID_RESOLVE_TYPES[rtype] then
         Log.line("RESOLVE", "unsupported type: " .. tostring(rtype))
         unsupported_context_tokens[#unsupported_context_tokens+1] = tok
@@ -28490,6 +29293,8 @@ function Net.process_response_buckets(text)
             plugin_ref_names[#plugin_ref_names+1] = exact_profile
           end
           S.pref_plugins_sent[rtype] = true
+          S.pref_plugins_unresolved = S.pref_plugins_unresolved or {}
+          S.pref_plugins_unresolved[rtype] = nil
           Log.line("RESOLVE", rtype .. " -> exact validated profile ("
             .. tostring(exact_profile) .. ")")
         else
@@ -28505,7 +29310,9 @@ function Net.process_response_buckets(text)
         local already_covered = false
         if rtype == "eq" and S.plugin_ref_sent and S.plugin_ref_sent["ReEQ"] then
           already_covered = true
-        elseif S.pref_plugins_sent and S.pref_plugins_sent[rtype] then
+        elseif S.pref_plugins_sent and S.pref_plugins_sent[rtype]
+           and not (S.pref_plugins_unresolved
+             and S.pref_plugins_unresolved[rtype]) then
           already_covered = true
         end
         if already_covered then
@@ -28553,6 +29360,8 @@ function Net.process_response_buckets(text)
             -- model already has the user's pref data, just under a
             -- plugin_ref: key instead of a pref: key).
             S.pref_plugins_sent[rtype] = true
+            S.pref_plugins_unresolved = S.pref_plugins_unresolved or {}
+            S.pref_plugins_unresolved[rtype] = nil
           elseif not S.pref_plugins_sent[rtype] then
             wants_pref_plugins = true
             pref_plugin_types[#pref_plugin_types+1] = rtype
@@ -28594,8 +29403,10 @@ function Net.process_response_buckets(text)
             local akw, apayload = at:match("^([^:]+):?(.*)$")
             akw = akw and akw:match("^%s*(.-)%s*$"):lower() or ""
             apayload = apayload and apayload:match("^%s*(.-)%s*$"):lower() or ""
-            if akw == "resolve" and apayload ~= "" and VALID_RESOLVE_TYPES[apayload] then
-              S.pending_resolves[#S.pending_resolves+1] = apayload
+            local pending_type = Net.preferred_plugin_type_key(apayload)
+            if akw == "resolve" and pending_type ~= ""
+               and VALID_RESOLVE_TYPES[pending_type] then
+              S.pending_resolves[#S.pending_resolves+1] = pending_type
             end
           end
           -- Stash any wants_* state already accumulated in this parse round
@@ -28629,8 +29440,9 @@ function Net.process_response_buckets(text)
         fx_filter_names[#fx_filter_names+1] = CTX.fx_filter_parse(name)
       elseif last_scoped == "fx_list" then
         fx_list_search[#fx_list_search+1] = name
-      elseif last_scoped == "preferred_plugins" then
-        if not S.pref_plugins_sent[name] then
+      elseif last_scoped == "preferred_plugins" or last_scoped == "pref" then
+        name = Net.preferred_plugin_type_key(name)
+        if name ~= "" and not S.pref_plugins_sent[name] then
           wants_pref_plugins = true
           pref_plugin_types[#pref_plugin_types+1] = name
         end
@@ -28687,13 +29499,16 @@ function Net.process_response_buckets(text)
   -- the per-turn model-call caps. A repeated malformed request still reaches
   -- the loop error below without another retry.
   if #unsupported_context_tokens > 0
-     and (S.context_loop_retries or 0) < 1 then
-    S.context_loop_retries = (S.context_loop_retries or 0) + 1
+     and (S.unsupported_context_token_retries or 0) < 1 then
+    S.unsupported_context_token_retries =
+      (S.unsupported_context_token_retries or 0) + 1
     S._unsupported_context_hint = unsupported_context_tokens
     wants_preempt_hint = true
     Log.line("CONTEXT_LOOP",
       "unsupported context token; firing one corrective follow-up: "
       .. tbl_concat(unsupported_context_tokens, ", "))
+  elseif #unsupported_context_tokens > 0 then
+    S.context_loop_retries = math.max(S.context_loop_retries or 0, 1)
   end
 
   -- If fx_list was requested (now or earlier this turn), skip fx_params -
@@ -28764,6 +29579,39 @@ function Net.process_response_buckets(text)
         S._midi_docs_suppressed_hint = tbl_concat(suppressed, ", ")
         wants_preempt_hint = true
       end
+    end
+  end
+
+
+  -- A reuse hint is a provider follow-up without a new context bucket. Allow
+  -- one such round through the existing context-loop recovery budget. If the
+  -- model repeats another reuse-only request in the same turn, skip another
+  -- provider call and let the terminal context-loop path below surface the
+  -- bounded error. Other wants_preempt_hint callers, including malformed-token
+  -- corrections, keep their existing behavior.
+  local has_real_context_request = wants_docs or wants_docs_extended
+    or wants_docs_section or wants_session or wants_tracks or wants_fx_params
+    or wants_plugin_ref or wants_fx_list or wants_fx_chains
+    or wants_track_flags or wants_midi or wants_recent_reaper_changes
+    or wants_pref_plugins or wants_theme or wants_fx_inspect
+    or wants_prompt_bundle or #bogus_docs_sections > 0
+  local reuse_hint_only = wants_preempt_hint
+    and type(S._context_reuse_hint) == "table"
+    and #S._context_reuse_hint > 0
+    and not has_real_context_request
+  if reuse_hint_only then
+    context_reuse_only = true
+    if (S.context_reuse_hint_retries or 0) < 1 then
+      S.context_reuse_hint_retries =
+        (S.context_reuse_hint_retries or 0) + 1
+      S.context_loop_retries = math.max(S.context_loop_retries or 0, 1)
+      Log.line("CONTEXT_LOOP",
+        "allowing one already-provided context reuse hint")
+    else
+      Log.line("CONTEXT_LOOP",
+        "repeated already-provided context reuse hint; stopping before another provider call")
+      wants_preempt_hint = false
+      S._context_reuse_hint = nil
     end
   end
 
@@ -28972,8 +29820,23 @@ function Net.process_response_buckets(text)
       end
     end
     if wants_plugin_ref then
-      local rp_content, rp_err = CTX.plugin_ref(plugin_ref_names)
-      if rp_content then
+      local approved_stock_refs = S.approved_stock_fallback_refs
+      local stock_names, regular_names = {}, {}
+      for _, nm in ipairs(plugin_ref_names) do
+        local key = tostring(nm or ""):lower():match("^%s*(.-)%s*$") or ""
+        key = key:gsub("%s+", " ")
+        if approved_stock_refs and approved_stock_refs[key] then
+          stock_names[#stock_names+1] = nm
+        else
+          regular_names[#regular_names+1] = nm
+        end
+      end
+      local rp_count, rp_err = 0, nil
+      local function pin_plugin_refs(names, options, turn_only)
+        if #names == 0 then return false end
+        local content, err = CTX.plugin_ref(names, options)
+        if not content then rp_err = rp_err or err return false end
+        rp_count = rp_count + 1
         -- Mark each injected plugin name as sent this turn so later round-
         -- trips within the same user turn don't re-inject the same content,
         -- while still allowing plugin_ref for OTHER plugin names to fire.
@@ -28984,13 +29847,37 @@ function Net.process_response_buckets(text)
         -- used to lock the name out for the rest of the turn, so the next
         -- intra-turn retry would re-emit <context_needed>plugin_ref:Foo
         -- and get nothing back.
-        for _, nm in ipairs(plugin_ref_names) do S.plugin_ref_sent[nm] = true end
+        for _, nm in ipairs(names) do S.plugin_ref_sent[nm] = true end
         -- Sticky only -- emitted by Net.sticky_text() as the pinned message
         -- on the follow-up build.
-        local rp_key = #plugin_ref_names > 0
-          and ("plugin_ref:" .. tbl_concat(plugin_ref_names, "/")) or "plugin_ref"
-        Net.sticky_set(rp_key, rp_content, "context_needed")
+        local rp_key = "plugin_ref:" .. tbl_concat(names, "/")
+        Net.sticky_set(rp_key, content, "context_needed")
         fetched_to_sticky[#fetched_to_sticky+1] = rp_key
+        if turn_only then
+          S.turn_only_stock_sticky_keys = S.turn_only_stock_sticky_keys or {}
+          local recorded = false
+          for _, key in ipairs(S.turn_only_stock_sticky_keys) do
+            if key == rp_key then recorded = true break end
+          end
+          if not recorded then
+            S.turn_only_stock_sticky_keys[#S.turn_only_stock_sticky_keys+1] =
+              rp_key
+          end
+        end
+        return true
+      end
+      pin_plugin_refs(regular_names, nil, false)
+      for _, nm in ipairs(stock_names) do
+        pin_plugin_refs({ nm }, {
+          approved_stock_refs = approved_stock_refs,
+        }, true)
+      end
+      if #stock_names > 0 then
+        S.turn_only_stock_approved_refs = approved_stock_refs
+      end
+      S.approved_stock_fallback_refs = nil
+      if rp_err then Log.add_error(rp_err) end
+      if rp_count > 0 then
         -- Co-pin plugin bundle + docs core (same rationale as the preempt
         -- path). docs core matters here too: plugin_ref payload is rich
         -- enough that the model often skips emitting <context_needed>docs
@@ -29013,7 +29900,6 @@ function Net.process_response_buckets(text)
           Net.copin_plugin_helpers(fetched_to_sticky)
         end
       else
-        Log.add_error(rp_err)
         wants_plugin_ref = false  -- clear flag so ctx_label is not updated below
       end
     end
@@ -29159,16 +30045,57 @@ function Net.process_response_buckets(text)
     end
     -- Preferred plugins: load only the requested type sections.
     if wants_pref_plugins then
-      local pp_content, pp_err = CTX.preferred_plugins(pref_plugin_types)
+      local pp_content, pp_err, pp_state =
+        CTX.preferred_plugins(pref_plugin_types)
       if pp_content then
-        -- Mark each injected type as sent this turn (per-type dedup, mirrors
-        -- the plugin_ref_sent pattern). Was a coarse boolean that blocked
-        -- preferred_plugins for ANY type once one had been sent in the turn
-        -- -- caused the resolve:compressor follow-up to silently no-op
-        -- after preferred_plugins:eq had fired in the same turn. Marked
-        -- only on fetch success so an intra-turn retry can re-fetch a type
-        -- that failed the first time.
-        for _, t in ipairs(pref_plugin_types) do S.pref_plugins_sent[t] = true end
+        S.pref_plugins_unresolved = S.pref_plugins_unresolved or {}
+        local resolved, unresolved = {}, {}
+        if pp_state then
+          for _, t in ipairs(pp_state.resolved_types or {}) do
+            resolved[t] = true
+          end
+          for _, t in ipairs(pp_state.unresolved_types or {}) do
+            unresolved[t] = true
+          end
+        else
+          -- Compatibility with a context provider that predates the optional
+          -- preferred-state result. Successful legacy content is resolved.
+          for _, t in ipairs(pref_plugin_types) do resolved[t] = true end
+        end
+        for t in pairs(unresolved) do
+          S.pref_plugins_sent[t] = nil
+          S.pref_plugins_unresolved[t] = true
+        end
+        for t in pairs(resolved) do
+          S.pref_plugins_sent[t] = true
+          S.pref_plugins_unresolved[t] = nil
+        end
+        local guard_type = S.resolve_resume_guard_type
+        if guard_type and unresolved[guard_type] then
+          S.resolve_resume_guard_type = nil
+          S.resolve_popup = nil
+          S.open_resolve_popup = false
+          S.pending_resolves = {}
+          S.pending_plugin_ref_names = {}
+          S.pending_pref_plugin_types = {}
+          Net._restore_pending_user_history()
+          local fallback = "Couldn't resume the request after your selection. "
+            .. "Please try sending the message again."
+          Log.add_error((RA and RA.t and RA.t(
+            "response.resume_failed", nil, fallback)) or fallback,
+            nil, nil, nil, {
+              error_kind = "context_loop",
+              error_debug = {
+                failure_kind = "resolve_resume_failed",
+                source = "preferred_plugins",
+                matched_condition = "selected_type_still_unresolved",
+              },
+            })
+          S.status = "idle"
+          return true
+        elseif guard_type and resolved[guard_type] then
+          S.resolve_resume_guard_type = nil
+        end
         -- Sticky only -- pinned-slot emission on follow-up build.
         local pp_key = #pref_plugin_types > 0
           and ("pref:" .. tbl_concat(pref_plugin_types, "/")) or "pref_plugins"
@@ -29297,6 +30224,10 @@ function Net.process_response_buckets(text)
           -- (just without enum/range annotations).
           Log.line("FX_PARAMS",
             "silent auto-inspect failed (continuing): " .. err)
+        elseif err:find("^MANUAL%-ONLY PLUGIN GUIDANCE:") then
+          history_content = history_content .. err .. "\n\n"
+          Log.line("FX_INSPECT",
+            "returned manual-only plug-in guidance without loading the FX")
         else
           history_content = history_content .. "FX INSPECT ERROR: " .. err .. "\n\n"
         end
@@ -29735,6 +30666,7 @@ function Net.process_response_buckets(text)
       Net.fire_validator_retry({
         kind = "context_needed",
         count_as_validator = false,
+        reuse_hint_only = context_reuse_only,
         history_content = history_content,
         ctx_label = bucket_str,
         failure_message = (RA and RA.t and RA.t(
@@ -29822,7 +30754,9 @@ function Net.process_response_buckets(text)
   -- sticky sent-set was the blocker (clear it + retry with a "use it" hint);
   -- otherwise surface a clean error with recovery buttons instead of
   -- dumping the raw tag as the assistant reply.
-  if #raw_tokens > 0 then
+  local loop_tokens = #raw_tokens > 0 and raw_tokens
+    or requested_context_tokens
+  if #loop_tokens > 0 then
     -- "had_sticky" -> the previous turn or earlier in this turn injected
     -- some piece of pinned data, so the model's re-request is plausibly
     -- about that already-pinned data and worth one retry with a hint.
@@ -29873,8 +30807,12 @@ function Net.process_response_buckets(text)
       S.midi_already_sent            = false
       S.theme_already_sent           = false
       S.fx_inspect_sent              = {}
+      if S.turn_only_stock_approved_refs
+          and #(S.turn_only_stock_sticky_keys or {}) > 0 then
+        S.approved_stock_fallback_refs = S.turn_only_stock_approved_refs
+      end
       S._context_reuse_hint = S._context_reuse_hint or {}
-      for _, t in ipairs(raw_tokens) do
+      for _, t in ipairs(loop_tokens) do
         S._context_reuse_hint[#S._context_reuse_hint+1] = t
       end
       return Net.process_response_buckets(text)
@@ -29930,7 +30868,8 @@ local function _is_in_plugin_ref(name)
   return Code.is_curated_plugin and Code.is_curated_plugin(name) or false
 end
 
-function Net.resolve_popup_resume(identifier)
+function Net.resolve_popup_resume(identifier, saved_preference,
+    explicit_stock_fallback)
   if not RA.code_runtime_loaded() then
     return RA.fail_code_runtime_unavailable("before resuming plugin resolution", "idle")
   end
@@ -29947,10 +30886,19 @@ function Net.resolve_popup_resume(identifier)
   local resolve_type    = (S.resolve_popup and S.resolve_popup.type)
                        or S.resolve_pending_type
                        or nil
+  if resolve_type then
+    resolve_type = Net.preferred_plugin_type_key(resolve_type)
+    if resolve_type == "" then resolve_type = nil end
+  end
   S.resolve_pending_type = nil
   local pending         = S.pending_resolves or {}
   local pending_pr      = S.pending_plugin_ref_names or {}
   local pending_pp      = S.pending_pref_plugin_types or {}
+  local saved_choice    = saved_preference == true
+  local unresolved_before = {}
+  for tkey, unresolved in pairs(S.pref_plugins_unresolved or {}) do
+    if unresolved then unresolved_before[tkey] = true end
+  end
   S.pending_resolves          = {}
   S.pending_plugin_ref_names  = {}
   S.pending_pref_plugin_types = {}
@@ -29965,9 +30913,46 @@ function Net.resolve_popup_resume(identifier)
   S.resolve_popup_last_filter = nil
   S.resolve_popup_refocus     = false
   S.status               = "waiting"
-  -- Clear the per-name sent set so the synthesized plugin_ref actually injects
-  -- (a previous turn in this session may have sent plugin_ref for other names).
-  S.plugin_ref_sent = {}
+  -- Clear only names this resume must re-emit. Unrelated validated references
+  -- stay deduped and retain their stable cache position.
+  S.plugin_ref_sent = S.plugin_ref_sent or {}
+  for _, name in ipairs(pending_pr) do S.plugin_ref_sent[name] = nil end
+  local approved_stock = nil
+  if explicit_stock_fallback == true and resolve_type
+      and Code.get_stock_fallback then
+    local candidate = Code.get_stock_fallback(resolve_type)
+    if candidate and tostring(candidate.ref or "") == tostring(identifier or "") then
+      approved_stock = candidate
+    end
+  end
+  local picked_is_curated = _is_in_plugin_ref(identifier)
+    or approved_stock ~= nil
+  if picked_is_curated then S.plugin_ref_sent[identifier] = nil end
+  if approved_stock then
+    local approved_key = tostring(identifier or ""):lower()
+      :match("^%s*(.-)%s*$") or ""
+    approved_key = approved_key:gsub("%s+", " ")
+    S.approved_stock_fallback_refs = {
+      [approved_key] = {
+        add = approved_stock.add,
+        identifier = approved_stock.add,
+        type = resolve_type,
+      },
+    }
+    S.pref_plugins_sent[resolve_type] = true
+    S.pref_plugins_unresolved = S.pref_plugins_unresolved or {}
+    S.pref_plugins_unresolved[resolve_type] = nil
+  else
+    S.approved_stock_fallback_refs = nil
+  end
+
+  local family = {}
+  if saved_choice and resolve_type then
+    family = Net.sticky_pref_family_invalidate(resolve_type)
+    S.resolve_resume_guard_type = resolve_type
+  else
+    S.resolve_resume_guard_type = nil
+  end
 
   -- Build the synthesized tag. For the picked plugin:
   --   * Fingerprint-validated bundled profile (e.g. ReaEQ/ReaComp/ReEQ) ->
@@ -29986,16 +30971,33 @@ function Net.resolve_popup_resume(identifier)
   for _, n in ipairs(pending_pr) do
     synth[#synth+1] = "plugin_ref:" .. n
   end
-  for _, t in ipairs(pending_pp) do
-    synth[#synth+1] = "preferred_plugins:" .. t
-  end
-  -- 2) The bucket for the plugin the user just picked in THIS popup.
-  if resolve_type and not _is_in_plugin_ref(identifier) then
-    synth[#synth+1] = "preferred_plugins:" .. resolve_type
-  else
+  -- 2) A validated selected profile goes before preferred-family refills.
+  if picked_is_curated then
     synth[#synth+1] = "plugin_ref:" .. identifier
   end
-  -- 3) Any resolve:Type tokens that were dropped when this popup bailed the
+  -- 3) Refill pending preferred buckets and every still-valid member of a
+  -- compound pref: family in stable order. Skip unresolved siblings so one
+  -- saved choice cannot open a second chooser for another type.
+  local refill_seen = {}
+  local function add_refill(tkey)
+    tkey = Net.preferred_plugin_type_key(tkey)
+    if tkey ~= "" and not refill_seen[tkey] then
+      refill_seen[tkey] = true
+      synth[#synth+1] = "preferred_plugins:" .. tkey
+    end
+  end
+  for _, tkey in ipairs(pending_pp) do add_refill(tkey) end
+  if saved_choice then
+    for _, tkey in ipairs(family) do
+      if tkey == resolve_type or not unresolved_before[tkey] then
+        add_refill(tkey)
+      end
+    end
+    add_refill(resolve_type)
+  elseif not picked_is_curated and resolve_type then
+    add_refill(resolve_type)
+  end
+  -- 4) Any resolve:Type tokens that were dropped when this popup bailed the
   -- loop. They go LAST so any popup they trigger re-stashes (1) and (2)'s
   -- buckets correctly via the bail-stash code in the resolve branch.
   for _, ptype in ipairs(pending) do
@@ -30014,6 +31016,7 @@ function Net.resolve_popup_resume(identifier)
       .. "Please try sending the message again."
     Log.add_error((RA and RA.t and RA.t(
       "response.resume_failed", nil, fallback)) or fallback)
+    S.resolve_resume_guard_type = nil
   end
 end
 
@@ -30035,6 +31038,24 @@ end
 -- Must stay above the curl --max-time set in Net.fire_curl so curl gets the
 -- chance to write its exit code before the watchdog fires. Custom providers
 -- use their user-configured request_timeout + 15s slack.
+function Net._same_model_recovery(p, recovery_kind)
+  local has_prompt = tostring(S.pending_orig_prompt or "") ~= ""
+  local has_attachments = type(S.pending_attachments) == "table"
+    and #S.pending_attachments > 0
+  if not p or not (has_prompt or has_attachments) then return nil end
+  local model_idx = S.pending_model_idx or prefs.model_idx
+  local model = type(p.models) == "table" and p.models[model_idx] or nil
+  if not model or not model.id then return nil end
+  return {
+    provider_id = p.id,
+    model_id = model.id,
+    model_label = model.label or model.id,
+    recovery_prompt = S.pending_orig_prompt,
+    recovery_attachments = S.pending_attachments,
+    recovery_kind = recovery_kind,
+  }
+end
+
 function Net._handle_watchdog_timeout()
   local p_active = PROVIDERS[S.pending_provider_idx] or PROVIDERS.active()
   local poll_timeout = (p_active.is_custom
@@ -30044,20 +31065,24 @@ function Net._handle_watchdog_timeout()
   if not S.send_time or elapsed <= poll_timeout then
     return false
   end
+  local recovery = Net._same_model_recovery(p_active, "request_timeout")
   local timeout_msg
   if p_active.id == "google" then
-    timeout_msg = RA.t("network.timeout.gemini", nil,
+    timeout_msg = recovery and RA.t("network.timeout.gemini_retry", nil,
+      "Retry Same Model below to resend the original message. The request timed out while waiting for Google's Gemini service. Gemini may be overloaded or temporarily unavailable. If the rest of your internet is working, this is a provider-side availability issue. If it keeps happening, use the Model or Provider selector before retrying.")
+      or RA.t("network.timeout.gemini", nil,
       "The request timed out while waiting for Google's Gemini service. "
         .. "Gemini may be overloaded or temporarily unavailable. If the rest "
         .. "of your internet is working, this is a provider-side availability "
-        .. "issue, not a problem with your prompt, API key, or ReaAssist.\n\n"
-        .. "Try again in a moment. If it keeps happening, switch to a faster "
-        .. "Gemini model or another provider for this request.")
+        .. "issue. If it keeps happening, use the Model or Provider selector "
+        .. "before retrying.")
   else
-    timeout_msg = RA.t("network.timeout.generic", nil,
-      "The request timed out. The server may be busy, or your internet "
-        .. "connection may have dropped.\n\n"
-        .. "Try sending your message again.")
+    timeout_msg = recovery and RA.t("network.timeout.generic_retry", nil,
+      "Retry Same Model below to resend the original message. The request timed out because the server may be busy or the connection may have dropped. If it keeps happening, use the Model or Provider selector before retrying.")
+      or RA.t("network.timeout.generic", nil,
+      "The request timed out because the server may be busy or the connection may "
+        .. "have dropped. If it keeps happening, use the Model or Provider "
+        .. "selector before retrying.")
   end
   local debug = Net._curl_failure_debug(nil, timeout_msg, "watchdog_timeout")
   debug.elapsed_s = elapsed
@@ -30119,10 +31144,14 @@ function Net._handle_watchdog_timeout()
     return true
   end
   if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-    S.display_messages[S.pending_display_idx].ctx_label = "timeout"
+    S.display_messages[S.pending_display_idx].request_status_text = "timeout"
   end
-  Log.add_error(timeout_msg, nil, nil, nil,
-    Net._failed_request_extra("watchdog_timeout", debug))
+  local extra = Net._failed_request_extra("watchdog_timeout", debug)
+  if recovery then
+    for key, value in pairs(recovery) do extra[key] = value end
+  end
+  Log.add_error(timeout_msg, nil, nil,
+    recovery and "request_timeout" or nil, extra)
   return true
 end
 
@@ -30301,7 +31330,7 @@ function Net._handle_curl_exit_failure()
     return true
   end
   if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-    S.display_messages[S.pending_display_idx].ctx_label = "network error"
+    S.display_messages[S.pending_display_idx].request_status_text = "network error"
   end
   Log.add_error(detail, nil, nil, nil,
     Net._failed_request_extra("curl_exit", debug))
@@ -30337,10 +31366,12 @@ function Net._schedule_transient_json_retry(raw, debug)
   S.retry_scheduled = true
   S.retry_fire_time = time_precise() + delay
   S.status = "waiting"
-  if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-    S.display_messages[S.pending_display_idx].ctx_label =
-      str_format("retrying in %.1fs (%d/%d)", delay, S.retry_count, max_retries)
-  end
+  Net._set_pending_request_status("retry_scheduled", "response_shape", {
+    retry_count = S.retry_count,
+    retry_max = max_retries,
+    display_text = str_format("retrying in %.1fs (%d/%d)",
+      delay, S.retry_count, max_retries),
+  })
   if debug then
     debug.transient_non_json_reason = reason
     debug.retry_count = S.retry_count
@@ -30369,7 +31400,7 @@ end
 function Net._handle_unexpected_response_shape(raw, resp, p, expected_shape)
   Code.safe_write(tmp.log, raw)
   if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-    S.display_messages[S.pending_display_idx].ctx_label = "error"
+    S.display_messages[S.pending_display_idx].request_status_text = "error"
   end
 
   local debug = Net._curl_failure_debug(nil, "Unexpected response shape",
@@ -30429,7 +31460,7 @@ function Net._handle_json_decode_error(raw, decode_err)
     response_head)
   if Net._schedule_transient_json_retry(raw, debug) then return end
   if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-    S.display_messages[S.pending_display_idx].ctx_label = "error"
+    S.display_messages[S.pending_display_idx].request_status_text = "error"
   end
   local extra = Net._failed_request_extra("json_decode_error", debug)
   local raw_head = raw:sub(1, 256):lower()
@@ -30660,6 +31691,8 @@ function Net._google_capacity_recovery(p)
   local recovery = {
     provider_id = "google",
     model_id = current_id,
+    model_label = current_model and (current_model.label or current_model.id)
+      or nil,
     recovery_prompt = S.pending_orig_prompt,
     recovery_attachments = S.pending_attachments,
   }
@@ -30829,16 +31862,18 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth,
     S.retry_scheduled = true
     S.retry_fire_time = time_precise() + delay
     S.status = "waiting"
-    if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-      S.display_messages[S.pending_display_idx].ctx_label =
-        str_format("retrying in %.1fs (%d/%d)", delay, S.retry_count, max_retries)
-    end
+    Net._set_pending_request_status("retry_scheduled", "provider_capacity", {
+      retry_count = S.retry_count,
+      retry_max = max_retries,
+      display_text = str_format("retrying in %.1fs (%d/%d)",
+        delay, S.retry_count, max_retries),
+    })
     return
   end
 
   if Net._recoverable_openai_throttle(p, inner_type, api_err) then
     if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-      S.display_messages[S.pending_display_idx].ctx_label = "provider throttle"
+      S.display_messages[S.pending_display_idx].request_status_text = "provider throttle"
     end
     Log.add_error(RA.t("response.openai_throttle_exhausted", nil,
       "OpenAI is throttling this request because the account/model "
@@ -30855,7 +31890,7 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth,
 
   if p and p.id == "google" and is_overloaded then
     if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-      S.display_messages[S.pending_display_idx].ctx_label = "provider capacity"
+      S.display_messages[S.pending_display_idx].request_status_text = "provider capacity"
     end
     local recovery = Net._google_capacity_recovery(p)
     local msg
@@ -30863,12 +31898,19 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth,
       msg = RA.t("response.google_503_recovery", {
           label = recovery.fallback_label or "the fallback model",
         },
-        "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can retry the same model, or switch to "
-          .. tostring(recovery.fallback_label or "the fallback model")
-          .. " and resend the same message.")
+        "Switch to " .. tostring(recovery.fallback_label
+          or "the fallback model")
+          .. " below to change the Model selector and resend the original "
+          .. "message, or use Retry Same Model. Google's Gemini service "
+          .. "returned 503 UNAVAILABLE after ReaAssist retried with "
+          .. "exponential backoff. The selected model is at capacity or "
+          .. "temporarily unavailable.")
     elseif recovery then
       msg = RA.t("response.google_503_retry", nil,
-        "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can retry the same message.")
+        "Use Retry Same Model below to resend the original message. Google's "
+          .. "Gemini service returned 503 UNAVAILABLE after ReaAssist retried "
+          .. "with exponential backoff. The selected model is at capacity or "
+          .. "temporarily unavailable.")
     else
       msg = RA.t("response.google_503", nil,
         "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can wait and retry later.")
@@ -30890,7 +31932,7 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth,
       Key.clear(p.key_extstate)
     end
     if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-      S.display_messages[S.pending_display_idx].ctx_label = "auth error"
+      S.display_messages[S.pending_display_idx].request_status_text = "auth error"
     end
     local extra = Net._provider_error_extra(p, inner_type, inner_type, api_err,
       "provider_auth_error")
@@ -31052,11 +32094,12 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth,
     S.retry_scheduled = true
     S.retry_fire_time = time_precise() + delay
     S.status = "waiting"
-    if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-      S.display_messages[S.pending_display_idx].ctx_label =
-        str_format("rate-limit retry in %.0fs (%d/%d)",
-          delay, S.retry_count, S.retry_max)
-    end
+    Net._set_pending_request_status("retry_scheduled", "rate_limit", {
+      retry_count = S.retry_count,
+      retry_max = S.retry_max,
+      display_text = str_format("rate-limit retry in %.0fs (%d/%d)",
+        delay, S.retry_count, S.retry_max),
+    })
     return
   end
 
@@ -31065,7 +32108,7 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth,
   local msg   = info and (info.msg or (info.msg_fn and info.msg_fn(api_err)))
     or "Something went wrong. Please try again."
   if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-    S.display_messages[S.pending_display_idx].ctx_label = label
+    S.display_messages[S.pending_display_idx].request_status_text = label
   end
   if api_err and not info then
     msg = msg .. "\n\nDetails: " .. api_err
@@ -31176,7 +32219,7 @@ function Net.try_finish_curl()
     if resp.type ~= "message" or type(resp.content) ~= "table" then
       Code.safe_write(tmp.log, raw)
       if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-        S.display_messages[S.pending_display_idx].ctx_label = "error"
+        S.display_messages[S.pending_display_idx].request_status_text = "error"
       end
       Log.add_error(RA.t("response.unexpected", nil,
         "Got an unexpected response from the server. This is likely a "
@@ -31310,7 +32353,7 @@ function Net.try_finish_curl()
       if cache_miss then
         Net.gemini_cache_invalidate()
         if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-          S.display_messages[S.pending_display_idx].ctx_label = "cache expired"
+          S.display_messages[S.pending_display_idx].request_status_text = "cache expired"
         end
         Log.add_error(RA.t("response.gemini_cache_expired", nil,
           "The Gemini context cache expired between sends. "
@@ -31329,7 +32372,7 @@ function Net.try_finish_curl()
         Store.set_gemini_paid_tier(false)
         MODELS.refresh()
         if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-          S.display_messages[S.pending_display_idx].ctx_label = "api error"
+          S.display_messages[S.pending_display_idx].request_status_text = "api error"
         end
         Log.add_error(RA.t("response.gemini_paid_required", nil,
           "Gemini Pro requires a paid Google account. "
@@ -31350,7 +32393,7 @@ function Net.try_finish_curl()
     if type(resp.candidates) ~= "table" or #resp.candidates == 0 then
       Code.safe_write(tmp.log, raw)
       if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-        S.display_messages[S.pending_display_idx].ctx_label = "error"
+        S.display_messages[S.pending_display_idx].request_status_text = "error"
       end
       Log.add_error(RA.t("response.unexpected", nil,
         "Got an unexpected response from the server. This is likely a "
@@ -31610,7 +32653,7 @@ function Net.try_finish_curl()
 
     if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
       local dmsg = S.display_messages[S.pending_display_idx]
-      dmsg.ctx_label = label
+      dmsg.request_status_text = label
       if S.request_start_time then
         dmsg.response_time = reaper.time_precise() - S.request_start_time
       end
@@ -31816,6 +32859,13 @@ function Net.try_finish_curl()
     lua_parts = collect_labelled_fences("reascript", true)
   end
   local lua_code = #lua_parts > 0 and tbl_concat(lua_parts, "\n\n") or nil
+  local effect_init_advisories = lua_code
+    and Code.find_effect_initialization_advisories
+    and Code.find_effect_initialization_advisories(lua_code) or nil
+  if effect_init_advisories and #effect_init_advisories > 0 then
+    Log.line("EFFECT-INIT-ADVISORY",
+      "unknown or third-party effect adds parameter writes in the first deferred cycle; advisory recorded")
+  end
   if lua_code and Code.strip_inapplicable_fx_param_tip then
     local cleaned_text, tip_removed = Code.strip_inapplicable_fx_param_tip(
       text, lua_code, S.pending_orig_prompt or "")
@@ -32096,6 +33146,54 @@ function Net.try_finish_curl()
   end
 
   local validator_gate_hit = false
+
+  -- Melodyne uses a protected manual handoff across VST3 and Audio Unit
+  -- identities. If a model still emits mutation code, retry once for a prose
+  -- handoff. A second strike blocks both auto-run and the displayed Run path;
+  -- Code.run repeats the same policy for later manual execution attempts.
+  if lua_code and type(Code.find_manual_only_plugin_operations) == "function" then
+    local manual_only_bad = Code.find_manual_only_plugin_operations(
+      lua_code, S.pending_orig_prompt or "")
+    if manual_only_bad and #manual_only_bad > 0 then
+      if (S.manual_only_plugin_validator_retries or 0) < 1 then
+        S.manual_only_plugin_validator_retries =
+          (S.manual_only_plugin_validator_retries or 0) + 1
+        Log.line("MANUAL-ONLY-PLUGIN-VALIDATOR",
+          "Melodyne mutation code emitted; retrying for manual handoff")
+        local history_content = "(INTERNAL NOTE TO THE MODEL. DO NOT "
+          .. "MENTION THIS RETRY: The user's request names Melodyne. "
+          .. "Melodyne is manual-only in ReaAssist for both VST3 and Audio "
+          .. "Unit identities because its ARA state and Undo behavior are "
+          .. "not safe enough for ReaScript automation. Respond with concise "
+          .. "manual guidance and no Lua, JSFX, typed actions, or context "
+          .. "request. If Melodyne is missing, tell the user to insert the "
+          .. "installed VST3 or Audio Unit manually as the first Track FX. "
+          .. "For an edit, name the exact control or editor action and say "
+          .. "that no project change was made. You may explain how to open "
+          .. "an existing Melodyne window. Never substitute ReaPitch, "
+          .. "ReaTune, or another effect. Respond as if this is your first "
+          .. "reply.)\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        Net.fire_validator_retry({
+          kind = "manual_only_plugin",
+          history_content = history_content,
+          ctx_label = "manual_only_plugin_retry",
+          retry_failed_key = "retry.reason.for_manual_only_plugin",
+          retry_failed_label = "for the protected Melodyne handoff",
+          failure_message = "Automatic repair for the protected Melodyne "
+            .. "handoff did not go through. Please resend the last message.",
+        })
+        return
+      end
+      validator_gate_hit = true
+      Log.line("MANUAL-ONLY-PLUGIN-VALIDATOR",
+        "Melodyne mutation code persisted after retry; execution blocked")
+      Log.add_error(RA.t("validator.manual_only_plugin_blocked", {
+        plugin = "Melodyne",
+      }, "ReaAssist blocked changes to Melodyne before any project change. "
+        .. "Insert it manually as the first Track FX and make the requested "
+        .. "edit in its editor."))
+    end
+  end
 
   -- Per-model validator: smaller models can confuse regions with point markers.
   -- If the user explicitly asks for a region, require the REAPER region
@@ -33475,6 +34573,60 @@ function Net.try_finish_curl()
     end
   end
 
+  -- MIDI receive identity is destination-side category -1 state. Removing a
+  -- first source-side match can hit the wrong duplicate route, and replacing
+  -- I_MIDIFLAGS with 31 destroys its packed high bits.
+  if lua_code and not validator_gate_hit then
+    local bad_midi_receive = Code.find_midi_receive_identity_misuse
+      and Code.find_midi_receive_identity_misuse(
+        lua_code, S.pending_orig_prompt) or nil
+    if bad_midi_receive and #bad_midi_receive > 0 then
+      if (S.midi_receive_identity_validator_retries or 0) < 1 then
+        S.midi_receive_identity_validator_retries =
+          (S.midi_receive_identity_validator_retries or 0) + 1
+        Log.line("MIDI-RECEIVE-IDENTITY-RETRY",
+          "unsafe receive identity or packed MIDI flags; retrying with destination-side pattern")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous "
+          .. "Lua used an unsafe MIDI receive identity, receive-removal "
+          .. "order, or packed I_MIDIFLAGS write. Identify MIDI-only "
+          .. "receives on the destination with category -1, P_SRCTRACK, "
+          .. "I_SRCCHAN == -1, and the low five MIDI bits. Iterate "
+          .. "destination receive indices backward before calling "
+          .. "reaper.RemoveTrackSend(destination, -1, receive_index). "
+          .. "When disabling the MIDI source channel, preserve every high "
+          .. "bit with `math.floor(old_flags) | 31`; never replace the "
+          .. "whole field with literal 31. Preserve all other requested "
+          .. "routing and settings. Respond as if this is your FIRST reply "
+          .. "and do not mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+          .. lua_code
+          .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        Net.fire_validator_retry({
+          kind = "midi_receive_identity",
+          findings = bad_midi_receive,
+          history_content = history_content,
+          ctx_label = "midi_receive_identity_retry",
+          retry_failed_key =
+            "retry.reason.after_midi_receive_identity_misuse",
+          retry_failed_label = "after unsafe MIDI receive handling",
+          failure_message = "Automatic repair after unsafe MIDI receive "
+            .. "handling did not go through. Please resend the last message.",
+        })
+        return
+      end
+      validator_gate_hit = true
+      Log.line("MIDI-RECEIVE-IDENTITY-VALIDATOR",
+        "unsafe receive identity or packed MIDI flags persisted after retry; auto-run blocked")
+      Log.add_error((RA and RA.t and RA.t(
+        "validator.midi_receive_identity_blocked", nil,
+        "The script still uses an unsafe MIDI receive identity, removal "
+          .. "order, or packed I_MIDIFLAGS write. ReaAssist did not run it. "
+          .. "Resolve the exact destination receive, iterate backward, and "
+          .. "preserve packed flag bits before running manually."))
+        or "The script still uses an unsafe MIDI receive identity, removal order, or packed I_MIDIFLAGS write. ReaAssist did not run it. Resolve the exact destination receive, iterate backward, and preserve packed flag bits before running manually.")
+    end
+  end
+
   -- High-confidence track-pan validator. When the user says to pan a track,
   -- D_PAN belongs on SetMediaTrackInfo_Value; SetTrackSendInfo_Value D_PAN
   -- changes a send pan and leaves the track pan untouched. Also catch Lua
@@ -34058,7 +35210,7 @@ function Net.try_finish_curl()
      and not typed_action_ready then
     Code.safe_write(tmp.log, raw)
     if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-      S.display_messages[S.pending_display_idx].ctx_label = "error"
+      S.display_messages[S.pending_display_idx].request_status_text = "error"
     end
     Log.add_error(
       "The model's response was empty after processing. This can happen "
@@ -34805,6 +35957,84 @@ function Net.try_finish_curl()
             .. "MediaItem_Take. Auto-run is blocked because this crashes at "
             .. "runtime. Get the active take from the item first."))
           or "The script calls TakeIsMIDI with a MediaItem instead of a MediaItem_Take. Auto-run is blocked because this crashes at runtime. Get the active take from the item first.")
+      end
+    end
+  end
+
+  -- MIDI RECORD MODE VALIDATOR: output-recording I_RECMODE values can be
+  -- syntactically valid while contradicting a MIDI input workflow. Retry once
+  -- with the exact enum, then pause automatic execution while retaining the
+  -- generated script for deliberate review and Run.
+  local midi_record_mode_gate_hit = false
+  if lua_code and not docs_gate_hit and not validator_gate_hit then
+    local record_mode_context = Net.retry_user_request_context()
+    local record_mode_bad = Code.find_midi_record_mode_output_misuse(
+      lua_code, record_mode_context)
+    if record_mode_bad and #record_mode_bad > 0 then
+      if (S.midi_record_mode_validator_retries or 0) < 1 then
+        S.midi_record_mode_retry_used = true
+        S.midi_record_mode_validator_retries =
+          (S.midi_record_mode_validator_retries or 0) + 1
+        local modes = {}
+        for _, finding in ipairs(record_mode_bad) do
+          modes[#modes + 1] = tostring(finding.mode or "?")
+        end
+        Log.line("MIDI-RECORD-MODE-VALIDATOR",
+          "suspicious output-recording mode(s) "
+            .. tbl_concat(modes, ", ")
+            .. "; retrying with exact I_RECMODE enum")
+        local history_content = "(INTERNAL NOTE TO THE MODEL. "
+          .. "DO NOT MENTION THIS IN YOUR VISIBLE REPLY: "
+          .. Net.midi_record_mode_retry_guidance(record_mode_bad)
+          .. ")\n\nPrevious Lua to fix:\n```lua\n"
+          .. lua_code .. "\n```\n\nUSER REQUEST:\n"
+          .. record_mode_context
+        Net.fire_validator_retry({
+          kind = "midi_record_mode",
+          history_content = history_content,
+          ctx_label = "midi_record_mode_retry",
+          retry_failed_key = "retry.reason.after_midi_record_mode_issue",
+          retry_failed_label = "after MIDI record-mode issue",
+          failure_message = "Auto-retry after MIDI record-mode issue did not go through. Please resend the last message.",
+        })
+        return
+      end
+      midi_record_mode_gate_hit = true
+      validator_gate_hit = true
+      local block_key, block_copy, block_debug =
+        Net.midi_record_mode_review_copy(record_mode_bad)
+      local findings = {}
+      for _, finding in ipairs(record_mode_bad) do
+        findings[#findings + 1] = {
+          line = finding.line,
+          mode = finding.mode,
+          mode_label = finding.mode_label,
+          request_midi = finding.request_midi,
+          target_midi_input = finding.target_midi_input,
+          adjacent_comment = finding.adjacent_comment,
+        }
+      end
+      block_debug.findings = findings
+      block_debug.generated_code_bytes = #lua_code
+      Log.line(block_debug.log_source,
+        "output-recording mode persisted after retry; auto-run paused")
+      Log.add_error((RA and RA.t and RA.t(
+        block_key, nil, block_copy)) or block_copy,
+        nil, nil, nil,
+        { error_kind = block_debug.error_kind,
+          error_debug = block_debug })
+      if S.history[_asst_hist_idx] then
+        S.history[_asst_hist_idx].run_status = block_debug.run_status
+        S.history[_asst_hist_idx].validation_status =
+          block_debug.validation_status
+        S.history[_asst_hist_idx].validation_block_kind =
+          block_debug.validation_block_kind
+        S.history[_asst_hist_idx].manual_review_reason =
+          (RA and RA.t and RA.t(block_key, nil, block_copy)) or block_copy
+        S.history[_asst_hist_idx].error_kind = block_debug.error_kind
+        S.history[_asst_hist_idx].error_debug = block_debug
+        S.history[_asst_hist_idx].code_bytes = #lua_code
+        S.history[_asst_hist_idx].code_type = "lua"
       end
     end
   end
@@ -35731,6 +36961,60 @@ function Net.try_finish_curl()
         or ("The model emitted REAPER API call(s) with the wrong number of arguments, even after a retry: "
           .. tbl_concat(user_lines, "; ")
           .. ". Auto-run is blocked; review and edit the code before clicking Run manually."))
+    end
+  end
+
+  -- LITERAL NAME WORD REMOVAL VALIDATOR: a request to remove one plain word
+  -- must not delete the same letters inside a larger name. Require token
+  -- boundaries, delimiter cleanup, and an empty-result guard.
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+      and not arity_gate_hit then
+    local name_word_bad = Code.find_unsafe_literal_name_word_removal
+      and Code.find_unsafe_literal_name_word_removal(
+        lua_code, S.pending_orig_prompt) or nil
+    if name_word_bad and #name_word_bad > 0 then
+      if (S.literal_name_word_validator_retries or 0) < 1 then
+        S.literal_name_word_validator_retries =
+          (S.literal_name_word_validator_retries or 0) + 1
+        Log.line("LITERAL-NAME-WORD-RETRY",
+          "unrestricted literal deletion in name cleanup; retrying with token-boundary pattern")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked to "
+          .. "remove one plain alphabetic word from names. Your previous "
+          .. "Lua used unrestricted substring deletion, which can corrupt "
+          .. "a larger embedded word. Regenerate the full script using Lua "
+          .. "frontier boundaries around the requested literal. Clean any "
+          .. "adjacent spaces, underscores, and hyphens left behind, trim "
+          .. "the final name, and keep the original name if the cleaned "
+          .. "result would be empty. Preserve all unrelated name text and "
+          .. "targets. Respond as if this is your FIRST reply and do not "
+          .. "mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+          .. lua_code
+          .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        Net.fire_validator_retry({
+          kind = "literal_name_word_removal",
+          findings = name_word_bad,
+          history_content = history_content,
+          ctx_label = "literal_name_word_retry",
+          retry_failed_key =
+            "retry.reason.after_unsafe_literal_name_word_removal",
+          retry_failed_label = "after unsafe literal name cleanup",
+          failure_message = "Automatic repair after unsafe literal name "
+            .. "cleanup did not go through. Please resend the last message.",
+        })
+        return
+      end
+      validator_gate_hit = true
+      Log.line("LITERAL-NAME-WORD-VALIDATOR",
+        "unsafe literal name cleanup persisted after retry; auto-run blocked")
+      Log.add_error((RA and RA.t and RA.t(
+        "validator.literal_name_word_removal_blocked", nil,
+        "The script still removes a requested word as an unrestricted "
+          .. "substring, leaves spaces, underscores, or hyphens unhandled, "
+          .. "or omits empty-name protection. ReaAssist did not run it. Add "
+          .. "token boundaries, cleanup for spaces, underscores, and "
+          .. "hyphens, plus an empty-result guard before running manually."))
+        or "The script still removes a requested word as an unrestricted substring, leaves spaces, underscores, or hyphens unhandled, or omits empty-name protection. ReaAssist did not run it. Add token boundaries, cleanup for spaces, underscores, and hyphens, plus an empty-result guard before running manually.")
     end
   end
 
@@ -37699,6 +38983,7 @@ function Net.try_finish_curl()
         or helper_gate_hit
         or helper_int_gate_hit
         or fx_param_provenance_gate_hit
+        or midi_record_mode_gate_hit
         or midi_input_gate_hit
         or jsfx_format_gate_hit
         or jsfx_wrong_artifact_gate_hit
@@ -37708,6 +38993,7 @@ function Net.try_finish_curl()
     if docs_gate_hit then return "docs_gate" end
     if action_relevance_gate_hit then return "action_relevance_review" end
     if marker_pair_gate_hit then return "marker_pair_validator" end
+    if midi_record_mode_gate_hit then return "midi_record_mode_review" end
     if midi_input_gate_hit then
       return midi_input_block_kind or "midi_input_validator"
     end
@@ -38516,6 +39802,9 @@ function Net.try_finish_curl()
         .. " default utility parameter line(s) from broad readout")
     end
   end
+  Net._set_pending_request_status("succeeded", nil, {
+    clear_display_text = true,
+  })
   S.display_messages[#S.display_messages+1] = {
     role       = "assistant",
     content    = explanation,
@@ -38525,6 +39814,14 @@ function Net.try_finish_curl()
       local dmsg = S.pending_display_idx
         and S.display_messages[S.pending_display_idx] or nil
       return dmsg and dmsg.ctx_label or nil
+    end)(),
+    request_status = (function()
+      local dmsg = S.pending_display_idx
+        and S.display_messages[S.pending_display_idx] or nil
+      return dmsg and type(dmsg.request_status) == "table"
+        and type(Diag) == "table"
+        and type(Diag.sanitize_request_status) == "function"
+        and Diag.sanitize_request_status(dmsg.request_status) or nil
     end)(),
     provider_id     = PROVIDERS.active().id,
     -- model_id captured alongside provider_id so per-message recovery
@@ -38572,14 +39869,18 @@ function Net.try_finish_curl()
         and "empty" or "complete"),
     run_status      = S.history[_asst_hist_idx]
       and S.history[_asst_hist_idx].run_status or nil,
-    manual_review_reason = action_relevance_review_message,
+    manual_review_reason = auto_run_block_reason == "midi_record_mode_review"
+      and S.history[_asst_hist_idx]
+      and S.history[_asst_hist_idx].manual_review_reason
+      or action_relevance_review_message,
     validation_status = (function()
       local _rs = S.history[_asst_hist_idx]
         and S.history[_asst_hist_idx].run_status or nil
       local _ta = typed_action_metrics
       local _ta_err = _ta and tostring(_ta.error or "") or ""
       if docs_gate_hit then return "blocked" end
-      if auto_run_block_reason == "action_relevance_review" then
+      if auto_run_block_reason == "action_relevance_review"
+         or auto_run_block_reason == "midi_record_mode_review" then
         return "manual_required"
       end
       if auto_run_block_reason
@@ -38766,6 +40067,13 @@ function Net.try_finish_curl()
       if type(dmsg.validation_trace) == "table"
          and type(dmsg.run_result) == "table" then
         dmsg.run_result.validation_trace = dmsg.validation_trace
+      end
+      if effect_init_advisories and #effect_init_advisories > 0 then
+        dmsg.validation_trace = dmsg.validation_trace or {}
+        dmsg.validation_trace.advisories = effect_init_advisories
+        if type(dmsg.run_result) == "table" then
+          dmsg.run_result.validation_trace = dmsg.validation_trace
+        end
       end
     end
   end
@@ -39155,6 +40463,10 @@ do
         api_calls_before_retry = tonumber(S.api_calls_this_turn) or 0,
         model_calls_before_retry = tonumber(S.model_calls_this_turn) or 0,
       }
+      if is_context then
+        event.reuse_hint_only = type(meta) == "table"
+          and meta.reuse_hint_only == true
+      end
       if type(meta) == "table" and type(meta.findings) == "table" then
         event.findings = {}
         for finding_index, finding in ipairs(meta.findings) do
@@ -39244,21 +40556,56 @@ end
 -- with .errors / .add_error / .build_report from earlier in this file; this
 -- dofile extends it with the network-uploader surface.
 --
--- The fallback catches both a hard load failure and a module that loaded but
--- disabled itself (e.g. internal RA.JSON guard tripped). In that case we
--- install no-op stubs for tick / rotate_chat_id so UI guards and main-loop
--- call sites never see missing functions.
+-- The fallback catches a hard load failure, an incompatible payload revision,
+-- or a module that loaded but disabled itself (e.g. internal RA.JSON guard
+-- tripped). A revision mismatch is the signature of a partial legacy update:
+-- fail closed before the old sidecar can emit a payload stamped with the new
+-- main script's CFG.VERSION, then route Diag.lua through bootstrap repair.
+--
+-- Diagnostic sidecar compatibility gate.
 do
-  local ok, err = pcall(dofile, RA.RESOURCES_DIR .. "Diag.lua")
-  if not ok or Diag.uploader_enabled ~= true then
+  local diag_path = RA.RESOURCES_DIR .. "Diag.lua"
+  local probe, probe_err = io.open(diag_path, "rb")
+  local head
+  if probe then
+    head = probe:read(8192)
+    probe:close()
+  end
+  local discovered_revision = type(head) == "string"
+    and tonumber(head:match("Diag%.PAYLOAD_REVISION%s*=%s*(%d+)")) or nil
+  local revision_mismatch =
+    discovered_revision ~= CFG.DIAG_PAYLOAD_REVISION
+  local ok, err = false, probe_err
+  if not revision_mismatch then
+    ok, err = pcall(dofile, diag_path)
+    revision_mismatch = ok
+      and tonumber(Diag.PAYLOAD_REVISION) ~= CFG.DIAG_PAYLOAD_REVISION
+  end
+  S.diag_repair_required = (not ok) or revision_mismatch
+  if not ok or Diag.uploader_enabled ~= true or revision_mismatch then
     Diag.uploader_enabled = false
-    Diag.tick             = Diag.tick             or function() end
-    Diag.rotate_chat_id   = Diag.rotate_chat_id   or function() end
-    if not ok then
+    if revision_mismatch then
+      -- Replace stale implementations instead of merely filling absent
+      -- functions. This keeps every direct call inert during repair mode.
+      Diag.tick           = function() end
+      Diag.rotate_chat_id = function() end
+    else
+      Diag.tick           = Diag.tick           or function() end
+      Diag.rotate_chat_id = Diag.rotate_chat_id or function() end
+    end
+    if revision_mismatch then
+      Log.line("DIAG", string.format(
+        "Diag.lua revision mismatch: expected %s, got %s; uploads "
+        .. "disabled and repair required.",
+        tostring(CFG.DIAG_PAYLOAD_REVISION),
+        discovered_revision == nil
+          and "missing" or tostring(discovered_revision)))
+    elseif not ok then
       Log.line("DIAG", "Diag.lua load failed: " .. tostring(err))
     end
   end
 end
+-- close diagnostic sidecar compatibility gate
 
 -- =============================================================================
 -- Critical-file recovery gate + UI sidecar load
@@ -39274,6 +40621,15 @@ end
 
 S.bootstrap_active  = false
 S.bootstrap_missing = {}
+
+-- A legacy sequential update can replace ReaAssist.lua before Diag.lua.
+-- Seed the existing recovery flow with the exact manifest filename so the
+-- bootstrap fast path downloads and verifies the compatible sidecar.
+-- Diagnostic repair bootstrap seed.
+if S.diag_repair_required then
+  S.bootstrap_missing[#S.bootstrap_missing + 1] = "Resources/Diag.lua"
+end
+-- close diagnostic repair bootstrap seed
 
 function RA.load_i18n()
   local path = RA.RESOURCES_DIR .. "I18N.lua"
@@ -39574,7 +40930,9 @@ function Loop.handle_resolve_deep_scan()
      and not fx_cache_ui.rescan.active
      and not deep_scan.active then
     local ident = S.resolve_pending_resume
+    local saved_choice = S.resolve_pending_saved_choice == true
     S.resolve_pending_resume = nil
+    S.resolve_pending_saved_choice = false
     S._resolve_deep_scan_attempted = nil
     S._resolve_context_unavailable_reported = nil
     if not RA.code_runtime_loaded() then
@@ -39586,7 +40944,7 @@ function Loop.handle_resolve_deep_scan()
       return
     end
     Log.line("RESOLVE", "scan finished; resuming for " .. ident)
-    Net.resolve_popup_resume(ident)
+    Net.resolve_popup_resume(ident, saved_choice)
   end
 end
 
@@ -39908,6 +41266,11 @@ function Loop.pump_curl_or_retry()
     local now = time_precise()
     if now >= S.retry_fire_time then
       S.retry_scheduled = false
+      Net._set_pending_request_status("sent", nil, {
+        retry_count = S.retry_count,
+        retry_max = S.retry_max,
+        clear_display_text = true,
+      })
       Code.safe_write(tmp.out, "")
       if S.retry_saved_body then
         local ok, reason = Net.fire_curl(S.retry_saved_body, {
@@ -40111,6 +41474,9 @@ function TypedActionController.apply_typed_action_message(msg, message_idx, opts
   local function apply_result(done_ok, exec_result)
     local completed_result = exec_result
       and (exec_result.result or exec_result) or nil
+    local applied_now = completed_result
+      and type(completed_result.action_results) == "table"
+      and #completed_result.action_results > 0
     msg.auto_run_block_reason = nil
     msg.typed_actions = msg.typed_actions or { present = true }
     msg.typed_actions.deferred_pending = nil
@@ -40120,6 +41486,8 @@ function TypedActionController.apply_typed_action_message(msg, message_idx, opts
     end
     if done_ok then
       msg.auto_ran = false
+      msg.typed_action_undo_clicked = nil
+      msg.screen_reader_undo_clicked = nil
       msg.run_status = "ran_ok"
       msg.validation_status = "passed"
       msg.validation_block_kind = nil
@@ -40144,6 +41512,10 @@ function TypedActionController.apply_typed_action_message(msg, message_idx, opts
     else
       local err = exec_result and exec_result.code or "execution_failed"
       msg.auto_ran = false
+      if applied_now then
+        msg.typed_action_undo_clicked = nil
+        msg.screen_reader_undo_clicked = nil
+      end
       msg.run_status = "errored"
       msg.validation_status = "failed"
       msg.validation_block_kind = err
@@ -40277,13 +41649,21 @@ function TypedActionController.request_lua_for_typed_action_message(msg,
   S.refocus_prompt = true
   S.skip_local_answer_once = true
   S.suppress_user_display_once = true
-  local ok, err = pcall(Net.send_to_api,
+  local call_ok, sent, _, send_handling = pcall(Net.send_to_api,
     TypedActionController.typed_action_lua_request_prompt(original_request))
-  if not ok then
-    if Log and Log.add_error then
-      Log.add_error("Typed-action Lua request failed: " .. tostring(err))
+  if not call_ok or sent ~= true then
+    S.skip_local_answer_once = nil
+    S.suppress_user_display_once = nil
+    msg.typed_action_lua_requested = nil
+    msg.typed_action_lua_requested_without_undo = nil
+    if not call_ok and Log and Log.add_error then
+      Log.add_error(TypedActionController.t("typed_actions.request_lua_failed",
+        nil, "Could not request the Lua/ReaScript version."), nil, nil, nil,
+        Net._send_exception_extra("typed_action_request_lua", sent))
     end
-    return false, tostring(err or "")
+    local failure_handling = call_ok and (send_handling or "boundary")
+      or "surfaced"
+    return false, nil, failure_handling
   end
   return true, TypedActionController.t("a11y.sr.request_lua_sent", nil,
     "Requesting Lua/ReaScript version.")

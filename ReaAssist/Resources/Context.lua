@@ -2346,9 +2346,36 @@ function CTX.local_read_project_summary(proj)
   return tbl_concat(lines, "\n")
 end
 
-function CTX.local_read_session_overview(proj)
+function CTX.local_read_session_overview(proj, opts)
   local facts = type(proj) == "table" and proj.track_count and proj
     or CTX.local_project_facts(proj)
+  if type(opts) == "table" and type(opts.t) == "function" then
+    local selected = ""
+    if #facts.selected_tracks > 0 then
+      local names = {}
+      for i = 1, math_min(#facts.selected_tracks, 4) do
+        local tr = facts.selected_tracks[i]
+        names[#names + 1] = str_format("%d. %s", tr.index or 0,
+          tr.name or "(unnamed)")
+      end
+      if #facts.selected_tracks > 4 then names[#names + 1] = "..." end
+      selected = opts.t("response.local_session_overview.selected", {
+        tracks = tbl_concat(names, ", "),
+      })
+    end
+    return opts.t("response.local_session_overview.body", {
+      project = facts.project_name or opts.t("session.unsaved"),
+      tempo = CTX.tempo(facts.proj),
+      track_count = facts.track_count,
+      selected_count = #facts.selected_tracks,
+      item_count = facts.item_count or 0,
+      fx_count = facts.fx_count or 0,
+      tracks_with_fx = facts.tracks_with_fx or 0,
+      marker_count = facts.marker_count,
+      region_count = facts.region_count,
+      selected_line = selected,
+    })
+  end
   local lines = {
     "Current REAPER session:",
     "- " .. (facts.project_name and ("Project: " .. facts.project_name)
@@ -5931,7 +5958,7 @@ function CTX.plugin_profile_record_request_overflow(entry, request_text, plan)
 end
 
 
-function CTX.plugin_ref(filter_names)
+function CTX.plugin_ref(filter_names, options)
   if not filter_names or #filter_names == 0 then
     return "PLUGIN_REF: (error: no plugin specified -- "
       .. "use plugin_ref:ReaComp or plugin_ref:reverb, eq)"
@@ -5954,12 +5981,41 @@ function CTX.plugin_ref(filter_names)
   local entries = {}
   local unavailable_names = {}
   local request_text = S.pending_orig_prompt or ""
+  local approved_stock_refs = type(options) == "table"
+    and type(options.approved_stock_refs) == "table"
+    and options.approved_stock_refs or {}
   for _, name in ipairs(filter_names) do
     local k = _profile_route_key(name)
     k = PLUGIN_REF_ALIASES[k] or k
     local section = CTX._plugin_ref_cache[k]
-    if section and CTX.plugin_profile_is_validated(k) then
-      local state = CTX.plugin_profile_state(k)
+    local approved_stock = approved_stock_refs[k]
+    local validated = section and CTX.plugin_profile_is_validated(k)
+    local pending_stock_state = nil
+    if section and not validated and type(approved_stock) == "table" then
+      local meta = CTX.plugin_profile_ensure_validation(k)
+      local approved_ident = CTX.plugin_profile_normalize(
+        approved_stock.add or approved_stock.identifier)
+      if type(meta) == "table" and approved_ident ~= "" then
+        for _, fingerprint in ipairs(
+            type(meta.fingerprints) == "table" and meta.fingerprints or {}) do
+          if CTX.plugin_profile_normalize(fingerprint.identifier)
+              == approved_ident
+             and tostring(fingerprint.observed_fingerprint_sha256 or "") ~= "" then
+            pending_stock_state = {
+              state = "approved_stock_pending",
+              reason = "explicit_turn_only_stock_fallback",
+              source = "explicit_user_choice",
+              identifier = fingerprint.identifier,
+              format = fingerprint.format,
+              fingerprint = fingerprint.observed_fingerprint_sha256,
+            }
+            break
+          end
+        end
+      end
+    end
+    if section and (validated or pending_stock_state) then
+      local state = pending_stock_state or CTX.plugin_profile_state(k)
       local meta = CTX._plugin_profile_metadata[k] or {}
       local rendered, selection =
         CTX.plugin_profile_render_section(k, request_text)
@@ -7282,6 +7338,13 @@ function CTX.fx_inspect_load(search_names)
   if not search_names or #search_names == 0 then
     return nil, nil, nil, "fx_inspect requires a plugin name to search for."
   end
+  local manual_policy = type(Code) == "table"
+    and type(Code.manual_only_plugin_policy) == "function"
+    and Code.manual_only_plugin_policy(tbl_concat(search_names, " ")) or nil
+  if manual_policy then
+    return nil, nil, nil, "MANUAL-ONLY PLUGIN GUIDANCE:\n"
+      .. Code.manual_only_plugin_guidance(manual_policy)
+  end
   Log.line("FX_INSPECT", "fx_inspect_load: search=" .. tbl_concat(search_names, ", "))
 
   -- Reuse installed_fx to find matching identifiers.
@@ -7418,6 +7481,14 @@ end
 -- filter_types: list of type key strings (e.g. {"eq", "compressor"}).
 --               If empty/nil, returns an error asking for specific types.
 
+function CTX.preferred_plugin_type_key(type_key)
+  local key = tostring(type_key or ""):lower():match("^%s*(.-)%s*$") or ""
+  if key == "" then return "" end
+  local aliases = pref_plugins and pref_plugins.alias_lookup
+    and pref_plugins.alias_lookup() or {}
+  return aliases[key] or key
+end
+
 function CTX.preferred_plugins(filter_types)
   if not filter_types or #filter_types == 0 then
     return "PREFERRED PLUGINS: (error: no plugin type specified -- "
@@ -7440,10 +7511,9 @@ function CTX.preferred_plugins(filter_types)
   local out = {}
   local matched = 0
   local no_pref_types = {}
-  local pp_aliases = pref_plugins.alias_lookup()
+  local resolved_types = {}
   for _, type_key in ipairs(filter_types) do
-    local k = type_key:lower():match("^%s*(.-)%s*$") or ""
-    k = pp_aliases[k] or k
+    local k = CTX.preferred_plugin_type_key(type_key)
     local identifier = pref_types[k]
     local original_identifier = identifier
     if identifier and identifier ~= ""
@@ -7471,6 +7541,7 @@ function CTX.preferred_plugins(filter_types)
       local plugin_data = cache.plugins[identifier]
         or (original_identifier and cache.plugins[original_identifier])
       matched = matched + 1
+      resolved_types[#resolved_types+1] = k
       out[#out+1] = k .. ": " .. identifier
       if plugin_data and plugin_data.params then
         if S._fx_cache_events then
@@ -7499,13 +7570,19 @@ function CTX.preferred_plugins(filter_types)
         .. "with a generic type name."
     end
     if matched == 0 then
-      return "PREFERRED PLUGINS:\n" .. tbl_concat(directives, "\n")
+      return "PREFERRED PLUGINS:\n" .. tbl_concat(directives, "\n"), nil, {
+        resolved_types = resolved_types,
+        unresolved_types = no_pref_types,
+      }
     end
     out[#out+1] = "Types with no preferred plugin set:"
     for _, d in ipairs(directives) do out[#out+1] = d end
   end
 
-  return "PREFERRED PLUGINS:\n" .. tbl_concat(out, "\n")
+  return "PREFERRED PLUGINS:\n" .. tbl_concat(out, "\n"), nil, {
+    resolved_types = resolved_types,
+    unresolved_types = no_pref_types,
+  }
 end
 
 -- =============================================================================
@@ -9291,6 +9368,10 @@ function CTX.plugin_profile_explicit_alias_matches(
 end
 
 function CTX.explicit_plugin_profile_matches(user_text)
+  if type(CTX.ensure_plugin_pack_cache) == "function"
+      and not CTX.ensure_plugin_pack_cache() then
+    return {}
+  end
   local preference_type_counts = {}
   for _, meta in pairs(CTX._plugin_profile_metadata or {}) do
     local preference_type = tostring(meta.preference_type or ""):lower()
@@ -9942,6 +10023,11 @@ CTX.PLUGIN_PACK_SIGNAL_TERMS = CTX.PLUGIN_PACK_SIGNAL_TERMS or {
   "reacomp", "readelay", "reaeq", "reagate", "realimit", "reapitch",
   "reaverbate", "reaxcomp", "reeq", "pro-c", "pro-ds", "pro-g",
   "pro-l", "pro-mb", "pro-q", "pro-r", "saturn", "timeless",
+  "auto-key", "autokey", "autotune", "decapitator", "echoboy",
+  "echo boy", "valhalladelay", "valhalla delay", "pro-c 2",
+  "valhallavintageverb", "valhalla vintage verb", "vintageverb",
+  "soothe2", "soothe 2", "soothe3", "soothe 3", "rc-20", "rc20",
+  "rc 20", "retro color", "ozone", "maximizer",
 }
 
 function CTX.prompt_has_plugin_pack_signal(user_text)
@@ -10258,20 +10344,45 @@ function CTX.prompt_type_keyword_is_internal_control(tkey, text, explicit_type_n
     end
   end
 
-  -- Pro-MB exposes Compression as a per-band dynamics mode. Do not prepare
-  -- the user's ordinary compressor preference merely because a request names
-  -- that internal mode. A distinct phrase such as "plus a compressor" remains
-  -- after these narrow removals and therefore still resolves both products.
+  -- Named multiband processors expose Compression as a band mode or control
+  -- family. Do not prepare the user's ordinary compressor preference merely
+  -- because a request names those internal controls. A distinct phrase such
+  -- as "plus a compressor" remains after these narrow removals and therefore
+  -- still resolves both products.
   if tkey == "compressor" and explicit_type_named.multiband_compressor then
     local internal_compressor_phrases = {
       "%f[%w]compression%s+mode%f[%W]",
       "%f[%w]compression%s+band%f[%W]",
+      "%f[%w]compression%s+threshold%f[%W]",
       "%f[%w]dynamics%s+mode%s*[:=]?%s*compression%f[%W]",
       "%f[%w]multiband%s+compression%f[%W]",
+      "%f[%w]full[%s%-]+band%s+compression%f[%W]",
     }
     for _, phrase in ipairs(internal_compressor_phrases) do
       remaining = remaining:gsub(phrase, " ")
     end
+    return remaining:find("%f[%w]compressor%f[%W]") == nil
+      and remaining:find("%f[%w]compression%f[%W]") == nil
+  end
+
+  -- A named multiband processor can include its own limiter controls. Do not
+  -- prepare the user's preferred limiter when the request only says to
+  -- preserve or adjust that internal control family.
+  if tkey == "limiter" and explicit_type_named.multiband_compressor then
+    remaining = remaining:gsub(
+      "%f[%w]limiter%s+controls%f[%W]", " ")
+    return remaining:find("%f[%w]limiter%f[%W]") == nil
+  end
+
+  -- Ozone Maximizer exposes Upward Compression as one of its own controls.
+  -- Do not prepare the user's ordinary compressor preference for that phrase.
+  -- A separate request such as "plus a compressor" remains after removal.
+  if tkey == "compressor"
+      and explicit_type_named.mastering == "Ozone 12 Maximizer" then
+    remaining = remaining:gsub(
+      "%f[%w]upward%s+compression%f[%W]", " ")
+    remaining = remaining:gsub(
+      "%f[%w]upward%s+compress%f[%W]", " ")
     return remaining:find("%f[%w]compressor%f[%W]") == nil
       and remaining:find("%f[%w]compression%f[%W]") == nil
   end
@@ -10379,6 +10490,9 @@ function CTX.preempt_buckets_for_prompt(user_text)
     type(Code) == "table"
     and type(Code.prompt_forbids_fx_addition) == "function"
     and Code.prompt_forbids_fx_addition(user_text) or false
+  local manual_only_policy = type(Code) == "table"
+    and type(Code.prompt_targets_manual_only_plugin) == "function"
+    and Code.prompt_targets_manual_only_plugin(user_text) or nil
 
   -- Scan chain-phrase hints first. Builds tkey -> matching_phrase so the
   -- main loop below can treat phrase hits identically to keyword hits and
@@ -10396,6 +10510,10 @@ function CTX.preempt_buckets_for_prompt(user_text)
   if forbids_fx_addition then
     Log.line("PREEMPT",
       "skipped plugin/FX preempt (prompt explicitly forbids effects/FX/plugins)")
+  end
+  if manual_only_policy then
+    phrase_implied.pitch_correction = nil
+    phrase_implied.pitch_shift = nil
   end
   if phrase_implied.gate == "chain.-rock%s+vocal" then
     if phrase_implied.deesser == "chain.-vocal" then phrase_implied.deesser = nil end
@@ -10415,6 +10533,16 @@ function CTX.preempt_buckets_for_prompt(user_text)
   -- preferred-types loop below append to the same list. Returned at the end
   -- as the caller's "what we just preempted" log payload.
   local injected = {}
+
+  if manual_only_policy
+      and type(Code.manual_only_plugin_guidance) == "function" then
+    local policy_key = "manual_only_plugin:"
+      .. tostring(manual_only_policy.key or "plugin")
+    Net.sticky_set(policy_key,
+      Code.manual_only_plugin_guidance(manual_only_policy), "preempt")
+    injected[#injected + 1] = policy_key
+    Log.line("PREEMPT", "injected manual-only Melodyne guidance")
+  end
 
   do
     local recent_hit = false
@@ -10911,6 +11039,12 @@ function CTX.preempt_buckets_for_prompt(user_text)
   end
 
   for _, tkey in ipairs(keys) do
+    if manual_only_policy
+        and (tkey == "pitch_correction" or tkey == "pitch_shift") then
+      Log.line("PREEMPT",
+        "skipped generic pitch plug-in preempt for explicit Melodyne request")
+      goto continue_preempt
+    end
     -- Word-boundary match so "eq" doesn't fire on "equal" / "sequence".
     -- %b pattern wouldn't help here; %f[%w] + %f[%W] brackets catch whole
     -- words including hyphenated ones like "de-esser".
@@ -11099,12 +11233,27 @@ function CTX.preempt_buckets_for_prompt(user_text)
         local pp_key = "pref:" .. tkey
         if not S.sticky_context[pp_key]
            and not (S.pref_plugins_sent or {})[tkey] then
-          local pp_content, pp_err = CTX.preferred_plugins({tkey})
+          local pp_content, pp_err, pp_state = CTX.preferred_plugins({tkey})
           if pp_content then
             Net.sticky_set(pp_key, pp_content)
-            -- Mark sent so the model's <context_needed>preferred_plugins:tkey
-            -- (if it emits one anyway) gets deduped by the bucket dispatcher.
-            if S.pref_plugins_sent then S.pref_plugins_sent[tkey] = true end
+            local unresolved = false
+            for _, unresolved_type in ipairs(
+                (pp_state and pp_state.unresolved_types) or {}) do
+              if unresolved_type == tkey then
+                unresolved = true
+                break
+              end
+            end
+            S.pref_plugins_unresolved = S.pref_plugins_unresolved or {}
+            if unresolved then
+              if S.pref_plugins_sent then S.pref_plugins_sent[tkey] = nil end
+              S.pref_plugins_unresolved[tkey] = true
+            else
+              -- Mark sent so the model's
+              -- <context_needed>preferred_plugins:tkey request gets deduped.
+              if S.pref_plugins_sent then S.pref_plugins_sent[tkey] = true end
+              S.pref_plugins_unresolved[tkey] = nil
+            end
             -- Co-pin plugin bundle + docs core (same rationale as the
             -- plugin_ref branch above: every pref-plugin pin drives a
             -- plugin task that needs both the workflow guide and the

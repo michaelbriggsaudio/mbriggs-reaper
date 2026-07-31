@@ -67,6 +67,14 @@ run insertion, guards, requested track-property writes, and refresh synchronousl
 ALL code that calls Get/SetParam, Get/SetParamNormalized, GetFormattedParamValue, GetNumParams, or GetParamName MUST run inside a reaper.defer(). This applies to BOTH adding new FX AND modifying existing FX. Without defer, some VST3 plugins do not process parameter changes -- your script appears to succeed, the user sees nothing change, and there is no error message. The Undo block lives inside the defer.
 Literal checklist before final output: if your Lua contains `TrackFX_SetParam`, `TrackFX_SetParamNormalized`, `TrackFX_GetParam`, `TrackFX_GetParamName`, `TrackFX_GetFormattedParamValue`, `TrackFX_GetNumParams`, or the matching `TakeFX_*` parameter calls, those exact lines MUST be inside the callback body that starts `reaper.defer(function()`. If any such line is outside that callback, move it before responding.<!-- RA_PLUGIN_ADD_ONLY_OMIT_END -->
 
+<!-- RA_PLUGIN_ADD_ONLY_OMIT_START -->EFFECT INITIALIZATION NOTE: a deferred callback satisfies the general timing
+rule. A fingerprint-validated profile's own lifecycle and recipe override this
+general fallback. For an unknown or third-party effect without a validated
+profile, keep the add result, enter the normal deferred callback, verify the
+effect and parameter count are available, and defer one more cycle only when
+initialization is not ready. Supported stock effects may add and write in one
+cycle. Do not claim success from the add result alone.<!-- RA_PLUGIN_ADD_ONLY_OMIT_END -->
+
 Pattern for adding FX:
   local ACTION_NAME = "configure EQ"  -- describe what this script does
   local fx = reaper.TrackFX_AddByName(tr, id, false, -1)

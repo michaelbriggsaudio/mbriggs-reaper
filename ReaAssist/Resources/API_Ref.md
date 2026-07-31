@@ -310,6 +310,14 @@ When setting solo from a script and the user did not request a special solo
 mode, prefer value `2` (solo-in-place) rather than `1`, because it preserves
 normal routing expectations better.
 
+I_RECINPUT for audio record input is bit-packed. Use a negative value for no
+input. For non-MIDI input, the low 10 bits hold the zero-based starting hardware
+input channel. Add `1024` for a stereo pair or `2048` for multichannel input;
+without either flag, the value selects mono input. ReaRoute or Loopback input
+channels begin at `512`. Exact stereo examples: hardware inputs 1+2 use `1024`,
+and hardware inputs 3+4 use `1026` (`1024 + 2`). Do not store a one-based input
+number directly in `I_RECINPUT`.
+
 I_RECINPUT for MIDI record input is bit-packed:
 `4096 + (physical_input_index * 32) + channel`, where channel `0` means all
 MIDI channels and `1..16` mean only that channel. The physical input index is
@@ -326,7 +334,13 @@ tracks for the allowed devices and route their MIDI to the target track, or ask
 the user to set the exclusion manually in REAPER.
 Arm a track with `reaper.SetMediaTrackInfo_Value(track, "I_RECARM", 1)`.
 `B_RECARM` is not a valid track property. For a newly created record-ready MIDI
-track, set `I_RECINPUT` and `I_RECMON` first, then set `I_RECARM` last.
+track, set only the recording properties the request requires. When the request
+includes a record mode, set `I_RECINPUT`, `I_RECMODE`, and `I_RECMON` first,
+then set `I_RECARM` last. Otherwise set `I_RECINPUT` and `I_RECMON` before
+`I_RECARM`. `I_RECMODE` uses the following exact values: `0` input, `1` stereo
+output, `2` none, `3` stereo output with latency compensation, `4` MIDI
+output, `5` mono output, `6` mono output with latency compensation, `7` MIDI
+overdub, and `8` MIDI replace.
 
 I_FOLDERDEPTH is a folder-depth delta: 1 starts a folder, 0 keeps the current
 depth, -1 closes one folder after this track, and lower negative values close
@@ -2006,6 +2020,33 @@ I_MIDIFLAGS:
   1=normal, 2+ secondary buses), and bits 22-29 are destination bus. If the
   user asks for complex MIDI send routing, prefer inspecting an existing send
   or asking them to set it in the UI rather than inventing bit math.
+  Preserve every packed high bit when changing only the source channel. Use
+  `(math.floor(old_flags) & ~31) | (math.floor(channel) & 31)` after validating
+  source channel 0 through 16, or `math.floor(old_flags) | 31` to disable the
+  MIDI source. Do not replace the whole value with the low-bit literal.
+```
+
+For MIDI-only receive cleanup, operate from the destination receive list. A
+source can have duplicate routes to one destination, so a first source-side
+match is not a safe identity. Iterate category `-1` backward, verify
+`P_SRCTRACK`, require `I_SRCCHAN == -1`, and inspect the low five MIDI bits
+before removal. Backward iteration keeps remaining receive indices stable.
+When changing only the MIDI source-channel bits, preserve the packed high bits:
+
+```lua
+for receive_index = reaper.GetTrackNumSends(destination, -1) - 1, 0, -1 do
+  local source = reaper.GetTrackSendInfo_Value(
+    destination, -1, receive_index, "P_SRCTRACK")
+  local srcchan = reaper.GetTrackSendInfo_Value(
+    destination, -1, receive_index, "I_SRCCHAN")
+  local flags = math.floor(reaper.GetTrackSendInfo_Value(
+    destination, -1, receive_index, "I_MIDIFLAGS"))
+  if source == wanted_source and srcchan == -1 and (flags & 31) ~= 31 then
+    reaper.SetTrackSendInfo_Value(
+      destination, -1, receive_index, "I_MIDIFLAGS", flags | 31)
+    reaper.RemoveTrackSend(destination, -1, receive_index)
+  end
+end
 ```
 
 ```lua

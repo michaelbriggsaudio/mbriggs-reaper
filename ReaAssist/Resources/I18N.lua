@@ -337,11 +337,11 @@ I18N.catalogs = {
       ["mode.model_tip.gpt-5.6-sol"] =
         "Premium GPT-5.6. Use None thinking. Flagship tier; higher effort added cost without a measured improvement.",
       ["mode.model_tip.gemini-3.1-flash-lite"] =
-        "Cheapest Gemini. Use Low thinking. Budget pick; Flash 3.5 Minimal is stronger for scripts and edits.",
-      ["mode.model_tip.gemini-3.5-flash"] =
-        "Recommended Gemini default. Use Minimal thinking. Fast, strong, and bench-backed; try Low only if Minimal struggles.",
+        "Cheapest Gemini. Use Low thinking. Budget pick; Flash 3.6 Minimal is stronger for scripts and edits.",
+      ["mode.model_tip.gemini-3.6-flash"] =
+        "Recommended Gemini default. Use Minimal thinking. Best tested balance for scripts and edits; try Low only if Minimal struggles.",
       ["mode.model_tip.gemini-3.1-pro-preview"] =
-        "Premium Gemini preview. Use Medium thinking. Capacity has been unreliable; Flash 3.5 Minimal is safer for coding.",
+        "Premium Gemini preview. Use Medium thinking. Capacity has been unreliable; Flash 3.6 Minimal is safer for coding.",
       ["mode.model_tip.deepseek-v4-flash"] =
         "Cheapest combo in the lineup. Use Non-Thinking. Strong cheap pick.",
       ["mode.combo_hint.anthropic.claude-haiku-4-5.none"] =
@@ -405,21 +405,21 @@ I18N.catalogs = {
       ["mode.combo_hint.google.gemini-3.1-flash-lite.LOW"] =
         "Recommended Level | Simple and complex | Cheap | Fast",
       ["mode.combo_hint.google.gemini-3.1-flash-lite.MEDIUM"] =
-        "Simple and complex | Cheap | Slow | Flash 3.5 Minimal is usually better value",
+        "Simple and complex | Cheap | Slow | Flash 3.6 Minimal is usually better value",
       ["mode.combo_hint.google.gemini-3.1-flash-lite.HIGH"] =
-        "Avoid complex prompts | Cheap | Very slow | Runtime-error risk; pick Flash Lite Low or Flash 3.5 Minimal",
-      ["mode.combo_hint.google.gemini-3.5-flash.MINIMAL"] =
-        "Recommended Level | Simple and common scripts | Fastest Flash 3.5 | Lowest cost",
-      ["mode.combo_hint.google.gemini-3.5-flash.LOW"] =
-        "Use if Minimal struggles | More thinking tokens | Slower | No bench win over Minimal",
-      ["mode.combo_hint.google.gemini-3.5-flash.MEDIUM"] =
+        "Avoid complex prompts | Cheap | Very slow | Runtime-error risk; pick Flash Lite Low or Flash 3.6 Minimal",
+      ["mode.combo_hint.google.gemini-3.6-flash.MINIMAL"] =
+        "Recommended Level | Simple and complex | Best tested Flash balance | Fast",
+      ["mode.combo_hint.google.gemini-3.6-flash.LOW"] =
+        "Use if Minimal struggles | More thinking tokens | Slower | Minimal is the tested default",
+      ["mode.combo_hint.google.gemini-3.6-flash.MEDIUM"] =
         "Complex code/debugging only | Higher cost | Much slower | Try Minimal first, then Low",
-      ["mode.combo_hint.google.gemini-3.5-flash.HIGH"] =
+      ["mode.combo_hint.google.gemini-3.6-flash.HIGH"] =
         "Hard reasoning only | Highest Flash cost | Slowest | Avoid for routine ReaAssist work",
       ["mode.combo_hint.google.gemini-3.1-pro-preview.LOW"] =
-        "Not recommended | Capacity-prone preview | Mid-cost | Underuses Pro -- use Flash 3.5 if 503s appear",
+        "Not recommended | Capacity-prone preview | Mid-cost | Underuses Pro -- use Flash 3.6 if 503s appear",
       ["mode.combo_hint.google.gemini-3.1-pro-preview.MEDIUM"] =
-        "Model default | Premium reasoning when available | Capacity-prone preview | Use Flash 3.5 for coding",
+        "Model default | Premium reasoning when available | Capacity-prone preview | Use Flash 3.6 for coding",
       ["mode.combo_hint.google.gemini-3.1-pro-preview.HIGH"] =
         "Not recommended | Capacity-prone preview | Mid-cost | Marginal lift over Medium",
       ["mode.combo_hint.deepseek.deepseek-v4-flash.disabled"] =
@@ -729,15 +729,21 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["message.retry"] = "Retry Message",
       ["message.retry.tooltip"] =
         "Re-send the last prompt with the current settings.",
+      ["message.retry_same_model"] = "Retry Same Model",
       ["message.retry_same_model.tooltip"] =
-        "Retry the same prompt on the same Gemini model.",
+        "Resend the original message with the model recorded on this error. The Model selector will stay on that model.",
       ["message.switch_to"] = "Switch to {label}",
       ["message.switch_resend.tooltip"] =
-        "Switch Gemini to {label} and resend the original message.",
+        "Switch the Model selector to {label}, save that selection and resend the original message.",
+      ["message.recovery.sent_with_model"] =
+        "Message resent with {label}. {label} is now selected for future messages.",
       ["message.resend_failed"] = "Could not resend message",
+      ["message.send_failed"] = "Could not send request. Please try again.",
       ["message.switch_failed"] = "Could not switch models",
       ["message.return_home"] = "Return to home screen",
       ["typed_actions.header"] = "STRUCTURED EDIT",
+      ["typed_actions.request_lua_failed"] =
+        "Could not request the Lua/ReaScript version.",
       ["typed_actions.status.undo_lua"] = "UNDO + LUA",
       ["typed_actions.status.lua_requested"] = "LUA REQUESTED",
       ["typed_actions.status.undo_sent"] = "UNDO SENT",
@@ -1219,6 +1225,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Auto-run was blocked because the generated Lua was not runnable. Review the response or ask ReaAssist to regenerate it.",
       ["a11y.sr.auto_run_blocked_manual_only"] =
         "Auto-run was blocked because this generated code requires manual review and cannot be run directly from Screen Reader Mode.",
+      ["validator.manual_only_plugin_blocked"] =
+        "ReaAssist blocked changes to {plugin} before any project change. Insert it manually as the first Track FX and make the requested edit in its editor.",
+      ["validator.manual_only_plugin_blocked.meaning"] =
+        "Explains that a protected plug-in must be edited manually after ReaAssist blocks generated mutations.",
       ["a11y.sr.reagirl_downloading"] =
         "Downloading accessible UI library.",
       ["a11y.sr.reagirl_download_still_running"] =
@@ -1283,6 +1293,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.provider_not_configured"] =
         "The selected provider needs an API key before ReaAssist can send.",
       ["a11y.sr.send_failed"] = "Could not send request: {error}",
+      ["a11y.sr.send_failed_generic"] =
+        "Could not send request. Please try again.",
       ["a11y.sr.response_copied"] = "Response copied to clipboard.",
       ["a11y.sr.copy_failed"] = "Could not copy the response.",
       ["a11y.sr.response_saved"] = "Response saved to {path}.",
@@ -2153,6 +2165,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.response_ready_title"] = "Response",
       ["a11y.sr.response_ready_title.meaning"] =
         "Latest ReaAssist response and available actions.",
+      ["a11y.sr.recovery.retry_same_model.meaning"] =
+        "Resends the original message with the model recorded on this error.",
+      ["a11y.sr.recovery.switch_resend.meaning"] =
+        "Switches to {label}, saves that selection and resends the original message.",
       ["a11y.sr.response_ready_body"] =
         "The response has arrived, but no readable response text was found.",
       ["a11y.sr.response_ready_body_action"] =
@@ -2544,9 +2560,13 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["gemini.toast.tier_failed"] =
         "Gemini tier check failed - will retry",
       ["network.timeout.gemini"] =
-        "The request timed out while waiting for Google's Gemini service. Gemini may be overloaded or temporarily unavailable. If the rest of your internet is working, this is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nTry again in a moment. If it keeps happening, switch to a faster Gemini model or another provider for this request.",
+        "The request timed out while waiting for Google's Gemini service. Gemini may be overloaded or temporarily unavailable. If the rest of your internet is working, this is a provider-side availability issue. If it keeps happening, use the Model or Provider selector before retrying.",
+      ["network.timeout.gemini_retry"] =
+        "Retry Same Model below to resend the original message. The request timed out while waiting for Google's Gemini service. Gemini may be overloaded or temporarily unavailable. If the rest of your internet is working, this is a provider-side availability issue. If it keeps happening, use the Model or Provider selector before retrying.",
       ["network.timeout.generic"] =
-        "The request timed out. The server may be busy, or your internet connection may have dropped.\n\nTry sending your message again.",
+        "The request timed out because the server may be busy or the connection may have dropped. If it keeps happening, use the Model or Provider selector before retrying.",
+      ["network.timeout.generic_retry"] =
+        "Retry Same Model below to resend the original message. The request timed out because the server may be busy or the connection may have dropped. If it keeps happening, use the Model or Provider selector before retrying.",
       ["network.launch_failed"] =
         "ReaAssist could not start the network request. Please try sending again.",
       ["network.key_test.timeout_short"] =
@@ -2587,6 +2607,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "The model re-requested context that was already provided. Try rephrasing your request, or switch to a different model.",
       ["response.resume_failed"] =
         "Couldn't resume the request after your selection. Please try sending the message again.",
+      ["response.preparation_resume_failed"] =
+        "Couldn't resume the request after preparation. Please try sending the message again.",
       ["net.cap.call"] =
         "Stopped after {calls} API calls in one turn to avoid runaway cost. {hint}",
       ["net.cap.call.hint_haiku"] =
@@ -2671,6 +2693,12 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "after MIDI validator issue",
       ["retry.reason.after_midi_input_routing_issue"] =
         "after MIDI input routing issue",
+      ["retry.reason.after_midi_record_mode_issue"] =
+        "after MIDI record-mode issue",
+      ["retry.reason.after_midi_receive_identity_misuse"] =
+        "after unsafe MIDI receive handling",
+      ["retry.reason.after_unsafe_literal_name_word_removal"] =
+        "after unsafe literal name cleanup",
       ["retry.reason.for_unverified_main_oncommand_ids"] =
         "for unverified Main_OnCommand ID(s)",
       ["retry.reason.for_tempo_marker_bar_alignment"] =
@@ -2737,6 +2765,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "The user asked for tracks going into a bus or return, but the script still does not create sends with reaper.CreateTrackSend(...). Auto-run is blocked; review the routing before running manually.",
       ["validator.master_send_blocked"] =
         "The script appears to change track master/parent sends with reaper.RemoveTrackSend(..., 1, ...). Category 1 is hardware output, not the master send. Use reaper.SetMediaTrackInfo_Value(track, \"B_MAINSEND\", 0 or 1). Auto-run is blocked; review and correct the master-send API usage before running manually.",
+      ["validator.midi_receive_identity_blocked"] =
+        "The script still uses an unsafe MIDI receive identity, removal order, or packed I_MIDIFLAGS write. ReaAssist did not run it. Resolve the exact destination receive, iterate backward, and preserve packed flag bits before running manually.",
+      ["validator.literal_name_word_removal_blocked"] =
+        "The script still removes a requested word as an unrestricted substring, leaves spaces, underscores, or hyphens unhandled, or omits empty-name protection. ReaAssist did not run it. Add token boundaries, cleanup for spaces, underscores, and hyphens, plus an empty-result guard before running manually.",
       ["validator.mistyped_reaper_global_blocked"] =
         "The model misspelled the REAPER API global, even after a retry: {lines}. Auto-run is blocked; review and edit the code before clicking Run manually.",
       ["validator.invalid_reaper_calls_blocked"] =
@@ -2765,6 +2797,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "The script calls TakeIsMIDI with a MediaItem instead of a MediaItem_Take. Auto-run is blocked because this crashes at runtime. Get the active take from the item first.",
       ["validator.midi_input_filter_blocked"] =
         "The script does not safely implement the requested MIDI input-device filter. REAPER cannot encode 'all MIDI devices except one named device' as a single track I_RECINPUT value, and the generated Lua still uses an unsupported map or only lists devices. Auto-run is blocked; use a name-matched helper-track workaround or set a single named input directly.",
+      ["validator.midi_record_mode_review"] =
+        "The script still assigns an output-recording I_RECMODE value to a MIDI recording workflow after an automatic correction attempt. Automatic execution is paused because that mode can record track output instead of the requested MIDI behavior. Review the code before using Run. MIDI overdub is 7 and MIDI replace is 8.",
       ["validator.record_arm_property_blocked"] =
         "The script still uses `B_RECARM` after an automatic correction attempt. `B_RECARM` is not a valid REAPER track property, so auto-run is blocked. Use `I_RECARM` for track record arming while preserving the requested audio or MIDI input and mode.",
       ["validator.action_id_blocked"] =
@@ -2850,9 +2884,9 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["response.openai_throttle_exhausted"] =
         "OpenAI is throttling this request because the account/model token-per-minute limit is temporarily saturated. This is a provider-side throughput limit, not a Lua or prompt failure.\n\nReaAssist retried with exponential backoff and OpenAI still returned a rate-limit error. Wait a minute and retry, or switch to a smaller model for this request.",
       ["response.google_503_recovery"] =
-        "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can retry the same model, or switch to {label} and resend the same message.",
+        "Switch to {label} below to change the Model selector and resend the original message, or use Retry Same Model. Google's Gemini service returned 503 UNAVAILABLE after ReaAssist retried with exponential backoff. The selected model is at capacity or temporarily unavailable.",
       ["response.google_503_retry"] =
-        "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can retry the same message.",
+        "Use Retry Same Model below to resend the original message. Google's Gemini service returned 503 UNAVAILABLE after ReaAssist retried with exponential backoff. The selected model is at capacity or temporarily unavailable.",
       ["response.google_503"] =
         "Google's Gemini service returned 503 UNAVAILABLE: this model is currently at capacity or temporarily unavailable. This is a provider-side availability issue, not a problem with your prompt, API key, or ReaAssist.\n\nReaAssist retried with exponential backoff and Google still returned 503 UNAVAILABLE. You can wait and retry later.",
       ["response.api_key_invalid"] =
@@ -2861,6 +2895,14 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Use {save} beneath the generated code and choose a filename. If the full file browser opens, you can also choose a location; otherwise the basic prompt saves the script in REAPER's Scripts folder. When prompted, choose {add}. Then open REAPER's Actions list, find the saved script, select it, and use Add... under Shortcuts for selected action to press the key you want.",
       ["response.local_save_actions_help_sr"] =
         "Use {save}. ReaAssist saves the Lua script in REAPER's Scripts/ReaAssist folder and adds it to the Actions list automatically. Then open REAPER's Actions list, find the saved script, select it, and use Add... under Shortcuts for selected action to press the key you want.",
+      ["response.local_session_overview.body"] =
+        "Current REAPER session:\n- Project: {project}\n- {tempo}\n- Tracks: {track_count} ({selected_count} selected)\n- Media items: {item_count}; track FX: {fx_count}; tracks with FX: {tracks_with_fx}\n- Markers: {marker_count}; regions: {region_count}\n{selected_line}- I can use this to target the right tracks and items, inspect routing or FX and avoid guessing when you ask for edits.",
+      ["response.local_session_overview.selected"] =
+        "- Selected: {tracks}\n",
+      ["response.local_loudness_bundle_clarification"] =
+        "I can set an explicit track-fader dB target and a dBFS peak ceiling once each has its own value. Integrated LUFS requires a loudness measurement or render result; it cannot be inferred from a fader setting. Which tracks and fader dB changes should I use, what dBFS ceiling should I set, and should I measure the rendered result for the LUFS target?",
+      ["response.local_vocal_edit_clarification"] =
+        "Which vocal tracks should I edit, should timing be aligned with stretch markers or item edits, which pitch-correction method should I use, and what measurable level target do you want, such as peak dBFS, RMS, or LUFS?",
       ["response.api_key_storage_note"] =
         "Your key is obfuscated and locked to this REAPER install path. It will not work if copied to another machine.",
       ["response.api_key_storage_note_v2"] =
@@ -4129,6 +4171,18 @@ function I18N.interpolate(text, values)
 end
 
 I18N.local_overrides = I18N.local_overrides or {}
+I18N.local_overrides.es = {
+    ["response.local_loudness_bundle_clarification"] =
+      "Puedo establecer un valor explícito en dB para los faders de pista y un techo de pico en dBFS cuando cada uno tenga su propio valor. El LUFS integrado requiere una medición de sonoridad o el resultado de una renderización; no se puede deducir de un ajuste de fader. ¿Qué pistas y ajustes de fader en dB debo usar, qué techo en dBFS debo establecer y debo medir el resultado renderizado para el objetivo de LUFS?",
+    ["response.local_vocal_edit_clarification"] =
+      "¿Qué pistas vocales debo editar, debe alinearse el tiempo con marcadores de estiramiento o con ediciones de ítems, qué método de corrección de afinación debo usar y qué objetivo de nivel medible quiere, como pico en dBFS, RMS o LUFS?",
+}
+I18N.local_overrides.pt = {
+    ["response.local_loudness_bundle_clarification"] =
+      "Posso definir um valor explícito em dB para os faders das faixas e um teto de pico em dBFS quando cada um tiver seu próprio valor. O LUFS integrado exige uma medição de loudness ou o resultado de uma renderização; ele não pode ser deduzido de um ajuste de fader. Quais faixas e ajustes de fader em dB devo usar, qual teto em dBFS devo definir e devo medir o resultado renderizado para a meta de LUFS?",
+    ["response.local_vocal_edit_clarification"] =
+      "Quais faixas vocais devo editar, o timing deve ser alinhado com marcadores de estiramento ou com edições de itens, qual método de correção de afinação devo usar e qual meta de nível mensurável você quer, como pico em dBFS, RMS ou LUFS?",
+}
 I18N.local_overrides.ja = {
     ["footer.credits.label"] = "クレジット",
     ["footer.donate.label"] = "寄付",

@@ -56,39 +56,35 @@ After installing, run the action "Script: ReaAssist.lua" from REAPER's Action Li
         <link rel="website" href="https://github.com/michaelbriggsaudio/mbriggs-reaper">GitHub Repository</link>
         <link rel="website" href="https://reaassist.app">ReaAssist Website</link>
       </metadata>
-      <version name="1.4.8" author="Michael Briggs" time="2026-07-31T20:26:37Z">
+      <version name="1.4.9" author="Michael Briggs" time="2026-08-07T23:45:22Z">
         <changelog><![CDATA[
-- ReaAssist now offers tested and certified support for 45 plug-ins. The expanded collection includes the current AutoTune release and Auto-Key 2, the full Ozone 12 component suite, soothe2 and soothe3, Soundtoys Decapitator and EchoBoy, ValhallaDelay and ValhallaVintageVerb, RC-20 Retro Color, and FabFilter Pro-C 2. ReaAssist can make more plug-in changes confidently while protecting controls that should stay untouched. It also recognizes when Melodyne needs hands-on editor work and provides safe guidance for completing it.
+- Gemini Flash Lite has been upgraded to 3.5. Saved Flash Lite 3.1 selections move automatically to 3.5 with Low thinking, the fastest tested Lite setting. Both versions passed the same 10 ReaAssist tasks, with 3.5 responding faster in every comparison.
 
-- GPT-5.6 Luna is now an exceptional value for everyday ReaAssist work. OpenAI has cut Luna's prices by 80 percent. Input falls from $1 to $0.20, output from $6 to $1.20, cached input from $0.10 to $0.02, and cache writes from $1.25 to $0.25 per million tokens. A request using 100,000 input tokens and 10,000 output tokens drops from about $0.16 to just $0.032. That is also about 73 percent less than the same request on GPT-5.4 Mini, which cost about $0.12. GPT-5.4 Mini has been removed from ReaAssist, and saved Mini selections move automatically to Luna with thinking set to None. Luna matched Mini's tested pass rate while delivering lower latency, a much larger context window, and a substantially lower price.
+- Certified plug-in support expands from 45 to 65 plug-ins. Twenty additional Soundtoys effects now have verified control guidance, including Crystallizer, FilterFreak, Little AlterBoy, MicroShift, PanMan, PhaseMistress, PrimalTap, Radiator, SuperPlate, and Tremolator.
 
-- GPT-5.6 Terra is cheaper too. OpenAI reduced Terra pricing by 20 percent. Input falls from $2.50 to $2, output from $15 to $12, cached input from $0.25 to $0.20, and cache writes from $3.125 to $2.50 per million tokens. Terra remains an easy step up when a difficult request needs more capability than Luna.
+- Generated plug-in edits and FX chains are more dependable. ReaAssist supplies maintained control guidance earlier, keeps plug-in requests on the appropriate generated-Lua path, handles multi-effect chains more reliably, and verifies requested parameter results before reporting success.
 
-- Gemini Flash 3.6 delivers better tested results with lower output costs. Flash 3.6 replaces Flash 3.5 as ReaAssist's recommended Gemini model, and saved selections move automatically while keeping Minimal thinking. Input remains $1.50 per million tokens, while output falls from $9 to $7.50, a 16.7 percent reduction. A request using 100,000 input tokens and 10,000 output tokens drops from about $0.24 to $0.225. With 50,000 output tokens, it drops from $0.60 to $0.525. ReaAssist testing also found better reliability and faster responses than Flash 3.5 at the same thinking level.
+- Validation and recovery are clearer. Stronger checks cover missing plug-in values, sidechain routing, envelope edits, new-track targeting, timeouts, protected calls, and deferred project changes. Failed or partial operations now provide more accurate outcomes and focused recovery.
 
-- Long conversations do a better job of staying on track. ReaAssist keeps a compact record of the important requirements from earlier messages, remembers completed work, and resumes smoothly after you choose a preferred plug-in. Complex requests can continue without losing the original goal or repeating finished steps.
-
-- More REAPER edits should land correctly the first time. Stronger safeguards cover MIDI recording and output routing, track sends, existing plug-ins, structured edits, undo cleanup, and workflows that require hands-on editor interaction. Recovery is also more dependable when a request needs another attempt.
-
-- The whole experience received another polish pass. Diagnostics recover and export more reliably, Screen Reader wording is clearer, Spanish translations sound more natural, and remotely delivered language packs are ready for safer updates.
+- Display troubleshooting and accessible workflows received another polish pass. Interface sizing behaves more consistently at fractional display scaling, diagnostic reports include more useful display context without display names, coordinates, or hardware identifiers, and Screen Reader chat saving and clearing behavior is documented more clearly.
         ]]></changelog>
-        <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.4.8</source>
-        <source main="main" file="ReaAssist_Screen_Reader_Mode.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist_Screen_Reader_Mode.lua?v=1.4.8</source>
-        <source file="manifest.json">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/manifest.json?v=1.4.8</source>
-        <source file="CHANGELOG.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/CHANGELOG.md?v=1.4.8</source>
+        <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.4.9</source>
+        <source main="main" file="ReaAssist_Screen_Reader_Mode.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist_Screen_Reader_Mode.lua?v=1.4.9</source>
+        <source file="manifest.json">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/manifest.json?v=1.4.9</source>
+        <source file="CHANGELOG.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/CHANGELOG.md?v=1.4.9</source>
         <source file="LICENSE.txt">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/LICENSE.txt?v=1.0.4</source>
         <source file="README.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/README.md?v=1.4.7</source>
-        <source file="Resources/UI.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/UI.lua?v=1.4.8</source>
-        <source file="Resources/CodeRuntime.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/CodeRuntime.lua?v=1.4.8</source>
-        <source file="Resources/Context.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Context.lua?v=1.4.8</source>
+        <source file="Resources/UI.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/UI.lua?v=1.4.9</source>
+        <source file="Resources/CodeRuntime.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/CodeRuntime.lua?v=1.4.9</source>
+        <source file="Resources/Context.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Context.lua?v=1.4.9</source>
         <source file="Resources/Relaunch.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Relaunch.lua?v=1.4.3</source>
-        <source file="Resources/Diag.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Diag.lua?v=1.4.8</source>
-        <source file="Resources/System_Prompt.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/System_Prompt.md?v=1.4.8</source>
-        <source file="Resources/Prompts.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Prompts.md?v=1.4.8</source>
-        <source file="Resources/API_Ref.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/API_Ref.md?v=1.4.8</source>
-        <source file="Resources/Plugin_Pack.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Plugin_Pack.md?v=1.4.8</source>
+        <source file="Resources/Diag.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Diag.lua?v=1.4.9</source>
+        <source file="Resources/System_Prompt.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/System_Prompt.md?v=1.4.9</source>
+        <source file="Resources/Prompts.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Prompts.md?v=1.4.9</source>
+        <source file="Resources/API_Ref.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/API_Ref.md?v=1.4.9</source>
+        <source file="Resources/Plugin_Pack.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Plugin_Pack.md?v=1.4.9</source>
         <source file="Resources/Reaper_Recent_Changes.md">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/Reaper_Recent_Changes.md?v=1.4.7</source>
-        <source file="Resources/I18N.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/I18N.lua?v=1.4.8</source>
+        <source file="Resources/I18N.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/I18N.lua?v=1.4.9</source>
         <source file="Resources/ReEQ/ReEQ.jsfx">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/ReEQ/ReEQ.jsfx?v=1.0.3</source>
         <source file="Resources/ReEQ/LICENSE.txt">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/ReEQ/LICENSE.txt?v=1.0.3</source>
         <source file="Resources/ReEQ/Dependencies/firhalfband.jsfx-inc">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/Resources/ReEQ/Dependencies/firhalfband.jsfx-inc?v=1.0.3</source>

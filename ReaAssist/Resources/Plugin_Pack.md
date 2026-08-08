@@ -3,54 +3,45 @@
 <!-- metadata_layout:split-route-validate -->
 <!-- profile_schema:2 -->
 <!-- builder_version:2 -->
-<!-- builder_script_sha256:c46480266e4a63fc4d9ea02d677edef81adbff6763a9ff1b821089d50ea5c09c -->
-<!-- section_count:46 -->
-<!-- source_set_sha256:11340a2241cb91f4076a73a0369f058d7b6ce5ef1cc390d9c5d5bd67745383d4 -->
+<!-- builder_script_sha256:826244e628ed2129115bb5c6b7320cbe77c63f17a50ffb87b50f1c2292608818 -->
+<!-- section_count:66 -->
+<!-- source_set_sha256:b09e29742a799f06433c45275ff1d2bc9e393ec13edf369b40fbe90b2824de63 -->
 <!-- stoplist_version:1 -->
 <!-- aggregate_injected_limit_bytes:98304 -->
-<!-- pack_revision:5e9d00639ffc90b5ac4be1534dc9be8ee515770b9bd8e3967227550167011439 -->
+<!-- pack_revision:fd5bedc2e019034f8a7e974fe6d7a445dde031d9d41faba72141e4bf0ccc655d -->
 <!-- Plugin_Pack.md - markers are PLUGIN:Name (NOT SECTION:) because each block -->
 <!-- is a typed, addressable plugin entry served as plugin_ref:Name. SECTION: -->
 <!-- is reserved for generic on-demand buckets in API_Ref.md / Prompts.md.    -->
 <!-- The two markers are deliberately distinct so the parser can tell plugin -->
 <!-- entries apart from the ## sub-headings inside each plugin's body.       -->
 
-# Plugin Parameter Reference
+# Plug-in Parameter Reference
 
-Curated parameter data for plugins ReaAssist supports first-class. Includes
-REAPER's stock plugins (verified from live REAPER install via TrackFX_GetParamName
-/ TrackFX_GetParam) and selected third-party plugins ReaAssist ships with or
-recommends as fallbacks (e.g. ReEQ).
+This pack supplies optional Model guidance for preferred-product routing,
+exact identities, verified controls, value conversions, product constraints,
+musical intent and concise standard Lua examples.
 
-All param indices are 0-based. Use TrackFX_GetNumParams to confirm count at runtime.
-Use TrackFX_AddByName(tr, "PluginName", false, -1) to add or find each plugin.
+Use the exact installed plug-in identity and standard REAPER APIs. Prefer live
+control names and formatted values from the current instance. Certified
+positions, normalized values and formulas may guide the generated Lua for the
+matching product and format. They do not authorize a different product or
+version, and missing or changed guidance must not block ordinary Lua using live
+discovery.
 
-## ENUM PARAM NORMS: LIVE DATA OVERRIDES CURATED TABLES
+## ENUM VALUES: LIVE DATA OVERRIDES CURATED TABLES
 
-Curated enum tables (STYLE / TYPE / MODE / etc.) and recipe norm literals
-in this file are stamped against a specific plugin version. Vendors
-reorder enums across updates -- the same literal norm can map to a
-different display name on a different version, silently writing the
-wrong setting.
+Curated enum tables and recipe literals are stamped against a specific plug-in
+version. Vendors can reorder choices across updates, so the same normalized
+value may select a different label in another version.
 
-Precedence when setting an enum param:
+When setting an enum control:
 
-1. **Live `fx_params` `[enum: ...]` list** (if pinned) -- always wins.
-   Find the named target's index in the live list and compute
-   `norm = index / (count - 1)`. Do NOT copy a recipe's literal norm
-   if it disagrees with live data.
-2. **Curated per-plugin enum table** in this file -- fallback only when
-   no live data exists (e.g. the plugin is being newly added this turn
-   and no `fx_params:` / `fx_inspect:` bucket is pinned).
-3. **Recipe norm literals** -- illustrative stamps that may drift.
-   The `-- Style: NAME` comment is canonical intent; the number is the
-   stamp. When the live enum and the curated table disagree, the
-   curated table is wrong; defer to live.
+1. Prefer the exact live labels reported by the current plug-in instance.
+2. Use the matching certified table only when live enum data is unavailable.
+3. Treat recipe literals as examples whose named intent must remain clear.
 
-Always cite the enum target *by name* in a comment alongside any enum
-SetParamNormalized call (e.g. `-- Style: "Vocal"`, not just `-- 0.769`)
-so the intent is auditable on review and the value is recomputable
-when versions drift.
+Name the intended enum label in a nearby Lua comment so the setting remains
+reviewable if the plug-in changes later.
 
 ## FALLBACK CHAINS
 
@@ -79,12 +70,11 @@ The resolver tries formats in order `VST3 > VSTi > VST > AU > CLAP`. JSFX
 entries use the full relative path (e.g. `ReJJ/ReEQ/ReEQ.jsfx`, or `JS:` prefix
 for stock JSFX under `Effects/`).
 
-Fallback-chain entries are not automatically curated parameter references.
-Use a `PLUGIN:Name` section below only for the exact matching version named by
-that marker. If an installed fallback has no matching marker (for example,
-`Pro-Q 3`, `Pro-Q 2`, or `Twin 2`), add/load it by its resolved identifier but
-do not borrow another version's parameter map; request live `fx_inspect` or
-`fx_params` before writing parameters.
+Fallback-chain entries are not automatically certified parameter references.
+Use a `PLUGIN:Name` section only for the exact matching product and format. If
+an installed fallback has no matching marker, use its resolved identity and
+ordinary live discovery. Never borrow another version's stored positions,
+normalized values or formulas.
 
 Edit chains freely to add other preferred plugins. Plugin type keys match
 ReaAssist's preferred-plugins types (lowercase, underscored). Types may
@@ -113,25 +103,19 @@ pitch_shift:          || ReaPitch
 
 <!-- NOTE: this FabFilter intro sits OUTSIDE the PLUGIN blocks, so it is     -->
 <!-- never served to the model (Context.lua slices PLUGIN blocks only).      -->
-<!-- The load-bearing rules are repeated inside each Pro-* entry, which is   -->
-<!-- what the model actually receives.                                       -->
 
 # FabFilter third-party plugins
 
 FabFilter's Pro series is a high-quality commercial plugin suite. ReaAssist
 auto-prefers installed FabFilter plugins over stock equivalents (see
-FALLBACK CHAINS). The migrated guidance was verified against the formats named
-inside each profile. Do not assume VST3, VST2, AU and CLAP parameter layouts
-are interchangeable; runtime fingerprint validation must authorize the exact
-installed format before mapped guidance is trusted. When preferred_plugins or
-a preempt header provides an exact format-prefixed AddByName identifier (for
+FALLBACK CHAINS). The identity guidance was verified against the formats named
+inside each profile. Do not assume VST3, VST2, AU and CLAP identities are
+interchangeable. When preferred_plugins or a preempt header provides an exact
+format-prefixed AddByName identifier (for
 example "VST3: Pro-G"), use that exact identifier. Do not strip the prefix and
 do not add a vendor suffix. Bare names are reference labels only and may fail
-on some installs.
-
-All FabFilter params use TrackFX_SetParamNormalized (values 0..1). Raw ranges
-are not documented here since the normalized slider values are what scripts
-actually write.
+on some installs. Use the matching guidance as an optional generation aid, and
+prefer exact live control names and formatted values when they are available.
 
 <!-- PLUGIN:Auto-Key 2 -->
 <!-- SECTION-REVISION:2eb70d4dc13d5a6cc2eb5a6bec8fdb77a2799d9fa9be03de5b64e0e9cc69d926 -->
@@ -797,7 +781,7 @@ instance. State final settings without claiming a heard amount of reduction.
 <!-- /PLUGIN:Pro-C 2 -->
 
 <!-- PLUGIN:Pro-C 3 -->
-<!-- SECTION-REVISION:b3dc9b95ba1c3ce16cee222cc7c112c8342f8ba0d90dc99a461264444e4b7bce -->
+<!-- SECTION-REVISION:e31d84650614670382cb57a0e660df438fb72809b6c6aaf42039abdd8bf6090d -->
 ## Pro-C 3
 
 ```json plugin-route
@@ -805,10 +789,38 @@ instance. State final settings without claiming a heard amount of reduction.
 ```
 
 ```json plugin-validate
-{"key":"fabfilter-pro-c-3","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Pro-C 3","loaded_name":"VST3: Pro-C 3 (FabFilter)","parameter_count":{"mode":"exact","value":240},"required_parameters":[{"index":0,"name":"Style","section":"","section_required":false},{"index":24,"name":"Host Trigger Offset","section":"","section_required":false},{"index":49,"name":"Side Chain EQ Band 2 Speakers","section":"Side Chain EQ Band 2","section_required":true},{"index":73,"name":"Side Chain EQ Band 5 Shape","section":"Side Chain EQ Band 5","section_required":true},{"index":99,"name":"Show Input Level Meter","section":"","section_required":false}],"observed_fingerprint_sha256":"e22bc8283626bbae7a3e5748e68200d6ca8c5d8b95dbb6aa2f88fd6214d1c34c"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"01efef72a33e56c97872425a0f45185c7c9e90da9cf9afb5b4e17e7a8e914d4a","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
+{"key":"fabfilter-pro-c-3","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Pro-C 3","loaded_name":"VST3: Pro-C 3 (FabFilter)","parameter_count":{"mode":"exact","value":240},"required_parameters":[{"index":0,"name":"Style","section":"","section_required":false},{"index":24,"name":"Host Trigger Offset","section":"","section_required":false},{"index":49,"name":"Side Chain EQ Band 2 Speakers","section":"Side Chain EQ Band 2","section_required":true},{"index":73,"name":"Side Chain EQ Band 5 Shape","section":"Side Chain EQ Band 5","section_required":true},{"index":99,"name":"Show Input Level Meter","section":"","section_required":false}],"observed_fingerprint_sha256":"e22bc8283626bbae7a3e5748e68200d6ca8c5d8b95dbb6aa2f88fd6214d1c34c"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"1ac6c01ae2651cef4c19c5a9f2cd2806a73da68560a4384321b24298385051f0","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
 ```
 
 <!-- CHUNK:control -->
+### QUICK DIRECT MAP FOR GENERATED LUA
+
+Use these facts before any longer reference below. Indices are zero-based.
+
+```
+0 Style: Clean=0/13, Versatile=1/13, Punch=3/13, Vocal=10/13,
+         Mastering=11/13, Bus=12/13
+1 Threshold: normalized=(requested_dB+60)/60
+4 Ratio: 1.5:1=0.30078125, 2:1=0.400390625,
+         3:1=0.52001953125, 4:1=0.599609375
+7 Attack: normalized=(requested_ms/250)^(1/3)
+8 Release: 100ms=0.2779541015625, 120ms=0.30712890625,
+           150ms=0.345947265625, 250ms=0.45001220703125
+19 Auto Gain: Off=0, On=1
+88 Mix: 100 percent=0.5
+```
+
+Keep the minus sign when converting a negative Threshold. For `-20 dB`, use
+exactly `(-20 + 60) / 60 = 0.6666666666666666`. For `-18 dB`, use exactly
+`(-18 + 60) / 60 = 0.7`. Never use `(20 + 60) / 60` for `-20 dB`; that
+clamps to `1.0` and displays `0.00 dB`.
+
+Keep each Ratio label and literal together. For a requested `3:1` ratio, use
+exactly `0.52001953125`. Never substitute the neighboring `2:1` literal
+`0.400390625`.
+
+Compute Attack from the requested number. Do not copy a neighboring table row.
+
 FabFilter Pro-C 3 is a transparent / character compressor with 14 styles,
 auto-threshold, auto-release, auto-gain, character saturation, internal
 sidechain EQ, and mid/side stereo link. The go-to compressor for most work.
@@ -907,8 +919,8 @@ slider   ratio       slider   ratio
                      1.00     100.00:1
 
 * = default. Useful targets:
-1.5:1 = 0.30    3:1   = 0.526   10:1 = 0.90
-2:1   = 0.40    4:1   = 0.60    20:1 = 0.94
+1.5:1 = 0.30078125    3:1   = 0.52001953125   10:1 = 0.90
+2:1   = 0.400390625   4:1   = 0.599609375     20:1 = 0.94
 2.5:1 = 0.475   6:1   = 0.70    inf:1 treat as 100:1 = 1.00
 ```
 
@@ -941,6 +953,15 @@ Default 0.725 ms = slider 0.142 (≈ 0.725^(1/3) / 250^(1/3)).
 10 ms   = 0.000    100 ms = 0.278 *    1 sec  = ~0.55
 20 ms   = ~0.05    200 ms = ~0.38      2 sec  = ~0.70
 50 ms   = ~0.18    500 ms = ~0.48      5 sec  = ~1.00
+```
+
+Exact live anchors used by maintained complex-chain cases:
+
+```
+100.0 ms = 0.277954101562500
+120.0 ms = 0.307128906250000
+150.0 ms = 0.345947265625000
+250.0 ms = 0.450012207031250
 ```
 
 ### MIX PARAM (idx 88, parallel compression)
@@ -1287,7 +1308,7 @@ end)
 <!-- /PLUGIN:Pro-DS -->
 
 <!-- PLUGIN:Pro-G -->
-<!-- SECTION-REVISION:8e177a110c7714ba10f6b8faf5efebd633ce113500cf7fb0017ae255ae95d8ab -->
+<!-- SECTION-REVISION:0626b40d632dca93a85e06e75380b06c9e50a27810a98d39b23e00358d16ecd3 -->
 ## Pro-G
 
 ```json plugin-route
@@ -1295,10 +1316,40 @@ end)
 ```
 
 ```json plugin-validate
-{"key":"fabfilter-pro-g","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Pro-G","loaded_name":"VST3: Pro-G (FabFilter)","parameter_count":{"mode":"exact","value":175},"required_parameters":[{"index":0,"name":"Threshold","section":"","section_required":false},{"index":8,"name":"Hold","section":"","section_required":false},{"index":16,"name":"Side Chain Input Signal","section":"","section_required":false},{"index":24,"name":"Midi State","section":"","section_required":false},{"index":34,"name":"Ex Style","section":"","section_required":false}],"observed_fingerprint_sha256":"06be5f6a23d50266cd8ab70bf4662efdea2a49f5cf82fb2ba0450f3a8e356e27"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"4deb081044e968cc86e341bded1f16c0efd26d411252aeb7b27516c81e7507e2","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
+{"key":"fabfilter-pro-g","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Pro-G","loaded_name":"VST3: Pro-G (FabFilter)","parameter_count":{"mode":"exact","value":175},"required_parameters":[{"index":0,"name":"Threshold","section":"","section_required":false},{"index":8,"name":"Hold","section":"","section_required":false},{"index":16,"name":"Side Chain Input Signal","section":"","section_required":false},{"index":24,"name":"Midi State","section":"","section_required":false},{"index":34,"name":"Ex Style","section":"","section_required":false}],"observed_fingerprint_sha256":"06be5f6a23d50266cd8ab70bf4662efdea2a49f5cf82fb2ba0450f3a8e356e27"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"1bfad79bf2b78f2569ee88e7f426c913dcb44f0e1fe8de4271f6ccc9f96f3964","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
 ```
 
 <!-- CHUNK:control -->
+### QUICK DIRECT MAP FOR GENERATED LUA
+
+Use these literal Pro-G values before any longer reference below. Indices are
+zero-based. Do not borrow Pro-C values.
+
+```
+0 Threshold: normalized=(requested_dB+60)/60; -36dB=0.4; -30dB=0.5
+2 Ratio: 2:1=0.400390625; 4:1=0.599609375
+4 Range: 16dB=0.5; 24dB=0.5799560546875
+5 Style: Clean=0.25
+6 Attack: 0.5ms=0.1495361328125; 1ms=0.177825927734375
+7 Release: 80ms=0.285736083984375; 100ms=0.30780029296875
+8 Hold: 20ms=0.31817626953125
+```
+
+Use the exact requested Attack anchor. For 1 ms, use
+`0.177825927734375`; never substitute the 0.5 ms value
+`0.1495361328125`.
+
+Keep Threshold and Style literals on their own controls. For `-36 dB`, write
+exactly `0.4` to Threshold index 0. The `0.25` literal belongs only to Clean
+Style index 5 and must never be written to Threshold.
+
+```lua
+reaper.TrackFX_SetParamNormalized(tr, fx, 5, 0.25) -- Style: Clean
+reaper.TrackFX_SetParamNormalized(tr, fx, 0, 0.4)  -- Threshold: -36 dB
+```
+
+Never write both requested controls to the same parameter index.
+
 FabFilter Pro-G is a gate and downward/upward expander. Its primary musical
 controls are Threshold, Ratio, Range, Style, Attack, Release, Hold and Knee.
 It also supports lookahead and sidechain high-pass/low-pass filtering.
@@ -1360,12 +1411,28 @@ wrong for this installed build. A live exact-control case proved:
 ```
 Parameter   Normalized value   Actual plug-in display
 ----------  -----------------  -----------------------
-Threshold   0.400000           -36.00 dB
-Ratio       0.400000           2.00:1
-Range       0.500000           16.00 dB
-Attack      0.178000           1.004 ms
-Release     0.308000           100.2 ms
+Threshold   0.400000000000000  -36.00 dB
+Ratio       0.400390625000000  2.00:1
+Range       0.500000000000000  16.00 dB
+Attack      0.177825927734375  1.000 ms
+Release     0.307800292968750  100.0 ms
 ```
+
+Additional live exact-control anchors for the standard Lua path:
+
+```
+Parameter   Requested display   Normalized value
+----------  ------------------  -----------------
+Style       Clean               0.250000000000000
+Ratio       4.00:1              0.599609375000000
+Range       24.00 dB            0.579956054687500
+Attack      0.500 ms            0.149536132812500
+Release     80.00 ms            0.285736083984375
+Hold        20.00 ms            0.318176269531250
+```
+
+Keep these Pro-G anchors scoped to Pro-G. Never compute its 16 dB Range as
+`16/24`, and never reuse Pro-C attack or release values for Pro-G.
 
 Therefore:
 
@@ -1482,7 +1549,7 @@ requires listening.
 <!-- /PLUGIN:Pro-G -->
 
 <!-- PLUGIN:Pro-L 2 -->
-<!-- SECTION-REVISION:a4ac86d79baa82e7989fa39a1e10d6703418707fc8ce67e8e1883192b4a6d6af -->
+<!-- SECTION-REVISION:a4699ed46000cc515168a7533a473579425a7867160ae4309ddce4d213a6f4b2 -->
 ## Pro-L 2
 
 ```json plugin-route
@@ -1490,10 +1557,23 @@ requires listening.
 ```
 
 ```json plugin-validate
-{"key":"fabfilter-pro-l-2","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Pro-L 2","loaded_name":"VST3: Pro-L 2 (FabFilter)","parameter_count":{"mode":"exact","value":172},"required_parameters":[{"index":0,"name":"Gain","section":"","section_required":false},{"index":7,"name":"Channel Link Center","section":"","section_required":false},{"index":15,"name":"Unity Gain","section":"","section_required":false},{"index":23,"name":"Display Mode","section":"","section_required":false},{"index":31,"name":"Loudness Auto-Reset","section":"","section_required":false}],"observed_fingerprint_sha256":"e8d76e3fc0d616f68c1dabcfb5888514479dbd5ad41a957e7378fe55509e05d1"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"633d4030db6ddd4da6f7669042746a3b83456c1b1c58d57be39b019942208007","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
+{"key":"fabfilter-pro-l-2","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Pro-L 2","loaded_name":"VST3: Pro-L 2 (FabFilter)","parameter_count":{"mode":"exact","value":172},"required_parameters":[{"index":0,"name":"Gain","section":"","section_required":false},{"index":7,"name":"Channel Link Center","section":"","section_required":false},{"index":15,"name":"Unity Gain","section":"","section_required":false},{"index":23,"name":"Display Mode","section":"","section_required":false},{"index":31,"name":"Loudness Auto-Reset","section":"","section_required":false}],"observed_fingerprint_sha256":"e8d76e3fc0d616f68c1dabcfb5888514479dbd5ad41a957e7378fe55509e05d1"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"3dda96870965bea45f66916af527c04aacc6ae8ebfb5772d1fd3971f4d9673bb","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
 ```
 
 <!-- CHUNK:control -->
+### QUICK DIRECT MAP FOR GENERATED LUA
+
+Use these facts before any longer reference below. Indices are zero-based.
+
+```
+0 Gain: normalized=requested_dB/30
+1 Style: Transparent=0; Modern=5/7
+10 True Peak Limiting: Off=0, On=1
+11 Dithering: Off=0, On=1
+18 Output Level: normalized=(requested_dBTP+30)/30; -1dBTP=29/30
+19 Lock Output: Unlocked=0, Locked=1
+```
+
 FabFilter Pro-L 2 is a true peak limiter with 8 character styles, true-peak
 metering, dither / noise shaping, and loudness monitoring. Used as the final
 stage of mastering chains.
@@ -1938,7 +2018,7 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 32, 0.10)    -- Release: 10%
 <!-- /PLUGIN:Pro-MB -->
 
 <!-- PLUGIN:Pro-Q 4 -->
-<!-- SECTION-REVISION:a4a6b3a99908c7a43c3de6def5d033881406305e698e7e42df3b96bbd2b148e0 -->
+<!-- SECTION-REVISION:131f5cf894fc99e4f24771b435b1ffa89aa66fe5663e57740727632683553a67 -->
 ## Pro-Q 4
 
 ```json plugin-route
@@ -1946,10 +2026,29 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 32, 0.10)    -- Release: 10%
 ```
 
 ```json plugin-validate
-{"key":"fabfilter-pro-q-4","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Pro-Q 4","loaded_name":"VST3: Pro-Q 4 (FabFilter)","parameter_count":{"mode":"exact","value":740},"required_parameters":[{"index":0,"name":"Band 1 Used","section":"Band 1","section_required":true},{"index":149,"name":"Band 7 Dynamics Auto","section":"Band 7","section_required":true},{"index":299,"name":"Band 14 Used","section":"Band 14","section_required":true},{"index":448,"name":"Band 20 Dynamics Auto","section":"Band 20","section_required":true},{"index":599,"name":"Band 24 Spectral Tilt","section":"Band 24","section_required":true}],"observed_fingerprint_sha256":"b90f26794dbf05ba04b652c813c932f02ec066c6996988a722d94d35449eb5ce"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"2f51e4fb981a2dfef9cf70c5f1309b9af827eb4aa3d14b4757c58a36e3f84322","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
+{"key":"fabfilter-pro-q-4","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Pro-Q 4","loaded_name":"VST3: Pro-Q 4 (FabFilter)","parameter_count":{"mode":"exact","value":740},"required_parameters":[{"index":0,"name":"Band 1 Used","section":"Band 1","section_required":true},{"index":149,"name":"Band 7 Dynamics Auto","section":"Band 7","section_required":true},{"index":299,"name":"Band 14 Used","section":"Band 14","section_required":true},{"index":448,"name":"Band 20 Dynamics Auto","section":"Band 20","section_required":true},{"index":599,"name":"Band 24 Spectral Tilt","section":"Band 24","section_required":true}],"observed_fingerprint_sha256":"b90f26794dbf05ba04b652c813c932f02ec066c6996988a722d94d35449eb5ce"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"58364f66e62ceded7798a0543182596c84b79cc10e975182831879627daa6f87","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
 ```
 
 <!-- CHUNK:control -->
+### QUICK DIRECT MAP FOR GENERATED LUA
+
+Use these formulas before any table of examples below. Indices are zero-based.
+For Band N, `base=(N-1)*23`. Write Used at `base+0`, Enabled at `base+1`,
+Frequency at `base+2`, Gain at `base+3`, Q at `base+4`, Shape at `base+5`, and
+Slope at `base+6`.
+
+```lua
+local function proq_freq_norm(hz)
+  return math.log(hz / 10) / math.log(3000)
+end
+local function proq_gain_norm(db) return (db + 30) / 60 end
+local function proq_q_norm(q) return math.log(q / 0.025) / math.log(1600) end
+```
+
+For every requested band, set Used=1, Enabled=1, the exact computed Frequency,
+Gain and Q, Bell Shape=0, and Bell Slope=0.2. Compute each requested frequency
+from the formula. Do not substitute a neighboring frequency-table literal.
+
 FabFilter Pro-Q 4 is a surgical / musical parametric EQ with up to 24 bands,
 dynamic EQ per band, spectral processing, per-band mid/side/surround routing,
 and multiple processing modes (Zero Latency / Natural Phase / Linear Phase).
@@ -6841,8 +6940,164 @@ the previous Amount value without removing the existing instance.
 <!-- /CHUNK:musical -->
 <!-- /PLUGIN:Saturation -->
 
+<!-- PLUGIN:Crystallizer -->
+<!-- SECTION-REVISION:36c2dd3897f3e1495e2d568154413c17e022b030d3ee0831b73f22be940d60d7 -->
+## Crystallizer
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-crystallizer","display_name":"Crystallizer","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys crystallizer","identifiers":{"add_by_name":["VST3: Crystallizer","VST3: Crystallizer (Soundtoys)"],"aliases":["crystallizer","soundtoys crystallizer","VST3: Crystallizer","VST3: Crystallizer (Soundtoys)"],"curated":["Crystallizer"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":["crystallizer"]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-crystallizer","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[5],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Crystallizer","loaded_name":"VST3: Crystallizer (Soundtoys)","parameter_count":{"mode":"exact","value":27},"required_parameters":[{"index":3,"name":"Mix","section":"","section_required":false},{"index":5,"name":"Regenerate","section":"","section_required":false},{"index":10,"name":"SyncMode","section":"","section_required":false},{"index":14,"name":"Pitch","section":"","section_required":false},{"index":16,"name":"SpliceValue","section":"","section_required":false},{"index":18,"name":"DelayValue","section":"","section_required":false}],"observed_fingerprint_sha256":"07059f7424388071c8c1958c5c4bf1b55ee1769d0d1ad706db399081169f1dab"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/wp-content/uploads/Crystallizer-Manual.pdf","document_title":"Crystallizer User's Guide Version 5","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"07059f7424388071c8c1958c5c4bf1b55ee1769d0d1ad706db399081169f1dab","body_sha256":"51f93c49134d394c537c601bfa9689ea3d5a5c8fd8402a9c8ab12bd39b38436f"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:755a47ba33529639284184f3560aa22fa2ffb29b252668953ecb8a0f7f13c01e -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 4, name = "InOutMode" }`
+  - `Digital` = `0`
+  - `Analog` = `1`
+
+- `{ index = 9, name = "Direction" }`
+  - `forward` = `0`
+  - `reverse` = `1`
+
+- `{ index = 10, name = "SyncMode" }`
+  - `FreeRun` = `0`
+  - `MIDI` = `1`
+
+- `{ index = 11, name = "FBMode" }`
+  - `Mixed` = `0`
+  - `Dual` = `0.5`
+  - `PingPong` = `1`
+
+- `{ index = 12, name = "DuckMode" }`
+  - `Output` = `0`
+  - `Regen` = `0.5`
+  - `Both` = `1`
+
+- `{ index = 16, name = "SpliceValue" }`
+  - `6` = `0`
+  - `5` = `0.1666666716337204`
+  - `4` = `0.3333333432674408`
+  - `3` = `0.5`
+  - `2` = `0.66666668653488159`
+  - `1` = `0.83333331346511841`
+  - `0` = `1`
+
+- `{ index = 18, name = "DelayValue" }`
+  - `7` = `0`
+  - `6` = `0.1428571492433548`
+  - `5` = `0.28571429848670959`
+  - `4` = `0.4285714328289032`
+  - `3` = `0.57142859697341919`
+  - `2` = `0.71428573131561279`
+  - `1` = `0.8571428656578064`
+  - `0` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 3, name = "Mix" }`: `25.0` = `0.25`
+- `{ index = 4, name = "InOutMode" }`: `Analog` = `1`
+- `{ index = 5, name = "Regenerate" }`: `0.250` = `0.25`
+- `{ index = 9, name = "Direction" }`: `reverse` = `1`
+- `{ index = 10, name = "SyncMode" }`: `MIDI` = `1`
+- `{ index = 11, name = "FBMode" }`: `PingPong` = `1`
+- `{ index = 12, name = "DuckMode" }`: `Both` = `1`
+- `{ index = 14, name = "Pitch" }`: `1200` = `0.66666668653488159`
+- `{ index = 16, name = "SpliceValue" }`: `3` = `0.5`
+- `{ index = 18, name = "DelayValue" }`: `3` = `0.57142859697341919`
+
+Calibrated natural value ladders:
+
+- `{ index = 3, name = "Mix" }`
+  - natural alternative: `20.0` = `0.20000000298023224`
+  - exact anchor: `25.0` = `0.25`
+  - natural alternative: `30.0` = `0.30000001192092896`
+
+- `{ index = 5, name = "Regenerate" }`
+  - natural alternative: `0.200` = `0.20000000298023224`
+  - exact anchor: `0.250` = `0.25`
+  - natural alternative: `0.300` = `0.30000001192092896`
+
+- `{ index = 14, name = "Pitch" }`
+  - natural alternative: `900` = `0.625`
+  - exact anchor: `1200` = `0.66666668653488159`
+  - natural alternative: `1440` = `0.69999998807907104`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:7ecd7a8fb332a653f67150425c07f696ad7e94517d418dd185f28f9f82f5bd31 -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+Crystallizer exposes product controls 1 through 23. Do not write Bypass 0 or
+host controls 24 through 26. Use the complete automatable menu map above.
+
+Regenerate can create sustained feedback. Keep it at or below 0.40 for unheard
+audio unless the user explicitly requests a runaway effect. Resolve all
+targets first, use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback. Verify delayed readback and preserve offsets, filters, dynamics
+and every unrelated control.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+Crystallizer combines pitch shifting, granular splicing and delay. A restrained
+shimmer start uses a one-octave shift, modest Mix and Regenerate, tempo sync and
+reverse direction. Ducking can keep regeneration out of the way of the source.
+Describe these as starting settings because audio was not judged.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:Crystallizer -->
+
 <!-- PLUGIN:Decapitator -->
-<!-- SECTION-REVISION:ead17911dae0f90417baa79a964fbbd5d87822723661a4d28a5106507b3e3586 -->
+<!-- SECTION-REVISION:faea6f8877ff4831b572f05192249ee3f9a1ba76d2917aca7c7aa322627b4a6a -->
 ## Decapitator
 
 ```json plugin-route
@@ -6850,10 +7105,55 @@ the previous Amount value without removing the existing instance.
 ```
 
 ```json plugin-validate
-{"key":"soundtoys-decapitator","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Decapitator","loaded_name":"VST3: Decapitator (Soundtoys)","parameter_count":{"mode":"exact","value":15},"required_parameters":[{"index":2,"name":"Drive","section":"","section_required":false},{"index":7,"name":"Mix","section":"","section_required":false},{"index":8,"name":"AutoGain","section":"","section_required":false},{"index":11,"name":"OutputTrim","section":"","section_required":false}],"observed_fingerprint_sha256":"3be117b87e84e189d3afe30d344fee1e5987157e21a5f437b753b7224fb32244"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/wp-content/uploads/Decapitator-Manual.pdf","migrated_at":"2026-07-30","body_sha256":"921962bcf42e74fc2179c52c73d052a5bc9168a0b02d1a1202174f5259517318","verified_at":"2026-07-30","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"3be117b87e84e189d3afe30d344fee1e5987157e21a5f437b753b7224fb32244"}}
+{"key":"soundtoys-decapitator","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Decapitator","loaded_name":"VST3: Decapitator (Soundtoys)","parameter_count":{"mode":"exact","value":15},"required_parameters":[{"index":2,"name":"Drive","section":"","section_required":false},{"index":7,"name":"Mix","section":"","section_required":false},{"index":8,"name":"AutoGain","section":"","section_required":false},{"index":11,"name":"OutputTrim","section":"","section_required":false}],"observed_fingerprint_sha256":"3be117b87e84e189d3afe30d344fee1e5987157e21a5f437b753b7224fb32244"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/wp-content/uploads/Decapitator-Manual.pdf","product_version":"5.5.5 64 bit","migrated_at":"2026-07-30","body_sha256":"8806ae2280326ba4402e55f6adb4e82d354d6c95b272a439483a502f635b149e","verified_at":"2026-08-01","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"3be117b87e84e189d3afe30d344fee1e5987157e21a5f437b753b7224fb32244"}}
 ```
 
 <!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- followup_evidence_sha256:a70a7bdde6e2cc83b913ff94f80b2666bed0717fe4ba041b30dac9b38d365c2f -->
+### CERTIFIED STORED VALUES
+
+These values passed repeated live storage, fixed-point readback and exact state
+restoration in Soundtoys 5.5.5. Use the literal normalized values. Do not
+interpolate them.
+
+Complete menu map:
+
+- `1 Style`: `A` = `0`, `E` = `0.25`, `N` = `0.5`, `T` = `0.75`, `P` = `1`
+- `3 Punish`: `Off` = `0`, `On` = `1`
+- `8 AutoGain`: `Off` = `0`, `On` = `1`
+- `9 LowThump`: `Off` = `0`, `On` = `1`
+- `10 HighSlope`: `Gentle` = `0`, `Steep` = `1`
+
+Exact recipe anchors:
+
+- `1 Style`: `A` = `0`
+- `2 Drive`: `3.0` = `0.30000001192092896`
+- `3 Punish`: `Off` = `0`
+- `4 LowCut`: `53.2` = `0.25008189678192139`
+- `5 Tone`: `0.0` = `0.5`
+- `6 HighCut`: `9457.4` = `0.74999940395355225`
+- `7 Mix`: `30.0` = `0.30000001192092896`
+- `8 AutoGain`: `On` = `1`
+- `9 LowThump`: `Off` = `0`
+- `10 HighSlope`: `Gentle` = `0`
+- `11 OutputTrim`: `0.0` = `1`
+
+Calibrated continuous ladders:
+
+- `2 Drive`: `2.0` = `0.20000000298023224`; `3.0` = `0.30000001192092896`; `4.0` = `0.40000000596046448`; `5.0` = `0.5`
+- `4 LowCut`: `36.0` = `0.15025132894515991`; `53.2` = `0.25008189678192139`; `78.6` = `0.34985464811325073`
+- `5 Tone`: `-2.4` = `0.40000000596046448`; `0.0` = `0.5`; `2.4` = `0.60000002384185791`
+- `6 HighCut`: `7009.2` = `0.64999920129776001`; `9457.4` = `0.74999940395355225`; `12760.7` = `0.84999924898147583`
+- `7 Mix`: `20.0` = `0.20000000298023224`; `30.0` = `0.30000001192092896`; `40.0` = `0.40000000596046448`; `100.0` = `1`
+- `11 OutputTrim`: `-2.4` = `0.89999997615814209`; `-1.2` = `0.94999998807907104`; `0.0` = `1`
+
+Natural-intent rule: choose only from the exact ladder and menu values above.
+Change at least one anchor so the natural result differs from the exact recipe.
+Preserve unrequested controls and describe unheard-audio settings as a starting
+point.
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
 Decapitator is a character saturation and distortion effect. The installed
 VST3 exposes 15 parameters. The useful musical surface is indices 1 through
 11. Do not write the plug-in Bypass at index 0, host Bypass at index 12, Wet
@@ -6889,13 +7189,21 @@ Soundtoys numeric controls.
 
 The shipping provenance validator must see each literal `mapped[N]` index at
 the setter call. Do not hide mapped indices inside a target table, loop or
-wrapper. Use seven explicit `TrackFX_SetParamNormalized` calls for this recipe.
+wrapper. Use eleven explicit `TrackFX_SetParamNormalized` calls for the full
+exact recipe.
 
-Soundtoys applies these VST3 writes on the next REAPER frame. The generated
-action must use exactly one `reaper.defer` callback for the resolver and
-writes. Do not schedule a second callback. ReaAssist commits the isolated
-normalized targets and verifies their live readback one frame later before it
-reports completion.
+Current live probes confirm that Decapitator stores these VST3 writes when they
+are issued synchronously. Keep insertion, every requested parameter write and
+`Undo_EndBlock` in one synchronous action. Do not use `reaper.defer` for an
+ordinary Decapitator edit. Call `reaper.UpdateArrange()` after ending the Undo
+block.
+
+For a newly requested Decapitator instance, begin the normal Undo and
+`PreventUIRefresh` scope first, add it with exactly
+`TrackFX_AddByName(tr, "VST3: Decapitator", false, -1)`, and configure it
+immediately after insertion. Do not use a positive instantiate mode or insert
+the full chain before returning to configure Decapitator. This ordering avoids
+the plug-in's startup preset restoring Drive and Mix to their defaults.
 
 For subtle or natural warmth, keep Punish Off, leave LowThump Off unless the
 user requests low-end emphasis, keep AutoGain On for a convenient starting
@@ -6908,41 +7216,270 @@ user explicitly requests Punish, extreme distortion or an aggressive smashed
 effect. Do not infer Punish from words such as warm, analog or saturated.
 
 ```lua
-reaper.defer(function()
+do
   local mapped, guard_err = reaassist_resolve_profile_params(tr, fx, {
     { index = 1, name = "Style" },
     { index = 2, name = "Drive" },
     { index = 3, name = "Punish" },
+    { index = 4, name = "LowCut" },
     { index = 5, name = "Tone" },
+    { index = 6, name = "HighCut" },
     { index = 7, name = "Mix" },
     { index = 8, name = "AutoGain" },
+    { index = 9, name = "LowThump" },
+    { index = 10, name = "HighSlope" },
     { index = 11, name = "OutputTrim" },
   })
   if not mapped then error(guard_err) end
   reaper.Undo_BeginBlock()
   reaper.TrackFX_SetParamNormalized(tr, fx, mapped[1], 0.0) -- Style A
-  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[2], 0.3) -- Drive 3.0
+  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[2],
+    0.30000001192092896) -- Drive 3.0
   reaper.TrackFX_SetParamNormalized(tr, fx, mapped[3], 0.0) -- Punish Off
-  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[4], 0.5) -- Tone 0.0
-  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[5], 0.3) -- Mix 30.0
-  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[6], 1.0) -- AutoGain On
-  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[7], 1.0) -- OutputTrim 0.0
+  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[4],
+    0.25008189678192139) -- LowCut 53.2
+  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[5], 0.5) -- Tone 0.0
+  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[6],
+    0.74999940395355225) -- HighCut 9457.4
+  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[7],
+    0.30000001192092896) -- Mix 30.0
+  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[8], 1.0) -- AutoGain On
+  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[9], 0.0) -- LowThump Off
+  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[10], 0.0) -- HighSlope Gentle
+  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[11], 1.0) -- OutputTrim 0.0
   reaper.Undo_EndBlock("ReaAssist: set Decapitator controls", -1)
   reaper.UpdateArrange()
-end)
+end
 ```
 <!-- /CHUNK:control -->
 
 <!-- CHUNK:musical -->
-For bass, vocals, drums or a mix bus, start with the restrained recipe and
-adjust Drive first. Use Mix for parallel character. Use Tone or the filters
-only when the user asks for a darker, brighter or band-limited result. Preserve
-all unrelated controls on an existing instance.
+For subtle natural warmth, use the certified natural alternative: Style N,
+Drive 2.0, Punish Off, LowCut 36.0, Tone -2.4, HighCut 7009.2, Mix 20.0,
+AutoGain On, LowThump Off, HighSlope Gentle and OutputTrim -1.2. For bass,
+vocals, drums or a mix bus, adjust Drive first and use Mix for parallel
+character. Preserve every unrequested control on an existing instance.
 <!-- /CHUNK:musical -->
 <!-- /PLUGIN:Decapitator -->
 
+<!-- PLUGIN:Devil-Loc -->
+<!-- SECTION-REVISION:493770989a5462aec9dcc79af6bd580a2812a9c2de39c7ff60995812872a6c83 -->
+## Devil-Loc
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-devil-loc","display_name":"Devil-Loc","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys devil loc","identifiers":{"add_by_name":["VST3: Devil-Loc","VST3: Devil-Loc (Soundtoys)"],"aliases":["devil-loc","devil loc","soundtoys devil-loc","VST3: Devil-Loc","VST3: Devil-Loc (Soundtoys)"],"curated":["Devil-Loc"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":[]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-devil-loc","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Devil-Loc","loaded_name":"VST3: Devil-Loc (Soundtoys)","parameter_count":{"mode":"exact","value":6},"required_parameters":[{"index":1,"name":"Crush","section":"","section_required":false},{"index":2,"name":"Crunch","section":"","section_required":false}],"observed_fingerprint_sha256":"98c6fd0f8cc384e3289d5f08aaa0c09e8000716191d636f7da42e68041fa190d"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/devil-loc/","document_title":"Devil-Loc Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"98c6fd0f8cc384e3289d5f08aaa0c09e8000716191d636f7da42e68041fa190d","body_sha256":"266db0b3977194723461bd21a488fbead0fdcac4c5f79443325c6a2c3dbddd0c"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:f42411a6d98fa621d0d4b312898266cc0b67f06482c891bf222d3e699689d3b5 -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 1, name = "Crush" }`: `2.5` = `0.25`
+- `{ index = 2, name = "Crunch" }`: `2.5` = `0.25`
+
+Calibrated natural value ladders:
+
+- `{ index = 1, name = "Crush" }`
+  - natural alternative: `2.0` = `0.20000000298023224`
+  - exact anchor: `2.5` = `0.25`
+  - natural alternative: `3.0` = `0.30000001192092896`
+
+- `{ index = 2, name = "Crunch" }`
+  - natural alternative: `2.0` = `0.20000000298023224`
+  - exact anchor: `2.5` = `0.25`
+  - natural alternative: `3.0` = `0.30000001192092896`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:cef87e6bb289d5cbcecb2d95cf5929dddd5ef50f9378a3348c2327d0d2231696 -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+The installed VST3 exposes Crush 1 and Crunch 2. Do not write plug-in Bypass 0
+or host controls 3 through 5.
+Devil-Loc is intentionally extreme at high settings. For unheard audio, keep
+both controls restrained. Resolve both exact names first, use literal
+`mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback.
+Verify next-frame readback and preserve host controls.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+Crush controls compression and Crunch controls distortion. A restrained drum
+room start uses both below 4.0. Higher settings can pump, gate and distort
+aggressively, so use them only when the user asks for a destroyed sound.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:Devil-Loc -->
+
+<!-- PLUGIN:Devil-Loc Deluxe -->
+<!-- SECTION-REVISION:c9957dd4f6dc03814f95cb2097938b34f08ffadf4f046589c8fdb7e40bf56840 -->
+## Devil-Loc Deluxe
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-devil-loc-deluxe","display_name":"Devil-Loc Deluxe","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys devil loc deluxe","identifiers":{"add_by_name":["VST3: Devil-Loc Deluxe","VST3: Devil-Loc Deluxe (Soundtoys)"],"aliases":["devil-loc deluxe","devil loc deluxe","soundtoys devil-loc deluxe","VST3: Devil-Loc Deluxe","VST3: Devil-Loc Deluxe (Soundtoys)"],"curated":["Devil-Loc Deluxe"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":[]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-devil-loc-deluxe","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Devil-Loc Deluxe","loaded_name":"VST3: Devil-Loc Deluxe (Soundtoys)","parameter_count":{"mode":"exact","value":9},"required_parameters":[{"index":1,"name":"Crush","section":"","section_required":false},{"index":2,"name":"Crunch","section":"","section_required":false},{"index":3,"name":"Mix","section":"","section_required":false},{"index":5,"name":"Release","section":"","section_required":false}],"observed_fingerprint_sha256":"6a9c44259e78ef02dcdae5836ff2a4ad13b4bfd101dbac1dd174d7569c79388f"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/wp-content/uploads/Devil-Loc-Deluxe-Manual.pdf","document_title":"Devil-Loc Deluxe User's Guide Version 5","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"6a9c44259e78ef02dcdae5836ff2a4ad13b4bfd101dbac1dd174d7569c79388f","body_sha256":"2878486025d91d1fe705d876ede9fe2d69ba5c5c911cd6c1be1e65e011ef2de3"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:d5f6376a0fc295478abc819cafeab952a9aea9a3ba8bc5013b1fd0fb8b044e39 -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 5, name = "Release" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 1, name = "Crush" }`: `2.5` = `0.25`
+- `{ index = 2, name = "Crunch" }`: `2.5` = `0.25`
+- `{ index = 3, name = "Mix" }`: `25.0` = `0.25`
+- `{ index = 4, name = "Darkness" }`: `7952.7` = `0.2500002384185791`
+- `{ index = 5, name = "Release" }`: `Off` = `0`
+
+Calibrated natural value ladders:
+
+- `{ index = 1, name = "Crush" }`
+  - natural alternative: `2.0` = `0.20000000298023224`
+  - exact anchor: `2.5` = `0.25`
+  - natural alternative: `3.0` = `0.30000001192092896`
+
+- `{ index = 2, name = "Crunch" }`
+  - natural alternative: `2.0` = `0.20000000298023224`
+  - exact anchor: `2.5` = `0.25`
+  - natural alternative: `3.0` = `0.30000001192092896`
+
+- `{ index = 3, name = "Mix" }`
+  - natural alternative: `20.0` = `0.20000000298023224`
+  - exact anchor: `25.0` = `0.25`
+  - natural alternative: `30.0` = `0.30000001192092896`
+
+- `{ index = 4, name = "Darkness" }`
+  - natural alternative: `9563.5` = `0.20000070333480835`
+  - exact anchor: `7952.7` = `0.2500002384185791`
+  - natural alternative: `6613.2` = `0.30000022053718567`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:bba20bbdb0a814f36eb3f58cad13ffe22ed284168e9b5cfe4ca9676c13e0e94a -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+Product controls are Crush 1, Crunch 2, Mix 3, Darkness 4 and Release 5. Do
+not write Bypass 0 or host controls 6 through 8. Use the complete automatable
+menu map above for Release.
+
+
+Resolve all targets before writing. Use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback. Preserve every unrequested
+control and verify delayed formatted readback.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+Use Mix for restrained parallel processing and Darkness to reduce harsh upper
+distortion. Keep Crush and Crunch low for a conservative drum-room start.
+Release changes the compressor recovery behavior; preserve it unless requested.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:Devil-Loc Deluxe -->
+
 <!-- PLUGIN:EchoBoy -->
-<!-- SECTION-REVISION:18ab39d9fb771842ccf806bec1eda64283bd257a532ffd033f0c385a6694b59b -->
+<!-- SECTION-REVISION:84883bb49ea05fa38a28eb0a005df7e2859ef876abcf47b82d6c40c3d3377bc9 -->
 ## EchoBoy
 
 ```json plugin-route
@@ -6950,33 +7487,143 @@ all unrelated controls on an existing instance.
 ```
 
 ```json plugin-validate
-{"key":"soundtoys-echoboy","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[11],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: EchoBoy","loaded_name":"VST3: EchoBoy (Soundtoys)","parameter_count":{"mode":"exact","value":28},"required_parameters":[{"index":1,"name":"InputGain","section":"","section_required":false},{"index":3,"name":"Mix","section":"","section_required":false},{"index":11,"name":"Feedback","section":"","section_required":false},{"index":23,"name":"Style","section":"","section_required":false}],"observed_fingerprint_sha256":"025fc93303fd567151d8af4e4f204ae7583d63f24ee62cad1804b02b47f1c41c"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/wp-content/uploads/EchoBoy-Manual.pdf","migrated_at":"2026-07-30","body_sha256":"9e81f2cf574a4bce6e10aaafd1acadff498e285026c3659f5d5e47b1488dd6d3","verified_at":"2026-07-30","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"025fc93303fd567151d8af4e4f204ae7583d63f24ee62cad1804b02b47f1c41c"}}
+{"key":"soundtoys-echoboy","safety":{"settle_ms":100,"heavy_selectors":[23],"unsafe_to_sweep":[11],"volatile_parameters":[24]},"fingerprints":[{"format":"VST3","identifier":"VST3: EchoBoy","loaded_name":"VST3: EchoBoy (Soundtoys)","parameter_count":{"mode":"exact","value":28},"required_parameters":[{"index":1,"name":"InputGain","section":"","section_required":false},{"index":3,"name":"Mix","section":"","section_required":false},{"index":11,"name":"Feedback","section":"","section_required":false},{"index":23,"name":"Style","section":"","section_required":false}],"observed_fingerprint_sha256":"025fc93303fd567151d8af4e4f204ae7583d63f24ee62cad1804b02b47f1c41c"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/wp-content/uploads/EchoBoy-Manual.pdf","product_version":"5.5.5 64 bit","migrated_at":"2026-07-30","body_sha256":"210f792e88b63659b6e50fecc86c0b1bf0a881083349c998c2c0b0c3066a0b03","verified_at":"2026-08-01","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"025fc93303fd567151d8af4e4f204ae7583d63f24ee62cad1804b02b47f1c41c"}}
 ```
 
 <!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- followup_evidence_sha256:a70a7bdde6e2cc83b913ff94f80b2666bed0717fe4ba041b30dac9b38d365c2f -->
+### CERTIFIED STORED VALUES
+
+These values passed repeated live storage, fixed-point readback and exact state
+restoration in Soundtoys 5.5.5. Use literal normalized values. Do not compute,
+round or interpolate them.
+
+Complete live menu maps:
+
+- `4 Mode`: `Single` = `0`, `Dual` = `0.3333333432674408`, `Ping-Pong` = `0.66666668653488159`, `Rhythm` = `1`
+- `5 Echo1Mode` and `8 Echo2Mode`: `Time` = `0`, `Note` = `0.25`, `Dotted` = `0.5`, `Triplet` = `0.75`, `Beats` = `1`
+- `6 Echo1Note` and `9 Echo2Note`: `1/1 note` = `0`, `1/2 note` = `0.05000000074505806`, `1/4 note` = `0.10000000149011612`, `1/8th` = `0.15000000596046448`, `1/16th` = `0.20000000298023224`, `1/32nd` = `0.25`, `1/64th` = `0.30000001192092896`, `1/1 trip` = `0.34999999403953552`, `1/2 trip` = `0.40000000596046448`, `1/4 trip` = `0.44999998807907104`, `1/8 trip` = `0.5`, `1/16 trip` = `0.55000001192092896`, `1/32 trip` = `0.60000002384185791`, `1/64 trip` = `0.64999997615814209`, `1/1 dot` = `0.69999998807907104`, `1/2 dot` = `0.75`, `1/4 dot` = `0.80000001192092896`, `1/8 dot` = `0.85000002384185791`, `1/16 dot` = `0.89999997615814209`, `1/32 dot` = `0.94999998807907104`, `1/64 dot` = `1`
+- `12 PrimeNumbers`: `Off` = `0`, `On` = `1`
+- `18 RhythmMode`: `Time` = `0`, `Note` = `0.1666666716337204`, `Dotted` = `0.3333333432674408`, `Triplet` = `0.5`, `Pattern` = `0.66666668653488159`, `CustomTime` = `0.83333331346511841`, `CustomBeats` = `1`
+- `19 RhythmNote`: `1/2 note` = `0`, `1/4 note` = `0.058823529630899429`, `1/8th` = `0.11764705926179886`, `1/16th` = `0.17647059261798859`, `1/32nd` = `0.23529411852359772`, `1/64th` = `0.29411765933036804`, `1/2 trip` = `0.35294118523597717`, `1/4 trip` = `0.4117647111415863`, `1/8 trip` = `0.47058823704719543`, `1/16 trip` = `0.52941179275512695`, `1/32 trip` = `0.58823531866073608`, `1/64 trip` = `0.64705884456634521`, `1/2 dot` = `0.70588237047195435`, `1/4 dot` = `0.76470589637756348`, `1/8 dot` = `0.82352942228317261`, `1/16 dot` = `0.88235294818878174`, `1/32 dot` = `0.94117647409439087`, `1/64 dot` = `1`
+- `21 RhythmRepeats`: `1` = `0`, `2` = `0.066666670143604279`, `3` = `0.13333334028720856`, `4` = `0.20000000298023224`, `5` = `0.26666668057441711`, `6` = `0.3333333432674408`, `7` = `0.40000000596046448`, `8` = `0.46666666865348816`, `9` = `0.53333336114883423`, `10` = `0.60000002384185791`, `11` = `0.66666668653488159`, `12` = `0.73333334922790527`, `13` = `0.80000001192092896`, `14` = `0.86666667461395264`, `15` = `0.93333333730697632`, `16` = `1`
+
+Full zero-write Style formatter map:
+
+- `Master Tape` = `0`; `Studio Tape` = `0.032258064`; `EchoPlex` = `0.06451613`; `Space Echo` = `0.09677419`
+- `Tube Tape` = `0.12903225`; `Cheap Tape` = `0.16129032`; `Memory Man` = `0.19354838`; `DM-2` = `0.22580644`
+- `TelRay` = `0.2580645`; `Binsonette` = `0.29032257`; `Telephone` = `0.32258064`; `AM Radio` = `0.3548387`
+- `FM Radio` = `0.38709676`; `Shortwave` = `0.41935483`; `Transmitter` = `0.4516129`; `Digital Delay` = `0.48387095`
+- `Analog Delay` = `0.516129`; `DigitalChorus` = `0.5483871`; `Analog Chorus` = `0.58064514`; `CE-1 Chorus` = `0.61290324`
+- `Vibrato` = `0.6451613`; `Saturated` = `0.67741936`; `Fat` = `0.7096774`; `Distressed` = `0.7419355`
+- `Limited` = `0.7741935`; `Distorted` = `0.8064516`; `Queeked` = `0.83870965`; `Ambient` = `0.87096775`
+- `Diffused` = `0.9032258`; `Splattered` = `0.9354839`; `Verbed` = `0.9677419`; `Edited Style` = `1`
+
+The 1,001-point Style grid is read-only. `Master Tape` = `0`, `Analog Delay` =
+`0.5161290168762207` and `Verbed` = `0.96774190664291382` also passed paced
+live storage. Style swaps modeled assets. Write one requested Style value and
+allow stable pacing. Never sweep Style or enumerate it with live writes.
+
+Exact recipe anchors:
+
+- `1 InputGain`: `0.0` = `0.5`; `2 OutputGain`: `0.0` = `0.5`; `3 Mix`: `20.0` = `0.20000000298023224`
+- `4 Mode`: `Single` = `0`; `5 Echo1Mode`: `Note` = `0.25`; `6 Echo1Note`: `1/8th` = `0.15000000596046448`; `7 Echo1Time`: `231.4` = `0.65001732110977173`
+- `8 Echo2Mode`: `Note` = `0.25`; `9 Echo2Note`: `1/8th` = `0.15000000596046448`; `10 Echo2Time`: `231.4` = `0.65001732110977173`
+- `11 Feedback`: `0.25` = `0.20000000298023224`; `12 PrimeNumbers`: `Off` = `0`; `13 Groove`: `0.000` = `0.5`; `14 Feel`: `0.000` = `0.5`
+- `15 Saturation`: `9.98` = `0.41583332419395447`; `16 LowCut`: `0.00` = `0`; `17 HighCut`: `0.00` = `0`
+- `18 RhythmMode`: `Note` = `0.1666666716337204`; `19 RhythmNote`: `1/8th` = `0.11764705926179886`; `20 RhythmTime`: `102.8` = `0.54999959468841553`
+- `21 RhythmRepeats`: `8` = `0.46666666865348816`; `22 RhythmDecay`: `8.0` = `0.20000000298023224`; `23 Style`: `Master Tape` = `0`
+
+Calibrated continuous ladders:
+
+- `1 InputGain` and `2 OutputGain`: `-2.4` = `0.44999998807907104`; `0.0` = `0.5`; `2.4` = `0.55000001192092896`
+- `3 Mix`: `15.0` = `0.15000000596046448`; `20.0` = `0.20000000298023224`; `25.0` = `0.25`
+- `7 Echo1Time` and `10 Echo2Time`: `127.4` = `0.5999717116355896`; `231.4` = `0.65001732110977173`; `419.9` = `0.69999676942825317`
+- `11 Feedback`: `0.19` = `0.15199999511241913`; `0.25` = `0.20000000298023224`; `0.31` = `0.24799999594688416`
+- `13 Groove` and `14 Feel`: `-0.050` = `0.40000000596046448`; `0.000` = `0.5`; `0.050` = `0.60000002384185791`
+- `15 Saturation`: `8.40` = `0.34999999403953552`; `9.98` = `0.41583332419395447`; `12.00` = `0.5`
+- `16 LowCut` and `17 HighCut`: `0.00` = `0`; `0.10` = `0.10000000149011612`; `0.20` = `0.20000000298023224`
+- `20 RhythmTime`: `54.7` = `0.50003999471664429`; `102.8` = `0.54999959468841553`; `193.2` = `0.59999239444732666`
+- `22 RhythmDecay`: `4.0` = `0.10000000149011612`; `8.0` = `0.20000000298023224`; `12.0` = `0.30000001192092896`
+
+Natural-intent rule: choose only from the exact ladder and menu values above.
+Change at least one requested target so the natural result differs from the
+exact recipe. Preserve unrequested controls and describe unheard-audio
+settings as a starting point.
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
 EchoBoy is a delay and echo effect with multiple timing modes and modeled echo
-styles. The installed VST3 exposes 28 parameters. Do not write index 0 or host
-indices 25 through 27 unless explicitly requested.
+styles. The installed VST3 exposes 28 parameters. Product controls are indices
+1 through 23. Do not write index 0, host-supplied Tempo at index 24 or host
+indices 25 through 27. Tempo follows the REAPER project and rejected live
+parameter writes during calibration.
 
 ### PRIMARY CONTROLS
 
 ```
-3 Mix           4 Mode          5 Echo1Mode     6 Echo1Note
-7 Echo1Time     8 Echo2Mode     9 Echo2Note    10 Echo2Time
-11 Feedback    15 Saturation   16 LowCut       17 HighCut
-23 Style       24 Tempo
+1 InputGain     2 OutputGain    3 Mix            4 Mode
+5 Echo1Mode     6 Echo1Note     7 Echo1Time       8 Echo2Mode
+9 Echo2Note    10 Echo2Time    11 Feedback       12 PrimeNumbers
+13 Groove      14 Feel         15 Saturation     16 LowCut
+17 HighCut     18 RhythmMode   19 RhythmNote     20 RhythmTime
+21 RhythmRepeats  22 RhythmDecay  23 Style
 ```
 
 Mode controls whether the instance uses one echo, dual echo, ping-pong or a
 rhythm pattern. Echo1 and Echo2 controls depend on that mode. For a Single
 echo, do not rewrite Echo2. When Echo1Mode is Note, set Echo1Note and preserve
 Echo1Time. When Echo1Mode is Time, set Echo1Time and preserve Echo1Note.
+RhythmMode selects the active RhythmNote or RhythmTime family. Change only the
+active timing family unless the user explicitly requests a complete preset.
+
+Treat the top-level Mode at index 4 as mandatory whenever the request names
+Single, Dual, Ping-Pong or Rhythm. RhythmMode at index 18 is a subordinate
+timing selector and never replaces the top-level Mode write. Resolve and write
+the active conditional controls in this order:
+
+- Dual Note: `4 Mode = Dual (0.3333333432674408)`, then
+  `5 Echo1Mode = Note (0.25)`,
+  `6 Echo1Note = 1/8th (0.15000000596046448)`,
+  `8 Echo2Mode = Note (0.25)` and
+  `9 Echo2Note = 1/4 note (0.10000000149011612)`. Preserve indices 7 and 10.
+- Dual Time: `4 Mode = Dual (0.3333333432674408)`, then
+  `5 Echo1Mode = Time (0)`,
+  `7 Echo1Time = 231.4 (0.65001732110977173)`,
+  `8 Echo2Mode = Time (0)` and
+  `10 Echo2Time = 419.9 (0.69999676942825317)`. The two Time values may differ.
+  Preserve indices 6 and 9.
+- Rhythm Note: `4 Mode = Rhythm (1)`, then
+  `18 RhythmMode = Note (0.1666666716337204)`,
+  `19 RhythmNote = 1/8th (0.11764705926179886)`,
+  `21 RhythmRepeats = 8 (0.46666666865348816)` and
+  `22 RhythmDecay = 8.0 (0.20000000298023224)`. Preserve index 20.
+- Rhythm Time selector transition: set `4 Mode = Rhythm (1)` and
+  `18 RhythmMode = Time (0)`. Preserve indices 19 through 22.
+- Rhythm Time value edit, only when the current instance is already in
+  top-level Rhythm mode with RhythmMode Time: preserve indices 4, 18 and 19,
+  then set `20 RhythmTime = 102.8 (0.54999959468841553)`,
+  `21 RhythmRepeats = 8 (0.46666666865348816)` and
+  `22 RhythmDecay = 8.0 (0.20000000298023224)`.
+
+The literal setter example below demonstrates Single mode only. Do not reuse
+its `Mode = Single` assignment for a Dual, Ping-Pong or Rhythm request.
+
+Soundtoys 5.5.5 cannot restore the prior RhythmTime value with one Undo when
+one action both switches from another mode into Rhythm Time and writes index
+20. The resulting values and delayed readback are correct, but Undo restores
+the selectors before the dependent value and leaves RhythmTime changed. Fail
+closed on that combined request. Explain that it needs two actions: first
+switch the two selectors while preserving indices 19 through 22, then set the
+Rhythm Time values after the instance is already in that mode. Do not silently
+apply only part of the request. Do not combine the two actions into one script.
 
 Feedback is marked unsafe to sweep because high values can self-oscillate and
 raise output substantially. Set a known requested display directly through
-the reviewed normalized anchors. EchoBoy formats Feedback as 0.00 through 1.25,
-so 25% feedback reads `0.25`. For unheard material, keep Feedback at or below
-`0.35` unless the user explicitly requests runaway or self-oscillating delay.
+the reviewed normalized anchors. EchoBoy formats Feedback as 0.00 through 1.25.
+The stored value `0.20000000298023224` reads `0.25`. For unheard material, use
+only the certified `0.19`, `0.25` or `0.31` display anchors unless the user
+explicitly requests runaway or self-oscillating delay.
 Keep Mix at or below 30.0 for an inline starting point. On a dedicated send
 return, use 100.0 Mix only when the user explicitly identifies it as a return.
 
@@ -6987,7 +7634,7 @@ each literal `mapped[N]` index at its setter call, so do not hide these writes
 inside a loop or wrapper. Use exactly one `reaper.defer` callback. ReaAssist
 commits and verifies delayed live readback before reporting completion. Do not
 call `TrackFX_GetFormattedParamValue` in generated code. Do not schedule a
-follow-up callback or add any verification loop after the seven writes.
+follow-up callback or add any verification loop after the requested writes.
 
 ```lua
 reaper.defer(function()
@@ -7002,15 +7649,17 @@ reaper.defer(function()
   })
   if not mapped then error(guard_err) end
   reaper.Undo_BeginBlock()
-  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[1], 0.2) -- Mix 20.0
+  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[1],
+    0.20000000298023224) -- Mix 20.0
   reaper.TrackFX_SetParamNormalized(tr, fx, mapped[2], 0.0) -- Single
   reaper.TrackFX_SetParamNormalized(tr, fx, mapped[3], 0.25) -- Note
-  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[4], 0.15) -- 1/8th
-  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[5], 0.2) -- Feedback 0.25
+  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[4],
+    0.15000000596046448) -- 1/8th
+  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[5],
+    0.20000000298023224) -- Feedback 0.25
   reaper.TrackFX_SetParamNormalized(tr, fx, mapped[6],
-    0.4166666567325592) -- Saturation 10.00
-  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[7],
-    0.032258063554763794) -- Studio Tape
+    0.41583332419395447) -- Saturation 9.98
+  reaper.TrackFX_SetParamNormalized(tr, fx, mapped[7], 0.0) -- Master Tape
   reaper.Undo_EndBlock("ReaAssist: set EchoBoy controls", -1)
   reaper.UpdateArrange()
 end)
@@ -7018,12 +7667,2451 @@ end)
 <!-- /CHUNK:control -->
 
 <!-- CHUNK:musical -->
-A restrained natural echo starts with Single mode, Note timing, 1/8th or
-1/4-note timing, 15% to 30% Feedback, 10 to 25 Mix, light Saturation and a tape
-style. Keep the summary factual: state the selected settings and call them a
-starting point. Do not claim the delay sits correctly without listening.
+A dark restrained tape echo starts with Single mode, Note timing at `1/4 note`,
+Mix 15.0, Feedback 0.19, Saturation 8.40 and Studio Tape. Preserve inactive
+Echo2 and Rhythm controls. Keep the summary factual: state the selected
+settings and call them a starting point. Do not claim the delay sits correctly
+without listening.
 <!-- /CHUNK:musical -->
 <!-- /PLUGIN:EchoBoy -->
+
+<!-- PLUGIN:EchoBoy Jr -->
+<!-- SECTION-REVISION:00cfec45aebbc886b08408f43e76b0975b531827ed7652b76748fa333aeea255 -->
+## EchoBoy Jr
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-echoboy-jr","display_name":"EchoBoy Jr","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys echoboy jr","identifiers":{"add_by_name":["VST3: EchoBoy Jr","VST3: EchoBoy Jr (Soundtoys)"],"aliases":["echoboy jr","echo boy jr","soundtoys echoboy jr","VST3: EchoBoy Jr","VST3: EchoBoy Jr (Soundtoys)"],"curated":["EchoBoy Jr"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":[]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-echoboy-jr","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[10],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: EchoBoy Jr","loaded_name":"VST3: EchoBoy Jr (Soundtoys)","parameter_count":{"mode":"exact","value":17},"required_parameters":[{"index":3,"name":"Mix","section":"","section_required":false},{"index":4,"name":"Mode","section":"","section_required":false},{"index":5,"name":"Style","section":"","section_required":false},{"index":7,"name":"EchoMode","section":"","section_required":false},{"index":8,"name":"EchoNote","section":"","section_required":false},{"index":10,"name":"Feedback","section":"","section_required":false}],"observed_fingerprint_sha256":"6da848693c12b98bfe0e768498890d01ac8d77fdf5f9af55315417fd9e583753"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/echoboy-jr/","document_title":"EchoBoy Jr Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"6da848693c12b98bfe0e768498890d01ac8d77fdf5f9af55315417fd9e583753","body_sha256":"7fd16c20f44a20690e6a188504b5993e1e6372b8c8ca935e26fb2c20d161fbce"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:e1600c3b3c0580881133d5925c6494498e87fbf1a746a6dd304c2c80320b74a9 -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 4, name = "Mode" }`
+  - `Normal` = `0`
+  - `Wide` = `0.5`
+  - `Ping-Pong` = `1`
+
+- `{ index = 5, name = "Style" }`
+  - `Studio Tape` = `0`
+  - `EchoPlex` = `0.1666666716337204`
+  - `Space Echo` = `0.3333333432674408`
+  - `Cheap Tape` = `0.5`
+  - `Memory Man` = `0.66666668653488159`
+  - `Ambient` = `0.83333331346511841`
+  - `Transmitter` = `1`
+
+- `{ index = 6, name = "Glide" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+- `{ index = 7, name = "EchoMode" }`
+  - `Time` = `0`
+  - `Note` = `0.25`
+  - `Dotted` = `0.5`
+  - `Triplet` = `0.75`
+  - `Beats` = `1`
+
+- `{ index = 8, name = "EchoNote" }`
+  - `1/1 note` = `0`
+  - `1/2 note` = `0.05000000074505806`
+  - `1/4 note` = `0.10000000149011612`
+  - `1/8th` = `0.15000000596046448`
+  - `1/16th` = `0.20000000298023224`
+  - `1/32nd` = `0.25`
+  - `1/64th` = `0.30000001192092896`
+  - `1/1 trip` = `0.34999999403953552`
+  - `1/2 trip` = `0.40000000596046448`
+  - `1/4 trip` = `0.44999998807907104`
+  - `1/8 trip` = `0.5`
+  - `1/16 trip` = `0.55000001192092896`
+  - `1/32 trip` = `0.60000002384185791`
+  - `1/64 trip` = `0.64999997615814209`
+  - `1/1 dot` = `0.69999998807907104`
+  - `1/2 dot` = `0.75`
+  - `1/4 dot` = `0.80000001192092896`
+  - `1/8 dot` = `0.85000002384185791`
+  - `1/16 dot` = `0.89999997615814209`
+  - `1/32 dot` = `0.94999998807907104`
+  - `1/64 dot` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 3, name = "Mix" }`: `25.0` = `0.25`
+- `{ index = 4, name = "Mode" }`: `Wide` = `0.5`
+- `{ index = 5, name = "Style" }`: `Space Echo` = `0.3333333432674408`
+- `{ index = 6, name = "Glide" }`: `Off` = `0`
+- `{ index = 7, name = "EchoMode" }`: `Note` = `0.25`
+- `{ index = 8, name = "EchoNote" }`: `1/8th` = `0.15000000596046448`
+- `{ index = 10, name = "Feedback" }`: `0.31` = `0.24799999594688416`
+- `{ index = 11, name = "Saturation" }`: `6.00` = `0.25`
+
+Calibrated natural value ladders:
+
+- `{ index = 3, name = "Mix" }`
+  - natural alternative: `20.0` = `0.20000000298023224`
+  - exact anchor: `25.0` = `0.25`
+  - natural alternative: `30.0` = `0.30000001192092896`
+
+- `{ index = 10, name = "Feedback" }`
+  - natural alternative: `0.25` = `0.20000000298023224`
+  - exact anchor: `0.31` = `0.24799999594688416`
+  - natural alternative: `0.38` = `0.30399999022483826`
+
+- `{ index = 11, name = "Saturation" }`
+  - natural alternative: `4.80` = `0.20000000298023224`
+  - exact anchor: `6.00` = `0.25`
+  - natural alternative: `7.20` = `0.30000001192092896`
+
+Certified natural menu alternative:
+- `5 Style`: `Studio Tape` = `0`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:5cac7d95d04aadb7902e9c379d2e99c2fe86e49700942802404b5e381b2ede5e -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+EchoBoy Jr product controls are 1 through 13. Do not write Bypass 0 or host
+controls 14 through 16. Use the complete automatable menu map above.
+
+Feedback can self-oscillate. Keep it at or below 0.35 for unheard audio unless
+explicitly requested. Resolve all targets, use literal `mapped[N]` setters,
+one Undo block and exactly one `reaper.defer` callback. Preserve EchoTime when Note mode
+is selected, verify delayed readback and preserve unrelated controls.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+For a dark restrained tape echo, use Studio Tape, Note timing, an eighth or
+quarter note, modest Feedback and Mix, and low Saturation. Style and Mode are
+independent. State chosen settings without claiming how they sit in the mix.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:EchoBoy Jr -->
+
+<!-- PLUGIN:FilterFreak1 -->
+<!-- SECTION-REVISION:9c2c23765425202c29fbbceb01b98171c3c373deb361c6dbea5c0f95e84e95cc -->
+## FilterFreak1
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-filterfreak1","display_name":"FilterFreak1","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys filterfreak1","identifiers":{"add_by_name":["VST3: FilterFreak1","VST3: FilterFreak1 (Soundtoys)"],"aliases":["filterfreak1","filter freak 1","soundtoys filterfreak1","VST3: FilterFreak1","VST3: FilterFreak1 (Soundtoys)"],"curated":["FilterFreak1"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":["filterfreak1"]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-filterfreak1","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[6],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: FilterFreak1","loaded_name":"VST3: FilterFreak1 (Soundtoys)","parameter_count":{"mode":"exact","value":16},"required_parameters":[{"index":5,"name":"Frequency","section":"","section_required":false},{"index":6,"name":"Resonance","section":"","section_required":false},{"index":7,"name":"FilterOrder","section":"","section_required":false},{"index":8,"name":"FilterShape","section":"","section_required":false}],"observed_fingerprint_sha256":"9f28af429a3b7a8619c1cbc560262ed2f538b1bc6c0b96ca35e3a311336f5216"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/wp-content/uploads/FilterFreak-Manual.pdf","document_title":"FilterFreak User's Guide Version 5","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9f28af429a3b7a8619c1cbc560262ed2f538b1bc6c0b96ca35e3a311336f5216","body_sha256":"71e0c28832c08b068e53cdba408c6c96d18477b8a6aabd46b25a756740ab2dcf"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:174e3f7b1152223d11e5da9a3c801f11823742fdd425a5a4f6292324098b80a4 -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 4, name = "InOutMode" }`
+  - `Digital` = `0`
+  - `Analog` = `1`
+
+- `{ index = 7, name = "FilterOrder" }`
+  - `2` = `0`
+  - `4` = `0.3333333432674408`
+  - `6` = `0.66666668653488159`
+  - `8` = `1`
+  - Formatter-only host readouts: `3`, `5`, `7`. A script cannot set these
+    states in this build. Offer the adjacent writable choices and explain why.
+
+- `{ index = 8, name = "FilterShape" }`
+  - `Lowpass` = `0`
+  - `Bandpass` = `0.3333333432674408`
+  - `Highpass` = `0.66666668653488159`
+  - `Notch` = `1`
+
+- `{ index = 10, name = "Trigger" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 3, name = "Mix" }`: `40.0` = `0.40000000596046448`
+- `{ index = 4, name = "InOutMode" }`: `Analog` = `1`
+- `{ index = 5, name = "Frequency" }`: `1262` = `0.60000979900360107`
+- `{ index = 6, name = "Resonance" }`: `7.2` = `0.40000000596046448`
+- `{ index = 7, name = "FilterOrder" }`: `4` = `0.3333333432674408`
+- `{ index = 8, name = "FilterShape" }`: `Bandpass` = `0.3333333432674408`
+- `{ index = 9, name = "ModulationDepth" }`: `0.25` = `0.25`
+- `{ index = 10, name = "Trigger" }`: `Off` = `0`
+
+Calibrated natural value ladders:
+
+- `{ index = 3, name = "Mix" }`
+  - natural alternative: `37.5` = `0.375`
+  - exact anchor: `40.0` = `0.40000000596046448`
+  - natural alternative: `45.0` = `0.44999998807907104`
+
+- `{ index = 5, name = "Frequency" }`
+  - natural alternative: `893` = `0.54994046688079834`
+  - exact anchor: `1262` = `0.60000979900360107`
+  - natural alternative: `1500` = `0.62502044439315796`
+
+- `{ index = 6, name = "Resonance" }`
+  - natural alternative: `5.3` = `0.33214285969734192`
+  - natural alternative: `6.5` = `0.375`
+  - exact anchor: `7.2` = `0.40000000596046448`
+
+- `{ index = 9, name = "ModulationDepth" }`
+  - natural alternative: `0.20` = `0.20000000298023224`
+  - exact anchor: `0.25` = `0.25`
+  - natural alternative: `0.30` = `0.30000001192092896`
+
+Certified natural menu alternative:
+- `8 FilterShape`: `Lowpass` = `0`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:fb55890659773b40a063b765a2477162a2d2c375b9a8f66e4969877f24be65d4 -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+Product controls are 1 through 12. Do not write Bypass 0 or host controls 13
+through 15. Use the complete automatable menu map above. FilterOrder
+automation exposes 2, 4, 6 and 8 poles. The host formatter also displays 3,
+5 and 7 between those states, but a script cannot store them in this build.
+If the user asks for an odd pole count, offer the adjacent writable choices
+and explain why.
+
+
+High resonance can self-oscillate. Keep it moderate on unheard audio. Resolve
+all targets first, use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback. The deep analog-style selector and modulation
+editors are not exposed as TrackFX parameters. Do not invent control for them.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+A gentle slow low-pass movement starts with low Resonance, moderate Mix and
+ModulationDepth, and a slow LFO. The filter shape and pole count materially
+change the result. Preserve them unless the request is clear.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:FilterFreak1 -->
+
+<!-- PLUGIN:FilterFreak2 -->
+<!-- SECTION-REVISION:2a6b46ea9d4a6ed549e333e3f44666f1e0f559c98ba4f287dd25055d3ab1abe8 -->
+## FilterFreak2
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-filterfreak2","display_name":"FilterFreak2","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys filterfreak2","identifiers":{"add_by_name":["VST3: FilterFreak2","VST3: FilterFreak2 (Soundtoys)"],"aliases":["filterfreak2","filter freak 2","soundtoys filterfreak2","VST3: FilterFreak2","VST3: FilterFreak2 (Soundtoys)"],"curated":["FilterFreak2"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":["filterfreak2"]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-filterfreak2","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[6,11],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: FilterFreak2","loaded_name":"VST3: FilterFreak2 (Soundtoys)","parameter_count":{"mode":"exact","value":24},"required_parameters":[{"index":5,"name":"Frequency1","section":"","section_required":false},{"index":8,"name":"Filter1Shape","section":"","section_required":false},{"index":10,"name":"Frequency2","section":"","section_required":false},{"index":13,"name":"Filter2Shape","section":"","section_required":false},{"index":16,"name":"FilterRouting","section":"","section_required":false}],"observed_fingerprint_sha256":"958e699ca98c94f0d2fd4764033c7332a9854cb3ed5f7653b8b517aa8b99baf9"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/wp-content/uploads/FilterFreak-Manual.pdf","document_title":"FilterFreak User's Guide Version 5","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"958e699ca98c94f0d2fd4764033c7332a9854cb3ed5f7653b8b517aa8b99baf9","body_sha256":"c85da9e78b5685c58f44342b35f3fe42cb2a1c342f02e55f397aa5831db650db"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:d774baec1c08d464d784b22600c7b003ec8827046f85f487eb78267deb0cf7fb -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 4, name = "InOutMode" }`
+  - `Digital` = `0`
+  - `Analog` = `1`
+
+- `{ index = 8, name = "Filter1Shape" }`
+  - `Lowpass` = `0`
+  - `Bandpass` = `0.3333333432674408`
+  - `Highpass` = `0.66666668653488159`
+  - `Notch` = `1`
+
+- `{ index = 9, name = "Filter1Order" }`
+  - `2` = `0`
+  - `4` = `0.3333333432674408`
+  - `6` = `0.66666668653488159`
+  - `8` = `1`
+  - Formatter-only host readouts: `3`, `5`, `7`. A script cannot set these
+    states in this build. Offer the adjacent writable choices and explain why.
+
+- `{ index = 13, name = "Filter2Shape" }`
+  - `Lowpass` = `0`
+  - `Bandpass` = `0.3333333432674408`
+  - `Highpass` = `0.66666668653488159`
+  - `Notch` = `1`
+
+- `{ index = 14, name = "Filter2Order" }`
+  - `2` = `0`
+  - `4` = `0.3333333432674408`
+  - `6` = `0.66666668653488159`
+  - `8` = `1`
+  - Formatter-only host readouts: `3`, `5`, `7`. A script cannot set these
+    states in this build. Offer the adjacent writable choices and explain why.
+
+- `{ index = 15, name = "FilterLink" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+- `{ index = 16, name = "FilterRouting" }`
+  - `Series` = `0`
+  - `Parallel` = `1`
+
+- `{ index = 18, name = "Trigger" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 3, name = "Mix" }`: `40.0` = `0.40000000596046448`
+- `{ index = 4, name = "InOutMode" }`: `Analog` = `1`
+- `{ index = 5, name = "Frequency1" }`: `316.98` = `0.40000063180923462`
+- `{ index = 6, name = "Resonance1" }`: `7.2` = `0.40000000596046448`
+- `{ index = 8, name = "Filter1Shape" }`: `Lowpass` = `0`
+- `{ index = 9, name = "Filter1Order" }`: `4` = `0.3333333432674408`
+- `{ index = 10, name = "Frequency2" }`: `1261.91` = `0.59999948740005493`
+- `{ index = 11, name = "Resonance2" }`: `3.0` = `0.25`
+- `{ index = 13, name = "Filter2Shape" }`: `Highpass` = `0.66666668653488159`
+- `{ index = 14, name = "Filter2Order" }`: `6` = `0.66666668653488159`
+- `{ index = 15, name = "FilterLink" }`: `Off` = `0`
+- `{ index = 16, name = "FilterRouting" }`: `Series` = `0`
+
+Calibrated natural value ladders:
+
+- `{ index = 3, name = "Mix" }`
+  - natural alternative: `37.5` = `0.375`
+  - exact anchor: `40.0` = `0.40000000596046448`
+  - natural alternative: `45.0` = `0.44999998807907104`
+
+- `{ index = 5, name = "Frequency1" }`
+  - natural alternative: `266.70` = `0.37499767541885376`
+  - exact anchor: `316.98` = `0.40000063180923462`
+  - natural alternative: `447.74` = `0.4499986469745636`
+
+- `{ index = 6, name = "Resonance1" }`
+  - natural alternative: `5.3` = `0.33214285969734192`
+  - natural alternative: `6.5` = `0.375`
+  - exact anchor: `7.2` = `0.40000000596046448`
+
+- `{ index = 10, name = "Frequency2" }`
+  - natural alternative: `893.37` = `0.55000042915344238`
+  - exact anchor: `1261.91` = `0.59999948740005493`
+  - natural alternative: `1499.79` = `0.62500017881393433`
+
+- `{ index = 11, name = "Resonance2" }`
+  - natural alternative: `2.4` = `0.20000000298023224`
+  - exact anchor: `3.0` = `0.25`
+  - natural alternative: `4.4` = `0.30000001192092896`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:fc52bb5c7eef162dfec9b2d993e7d02fef4f684048daf01aea89eb7d32511a51 -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+Product controls are 1 through 20. Do not write Bypass 0 or host controls 21
+through 23. Use the complete automatable menu map above. Both FilterOrder
+automation controls expose 2, 4, 6 and 8 poles. The host formatter also shows
+3, 5 and 7, but a script cannot store them in this build. Offer the adjacent
+writable choices when an odd pole count is requested.
+
+
+Resolve all targets before writing. Use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback. Keep resonance conservative. Deep analog
+style and modulation editors are not host-exposed and remain manual.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+Series routing applies one filter after the other; Parallel blends their
+outputs. Link intentionally couples the two filter controls, so leave it Off
+for independent exact settings. For gentle motion, keep resonance and Mix
+moderate and preserve unrelated modulation controls.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:FilterFreak2 -->
+
+<!-- PLUGIN:Little AlterBoy -->
+<!-- SECTION-REVISION:d9305951b474dc7a9213a04d2e74c6af532d2720628ba8681b5b94eb0c63541f -->
+## Little AlterBoy
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-little-alterboy","display_name":"Little AlterBoy","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys little alterboy","identifiers":{"add_by_name":["VST3: Little AlterBoy","VST3: Little AlterBoy (Soundtoys)"],"aliases":["little alterboy","little alter boy","soundtoys little alterboy","VST3: Little AlterBoy","VST3: Little AlterBoy (Soundtoys)"],"curated":["Little AlterBoy"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":[]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-little-alterboy","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Little AlterBoy","loaded_name":"VST3: Little AlterBoy (Soundtoys)","parameter_count":{"mode":"exact","value":10},"required_parameters":[{"index":1,"name":"Pitch","section":"","section_required":false},{"index":2,"name":"Formant","section":"","section_required":false},{"index":5,"name":"ShiftMode","section":"","section_required":false},{"index":6,"name":"FormantLink","section":"","section_required":false}],"observed_fingerprint_sha256":"03b17bf1e8466344c09d22ca661cb38b699337e61c99db8a0cfec075e6811c55"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/wp-content/uploads/Little-AlterBoy-Manual.pdf","document_title":"Little AlterBoy User's Guide Version 5","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"03b17bf1e8466344c09d22ca661cb38b699337e61c99db8a0cfec075e6811c55","body_sha256":"7d2516daa2aeba2680d410994b98b89b0673d9f88f46872b9f313137cbefe6ec"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:75bd0590f6c8d48ae113e5e9bc0b8ba517c6a6256d58693a76580718b6a008c4 -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 5, name = "ShiftMode" }`
+  - `Transpose` = `0`
+  - `Quantize` = `0.5`
+  - `Robot` = `1`
+
+- `{ index = 6, name = "FormantLink" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 1, name = "Pitch" }`: `-6.0` = `0.25`
+- `{ index = 2, name = "Formant" }`: `-2.4` = `0.40000000596046448`
+- `{ index = 3, name = "Drive" }`: `2.5` = `0.25`
+- `{ index = 4, name = "Mix" }`: `40.0` = `0.40000000596046448`
+- `{ index = 5, name = "ShiftMode" }`: `Transpose` = `0`
+- `{ index = 6, name = "FormantLink" }`: `Off` = `0`
+
+Calibrated natural value ladders:
+
+- `{ index = 1, name = "Pitch" }`
+  - natural alternative: `-7.2` = `0.20000000298023224`
+  - exact anchor: `-6.0` = `0.25`
+  - natural alternative: `-4.8` = `0.30000001192092896`
+
+- `{ index = 2, name = "Formant" }`
+  - natural alternative: `-3.0` = `0.375`
+  - exact anchor: `-2.4` = `0.40000000596046448`
+  - natural alternative: `-1.2` = `0.44999998807907104`
+
+- `{ index = 3, name = "Drive" }`
+  - natural alternative: `2.0` = `0.20000000298023224`
+  - exact anchor: `2.5` = `0.25`
+  - natural alternative: `3.0` = `0.30000001192092896`
+
+- `{ index = 4, name = "Mix" }`
+  - natural alternative: `37.5` = `0.375`
+  - exact anchor: `40.0` = `0.40000000596046448`
+  - natural alternative: `45.0` = `0.44999998807907104`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:ba5595199a0dfab88eb2b3de689787b91d541fa1afab4a375f99d6750bf15d33 -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+The installed Soundtoys 5.5.5 VST3 exposes six product controls at indices 1
+through 6. Do not write plug-in Bypass at 0 or host controls 7 through 9.
+
+ShiftMode is a nonstandard stepped control. Use the complete automatable menu
+map above for ShiftMode and FormantLink.
+
+
+Resolve every requested index and exact name in one
+`reaassist_resolve_profile_params` call before writing. Use literal
+`mapped[N]` setter arguments, one Undo block and exactly one `reaper.defer` callback. Soundtoys applies VST3 writes one REAPER frame later. Preserve every
+unrequested control and use guarded normalized anchors followed by formatted
+readback verification.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+Little AlterBoy is intended primarily for clean monophonic vocals. Transpose
+preserves independent formant control. Quantize creates stepped pitch and
+Robot holds one pitch. For a natural lower vocal, start with Transpose,
+FormantLink Off, restrained negative Pitch and Formant values, light Drive and
+a moderate Mix. Describe unheard-audio settings as a starting point.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:Little AlterBoy -->
+
+<!-- PLUGIN:Little MicroShift -->
+<!-- SECTION-REVISION:05772561f60558b81322eaff895df88d48e76b7ca73769d756be83fcf8b28e72 -->
+## Little MicroShift
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-little-microshift","display_name":"Little MicroShift","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys little microshift","identifiers":{"add_by_name":["VST3: Little MicroShift","VST3: Little MicroShift (Soundtoys)"],"aliases":["little microshift","little micro shift","soundtoys little microshift","VST3: Little MicroShift","VST3: Little MicroShift (Soundtoys)"],"curated":["Little MicroShift"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":[]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-little-microshift","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Little MicroShift","loaded_name":"VST3: Little MicroShift (Soundtoys)","parameter_count":{"mode":"exact","value":7},"required_parameters":[{"index":1,"name":"InputGain","section":"","section_required":false},{"index":2,"name":"Mix","section":"","section_required":false},{"index":3,"name":"Style","section":"","section_required":false}],"observed_fingerprint_sha256":"eb0e0c89289d5fd82a067955b8e2b436bfe340d368b08f26b857b8cc0339b902"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/little-microshift/","document_title":"Little MicroShift Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"eb0e0c89289d5fd82a067955b8e2b436bfe340d368b08f26b857b8cc0339b902","body_sha256":"c84be03170346f77207108a114727b27344606bf6fb0d908b9bcf3859b29e9e8"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:7dec20f1dbe786c068acbdf8df26cc139019c17a49f386db5d52609a4a31d84e -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 3, name = "Style" }`
+  - `I` = `0`
+  - `II` = `0.5`
+  - `III` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 1, name = "InputGain" }`: `0.6` = `0.40000000596046448`
+- `{ index = 2, name = "Mix" }`: `25.0` = `0.25`
+- `{ index = 3, name = "Style" }`: `III` = `1`
+
+Calibrated natural value ladders:
+
+- `{ index = 1, name = "InputGain" }`
+  - natural alternative: `0.4` = `0.37777778506278992`
+  - exact anchor: `0.6` = `0.40000000596046448`
+  - natural alternative: `1.0` = `0.4444444477558136`
+
+- `{ index = 2, name = "Mix" }`
+  - natural alternative: `20.0` = `0.20000000298023224`
+  - exact anchor: `25.0` = `0.25`
+  - natural alternative: `30.0` = `0.30000001192092896`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:3a7a721b898596a9b141d91b75182eaad2a354fccf4fde376a9c21cd179f41f1 -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+Little MicroShift product controls are 1 through 3. Do not write Bypass 0 or
+host controls 4 through 6. Use the complete automatable Style map above.
+
+
+Resolve all targets before writing. Use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback. Verify delayed readback and preserve all
+unrelated controls.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+For subtle width, start with Style I or II and a low Mix. Style III is more
+pronounced. Preserve Input Gain unless a level change is requested, and report
+the chosen settings without claiming how they sound in context.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:Little MicroShift -->
+
+<!-- PLUGIN:Little Plate -->
+<!-- SECTION-REVISION:ad3615e5181a361c473db816df8a0868f32640383a467b3fbacc12a78f29c0ed -->
+## Little Plate
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-little-plate","display_name":"Little Plate","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys little plate","identifiers":{"add_by_name":["VST3: Little Plate","VST3: Little Plate (Soundtoys)"],"aliases":["little plate","soundtoys little plate","VST3: Little Plate","VST3: Little Plate (Soundtoys)"],"curated":["Little Plate"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":[]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-little-plate","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Little Plate","loaded_name":"VST3: Little Plate (Soundtoys)","parameter_count":{"mode":"exact","value":8},"required_parameters":[{"index":1,"name":"Mix","section":"","section_required":false},{"index":2,"name":"Decay","section":"","section_required":false},{"index":3,"name":"Low Cut","section":"","section_required":false},{"index":4,"name":"Mod Enable","section":"","section_required":false}],"observed_fingerprint_sha256":"c9ea83b8c2911f1daab2610eca2b57fd54a51cd885befb027ccb60f2a529b1e8"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/little-plate/","document_title":"Little Plate Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"c9ea83b8c2911f1daab2610eca2b57fd54a51cd885befb027ccb60f2a529b1e8","body_sha256":"03a982e86a36a0c112c7e86f2063b43f4d789d25dd9c0b1f4a393998c86e6abe"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:dd7ab32ce7f0e78c147d473e8acd45446057188daa86903f6589195232a56aa4 -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 4, name = "Mod Enable" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 1, name = "Mix" }`: `25.0` = `0.25`
+- `{ index = 2, name = "Decay" }`: `3.48` = `0.39986962080001831`
+- `{ index = 3, name = "Low Cut" }`: `209` = `0.59984362125396729`
+- `{ index = 4, name = "Mod Enable" }`: `On` = `1`
+
+Calibrated natural value ladders:
+
+- `{ index = 1, name = "Mix" }`
+  - natural alternative: `20.0` = `0.20000000298023224`
+  - exact anchor: `25.0` = `0.25`
+  - natural alternative: `30.0` = `0.30000001192092896`
+
+- `{ index = 2, name = "Decay" }`
+  - natural alternative: `3.08` = `0.37470433115959167`
+  - exact anchor: `3.48` = `0.39986962080001831`
+  - natural alternative: `4.44` = `0.45007994771003723`
+
+- `{ index = 3, name = "Low Cut" }`
+  - natural alternative: `172` = `0.55003821849822998`
+  - exact anchor: `209` = `0.59984362125396729`
+  - natural alternative: `231` = `0.62542718648910522`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:779791d6b15415fa1bd10a9a4c8b87def0fdf20c7a584597a106815ead9fa1b6 -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+The installed VST3 has product controls Mix 1, Decay 2, Low Cut 3 and Mod
+Enable 4. Do not write plug-in Bypass 0 or host controls 5 through 7. Use the
+complete automatable menu map above for Mod Enable.
+
+
+Resolve every target before the first write. Use literal `mapped[N]` setter
+arguments, one Undo block and exactly one `reaper.defer` callback. Preserve unrelated controls.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+Little Plate models a plate reverb with optional tail modulation. A restrained
+vocal start uses 20 to 30 percent Mix, a short Decay, some Low Cut and Mod On.
+Do not claim the reverb fits the source without listening.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:Little Plate -->
+
+<!-- PLUGIN:Little PrimalTap -->
+<!-- SECTION-REVISION:fe34294afa0e7e8bcf3724d366c2494bfcadc979195b8cfb2a6cdc6d2d714207 -->
+## Little PrimalTap
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-little-primaltap","display_name":"Little PrimalTap","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys little primaltap","identifiers":{"add_by_name":["VST3: Little PrimalTap","VST3: Little PrimalTap (Soundtoys)"],"aliases":["little primaltap","little primal tap","soundtoys little primaltap","VST3: Little PrimalTap","VST3: Little PrimalTap (Soundtoys)"],"curated":["Little PrimalTap"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":[]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-little-primaltap","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[5],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Little PrimalTap","loaded_name":"VST3: Little PrimalTap (Soundtoys)","parameter_count":{"mode":"exact","value":10},"required_parameters":[{"index":1,"name":"Time","section":"","section_required":false},{"index":3,"name":"Multiply","section":"","section_required":false},{"index":5,"name":"Feedback","section":"","section_required":false},{"index":6,"name":"Mix","section":"","section_required":false}],"observed_fingerprint_sha256":"b0f08b21d6e44ea83957344632fdd2bc9fe58be40aa50c0a67a8161ad16359ad"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/little-primaltap/","document_title":"Little PrimalTap Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"b0f08b21d6e44ea83957344632fdd2bc9fe58be40aa50c0a67a8161ad16359ad","body_sha256":"e28d034c47a678bd5ec9d4cfaaf65caf7239d5bd24ef4405af569833e811eeea"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:c2c07502344a36a8fb77470e559f25324431b890efe367790fb2d5212b33c0a9 -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 3, name = "Multiply" }`
+  - `1x` = `0`
+  - `2x` = `0.3333333432674408`
+  - `4x` = `0.66666668653488159`
+  - `8x` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 1, name = "Time" }`: `204` = `0.40019568800926208`
+- `{ index = 2, name = "Adjust" }`: `0.758` = `0.39973023533821106`
+- `{ index = 3, name = "Multiply" }`: `2x` = `0.3333333432674408`
+- `{ index = 4, name = "InputGain" }`: `8.0` = `0.25`
+- `{ index = 5, name = "Feedback" }`: `31.3` = `0.25040000677108765`
+- `{ index = 6, name = "Mix" }`: `25.0` = `0.25`
+
+Calibrated natural value ladders:
+
+- `{ index = 1, name = "Time" }`
+  - natural alternative: `192` = `0.3747553825378418`
+  - exact anchor: `204` = `0.40019568800926208`
+  - natural alternative: `230` = `0.45009785890579224`
+
+- `{ index = 2, name = "Adjust" }`
+  - natural alternative: `0.771` = `0.37519723176956177`
+  - exact anchor: `0.758` = `0.39973023533821106`
+  - natural alternative: `0.732` = `0.45008444786071777`
+
+- `{ index = 4, name = "InputGain" }`
+  - natural alternative: `6.4` = `0.20000000298023224`
+  - exact anchor: `8.0` = `0.25`
+  - natural alternative: `9.6` = `0.30000001192092896`
+
+- `{ index = 5, name = "Feedback" }`
+  - natural alternative: `25.0` = `0.20000000298023224`
+  - exact anchor: `31.3` = `0.25040000677108765`
+  - natural alternative: `37.5` = `0.30000001192092896`
+
+- `{ index = 6, name = "Mix" }`
+  - natural alternative: `20.0` = `0.20000000298023224`
+  - exact anchor: `25.0` = `0.25`
+  - natural alternative: `30.0` = `0.30000001192092896`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:f447bc5c32a9e42a2cf5d49e865df003e65d61fa129d79b500f129915f29838c -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+Little PrimalTap product controls are 1 through 6. Do not write Bypass 0 or
+host controls 7 through 9. Use the complete automatable Multiply map above.
+
+
+Feedback can become unstable at high values. Keep it below 40% for unheard
+audio unless the user explicitly asks for more. Resolve all targets before
+writing, use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback. Verify delayed readback and preserve unrelated controls.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+For a restrained lo-fi slap, use a short Time, 1x or 2x Multiply, modest
+Feedback and a low Mix. Adjust changes the old-hardware timing character, so
+preserve it unless the request calls for that behavior.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:Little PrimalTap -->
+
+<!-- PLUGIN:Little Radiator -->
+<!-- SECTION-REVISION:78cb0fd9bd1fccfa4ad9452dae4e281f1debf1349240e1f01766ef44d3c4b5b7 -->
+## Little Radiator
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-little-radiator","display_name":"Little Radiator","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys little radiator","identifiers":{"add_by_name":["VST3: Little Radiator","VST3: Little Radiator (Soundtoys)"],"aliases":["little radiator","soundtoys little radiator","VST3: Little Radiator","VST3: Little Radiator (Soundtoys)"],"curated":["Little Radiator"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":[]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-little-radiator","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Little Radiator","loaded_name":"VST3: Little Radiator (Soundtoys)","parameter_count":{"mode":"exact","value":8},"required_parameters":[{"index":1,"name":"Heat","section":"","section_required":false},{"index":2,"name":"Mix","section":"","section_required":false},{"index":3,"name":"Bias","section":"","section_required":false},{"index":4,"name":"Noise","section":"","section_required":false}],"observed_fingerprint_sha256":"2f4c4f63a0ecad68e0db852f3ee1164281fa966c16ffbab8916fbcdd3ab32c07"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/little-radiator/","document_title":"Little Radiator Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"2f4c4f63a0ecad68e0db852f3ee1164281fa966c16ffbab8916fbcdd3ab32c07","body_sha256":"4accdf3e922146d661a1ab0d7aafcb6bcc7e68657df79c1ecb5ad2abd6da158f"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:20f0c9107578008b78b5149b62a98302e729d0c0b6fae3a15d92ab1c5ce742df -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 3, name = "Bias" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+- `{ index = 4, name = "Noise" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 1, name = "Heat" }`: `3.00` = `0.60000002384185791`
+- `{ index = 2, name = "Mix" }`: `40.0` = `0.40000000596046448`
+- `{ index = 3, name = "Bias" }`: `Off` = `0`
+- `{ index = 4, name = "Noise" }`: `Off` = `0`
+
+Calibrated natural value ladders:
+
+- `{ index = 1, name = "Heat" }`
+  - natural alternative: `1.50` = `0.55000001192092896`
+  - exact anchor: `3.00` = `0.60000002384185791`
+  - natural alternative: `3.75` = `0.625`
+
+- `{ index = 2, name = "Mix" }`
+  - natural alternative: `37.5` = `0.375`
+  - exact anchor: `40.0` = `0.40000000596046448`
+  - natural alternative: `45.0` = `0.44999998807907104`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:c2e70edb4cd5d1a59deb1195cf80374a6f26e83b477203c21fa80b7b5bd1e9cc -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+Little Radiator product controls are 1 through 4. Do not write Bypass 0 or host
+controls 5 through 7. Use the complete automatable menu map above for Bias and
+Noise.
+
+
+Resolve all targets before writing. Use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback. Bias changes the distortion behavior, and
+Noise deliberately adds noise. Preserve both unless requested. Verify delayed
+readback and preserve unrelated controls.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+For subtle warmth, use low positive Heat, a moderate Mix, Bias Off and Noise
+Off. Raise Heat or enable Bias only when more obvious saturation is requested.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:Little Radiator -->
+
+<!-- PLUGIN:MicroShift -->
+<!-- SECTION-REVISION:ea9a5e5b09a837177fd97f769bc824ed35fb46ea2c3c582d505801cdf7668f2b -->
+## MicroShift
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-microshift","display_name":"MicroShift","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys microshift","identifiers":{"add_by_name":["VST3: MicroShift","VST3: MicroShift (Soundtoys)"],"aliases":["microshift","micro shift","soundtoys microshift","VST3: MicroShift","VST3: MicroShift (Soundtoys)"],"curated":["MicroShift"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":["microshift"]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-microshift","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: MicroShift","loaded_name":"VST3: MicroShift (Soundtoys)","parameter_count":{"mode":"exact","value":10},"required_parameters":[{"index":1,"name":"Mix","section":"","section_required":false},{"index":3,"name":"Detune","section":"","section_required":false},{"index":5,"name":"Focus","section":"","section_required":false},{"index":6,"name":"Style","section":"","section_required":false}],"observed_fingerprint_sha256":"64cbde7f06b4b800819731dbdf0e96b406e0cd2e81b741c5ce1b06bdf32afb80"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/wp-content/uploads/MicroShift-Manual.pdf","document_title":"MicroShift User's Guide Version 5","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"64cbde7f06b4b800819731dbdf0e96b406e0cd2e81b741c5ce1b06bdf32afb80","body_sha256":"598a0cafa1f6ddc2a056a5a8aab0117005dd554d5d53706a1cbd92de8abcf9ca"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:e0ff77b8fc6067f900fcec3447081b4b09a62b084c7ed2bd194099ed6b75cc43 -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 6, name = "Style" }`
+  - `I` = `0`
+  - `II` = `0.5`
+  - `III` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 1, name = "Mix" }`: `25.0` = `0.25`
+- `{ index = 2, name = "InputGain" }`: `0.6` = `0.40000000596046448`
+- `{ index = 3, name = "Detune" }`: `87.1` = `0.40037232637405396`
+- `{ index = 4, name = "Delay" }`: `87.1` = `0.40037232637405396`
+- `{ index = 5, name = "Focus" }`: `240.2` = `0.39998331665992737`
+- `{ index = 6, name = "Style" }`: `II` = `0.5`
+
+Calibrated natural value ladders:
+
+- `{ index = 1, name = "Mix" }`
+  - natural alternative: `20.0` = `0.20000000298023224`
+  - exact anchor: `25.0` = `0.25`
+  - natural alternative: `30.0` = `0.30000001192092896`
+
+- `{ index = 2, name = "InputGain" }`
+  - natural alternative: `0.4` = `0.37777778506278992`
+  - exact anchor: `0.6` = `0.40000000596046448`
+  - natural alternative: `1.0` = `0.4444444477558136`
+
+- `{ index = 3, name = "Detune" }`
+  - natural alternative: `84.1` = `0.37508884072303772`
+  - exact anchor: `87.1` = `0.40037232637405396`
+  - natural alternative: `93.3` = `0.44997450709342957`
+
+- `{ index = 4, name = "Delay" }`
+  - natural alternative: `84.1` = `0.37508884072303772`
+  - exact anchor: `87.1` = `0.40037232637405396`
+  - natural alternative: `93.3` = `0.44997450709342957`
+
+- `{ index = 5, name = "Focus" }`
+  - natural alternative: `205.7` = `0.37503355741500854`
+  - exact anchor: `240.2` = `0.39998331665992737`
+  - natural alternative: `327.8` = `0.45001572370529175`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:f88be1b7606ad3c4787fc7b009ef7c11dd815dd7e496095e2b90efbd3441c33f -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+Product controls are Mix 1, InputGain 2, Detune 3, Delay 4, Focus 5 and Style
+6. Do not write Bypass 0 or host controls 7 through 9. Use the complete
+automatable Style map above.
+
+
+Resolve all targets first. Use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback. Verify delayed formatted readback and
+preserve unrelated controls.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+MicroShift creates stereo width through detune and changing delay. For subtle
+vocal width, keep Mix near 20 to 30 percent, keep Detune and Delay below their
+100 percent defaults and use Focus to protect low frequencies. All three styles
+are valid colors; do not claim one is best without listening.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:MicroShift -->
+
+<!-- PLUGIN:PanMan -->
+<!-- SECTION-REVISION:ee32da0c6de5241225652ef6dbbffc79b8f94f17b59fefec837e921eb9d795b7 -->
+## PanMan
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-panman","display_name":"PanMan","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys panman","identifiers":{"add_by_name":["VST3: PanMan","VST3: PanMan (Soundtoys)"],"aliases":["panman","pan man","soundtoys panman","VST3: PanMan","VST3: PanMan (Soundtoys)"],"curated":["PanMan"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":["panman"]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-panman","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: PanMan","loaded_name":"VST3: PanMan (Soundtoys)","parameter_count":{"mode":"exact","value":19},"required_parameters":[{"index":3,"name":"Mix","section":"","section_required":false},{"index":4,"name":"InOutMode","section":"","section_required":false},{"index":5,"name":"Rate","section":"","section_required":false},{"index":7,"name":"Width","section":"","section_required":false},{"index":14,"name":"ManualTrigger","section":"","section_required":false}],"observed_fingerprint_sha256":"f6b45d4c8e18cd3ae4bdf27bf5f766c8f9d636cf7b8c87178ed63e8d7b0c8c16"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/panman/","document_title":"PanMan Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"f6b45d4c8e18cd3ae4bdf27bf5f766c8f9d636cf7b8c87178ed63e8d7b0c8c16","body_sha256":"21de7c4e15a1be79d8b1b879ff7ae2a2cef6c06a25803088df35eb2e08fc0064"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:6f68c36233096c515927ca889a03f80a523a00f171e8d1741959ed1ed7dc6aa2 -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 4, name = "InOutMode" }`
+  - `Digital` = `0`
+  - `Analog` = `1`
+
+- `{ index = 14, name = "ManualTrigger" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 3, name = "Mix" }`: `40.0` = `0.40000000596046448`
+- `{ index = 4, name = "InOutMode" }`: `Analog` = `1`
+- `{ index = 5, name = "Rate" }`: `0.1585` = `0.40000975131988525`
+- `{ index = 6, name = "Offset" }`: `0.00` = `0.5`
+- `{ index = 7, name = "Width" }`: `126.00` = `0.60000002384185791`
+- `{ index = 8, name = "Smoothing" }`: `0.25` = `0.25`
+- `{ index = 14, name = "ManualTrigger" }`: `Off` = `0`
+
+Calibrated natural value ladders:
+
+- `{ index = 3, name = "Mix" }`
+  - natural alternative: `37.5` = `0.375`
+  - exact anchor: `40.0` = `0.40000000596046448`
+  - natural alternative: `45.0` = `0.44999998807907104`
+
+- `{ index = 5, name = "Rate" }`
+  - natural alternative: `0.1334` = `0.37505194544792175`
+  - exact anchor: `0.1585` = `0.40000975131988525`
+  - natural alternative: `0.2239` = `0.4500180184841156`
+
+- `{ index = 6, name = "Offset" }`
+  - natural alternative: `-10.50` = `0.44999998807907104`
+  - exact anchor: `0.00` = `0.5`
+  - natural alternative: `10.50` = `0.55000001192092896`
+
+- `{ index = 7, name = "Width" }`
+  - natural alternative: `115.50` = `0.55000001192092896`
+  - exact anchor: `126.00` = `0.60000002384185791`
+  - natural alternative: `131.25` = `0.625`
+
+- `{ index = 8, name = "Smoothing" }`
+  - natural alternative: `0.20` = `0.20000000298023224`
+  - exact anchor: `0.25` = `0.25`
+  - natural alternative: `0.30` = `0.30000001192092896`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:ad0e8b2eb6ded2be6b6322dfb2cb92347fa09720cad8dd0e84c26922e146793b -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+PanMan product controls are 1 through 15. Do not write Bypass 0 or host
+controls 16 through 18. Use the complete automatable menu map above for
+InOutMode and ManualTrigger.
+
+
+Resolve all targets before writing. Use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback. Verify delayed readback and preserve
+unrelated controls. PanMan's six operating modes and rhythm editor are not
+host-exposed. Do not claim to set them through parameter automation.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+For slow restrained movement, use a low Rate, moderate Width and Mix, and some
+Smoothing. The hidden operating mode and rhythm editor must be set manually in
+the plug-in when the request depends on them.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:PanMan -->
+
+<!-- PLUGIN:PhaseMistress -->
+<!-- SECTION-REVISION:434748b652e1ec7ac57387e14f6cd43763ccfcb67fbaed606f94335d0f0083be -->
+## PhaseMistress
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-phasemistress","display_name":"PhaseMistress","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys phasemistress","identifiers":{"add_by_name":["VST3: PhaseMistress","VST3: PhaseMistress (Soundtoys)"],"aliases":["phasemistress","phase mistress","soundtoys phasemistress","VST3: PhaseMistress","VST3: PhaseMistress (Soundtoys)"],"curated":["PhaseMistress"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":["phasemistress"]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-phasemistress","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[6],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: PhaseMistress","loaded_name":"VST3: PhaseMistress (Soundtoys)","parameter_count":{"mode":"exact","value":16},"required_parameters":[{"index":3,"name":"Mix","section":"","section_required":false},{"index":4,"name":"InOutMode","section":"","section_required":false},{"index":5,"name":"Frequency","section":"","section_required":false},{"index":8,"name":"ModulationDepth","section":"","section_required":false},{"index":9,"name":"Style","section":"","section_required":false},{"index":12,"name":"LFO Rate","section":"","section_required":false}],"observed_fingerprint_sha256":"2994deeef08533300bd79adefabac68bf9029865fb3ca15b010f1f9addd92993"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/phasemistress/","document_title":"PhaseMistress Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"2994deeef08533300bd79adefabac68bf9029865fb3ca15b010f1f9addd92993","body_sha256":"b267820acb38b5167600d5047de6900923369f1046c8c706dc2b77a413624531"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:9d87a8ecc0509a1a4bd93a9d07cfe6279ab71272f924128ce14898389df45270 -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 4, name = "InOutMode" }`
+  - `Digital` = `0`
+  - `Analog` = `1`
+
+- `{ index = 9, name = "Style" }`
+  - `Super 12` = `0`
+  - `Super 8` = `0.014705882407724857`
+  - `Super 7x5L` = `0.029411764815449715`
+  - `Super 7x5` = `0.044117648154497147`
+  - `Super 7-1` = `0.058823529630899429`
+  - `Super 7` = `0.07352941483259201`
+  - `Super 6` = `0.088235296308994293`
+  - `Super 5-` = `0.10294117778539658`
+  - `Super 5` = `0.11764705926179886`
+  - `Super 4` = `0.13235294818878174`
+  - `Super 3-` = `0.14705882966518402`
+  - `Super 3` = `0.1617647111415863`
+  - `Super 2` = `0.17647059261798859`
+  - `Rezo 6 Hi` = `0.19117647409439087`
+  - `Rezo 6 Mid` = `0.20588235557079315`
+  - `Rezo 7 Low` = `0.22058823704719543`
+  - `Rezo 6 Low` = `0.23529411852359772`
+  - `PM 24` = `0.25`
+  - `PM 23x12` = `0.26470589637756348`
+  - `PM 16` = `0.27941176295280457`
+  - `PM 12x10` = `0.29411765933036804`
+  - `PM 12` = `0.30882352590560913`
+  - `PM 11x6` = `0.32352942228317261`
+  - `PM 11` = `0.3382352888584137`
+  - `PM 8x6` = `0.35294118523597717`
+  - `PM 8` = `0.36764705181121826`
+  - `PM 7x15` = `0.38235294818878174`
+  - `PM 7x5` = `0.39705881476402283`
+  - `PM 7x3` = `0.4117647111415863`
+  - `PM 6x9` = `0.42647057771682739`
+  - `PM 6 Peak` = `0.44117647409439087`
+  - `PM 6` = `0.45588234066963196`
+  - `PM 5x6` = `0.47058823704719543`
+  - `PM 5 High` = `0.48529410362243652`
+  - `PM 4x2` = `0.5`
+  - `PM 4` = `0.51470589637756348`
+  - `PM 3x17` = `0.52941179275512695`
+  - `PM 3x14` = `0.54411762952804565`
+  - `PM 2x4` = `0.55882352590560913`
+  - `PM 2` = `0.57352942228317261`
+  - `Classic 12` = `0.58823531866073608`
+  - `Classic 9` = `0.60294115543365479`
+  - `Classic 7` = `0.61764705181121826`
+  - `Classic 6` = `0.63235294818878174`
+  - `Classic 5` = `0.64705884456634521`
+  - `Classic 4` = `0.66176468133926392`
+  - `Classic 3` = `0.67647057771682739`
+  - `Classic 2` = `0.69117647409439087`
+  - `WishWash` = `0.70588237047195435`
+  - `Vacuum` = `0.72058820724487305`
+  - `ThinMan` = `0.73529410362243652`
+  - `ThinFace` = `0.75`
+  - `The Trine` = `0.76470589637756348`
+  - `Squeezer` = `0.77941179275512695`
+  - `SeeSaw` = `0.79411762952804565`
+  - `Scoopy` = `0.80882352590560913`
+  - `Primes` = `0.82352942228317261`
+  - `Phase 90` = `0.83823531866073608`
+  - `PhaseJet 4` = `0.85294115543365479`
+  - `OuterIn` = `0.86764705181121826`
+  - `HiWay` = `0.88235294818878174`
+  - `FoogerOog` = `0.89705884456634521`
+  - `FatFace` = `0.91176468133926392`
+  - `FatBottom` = `0.92647057771682739`
+  - `DOD 201` = `0.94117647409439087`
+  - `Breath 4` = `0.95588237047195435`
+  - `BiPhase` = `0.97058820724487305`
+  - `Basement` = `0.98529410362243652`
+  - `Custom` = `1`
+
+- `{ index = 10, name = "Trigger" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 3, name = "Mix" }`: `40.0` = `0.40000000596046448`
+- `{ index = 4, name = "InOutMode" }`: `Analog` = `1`
+- `{ index = 5, name = "Frequency" }`: `138` = `0.40002360939979553`
+- `{ index = 6, name = "Resonance" }`: `7.2` = `0.40000000596046448`
+- `{ index = 8, name = "ModulationDepth" }`: `0.400` = `0.40000000596046448`
+- `{ index = 9, name = "Style" }`: `Phase 90` = `0.83823531866073608`
+- `{ index = 10, name = "Trigger" }`: `Off` = `0`
+- `{ index = 12, name = "LFO Rate" }`: `0.58` = `0.40002995729446411`
+
+Calibrated natural value ladders:
+
+- `{ index = 3, name = "Mix" }`
+  - natural alternative: `37.5` = `0.375`
+  - exact anchor: `40.0` = `0.40000000596046448`
+  - natural alternative: `45.0` = `0.44999998807907104`
+
+- `{ index = 5, name = "Frequency" }`
+  - natural alternative: `112` = `0.37485438585281372`
+  - exact anchor: `138` = `0.40002360939979553`
+  - natural alternative: `209` = `0.45006921887397766`
+
+- `{ index = 6, name = "Resonance" }`
+  - natural alternative: `5.3` = `0.33214285969734192`
+  - natural alternative: `6.5` = `0.375`
+  - exact anchor: `7.2` = `0.40000000596046448`
+
+- `{ index = 8, name = "ModulationDepth" }`
+  - natural alternative: `0.375` = `0.375`
+  - exact anchor: `0.400` = `0.40000000596046448`
+  - natural alternative: `0.450` = `0.44999998807907104`
+
+- `{ index = 12, name = "LFO Rate" }`
+  - natural alternative: `0.45` = `0.37502780556678772`
+  - exact anchor: `0.58` = `0.40002995729446411`
+  - natural alternative: `0.96` = `0.44967406988143921`
+
+Certified natural menu alternative:
+- `9 Style`: `Classic 4` = `0.66176468133926392`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:467b58d7ae6a6dd2a2e5f6315b42abb6e88b4203fcdbc5a69402d3184cd4c294 -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+PhaseMistress product controls are 1 through 12. Do not write Bypass 0 or host
+controls 13 through 15. Use the complete automatable menu map above, including
+all 69 measured Style states.
+
+Resolve all targets before writing. Use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback. Keep resonance conservative, verify delayed readback and
+preserve unrelated controls.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+For a slow smooth sweep, use a Classic style, low LFO Rate, moderate Depth and
+Mix, and restrained Resonance. Style names encode different phaser structures,
+so choose the requested name exactly and report the setting without claiming
+how it sounds in context.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:PhaseMistress -->
+
+<!-- PLUGIN:PrimalTap -->
+<!-- SECTION-REVISION:b4d1fdb6c40a0da0e75527ddc8b7e6c052268ccb4a04237d9c73e90b662461e2 -->
+## PrimalTap
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-primaltap","display_name":"PrimalTap","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys primaltap","identifiers":{"add_by_name":["VST3: PrimalTap","VST3: PrimalTap (Soundtoys)"],"aliases":["primaltap","primal tap","soundtoys primaltap","VST3: PrimalTap","VST3: PrimalTap (Soundtoys)"],"curated":["PrimalTap"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":["primaltap"]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-primaltap","safety":{"settle_ms":100,"heavy_selectors":[19],"unsafe_to_sweep":[12,13,19],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: PrimalTap","loaded_name":"VST3: PrimalTap (Soundtoys)","parameter_count":{"mode":"exact","value":36},"required_parameters":[{"index":1,"name":"AB_Link","section":"","section_required":false},{"index":2,"name":"Sync_Mode_A","section":"","section_required":false},{"index":5,"name":"Beats_A","section":"","section_required":false},{"index":9,"name":"Multiply","section":"","section_required":false},{"index":11,"name":"Algorithm","section":"","section_required":false},{"index":12,"name":"Feedback_A","section":"","section_required":false},{"index":16,"name":"Mix","section":"","section_required":false},{"index":19,"name":"Freeze","section":"","section_required":false},{"index":31,"name":"VCO_Shape","section":"","section_required":false}],"observed_fingerprint_sha256":"dc2d51e534c89212c8a5b5ce684a51529db02cc6d51aa7ffdb75a3859aa16a6b"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/primaltap/","document_title":"PrimalTap Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"dc2d51e534c89212c8a5b5ce684a51529db02cc6d51aa7ffdb75a3859aa16a6b","body_sha256":"6db22f3fc205ea2c11aa9ee45af109eb0f3cb18096ede1c567fbab7efb809962"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:f04176dafaedae7974d3bf7afa9e43f8776cca34463e8ec0c1c2499ac3b6ba5e -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 1, name = "AB_Link" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+- `{ index = 2, name = "Sync_Mode_A" }`
+  - `TIME` = `0`
+  - `BEATS` = `1`
+
+- `{ index = 3, name = "Sync_Mode_B" }`
+  - `TIME` = `0`
+  - `BEATS` = `1`
+
+- `{ index = 9, name = "Multiply" }`
+  - `1x` = `0`
+  - `2x` = `0.3333333432674408`
+  - `4x` = `0.66666668653488159`
+  - `8x` = `1`
+
+- `{ index = 11, name = "Algorithm" }`
+  - `Classic` = `0`
+  - `Parallel` = `0.20000000298023224`
+  - `Reverb` = `0.40000000596046448`
+  - `Series` = `0.60000002384185791`
+  - `CrissCross` = `0.80000001192092896`
+  - `Ping-Pong` = `1`
+
+- `{ index = 19, name = "Freeze" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+- `{ index = 20, name = "Rolloff_Mode" }`
+  - `Feedback` = `0`
+  - `Output` = `1`
+
+- `{ index = 25, name = "Output_Polarity_A" }`
+  - `Positive` = `0`
+  - `Negative` = `1`
+
+- `{ index = 26, name = "Output_Polarity_B" }`
+  - `Positive` = `0`
+  - `Negative` = `1`
+
+- `{ index = 29, name = "VCO_Polarity_A" }`
+  - `Positive` = `0`
+  - `Negative` = `1`
+
+- `{ index = 30, name = "VCO_Polarity_B" }`
+  - `Positive` = `0`
+  - `Negative` = `1`
+
+- `{ index = 31, name = "VCO_Shape" }`
+  - `Triangle` = `0`
+  - `Square` = `0.25`
+  - `Sine` = `0.5`
+  - `RampUp` = `0.75`
+  - `RampDown` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 1, name = "AB_Link" }`: `On` = `1`
+- `{ index = 2, name = "Sync_Mode_A" }`: `BEATS` = `1`
+- `{ index = 3, name = "Sync_Mode_B" }`: `BEATS` = `1`
+- `{ index = 5, name = "Beats_A" }`: `1.0000` = `0.25`
+- `{ index = 7, name = "Beats_B" }`: `1.0000` = `0.25`
+- `{ index = 9, name = "Multiply" }`: `2x` = `0.3333333432674408`
+- `{ index = 11, name = "Algorithm" }`: `Parallel` = `0.20000000298023224`
+- `{ index = 12, name = "Feedback_A" }`: `20.0` = `0.40000000596046448`
+- `{ index = 13, name = "Feedback_B" }`: `20.0` = `0.40000000596046448`
+- `{ index = 16, name = "Mix" }`: `25.0` = `0.25`
+- `{ index = 19, name = "Freeze" }`: `Off` = `0`
+- `{ index = 20, name = "Rolloff_Mode" }`: `Feedback` = `0`
+- `{ index = 31, name = "VCO_Shape" }`: `Sine` = `0.5`
+
+Calibrated natural value ladders:
+
+- `{ index = 5, name = "Beats_A" }`
+  - natural alternative: `0.8000` = `0.20000000298023224`
+  - exact anchor: `1.0000` = `0.25`
+  - natural alternative: `1.2000` = `0.30000001192092896`
+
+- `{ index = 7, name = "Beats_B" }`
+  - natural alternative: `0.8000` = `0.20000000298023224`
+  - exact anchor: `1.0000` = `0.25`
+  - natural alternative: `1.2000` = `0.30000001192092896`
+
+- `{ index = 12, name = "Feedback_A" }`
+  - natural alternative: `13.9` = `0.33346664905548096`
+  - natural alternative: `17.6` = `0.37523326277732849`
+  - exact anchor: `20.0` = `0.40000000596046448`
+
+- `{ index = 13, name = "Feedback_B" }`
+  - natural alternative: `13.9` = `0.33346664905548096`
+  - natural alternative: `17.6` = `0.37523326277732849`
+  - exact anchor: `20.0` = `0.40000000596046448`
+
+- `{ index = 16, name = "Mix" }`
+  - natural alternative: `20.0` = `0.20000000298023224`
+  - exact anchor: `25.0` = `0.25`
+  - natural alternative: `30.0` = `0.30000001192092896`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:8b72d42933000fa54d31ca277e89507acb790ef5c8e583f5fd7388aa3f679064 -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+PrimalTap product controls are 1 through 32. Do not write Bypass 0 or host
+controls 33 through 35. The complete stepped menus are:
+
+Freeze and high Feedback can sustain audio indefinitely. Keep Freeze Off and
+both Feedback values at or below 35% for unheard audio unless explicitly
+requested. Resolve every target before writing, use literal `mapped[N]`
+setters, one Undo block and exactly one `reaper.defer` callback. Link A and B before
+writing both tap settings. Verify delayed readback and preserve unrelated
+controls.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+For a restrained linked stereo echo, use Beats mode, Link On, a low Multiply,
+Parallel or Classic algorithm, moderate Feedback and low Mix. Freeze is an
+intentional hold effect and should stay Off for ordinary echo requests.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:PrimalTap -->
+
+<!-- PLUGIN:Radiator -->
+<!-- SECTION-REVISION:1ea67024b4471a6a877b3aef0ac782be258498334b6de4cdf4a5fc529ad882a9 -->
+## Radiator
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-radiator","display_name":"Radiator","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys radiator","identifiers":{"add_by_name":["VST3: Radiator","VST3: Radiator (Soundtoys)"],"aliases":["radiator","soundtoys radiator","VST3: Radiator","VST3: Radiator (Soundtoys)"],"curated":["Radiator"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":["radiator"]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-radiator","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Radiator","loaded_name":"VST3: Radiator (Soundtoys)","parameter_count":{"mode":"exact","value":11},"required_parameters":[{"index":1,"name":"Bass","section":"","section_required":false},{"index":2,"name":"Treble","section":"","section_required":false},{"index":3,"name":"Input","section":"","section_required":false},{"index":4,"name":"Output","section":"","section_required":false},{"index":5,"name":"Mix","section":"","section_required":false},{"index":6,"name":"MicLine","section":"","section_required":false},{"index":7,"name":"Noise","section":"","section_required":false}],"observed_fingerprint_sha256":"3f2d76fffbbae1e24bc12a76ebd8f2b2b90df71025447699fa2b4024d93f1eb8"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/radiator/","document_title":"Radiator Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"3f2d76fffbbae1e24bc12a76ebd8f2b2b90df71025447699fa2b4024d93f1eb8","body_sha256":"37c66d99ed0d8fa59d67f10418774a018d86eebe26ec7bd93cc207830b723bb9"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:738f7b130ffa63ee28ad8109409bcdc8b7304f212f258adba89c865124194ef6 -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 6, name = "MicLine" }`
+  - `LINE` = `0`
+  - `MIC` = `1`
+
+- `{ index = 7, name = "Noise" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 1, name = "Bass" }`: `2.0` = `0.60000002384185791`
+- `{ index = 2, name = "Treble" }`: `-2.0` = `0.40000000596046448`
+- `{ index = 3, name = "Input" }`: `3.00` = `0.60000002384185791`
+- `{ index = 4, name = "Output" }`: `-3.00` = `0.40000000596046448`
+- `{ index = 5, name = "Mix" }`: `40.0` = `0.40000000596046448`
+- `{ index = 6, name = "MicLine" }`: `MIC` = `1`
+- `{ index = 7, name = "Noise" }`: `Off` = `0`
+
+Calibrated natural value ladders:
+
+- `{ index = 1, name = "Bass" }`
+  - natural alternative: `1.0` = `0.55000001192092896`
+  - exact anchor: `2.0` = `0.60000002384185791`
+  - natural alternative: `2.5` = `0.625`
+
+- `{ index = 2, name = "Treble" }`
+  - natural alternative: `-2.5` = `0.375`
+  - exact anchor: `-2.0` = `0.40000000596046448`
+  - natural alternative: `-1.0` = `0.44999998807907104`
+
+- `{ index = 3, name = "Input" }`
+  - natural alternative: `1.50` = `0.55000001192092896`
+  - exact anchor: `3.00` = `0.60000002384185791`
+  - natural alternative: `3.75` = `0.625`
+
+- `{ index = 4, name = "Output" }`
+  - natural alternative: `-3.75` = `0.375`
+  - exact anchor: `-3.00` = `0.40000000596046448`
+  - natural alternative: `-1.50` = `0.44999998807907104`
+
+- `{ index = 5, name = "Mix" }`
+  - natural alternative: `37.5` = `0.375`
+  - exact anchor: `40.0` = `0.40000000596046448`
+  - natural alternative: `45.0` = `0.44999998807907104`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:b542523b1065f725e185dfee623f7fb5a06e692df48bf3c49dc39dbb66d44212 -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+Radiator product controls are 1 through 7. Do not write Bypass 0 or host
+controls 8 through 10. Use the complete automatable menu map above for MicLine
+and Noise.
+
+
+Input and Output interact with saturation and level. When adding Input drive,
+use Output compensation when requested and preserve the user's gain structure.
+Resolve all targets before writing, use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback. Verify delayed readback and preserve
+unrelated controls.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+For subtle warmth, use modest Input, compensating Output, a moderate Mix and
+Noise Off. MIC is more colored than LINE. Preserve the tone controls unless a
+specific balance is requested.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:Radiator -->
+
+<!-- PLUGIN:Sie-Q -->
+<!-- SECTION-REVISION:1d3884a4babc53642daebe71b767194625ebf65bba1cc9df6849ee55993e8440 -->
+## Sie-Q
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-sie-q","display_name":"Sie-Q","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys sie-q","identifiers":{"add_by_name":["VST3: Sie-Q","VST3: Sie-Q (Soundtoys)"],"aliases":["sie-q","sie q","soundtoys sie-q","VST3: Sie-Q","VST3: Sie-Q (Soundtoys)"],"curated":["Sie-Q"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":["sie q"]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-sie-q","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Sie-Q","loaded_name":"VST3: Sie-Q (Soundtoys)","parameter_count":{"mode":"exact","value":9},"required_parameters":[{"index":1,"name":"Low Gain","section":"","section_required":false},{"index":2,"name":"Mid Gain","section":"","section_required":false},{"index":3,"name":"Mid Frequency","section":"","section_required":false},{"index":4,"name":"High Gain","section":"","section_required":false},{"index":5,"name":"Drive","section":"","section_required":false}],"observed_fingerprint_sha256":"a812b84639025abf05d7b6007d944d33e1ccbdcb8472ded94a867e5831496a1e"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/sie-q/","document_title":"Sie-Q Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"a812b84639025abf05d7b6007d944d33e1ccbdcb8472ded94a867e5831496a1e","body_sha256":"98135fdda57026ccc5c217e61dbd3d3553633756695d71f5c4fdb819c3206dc5"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:77b20af0f8dda557620f974bb61c668cd9383935e93e853e454fd2f8fdc08c3d -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 3, name = "Mid Frequency" }`
+  - `0.7 kHz` = `0`
+  - `1.0 kHz` = `0.20000000298023224`
+  - `1.5 kHz` = `0.40000000596046448`
+  - `2.3 kHz` = `0.60000002384185791`
+  - `3.5 kHz` = `0.80000001192092896`
+  - `5.6 kHz` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 1, name = "Low Gain" }`: `3.0` = `0.60000002384185791`
+- `{ index = 2, name = "Mid Gain" }`: `1.6` = `0.60000002384185791`
+- `{ index = 3, name = "Mid Frequency" }`: `2.3 kHz` = `0.60000002384185791`
+- `{ index = 4, name = "High Gain" }`: `3.0` = `0.60000002384185791`
+- `{ index = 5, name = "Drive" }`: `3.0` = `0.60000002384185791`
+
+Calibrated natural value ladders:
+
+- `{ index = 1, name = "Low Gain" }`
+  - natural alternative: `1.5` = `0.55000001192092896`
+  - exact anchor: `3.0` = `0.60000002384185791`
+  - natural alternative: `3.8` = `0.62666666507720947`
+
+- `{ index = 2, name = "Mid Gain" }`
+  - natural alternative: `0.8` = `0.55000001192092896`
+  - exact anchor: `1.6` = `0.60000002384185791`
+  - natural alternative: `2.0` = `0.625`
+
+- `{ index = 4, name = "High Gain" }`
+  - natural alternative: `1.5` = `0.55000001192092896`
+  - exact anchor: `3.0` = `0.60000002384185791`
+  - natural alternative: `3.8` = `0.62666666507720947`
+
+- `{ index = 5, name = "Drive" }`
+  - natural alternative: `1.5` = `0.55000001192092896`
+  - exact anchor: `3.0` = `0.60000002384185791`
+  - natural alternative: `3.8` = `0.62666666507720947`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:a6e953a3b3cfc8ef8eda11af17cccd6b30ce2736d58a5c9321135fb74dc625d7 -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+Sie-Q product controls are 1 through 5. Do not write Bypass 0 or host controls
+6 through 8. Use the complete automatable Mid Frequency map above.
+
+
+Resolve all targets before writing. Use the exact switched-frequency constants
+in the certified map, literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback.
+Verify delayed readback and preserve unrelated controls.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+For a gentle broad lift, use small boosts and modest Drive. Mid Frequency is a
+six-position selector, so choose the nearest named position only when the user
+does not specify one.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:Sie-Q -->
+
+<!-- PLUGIN:SpaceBlender -->
+<!-- SECTION-REVISION:027469eeb551cd95894ff9422786893b809c08bcb5faf6f403333b0fcf08a4fe -->
+## SpaceBlender
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-spaceblender","display_name":"SpaceBlender","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys spaceblender","identifiers":{"add_by_name":["VST3: SpaceBlender","VST3: SpaceBlender (Soundtoys)"],"aliases":["spaceblender","space blender","soundtoys spaceblender","VST3: SpaceBlender","VST3: SpaceBlender (Soundtoys)"],"curated":["SpaceBlender"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":["spaceblender"]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-spaceblender","safety":{"settle_ms":125,"heavy_selectors":[8,9],"unsafe_to_sweep":[8,9],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: SpaceBlender","loaded_name":"VST3: SpaceBlender (Soundtoys)","parameter_count":{"mode":"exact","value":15},"required_parameters":[{"index":1,"name":"Mix","section":"","section_required":false},{"index":2,"name":"SyncMode","section":"","section_required":false},{"index":4,"name":"Beats","section":"","section_required":false},{"index":5,"name":"Color","section":"","section_required":false},{"index":8,"name":"Warp","section":"","section_required":false},{"index":9,"name":"Freeze","section":"","section_required":false},{"index":10,"name":"ShapeX","section":"","section_required":false},{"index":11,"name":"ShapeY","section":"","section_required":false}],"observed_fingerprint_sha256":"2cad4f9e1a7b588a3b0b29f002d2ef63d79d167a76e9e1c330b2330e6083aa69"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/spaceBlender/","document_title":"SpaceBlender Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"2cad4f9e1a7b588a3b0b29f002d2ef63d79d167a76e9e1c330b2330e6083aa69","body_sha256":"5f83678328b7142c21f01fe6541d2a5160f2ce26cc7fd411d3059923ead75e59"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:4385c5fc9388f5530912ae5f3fe94fc878a1a9dabfe5ea9fd9b2f8cea8276acb -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 2, name = "SyncMode" }`
+  - `Time` = `0`
+  - `Beats` = `1`
+
+- `{ index = 4, name = "Beats" }`
+  - `1 beats` = `0`
+  - `2 beats` = `0.032258063554763794`
+  - `3 beats` = `0.064516127109527588`
+  - `4 beats` = `0.096774190664291382`
+  - `5 beats` = `0.12903225421905518`
+  - `6 beats` = `0.16129031777381897`
+  - `7 beats` = `0.19354838132858276`
+  - `8 beats` = `0.22580644488334656`
+  - `9 beats` = `0.25806450843811035`
+  - `10 beats` = `0.29032257199287415`
+  - `11 beats` = `0.32258063554763794`
+  - `12 beats` = `0.35483869910240173`
+  - `13 beats` = `0.38709676265716553`
+  - `14 beats` = `0.41935482621192932`
+  - `15 beats` = `0.45161288976669312`
+  - `16 beats` = `0.48387095332145691`
+  - `17 beats` = `0.5161290168762207`
+  - `18 beats` = `0.54838711023330688`
+  - `19 beats` = `0.58064514398574829`
+  - `20 beats` = `0.61290323734283447`
+  - `21 beats` = `0.64516127109527588`
+  - `22 beats` = `0.67741936445236206`
+  - `23 beats` = `0.70967739820480347`
+  - `24 beats` = `0.74193549156188965`
+  - `25 beats` = `0.77419352531433105`
+  - `26 beats` = `0.80645161867141724`
+  - `27 beats` = `0.83870965242385864`
+  - `28 beats` = `0.87096774578094482`
+  - `29 beats` = `0.90322577953338623`
+  - `30 beats` = `0.93548387289047241`
+  - `31 beats` = `0.96774190664291382`
+  - `32 beats` = `1`
+
+- `{ index = 8, name = "Warp" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+- `{ index = 9, name = "Freeze" }`
+  - `Off` = `0`
+  - `On` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 1, name = "Mix" }`: `25.0` = `0.25`
+- `{ index = 2, name = "SyncMode" }`: `Beats` = `1`
+- `{ index = 4, name = "Beats" }`: `8` = `0.22580644488334656`
+- `{ index = 5, name = "Color" }`: `-20.0` = `0.40000000596046448`
+- `{ index = 6, name = "Mod" }`: `40.0` = `0.40000000596046448`
+- `{ index = 7, name = "Texture" }`: `60.0` = `0.60000002384185791`
+- `{ index = 8, name = "Warp" }`: `Off` = `0`
+- `{ index = 9, name = "Freeze" }`: `Off` = `0`
+- `{ index = 10, name = "ShapeX" }`: `0.40` = `0.40000000596046448`
+- `{ index = 11, name = "ShapeY" }`: `0.60` = `0.60000002384185791`
+
+Calibrated natural value ladders:
+
+- `{ index = 1, name = "Mix" }`
+  - natural alternative: `20.0` = `0.20000000298023224`
+  - exact anchor: `25.0` = `0.25`
+  - natural alternative: `30.0` = `0.30000001192092896`
+
+- `{ index = 5, name = "Color" }`
+  - natural alternative: `-25.0` = `0.375`
+  - exact anchor: `-20.0` = `0.40000000596046448`
+  - natural alternative: `-10.0` = `0.44999998807907104`
+
+- `{ index = 6, name = "Mod" }`
+  - natural alternative: `37.5` = `0.375`
+  - exact anchor: `40.0` = `0.40000000596046448`
+  - natural alternative: `45.0` = `0.44999998807907104`
+
+- `{ index = 7, name = "Texture" }`
+  - natural alternative: `55.0` = `0.55000001192092896`
+  - exact anchor: `60.0` = `0.60000002384185791`
+  - natural alternative: `62.5` = `0.625`
+
+- `{ index = 10, name = "ShapeX" }`
+  - natural alternative: `0.38` = `0.37999999523162842`
+  - exact anchor: `0.40` = `0.40000000596046448`
+  - natural alternative: `0.45` = `0.44999998807907104`
+
+- `{ index = 11, name = "ShapeY" }`
+  - natural alternative: `0.55` = `0.55000001192092896`
+  - exact anchor: `0.60` = `0.60000002384185791`
+  - natural alternative: `0.63` = `0.62999999523162842`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:57d0ea803f81b65ae05da91be4c99c4c11a51a41851084a6b33958c1b18a6a7a -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+SpaceBlender product controls are 1 through 11. Do not write Bypass 0 or host
+controls 12 through 14. Use the complete automatable menu map above, including
+all 32 measured Beats states, SyncMode, Warp and Freeze.
+
+Warp and Freeze can create sustained or discontinuous output. Keep both Off
+for unheard audio unless explicitly requested. Resolve every target before
+writing, use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback. Set SyncMode before Beats. Verify delayed readback and preserve unrelated
+controls.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+For a restrained dark evolving space, lower Color and Mix, use moderate Mod and
+Texture, and keep Warp and Freeze Off. Shape X and Shape Y jointly select the
+space character, so preserve both when the request does not mention them.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:SpaceBlender -->
+
+<!-- PLUGIN:SuperPlate -->
+<!-- SECTION-REVISION:400d4f7cf4c8d9a9b068457c12000817e26a5cd06bc897335f28ec221945a1c3 -->
+## SuperPlate
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-superplate","display_name":"SuperPlate","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys superplate","identifiers":{"add_by_name":["VST3: SuperPlate","VST3: SuperPlate (Soundtoys)"],"aliases":["superplate","super plate","soundtoys superplate","VST3: SuperPlate","VST3: SuperPlate (Soundtoys)"],"curated":["SuperPlate"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":["superplate"]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-superplate","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: SuperPlate","loaded_name":"VST3: SuperPlate (Soundtoys)","parameter_count":{"mode":"exact","value":28},"required_parameters":[{"index":1,"name":"Plate Style","section":"","section_required":false},{"index":2,"name":"Analog Style","section":"","section_required":false},{"index":3,"name":"Decay","section":"","section_required":false},{"index":6,"name":"Mix","section":"","section_required":false},{"index":23,"name":"Low Cut Slope","section":"","section_required":false}],"observed_fingerprint_sha256":"d62bb89c771f1f07e0b17ca4a765adc082e7a1db7edb8938859384fedbc832ba"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/superplate/","document_title":"SuperPlate Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"d62bb89c771f1f07e0b17ca4a765adc082e7a1db7edb8938859384fedbc832ba","body_sha256":"a9bda7cd12a6664f84f4ff4a5913ccace10ccd6811c708bb3f4c45373403f6bb"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:3a8a067116ba1b1228cc366a65cc125d17145f29f141ccb9210ecb61dd9ef959 -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 1, name = "Plate Style" }`
+  - `Stocktronics` = `0`
+  - `E. Plate III` = `0.25`
+  - `Audicon` = `0.5`
+  - `Goldfoil 240` = `0.75`
+  - `Classic 140` = `1`
+
+- `{ index = 2, name = "Analog Style" }`
+  - `Tube` = `0`
+  - `Solid State` = `0.5`
+  - `Clean` = `1`
+
+- `{ index = 23, name = "Low Cut Slope" }`
+  - `-6 dB` = `0`
+  - `-12 dB` = `0.5`
+  - `-24 dB` = `1`
+
+- `{ index = 24, name = "High Cut Slope" }`
+  - `-6 dB` = `0`
+  - `-12 dB` = `0.5`
+  - `-24 dB` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 1, name = "Plate Style" }`: `Goldfoil 240` = `0.75`
+- `{ index = 2, name = "Analog Style" }`: `Tube` = `0`
+- `{ index = 3, name = "Decay" }`: `3.48` = `0.39986962080001831`
+- `{ index = 4, name = "PreDelay" }`: `63` = `0.25200000405311584`
+- `{ index = 5, name = "Modulation" }`: `25` = `0.25`
+- `{ index = 6, name = "Mix" }`: `25.0` = `0.25`
+- `{ index = 9, name = "Low Cut" }`: `209` = `0.59984362125396729`
+- `{ index = 10, name = "High Cut" }`: `6034` = `0.59999024868011475`
+- `{ index = 23, name = "Low Cut Slope" }`: `-12 dB` = `0.5`
+- `{ index = 24, name = "High Cut Slope" }`: `-12 dB` = `0.5`
+
+Calibrated natural value ladders:
+
+- `{ index = 3, name = "Decay" }`
+  - natural alternative: `3.08` = `0.37470433115959167`
+  - exact anchor: `3.48` = `0.39986962080001831`
+  - natural alternative: `4.44` = `0.45007994771003723`
+
+- `{ index = 4, name = "PreDelay" }`
+  - natural alternative: `50` = `0.20000000298023224`
+  - exact anchor: `63` = `0.25200000405311584`
+  - natural alternative: `75` = `0.30000001192092896`
+
+- `{ index = 5, name = "Modulation" }`
+  - natural alternative: `20` = `0.20000000298023224`
+  - exact anchor: `25` = `0.25`
+  - natural alternative: `30` = `0.30000001192092896`
+
+- `{ index = 6, name = "Mix" }`
+  - natural alternative: `20.0` = `0.20000000298023224`
+  - exact anchor: `25.0` = `0.25`
+  - natural alternative: `30.0` = `0.30000001192092896`
+
+- `{ index = 9, name = "Low Cut" }`
+  - natural alternative: `172` = `0.55003821849822998`
+  - exact anchor: `209` = `0.59984362125396729`
+  - natural alternative: `231` = `0.62542718648910522`
+
+- `{ index = 10, name = "High Cut" }`
+  - natural alternative: `5195` = `0.5500146746635437`
+  - exact anchor: `6034` = `0.59999024868011475`
+  - natural alternative: `6503` = `0.62497693300247192`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:7b05d4d93331a14fe6fdc69a31d2c1baa8dd553d05be8313ea4de0acd531da3b -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+SuperPlate exposes product controls 1 through 24. Do not write Bypass 0 or host
+controls 25 through 27. Use the complete automatable menu map above.
+
+Decay can reach infinity. Use infinite decay only when explicitly requested.
+Resolve all targets before writing, use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback. Preserve Auto-Decay, EQ and every
+unrequested control.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+The five plate styles and three analog input styles are independent choices.
+For a dark restrained vocal plate, Goldfoil 240, modest Decay and Mix, a short
+PreDelay and filtered lows and highs are conservative starting settings. Tube
+adds color; Clean avoids preamp coloration.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:SuperPlate -->
+
+<!-- PLUGIN:Tremolator -->
+<!-- SECTION-REVISION:cc1d85fcbd65923aad71f080e2c5d10cad4a8626d4b2e35f461dc023dbf61fad -->
+## Tremolator
+
+```json plugin-route
+{"pack_format":2,"profile_schema":2,"key":"soundtoys-tremolator","display_name":"Tremolator","vendor":"Soundtoys","product_class":"ordinary","preference_type":"soundtoys tremolator","identifiers":{"add_by_name":["VST3: Tremolator","VST3: Tremolator (Soundtoys)"],"aliases":["tremolator","soundtoys tremolator","VST3: Tremolator","VST3: Tremolator (Soundtoys)"],"curated":["Tremolator"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":["tremolator"]},"chunks":["control","musical"]}
+```
+
+```json plugin-validate
+{"key":"soundtoys-tremolator","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Tremolator","loaded_name":"VST3: Tremolator (Soundtoys)","parameter_count":{"mode":"exact","value":19},"required_parameters":[{"index":3,"name":"InOutMode","section":"","section_required":false},{"index":4,"name":"Depth","section":"","section_required":false},{"index":5,"name":"Groove","section":"","section_required":false},{"index":6,"name":"Accent","section":"","section_required":false},{"index":7,"name":"Width","section":"","section_required":false},{"index":10,"name":"Threshold","section":"","section_required":false},{"index":13,"name":"EnvMode","section":"","section_required":false}],"observed_fingerprint_sha256":"5d4b5c61ecd7c045dcf621a01896b92abed649649291de2d9f7151071b6dc305"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/tremolator/","document_title":"Tremolator Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"5d4b5c61ecd7c045dcf621a01896b92abed649649291de2d9f7151071b6dc305","body_sha256":"8230e63c2b04b528e8ce51548f2dddc9fe161420293aaf06157ed20a04dcd816"}}
+```
+
+<!-- CHUNK:control -->
+<!-- SOUND TOYS CERTIFIED STORED VALUES -->
+<!-- campaign_sha256:942f4dddd4fd0a9c5eb87e3dfc0c8337b388bb823497cf82024a39a4a2954ea4 receipt_sha256:e7825e3ab7fb578f31ca4c86aedb39658df80c52606741a6492350151e8cc6fe -->
+### CERTIFIED STORED VALUES
+
+These are the exact repeated live stored values for Soundtoys 5.5.5.
+Use only these normalized constants for writes. Resolve every index and
+name first, then verify Soundtoys delayed readback one REAPER frame later.
+This section is complete for the listed host-exposed controls. Do not
+request additional plug-in context before using its maps and ladders.
+An existing-instance request with a session target hint is context-complete.
+Generate the runnable script immediately. Do not emit ``context_needed``
+for ``fx_chains``, ``fx_params``, ``docs`` or plug-in helper bundles.
+This product is script-automatable for every listed control. Never
+classify it as manual-only or substitute another product profile.
+This certified block overrides generic ``fx_params`` scan formatter,
+range and enum approximations. Resolve all targets together with
+``reaassist_resolve_profile_params``. Write only through the returned
+``mapped[N]`` indices and the exact normalized constants below. Never
+use a local parameter finder, a direct numeric index, a range formula,
+``set_param_display``, ``set_param_enum`` or ``set_param_enum_paced``
+for profile-backed writes.
+For a request that says the product already exists, use
+``TrackFX_GetByName(..., false)`` only. Never call ``TrackFX_AddByName``.
+If the lookup returns less than zero, show a clear error and return before
+the resolver. Never wrap the writes in a silent ``if fx >= 0`` branch.
+After resolving every target in one call, use the exact nil guard
+``if not mapped then error(guard_err) end``. Do not add a fallback
+message, wrapper or alternate condition to that guard.
+Every ``index`` below is already the exact zero-based REAPER host index.
+Copy it unchanged and never subtract one. Each ``name`` is exact and does
+not include the index number. Copy the resolver object literally.
+For a compound action, use exactly one ``reaper.defer`` callback for the
+resolver and every mapped setter. Do not schedule a second callback.
+Use one Undo block inside that callback and call ``reaper.UpdateArrange()``
+immediately after ``reaper.Undo_EndBlock(...)``. ReaAssist commits the
+isolated normalized targets and verifies their live delayed readback before
+it reports completion.
+
+Complete automatable menu map:
+
+- `{ index = 3, name = "InOutMode" }`
+  - `Digital` = `0`
+  - `Analog` = `1`
+
+- `{ index = 13, name = "EnvMode" }`
+  - `Envelope` = `0`
+  - `Gate` = `1`
+
+Intent gate: use the exact recipe anchors only when the user supplies
+explicit numeric or named values. For a natural-language request with
+no supplied values, choose only measured ladder rungs for requested
+continuous controls and use at least one natural alternative. Copy the
+selected rung normalized constant exactly and never shorten it.
+
+Explicit-value exact recipe anchors:
+- `{ index = 3, name = "InOutMode" }`: `Analog` = `1`
+- `{ index = 4, name = "Depth" }`: `0.40` = `0.40000000596046448`
+- `{ index = 5, name = "Groove" }`: `-0.05` = `0.40000000596046448`
+- `{ index = 6, name = "Accent" }`: `-4.00` = `0.40000000596046448`
+- `{ index = 7, name = "Width" }`: `40` = `0.40000000596046448`
+- `{ index = 10, name = "Threshold" }`: `-48.00` = `0.40000000596046448`
+- `{ index = 11, name = "Attack" }`: `7.6` = `0.40026083588600159`
+- `{ index = 12, name = "Release" }`: `66.0` = `0.60003447532653809`
+- `{ index = 13, name = "EnvMode" }`: `Envelope` = `0`
+
+Calibrated natural value ladders:
+
+- `{ index = 4, name = "Depth" }`
+  - natural alternative: `0.38` = `0.37999999523162842`
+  - exact anchor: `0.40` = `0.40000000596046448`
+  - natural alternative: `0.45` = `0.44999998807907104`
+
+- `{ index = 5, name = "Groove" }`
+  - natural alternative: `-0.06` = `0.37999999523162842`
+  - exact anchor: `-0.05` = `0.40000000596046448`
+  - natural alternative: `-0.03` = `0.43999999761581421`
+
+- `{ index = 6, name = "Accent" }`
+  - natural alternative: `-5.00` = `0.375`
+  - exact anchor: `-4.00` = `0.40000000596046448`
+  - natural alternative: `-2.00` = `0.44999998807907104`
+
+- `{ index = 7, name = "Width" }`
+  - natural alternative: `38` = `0.37999999523162842`
+  - exact anchor: `40` = `0.40000000596046448`
+  - natural alternative: `45` = `0.44999998807907104`
+
+- `{ index = 10, name = "Threshold" }`
+  - natural alternative: `-50.00` = `0.375`
+  - exact anchor: `-48.00` = `0.40000000596046448`
+  - natural alternative: `-44.00` = `0.44999998807907104`
+
+- `{ index = 11, name = "Attack" }`
+  - natural alternative: `5.8` = `0.37527969479560852`
+  - exact anchor: `7.6` = `0.40026083588600159`
+  - natural alternative: `13.0` = `0.44987377524375916`
+
+- `{ index = 12, name = "Release" }`
+  - natural alternative: `38.4` = `0.54997825622558594`
+  - exact anchor: `66.0` = `0.60003447532653809`
+  - natural alternative: `86.5` = `0.62503403425216675`
+
+Natural-intent rule: choose only from the exact ladder values above.
+Use at least one natural alternative so the complete result differs from
+the explicit-value recipe. Never compute, round or
+interpolate a normalized value. Preserve
+unrequested controls and describe unheard-audio settings as a starting point.
+<!-- ladder_evidence_sha256:a67b3eb1bedf0f106ece560ddc30b1733407e4d2ce97c6948e93ce7630b1bec6 receipt_sha256:5e8c6a0ac437e2086eb10a6943ca1c27344197b8f451e953f88a1f8b05ca6330 -->
+<!-- /SOUND TOYS CERTIFIED STORED VALUES -->
+
+Tremolator product controls are 1 through 15. Do not write Bypass 0 or host
+controls 16 through 18. Use the complete automatable menu map above for
+InOutMode and EnvMode.
+
+
+Resolve all targets before writing. Use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback. Verify delayed readback and preserve
+unrelated controls. Tremolator's full operating-mode selector, waveshape editor
+and rhythm editor are not host-exposed. Do not claim to set them through
+parameter automation.
+End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
+survive Redo and save/reload.
+<!-- /CHUNK:control -->
+
+<!-- CHUNK:musical -->
+For gentle smooth movement, use moderate Depth and Width, Envelope mode, a
+soft Accent and conservative dynamics settings. Rhythmic patterns and custom
+waveshapes must be set manually in the plug-in when the request depends on
+those hidden editors.
+<!-- /CHUNK:musical -->
+<!-- /PLUGIN:Tremolator -->
 
 <!-- PLUGIN:ValhallaDelay -->
 <!-- SECTION-REVISION:ce74f0b5c7e0ec04e685933007fcb0d867047b319c04b029fece2cd0a6d3ae25 -->
@@ -7110,7 +10198,7 @@ and right timing, Tape mode, Past era, 30.0 % Feedback, a 5000 Hz HighCut and
 <!-- /PLUGIN:ValhallaDelay -->
 
 <!-- PLUGIN:ValhallaVintageVerb -->
-<!-- SECTION-REVISION:270a5d7ca279ec980e8a943b644b3783b2d3341031cd2ad5cda9ef50eb668491 -->
+<!-- SECTION-REVISION:386d39136e05f449951994d942035e78f3c1fd746a04a715b2cb10471a9b4c91 -->
 ## ValhallaVintageVerb
 
 ```json plugin-route
@@ -7118,7 +10206,7 @@ and right timing, Tape mode, Past era, 30.0 % Feedback, a 5000 Hz HighCut and
 ```
 
 ```json plugin-validate
-{"key":"valhalla-vintage-verb","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: ValhallaVintageVerb","loaded_name":"VST3: ValhallaVintageVerb (Valhalla DSP, LLC)","parameter_count":{"mode":"exact","value":21},"required_parameters":[{"index":0,"name":"Mix","section":"","section_required":false},{"index":12,"name":"ModDepth","section":"","section_required":false},{"index":15,"name":"ColorMode","section":"","section_required":false},{"index":16,"name":"ReverbMode","section":"","section_required":false}],"observed_fingerprint_sha256":"e9e5ec6ca0ca2a3fd0e9cab0286d9d048712ce9614a69ceb56be576f700e6352"}],"status":"pilot","provenance":{"source":"https://valhalladsp.com/shop/reverb/valhalla-vintage-verb/","migrated_at":"2026-07-30","body_sha256":"9a2a48f6980e3329ebdd9dd04395cb0d376377630ad6d60c994157c1564c4cf4","verified_at":"2026-07-30","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"e9e5ec6ca0ca2a3fd0e9cab0286d9d048712ce9614a69ceb56be576f700e6352"}}
+{"key":"valhalla-vintage-verb","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: ValhallaVintageVerb","loaded_name":"VST3: ValhallaVintageVerb (Valhalla DSP, LLC)","parameter_count":{"mode":"exact","value":21},"required_parameters":[{"index":0,"name":"Mix","section":"","section_required":false},{"index":12,"name":"ModDepth","section":"","section_required":false},{"index":15,"name":"ColorMode","section":"","section_required":false},{"index":16,"name":"ReverbMode","section":"","section_required":false}],"observed_fingerprint_sha256":"e9e5ec6ca0ca2a3fd0e9cab0286d9d048712ce9614a69ceb56be576f700e6352"}],"status":"pilot","provenance":{"source":"https://valhalladsp.com/shop/reverb/valhalla-vintage-verb/","migrated_at":"2026-07-30","body_sha256":"c2b3f96bfc8e135a86a151ac4adfd305460d707c6588d00a236c298fc0915ee8","verified_at":"2026-07-30","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"e9e5ec6ca0ca2a3fd0e9cab0286d9d048712ce9614a69ceb56be576f700e6352"}}
 ```
 
 <!-- CHUNK:control -->
@@ -7143,6 +10231,9 @@ mapped indices in a target table, loop or wrapper. Use exactly one
 `reaper.defer` callback and no follow-up verification callback. For an insert,
 start with Mix at or below 25.0 %. Use 100.0 % only when the user explicitly
 identifies a dedicated reverb return.
+
+For an explicit `100.0 %` Mix request on a dedicated return, write exactly
+`1.0` to Mix index 0. Do not substitute `0.5`, which displays `50.0 %`.
 
 A conservative vocal plate starting point is Plate mode, eighties color,
 1.50 s Decay, 25.00 ms PreDelay, 8000 Hz HighCut, 150 Hz LowCut and 20.0 % Mix.

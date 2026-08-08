@@ -1,5 +1,17 @@
 # ReaAssist - Changelog
 
+## v1.4.9 - 2026-08-07
+
+- **Gemini Flash Lite has been upgraded to 3.5.** Saved Flash Lite 3.1 selections move automatically to 3.5 with Low thinking, the fastest tested Lite setting. Both versions passed the same 10 ReaAssist tasks, with 3.5 responding faster in every comparison.
+
+- **Certified plug-in support expands from 45 to 65 plug-ins.** Twenty additional Soundtoys effects now have verified control guidance, including Crystallizer, FilterFreak, Little AlterBoy, MicroShift, PanMan, PhaseMistress, PrimalTap, Radiator, SuperPlate, and Tremolator.
+
+- **Generated plug-in edits and FX chains are more dependable.** ReaAssist supplies maintained control guidance earlier, keeps plug-in requests on the appropriate generated-Lua path, handles multi-effect chains more reliably, and verifies requested parameter results before reporting success.
+
+- **Validation and recovery are clearer.** Stronger checks cover missing plug-in values, sidechain routing, envelope edits, new-track targeting, timeouts, protected calls, and deferred project changes. Failed or partial operations now provide more accurate outcomes and focused recovery.
+
+- **Display troubleshooting and accessible workflows received another polish pass.** Interface sizing behaves more consistently at fractional display scaling, diagnostic reports include more useful display context without display names, coordinates, or hardware identifiers, and Screen Reader chat saving and clearing behavior is documented more clearly.
+
 ## v1.4.8 - 2026-07-31
 
 - **ReaAssist now offers tested and certified support for 45 plug-ins.** The expanded collection includes the current AutoTune release and Auto-Key 2, the full Ozone 12 component suite, soothe2 and soothe3, Soundtoys Decapitator and EchoBoy, ValhallaDelay and ValhallaVintageVerb, RC-20 Retro Color, and FabFilter Pro-C 2. ReaAssist can make more plug-in changes confidently while protecting controls that should stay untouched. It also recognizes when Melodyne needs hands-on editor work and provides safe guidance for completing it.

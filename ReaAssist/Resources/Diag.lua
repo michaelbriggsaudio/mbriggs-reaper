@@ -39,7 +39,7 @@ end
 -- Constants
 -- ============================================================================
 Diag.SCHEMA_VERSION    = 2
-Diag.PAYLOAD_REVISION  = 6
+Diag.PAYLOAD_REVISION  = 8
 Diag.PAYLOAD_CAP_BYTES = 1024 * 1024     -- 1 MB server-side cap (manual feedback)
 -- Bug-report tier carries the full Advanced Log inline as a JSON string.
 -- Logs are auto-pruned to MAX_LOG_TURNS (40) at write time, but each turn can
@@ -83,6 +83,7 @@ Diag.CACHE_STATE_VOCABULARY  = { "hit", "miss", "created", "invalidated",
 Diag.RETRY_REASON_VOCABULARY = {
   "validator", "docs_gate", "plugin_helper", "semantic", "context_fetch",
   "response_shape", "provider_capacity", "http_5xx", "timeout", "rate_limit",
+  "schannel_revocation_offline",
   "length", "empty", "action", "action_relevance", "api", "arity",
   "audio_accessor_nil", "audio_sync", "bus_routing", "context_needed", "defer",
   "drum_marker_sync", "drum_quantize", "existing_fx_add",
@@ -111,13 +112,15 @@ Diag.ERROR_KIND_VOCABULARY = {
   "validator_blocked", "context_loop", "diag_auto_write_failed",
   "runaway_call_cap", "runaway_context_fetch_cap",
   "runaway_validator_retry_cap", "runtime_busy", "semantic_unsafe",
-  "turn_spend_budget", "unknown",
+  "turn_spend_budget", "plugin_pack_integrity_mismatch",
+  "plugin_pack_integrity_unavailable", "unknown",
 }
 Diag.ADVISORY_KIND_VOCABULARY = {
   "unknown_effect_same_cycle_param_write", "unknown",
 }
 Diag.FAILURE_STAGE_VOCABULARY = {
-  "provider", "response", "validation", "execution", "unknown",
+  "provider", "response", "context_dispatch", "validation", "execution",
+  "unknown",
 }
 Diag.TERMINAL_OUTCOME_VOCABULARY = {
   "answer_complete", "answer_truncated", "answer_empty",
@@ -150,6 +153,46 @@ Diag.LANGUAGE_CODE_VOCABULARY = {
 Diag.INTERFACE_MODE_VOCABULARY = {
   "visual", "screen_reader", "unknown",
 }
+-- Payload revision 8 platform vocabulary. PLATFORM_VOCABULARY must stay
+-- identical to Deps.detect_platform()'s return set in ReaAssist.lua plus the
+-- "unknown" stand-in for its nil result.
+Diag.PLATFORM_VOCABULARY = {
+  "win-x64", "win-x86", "mac-x64", "mac-x86", "mac-arm64",
+  "linux-x64", "linux-x86", "linux-arm64", "linux-arm32", "unknown",
+}
+Diag.OS_ARCH_VOCABULARY   = { "x64", "x86", "arm64", "arm32", "unknown" }
+Diag.OS_FAMILY_VOCABULARY = { "windows", "macos", "linux", "unknown" }
+Diag.SR_ENTERED_VIA_VOCABULARY = {
+  "action", "startup_flag", "setting", "unknown",
+}
+-- Any distro id outside this set collapses to "other" so a custom or
+-- self-built /etc/os-release can never turn os_version_label into free text.
+Diag.LINUX_DISTRO_VOCABULARY = {
+  "alpine", "arch", "centos", "debian", "elementary", "endeavouros",
+  "fedora", "gentoo", "linuxmint", "manjaro", "nixos", "opensuse", "pop",
+  "rhel", "rocky", "slackware", "ubuntu", "void", "zorin", "other",
+}
+-- Importer contract: os_version_label is a trimmed lowercase token matching
+-- ^[a-z0-9][a-z0-9._-]{0,31}$, and the counters below are rejected outright
+-- rather than clamped server-side, so both are bounded here before sending.
+Diag.OS_VERSION_LABEL_CAP   = 32
+Diag.WEBVIEW2_VERSION_CAP   = 32
+Diag.SR_PROMPTS_MAX         = 100000
+Diag.SR_SESSION_SECONDS_MAX = 2592000
+-- Give-up window for the detached platform probe. Nothing waits on it; this
+-- only stops the poll from watching a file that will never arrive.
+Diag.PLATFORM_PROBE_TIMEOUT_S = 60
+-- Seconds after module load before the tick lane spawns the POSIX probe, so
+-- its launcher cost lands well clear of ReaAssist startup.
+Diag.PLATFORM_PROBE_DEFER_S = 5
+-- Windows waits for a user-initiated send instead of a timer, then lets a
+-- frame pass so the spawn lands after the curl launcher's own hitch rather
+-- than stacking onto it.
+Diag.PLATFORM_PROBE_SEND_DEFER_S = 0.5
+-- Marker file that flags a development or test install. Lives in the
+-- script-owned Data tree and is deliberately preserved by Factory Reset.
+Diag.INTERNAL_MARKER_FILENAME    = "internal_telemetry.flag"
+Diag.SR_VISUAL_SWITCH_FILENAME   = "sr_visual_switch.json"
 local EXT_NS             = "reaassist"
 local EXT_KEY_INSTALL_ID = "feedback_install_id"
 
@@ -863,6 +906,30 @@ local function _turn_run_result(msg, err_kind, redact_content)
   out.error_debug = nil
   put("error_kind", err_kind, true)
   put("observable_change_status", msg.observable_change_status, true)
+  local raw_parameter_evidence = msg.parameter_change_evidence
+    or out.parameter_change_evidence
+  if type(raw_parameter_evidence) == "table" then
+    local allowed_counts = {
+      "target_count", "write_count", "changed_target_count",
+      "unchanged_target_count", "returned_to_initial_count",
+       "unknown_target_count", "requested_value_match_count",
+       "requested_value_mismatch_count", "requested_value_unknown_count",
+       "requested_value_confirmed_mismatch_count",
+       "requested_value_quantized_match_count",
+       "setter_rejected_target_count", "profile_guarded_target_count",
+    }
+    local safe_parameter_evidence = {
+      status = tostring(raw_parameter_evidence.status or "unknown"),
+    }
+    for _, key in ipairs(allowed_counts) do
+      local count = tonumber(raw_parameter_evidence[key])
+      if count ~= nil then
+        safe_parameter_evidence[key] = math.max(0, math.floor(count))
+      end
+    end
+    out.parameter_change_evidence = safe_parameter_evidence
+    has = true
+  end
   if msg.change_evidence ~= nil and out.change_evidence == nil then
     out.change_evidence = _redact_payload_value(msg.change_evidence)
     has = true
@@ -897,6 +964,13 @@ local function _turn_to_table(msg, redact_content)
   end
   if type(msg.request_status) == "table" then
     t.request_status = Diag.sanitize_request_status(msg.request_status)
+  end
+  if msg.response_time ~= nil then
+    local response_time = tonumber(msg.response_time)
+    if response_time and response_time == response_time
+        and response_time < math.huge then
+      t.response_time = math.max(0, math.min(86400, response_time))
+    end
   end
   if msg.role == "assistant" then
     local provider_id = _safe_turn_provider_id(msg.provider_id)
@@ -949,8 +1023,48 @@ local function _turn_to_table(msg, redact_content)
     end
     if msg.tok_in        ~= nil then t.tok_in        = msg.tok_in end
     if msg.tok_out       ~= nil then t.tok_out       = msg.tok_out end
+    if msg.tok_out_visible ~= nil then
+      t.tok_out_visible = math.max(0,
+        math.floor(tonumber(msg.tok_out_visible) or 0))
+    end
+    if msg.tok_out_reasoning ~= nil then
+      t.tok_out_reasoning = math.max(0,
+        math.floor(tonumber(msg.tok_out_reasoning) or 0))
+    end
     if msg.tok_cache_read   ~= nil then t.tok_cache_read   = msg.tok_cache_read end
     if msg.tok_cache_create ~= nil then t.tok_cache_create = msg.tok_cache_create end
+    if type(msg.model_call_usage) == "table" then
+      t.model_call_usage = {}
+      for i, usage in ipairs(msg.model_call_usage) do
+        if i > 8 then break end
+        if type(usage) == "table" then
+          t.model_call_usage[#t.model_call_usage + 1] = {
+            call_index = math.max(1,
+              math.floor(tonumber(usage.call_index) or i)),
+            stage = tostring(usage.stage or "response"),
+            provider_id = _safe_turn_provider_id(usage.provider_id),
+            input_tokens = math.max(0,
+              math.floor(tonumber(usage.input_tokens) or 0)),
+            output_tokens = math.max(0,
+              math.floor(tonumber(usage.output_tokens) or 0)),
+            visible_output_tokens = usage.visible_output_tokens ~= nil
+              and math.max(0, math.floor(
+                tonumber(usage.visible_output_tokens) or 0)) or nil,
+            reasoning_output_tokens = usage.reasoning_output_tokens ~= nil
+              and math.max(0, math.floor(
+                tonumber(usage.reasoning_output_tokens) or 0)) or nil,
+            cache_read_tokens = math.max(0,
+              math.floor(tonumber(usage.cache_read_tokens) or 0)),
+            cache_create_tokens = math.max(0,
+              math.floor(tonumber(usage.cache_create_tokens) or 0)),
+            uncached_input_tokens = math.max(0,
+              math.floor(tonumber(usage.uncached_input_tokens) or 0)),
+            context_class = Diag.normalize_context_class(usage.context_label),
+          }
+        end
+      end
+      if #t.model_call_usage == 0 then t.model_call_usage = nil end
+    end
     if msg.cost          ~= nil then t.cost          = msg.cost end
     if msg.recovery_kind ~= nil or msg.recovery ~= nil then
       t.retry_reason = Diag.normalize_retry_reason(
@@ -1017,8 +1131,6 @@ end
 
 local function _remember_turn(msg)
   if type(msg) ~= "table" then return end
-  if auto_seen_turns[msg] then return end
-  auto_seen_turns[msg] = true
   local copy = _turn_to_table(msg, true)
   if type(copy.content) == "string" and #copy.content > 4096 then
     copy.content = _truncate_with_byte_count_marker(copy.content, 4096,
@@ -1028,7 +1140,14 @@ local function _remember_turn(msg)
     copy.code_block = _truncate_with_byte_count_marker(copy.code_block, 4096,
       _trunc_marker)
   end
+  local remembered = auto_seen_turns[msg]
+  if type(remembered) == "table" then
+    for key in pairs(remembered) do remembered[key] = nil end
+    for key, value in pairs(copy) do remembered[key] = value end
+    return
+  end
   auto_recent_turns[#auto_recent_turns + 1] = copy
+  auto_seen_turns[msg] = copy
   local limit = tonumber(Diag.AUTO_RECENT_TURN_LIMIT) or 80
   while #auto_recent_turns > limit do
     table.remove(auto_recent_turns, 1)
@@ -1239,11 +1358,15 @@ function Diag.sanitize_retry_event(event, fallback_index, retry_class)
       byte_count = math.max(0, math.floor(tonumber(event.candidate.byte_count) or 0)),
       content_hash = event.candidate.content_hash,
       content_hash_scope = event.candidate.content_hash_scope,
-      excerpt = Diag.redact(tostring(event.candidate.excerpt or "")),
-      excerpt_bytes = math.max(0,
-        math.floor(tonumber(event.candidate.excerpt_bytes) or 0)),
-      excerpt_truncated = event.candidate.excerpt_truncated == true or nil,
     }
+    if event.candidate.excerpt ~= nil then
+      out.candidate.excerpt =
+        Diag.redact(tostring(event.candidate.excerpt or ""))
+      out.candidate.excerpt_bytes = math.max(0,
+        math.floor(tonumber(event.candidate.excerpt_bytes) or 0))
+      out.candidate.excerpt_truncated =
+        event.candidate.excerpt_truncated == true or nil
+    end
   end
   return out
 end
@@ -1285,6 +1408,12 @@ function Diag.sanitize_validation_trace(trace)
           provider_id = _safe_turn_provider_id(usage.provider_id),
           input_tokens = math.max(0, math.floor(tonumber(usage.input_tokens) or 0)),
           output_tokens = math.max(0, math.floor(tonumber(usage.output_tokens) or 0)),
+          visible_output_tokens = usage.visible_output_tokens ~= nil
+            and math.max(0, math.floor(
+              tonumber(usage.visible_output_tokens) or 0)) or nil,
+          reasoning_output_tokens = usage.reasoning_output_tokens ~= nil
+            and math.max(0, math.floor(
+              tonumber(usage.reasoning_output_tokens) or 0)) or nil,
           cache_read_tokens = math.max(0,
             math.floor(tonumber(usage.cache_read_tokens) or 0)),
           cache_create_tokens = math.max(0,
@@ -1485,6 +1614,108 @@ local function _safe_try(fn, fallback)
   return fallback
 end
 
+local function _display_integer(value, min_value, max_value)
+  value = tonumber(value)
+  if not value or value ~= value or value < min_value or value > max_value then
+    return nil
+  end
+  return math.floor(value + 0.5)
+end
+
+local function _display_preferences(out)
+  local scale_count = type(CFG) == "table"
+    and type(CFG.UI_SCALE_OPTIONS) == "table" and #CFG.UI_SCALE_OPTIONS or 0
+  local idx = _display_integer(type(prefs) == "table" and prefs.ui_scale_idx,
+    1, scale_count)
+  local scale = idx and tonumber(CFG.UI_SCALE_OPTIONS[idx]) or nil
+  if scale and scale >= 0.5 and scale <= 4 then
+    out.interface_size_percent = math.floor(scale * 100 + 0.5)
+    out.interface_size_mode = idx == 3 and "auto" or "manual"
+  end
+
+  local dpi = type(S) == "table" and S._window_dpi_valid == true
+    and tonumber(S._window_dpi_scale) or nil
+  local dpi_key = dpi and dpi >= 0.5 and dpi <= 8
+    and tostring(math.floor(dpi * 100 + 0.5)) or nil
+  local scale_map = type(prefs) == "table" and prefs.ui_scale_by_dpi or nil
+  local remembered_idx = dpi_key and type(scale_map) == "table"
+    and _display_integer(scale_map[dpi_key], 1, scale_count) or nil
+  out.interface_size_remembered = idx ~= nil and remembered_idx == idx
+
+  local text_idx = _display_integer(
+    type(prefs) == "table" and prefs.screen_reader_text_size_idx, 1,
+    type(CFG) == "table" and type(CFG.SCREEN_READER_TEXT_SIZE_FACTORS) == "table"
+      and #CFG.SCREEN_READER_TEXT_SIZE_FACTORS or 0)
+  local factor = text_idx and tonumber(CFG.SCREEN_READER_TEXT_SIZE_FACTORS[text_idx]) or nil
+  if factor and factor >= 0.5 and factor <= 4 then
+    out.screen_reader_text_size_index = text_idx
+    out.screen_reader_text_size_percent = math.floor(factor * 100 + 0.5)
+  end
+end
+
+function Diag.display_context_snapshot()
+  local cached = type(S) == "table" and S._display_context or nil
+  local out = { status = "unavailable", source = "none" }
+  local numeric_fields = {
+    "dpi_scale_percent", "reaper_dpi_scale_percent",
+    "display_logical_width", "display_logical_height",
+    "display_platform_width", "display_platform_height",
+    "work_area_logical_width", "work_area_logical_height",
+    "work_area_platform_width", "work_area_platform_height",
+    "window_logical_width", "window_logical_height",
+    "window_platform_width", "window_platform_height",
+    "interface_size_percent", "screen_reader_text_size_index",
+    "screen_reader_text_size_percent",
+  }
+  if type(cached) == "table" then
+    for _, key in ipairs(numeric_fields) do
+      local max_value = key:find("_percent", 1, true) and 800
+        or key == "screen_reader_text_size_index" and 4 or 100000
+      out[key] = _display_integer(cached[key], 1, max_value)
+    end
+    if cached.interface_size_mode == "auto" or cached.interface_size_mode == "manual" then
+      out.interface_size_mode = cached.interface_size_mode
+    end
+    if type(cached.interface_size_remembered) == "boolean" then
+      out.interface_size_remembered = cached.interface_size_remembered
+    end
+    if cached.source == "reaper_viewport_imgui" then
+      out.source = cached.source
+    end
+  end
+  _display_preferences(out)
+
+  local has_display = out.display_platform_width ~= nil
+    or out.display_logical_width ~= nil or out.dpi_scale_percent ~= nil
+  if has_display then
+    out.status = type(cached) == "table" and cached.status == "ok"
+      and "ok" or "partial"
+  elseif type(S) == "table" and S.screen_reader_mode == true
+      and type(reaper) == "table" and type(reaper.my_getViewport) == "function" then
+    local ok, left, top, right, bottom = pcall(
+      reaper.my_getViewport, 0, 0, 0, 0, 0, 0, 0, 0, false)
+    local width = ok and _display_integer(math.abs((tonumber(right) or 0)
+      - (tonumber(left) or 0)), 1, 100000) or nil
+    local height = ok and _display_integer(math.abs((tonumber(bottom) or 0)
+      - (tonumber(top) or 0)), 1, 100000) or nil
+    if width and height then
+      out.display_platform_width = width
+      out.display_platform_height = height
+      out.status = "partial"
+      out.source = "reaper_viewport"
+    end
+  end
+
+  if not out.reaper_dpi_scale_percent and type(reaper) == "table"
+      and type(reaper.ThemeLayout_GetLayout) == "function" then
+    local ok, _, raw = pcall(reaper.ThemeLayout_GetLayout, "tcp", -3)
+    raw = ok and tonumber(raw) or nil
+    out.reaper_dpi_scale_percent = raw
+      and _display_integer((raw / 256) * 100, 50, 800) or nil
+  end
+  return out
+end
+
 function Diag.client_context()
   local language_code = _safe_try(function()
     if type(CFG) == "table"
@@ -1519,11 +1750,29 @@ function Diag.client_context()
   end
   interface_mode = _coarsen(interface_mode, INTERFACE_MODE_VOCAB, "unknown")
 
-  return {
+  local platform = Diag.platform_context()
+  local out = {
     language_code = language_code,
     language_pack_version = language_pack_version,
     interface_mode = interface_mode,
+    display_context = Diag.display_context_snapshot(),
+    platform         = platform.platform,
+    os_arch          = platform.os_arch,
+    os_family        = platform.os_family,
+    os_version_label = platform.os_version_label,
+    webview2_runtime = platform.webview2_runtime,
+    sr_switched_to_visual = Diag.screen_reader_switched_to_visual(),
   }
+  -- Omitted rather than sent as false so a normal user install carries no
+  -- internal-install key at all.
+  if Diag.internal_install() then out.internal_install = true end
+  if interface_mode == "screen_reader" then
+    local sr = Diag.screen_reader_engagement()
+    out.sr_prompts         = sr.sr_prompts
+    out.sr_session_seconds = sr.sr_session_seconds
+    out.sr_entered_via     = sr.sr_entered_via
+  end
+  return out
 end
 
 local function _environment_summary()
@@ -1665,6 +1914,14 @@ local function _metrics_summary()
   local tier = _model_tier(provider_id, model_id)
   local token_in = (type(S) == "table" and tonumber(S.session_tok_in)) or 0
   local token_out = (type(S) == "table" and tonumber(S.session_tok_out)) or 0
+  local token_out_visible = (type(S) == "table"
+    and tonumber(S.session_tok_out_visible)) or 0
+  local token_out_reasoning = (type(S) == "table"
+    and tonumber(S.session_tok_out_reasoning)) or 0
+  local output_usage_calls = (type(S) == "table"
+    and tonumber(S.session_output_usage_calls)) or 0
+  local output_split_calls = (type(S) == "table"
+    and tonumber(S.session_output_split_calls)) or 0
   local cache_read, cache_create, api_call_count, latency_vals = 0, 0, 0, {}
   local failed_request_latency_ms = 0
   local context_features, bucket_counts, bucket_states = {}, {}, {}
@@ -1737,6 +1994,10 @@ local function _metrics_summary()
   end
   local function failure_stage(m, err_kind)
     if network_error_kinds[err_kind] then return "provider" end
+    if err_kind == "plugin_pack_integrity_mismatch"
+       or err_kind == "plugin_pack_integrity_unavailable" then
+      return "context_dispatch"
+    end
     local response_status = tostring(m.assistant_response_status or "")
     if err_kind == "model_no_usable_answer" or err_kind == "json_decode_error"
        or err_kind == "context_loop"
@@ -2081,16 +2342,21 @@ local function _metrics_summary()
           and "free" or "unknown",
     }
   end
+  local tokens = {
+    in_total = token_in,
+    uncached_input_total = math.max(0, token_in - cache_read - cache_create),
+    out_total = token_out,
+    cache_read_total = cache_read,
+    cache_create_total = cache_create,
+  }
+  if output_usage_calls > 0 and output_split_calls == output_usage_calls then
+    tokens.visible_output_total = token_out_visible
+    tokens.reasoning_output_total = token_out_reasoning
+  end
   return {
     providers_used = provider_id ~= "unknown" and { provider_id } or {},
     model_tiers_used = tier ~= "unknown" and { tier } or {},
-    tokens = {
-      in_total = token_in,
-      uncached_input_total = math.max(0, token_in - cache_read - cache_create),
-      out_total = token_out,
-      cache_read_total = cache_read,
-      cache_create_total = cache_create,
-    },
+    tokens = tokens,
     api_call_count = api_call_count,
     cost_total_usd = (type(S) == "table" and tonumber(S.session_cost)) or 0,
     failed_request_latency_ms = failed_request_latency_ms,
@@ -2179,7 +2445,7 @@ local function _errors_summary()
       end
       local ta = type(m.typed_actions) == "table" and m.typed_actions or nil
       local rejected = m.docs_gate_hit == true
-        or (ta and ta.valid == false)
+        or (ta and ta.present == true and ta.valid == false)
         or m.validation_status == "failed"
         or m.validation_status == "blocked"
       if rejected then validator_reject_count = validator_reject_count + 1 end
@@ -2257,8 +2523,19 @@ function Diag.assemble_auto_payload(tier)
     language_code        = client_context.language_code,
     language_pack_version = client_context.language_pack_version,
     interface_mode       = client_context.interface_mode,
+    display_context      = client_context.display_context,
     reaper_version       = _safe_try(function() return reaper.GetAppVersion() end, "unknown"),
     os                   = _detect_os(),
+    platform             = client_context.platform,
+    os_arch              = client_context.os_arch,
+    os_family            = client_context.os_family,
+    os_version_label     = client_context.os_version_label,
+    webview2_runtime     = client_context.webview2_runtime,
+    sr_prompts           = client_context.sr_prompts,
+    sr_session_seconds   = client_context.sr_session_seconds,
+    sr_entered_via       = client_context.sr_entered_via,
+    sr_switched_to_visual = client_context.sr_switched_to_visual,
+    internal_install     = client_context.internal_install,
     provider             = provider_id,
     model_tier           = _model_tier(provider_id, model_id),
     session_summary      = _session_summary(now),
@@ -2392,8 +2669,19 @@ function Diag.assemble_auto_ping_payload()
     language_code        = client_context.language_code,
     language_pack_version = client_context.language_pack_version,
     interface_mode       = client_context.interface_mode,
+    display_context      = client_context.display_context,
     reaper_version       = _safe_try(function() return reaper.GetAppVersion() end, "unknown"),
     os                   = _detect_os(),
+    platform             = client_context.platform,
+    os_arch              = client_context.os_arch,
+    os_family            = client_context.os_family,
+    os_version_label     = client_context.os_version_label,
+    webview2_runtime     = client_context.webview2_runtime,
+    sr_prompts           = client_context.sr_prompts,
+    sr_session_seconds   = client_context.sr_session_seconds,
+    sr_entered_via       = client_context.sr_entered_via,
+    sr_switched_to_visual = client_context.sr_switched_to_visual,
+    internal_install     = client_context.internal_install,
     provider             = provider_id,
     model_tier           = _model_tier(provider_id, model_id),
     session_summary      = _session_summary(now),
@@ -2486,7 +2774,18 @@ function Diag.begin_draft(target_idx)
     language_code        = client_context.language_code,
     language_pack_version = client_context.language_pack_version,
     interface_mode       = client_context.interface_mode,
+    display_context      = client_context.display_context,
     os                   = _detect_os(),
+    platform             = client_context.platform,
+    os_arch              = client_context.os_arch,
+    os_family            = client_context.os_family,
+    os_version_label     = client_context.os_version_label,
+    webview2_runtime     = client_context.webview2_runtime,
+    sr_prompts           = client_context.sr_prompts,
+    sr_session_seconds   = client_context.sr_session_seconds,
+    sr_entered_via       = client_context.sr_entered_via,
+    sr_switched_to_visual = client_context.sr_switched_to_visual,
+    internal_install     = client_context.internal_install,
     reaper_version       = reaper_version,
     provider             = provider_id,
     model                = model_id,
@@ -2529,7 +2828,18 @@ function Diag.assemble_payload(draft, comment, flags)
     language_code        = draft.language_code,
     language_pack_version = draft.language_pack_version,
     interface_mode       = draft.interface_mode,
+    display_context      = draft.display_context,
     os                   = draft.os,
+    platform             = draft.platform,
+    os_arch              = draft.os_arch,
+    os_family            = draft.os_family,
+    os_version_label     = draft.os_version_label,
+    webview2_runtime     = draft.webview2_runtime,
+    sr_prompts           = draft.sr_prompts,
+    sr_session_seconds   = draft.sr_session_seconds,
+    sr_entered_via       = draft.sr_entered_via,
+    sr_switched_to_visual = draft.sr_switched_to_visual,
+    internal_install     = draft.internal_install,
     reaper_version       = draft.reaper_version,
     provider             = draft.provider,
     model                = draft.model,
@@ -2852,7 +3162,18 @@ function Diag.begin_bug_report_draft()
     language_code            = client_context.language_code,
     language_pack_version    = client_context.language_pack_version,
     interface_mode           = client_context.interface_mode,
+    display_context          = client_context.display_context,
     os                       = _detect_os(),
+    platform                 = client_context.platform,
+    os_arch                  = client_context.os_arch,
+    os_family                = client_context.os_family,
+    os_version_label         = client_context.os_version_label,
+    webview2_runtime         = client_context.webview2_runtime,
+    sr_prompts               = client_context.sr_prompts,
+    sr_session_seconds       = client_context.sr_session_seconds,
+    sr_entered_via           = client_context.sr_entered_via,
+    sr_switched_to_visual    = client_context.sr_switched_to_visual,
+    internal_install         = client_context.internal_install,
     reaper_version           = reaper_version,
     provider                 = provider_id,
     model                    = model_id,
@@ -2910,7 +3231,18 @@ function Diag.assemble_bug_report_payload(draft, comment, name, email)
     language_code        = draft.language_code,
     language_pack_version = draft.language_pack_version,
     interface_mode       = draft.interface_mode,
+    display_context      = draft.display_context,
     os                   = draft.os,
+    platform             = draft.platform,
+    os_arch              = draft.os_arch,
+    os_family            = draft.os_family,
+    os_version_label     = draft.os_version_label,
+    webview2_runtime     = draft.webview2_runtime,
+    sr_prompts           = draft.sr_prompts,
+    sr_session_seconds   = draft.sr_session_seconds,
+    sr_entered_via       = draft.sr_entered_via,
+    sr_switched_to_visual = draft.sr_switched_to_visual,
+    internal_install     = draft.internal_install,
     reaper_version       = draft.reaper_version,
     provider             = draft.provider,
     model                = draft.model,
@@ -3230,7 +3562,11 @@ local function _launch_curl(cmd, is_windows)
   return true
 end
 
-local function _send_body(body, curl_timeout_s, tick_timeout_s, on_done)
+-- carries_sr_switch marks a body whose payload asserts sr_switched_to_visual.
+-- The on-disk marker is only cleared once such a body is accepted, so a failed
+-- or abandoned send can never lose the observation.
+local function _send_body(body, curl_timeout_s, tick_timeout_s, on_done,
+                          carries_sr_switch)
   if in_flight then
     if on_done then on_done(false, nil, "send already in flight") end
     return
@@ -3277,6 +3613,7 @@ local function _send_body(body, curl_timeout_s, tick_timeout_s, on_done)
                      and (reaper.time_precise() + 0.15) or nil,
     launched       = false,
     on_done        = on_done,
+    carries_sr_switch = carries_sr_switch == true,
     -- 60 s is generous given the 30 s curl --max-time + manual feedback's
     -- sub-MB body. Bug-report sends override this with a higher value to
     -- cover multi-MB log uploads on slow uplinks.
@@ -3296,7 +3633,8 @@ function Diag.send_draft(draft, comment, flags, on_done)
     return
   end
 
-  _send_body(body, Diag.CURL_TIMEOUT_S, 60, on_done)
+  _send_body(body, Diag.CURL_TIMEOUT_S, 60, on_done,
+    draft.sr_switched_to_visual == true)
 end
 
 -- Bug-report sender. Same curl harness + single-flight gate as send_draft;
@@ -3316,7 +3654,8 @@ function Diag.send_bug_report(draft, comment, name, email, on_done)
   end
 
   _send_body(body, Diag.BUG_REPORT_CURL_TIMEOUT_S,
-    Diag.BUG_REPORT_TICK_TIMEOUT_S, on_done)
+    Diag.BUG_REPORT_TICK_TIMEOUT_S, on_done,
+    draft.sr_switched_to_visual == true)
 end
 
 local function _read_file(path)
@@ -3378,6 +3717,510 @@ local function _decode_json(s)
   if ok and type(v) == "table" then return v end
   return nil
 end
+
+-- ============================================================================
+-- Payload revision 8: platform, OS version, WebView2, Screen Reader engagement
+-- ============================================================================
+-- Every value below is either drawn from a fixed vocabulary or normalized to a
+-- short bounded label client-side. Raw probe output never leaves the machine.
+-- A probe that failed or has not finished leaves its field absent; "unknown"
+-- is reserved for a probe that genuinely returned an unrecognized value.
+local PLATFORM_VOCAB_SETS = {
+  platform      = _vocab_set(Diag.PLATFORM_VOCABULARY),
+  os_arch       = _vocab_set(Diag.OS_ARCH_VOCABULARY),
+  os_family     = _vocab_set(Diag.OS_FAMILY_VOCABULARY),
+  linux_distro  = _vocab_set(Diag.LINUX_DISTRO_VOCABULARY),
+  sr_entered_via = _vocab_set(Diag.SR_ENTERED_VIA_VOCABULARY),
+}
+
+local platform_probe = {
+  fired = false, done = false, started_at = 0, path = nil, result = nil,
+  defer_until = nil,
+}
+local sr_ui_opened_at        = nil
+local sr_visual_switch_state = nil
+
+local function _data_root_dir()
+  if type(RA) == "table" and type(RA.DATA_DIR) == "string" and RA.DATA_DIR ~= "" then
+    local base = RA.DATA_DIR
+    if not base:match("[/\\]$") then base = base .. _sep() end
+    return base
+  end
+  return _fallback_data_dir()
+end
+
+function Diag.normalize_platform(value)
+  return _coarsen(value, PLATFORM_VOCAB_SETS.platform, "unknown")
+end
+
+function Diag.normalize_os_family(os_short)
+  os_short = tostring(os_short or ""):lower()
+  if os_short == "win"   then return "windows" end
+  if os_short == "mac"   then return "macos" end
+  if os_short == "linux" then return "linux" end
+  return "unknown"
+end
+
+-- Accepts both Windows PROCESSOR_ARCHITECTURE spellings and `uname -m` output.
+-- No value at all returns nil so the field stays absent; a value we simply do
+-- not recognize returns "unknown", which is itself a real measurement.
+function Diag.normalize_os_arch(raw)
+  if raw == nil then return nil end
+  raw = tostring(raw):lower():gsub("%s+", "")
+  if raw == "" then return nil end
+  if raw == "amd64" or raw == "x86_64" or raw == "x64" or raw == "em64t" then
+    return "x64"
+  end
+  if raw == "x86" or raw == "i386" or raw == "i486" or raw == "i586"
+     or raw == "i686" then
+    return "x86"
+  end
+  if raw == "arm64" or raw == "aarch64" or raw == "arm64ec" then return "arm64" end
+  if raw == "arm" or raw == "arm32" or raw == "aarch32"
+     or raw:match("^armv[5-8]") then
+    return "arm32"
+  end
+  return "unknown"
+end
+
+-- Windows reports 6.1/6.2/6.3 for 7/8/8.1 and 10.0 for both 10 and 11; the
+-- build number is the only split between the last two.
+function Diag.normalize_windows_version_label(raw)
+  local major, minor, build = tostring(raw or ""):match("^(%d+)%.(%d+)%.(%d+)")
+  major, minor, build = tonumber(major), tonumber(minor), tonumber(build)
+  if not major or not minor then return nil end
+  if major == 6 and minor == 1 then return "7" end
+  if major == 6 and minor == 2 then return "8" end
+  if major == 6 and minor == 3 then return "8.1" end
+  if major ~= 10 or minor ~= 0 or not build or build < 0 or build > 99999 then
+    return nil
+  end
+  return string.format("%s.%d", build >= 22000 and "11" or "10", build)
+end
+
+function Diag.normalize_macos_version_label(raw)
+  local major, minor = tostring(raw or ""):match("^(%d+)%.?(%d*)")
+  major, minor = tonumber(major), tonumber(minor)
+  if not major or major < 10 or major > 99 then return nil end
+  if major > 10 then return tostring(major) end
+  if not minor or minor < 0 or minor > 99 then return nil end
+  return "10." .. tostring(minor)
+end
+
+function Diag.normalize_linux_version_label(distro_id, kernel_release)
+  local distro = tostring(distro_id or ""):lower()
+    :gsub('^"', ""):gsub('"$', ""):gsub("%s+", "")
+  -- An unreadable /etc/os-release means the distro was never measured. A
+  -- kernel alone cannot stand in for it, because "other-6.8" would read as a
+  -- distro we recognized and rejected rather than one we never saw. os_arch
+  -- comes from uname and is unaffected.
+  if distro == "" then return nil end
+  if distro == "mint" then distro = "linuxmint" end
+  if distro == "pop_os" or distro == "popos" then distro = "pop" end
+  if distro:match("^opensuse") then distro = "opensuse" end
+  if not PLATFORM_VOCAB_SETS.linux_distro[distro] then distro = "other" end
+  local major, minor = tostring(kernel_release or ""):match("^(%d+)%.(%d+)")
+  major, minor = tonumber(major), tonumber(minor)
+  if not major or major < 0 or major > 99 or not minor
+     or minor < 0 or minor > 999 then
+    return distro
+  end
+  return string.format("%s-%d.%d", distro, major, minor)
+end
+
+-- Three outcomes, deliberately distinct:
+--   nil        the value is malformed, so the field is omitted entirely
+--   "absent"   the probe ran cleanly and found no runtime. Microsoft treats a
+--              missing, empty or all-zero pv as "not installed"
+--   version    up to four dot groups of up to five digits, matching the
+--              importer's accept rule exactly
+function Diag.normalize_webview2_version(raw)
+  if raw == nil then return nil end
+  raw = tostring(raw):gsub("%s+", "")
+  if raw == "" then return "absent" end
+  if #raw > Diag.WEBVIEW2_VERSION_CAP then return nil end
+  -- Split explicitly rather than with a pattern class: gmatch skips empty
+  -- groups, so "1..2" would pass here while the importer rejects it.
+  local groups, cursor = {}, 1
+  while true do
+    local dot = raw:find(".", cursor, true)
+    if not dot then
+      groups[#groups + 1] = raw:sub(cursor)
+      break
+    end
+    groups[#groups + 1] = raw:sub(cursor, dot - 1)
+    cursor = dot + 1
+  end
+  if #groups > 4 then return nil end
+  local all_zero = true
+  for _, group in ipairs(groups) do
+    if not group:match("^%d%d?%d?%d?%d?$") then return nil end
+    if tonumber(group) ~= 0 then all_zero = false end
+  end
+  if all_zero then return "absent" end
+  return raw
+end
+
+-- The Evergreen runtime installs into a versioned directory, so its presence
+-- and version can be read straight off the filesystem. No process, no shell,
+-- microseconds. Machine-wide lives under both Program Files variants; a
+-- per-user install lives under LOCALAPPDATA.
+local function _webview2_roots()
+  local roots, seen = {}, {}
+  local function add(base)
+    if type(base) ~= "string" or base == "" then return end
+    local path = base:gsub("[/\\]+$", "")
+      .. "\\Microsoft\\EdgeWebView\\Application"
+    local key = path:lower()
+    if seen[key] then return end
+    seen[key] = true
+    roots[#roots + 1] = path
+  end
+  add(os.getenv("ProgramFiles(x86)"))
+  add(os.getenv("ProgramFiles"))
+  add(os.getenv("LOCALAPPDATA"))
+  return roots
+end
+
+local function _version_greater(candidate, incumbent)
+  if incumbent == nil then return true end
+  local a, b = candidate:gmatch("%d+"), incumbent:gmatch("%d+")
+  for _ = 1, 4 do
+    local av = tonumber(a() or 0) or 0
+    local bv = tonumber(b() or 0) or 0
+    if av ~= bv then return av > bv end
+  end
+  return false
+end
+
+-- A version-named directory only proves an install when it still holds the
+-- runtime executable. An emptied or abandoned folder is left behind by
+-- uninstalls and updates, so counting it would report a runtime that cannot
+-- launch.
+local function _webview2_verified(root, name)
+  local ok, present = pcall(reaper.file_exists,
+    root .. "\\" .. name .. "\\msedgewebview2.exe")
+  return ok and present == true
+end
+
+-- Windows only. Returns the highest verified runtime version, "absent" when no
+-- verified version exists across the roots, and nil when the APIs needed to
+-- measure it are unavailable.
+function Diag.webview2_runtime()
+  if Diag.normalize_os_family(_detect_os()) ~= "windows" then return nil end
+  if type(reaper) ~= "table"
+     or type(reaper.EnumerateSubdirectories) ~= "function"
+     or type(reaper.file_exists) ~= "function" then
+    return nil
+  end
+  local best = nil
+  for _, root in ipairs(_webview2_roots()) do
+    for index = 0, 63 do
+      local ok, name = pcall(reaper.EnumerateSubdirectories, root, index)
+      if not ok or type(name) ~= "string" or name == "" then break end
+      -- Non-version entries such as SetupMetrics simply do not parse. An
+      -- unverified directory is skipped outright: it neither counts as an
+      -- install nor suppresses a verified one found elsewhere.
+      local version = Diag.normalize_webview2_version(name)
+      if version ~= nil and version ~= "absent"
+         and _version_greater(version, best)
+         and _webview2_verified(root, name) then
+        best = version
+      end
+    end
+  end
+  return best or "absent"
+end
+
+local function _bounded_version_label(label)
+  if type(label) ~= "string" then return nil end
+  label = label:match("^%s*(.-)%s*$"):lower()
+  if #label == 0 or #label > Diag.OS_VERSION_LABEL_CAP then return nil end
+  if not label:match("^[a-z0-9][a-z0-9%._%-]*$") then return nil end
+  return label
+end
+
+-- ---------------------------------------------------------------------------
+-- Platform probe: detached spawn plus defer-cadence poll
+-- ---------------------------------------------------------------------------
+-- Launched and collected by Diag.tick. Nothing on a payload or draft path ever
+-- waits on it: a payload built before it lands simply omits os_version_label.
+--
+-- The launcher hand-off is NOT free. It blocks the main thread while the shell
+-- host starts: milliseconds for /bin/sh, but 1 to 3 seconds for a cold
+-- PowerShell on Windows. REAPER's true-async timeoutmsec of -1 cannot avoid
+-- that, because its async path skips the hidden-window flag and flashes a
+-- console, which this codebase already fixed once. So the two platforms are
+-- scheduled differently: POSIX rides a short timer after load, while Windows
+-- waits until the user has fired a chat send, which both warms PowerShell and
+-- means the only stall lands inside work the user explicitly requested. An
+-- unconditional Windows timer was rejected because it can freeze the app mid
+-- typing for something the user never asked for.
+local PLATFORM_PROBE_SENTINEL = "__RA_PROBE_DONE__"
+
+local function _probe_clock()
+  if type(reaper) == "table" and type(reaper.time_precise) == "function" then
+    local ok, now = pcall(reaper.time_precise)
+    if ok and type(now) == "number" then return now end
+  end
+  return os.time()
+end
+
+local function _platform_probe_path()
+  local base
+  if type(RA) == "table" and type(RA.TEMP_DIR) == "string" and RA.TEMP_DIR ~= "" then
+    base = RA.TEMP_DIR
+  else
+    base = _data_root_dir() .. "Temp" .. _sep()
+  end
+  if not base:match("[/\\]$") then base = base .. _sep() end
+  return _ensure_dir(base) .. "reaassist_platform_probe_" .. _instance_id() .. ".txt"
+end
+
+-- `ver` keeps this free of quoting hazards: no single quotes to escape through
+-- the PowerShell launcher, and no nested shell. WebView2 is not read here; it
+-- comes from the filesystem with no process at all.
+local function _platform_probe_command(out_path, family)
+  if family == "windows" then
+    local cmd_line = string.format(
+      '(ver & echo %s) > """%s""" 2>&1',
+      PLATFORM_PROBE_SENTINEL, out_path)
+    return string.format(
+      'powershell -NoProfile -WindowStyle Hidden'
+      .. ' -Command "Start-Process cmd -ArgumentList \'/c %s\''
+      .. ' -WindowStyle Hidden"',
+      _ps_escape(cmd_line))
+  end
+  if family == "macos" then
+    return string.format(
+      "(uname -m; sw_vers -productVersion; echo %s) > %s 2>&1 &",
+      PLATFORM_PROBE_SENTINEL, _sq(out_path))
+  end
+  return string.format(
+    "(uname -m; uname -r; sed -n 's/^ID=//p' /etc/os-release 2>/dev/null || true;"
+    .. " echo %s) > %s 2>&1 &",
+    PLATFORM_PROBE_SENTINEL, _sq(out_path))
+end
+
+local function _parse_platform_probe(raw, family)
+  local out = {}
+  if family == "windows" then
+    -- `ver` is localized, so match the numeric version anywhere in the line.
+    out.os_version_label = _bounded_version_label(
+      Diag.normalize_windows_version_label(raw:match("(%d+%.%d+%.%d+)")))
+    return out
+  end
+  local lines = {}
+  for line in raw:gmatch("[^\r\n]+") do
+    line = line:match("^%s*(.-)%s*$")
+    if line ~= "" and line ~= PLATFORM_PROBE_SENTINEL then
+      lines[#lines + 1] = line
+    end
+  end
+  out.os_arch = Diag.normalize_os_arch(lines[1])
+  if family == "macos" then
+    out.os_version_label = _bounded_version_label(
+      Diag.normalize_macos_version_label(lines[2]))
+  else
+    out.os_version_label = _bounded_version_label(
+      Diag.normalize_linux_version_label(lines[3], lines[2]))
+  end
+  return out
+end
+
+-- Records the earliest moment the tick lane may spawn the probe. Called at
+-- module init. Windows deliberately arms nothing here: its PowerShell launcher
+-- costs 1 to 3 seconds cold, which is only acceptable attached to work the
+-- user just asked for, so Windows waits for Diag.note_curl_launched. The POSIX
+-- hand-off is a millisecond-scale /bin/sh spawn and can ride a plain timer.
+function Diag.arm_platform_probe()
+  if platform_probe.fired or platform_probe.defer_until ~= nil then return end
+  if Diag.normalize_os_family(_detect_os()) == "windows" then return end
+  platform_probe.defer_until = _probe_clock() + Diag.PLATFORM_PROBE_DEFER_S
+end
+
+-- Called by Net.fire_curl when a user-initiated chat POST has launched its
+-- curl process. Windows only, first such send per session: PowerShell is warm
+-- from the curl spawn and the user has explicitly asked for visible work, so
+-- the version probe costs nothing they would notice. If no send happens all
+-- session, os_version_label stays absent for that session, which is honest.
+function Diag.note_curl_launched()
+  if platform_probe.fired or platform_probe.defer_until ~= nil then return end
+  if Diag.normalize_os_family(_detect_os()) ~= "windows" then return end
+  platform_probe.defer_until = _probe_clock() + Diag.PLATFORM_PROBE_SEND_DEFER_S
+end
+
+function Diag.start_platform_probe()
+  if platform_probe.fired then return end
+  platform_probe.fired = true
+  platform_probe.started_at = os.time()
+  local ok = pcall(function()
+    local family = Diag.normalize_os_family(_detect_os())
+    if family == "unknown" then
+      platform_probe.done = true
+      return
+    end
+    local path = _platform_probe_path()
+    if not _path_safe(path) then
+      platform_probe.done = true
+      return
+    end
+    os.remove(path)
+    platform_probe.path = path
+    local cmd = _platform_probe_command(path, family)
+    if family == "windows" then
+      if type(reaper) ~= "table" or type(reaper.ExecProcess) ~= "function" then
+        platform_probe.done = true
+        return
+      end
+      reaper.ExecProcess(cmd, 5000)
+    else
+      os.execute(cmd)
+    end
+  end)
+  if not ok then platform_probe.done = true end
+end
+
+function Diag.poll_platform_probe()
+  if platform_probe.done then return end
+  if not platform_probe.fired then
+    if platform_probe.defer_until == nil then return end
+    if _probe_clock() < platform_probe.defer_until then return end
+    Diag.start_platform_probe()
+    return
+  end
+  pcall(function()
+    local raw = platform_probe.path and _read_file(platform_probe.path) or nil
+    if type(raw) == "string" and #raw <= 65536
+       and raw:find(PLATFORM_PROBE_SENTINEL, 1, true) then
+      platform_probe.result =
+        _parse_platform_probe(raw, Diag.normalize_os_family(_detect_os()))
+      platform_probe.done = true
+      os.remove(platform_probe.path)
+      return
+    end
+    if os.time() - platform_probe.started_at > Diag.PLATFORM_PROBE_TIMEOUT_S then
+      platform_probe.done = true
+      if platform_probe.path then os.remove(platform_probe.path) end
+    end
+  end)
+end
+
+-- Cheap to rebuild per call: two environment reads and a table lookup. The
+-- probed fields appear only once the detached probe has landed.
+function Diag.platform_context()
+  local ctx = {
+    platform  = Diag.normalize_platform(
+      type(RA) == "table" and RA.platform or nil),
+    os_family = Diag.normalize_os_family(_detect_os()),
+  }
+  if ctx.os_family == "windows" then
+    ctx.os_arch = Diag.normalize_os_arch(
+      os.getenv("PROCESSOR_ARCHITEW6432") or os.getenv("PROCESSOR_ARCHITECTURE"))
+    -- Filesystem read, not a probe: cheap enough to do per payload and always
+    -- current, so it never depends on the deferred spawn landing.
+    ctx.webview2_runtime = Diag.webview2_runtime()
+  end
+  if type(platform_probe.result) == "table" then
+    for _, key in ipairs({ "os_arch", "os_version_label", "webview2_runtime" }) do
+      if platform_probe.result[key] ~= nil then
+        ctx[key] = platform_probe.result[key]
+      end
+    end
+  end
+  if ctx.os_arch ~= nil then
+    ctx.os_arch = _coarsen(ctx.os_arch, PLATFORM_VOCAB_SETS.os_arch, "unknown")
+  end
+  return ctx
+end
+
+function Diag.internal_install()
+  local ok, present = pcall(function()
+    local f = io.open(_data_root_dir() .. Diag.INTERNAL_MARKER_FILENAME, "rb")
+    if not f then return false end
+    f:close()
+    return true
+  end)
+  return ok and present == true
+end
+
+local function _sr_switch_path()
+  return _ensure_dir(_data_root_dir() .. "Diag" .. _sep())
+    .. Diag.SR_VISUAL_SWITCH_FILENAME
+end
+
+-- The switch-to-visual flow fires the relauncher and closes the Screen Reader
+-- script before any payload can send, so the observation has to survive on
+-- disk until the next launch assembles a payload.
+function Diag.record_screen_reader_visual_switch()
+  local ok, wrote = pcall(function()
+    local path = _sr_switch_path()
+    local body = _serialize({
+      sr_switched_to_visual = true,
+      recorded_at = os.time(),
+    })
+    -- _atomic_write returns nil on success and an error string on failure, so
+    -- the plain write below is the fallback, never a second write.
+    if _atomic_write(path, body) == nil then return true end
+    local f = io.open(path, "wb")
+    if not f then return false end
+    local written = pcall(f.write, f, body)
+    f:close()
+    return written == true and _read_file(path) ~= nil
+  end)
+  return ok and wrote == true
+end
+
+-- Read once per launch. The marker stays on disk until a payload carrying the
+-- flag has actually been accepted by the server.
+function Diag.screen_reader_switched_to_visual()
+  if sr_visual_switch_state ~= nil then return sr_visual_switch_state end
+  sr_visual_switch_state = false
+  pcall(function()
+    local raw = _read_file(_sr_switch_path())
+    if raw == nil or #raw == 0 or #raw > 4096 then return end
+    local decoded = _decode_json(raw)
+    if type(decoded) == "table" and decoded.sr_switched_to_visual == true then
+      sr_visual_switch_state = true
+    end
+  end)
+  return sr_visual_switch_state
+end
+
+-- Called only after the server accepted a payload carrying the flag. A crash
+-- between that acceptance and this removal can repeat the flag on a later
+-- launch; a rare duplicate is cheaper than losing the only record of a switch.
+function Diag.note_screen_reader_visual_switch_delivered()
+  if sr_visual_switch_state ~= true then return end
+  pcall(os.remove, _sr_switch_path())
+  sr_visual_switch_state = false
+end
+
+function Diag.note_screen_reader_ui_opened()
+  if sr_ui_opened_at == nil then sr_ui_opened_at = os.time() end
+end
+
+-- Only meaningful while interface_mode is "screen_reader"; callers gate on
+-- that before attaching these to a payload.
+function Diag.screen_reader_engagement()
+  local prompts = 0
+  if type(S) == "table" and type(S.display_messages) == "table" then
+    for i = 1, #S.display_messages do
+      local m = S.display_messages[i]
+      if type(m) == "table" and m.role == "user" then prompts = prompts + 1 end
+    end
+  end
+  local elapsed = os.time() - (sr_ui_opened_at or launch_started_at)
+  return {
+    sr_prompts = math.max(0, math.min(prompts, Diag.SR_PROMPTS_MAX)),
+    sr_session_seconds = math.max(0,
+      math.min(math.floor(elapsed), Diag.SR_SESSION_SECONDS_MAX)),
+    sr_entered_via = _coarsen(
+      type(RA) == "table" and RA.launch_screen_reader_entry_via or nil,
+      PLATFORM_VOCAB_SETS.sr_entered_via, "unknown"),
+  }
+end
+
 
 local function _encode_wrapper(wrapper)
   return _serialize(wrapper)
@@ -3491,7 +4334,7 @@ local function _send_first_chat_ping()
       return
     end
     auto_state.last_ping_error = err
-  end)
+  end, payload.sr_switched_to_visual == true)
   return true
 end
 
@@ -3864,7 +4707,7 @@ local function _process_auto_file(file)
     local pending_err = _write_wrapper(pending, wrapper)
     if pending_err then _report_write_failure(pending, pending_err) end
     os.remove(claimed)
-  end)
+  end, wrapper.payload.sr_switched_to_visual == true)
   return true
 end
 
@@ -3900,6 +4743,7 @@ local function _cleanup_inflight()
 end
 
 function Diag.tick()
+  Diag.poll_platform_probe()
   if not in_flight then
     _auto_tick()
     return
@@ -3943,13 +4787,23 @@ function Diag.tick()
   end
 
   local cb = in_flight.on_done
+  local carried_sr_switch = in_flight.carries_sr_switch == true
   _cleanup_inflight(); in_flight = nil
 
-  if ok then Diag.commit_install_id() end
+  if ok then
+    Diag.commit_install_id()
+    if carried_sr_switch then
+      Diag.note_screen_reader_visual_switch_delivered()
+    end
+  end
   if cb then cb(ok, status_code, err) end
 end
 
 -- ============================================================================
 -- Module load complete.
 -- ============================================================================
+-- Arm the platform probe. Diag.tick spawns it detached once startup has
+-- settled and collects it at defer cadence, so neither launch nor any
+-- payload or draft path ever waits on a shell.
+Diag.arm_platform_probe()
 Diag.uploader_enabled = true

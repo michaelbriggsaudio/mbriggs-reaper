@@ -3230,6 +3230,9 @@ end
 -- script execution here. The script will resume normal startup after the
 -- user restarts REAPER with the new extension(s) loaded.
 local _platform = Deps.detect_platform()
+-- Handed off on a global because Deps is scoped to this block: the diagnostics
+-- sidecar reports this exact value and must never recompute or approximate it.
+RA_DETECTED_PLATFORM = _platform
 local _sr_intent = Deps.screen_reader_intent()
 -- Reserved for future/local native setup-only flows. The current Screen
 -- Reader wrapper no longer sets this; keep the branch explicit so a future
@@ -3271,6 +3274,8 @@ local ImGui = reaper  -- secondary alias used for ImGui calls (reads as ImGui.Im
 -- the sel_cb EEL callback. Pre-existing namespaces (S, CFG, TK, COL,
 -- FONT, prefs, Log, Net, UI, Render, ...) stay as plain globals.
 RA = {}
+RA.platform = RA_DETECTED_PLATFORM
+RA_DETECTED_PLATFORM = nil
 
 function RA.t(key, values, fallback)
   if I18N and I18N.t then
@@ -3386,6 +3391,25 @@ do
     or fn:lower():find("screen_reader", 1, true) ~= nil
     or fn:lower():find("screen reader", 1, true) ~= nil
   REAASSIST_SCREEN_READER_MODE = nil
+  -- How this Screen Reader launch was reached. "setting" arrives as a global
+  -- from the wrapper's own preference prompt (same Lua state); "startup_flag"
+  -- arrives as an ExtState breadcrumb from the visual entry's redirect, which
+  -- runs in a separate Lua state. Anything else is a direct action run.
+  RA.launch_screen_reader_entry_via = nil
+  if RA.launch_screen_reader_mode then
+    if rawget(_G, "REAASSIST_SCREEN_READER_ENTRY_VIA") == "setting" then
+      RA.launch_screen_reader_entry_via = "setting"
+    elseif type(reaper.GetExtState) == "function"
+        and reaper.GetExtState("reaassist", "sr_entry_via") == "startup_flag" then
+      RA.launch_screen_reader_entry_via = "startup_flag"
+    else
+      RA.launch_screen_reader_entry_via = "action"
+    end
+  end
+  REAASSIST_SCREEN_READER_ENTRY_VIA = nil
+  if type(reaper.DeleteExtState) == "function" then
+    reaper.DeleteExtState("reaassist", "sr_entry_via", false)
+  end
   if not RA.launch_screen_reader_mode
       and not fn:lower():find("reaassist") then
     local early_t = type(RA.early_t) == "function" and RA.early_t
@@ -3611,10 +3635,10 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.4.8", -- public release version
+  VERSION           = "1.4.9", -- public release version
   -- Keep this assignment inside the first 8 KiB. The startup compatibility
   -- probe reads only that prefix before deciding whether bootstrap repair is required.
-  DIAG_PAYLOAD_REVISION = 6, -- required Resources/Diag.lua compatibility revision
+  DIAG_PAYLOAD_REVISION = 8, -- required Resources/Diag.lua compatibility revision
   CURL_TIMEOUT      = 1800,      -- curl --max-time HARD CEILING (cloud providers). Stays high (30 min) so curl never bites before the watchdog -- the user-facing timeout is enforced by the watchdog using prefs.cloud_request_timeout, which the user can change in Settings AND can extend mid-request via the "Extend by 60s" button.
   CLOUD_TIMEOUT_DEFAULT = 180,   -- default value for prefs.cloud_request_timeout (the user-facing watchdog timeout for cloud providers)
   CLOUD_TIMEOUT_MIN     = 30,    -- min/max for the Settings input
@@ -3627,8 +3651,8 @@ CFG = {
   TURN_TOKEN_LIMIT_MAX     = 4000000,
   EXTEND_BY_SECS    = 60,        -- "Extend by Ns" button bumps timeout by this many seconds per click
   EXTEND_SHOW_BEFORE_TIMEOUT = 30,  -- show the Extend button when within this many seconds of timeout
-  UI_SCALE_OPTIONS   = { 0.75, 0.85, 1.0, 1.25, 1.5, 2.0 },  -- UI zoom choices
-  UI_SCALE_LABELS    = { "75%", "85%", "100%", "125%", "150%", "200%" },
+  UI_SCALE_OPTIONS   = { 0.75, 0.85, 1.0, 1.25, 1.5, 2.0, 1.0 },
+  UI_SCALE_LABELS    = { "75%", "85%", "AUTO (100%)", "125%", "150%", "200%", "100%" },
   CHAT_FONT_SIZES    = { 10, 12, 14 },   -- Small, Medium, Large (px before SC).
   -- Details-card mono font, indexed the same as CHAT_FONT_SIZES so
   -- the Chat Font preference scales both together. Sized -1 px vs the
@@ -3664,13 +3688,8 @@ CFG = {
                                  -- cost. Per-vector caps still apply; this is
                                  -- the aggregate backstop. Per-provider tuning
                                  -- is intentionally not exposed in v1.
-  MAX_VALIDATOR_RETRIES_PER_TURN = 3, -- normal aggregate repair budget
-  MAX_VALIDATOR_RETRY_KINDS_PER_TURN = 4, -- first repair for up to four
-                                 -- validator families may continue beyond the
-                                 -- normal aggregate budget. This keeps the
-                                 -- reachable validator maximum at six retries,
-                                 -- leaving one call below the hard POST cap
-                                 -- after the initial send.
+  MAX_VALIDATOR_RETRIES_PER_TURN = 3, -- bounded Model corrections before mutation
+  MAX_VALIDATOR_RETRY_KINDS_PER_TURN = 4, -- bounded extension for new repair causes
   MAX_CONTEXT_FETCHES_PER_TURN = 3, -- separate cap for hidden
                                  -- <context_needed> follow-ups. Context
                                  -- acquisition is not a validator failure,
@@ -4077,6 +4096,10 @@ S = {
   -- Token accumulators (reset each script run)
   session_tok_in    = 0,
   session_tok_out   = 0,
+  session_tok_out_visible = 0,
+  session_tok_out_reasoning = 0,
+  session_output_usage_calls = 0,
+  session_output_split_calls = 0,
   session_cost      = 0,       -- cumulative USD cost for the session
   -- curl/poll state
   curl_pid          = nil,     -- truthy while a request is pending, nil when idle
@@ -4108,6 +4131,9 @@ S = {
   retry_saved_provider_idx = nil,
   retry_saved_model_idx    = nil,
   retry_saved_thinking_idx = nil,
+  schannel_revocation_retry_pending = false,
+  schannel_revocation_retry_used = false,
+  schannel_revocation_original_error = nil,
   validator_retry_cap_streak = 0, -- consecutive turns ended by validator retry cap
   pending_attachments     = nil,  -- snapshot of attachments for rebuild retries
   -- API reference. Single physical file (Resources/API_Ref.md)
@@ -4169,6 +4195,7 @@ S = {
   open_no_tracks_warn   = false, -- triggers no-tracks-selected popup next frame
   -- Context follow-up state
   pending_orig_prompt    = nil,    -- bare user text, saved for follow-up resend
+  pending_output_note    = nil,    -- exact same-turn Lua guidance reused by validator retries
   pending_typed_action_expected = false, -- true when a typed-action contract was appended to this turn
   pending_typed_action_response_format = false, -- true when OpenAI response_format should emit raw typed-action JSON
   pending_typed_action_profile = nil, -- optional model-scoped typed-action strengthening profile key
@@ -4190,6 +4217,9 @@ S = {
   tracks_already_sent    = false,
   fx_params_already_sent = false,
   plugin_ref_sent          = {},   -- set of plugin names sent this turn (dedup per-name, not turn-wide)
+  plugin_ref_failed        = {},   -- names whose curated pack lookup failed integrity this turn
+  plugin_ref_generic_fallback_attempted = false,
+  plugin_ref_generic_fallback_name = nil,
   pending_resolves         = {},   -- queue of resolve:Type tokens deferred when a popup blocks the loop
   pending_plugin_ref_names = {},   -- plugin_ref names accumulated before a popup bailed the parse loop
   pending_pref_plugin_types= {},   -- preferred_plugins types accumulated before a popup bailed the parse loop
@@ -4284,11 +4314,10 @@ S._turn_retry_keys = {
   drum_quantize_validator_retries = true,
   drum_marker_sync_validator_retries = true,
   arity_validator_retries = true,
+  envelope_vis_validator_retries = true,
   sendidx_validator_retries = true,
   timecode_workflow_validator_retries = true,
-  stockfx_validator_retries = true,
   timecodefx_validator_retries = true,
-  fxident_validator_retries = true,
   typed_action_format_validator_retries = true,
   typed_action_schema_validator_retries = true,
   typed_action_semantic_validator_retries = true,
@@ -4300,18 +4329,6 @@ S._turn_retry_keys = {
   typed_action_lua_fallback_used = true,
   fxrecfx_validator_retries = true,
   fxcheck_validator_retries = true,
-  fxget_validator_retries = true,
-  existing_fx_add_validator_retries = true,
-  fxadd_getonly_validator_retries = true,
-  upsert_validator_retries = true,
-  helper_int_validator_retries = true,
-  defer_validator_retries = true,
-  proq4_slope_validator_retries = true,
-  musical_enum_validator_retries = true,
-  fx_param_scope_validator_retries = true,
-  reeq_gain_validator_retries = true,
-  plugin_profile_guard_validator_retries = true,
-  fx_param_provenance_validator_retries = true,
   manual_only_plugin_validator_retries = true,
   internal_output_leak_validator_retries = true,
   helper_validator_retries = true,
@@ -4349,6 +4366,7 @@ S._turn_retry_keys = {
   exclusive_selection_retry_used = true,
   bus_routing_validator_retries = true,
   bus_routing_retry_used = true,
+  sidechain_send_validator_retries = true,
   sidechain_send_retry_used = true,
   podcast_bus_retry_used = true,
   track_pan_validator_retries = true,
@@ -4413,11 +4431,10 @@ S._turn_retry_defaults = {
   drum_quantize_validator_retries = 0,
   drum_marker_sync_validator_retries = 0,
   arity_validator_retries = 0,
+  envelope_vis_validator_retries = 0,
   sendidx_validator_retries = 0,
   timecode_workflow_validator_retries = 0,
-  stockfx_validator_retries = 0,
   timecodefx_validator_retries = 0,
-  fxident_validator_retries = 0,
   typed_action_format_validator_retries = 0,
   typed_action_schema_validator_retries = 0,
   typed_action_semantic_validator_retries = 0,
@@ -4427,18 +4444,6 @@ S._turn_retry_defaults = {
   typed_action_lua_fallback_used = false,
   fxrecfx_validator_retries = 0,
   fxcheck_validator_retries = 0,
-  fxget_validator_retries = 0,
-  existing_fx_add_validator_retries = 0,
-  fxadd_getonly_validator_retries = 0,
-  upsert_validator_retries = 0,
-  helper_int_validator_retries = 0,
-  defer_validator_retries = 0,
-  proq4_slope_validator_retries = 0,
-  musical_enum_validator_retries = 0,
-  fx_param_scope_validator_retries = 0,
-  reeq_gain_validator_retries = 0,
-  plugin_profile_guard_validator_retries = 0,
-  fx_param_provenance_validator_retries = 0,
   manual_only_plugin_validator_retries = 0,
   internal_output_leak_validator_retries = 0,
   helper_validator_retries = 0,
@@ -4476,6 +4481,7 @@ S._turn_retry_defaults = {
   exclusive_selection_retry_used = false,
   bus_routing_validator_retries = 0,
   bus_routing_retry_used = false,
+  sidechain_send_validator_retries = 0,
   sidechain_send_retry_used = false,
   podcast_bus_retry_used = false,
   track_pan_validator_retries = 0,
@@ -4545,6 +4551,10 @@ end
 
 if S.screen_reader_startup_intent and not S.screen_reader_mode then
   if RA.screen_reader_action_cmd and RA.screen_reader_action_cmd ~= 0 then
+    -- Non-persistent breadcrumb: the Screen Reader action runs in its own Lua
+    -- state, so this is the only way it can tell a preference-driven redirect
+    -- apart from a direct action run. The consumer deletes it.
+    reaper.SetExtState(CFG.EXT_NS, "sr_entry_via", "startup_flag", false)
     reaper.Main_OnCommand(RA.screen_reader_action_cmd, 0)
     return
   end
@@ -5047,6 +5057,8 @@ update = {
                              -- the user dismisses (Later, OK) or starts a new fetch (Retry)
   popup_opened    = false,   -- true once the "Update Available" popup has been shown
   force           = false,   -- true to bypass version comparison (integrity reinstall)
+  silent_manifest_repair = false, -- transition-only manifest self-heal; never opens repair UI
+  _silent_manifest_manual = false, -- preserve manual-check feedback through silent apply
   -- Transactional apply scratch state (nil while idle):
   --   _batch     -- stage A: {started_at, watchdog, refire_used}
   --   _dl_verify -- stage B: staged-hash walker (mirrors _sha_diff's shape)
@@ -5066,6 +5078,131 @@ update = {
 -- =============================================================================
 if not S.screen_reader_startup_intent then
 RA.ctx = ImGui.ImGui_CreateContext(CFG._PRODUCT .. " v" .. CFG.VERSION)
+
+-- Bridge REAPER's native monitor rectangles into ReaImGui's logical global
+-- coordinate space. PointConvertNative handles per-monitor DPI on Windows and
+-- Linux and the inverted native Y axis on macOS. Monitor right/bottom values
+-- are exclusive, so convert only their last real pixel and rebuild a
+-- conservative exclusive logical edge.
+function RA._monitor_work_rect_from_native(native_l, native_t, native_r, native_b)
+  if not RA.ctx or type(ImGui) ~= "table"
+      or type(ImGui.ImGui_PointConvertNative) ~= "function"
+      or not reaper or type(reaper.my_getViewport) ~= "function" then
+    return nil
+  end
+  native_l, native_t, native_r, native_b =
+    tonumber(native_l), tonumber(native_t), tonumber(native_r), tonumber(native_b)
+  if not native_l or not native_t or not native_r or not native_b then return nil end
+  if native_l ~= native_l or native_t ~= native_t
+      or native_r ~= native_r or native_b ~= native_b then return nil end
+
+  local src_l = math.min(native_l, native_r)
+  local src_t = math.min(native_t, native_b)
+  local src_r = math.max(native_l, native_r)
+  local src_b = math.max(native_t, native_b)
+  src_l, src_t = math.floor(src_l), math.floor(src_t)
+  src_r, src_b = math.ceil(src_r), math.ceil(src_b)
+  if src_r <= src_l then src_r = src_l + 1 end
+  if src_b <= src_t then src_b = src_t + 1 end
+
+  local viewport_ok, monitor_l, monitor_t, monitor_r, monitor_b = pcall(
+    reaper.my_getViewport, 0, 0, 0, 0,
+    src_l, src_t, src_r, src_b, true)
+  if not viewport_ok then return nil end
+  monitor_l, monitor_t, monitor_r, monitor_b =
+    tonumber(monitor_l), tonumber(monitor_t),
+    tonumber(monitor_r), tonumber(monitor_b)
+  if not monitor_l or not monitor_t or not monitor_r or not monitor_b then return nil end
+
+  -- Normalize the native result before stepping from its exclusive far edges
+  -- to the final real pixel. This also keeps the arithmetic safe if a platform
+  -- reports an axis in the opposite direction.
+  local work_l = math.min(monitor_l, monitor_r)
+  local work_t = math.min(monitor_t, monitor_b)
+  local work_r = math.max(monitor_l, monitor_r)
+  local work_b = math.max(monitor_t, monitor_b)
+  if work_r - work_l < 1 or work_b - work_t < 1 then return nil end
+
+  local first_ok, first_x, first_y = pcall(
+    ImGui.ImGui_PointConvertNative, RA.ctx, work_l, work_t, false)
+  local last_ok, last_x, last_y = pcall(
+    ImGui.ImGui_PointConvertNative, RA.ctx, work_r - 1, work_b - 1, false)
+  if not first_ok or not last_ok then return nil end
+  first_x, first_y, last_x, last_y =
+    tonumber(first_x), tonumber(first_y), tonumber(last_x), tonumber(last_y)
+  if not first_x or not first_y or not last_x or not last_y then return nil end
+
+  -- Normalize after conversion before rounding. The order matters on macOS,
+  -- where PointConvertNative flips the Y axis.
+  local logical_l = math.ceil(math.min(first_x, last_x))
+  local logical_t = math.ceil(math.min(first_y, last_y))
+  local logical_r = math.floor(math.max(first_x, last_x) + 1)
+  local logical_b = math.floor(math.max(first_y, last_y) + 1)
+  if logical_r <= logical_l or logical_b <= logical_t then return nil end
+  return logical_l, logical_t, logical_r, logical_b
+end
+
+function RA.monitor_work_rect_native(native_l, native_t, native_r, native_b)
+  local logical_l, logical_t, logical_r, logical_b =
+    RA._monitor_work_rect_from_native(native_l, native_t, native_r, native_b)
+  if not logical_l then return nil end
+
+  -- Reject a converted source point outside the selected logical monitor.
+  -- This catches malformed results, wrong-monitor selection, and per-monitor
+  -- scaling disagreement while leaving callers with their existing fallback.
+  local point_x = math.min(tonumber(native_l) or 0, tonumber(native_r) or 0)
+  local point_y = math.min(tonumber(native_t) or 0, tonumber(native_b) or 0)
+  local point_ok, check_x, check_y = pcall(
+    ImGui.ImGui_PointConvertNative, RA.ctx, point_x, point_y, false)
+  if not point_ok or type(check_x) ~= "number" or type(check_y) ~= "number"
+      or check_x < logical_l or check_x >= logical_r
+      or check_y < logical_t or check_y >= logical_b then
+    return nil
+  end
+  return logical_l, logical_t, logical_r, logical_b
+end
+
+function RA.monitor_work_rect(logical_l, logical_t, logical_r, logical_b)
+  if not RA.ctx or type(ImGui) ~= "table"
+      or type(ImGui.ImGui_PointConvertNative) ~= "function" then
+    return nil
+  end
+  logical_l, logical_t, logical_r, logical_b =
+    tonumber(logical_l), tonumber(logical_t),
+    tonumber(logical_r), tonumber(logical_b)
+  if not logical_l or not logical_t or not logical_r or not logical_b then return nil end
+
+  local src_l = math.min(logical_l, logical_r)
+  local src_t = math.min(logical_t, logical_b)
+  local src_r = math.max(logical_l, logical_r)
+  local src_b = math.max(logical_t, logical_b)
+  if src_r - src_l < 1 then src_r = src_l + 1 end
+  if src_b - src_t < 1 then src_b = src_t + 1 end
+
+  local first_ok, first_x, first_y = pcall(
+    ImGui.ImGui_PointConvertNative, RA.ctx, src_l, src_t, true)
+  local last_ok, last_x, last_y = pcall(
+    ImGui.ImGui_PointConvertNative, RA.ctx, src_r - 1, src_b - 1, true)
+  if not first_ok or not last_ok then return nil end
+  if type(first_x) ~= "number" or type(first_y) ~= "number"
+      or type(last_x) ~= "number" or type(last_y) ~= "number" then return nil end
+
+  local native_l = math.floor(math.min(first_x, last_x))
+  local native_t = math.floor(math.min(first_y, last_y))
+  local native_r = math.ceil(math.max(first_x, last_x)) + 1
+  local native_b = math.ceil(math.max(first_y, last_y)) + 1
+  if native_r <= native_l then native_r = native_l + 1 end
+  if native_b <= native_t then native_b = native_t + 1 end
+
+  local work_l, work_t, work_r, work_b =
+    RA._monitor_work_rect_from_native(native_l, native_t, native_r, native_b)
+  if not work_l then return nil end
+  -- Reject a monitor-selection result that cannot contain any part of the
+  -- caller's visible logical source rectangle.
+  if work_r <= src_l or work_l >= src_r
+      or work_b <= src_t or work_t >= src_b then return nil end
+  return work_l, work_t, work_r, work_b
+end
 
 -- Freshly-installed-ReaImGui preflight. After the gfx installer drops a
 -- new ReaImGui dylib into UserPlugins, REAPER occasionally hands us a
@@ -5618,7 +5755,8 @@ prefs = {
   provider_idx     = 1,  -- set below from ExtState (1=Claude, 2=ChatGPT, 3=Gemini)
   model_idx        = 2,  -- set below by MODELS.refresh() per active provider
   thinking_idx     = 0,  -- 0 = provider has no thinking; set by MODELS.refresh()
-  ui_scale_idx     = 3,  -- index into CFG.UI_SCALE_OPTIONS (default 3 = 1.0)
+  ui_scale_idx     = 3,  -- index 3 = Auto; index 7 = exact 100% manual scale
+  ui_scale_by_dpi  = {}, -- remembered UI scale index by rounded monitor DPI percent
   theme            = "auto",  -- "auto", "dark", or "light"
   chat_font_idx    = 2,  -- index into CHAT_FONT_SIZES: 1=Small, 2=Medium, 3=Large
   reply_language_idx = 1, -- 1=English; visible assistant prose language only
@@ -6704,9 +6842,10 @@ PROVIDERS = {
     -- context_window: per-model context size used by the preflight token
     -- gate. All current Gemini 3.x models advertise the same 1,048,576-
     -- token input window.
-    -- default_thinking_idx (per-model override): Flash Lite defaults
-    -- to Low (2) -- Flash Lite at Minimal misses on complex routing
-    -- while Low handles both simple and complex reliably. Flash 3.6
+    -- default_thinking_idx (per-model override): Flash Lite 3.5 defaults
+    -- to Low (2). Minimal and Low both passed the focused ReaAssist probes,
+    -- while Low was faster and slightly cheaper in the core and complex
+    -- samples. Flash 3.6
     -- defaults to Minimal (1): the ReaAssist comparison showed better
     -- pass rate, latency, and cost than Flash 3.5 at the same level.
     -- Pro 3.1 inherits the provider Medium default.
@@ -6714,8 +6853,8 @@ PROVIDERS = {
     -- context surcharge tier + the cost of every Pro turn make it
     -- the wrong daily-driver pick.
     models = {
-      { label = "Flash Lite 3.1", chip_label = "FLASH LITE", id = "gemini-3.1-flash-lite",
-        price_in = 0.25,  price_out = 1.50, price_cache_r = 0.025, is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 2 },
+      { label = "Flash Lite 3.5", chip_label = "FLASH LITE", id = "gemini-3.5-flash-lite",
+        price_in = 0.30,  price_out = 2.50, price_cache_r = 0.03,  is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 2 },
       { label = "Flash 3.6",      chip_label = "FLASH",      id = "gemini-3.6-flash",
         price_in = 1.50,  price_out = 7.50, price_cache_r = 0.15,  is_flash = true,    max_output = 65536, context_window = 1048576, default_thinking_idx = 1 },
       { label = "Pro 3.1",        chip_label = "PRO",        id = "gemini-3.1-pro-preview",
@@ -7336,6 +7475,7 @@ function Store.cleanup_config_extstate(doc)
     "google_flash_35_model_v1",
     "google_flash_35_minimal_default_v1",
     "google_flash_36_model_v1",
+    "google_flash_lite_35_model_v1",
     "update_check_default_on_v1",
   }
   if PROVIDERS then
@@ -7572,6 +7712,7 @@ function Store.current_preferences()
     screen_reader_contrast = prefs.screen_reader_contrast or "auto",
     diag_auto_tier        = prefs.diag_auto_tier or "off",
     ui_scale_idx          = prefs.ui_scale_idx or 3,
+    ui_scale_by_dpi       = prefs.ui_scale_by_dpi or {},
     theme                 = prefs.theme or "auto",
     chat_font_idx         = prefs.chat_font_idx or 2,
     reply_language_idx    = prefs.reply_language_idx or 1,
@@ -7624,6 +7765,19 @@ function Store.apply_config_preferences()
 
   prefs.ui_scale_idx = Store._pref_index(
     "ui_scale_idx", prefs.ui_scale_idx, CFG.UI_SCALE_OPTIONS)
+  prefs.ui_scale_by_dpi = {}
+  local ui_scale_by_dpi = Store.config_pref_value("ui_scale_by_dpi")
+  if type(ui_scale_by_dpi) == "table" then
+    for dpi_key, scale_idx in pairs(ui_scale_by_dpi) do
+      local dpi_percent = tonumber(dpi_key)
+      local idx = tonumber(scale_idx)
+      if dpi_percent and dpi_percent >= 50 and dpi_percent <= 800
+          and idx and idx >= 1 and idx <= #CFG.UI_SCALE_OPTIONS then
+        prefs.ui_scale_by_dpi[tostring(math_floor(dpi_percent + 0.5))] =
+          math_floor(idx)
+      end
+    end
+  end
   local theme = Store.config_pref_value("theme")
   if theme == "auto" or theme == "dark" or theme == "light" then
     prefs.theme = theme
@@ -9945,6 +10099,59 @@ do
   end
 end
 
+-- One-time Gemini 3.5 Flash-Lite migration. Keep users on the Lite row and
+-- carry their explicit thinking preference to the replacement model. The row
+-- index is unchanged, so legacy index-only installs already land correctly.
+do
+  if not (S and S._factory_reset_clean_boot)
+     and not Store.migration_fired("google_flash_lite_35_model_v1") then
+    local doc = Store.config_doc()
+    doc.selection = type(doc.selection) == "table" and doc.selection or {}
+    doc.selection.model_id_by_provider =
+      type(doc.selection.model_id_by_provider) == "table"
+      and doc.selection.model_id_by_provider or {}
+    doc.selection.thinking_idx_by_provider_model =
+      type(doc.selection.thinking_idx_by_provider_model) == "table"
+      and doc.selection.thinking_idx_by_provider_model or {}
+
+    if doc.selection.model_id_by_provider.google
+       == "gemini-3.1-flash-lite" then
+      doc.selection.model_id_by_provider.google = "gemini-3.5-flash-lite"
+    end
+
+    local old_key = "google/gemini-3.1-flash-lite"
+    local new_key = "google/gemini-3.5-flash-lite"
+    local old_ext = reaper.GetExtState(
+      CFG.EXT_NS, "thinking_idx_google_gemini-3.1-flash-lite")
+    local new_ext = reaper.GetExtState(
+      CFG.EXT_NS, "thinking_idx_google_gemini-3.5-flash-lite")
+    local migrated_thinking =
+      doc.selection.thinking_idx_by_provider_model[new_key]
+      or tonumber(new_ext)
+      or doc.selection.thinking_idx_by_provider_model[old_key]
+      or tonumber(old_ext)
+    if doc.selection.thinking_idx_by_provider_model[new_key] == nil then
+      doc.selection.thinking_idx_by_provider_model[new_key] = migrated_thinking
+    end
+    doc.selection.thinking_idx_by_provider_model[old_key] = nil
+
+    if new_ext == "" and migrated_thinking ~= nil then
+      reaper.SetExtState(CFG.EXT_NS,
+        "thinking_idx_google_gemini-3.5-flash-lite",
+        tostring(migrated_thinking), true)
+    end
+    reaper.DeleteExtState(CFG.EXT_NS,
+      "thinking_idx_google_gemini-3.1-flash-lite", true)
+
+    doc.migrations = type(doc.migrations) == "table" and doc.migrations or {}
+    doc.migrations.google_flash_lite_35_model_v1 = true
+    local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
+    if err then
+      Store._notify_write_failure("Config.json", err)
+    end
+  end
+end
+
 -- Legacy Gemini Preview migration kept for marker compatibility. The historic
 -- marker name remains unchanged, but any defensive run now targets Flash 3.6.
 do
@@ -10069,7 +10276,7 @@ if Store and Store.migration_fired and Store.set_migration_fired
   Store.set_migration_fired("turn_token_limit_default_1m_v1")
 end
 
--- Load ui_scale_idx (default 3 = 100%). SC() scales any pixel value by the factor.
+-- Load ui_scale_idx (default 3 = Auto). Manual choices scale the full layout.
 prefs.ui_scale_idx = _prefs_load_idx("ui_scale_idx", 3, CFG.UI_SCALE_OPTIONS)
 function RA.SC(px)
   return math.floor(px * CFG.UI_SCALE_OPTIONS[prefs.ui_scale_idx] + 0.5)
@@ -11700,7 +11907,7 @@ end
 if reaper.JS_Mouse_GetState then
   -- JS_Mouse_GetState modifier bits: 8 = Shift, 4 = Ctrl, 16 = Alt
   if reaper.JS_Mouse_GetState(8) == 8 then
-    prefs.ui_scale_idx = 3  -- 100%
+    prefs.ui_scale_idx = 3  -- Auto
     prefs.theme = "auto"
     Store.clear_window_geometry()
   end
@@ -11804,7 +12011,7 @@ UI.MODEL_TIPS = {
   ["gpt-5.6-luna"]                   = "Recommended OpenAI default. Use None thinking. Best tested balance of quality, speed, and cost.",
   ["gpt-5.6-terra"]                  = "Higher-cost GPT-5.6. Use None thinking. Choose Terra when Luna struggles or extra quality is worth the price.",
   ["gpt-5.6-sol"]                    = "Premium GPT-5.6. Use None thinking. Flagship tier; higher effort added cost without a measured improvement.",
-  ["gemini-3.1-flash-lite"]          = "Cheapest Gemini. Use Low thinking. Budget pick; Flash 3.6 Minimal is stronger for scripts and edits.",
+  ["gemini-3.5-flash-lite"]          = "Cheapest Gemini. Use Low thinking. Budget default based on ReaAssist testing; Flash 3.6 Minimal remains the stronger general recommendation.",
   ["gemini-3.6-flash"]               = "Recommended Gemini default. Use Minimal thinking. Best tested balance for scripts and edits; try Low only if Minimal struggles.",
   ["gemini-3.1-pro-preview"]         = "Premium Gemini preview. Use Medium thinking. Capacity has been unreliable; Flash 3.6 Minimal is safer for coding.",
   ["deepseek-v4-flash"]              = "Cheapest combo in the lineup. Use Non-Thinking. Strong cheap pick.",
@@ -11878,11 +12085,11 @@ UI.COMBO_HINTS = {
     },
   },
   google = {
-    ["gemini-3.1-flash-lite"] = {
-      MINIMAL = "Simple tasks only | Cheap | Fast | Low is more reliable on complex routing",
-      LOW     = "Recommended Level | Simple and complex | Cheap | Fast",
-      MEDIUM  = "Simple and complex | Cheap | Slow | Flash 3.6 Minimal is usually better value",
-      HIGH    = "Avoid complex prompts | Cheap | Very slow | Runtime-error risk; pick Flash Lite Low or Flash 3.6 Minimal",
+    ["gemini-3.5-flash-lite"] = {
+      MINIMAL = "Simple and common scripts | Lowest Gemini cost | Fast | Low was faster in ReaAssist testing",
+      LOW     = "Recommended Level | Simple and complex | Lowest Gemini cost | Fastest tested Lite setting",
+      MEDIUM  = "Simple and complex | Low cost | Slower | No measured gain over Low",
+      HIGH    = "Hard reasoning only | Low cost | Slowest | No measured gain over Low",
     },
     ["gemini-3.6-flash"] = {
       MINIMAL = "Recommended Level | Simple and complex | Best tested Flash balance | Fast",
@@ -11915,9 +12122,6 @@ UI.COMBO_TONES = {
     },
   },
   google = {
-    ["gemini-3.1-flash-lite"] = {
-      HIGH = "warn",
-    },
     ["gemini-3.1-pro-preview"] = {
       LOW = "warn",
       MEDIUM = "warn",
@@ -13091,10 +13295,12 @@ end
 -- =============================================================================
 -- Suggests a .lua filename from code content without an API call.
 -- Strategy (in priority order):
---   1. Undo_EndBlock label: "ReaAssist: Create 20 tracks" -> "Create 20 tracks.lua"
+--   1. Last useful Undo_EndBlock label:
+--      "ReaAssist: Create 20 tracks" -> "Create 20 tracks.lua"
 --   2. First useful comment: "-- My Script" -> "My Script.lua"
---   3. First function name: "local function do_thing()" -> "do_thing.lua"
---   4. Fallback: "reaassist_script.lua"
+--   3. The source request, when the response message provides it.
+--   4. First function name: "local function do_thing()" -> "do_thing.lua"
+--   5. Fallback: "reaassist_script.lua"
 -- Result is safe for all OSes: filesystem-unsafe chars stripped,
 -- spaces preserved, length capped at 60 chars.
 -- Shared filename sanitizer: strip filesystem-unsafe chars, collapse whitespace,
@@ -13112,12 +13318,40 @@ local function sanitize_filename(s, fallback)
   return s
 end
 
-function Code.derive_filename(code)
-  -- 1. Undo_EndBlock label: e.g. Undo_EndBlock("ReaAssist: Create 20 tracks", -1)
-  --    Strip a leading "ReaAssist: " prefix if present so the filename is clean.
-  local undo_label = code:match("Undo_EndBlock%s*%(%s*\"(.-)\"%s*,")
-                  or code:match("Undo_EndBlock%s*%(%s*'(.-)'%s*,")
-  if undo_label and undo_label ~= "" then
+function Code.derive_filename(code, request_text)
+  code = tostring(code or "")
+  local function generic_label(text)
+    local lower = tostring(text or ""):lower()
+      :gsub("^reaassist:%s*", ""):match("^%s*(.-)%s*$") or ""
+    return lower == "" or lower == "reaassist" or lower == "script"
+      or lower == "action" or lower == "protected plug-in control action"
+      or lower == "protected plugin control action"
+      or lower == "reaassist protected plug-in control action"
+      or lower == "reaassist protected plugin control action"
+  end
+
+  local function failure_label(text)
+    local lower = tostring(text or ""):lower()
+      :gsub("^reaassist:%s*", ""):match("^%s*(.-)%s*$") or ""
+    return lower:match("^fail%w*%f[%W]") ~= nil
+      or lower:match("^error%f[%W]") ~= nil
+      or lower:match("^could not%f[%W]") ~= nil
+      or lower:match("^unable to%f[%W]") ~= nil
+      or lower:match("^cancel?l?ed%f[%W]") ~= nil
+      or lower:match("^invalid%f[%W]") ~= nil
+      or lower:match("^missing%f[%W]") ~= nil
+  end
+
+  -- 1. Prefer the last usable Undo_EndBlock label. Generated scripts often
+  --    close an early failure branch before the final successful action label.
+  local undo_label = nil
+  for _, label in code:gmatch(
+      "Undo_EndBlock%s*%(%s*([\"'])(.-)%1%s*,") do
+    if not generic_label(label) and not failure_label(label) then
+      undo_label = label
+    end
+  end
+  if undo_label then
     undo_label = undo_label:gsub("^ReaAssist:%s*", "")
     return sanitize_filename(undo_label, "reaassist_script") .. ".lua"
   end
@@ -13128,6 +13362,10 @@ function Code.derive_filename(code)
     lower = lower:gsub("^%s+", ""):gsub("%s+$", "")
     return lower:match("^helper:") ~= nil
       or lower:find("plugin_ref", 1, true) ~= nil
+      or lower:find("protected plug%-in control", 1, false) ~= nil
+      or lower:find("self%-contained", 1, false) ~= nil
+      or lower:find("macro contract", 1, true) ~= nil
+      or lower:find("runtime source", 1, true) ~= nil
       or lower:find("binary search", 1, true) ~= nil
       or lower:match("^band%s*%d") ~= nil
   end
@@ -13140,12 +13378,34 @@ function Code.derive_filename(code)
     end
   end
 
-  -- 3. First function name (covers local function and bare function forms).
+  -- 3. The source request. Remove conversational filler so numeric settings
+  -- near the end are less likely to be lost to the filename length cap.
+  local request_name = tostring(request_text or "")
+    :gsub("[%c]+", " "):match("^%s*(.-)%s*$") or ""
+  if request_name ~= "" then
+    request_name = request_name
+      :gsub("^[Pp]lease%s+", "")
+      :gsub("^[Cc]an you%s+", "")
+      :gsub("^[Cc]ould you%s+", "")
+      :gsub("^[Ww]ould you%s+", "")
+      :gsub("%f[%a][Tt]he%f[%A]", "")
+      :gsub("%f[%a][Mm]y%f[%A]", "")
+      :gsub("%f[%a][Aa]n?%f[%A]", "")
+      :gsub("%f[%a][Aa]nd%f[%A]", "")
+      :gsub("%f[%a][Tt]o%f[%A]", "")
+      :gsub("%f[%a][Oo]f%f[%A]", "")
+      :gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
+    if request_name ~= "" then
+      return sanitize_filename(request_name, "reaassist_script") .. ".lua"
+    end
+  end
+
+  -- 4. First function name (covers local function and bare function forms).
   local fn_name = code:match("local%s+function%s+([%w_]+)%s*%(")
                or code:match("^function%s+([%w_]+)%s*%(")
   if fn_name then return sanitize_filename(fn_name, "reaassist_script") .. ".lua" end
 
-  -- 4. Fallback.
+  -- 5. Fallback.
   return "reaassist_script.lua"
 end
 
@@ -13834,11 +14094,11 @@ function Code.auto_save_jsfx(code)
   return nil
 end
 
-function Code.auto_save_lua(code)
+function Code.auto_save_lua(code, request_text)
   code = tostring(code or "")
   if code == "" then return nil end
 
-  local base_name = Code.derive_filename(code)
+  local base_name = Code.derive_filename(code, request_text)
   if not base_name:lower():match("%.lua$") then base_name = base_name .. ".lua" end
   reaper.RecursiveCreateDirectory(RA.SCRIPT_SAVE_DIR, 0)
 
@@ -14069,7 +14329,10 @@ function Code.plugin_pack_raw_step(max_bytes)
   end
   raw.file:close()
   raw.file = nil
-  raw.content = tbl_concat(raw.chunks)
+  -- Git and Windows editors may materialize this maintained text file with
+  -- CRLF. Normalize in memory so harmless line-ending style cannot disable
+  -- plug-in guidance or break the format parser.
+  raw.content = tbl_concat(raw.chunks):gsub("\r\n", "\n"):gsub("\r", "\n")
   raw.chunks = nil
   raw.phase = nil
   raw.state = "ready"
@@ -14800,6 +15063,39 @@ function Diag.build_report(opts)
     .. tostring(client_context.language_pack_version or "unknown")
   parts[#parts + 1] = "Interface mode:    "
     .. tostring(client_context.interface_mode or "unknown")
+  local display = type(client_context.display_context) == "table"
+    and client_context.display_context or {}
+  local function _dimensions(width, height)
+    if width and height then return tostring(width) .. " x " .. tostring(height) end
+    return "unknown"
+  end
+  parts[#parts + 1] = "Display capture:    " .. tostring(display.status or "unavailable")
+  parts[#parts + 1] = "Display logical:    "
+    .. _dimensions(display.display_logical_width, display.display_logical_height)
+  parts[#parts + 1] = "Display platform:   "
+    .. _dimensions(display.display_platform_width, display.display_platform_height)
+  parts[#parts + 1] = "Work area logical:  "
+    .. _dimensions(display.work_area_logical_width, display.work_area_logical_height)
+  parts[#parts + 1] = "Work area platform: "
+    .. _dimensions(display.work_area_platform_width, display.work_area_platform_height)
+  parts[#parts + 1] = "Window logical:     "
+    .. _dimensions(display.window_logical_width, display.window_logical_height)
+  parts[#parts + 1] = "Window platform:    "
+    .. _dimensions(display.window_platform_width, display.window_platform_height)
+  parts[#parts + 1] = "Display DPI:        "
+    .. (display.dpi_scale_percent and tostring(display.dpi_scale_percent) .. "%" or "unknown")
+  parts[#parts + 1] = "REAPER DPI:         "
+    .. (display.reaper_dpi_scale_percent
+      and tostring(display.reaper_dpi_scale_percent) .. "%" or "unknown")
+  parts[#parts + 1] = "Interface Size:     "
+    .. (display.interface_size_percent
+      and tostring(display.interface_size_percent) .. "%" or "unknown")
+    .. " (" .. tostring(display.interface_size_mode or "unknown") .. ")"
+  parts[#parts + 1] = "Size remembered:    "
+    .. _onoff(display.interface_size_remembered == true)
+  parts[#parts + 1] = "SR visual text:     "
+    .. (display.screen_reader_text_size_percent
+      and tostring(display.screen_reader_text_size_percent) .. "%" or "unknown")
   -- ReaImGui version -- UI / rendering bugs hinge on this. Probe
   -- covers a few possible shapes across ReaImGui releases.
   local imgui_ver = _try(function()
@@ -17109,7 +17405,9 @@ function Updater.poll()
   return "done"
 end
 
--- Read and parse the response file. Returns parsed table or nil.
+-- Read and parse the response file. Returns parsed table plus the exact raw
+-- bytes so manifest.json can participate in the same verified transaction as
+-- every file it describes.
 function Updater.read_response()
   local f = io.open(tmp.update_out, "r")
   if not f then return nil end
@@ -17117,7 +17415,42 @@ function Updater.read_response()
   if not raw or #raw < 2 then return nil end
   local data, err = JSON.decode(raw)
   if not data or type(data) ~= "table" then return nil end
-  return data
+  return data, raw
+end
+
+-- Add the fetched manifest itself to the in-memory file list. Release
+-- manifests intentionally omit a self-hash because embedding that hash would
+-- be circular. Hashing the exact fetched bytes here gives update, repair,
+-- staging verification, journaling, and startup recovery one consistent source
+-- of truth without changing the persisted manifest format.
+function Updater.attach_manifest_payload(manifest, raw)
+  if type(manifest) ~= "table" or type(manifest.files) ~= "table"
+      or type(raw) ~= "string" or #raw < 2 then
+    return false, "missing manifest bytes or files list"
+  end
+  local filename = tostring(CFG.UPDATE_MANIFEST or "")
+  if filename == "" then return false, "missing manifest filename" end
+  for _, entry in ipairs(manifest.files) do
+    if type(entry) == "table" and entry.name == filename then
+      return false, "manifest file list contains a self-entry"
+    end
+  end
+  manifest.files[#manifest.files + 1] = {
+    name = filename,
+    sha256 = sha256_hash(raw),
+    inline_bytes = raw,
+  }
+  return true
+end
+
+function Updater.is_manifest_only_repair(diff)
+  if type(diff) ~= "table" then return false end
+  local filename = tostring(CFG.UPDATE_MANIFEST or "")
+  if filename == "" then return false end
+  local missing = type(diff.missing) == "table" and diff.missing or {}
+  local mismatched = type(diff.mismatched) == "table" and diff.mismatched or {}
+  if #missing + #mismatched ~= 1 then return false end
+  return missing[1] == filename or mismatched[1] == filename
 end
 
 -- Force a reinstall: bypass version check, daily cap, and snooze.
@@ -17134,6 +17467,8 @@ function Updater.force_reinstall()
   if Updater.language_download_busy() then return false end
   update.force = true
   update.popup_opened = false
+  update.silent_manifest_repair = false
+  update._silent_manifest_manual = false
   -- Clear stale failure metadata from a previous attempt. Without this,
   -- a Retry-after-failed click inherits the prior failure's last_step /
   -- last_error / repair_missing / repair_mismatched / action_was_repair
@@ -17180,6 +17515,8 @@ function Updater.check_start()
   if Updater.is_busy() then return end
   if Updater.font_download_busy() then return end
   if Updater.language_download_busy() then return end
+  update.silent_manifest_repair = false
+  update._silent_manifest_manual = false
   Store.set_update_last_check(os.time())
   local url = Updater.url_for(CFG.UPDATE_MANIFEST)
   if Updater.fire_get(url, tmp.update_out, tmp.update_exit) then
@@ -17211,6 +17548,8 @@ function Updater.manual_check()
       "Finish the language pack download first"), "err")
     return false
   end
+  update.silent_manifest_repair = false
+  update._silent_manifest_manual = false
   Store.set_update_last_check(os.time())
   update._manual = true
   -- Reset popup_opened so the "Update Available" dialog re-fires when
@@ -17767,6 +18106,8 @@ function Updater._sha_diff_complete()
   update._sha_diff = nil
 
   if purpose == "update" then
+    update.silent_manifest_repair = false
+    update._silent_manifest_manual = false
     update.state             = "available"
     update.remote_version    = manifest.version
     update.manifest          = manifest
@@ -17812,6 +18153,21 @@ function Updater._sha_diff_complete()
     update.manifest       = manifest
     update.repair_missing    = diff.missing
     update.repair_mismatched = diff.mismatched
+    if Updater.is_manifest_only_repair(diff) then
+      update.silent_manifest_repair = true
+      update._silent_manifest_manual = manual == true or forced == true
+      update.show_dialog = false
+      update.popup_opened = false
+      if manual then S.float_toast = nil end
+      Log.line("UPDATE", string.format(
+        "sha_diff complete in %.2fs: only %s needs transition repair; "
+        .. "starting silent verified self-heal.", elapsed,
+        tostring(CFG.UPDATE_MANIFEST)))
+      Updater.try_silent_manifest_repair()
+      return
+    end
+    update.silent_manifest_repair = false
+    update._silent_manifest_manual = false
     Log.line("UPDATE", string.format(
       "sha_diff complete in %.2fs: version matches (%s) but %d files "
       .. "need repair (%d missing, %d mismatched; %d locked skipped).",
@@ -17821,6 +18177,8 @@ function Updater._sha_diff_complete()
     -- toast so the repair popup is the sole visual feedback.
     if manual then S.float_toast = nil end
   else
+    update.silent_manifest_repair = false
+    update._silent_manifest_manual = false
     update.state = "idle"  -- already up to date and all files intact
     Log.line("UPDATE", string.format(
       "sha_diff complete in %.2fs: version matches (%s) and all files "
@@ -17879,7 +18237,7 @@ function Updater.check_poll()
     return
   end
   -- Parse manifest.
-  local manifest = Updater.read_response()
+  local manifest, manifest_raw = Updater.read_response()
   if not manifest
     or type(manifest.version) ~= "string"
     or type(manifest.files) ~= "table" then
@@ -17918,6 +18276,21 @@ function Updater.check_poll()
         UI.show_float_toast(
           "Update server returned a malformed response", "err")
       end
+    end
+    update.state = "idle"
+    return
+  end
+  local manifest_ok, manifest_err = Updater.attach_manifest_payload(
+    manifest, manifest_raw)
+  if not manifest_ok then
+    if forced then
+      Updater._set_failure("manifest_parse",
+        "Update server returned an unusable manifest ("
+          .. tostring(manifest_err) .. ").")
+    end
+    if manual then
+      UI.show_float_toast(
+        "Update server returned a malformed response", "err")
     end
     update.state = "idle"
     return
@@ -18211,6 +18584,7 @@ function Updater.download_start()
           filename = filename,
           url      = Updater.url_for(filename, payload_base),
           sha256   = expected_hash,
+          inline_bytes = entry.inline_bytes,
         }
       else
         update.skipped_count = update.skipped_count + 1
@@ -18225,6 +18599,7 @@ function Updater.download_start()
           filename = filename,
           url      = Updater.url_for(filename, payload_base),
           sha256   = expected_hash,
+          inline_bytes = entry.inline_bytes,
         }
       else
         update.skipped_count = update.skipped_count + 1
@@ -18238,6 +18613,7 @@ function Updater.download_start()
         filename = filename,
         url      = Updater.url_for(filename, payload_base),
         sha256   = expected_hash,
+        inline_bytes = entry.inline_bytes,
       }
     end
   end
@@ -18286,8 +18662,20 @@ function Updater.download_start()
     watchdog    = CFG.UPDATE_BATCH_WATCHDOG_BASE
                 + CFG.UPDATE_BATCH_WATCHDOG_PER_FILE * #update.download_queue,
   }
-  if not Updater.fire_batch_download(update.download_queue) then
+  local remote_queue, inline_err =
+    Updater.stage_inline_entries(update.download_queue)
+  if not remote_queue then
     update._batch = nil
+    Updater._download_verify_fail("download_stage", inline_err)
+    return
+  end
+  if #remote_queue == 0 then
+    Updater.download_verify_start()
+    return
+  end
+  if not Updater.fire_batch_download(remote_queue) then
+    update._batch = nil
+    Updater._delete_all_staged()
     Updater._set_failure("download_start",
       "Could not start the update download.")
     Updater.release_apply_lock()
@@ -18295,6 +18683,49 @@ function Updater.download_start()
     return
   end
   update.state = "downloading_batch"
+end
+
+function Updater.settle_silent_manifest_failure()
+  if update.silent_manifest_repair ~= true or update.state ~= "failed" then
+    return false
+  end
+  Log.line("UPDATE", string.format(
+    "silent manifest transition repair deferred after failure [%s]: %s",
+    tostring(update.last_step), tostring(update.last_error)))
+  Updater.release_apply_lock()
+  update.state = "idle"
+  update.last_step = nil
+  update.last_error = nil
+  update.show_dialog = false
+  update.popup_opened = false
+  update.force = false
+  update.applied = false
+  update.restart_after = nil
+  update.restart_fired = nil
+  update.action_was_repair = nil
+  update.repair_missing = nil
+  update.repair_mismatched = nil
+  update.silent_manifest_repair = false
+  update._silent_manifest_manual = false
+  update._batch = nil
+  update._dl_verify = nil
+  update._apply = nil
+  update.download_queue = {}
+  update.applied_files = {}
+  return true
+end
+
+function Updater.try_silent_manifest_repair()
+  if update.silent_manifest_repair ~= true
+      or update.state ~= "repair_available" then
+    return false
+  end
+  if Updater.font_download_busy() or Updater.language_download_busy() then
+    return false
+  end
+  Updater.download_start()
+  if Updater.settle_silent_manifest_failure() then return false end
+  return update.state ~= "repair_available"
 end
 
 -- Rollback all successfully written files. For files that existed before
@@ -18457,6 +18888,33 @@ end
 function Updater._curl_cfg_quote(value)
   local v = tostring(value or ""):gsub("\\", "/"):gsub('"', '\\"')
   return '"' .. v .. '"'
+end
+
+-- Stage payload bytes captured during the manifest fetch without performing a
+-- second network request. Other entries remain in the returned remote queue.
+-- This keeps the installed manifest byte-for-byte aligned with the hashes used
+-- to select and verify the rest of the transaction.
+function Updater.stage_inline_entries(entries)
+  local remote = {}
+  for _, entry in ipairs(entries or {}) do
+    if type(entry.inline_bytes) == "string" then
+      local f, open_err = io.open(entry.staged, "wb")
+      if not f then
+        return nil, "Could not stage fetched " .. tostring(entry.filename)
+          .. ": " .. tostring(open_err)
+      end
+      local ok, write_err = f:write(entry.inline_bytes)
+      local close_ok, close_err = f:close()
+      if not ok or close_ok == nil then
+        os.remove(entry.staged)
+        return nil, "Could not stage fetched " .. tostring(entry.filename)
+          .. ": " .. tostring(write_err or close_err)
+      end
+    else
+      remote[#remote + 1] = entry
+    end
+  end
+  return remote
 end
 
 -- Launch ONE detached curl process that downloads every queued entry to
@@ -18660,7 +19118,16 @@ function Updater._download_verify_hashes_done()
       update._batch.watchdog    = CFG.UPDATE_BATCH_WATCHDOG_BASE
         + CFG.UPDATE_BATCH_WATCHDOG_PER_FILE * #refire
       update._dl_verify = nil
-      if not Updater.fire_batch_download(refire) then
+      local remote_refire, inline_err = Updater.stage_inline_entries(refire)
+      if not remote_refire then
+        Updater._download_verify_fail("download_stage", inline_err)
+        return
+      end
+      if #remote_refire == 0 then
+        Updater.download_verify_start()
+        return
+      end
+      if not Updater.fire_batch_download(remote_refire) then
         Updater._download_verify_fail("download_batch",
           "Could not restart the update download.")
         return
@@ -19436,6 +19903,7 @@ end
 -- mark the journal committed, delete the .baks, delete the journal,
 -- then hand off to the done/auto-restart flow.
 function Updater._apply_finish()
+  local silent_manifest = update.silent_manifest_repair == true
   -- Per-version stale-file cleanup. The new manifest's removed_files
   -- list (auto-populated by gen_manifest.py from the diff between this
   -- release and the prior, plus carry-forward of older deletions for
@@ -19454,7 +19922,7 @@ function Updater._apply_finish()
   --      runtime debug log, FX cache).
   -- os.remove failures are logged but do not fail the update; the
   -- new files are already in place, lingering orphans are cosmetic.
-  do
+  if not silent_manifest then
     local removed = update.manifest and update.manifest.removed_files
     if type(removed) == "table" then
       local current_files = {}
@@ -19504,6 +19972,29 @@ function Updater._apply_finish()
   Updater.release_apply_lock()
   update.state   = "done"
   update.applied = true
+  if silent_manifest then
+    local manual = update._silent_manifest_manual == true
+    update.state = "idle"
+    update._last_ok_at = os.time()
+    update.restart_after = nil
+    update.restart_fired = nil
+    update.show_dialog = false
+    update.popup_opened = false
+    update.force = false
+    update.action_was_repair = nil
+    update.repair_missing = nil
+    update.repair_mismatched = nil
+    update.silent_manifest_repair = false
+    update._silent_manifest_manual = false
+    update.download_queue = {}
+    update.applied_files = {}
+    if manual and UI and UI.show_float_toast then
+      UI.show_float_toast(
+        "ReaAssist is up to date (v" .. CFG.VERSION .. ")", "ok")
+    end
+    Log.line("UPDATE", "silent manifest transition repair verified and applied")
+    return
+  end
   -- Active stale-stock nudge for power-user prompt overrides. If this
   -- update modified the stock system prompt AND the user has a custom
   -- override file in place (which the loader prefers over the stock),
@@ -20215,7 +20706,7 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
 - For simple folder/template setup requests, treat plural category words like "guitars", "vocals", "keys", or "drums" as one category track named by that word unless the user gives a count or names separate parts. Do not ask how many tracks to create for those ordinary categories.
 - For cue/routing setup requests that name source parts like vocal, guitar, or keys, ensure those named source tracks exist before creating sends. If the current session does not already contain a named source track, create it; do not silently skip a requested source because it is missing.
 - For cue/headphones/monitor buses that should stay out of the master, set the bus track's `B_MAINSEND` to `0` with `SetMediaTrackInfo_Value`. Do not leave that bus feeding the master.
-- Avoid plugin helper functions unless helper definitions are pinned and truly needed for a requested display-unit value. For simple/basic EQ/compressor/limiter tasks, add the resolved preferred plugin and use direct verified normalized values only when configuring is clearly requested; never invent or rewrite bundled helper bodies.
+- Keep plug-in Lua direct. Use maintained mappings as guidance when they fit, or resolve requested controls by live parameter name and standard REAPER APIs. Configure only what the user requested.
 - For JSFX delay, reverb, and grain/freezer effects, keep memory base names literal and stable across sections. If `@init` assigns `bufferL = 0`, `@sample` must read/write `bufferL[i]` exactly; do not rename it to `bufferL_base`, `bufL`, or pass it through `buf[base + i]`. If the user says allpass, name buffers or comments with the full word `allpass`, not only `ap`.
 - For JSFX with several delay/comb/allpass buffers, allocate fixed unique base regions in `@init`. Do not initialize every buffer to `0` as placeholders, and do not compute buffer base offsets in `@slider`; slider changes can adjust tap lengths, not memory layout.
 - For JSFX reverb code, do not abbreviate allpass as `ap`, `ap1`, `ap2`, or `ap_fb`; use identifiers such as `allpass1L`, `allpass2R`, and `allpass_fb`.
@@ -20223,7 +20714,6 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
       validators = {
         exclusive_track_selection = true,
         created_track_inferred_name = true,
-        action_requires_lua = true,
       },
     },
   },
@@ -20239,13 +20729,12 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
 - For setup wording like "host, guest, music, and a bus", create the bus and route every named non-bus source track to it unless the user explicitly says a source should remain direct. Do not reinterpret that as a dialogue-only bus when Music is named; Music is a named source.
 - For short MIDI ideas, beats, patterns, chords, or pads, create one appropriately named MIDI track and one MIDI item unless the user asks for separate tracks or separate items. Put multiple drums or chords into that one item; for a drum idea, name the track with "Drum" and include common GM kick/snare notes.
 - For explicit sidechain wording like "create a send from Voiceover to Music Bed", follow those named endpoints exactly: put the compressor on the destination/ducked track and create one direct source-to-destination send feeding sidechain channels. If the prompt also names a Sidechain Comp track, create/name that track only; do not route through it, send the destination into it, disable master send, or invent a separate sidechain/helper bus unless the user explicitly says that track is the bus. For generic kick/bass ducking with no endpoints named, use Kick as source and Bass as destination.
-- Keep plugin scripts direct and small. For simple/basic/add-only plugin chains, add the requested/resolved plugins and avoid display-unit helper functions unless helper definitions are pinned and must be copied exactly.
+- Keep plug-in scripts direct and small. For simple/basic/add-only chains, add the requested or resolved plug-ins in order and leave their defaults unchanged.
 - Plain requests such as "add EQ and compression" are add-only when the user gives no settings, tonal goal, recipe, or starter/generic-treatment request. Insert the resolved plugins in the requested order at their defaults, check every AddByName result, and stop; do not invent settings, request fx_inspect, or use plugin helpers.
 - Track/item custom colors written through I_CUSTOMCOLOR and ColorToNative are object colors, not application-theme edits. Do not request theme or prompt_bundle:theme unless actually calling SetThemeColor.
 - For JSFX requests, return the requested ```jsfx block, not Lua/ReaScript. Preserve user-named DSP terms like allpass, buffer, grain, freeze, and width as readable identifiers or comments.
 ]],
       validators = {
-        action_requires_lua = true,
         bus_routing_requires_sends = true,
         podcast_bus_routes_all_sources = true,
         sidechain_ducking_requires_send = true,
@@ -20260,10 +20749,9 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
 - Treat aliases like "comp" or "compression" as compressor requests. If `pref:` or `plugin_ref:` context is already pinned for the needed plugin type, use it and write the script; do not emit another `resolve:` request for that same type.
 - For simple vocal chain requests, add the EQ and compressor in order and stop there unless the user asks for exact settings. Do not define `set_param_display`, use parameter helper functions, or defer parameter-setting code for a simple chain.
 - For kick/bass ducking, the Kick-to-Bass send is mandatory. Create the send before any deferred compressor parameter setup, even if you also add/configure Pro-C or ReaComp.
-- Keep plugin code direct and small. Avoid helper functions unless helper definitions are pinned and the user requested a display-unit value that cannot be set from verified normalized reference values.
+- Keep plug-in code direct and small. Use standard REAPER parameter APIs and add a conversion helper only when the requested display value truly needs one.
 ]],
       validators = {
-        action_requires_lua = true,
       },
     },
     ["claude-sonnet-5"] = {
@@ -20283,7 +20771,6 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
 - For folder setup such as "put drums, bass, and guitar inside a band folder", create the folder/category track plus the named child tracks. Close the folder on the last child track, not on the following outside track.
 ]],
       validators = {
-        action_requires_lua = true,
         bus_routing_requires_sends = true,
       },
     },
@@ -20303,7 +20790,7 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
         sidechain_ducking_requires_send = true,
       },
     },
-    ["gemini-3.1-flash-lite"] = {
+    ["gemini-3.5-flash-lite"] = {
       key = "flash_lite_practical_free_tier_actions",
       prompt = [[
 - For ordinary action requests like create, add, make, put, set up, route, or select in REAPER, return a runnable fenced ```lua script. Do not answer with only a prose question, summary, or `<context_needed>` when a practical default exists.
@@ -20314,41 +20801,23 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
 - For cue/routing setup requests that name source parts like vocal, guitar, or keys, ensure those named source tracks exist before creating sends. If the current session does not already contain a named source track, create it; do not silently skip a requested source because it is missing.
 - For cue/headphone/monitor buses that should be separate from the main mix, set the cue bus track's own `B_MAINSEND` to `0` with `reaper.SetMediaTrackInfo_Value(cue_bus_track, "B_MAINSEND", 0)`. Disabling master send only on the source tracks is incomplete; the cue bus itself must not feed the master.
 - When the user asks for tracks going into a bus or return, create explicit sends with `reaper.CreateTrackSend(source_track, bus_or_return_track)`. Folder depth alone is not bus routing.
-- Avoid plugin helper functions unless helper definitions are pinned and truly needed for a requested display-unit value. For simple/basic EQ/compressor/limiter tasks, add the resolved preferred plugin and use direct verified normalized values only when configuring is clearly requested; never invent or rewrite bundled helper bodies.
+- Keep plug-in Lua direct. Use maintained mappings as guidance when they fit, or resolve requested controls by live parameter name and standard REAPER APIs. Configure only what the user requested.
 - For a request to modify an existing effect, when you use `TrackFX_GetByName` or `TakeFX_GetByName` to resolve that required effect, check `if fx < 0 then` and show a clear error plus `return` before any writes. Never use only `if fx >= 0 then ... end`, and do not put the missing-effect message in an `else` branch that continues to a success receipt. For add-and-configure requests, follow the ADD named plugin rule from `prompt_bundle:plugin` instead: add or upsert the requested effect and fail only if the required add also fails.
 ]],
       validators = {
-        action_requires_lua = true,
         bus_routing_requires_sends = true,
       },
     },
   },
   deepseek = {
     ["deepseek-v4-flash"] = {
-      key = "deepseek_exact_reaper_global",
+      key = "deepseek_compact_targeted",
       prompt = [[
-- When writing REAPER Lua, every REAPER API call must use the exact global `reaper`. Never write `rearga`, `repaer`, `reaperl`, or any other variant.
-- If you need context, output the literal `<context_needed>...</context_needed>` tag as the entire reply. Do not wrap it in backticks, code fences, quotes, or prose.
-- Always include the closing `</context_needed>` tag. If PINNED REFERENCES already lists the bucket you need, especially `midi`, do not request it again; use the pinned data and write the Lua script.
-- For runnable Lua, use one fenced ```lua code block. The opening fence must be exactly three backticks immediately followed by lua on the same line: ```lua. Never write ``` on one line and lua on the next line.
-- A request to use, modify, configure, adjust, clean up, or otherwise change an existing plugin is an action request even when the user describes only a musical result. Return a runnable fenced Lua script that makes conservative choices from pinned plugin-profile guidance; never answer with only a prose completion summary.
-- For JSFX, use one fenced ```jsfx code block. The opening fence must be exactly three backticks immediately followed by jsfx on the same line, and the closing fence must be on its own line after the final JSFX statement.
-- For pure track, folder, marker, region, MIDI, and routing setup requests with docs/session already pinned, write the runnable Lua immediately. Do not request `prompt_bundle:plugin` unless your script will actually call TrackFX_* or plugin parameter APIs.
-- When a request says to make, create, add, or set up a track, insert the new track first. Do not replace requested track creation with `reaper.GetTrack(0, 0)` unless the user explicitly asked to modify an existing or selected track.
-- For ordered track layouts, especially folder outlines, append tracks in forward user order: get `idx = reaper.CountTracks(0)`, insert at `idx`, fetch `reaper.GetTrack(0, idx)`, then name/store that handle. Do not repeatedly insert at index 0 or reverse the name list.
-- If the user says to create or append a new track after the existing tracks, insert it after the current last track. Do not insert after a similarly named existing track unless that exact existing-track insertion point is named.
-- Do not delete, clear, or replace existing tracks before building a setup unless the user explicitly asks to delete/clear/replace tracks or start from scratch.
-- For folder setup such as "Band folder with Drums, Bass, Guitars, and Keys inside, then Mix Print outside", create Band, Drums, Bass, Guitars, Keys, and Mix Print only. Set Band `I_FOLDERDEPTH = 1`, set the last child Keys `I_FOLDERDEPTH = -1`, and leave Mix Print at `0`. Never create a separate "(folder end)" track.
-- When the user asks for tracks going into a bus or return, create explicit sends with `reaper.CreateTrackSend(source_track, bus_or_return_track)`. Folder depth alone is not bus routing.
-- For named routing lists, create only the requested sends from the named sources to the named destination bus, return, or print track. Do not also route return/parallel/print/bus tracks to each other unless the user explicitly asks for those extra sends.
-- For explicit sidechain wording like "create a send from Voiceover to Music Bed", follow those named endpoints exactly: put the compressor on the destination/ducked track and create one direct source-to-destination send feeding sidechain channels. If the prompt also names a Sidechain Comp track, create/name that track only; do not route through it, send the destination into it, disable master send, or invent a separate sidechain/helper bus unless the user explicitly says that track is the bus.
-- When the user asks for a region, create a region, not a marker: use `reaper.AddProjectMarker(0, true, start_time, end_time, name, -1)` or the equivalent region API with the region boolean set to `true`.
-- If the user gives exact marker, region, item, loop, or time-selection positions in seconds, use those exact seconds. BPM, bar count, or phrase-length wording must not shorten or replace explicit second-based positions.
-- For short MIDI idea or pattern requests, create a new appropriately named MIDI track and pass that track handle to `reaper.CreateNewMIDIItemInProj(track, start_seconds, end_seconds, false)`. Never pass `0`, `nil`, or a project id as the first argument.
-- For chord/arpeggio MIDI scripts, keep pitch tables scalar: `local chords = { {48, 51, 55}, {53, 56, 60} }`. Do not wrap all chord rows in one extra table, because `chord[i]` must be a numeric MIDI pitch before `MIDI_InsertNote`.
+- PINNED REFERENCES are complete inputs. Generate the requested runnable response now and never emit `<context_needed>` for a listed bucket. When SESSION CONTEXT is present, including `Tracks: none`, the `session` bucket is already complete and must never be requested again.
+- For an open-ended plug-in chain, use every resolved preferred type listed in the final chain requirements unless the user excluded it. Return the complete runnable script in the first reply. Never return an empty Undo block, silently omit one of those resolved chain types, or claim project changes that are absent from the Lua.
+- For ReaComp sidechain ducking, ensure the destination track has at least four channels, create one direct source-to-destination send, store its returned send index, and set that exact send's `I_DSTCHAN` to `2`. Enable the detector input using the maintained mapping when it fits or by resolving its live parameter name. Do not set threshold, ratio, attack, release, or other controls unless the user requested them.
 ]],
       validators = {
-        action_requires_lua = true,
         bus_routing_requires_sends = true,
         region_requires_region_flag = true,
         sidechain_ducking_requires_send = true,
@@ -20542,14 +21011,14 @@ end
 function Code.compact_system_prompt_text()
   local version = (type(CFG) == "table" and CFG.VERSION) or ""
   local text = [[-- ReaAssist v]] .. version .. "\n" .. [[
-You are a REAPER DAW assistant. This is the compact prompt for local/custom models: be practical, obey the context protocol exactly, and generate safe standalone REAPER Lua/JSFX.
+You are a REAPER DAW assistant. This is the compact prompt: be practical, obey the context protocol exactly, and generate safe standalone REAPER Lua/JSFX.
 
 CONTEXT PROTOCOL:
 - Check the PINNED REFERENCES manifest before asking for context. If a key is listed, use the already-pinned data and do not request it again.
 - When context is needed, the whole reply must be one tag only: <context_needed>bucket, bucket</context_needed>. No prose, no fence, no explanation.
 - Required buckets: `docs` before any reaper.* code unless docs is pinned or the request is covered only by pinned `midi`; `session` for project state/track selection; `tracks` only when capped session rows omit needed tracks; `recent_reaper_changes` for current/latest REAPER behavior.
 - Live track FX names normally come from the session snapshot. Request `fx_chains` only when the needed track was omitted by the snapshot cap. `fx_list:Name` searches the installed catalog for add-only unknown plugins; it is never a live track-chain read. Other plugin buckets: `resolve:Type` for generic FX types; `plugin_ref:Name` for curated plugins; `fx_inspect:Name` for add+configure unknown plugins; `fx_params:Name@TrackIndex` for current values on loaded plugins. Use full prefixes for multiple tokens.
-- Prompt bundles are mandatory before their domains: `prompt_bundle:plugin` before TrackFX_*/param code, `prompt_bundle:plugin_helpers` before using helper functions, `prompt_bundle:drums` for drum edit/quantize code, `prompt_bundle:jsfx` before JSFX, and `prompt_bundle:theme` before SetThemeColor.
+- Prompt bundles provide focused guidance. Ordinary TrackFX and TakeFX Lua does not require a bundle as an authorization step. Request `plugin_helpers` only for a difficult display-value conversion that truly needs those templates. Drum edits, JSFX authoring, and theme changes still use their focused bundles.
 
 OUTPUT CONTRACT:
 - For action requests, prefer one complete runnable ```lua block after required context is pinned. For JSFX requests, output one ```jsfx block with `desc:` first.
@@ -20565,7 +21034,8 @@ REAPER LUA PITFALLS:
 - Void APIs return nil: InsertTrackAtIndex, SetEditCurPos, Main_OnCommand, Undo_BeginBlock, Undo_EndBlock, PreventUIRefresh, UpdateArrange, ThemeLayout_RefreshAll. Call them separately, then fetch handles.
 - Track indices shown to users are 1-based; API indices are 0-based. Never invent track indices. Nil-check tracks/items/takes before use.
 - Create tracks with InsertTrackAtIndex(index, true), then GetTrack(0, index), then name with GetSetMediaTrackInfo_String(track, "P_NAME", name, true).
-- Wrap project changes in one Undo_BeginBlock/Undo_EndBlock. Balance PreventUIRefresh with pcall and always call UpdateArrange after changes.
+- If the user asks for a created track to be selected, explicitly select it after creation with SetOnlyTrackSelected(track) or SetTrackSelected(track, true), as appropriate.
+- Wrap project changes in one Undo_BeginBlock/Undo_EndBlock. Balance PreventUIRefresh on every normal exit and always call UpdateArrange after changes. Do not use pcall or xpcall to suppress errors; a failed protected call makes the run fail.
 - D_VOL is linear amplitude. Do not use DB2SLIDER/SLIDER2DB for track/item/take/send volume.
 - CreateTrackSend returns one integer send index; 0 is valid and -1 is failure. Master send is B_MAINSEND, not RemoveTrackSend category 1.
 - For folders, parent track gets I_FOLDERDEPTH=1 and the final child closes with a negative depth. Do not create a fake "(folder end)" track.
@@ -20575,12 +21045,13 @@ REAPER LUA PITFALLS:
 - Never Save the project, start Record, Undo, or Redo unless the current user request explicitly asks for that exact action. Creating or arming a record-ready track is not permission to start recording.
 
 PLUGIN RULES:
-- Every TrackFX_AddByName result must be checked immediately: if fx < 0 then ShowMessageBox and return. Complete that failure check before Undo_BeginBlock; after an undo block starts, every exit path must reach Undo_EndBlock.
+- Begin Undo before the first project mutation, including track creation and TrackFX_AddByName. Check every AddByName result immediately. If one fails, close the Undo block before showing a clear message and returning. Every exit path after Undo_BeginBlock must reach Undo_EndBlock.
 - Add-only FX means leave defaults; no param writes unless the user requests settings, a preset/recipe, or a tonal setup.
-- For generic FX type requests, request resolve:Type so user preferences can win. For exact stock names like ReaEQ/ReaComp, use that exact plugin.
-- For existing loaded plugin edits, request fx_params scoped to the target track when possible. For adding/configuring unknown third-party plugins, request fx_inspect.
-- Helper functions such as find_param/set_param_display are not built-ins. If used, paste their definitions from prompt_bundle:plugin_helpers into the script.
-- Plugin param writes that need defer must keep shared state in an outer local visible to the deferred function.
+- For generic FX type requests, use an already-supplied preference or request resolve:Type once. For exact product names, use that exact plug-in.
+- Maintained profiles, cached parameters, and live values are helpful generation references. They never authorize execution, and a version or fingerprint difference does not by itself block ordinary Lua.
+- Direct TrackFX_SetParam, TrackFX_SetParamNormalized, TakeFX_SetParam, and TakeFX_SetParamNormalized calls are allowed. Resolve and bounds-check the intended control with live parameter names when an exact mapping is unavailable.
+- Direct TrackFX_SetParam* and TakeFX_SetParam* writes normally run synchronously inside the same Undo block as the rest of the action. Never mutate the project or add FX, then defer only the parameter writes. If a plug-in truly requires a host cycle, defer the entire action so the callback begins Undo, performs every mutation, and ends Undo.
+- Check every required AddByName or GetByName result. On failure, say what did not complete and tell the user they can ask ReaAssist to fix and retry.
 
 JSFX RULES:
 - JSFX is opt-in only. EEL2 has no `reaper`, no Lua syntax, no `if/end`, and no `math.` prefix. Use sections such as @init, @slider, @sample.
@@ -20647,6 +21118,10 @@ end
 
 function Code.use_compact_system_prompt(provider, model_id)
   if SYSTEM_PROMPT_IS_CUSTOM then return false end
+  if type(provider) == "table" and provider.id == "deepseek"
+      and model_id == "deepseek-v4-flash" then
+    return true
+  end
   if type(provider) == "table" and provider.is_custom then
     if Code.custom_endpoint_looks_hosted(provider.endpoint) then
       return false
@@ -21119,36 +21594,10 @@ function Net.copin_theme_bundle(out_list)
   if out_list then out_list[#out_list+1] = pb_key end
 end
 
--- Pre-pin prompt_bundle:plugin_helpers (DECIDE FIRST flowchart, helper
--- function source, API DISPLAY RANGE MISMATCH guidance) into sticky_context.
--- Called when the dispatcher resolves a path that's about to write plugin
--- params with non-anchor values: fx_inspect (ADD + CONFIGURE), and fx_params
--- / preferred_plugins under a write-intent prompt. Most curated-plugin tasks
--- with verified-anchor values never need helpers and skip this co-pin.
---
--- No-op when:
---   - prompt_bundle:plugin_helpers is already in sticky_context (loaded
---     earlier this session; eviction is exempted same as docs sections).
---   - prompt_bundle_sent[plugin_helpers] is already true (defensive guard
---     against rapid double-co-pin within the same dispatch).
---   - The bundle file fails to load (logged via CTX.prompt_bundle error
---     path; the validators remain the safety net and use load-aware wording).
-function Net.copin_plugin_helpers(out_list, source)
-  local ph_key = "prompt_bundle:plugin_helpers"
-  if S.sticky_context[ph_key] then
-    if S.prompt_bundle_sent then S.prompt_bundle_sent["plugin_helpers"] = true end
-    return
-  end
-  local ph_content, _ = CTX.prompt_bundle("plugin_helpers")
-  if not ph_content then return end
-  -- source defaults to "copin" inside Net.sticky_set. Pass "preempt"
-  -- explicitly when called from CTX.preempt_buckets_for_prompt so the
-  -- helpers bundle rides the same stable rung that's being initialized
-  -- alongside prompt_bundle:plugin -- no extra rung-invalidation cost
-  -- because the stable rung is being rebuilt this turn anyway.
-  Net.sticky_set(ph_key, ph_content, source)
-  if S.prompt_bundle_sent then S.prompt_bundle_sent["plugin_helpers"] = true end
-  if out_list then out_list[#out_list+1] = ph_key end
+-- Helper templates remain available when a Model explicitly asks for them,
+-- but ordinary plug-in work no longer pre-pins a large mandatory helper body.
+function Net.copin_plugin_helpers()
+  return false
 end
 
 -- Recovery retries must never claim the canonical helper reference is pinned
@@ -21171,13 +21620,14 @@ end
 function Net.plugin_helpers_retry_guidance(integrity_retry)
   if Net.ensure_plugin_helpers_for_retry() then
     if integrity_retry then
-      return "The canonical helper reference is pinned above. Paste each "
-        .. "required helper definition VERBATIM from that reference before "
-        .. "main(); do not rewrite, simplify, or paraphrase its body. "
+      return "Helper guidance is pinned above. Replace each affected call "
+        .. "with direct REAPER API calls, or write a complete safe local "
+        .. "definition before main(). Do not claim a canonical body exists. "
     end
-    return "For find_param/set_param_display/set_param_enum/"
-      .. "set_param_enum_paced, the canonical definitions are pinned above. "
-      .. "Paste each required definition verbatim before its first call. "
+    return "Helper guidance is pinned above. For find_param/"
+      .. "set_param_display/set_param_enum/set_param_enum_paced, use direct "
+      .. "REAPER API calls or write a complete safe local definition before "
+      .. "its first call. "
   end
   if integrity_retry then
     return "The canonical helper reference is not available in this "
@@ -23062,6 +23512,18 @@ function Net._action_relevance_retry_policy(findings, user_text,
 end
 
 function Net._action_relevance_block_message(findings, snapshot)
+  for _, finding in ipairs(findings or {}) do
+    if type(finding) == "table"
+        and finding.kind == "missing_requested_fx_param_write" then
+      local fallback = "Auto-run was blocked because the plug-in was added "
+        .. "without applying another requested value. Review the generated "
+        .. "action and resend the request. Do not run the blocked script "
+        .. "manually."
+      return (RA and RA.t and RA.t(
+        "auto_run.blocked.missing_fx_parameter_write", nil, fallback))
+        or fallback
+    end
+  end
   local no_time_selection = tostring(snapshot or ""):find(
     "Time selection: none", 1, true) ~= nil
   if no_time_selection then
@@ -23157,23 +23619,10 @@ function Net._call_cap_message()
 end
 
 function Net._validator_retry_cap_message()
-  local cap = CFG.MAX_VALIDATOR_RETRIES_PER_TURN or 3
-  local kind_cap = CFG.MAX_VALIDATOR_RETRY_KINDS_PER_TURN or 4
-  local help = RA.t("help.nav.feedback", nil, "Feedback & Report a Bug")
-  if (S.validator_retry_cap_streak or 0) > 1 then
-    return RA.t("net.cap.validator_retry_streak",
-      { cap = cap, kind_cap = kind_cap, help = help },
-      ("No project changes were run. The automatic repair budget failed "
-        .. "again on consecutive turns. Rephrasing is unlikely to help. "
-        .. "Please use Help -> %s; starting a new chat or choosing another "
-        .. "model may work around it."):format(help))
-  end
   return RA.t("net.cap.validator_retry",
-    { cap = cap, kind_cap = kind_cap, help = help },
-    ("No project changes were run. ReaAssist stopped when the automatic "
-      .. "repair budget was exhausted to avoid runaway cost. Start a new "
-      .. "chat or try another model. If it happens again, please use "
-      .. "Help -> %s."):format(help))
+    nil,
+    "No project changes were made. ReaAssist could not safely complete this "
+      .. "request after its automatic correction attempts.")
 end
 
 function Net._validator_retry_budget_state()
@@ -23207,22 +23656,13 @@ end
 
 function Net._validator_retry_cap_display_message()
   local message = Net._validator_retry_cap_message()
-  local candidate = tostring(S.validator_retry_candidate_text or "")
-  if candidate == "" then return message end
-  candidate = tostring(Net._debug_scrub(candidate) or "")
-  if #candidate > 2048 then
-    if Diag and type(Diag._utf8_truncate_with_marker) == "function" then
-      candidate = Diag._utf8_truncate_with_marker(candidate, 2048, "\n[...]")
-    elseif Diag and type(Diag._utf8_safe_prefix_bytes) == "function" then
-      candidate = Diag._utf8_safe_prefix_bytes(candidate, 2042) .. "\n[...]"
-    else
-      candidate = candidate:sub(1, 2042) .. "\n[...]"
-    end
-  end
-  local notice = RA.t("net.cap.validator_retry_candidate_review", nil,
-    "The latest blocked draft is included below for review only. It did not "
-      .. "pass validation, and this message cannot run it.")
-  return message .. "\n\n" .. notice .. "\n\n" .. candidate
+  local help = RA.t("help.nav.feedback", nil, "Feedback & Report a Bug")
+  return message .. "\n\n" .. RA.t(
+    "net.cap.validator_retry_next_resend",
+    { help = help },
+    "Send the same request again. If it fails again, switch models. If the "
+      .. "problem repeats, use Help -> " .. help
+      .. ". The rejected draft was kept out of this chat.")
 end
 
 function Net._context_fetch_cap_message()
@@ -23307,10 +23747,14 @@ function Net._copy_retry_event(event, fallback_index, opts)
       byte_count = tonumber(event.candidate.byte_count) or 0,
       content_hash = event.candidate.content_hash,
       content_hash_scope = event.candidate.content_hash_scope,
-      excerpt = tostring(event.candidate.excerpt or ""),
-      excerpt_bytes = tonumber(event.candidate.excerpt_bytes) or 0,
-      excerpt_truncated = event.candidate.excerpt_truncated == true or nil,
     }
+    if event.candidate.excerpt ~= nil then
+      copy.candidate.excerpt = tostring(event.candidate.excerpt or "")
+      copy.candidate.excerpt_bytes =
+        tonumber(event.candidate.excerpt_bytes) or 0
+      copy.candidate.excerpt_truncated =
+        event.candidate.excerpt_truncated == true or nil
+    end
   end
   return copy
 end
@@ -23853,7 +24297,7 @@ function Net._try_escalate_typed_actions(reason_code, detail)
 
   local p = PROVIDERS.active() or {}
   local m = MODELS[prefs.model_idx] or MODELS[1] or {}
-  local response_format = p.id == "openai"
+  local response_format = false
   local fallback_profile = Code.typed_actions_model_profile(p.id, m.id)
   local fallback_model_id = m.id or fallback.model_id or "?"
   if fallback.thinking_value and p.thinking_levels then
@@ -23911,9 +24355,7 @@ function Net._try_escalate_typed_actions(reason_code, detail)
         response_format = response_format,
         profile = fallback_profile,
       }) or ""
-  local reemit_hint = response_format
-    and "the raw JSON object required by the active response schema"
-    or "a single ```reaassist-actions fenced JSON object"
+  local reemit_hint = "a single ```reaassist-actions fenced JSON object"
   local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
     .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: A weaker model could "
     .. "not produce a safe typed-action plan for this request. Reason: "
@@ -24153,6 +24595,9 @@ function Net.cancel_active_request(probe_reason)
   S.retry_saved_provider_idx = nil
   S.retry_saved_model_idx    = nil
   S.retry_saved_thinking_idx = nil
+  if Net._clear_schannel_revocation_retry then
+    Net._clear_schannel_revocation_retry()
+  end
   if Net._clear_turn_budget_confirmation then
     Net._clear_turn_budget_confirmation()
   end
@@ -24188,6 +24633,9 @@ function Net._abort_runaway_turn(probe_reason)
   S.retry_saved_provider_idx = nil
   S.retry_saved_model_idx    = nil
   S.retry_saved_thinking_idx = nil
+  if Net._clear_schannel_revocation_retry then
+    Net._clear_schannel_revocation_retry()
+  end
   Net._finish_probe_turn(S.probe_turn, probe_reason or "call_cap")
   return false, "call_cap_exceeded"
 end
@@ -24257,6 +24705,104 @@ function Net._curl_exit_meaning(code)
   return meanings[tonumber(code)] or "unmapped curl error"
 end
 
+function Net._curl_timeout_scope(p, debug, stderr_text)
+  local text = tostring(stderr_text or ""):lower()
+  if text:find("failed to connect", 1, true)
+      or text:find("connection timed out", 1, true)
+      or text:find("connect timeout", 1, true)
+      or text:find("ssl connection timeout", 1, true)
+      or text:find("resolving timed out", 1, true) then
+    return "connection_timeout"
+  end
+  if text:find("operation timed out", 1, true)
+      or text:find("maximum time allowed", 1, true) then
+    return p and p.is_custom and "custom_request_timeout"
+      or "request_timeout"
+  end
+
+  local elapsed = type(debug) == "table"
+    and tonumber(debug.request_elapsed_s) or nil
+  local connect_timeout = type(debug) == "table"
+    and tonumber(debug.connect_timeout_s) or nil
+  local request_timeout = type(debug) == "table"
+    and tonumber(debug.curl_timeout_s) or nil
+  if elapsed and request_timeout and request_timeout > 0
+      and elapsed >= math.max(0, request_timeout - 1.5)
+      and (not connect_timeout or request_timeout > connect_timeout + 1.5) then
+    return p and p.is_custom and "custom_request_timeout"
+      or "request_timeout"
+  end
+  if elapsed and connect_timeout and connect_timeout > 0
+      and elapsed <= connect_timeout + 1.5 then
+    return "connection_timeout"
+  end
+  return p and p.is_custom and "custom_request_timeout"
+    or "request_timeout"
+end
+
+function Net._curl_timeout_message(p, debug, stderr_text, recovery_available,
+    key_test)
+  local scope = Net._curl_timeout_scope(p, debug, stderr_text)
+  local provider = p and p.label or "the provider"
+  if scope == "connection_timeout" then
+    if key_test and p and p.is_custom then
+      local seconds = math.max(1, math.floor(tonumber(
+        type(debug) == "table" and debug.connect_timeout_s or nil) or 3))
+      return RA.t("network.curl.custom_test_connect_timeout", {
+        seconds = seconds,
+      }, "The custom provider could not connect within the "
+        .. tostring(seconds) .. "-second connection test. Check that the "
+        .. "server is running and that its URL and port are correct, then "
+        .. "try the test again."), scope
+    end
+    return recovery_available and RA.t("network.curl.connect_timeout_retry", {
+      provider = provider,
+    }, "Retry Same Model below to resend the original message. The connection to "
+      .. provider .. " did not finish before the connection time limit. The "
+      .. "provider or network path may be temporarily delayed. Check your "
+      .. "internet connection before retrying.")
+      or RA.t("network.curl.connect_timeout", { provider = provider },
+        "The connection to " .. provider
+          .. " did not finish before the connection time limit. The provider "
+          .. "or network path may be temporarily delayed. Check your internet "
+          .. "connection, then try again in a moment."),
+      scope
+  end
+  if scope == "custom_request_timeout" then
+    local seconds = math.max(1, math.floor(tonumber(
+      type(debug) == "table" and debug.curl_timeout_s or nil) or 600))
+    if key_test then
+      return RA.t("network.curl.custom_test_timeout", { seconds = seconds },
+        "The custom provider did not respond within the " .. tostring(seconds)
+          .. "-second connection test. Check that the server is running and "
+          .. "that its URL and port are correct, then try the test again."),
+        scope
+    end
+    return recovery_available and RA.t(
+      "network.curl.custom_request_timeout_retry", { seconds = seconds },
+      "Retry Same Model below to resend the original message. The custom "
+        .. "provider did not finish before its configured Request Timeout of "
+        .. tostring(seconds) .. " seconds. If this repeats while the server "
+        .. "is still working, increase Request Timeout in Custom LLM settings.")
+      or RA.t("network.curl.custom_request_timeout", { seconds = seconds },
+        "The custom provider did not finish before its configured Request "
+          .. "Timeout of " .. tostring(seconds) .. " seconds. If this repeats "
+          .. "while the server is still working, increase Request Timeout in "
+          .. "Custom LLM settings."),
+      scope
+  end
+  return recovery_available and RA.t("network.timeout.generic_retry", nil,
+    "Retry Same Model below to resend the original message. The request timed "
+      .. "out because the server may be busy or the connection may have "
+      .. "dropped. If it keeps happening, use the Model or Provider selector "
+      .. "before retrying.")
+    or RA.t("network.timeout.generic", nil,
+      "The request timed out because the server may be busy or the connection "
+        .. "may have dropped. If it keeps happening, use the Model or Provider "
+        .. "selector before retrying."),
+    scope
+end
+
 function Net._curl_failure_debug(exit_code, detail, failure_kind)
   Net._record_request_elapsed()
   local dbg = {}
@@ -24300,6 +24846,125 @@ function Net._curl_failure_debug(exit_code, detail, failure_kind)
     dbg.response_head_truncated = body_truncated or nil
   end
   return dbg
+end
+
+function Net._clear_schannel_revocation_retry()
+  S.schannel_revocation_retry_pending = false
+  S.schannel_revocation_retry_used = false
+  S.schannel_revocation_original_error = nil
+end
+
+function Net._is_schannel_revocation_offline(exit_code, stderr_text)
+  if tonumber(exit_code) ~= 35 then return false end
+  local text = tostring(stderr_text or ""):lower()
+  if not text:find("0x80092013", 1, true) then return false end
+  if not text:find("revocation", 1, true) then return false end
+  return text:find("offline", 1, true) ~= nil
+    or text:find("crypt_e_revocation_offline", 1, true) ~= nil
+end
+
+function Net._curl_rejected_ssl_revoke_best_effort(stderr_text)
+  local text = tostring(stderr_text or ""):lower()
+  if not text:find("ssl%-revoke%-best%-effort") then return false end
+  return text:find("unknown option", 1, true) ~= nil
+    or text:find("unrecognized option", 1, true) ~= nil
+    or text:find("unsupported option", 1, true) ~= nil
+    or text:find("is unknown", 1, true) ~= nil
+end
+
+function Net._schedule_schannel_revocation_retry(exit_code, stderr_text,
+                                                  detail, debug)
+  if not (RA and RA.IS_WINDOWS) then return false end
+  if not Net._is_schannel_revocation_offline(exit_code, stderr_text) then
+    return false
+  end
+  if S.gemini_tier_pending or S.key_test_pending
+      or S.schannel_revocation_retry_used == true
+      or S.retry_scheduled == true
+      or not S.retry_saved_body
+      or S.pending_orig_prompt == nil
+      or not S.pending_display_idx
+      or not S.display_messages[S.pending_display_idx] then
+    return false
+  end
+
+  S.schannel_revocation_retry_pending = true
+  S.schannel_revocation_retry_used = true
+  S.schannel_revocation_original_error = {
+    detail = detail,
+    debug = debug,
+  }
+  S.retry_scheduled = true
+  S.retry_fire_time = time_precise()
+  S.status = "waiting"
+  local prior_status = S.display_messages[S.pending_display_idx].request_status
+  local prior_retry_count = type(prior_status) == "table"
+    and tonumber(prior_status.retry_count) or 0
+  local status = Net._set_pending_request_status("retry_scheduled",
+    "schannel_revocation_offline", {
+      retry_count = 1,
+      retry_max = 1,
+      display_text = "retrying secure connection",
+    })
+  if status and prior_retry_count <= 0 then
+    status.retry_count = 1
+    status.retry_max = 1
+  end
+  Log.line("CURL", "retrying exact Schannel revocation-offline failure once")
+  return true
+end
+
+function Net._surface_schannel_revocation_original_error()
+  local original = S.schannel_revocation_original_error
+  if type(original) ~= "table" then return false end
+  Net._clear_schannel_revocation_retry()
+  S.send_time = nil
+  if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
+    S.display_messages[S.pending_display_idx].request_status_text = "network error"
+  end
+  Log.add_error(original.detail, nil, nil, nil,
+    Net._failed_request_extra("curl_exit", original.debug))
+  return true
+end
+
+function Net._clarified_action_request_context(current_user_text)
+  local current = Net._retry_trim_text(current_user_text)
+  if current == "" or #current > 400 then return nil end
+  if Code.prompt_is_question_or_readonly
+      and Code.prompt_is_question_or_readonly(current) then
+    return nil
+  end
+  local lower = current:lower():gsub("%s+", " ")
+  for _, phrase in ipairs({
+    "never mind", "nevermind", "cancel", "stop", "forget it",
+    "no thanks", "do not", "don't", "not anymore",
+  }) do
+    if lower:find(phrase, 1, true) then return nil end
+  end
+
+  if Code.prompt_likely_needs_lua_action(current) then return nil end
+
+  if type(S.history) ~= "table" then return nil end
+  local count = #S.history
+  local current_assistant = S.history[count]
+  local current_user = S.history[count - 1]
+  local prior_assistant = S.history[count - 2]
+  local prior_user = S.history[count - 3]
+  if not (current_assistant and current_assistant.role == "assistant"
+      and current_user and current_user.role == "user"
+      and prior_assistant and prior_assistant.role == "assistant"
+      and prior_user and prior_user.role == "user") then
+    return nil
+  end
+  if not Code.no_code_reply_is_clarification(prior_assistant.content) then
+    return nil
+  end
+  local prior_request = Net._retry_extract_user_request(prior_user.content)
+  if prior_request == ""
+      or not Code.prompt_likely_needs_lua_action(prior_request) then
+    return nil
+  end
+  return prior_request
 end
 
 function Net._turn_call_budget(body, provider_idx, model_idx)
@@ -24430,18 +25095,30 @@ end
 -- can return early and fire another model call, but their tokens and cost still
 -- belong to the visible exchange and the session total.
 function Net._record_display_usage(p, raw_tok_in, raw_tok_out,
-                                   tok_in_read, tok_in_create, stage)
+                                   tok_in_read, tok_in_create, stage,
+                                   visible_tok_out, reasoning_tok_out)
   local input = tonumber(raw_tok_in) or 0
   local output = tonumber(raw_tok_out) or 0
   if input <= 0 and output <= 0 then return nil end
   local cache_read = tonumber(tok_in_read) or 0
   local cache_create = tonumber(tok_in_create) or 0
+  local visible_output = visible_tok_out ~= nil
+    and math_max(0, tonumber(visible_tok_out) or 0) or nil
+  local reasoning_output = reasoning_tok_out ~= nil
+    and math_max(0, tonumber(reasoning_tok_out) or 0) or nil
   local dmsg = S.pending_display_idx
     and S.display_messages[S.pending_display_idx] or nil
 
   if dmsg then
     dmsg.tok_in = (dmsg.tok_in or 0) + input
     dmsg.tok_out = (dmsg.tok_out or 0) + output
+    if visible_output ~= nil then
+      dmsg.tok_out_visible = (dmsg.tok_out_visible or 0) + visible_output
+    end
+    if reasoning_output ~= nil then
+      dmsg.tok_out_reasoning =
+        (dmsg.tok_out_reasoning or 0) + reasoning_output
+    end
     dmsg.tok_cache_read = (dmsg.tok_cache_read or 0) + cache_read
     dmsg.tok_cache_create = (dmsg.tok_cache_create or 0) + cache_create
     if type(dmsg.model_call_usage) ~= "table" then
@@ -24454,6 +25131,8 @@ function Net._record_display_usage(p, raw_tok_in, raw_tok_out,
         provider_id = p and (p.is_custom and "custom" or p.id) or nil,
         input_tokens = input,
         output_tokens = output,
+        visible_output_tokens = visible_output,
+        reasoning_output_tokens = reasoning_output,
         cache_read_tokens = cache_read,
         cache_create_tokens = cache_create,
         uncached_input_tokens = math_max(0,
@@ -24474,6 +25153,18 @@ function Net._record_display_usage(p, raw_tok_in, raw_tok_out,
 
   S.session_tok_in = S.session_tok_in + input
   S.session_tok_out = S.session_tok_out + output
+  S.session_output_usage_calls = (S.session_output_usage_calls or 0) + 1
+  if visible_output ~= nil and reasoning_output ~= nil then
+    S.session_output_split_calls = (S.session_output_split_calls or 0) + 1
+  end
+  if visible_output ~= nil then
+    S.session_tok_out_visible =
+      (S.session_tok_out_visible or 0) + visible_output
+  end
+  if reasoning_output ~= nil then
+    S.session_tok_out_reasoning =
+      (S.session_tok_out_reasoning or 0) + reasoning_output
+  end
   if not free_tier then
     S.session_cost = S.session_cost + this_cost
   end
@@ -24800,6 +25491,9 @@ function Net.fire_curl(body, opts)
   -- Only ever applied to custom providers (cloud providers always validate).
   -- Emitted as a standalone flag in both Windows and POSIX branches below.
   local insecure_flag = (p.is_custom and p.allow_insecure) and " --insecure" or ""
+  local ssl_revoke_best_effort_flag = RA.IS_WINDOWS
+    and opts and opts.ssl_revoke_best_effort == true
+    and " --ssl-revoke-best-effort" or ""
 
   -- Build the endpoint URL.
   local endpoint
@@ -24881,13 +25575,14 @@ function Net.fire_curl(body, opts)
     local body_flags = is_get and ""
       or (' -d @"""' .. tmp.body .. '"""')
     local cmd_line = str_format(
-      'curl -sS%s --connect-timeout %d --max-time %d'
+      'curl -sS%s%s --connect-timeout %d --max-time %d'
       .. ' -X %s """%s"""'
       .. '%s'
       .. '%s -o """%s""" 2> """%s"""'
       .. ' & call echo ^%%errorlevel^%% > """%s"""'
       .. '%s',
       insecure_flag,
+      ssl_revoke_best_effort_flag,
       connect_timeout, curl_timeout,
       method, endpoint,
       h_flags,
@@ -24951,6 +25646,14 @@ function Net.fire_curl(body, opts)
       sq(tmp.exit),
       cleanup)
     os.execute(unix_curl)
+  end
+
+  -- Windows only, first chat send of the session: the diagnostics OS-version
+  -- probe piggybacks on this launch. PowerShell is warm from the curl spawn
+  -- and the user just asked for visible work, so its own launcher hand-off
+  -- costs nothing they would notice. It never fires on an idle timer.
+  if is_turn_post and Diag and Diag.note_curl_launched then
+    Diag.note_curl_launched()
   end
 
   S.curl_pid              = true
@@ -25033,54 +25736,7 @@ function Net.fire_pending_retry(msgs, snapshot, msg_attachments)
 end
 
 function Net._append_persistent_validator_constraints(history_content, opts)
-  local content = tostring(history_content or "")
-  opts = type(opts) == "table" and opts or {}
-  if type(S.plugin_profiles_used) == "table"
-     and #S.plugin_profiles_used > 0
-     and (S.plugin_profile_guard_validator_retries or 0) > 0
-     and tostring(opts.kind or "") ~= "plugin_profile_guard"
-     and not content:find(
-       "PERSISTENT VALIDATED-PROFILE SAFETY REQUIREMENT", 1, true) then
-    content = content
-      .. "\n\n(INTERNAL PERSISTENT VALIDATED-PROFILE SAFETY REQUIREMENT "
-      .. "-- DO NOT MENTION THIS: Preserve the mandatory "
-      .. "`reaassist_resolve_profile_params` guard from the prior repair. "
-      .. "Keep one resolver call inside the deferred callback before any "
-      .. "parameter work, test `if not mapped`, and pass only direct "
-      .. "`mapped[n]` values as mapped parameter indices. Do not replace "
-      .. "them with numeric literals, arithmetic expressions, aliases or "
-      .. "unvalidated indices. Regenerate the full script while satisfying "
-      .. "both this requirement and the newest repair instruction.)"
-  end
-  if (S.existing_fx_add_validator_retries or 0) > 0
-     and tostring(opts.kind or "") ~= "existing_fx_add"
-     and not content:find(
-       "PERSISTENT EXISTING-EFFECT SAFETY REQUIREMENT", 1, true) then
-    content = content
-      .. "\n\n(INTERNAL PERSISTENT EXISTING-EFFECT SAFETY REQUIREMENT "
-      .. "-- DO NOT MENTION THIS: Preserve the strict existing-instance "
-      .. "scope from the prior repair. For an effect the user said already "
-      .. "exists, keep `TrackFX_GetByName` or `TakeFX_GetByName`, then show "
-      .. "a clear missing-effect message and return when the lookup fails. "
-      .. "Do not add a replacement of that same effect with "
-      .. "`TrackFX_AddByName` or `TakeFX_AddByName`. Regenerate the full "
-      .. "script while satisfying both this requirement and the newest "
-      .. "repair instruction.)"
-  end
-  if (S.defer_validator_retries or 0) > 0
-     and tostring(opts.kind or "") ~= "defer"
-     and not content:find(
-       "PERSISTENT DEFERRED-PARAMETER SAFETY REQUIREMENT", 1, true) then
-    content = content
-      .. "\n\n(INTERNAL PERSISTENT DEFERRED-PARAMETER SAFETY REQUIREMENT "
-      .. "-- DO NOT MENTION THIS: Preserve the deferred parameter-work "
-      .. "structure from the prior repair. Keep every plug-in parameter "
-      .. "Get/Set call and every helper that performs those calls inside "
-      .. "exactly one `reaper.defer(function() ... end)` callback. Preserve "
-      .. "the user's requested existing-instance or add-new scope while "
-      .. "satisfying the newest repair instruction.)"
-  end
-  return content
+  return tostring(history_content or "")
 end
 
 function Net.fire_validator_retry(opts)
@@ -26915,6 +27571,10 @@ function Net.send_to_api(user_text, opts)
   S.tracks_already_sent   = false
   S.fx_params_already_sent = false
   S.plugin_ref_sent        = {}
+  S.plugin_ref_failed      = {}
+  S.plugin_ref_generic_fallback_attempted = false
+  S.plugin_ref_generic_fallback_name = nil
+  S._plugin_pack_fallback_hint = nil
   S.pending_resolves       = {}
   S.pending_plugin_ref_names = {}
   S.pending_pref_plugin_types = {}
@@ -26956,6 +27616,7 @@ function Net.send_to_api(user_text, opts)
   S.retry_saved_provider_idx = nil
   S.retry_saved_model_idx    = nil
   S.retry_saved_thinking_idx = nil
+  Net._clear_schannel_revocation_retry()
 
   -- Capture current attachments and clear the queue before any early returns.
   local msg_attachments = #send_attachments > 0 and send_attachments or nil
@@ -27199,8 +27860,10 @@ function Net.send_to_api(user_text, opts)
   local typed_action_profile =
     Code.typed_actions_model_profile(active_provider.id,
       active_model and active_model.id or nil)
-  local typed_action_response_format =
-    active_provider.id == "openai"
+  -- Keep the retained track-only contract provider-neutral. Plug-in requests
+  -- always use ordinary Lua, and the small structured lane uses one explicit
+  -- fenced JSON block for every provider.
+  local typed_action_response_format = false
   local typed_action_plan_prompt =
     CTX.prompt_indicates_typed_action_plan(user_text)
   -- Contract eligibility is separate from execution eligibility. Auto-run and
@@ -27304,9 +27967,10 @@ function Net.send_to_api(user_text, opts)
     local note = "(INTERNAL CONTEXT NOTE -- DO NOT MENTION THIS: "
       .. "The following references are already pinned above: "
       .. tbl_concat(note_keys, ", ")
-      .. ". Use them directly and do not request them again. If SESSION "
-      .. "CONTEXT appears below, it is also already available; do not request "
-      .. "session."
+      .. ". Use them directly and do not request them again. The SESSION "
+      .. "CONTEXT block below is complete for this request, including when "
+      .. "it reports no tracks. Use it now and never emit "
+      .. "<context_needed>session</context_needed>."
     if has_recent then
       note = note .. " Recent REAPER changes override stale training data "
         .. "for version-specific facts."
@@ -27553,17 +28217,159 @@ function Net.send_to_api(user_text, opts)
       .. "the user asks for a new edit.)\n\n" .. history_text
   end
 
+  S.pending_output_note = nil
   if not suppress_action_context
      and not typed_action_contract and reascript_prompt then
     local ref_note = S.api_ref_message
       and (" Core REAPER API docs are already pinned above, so do NOT "
         .. "emit <context_needed>docs</context_needed>.")
       or ""
-    history_text = "(INTERNAL OUTPUT NOTE -- DO NOT MENTION THIS: "
+    local plugin_note = ""
+    local track_creation_note = ""
+    local plugin_ref_pinned, proq4_ref_pinned, proc3_ref_pinned,
+      prog_ref_pinned, decap_ref_pinned, echoboy_ref_pinned =
+      false, false, false, false, false, false
+    local function note_pinned_plugin_ref(key)
+      if type(key) ~= "string" then return end
+      local lower_key = key:lower()
+      if lower_key:find("plugin_ref:", 1, true) ~= 1 then return end
+      plugin_ref_pinned = true
+      if lower_key == "plugin_ref:pro-q 4"
+          or lower_key == "plugin_ref:fabfilter-pro-q-4" then
+        proq4_ref_pinned = true
+      end
+      if lower_key == "plugin_ref:pro-c 3"
+          or lower_key == "plugin_ref:fabfilter-pro-c-3" then
+        proc3_ref_pinned = true
+      end
+      if lower_key == "plugin_ref:pro-g"
+          or lower_key == "plugin_ref:fabfilter-pro-g" then
+        prog_ref_pinned = true
+      end
+      if lower_key == "plugin_ref:decapitator"
+          or lower_key == "plugin_ref:soundtoys-decapitator" then
+        decap_ref_pinned = true
+      end
+      if lower_key == "plugin_ref:echoboy"
+          or lower_key == "plugin_ref:soundtoys-echoboy" then
+        echoboy_ref_pinned = true
+      end
+    end
+    for _, key in ipairs(preempted_context or {}) do
+      note_pinned_plugin_ref(key)
+    end
+    -- Guidance loading can pin profiles before this final request is built.
+    -- In that case preempt_buckets_for_prompt omits the already-present keys,
+    -- so inspect the stable sticky set too. Otherwise the most important
+    -- one-pass output reminder disappears exactly when the profile is ready.
+    for key in pairs(S.sticky_context or {}) do
+      note_pinned_plugin_ref(key)
+    end
+    if plugin_ref_pinned then
+      plugin_note = " Keep the complete plug-in action synchronous; do not "
+        .. "use reaper.defer. Begin the Undo block before the first project "
+        .. "mutation, including track creation. Store and check each "
+        .. "TrackFX_AddByName or TakeFX_AddByName result with `fx < 0` "
+        .. "immediately before another AddByName call. Finish every required "
+        .. "AddByName call and failure check before the first parameter "
+        .. "write, then configure the stored handles; do not interleave "
+        .. "plug-in insertion and configuration in a chain. This chain-order "
+        .. "rule controls if an individual profile says to configure "
+        .. "immediately after insertion. "
+        .. "Copy exact formulas and normalized anchors from each "
+        .. "pinned mapping; do not approximate them or substitute a value "
+        .. "remembered from another plug-in. Keep enum labels and normalized "
+        .. "literals aligned with the pinned mapping. On failure, clean up "
+        .. "in this order before returning: "
+        .. "`reaper.PreventUIRefresh(-1)`, `reaper.Undo_EndBlock(...)`, then "
+        .. "`reaper.ShowMessageBox(...)`."
+    end
+    if proq4_ref_pinned then
+      plugin_note = plugin_note
+        .. " For Pro-Q 4, define these exact conversion helpers in the "
+        .. "generated script: `local function proq_freq_norm(hz) return "
+        .. "math.log(hz / 10) / math.log(3000) end`, `local function "
+        .. "proq_q_norm(q) return math.log(q / 0.025) / math.log(1600) "
+        .. "end`, and `local function proq4_slope_norm(db) if db <= 36 "
+        .. "then return db / 60 elseif db <= 48 then return 0.6 + (db - "
+        .. "36) / 120 end return 0.7 + (db - 48) / 240 end`. Call them "
+        .. "directly inside setters, such as `proq_freq_norm(350)`, "
+        .. "`proq_q_norm(1.0)`, and `proq4_slope_norm(24)`. Do not use "
+        .. "raw normalized literals for Pro-Q Frequency, Q, or Slope, and "
+        .. "do not write the same target twice. For every Pro-Q band you "
+        .. "configure, set both its Used and Enabled parameters to 1 before "
+        .. "writing that band's values. Gain normalized is "
+        .. "(requested_dB+30)/60. Preserve the requested sign: "
+        .. "-2dB=28/60 and +2.5dB=32.5/60."
+    end
+    if proc3_ref_pinned then
+      plugin_note = plugin_note
+        .. " For Pro-C 3, use the maintained exact map: Style Clean=0/13, "
+        .. "Versatile=1/13, Punch=3/13, Vocal=10/13, Mastering=11/13, and "
+        .. "Bus=12/13; Threshold normalized=(requested_dB+60)/60; Ratio "
+        .. "1.5:1=0.30078125, 2:1=0.400390625, 3:1=0.52001953125, and "
+        .. "4:1=0.599609375; Attack normalized=(requested_ms/250)^(1/3); "
+        .. "Release 100ms=0.2779541015625, 120ms=0.30712890625, "
+        .. "150ms=0.345947265625, and 250ms=0.45001220703125; Auto Gain "
+        .. "Off=0 and On=1; Mix 100 percent=0.5. Keep the requested Ratio "
+        .. "label beside its matching literal, and compute Attack from the "
+        .. "requested number."
+    end
+    if prog_ref_pinned then
+      plugin_note = plugin_note
+        .. " For Pro-G, keep these exact maintained anchors together: "
+        .. "Style Clean=0.25; Threshold -36dB=0.4; Ratio "
+        .. "2:1=0.400390625; Range 16dB=0.5 and "
+        .. "24dB=0.5799560546875; Attack "
+        .. "1ms=0.177825927734375; Release "
+        .. "100ms=0.30780029296875. In particular, never use the 24dB "
+        .. "Range value for a requested 16dB Range."
+    end
+    if decap_ref_pinned then
+      plugin_note = plugin_note
+        .. " For Decapitator, keep the requested controls distinct: index "
+        .. "2 Drive 3.0=0.30000001192092896; index 7 Mix "
+        .. "20.0=0.20000000298023224, 25.0=0.25, and "
+        .. "30.0=0.30000001192092896; index 8 AutoGain On=1; index 11 "
+        .. "OutputTrim 0.0=1. Never copy EchoBoy's Mix value into the "
+        .. "Decapitator Mix setter."
+    end
+    if echoboy_ref_pinned then
+      plugin_note = plugin_note
+        .. " For EchoBoy, use these requested recipe anchors only on "
+        .. "EchoBoy: index 3 Mix 20.0=0.20000000298023224; index 4 "
+        .. "Single=0; index 5 Note=0.25; index 6 1/8th="
+        .. "0.15000000596046448; index 11 Feedback 0.25="
+        .. "0.20000000298023224; index 15 Saturation 9.98="
+        .. "0.41583332419395447; index 23 Master Tape=0."
+    end
+    if Code.prompt_requests_track_creation(user_text) then
+      track_creation_note = " The user explicitly requested new track "
+        .. "creation. Create every requested new track first with "
+        .. "reaper.InsertTrackAtIndex(..., true), fetch that new track "
+        .. "with reaper.GetTrack(...), and use that handle for all "
+        .. "requested FX. The Undo block must already be open before "
+        .. "InsertTrackAtIndex. Inside a creation loop, set `local new_idx "
+        .. "= reaper.CountTracks(0)` before each insertion, insert at "
+        .. "`new_idx`, then fetch `reaper.GetTrack(0, new_idx)`. Never use "
+        .. "the requested table length or one fixed final index for every "
+        .. "loop iteration. Do not substitute reaper.GetSelectedTrack "
+        .. "or another existing track."
+    end
+    S.pending_output_note = "(INTERNAL OUTPUT NOTE -- DO NOT MENTION THIS: "
       .. "If you generate Lua/ReaScript for this request, return the "
       .. "entire runnable script inside one complete ```lua ... ``` "
-      .. "code fence. Do not return bare Lua." .. ref_note .. ")\n\n"
-      .. history_text
+      .. "code fence. Return exactly one implementation; never include an "
+      .. "abandoned draft or a corrected second copy in that fence. Do not "
+      .. "return bare Lua. End the script with the matching closing ``` "
+      .. "fence; an unclosed fence will be rejected." .. ref_note
+      .. " Never call reaper.ShowConsoleMsg, reaper.ClearConsole, or "
+      .. "print(). ReaAssist already displays completion and records "
+      .. "diagnostics without opening the ReaScript console."
+      .. track_creation_note
+      .. plugin_note
+      .. ")\n\n"
+    history_text = S.pending_output_note .. history_text
   end
 
   local screen_reader_summary_requested =
@@ -27609,12 +28415,26 @@ function Net.send_to_api(user_text, opts)
     end
     if #resolved_tags > 0 then
       table.sort(resolved_tags)
+      local resolved_list = tbl_concat(resolved_tags, ", ")
+      local chain_requirements = ""
+      if CTX and CTX.prompt_indicates_chain_context
+          and CTX.prompt_indicates_chain_context(user_text) then
+        chain_requirements = "\n\n(INTERNAL FINAL CHAIN REQUIREMENTS -- DO "
+          .. "NOT MENTION THIS: Complete the requested chain in this response. "
+          .. "Use every already-resolved preferred type in this list unless "
+          .. "the user excluded it: " .. resolved_list .. ". Add and configure "
+          .. "each corresponding pinned preferred plug-in exactly once. "
+          .. "Open one Undo block before track creation or any other mutation, and "
+          .. "check each plug-in load before attempting the next load. Do not "
+          .. "return an empty Undo block, a partial chain, or prose claiming "
+          .. "project changes that are absent from the Lua.)"
+      end
       history_text = "(INTERNAL CONTEXT NOTE -- DO NOT MENTION THIS: "
         .. "The generic plugin type(s) for this request are already "
-        .. "resolved and pinned above: " .. tbl_concat(resolved_tags, ", ")
+        .. "resolved and pinned above: " .. resolved_list
         .. ". Do NOT emit <context_needed> for these resolve tags. "
         .. "Use the pinned plugin_ref / preferred-plugin content now.)\n\n"
-        .. history_text
+        .. history_text .. chain_requirements
     end
   end
 
@@ -28048,6 +28868,12 @@ end
 -- cleared so it is re-pinned on the next send; the Gemini explicit cache is
 -- app-scoped static reference state and remains usable when its source
 -- signature still matches.
+function Net.conversation_has_content()
+  return (type(S.display_messages) == "table" and #S.display_messages > 0)
+    or (type(S.history) == "table" and #S.history > 0)
+    or S.pending_code ~= nil
+end
+
 function Net.clear_conversation(opts)
   local clear_gemini_cache =
     type(opts) == "table" and opts.clear_gemini_cache == true
@@ -28118,6 +28944,10 @@ function Net.clear_conversation(opts)
   S.theme_already_sent         = false
   S.fx_inspect_sent            = {}
   S.plugin_ref_sent            = {}
+  S.plugin_ref_failed          = {}
+  S.plugin_ref_generic_fallback_attempted = false
+  S.plugin_ref_generic_fallback_name = nil
+  S._plugin_pack_fallback_hint = nil
   Net._reset_preferred_turn_state()
   Net._clear_turn_budget_confirmation()
   S.reset_turn_retries()
@@ -28171,6 +29001,10 @@ function Net.clear_conversation(opts)
   -- Session totals
   S.session_tok_in       = 0
   S.session_tok_out      = 0
+  S.session_tok_out_visible = 0
+  S.session_tok_out_reasoning = 0
+  S.session_output_usage_calls = 0
+  S.session_output_split_calls = 0
   S.session_cost         = 0
   -- Retry / attachment state
   S.retry_count          = 0
@@ -28180,6 +29014,7 @@ function Net.clear_conversation(opts)
   S.retry_saved_provider_idx = nil
   S.retry_saved_model_idx    = nil
   S.retry_saved_thinking_idx = nil
+  Net._clear_schannel_revocation_retry()
   S.attachments          = {}
   S.attach_error         = nil
   S.attach_error_time    = 0
@@ -28578,6 +29413,35 @@ end
 -- if fresh bucket data is needed, assembles the enriched history and fires a
 -- follow-up curl request. Returns true when the follow-up was fired (caller
 -- should bail); false when the normal final-response path should continue.
+function Net._plugin_pack_context_failure(integrity_kind, matched_condition)
+  S._plugin_pack_fallback_hint = nil
+  S._fx_params_pending_assemble = nil
+  Log.line("PLUGIN_PACK", "optional guidance unavailable; using ordinary Lua: "
+    .. tostring(integrity_kind) .. " " .. tostring(matched_condition or ""))
+  local history_content = "(INTERNAL NOTE TO THE MODEL. DO NOT MENTION "
+    .. "THIS RETRY: Optional maintained plug-in guidance is unavailable. "
+    .. "Generate the complete self-contained Lua now using standard "
+    .. "REAPER APIs, the selected or named track, exact installed plug-in "
+    .. "names from the session context, and live parameter-name discovery "
+    .. "when needed. Do not request plugin_ref, fx_params, fx_inspect, or "
+    .. "another context bucket. Keep the action limited to the user's "
+    .. "request and check every AddByName result. Respond as if this is "
+    .. "your first reply.)\n\nUSER REQUEST:\n"
+    .. tostring(S.pending_orig_prompt or "")
+  Net.fire_validator_retry({
+    kind = "plugin_pack_generic",
+    count_as_validator = false,
+    history_content = history_content,
+    ctx_label = "plugin_pack_generic_retry",
+    retry_failed_key = "retry.reason.after_plugin_guidance_unavailable",
+    retry_failed_label = "after optional plug-in guidance was unavailable",
+    failure_message = "ReaAssist could not regenerate the action. Select "
+      .. "the target track, use the plug-in name shown in REAPER, and "
+      .. "send the request again.",
+  })
+  return true
+end
+
 function Net.process_response_buckets(text)
   if not RA.code_runtime_loaded() then
     return RA.fail_code_runtime_unavailable("while processing context requests", "idle")
@@ -28590,6 +29454,7 @@ function Net.process_response_buckets(text)
   -- fx_params:Name[, Name2]. Buckets can be combined in one tag (comma-separated).
   -- Each is guarded by a one-shot flag so the same bucket is never injected twice
   -- in one turn, preventing infinite follow-up loops.
+  S.plugin_ref_failed = S.plugin_ref_failed or {}
   local scan_text = text
   do
     local trimmed = tostring(text or ""):match("^%s*(.-)%s*$") or ""
@@ -28732,6 +29597,15 @@ function Net.process_response_buckets(text)
       local key = fx_inspect_state_key(name)
       if key ~= "" then S.fx_inspect_sent[key] = true end
     end
+  end
+
+  local function fail_plugin_pack_fallback(condition)
+    if not S.plugin_ref_generic_fallback_name then return false end
+    S._plugin_pack_fallback_hint = nil
+    S._fx_params_pending_assemble = nil
+    Net._plugin_pack_context_failure(
+      CTX._plugin_pack_error_kind or "integrity_mismatch", condition)
+    return true
   end
 
   -- Parse comma-separated bucket tokens. Plain keywords ("session", "docs") are
@@ -29006,6 +29880,7 @@ function Net.process_response_buckets(text)
   -- exception: preempt may have already pinned the exact live instance for
   -- this turn, and re-requesting it just burns a follow-up round-trip.
   local dropped_pinned = {}
+  local repeated_failed_plugin_refs = {}
   do
     local function token_already_pinned(kw, payload)
       if kw == "session" then
@@ -29040,7 +29915,11 @@ function Net.process_response_buckets(text)
         return S.sticky_context
           and S.sticky_context["prompt_bundle:" .. pkey] ~= nil
       elseif kw == "plugin_ref" and payload ~= "" then
+        if S.plugin_ref_failed and S.plugin_ref_failed[payload] then
+          repeated_failed_plugin_refs[#repeated_failed_plugin_refs + 1] = payload
+        end
         return (S.plugin_ref_sent and S.plugin_ref_sent[payload] == true)
+          or (S.plugin_ref_failed and S.plugin_ref_failed[payload] == true)
           or (S.sticky_context and S.sticky_context["plugin_ref:" .. payload] ~= nil)
       elseif (kw == "preferred_plugins" or kw == "pref") and payload ~= "" then
         local pref_key = Net.preferred_plugin_type_key(payload)
@@ -29122,6 +30001,12 @@ function Net.process_response_buckets(text)
       end
     end
     raw_tokens = kept
+  end
+
+  if #repeated_failed_plugin_refs > 0 then
+    return Net._plugin_pack_context_failure(
+      CTX._plugin_pack_error_kind or "integrity_mismatch",
+      "repeated_failed_plugin_ref")
   end
 
   local last_scoped = nil  -- tracks which scoped keyword ("fx_params"/"fx_list") was last seen
@@ -29831,11 +30716,20 @@ function Net.process_response_buckets(text)
           regular_names[#regular_names+1] = nm
         end
       end
-      local rp_count, rp_err = 0, nil
+      local rp_count, rp_err, rp_failure_kind = 0, nil, nil
       local function pin_plugin_refs(names, options, turn_only)
         if #names == 0 then return false end
         local content, err = CTX.plugin_ref(names, options)
-        if not content then rp_err = rp_err or err return false end
+        if not content then
+          rp_err = rp_err or err
+          local failure_kind = CTX._plugin_pack_error_kind
+          if failure_kind == "integrity_mismatch"
+              or failure_kind == "integrity_unavailable" then
+            rp_failure_kind = rp_failure_kind or failure_kind
+            for _, nm in ipairs(names) do S.plugin_ref_failed[nm] = true end
+          end
+          return false
+        end
         rp_count = rp_count + 1
         -- Mark each injected plugin name as sent this turn so later round-
         -- trips within the same user turn don't re-inject the same content,
@@ -29876,6 +30770,25 @@ function Net.process_response_buckets(text)
         S.turn_only_stock_approved_refs = approved_stock_refs
       end
       S.approved_stock_fallback_refs = nil
+      if rp_failure_kind then
+        CTX.plugin_pack_show_notice(rp_failure_kind)
+        rp_err = nil
+        if #regular_names > 0
+            and not S.plugin_ref_generic_fallback_attempted then
+          local fallback_name = regular_names[1]
+          S.plugin_ref_generic_fallback_attempted = true
+          S.plugin_ref_generic_fallback_name = fallback_name
+          S._plugin_pack_fallback_hint = fallback_name
+          wants_fx_inspect = true
+          fx_inspect_silent = false
+          fx_inspect_names[#fx_inspect_names + 1] = fallback_name
+          Log.line("PLUGIN_PACK",
+            "curated lookup failed integrity; starting one generic inspection")
+        else
+          return Net._plugin_pack_context_failure(
+            rp_failure_kind, "plugin_ref_integrity_failure")
+        end
+      end
       if rp_err then Log.add_error(rp_err) end
       if rp_count > 0 then
         -- Co-pin plugin bundle + docs core (same rationale as the preempt
@@ -30128,6 +31041,32 @@ function Net.process_response_buckets(text)
     -- Phase 1 runs here (add temp track + plugin); phase 2 (read params +
     -- cleanup) runs inside finalize_context after a one-frame defer.
     if wants_fx_inspect then
+      if S.plugin_ref_generic_fallback_name then
+        local fallback_name = tostring(S.plugin_ref_generic_fallback_name)
+        if S._fx_inspect_tmp or S._deep_scan_started then
+          S._fx_params_pending_assemble = nil
+          return Net._plugin_pack_context_failure(
+            CTX._plugin_pack_error_kind or "integrity_mismatch",
+            "generic_fx_inspect_overlap")
+        end
+        local unique_names, seen_names = {}, {}
+        for _, inspect_name in ipairs(fx_inspect_names) do
+          local inspect_key = fx_inspect_state_key(inspect_name)
+          if inspect_key ~= "" and not seen_names[inspect_key] then
+            seen_names[inspect_key] = true
+            unique_names[#unique_names + 1] = inspect_name
+          end
+        end
+        fx_inspect_names = unique_names
+        if #fx_inspect_names ~= 1
+            or fx_inspect_state_key(fx_inspect_names[1])
+              ~= fx_inspect_state_key(fallback_name) then
+          S._fx_params_pending_assemble = nil
+          return Net._plugin_pack_context_failure(
+            CTX._plugin_pack_error_kind or "integrity_mismatch",
+            "generic_fx_inspect_target_conflict")
+        end
+      end
       -- Multi-plugin fx_inspect is NOT supported. fx_inspect_load picks the
       -- single best_id from installed_fx's combined output, silently
       -- dropping the rest. That bug let the model use one plugin's data
@@ -30218,6 +31157,9 @@ function Net.process_response_buckets(text)
           CTX.fx_inspect_load(inspect_load_names)
       end
       if err then
+        if fail_plugin_pack_fallback("generic_fx_inspect_load_failed") then
+          return true
+        end
         if fx_inspect_silent then
           -- Silent auto-cache trigger from fx_params: don't surface the
           -- inspect error to the model. fx_params still emits live values
@@ -30297,6 +31239,10 @@ function Net.process_response_buckets(text)
           cleanup_fx_inspect(true,
             "ReaAssist: fx_inspect (invalid track)")
           S._fx_inspect_tmp = nil
+          if fail_plugin_pack_fallback(
+              "generic_fx_inspect_track_invalidated") then
+            return
+          end
           if not fi.silent then
             history_content = history_content
               .. "FX INSPECT ERROR: temporary track was invalidated before params could be read.\n\n"
@@ -30318,6 +31264,9 @@ function Net.process_response_buckets(text)
           cleanup_fx_inspect(true,
             "ReaAssist: fx_inspect (scan error)")
           S._fx_inspect_tmp = nil
+          if fail_plugin_pack_fallback("generic_fx_inspect_scan_failed") then
+            return
+          end
           if not fi.silent then
             history_content = history_content
               .. "FX INSPECT ERROR: shallow scan failed unexpectedly.\n\n"
@@ -30380,6 +31329,10 @@ function Net.process_response_buckets(text)
                 S._fx_params_pending_assemble  = nil
                 return
               end
+              if fail_plugin_pack_fallback(
+                  "generic_fx_inspect_deep_scan_failed") then
+                return
+              end
               if fi.silent then
                 Log.line("FX_PARAMS",
                   "silent auto-inspect deep scan failed (continuing): "
@@ -30406,6 +31359,10 @@ function Net.process_response_buckets(text)
             S._fx_inspect_tmp    = nil
             S._deep_scan_started = false
             S._deep_scan_label   = nil
+            if fail_plugin_pack_fallback(
+                "generic_fx_inspect_deep_scan_start_failed") then
+              return
+            end
             if not fi.silent then
               history_content = history_content
                 .. "FX INSPECT ERROR: deep scan could not start (see debug log).\n\n"
@@ -30534,12 +31491,24 @@ function Net.process_response_buckets(text)
       end
       if S._context_reuse_hint and #S._context_reuse_hint > 0 then
         local tags_str = tbl_concat(S._context_reuse_hint, ", ")
+        local chain_reuse_note = ""
+        if tags_str:find("resolve:", 1, true)
+            and CTX and CTX.prompt_indicates_chain_context
+            and CTX.prompt_indicates_chain_context(S.pending_orig_prompt) then
+          chain_reuse_note = " Return the complete chain script in this reply. "
+            .. "Use every resolved preferred type in that list, create the "
+            .. "requested new track when applicable, add and configure each "
+            .. "pinned preferred plug-in, and immediately stop with a clear "
+            .. "error if any TrackFX_AddByName call returns less than zero. "
+            .. "Never return an empty Undo block or a partial chain."
+        end
         history_content = history_content
           .. "(NOTE: The reference/context data you requested ("
           .. tags_str
           .. ") is already present in PINNED REFERENCES above. "
           .. "USE IT NOW to generate the code. Do NOT emit another "
-          .. "<context_needed> tag for these tags.)\n\n"
+          .. "<context_needed> tag for these tags." .. chain_reuse_note
+          .. ")\n\n"
         S._context_reuse_hint = nil  -- one-shot
         reuse_hint_fired = true
       end
@@ -30558,6 +31527,19 @@ function Net.process_response_buckets(text)
           .. "now.)\n\n"
         S._unsupported_context_hint = nil
         reuse_hint_fired = true
+      end
+      if S._plugin_pack_fallback_hint then
+        history_content = history_content
+          .. "(INTERNAL CONTEXT NOTE: Specific bundled guidance for "
+          .. tostring(S._plugin_pack_fallback_hint)
+          .. " failed integrity verification. A one-time generic live "
+          .. "parameter inspection was used instead. Use the fx_inspect data "
+          .. "in PINNED REFERENCES. Do not request plugin_ref for this plug-in "
+          .. "again this turn. If the required data is missing, explain that "
+          .. "ReaAssist could not verify the plug-in reference and do not "
+          .. "guess.)\n\n"
+        S._plugin_pack_fallback_hint = nil
+        S.plugin_ref_generic_fallback_name = nil
       end
       if S._mixed_output_hint then
         history_content = history_content
@@ -30699,6 +31681,10 @@ function Net.process_response_buckets(text)
             fi.undo_open = false
           end
           S._fx_inspect_tmp = nil
+          if fail_plugin_pack_fallback(
+              "generic_fx_inspect_track_invalidated") then
+            return
+          end
           -- Honor the silent-inspect contract: when this inspect was an
           -- auto-trigger from fx_params (not user-requested), do not leak
           -- "FX INSPECT ERROR" prose into history_content (which becomes
@@ -30727,6 +31713,9 @@ function Net.process_response_buckets(text)
             fi.undo_open = false
           end
           S._fx_inspect_tmp = nil
+          if fail_plugin_pack_fallback("generic_fx_inspect_timeout") then
+            return
+          end
           if fi.silent then
             Log.line("FX_PARAMS",
               "silent auto-inspect timed out (continuing): "
@@ -31210,6 +32199,7 @@ function Net._handle_curl_exit_failure()
     -- responses (captive portals, proxy HTML) surface as a clear error instead
     -- of looping until the watchdog fires.
     S.curl_exited_clean = true
+    Net._clear_schannel_revocation_retry()
     os.remove(tmp.exit)
     os.remove(tmp.err)
     return false
@@ -31218,6 +32208,7 @@ function Net._handle_curl_exit_failure()
   os.remove(tmp.exit)
   local p_active = PROVIDERS[S.pending_provider_idx] or PROVIDERS.active()
   local prov_label = p_active.label
+  local stderr_text = Net._read_file_limited(tmp.err, 4096)
   local curl_errors = {
     [5]  = RA.t("network.curl.proxy", { provider = prov_label },
       "Can't reach the proxy configured for " .. prov_label .. ". "
@@ -31261,6 +32252,14 @@ function Net._handle_curl_exit_failure()
       "A network error occurred. Please check your internet "
         .. "connection and try again.")
   local debug = Net._curl_failure_debug(exit_code, detail)
+  local recovery = exit_code == 28
+    and not S.gemini_tier_pending and not S.key_test_pending
+    and Net._same_model_recovery(p_active, "request_timeout") or nil
+  if exit_code == 28 then
+    detail, debug.timeout_scope = Net._curl_timeout_message(p_active, debug,
+      stderr_text, recovery ~= nil, S.key_test_pending == true)
+    debug.user_message = detail
+  end
   S.send_time = nil
   Log.line("CURL", string.format("exit=%s (%s), provider=%s, model=%s",
     tostring(exit_code), tostring(debug.exit_meaning),
@@ -31329,11 +32328,28 @@ function Net._handle_curl_exit_failure()
       nil, nil, nil, Net._failed_request_extra("curl_exit", debug))
     return true
   end
-  if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
-    S.display_messages[S.pending_display_idx].request_status_text = "network error"
+  if Net._schedule_schannel_revocation_retry(exit_code, stderr_text,
+      detail, debug) then
+    S.send_time = nil
+    return true
   end
-  Log.add_error(detail, nil, nil, nil,
-    Net._failed_request_extra("curl_exit", debug))
+  if type(S.schannel_revocation_original_error) == "table"
+      and (Net._is_schannel_revocation_offline(exit_code, stderr_text)
+        or Net._curl_rejected_ssl_revoke_best_effort(stderr_text))
+      and Net._surface_schannel_revocation_original_error() then
+    return true
+  end
+  Net._clear_schannel_revocation_retry()
+  if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
+    S.display_messages[S.pending_display_idx].request_status_text =
+      exit_code == 28 and "timeout" or "network error"
+  end
+  local extra = Net._failed_request_extra("curl_exit", debug)
+  if recovery then
+    for key, value in pairs(recovery) do extra[key] = value end
+  end
+  Log.add_error(detail, nil, nil,
+    recovery and "request_timeout" or nil, extra)
   return true
 end
 
@@ -32202,6 +33218,7 @@ function Net.try_finish_curl()
   -- the post-parse error message can name the actual cause (length cap hit on
   -- reasoning tokens, content filter, refusal) instead of the generic fallback.
   local text, raw_tok_in, raw_tok_out, tok_in_read, tok_in_create
+  local visible_tok_out
   local empty_reason, refusal_text, reasoning_only_tokens
 
   if p.id == "anthropic" then
@@ -32423,11 +33440,12 @@ function Net.try_finish_curl()
     -- from an explicit context cache (billed at a discounted rate).
     local usage   = type(resp.usageMetadata) == "table" and resp.usageMetadata or {}
     raw_tok_in    = tonumber(usage.promptTokenCount)     or 0
-    raw_tok_out   = tonumber(usage.candidatesTokenCount) or 0
+    visible_tok_out = tonumber(usage.candidatesTokenCount) or 0
     tok_in_read   = tonumber(usage.cachedContentTokenCount) or 0
     tok_in_create = 0  -- Gemini has no per-turn cache-create token cost
     -- Gemini reports thinking tokens separately in thoughtsTokenCount.
     reasoning_only_tokens = tonumber(usage.thoughtsTokenCount) or 0
+    raw_tok_out = visible_tok_out + reasoning_only_tokens
   end
 
   -- Probe request metadata and usage capture.
@@ -32461,6 +33479,8 @@ function Net.try_finish_curl()
       cache_create = cache_create,
       uncached_in  = uncached_in,
       output       = tonumber(raw_tok_out) or 0,
+      visible_output = visible_tok_out,
+      reasoning_output = visible_tok_out ~= nil and reasoning_only_tokens or nil,
     })
   end
 
@@ -32471,7 +33491,9 @@ function Net.try_finish_curl()
     tok_in_read, tok_in_create)
   Net._record_display_usage(p, raw_tok_in, raw_tok_out,
     tok_in_read, tok_in_create,
-    (not text or text == "") and "response_empty" or "response")
+    (not text or text == "") and "response_empty" or "response",
+    visible_tok_out,
+    visible_tok_out ~= nil and reasoning_only_tokens or nil)
 
   -- Common post-parse: clean up text.
   if text then
@@ -32538,8 +33560,13 @@ function Net.try_finish_curl()
       S.thinking_override_idx = _retry_off_idx  -- provider-aware "off"
       local detail = ""
       if reasoning_only_tokens and reasoning_only_tokens > 0 then
+        local reported_visible = visible_tok_out
+        if reported_visible == nil then
+          reported_visible = math_max(0,
+            (tonumber(raw_tok_out) or 0) - reasoning_only_tokens)
+        end
         detail = " (" .. reasoning_only_tokens
-          .. " reasoning tokens, " .. (raw_tok_out or 0) .. " visible)"
+          .. " reasoning tokens, " .. reported_visible .. " visible)"
       end
       Log.line("LENGTH-RETRY",
         "empty response from length cap" .. detail
@@ -32557,6 +33584,7 @@ function Net.try_finish_curl()
         .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
       Net.fire_validator_retry({
         kind = "length",
+        count_as_validator = false,
         history_content = history_content,
         ctx_label = "length_retry",
         retry_failed_key = "retry.reason.after_empty_length_capped_reply",
@@ -32628,6 +33656,7 @@ function Net.try_finish_curl()
           .. "FIRST reply -- do NOT apologize, do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
         Net.fire_validator_retry({
+          count_as_validator = false,
           history_content = history_content,
           ctx_label = "empty_retry",
           retry_failed_key = "retry.reason.after_empty_response",
@@ -32726,6 +33755,7 @@ function Net.try_finish_curl()
       Net.fire_validator_retry({
         kind = "internal_output_leak",
         findings = internal_output_leaks,
+        omit_candidate_excerpt = true,
         log_tag = "INTERNAL-OUTPUT-LEAK-VALIDATOR",
         log_message = "discarded internal output marker(s): "
           .. tbl_concat(leak_labels, ", ") .. "; retrying user-invisibly",
@@ -32742,13 +33772,36 @@ function Net.try_finish_curl()
     Log.line("INTERNAL-OUTPUT-LEAK-VALIDATOR",
       "internal output still present after two repairs: "
       .. tbl_concat(leak_labels, ", ") .. "; response discarded")
+    local request_elapsed_s = S.request_start_time
+      and math.max(0, time_precise() - S.request_start_time) or nil
+    local validation_trace = Net._validation_trace_for_turn(
+      S.validator_retry_candidate_text)
     Log.add_error((RA and RA.t and RA.t(
       "validator.internal_output_leak_blocked", nil,
       "The model repeatedly returned internal ReaAssist processing details "
         .. "instead of a safe user-facing answer. ReaAssist discarded those "
         .. "replies and did not run any project changes. Please resend the "
         .. "request or try another model."))
-      or "The model repeatedly returned internal ReaAssist processing details instead of a safe user-facing answer. ReaAssist discarded those replies and did not run any project changes. Please resend the request or try another model.")
+      or "The model repeatedly returned internal ReaAssist processing details instead of a safe user-facing answer. ReaAssist discarded those replies and did not run any project changes. Please resend the request or try another model.",
+      nil, nil, nil, {
+        error_kind = "validator_blocked",
+        run_status = "blocked_validator",
+        validation_status = "blocked",
+        validation_block_kind = "internal_output_leak",
+        failed_request_latency_ms = request_elapsed_s
+          and math.floor(request_elapsed_s * 1000 + 0.5) or nil,
+        validation_trace = validation_trace,
+        error_debug = {
+          failure_kind = "validator_blocked",
+          source = "internal_output_leak_validator",
+          matched_condition = "internal_output_leak",
+          validation_block_kind = "internal_output_leak",
+          request_elapsed_s = request_elapsed_s,
+          request_elapsed_scope = "turn",
+          internal_output_repair_count =
+            S.internal_output_leak_validator_retries or 0,
+        },
+      })
     return
   end
 
@@ -33086,6 +34139,10 @@ function Net.try_finish_curl()
       early_typed_actions_present =
         early_typed_metrics and early_typed_metrics.present == true
     end
+    local clarified_action_request =
+      Net._clarified_action_request_context(S.pending_orig_prompt)
+    local no_code_action_request = clarified_action_request
+      or S.pending_orig_prompt
     local no_code_action_prompt = not lua_code
         and not jsfx_code
         and not early_typed_actions_present
@@ -33093,7 +34150,7 @@ function Net.try_finish_curl()
         and not S.no_code_action_retry_used
         and (not Code.prompt_is_question_or_readonly
           or not Code.prompt_is_question_or_readonly(S.pending_orig_prompt))
-        and Code.prompt_likely_needs_lua_action(S.pending_orig_prompt)
+        and Code.prompt_likely_needs_lua_action(no_code_action_request)
     local no_code_provider = PROVIDERS[S.pending_provider_idx]
       or PROVIDERS.active() or {}
     local no_code_model = MODELS[S.pending_model_idx or prefs.model_idx]
@@ -33101,21 +34158,21 @@ function Net.try_finish_curl()
     local force_no_code_action_retry =
       (Code.prompt_requests_sidechain_ducking
         and Code.prompt_requests_sidechain_ducking(S.pending_orig_prompt)
-        and Code.model_validator_enabled(no_code_provider.id,
-          no_code_model.id, "sidechain_ducking_requires_send"))
+        and (Code.model_validator_enabled(no_code_provider.id,
+          no_code_model.id, "sidechain_ducking_requires_send")
+          or Code.model_validator_enabled(no_code_provider.id,
+            no_code_model.id,
+            "sidechain_ducking_requires_functional_setup")))
       or (Code.prompt_requests_podcast_bus_all_sources
         and Code.prompt_requests_podcast_bus_all_sources(S.pending_orig_prompt)
         and Code.model_validator_enabled(no_code_provider.id,
           no_code_model.id, "podcast_bus_routes_all_sources"))
-    local action_requires_lua_retry =
-      Code.model_validator_enabled(no_code_provider.id,
-        no_code_model.id, "action_requires_lua")
     local no_code_reply_is_clarification =
       Code.no_code_reply_is_clarification(text)
     if no_code_action_prompt
         and no_code_reply_is_clarification
         and not force_no_code_action_retry
-        and not action_requires_lua_retry then
+        and not clarified_action_request then
       Log.line("NO-CODE-ACTION-RETRY",
         "action prompt returned clarification; not retrying")
     elseif no_code_action_prompt then
@@ -33130,7 +34187,10 @@ function Net.try_finish_curl()
         .. "is your FIRST reply -- do NOT apologize, do NOT mention a "
         .. "retry.)\n\nPrevious reply:\n"
         .. text
-        .. "\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        .. "\n\nUSER REQUEST:\n" .. (no_code_action_request or "")
+        .. (clarified_action_request
+          and ("\n\nUSER CLARIFICATION ANSWER:\n"
+            .. (S.pending_orig_prompt or "")) or "")
       Net.fire_validator_retry({
         kind = "empty",
         log_tag = "NO-CODE-ACTION-RETRY",
@@ -33146,6 +34206,12 @@ function Net.try_finish_curl()
   end
 
   local validator_gate_hit = false
+  local relaxed_plugin_lua = lua_code and (
+    (type(CTX) == "table"
+      and type(CTX.prompt_has_plugin_pack_signal) == "function"
+      and CTX.prompt_has_plugin_pack_signal(S.pending_orig_prompt or ""))
+    or lua_code:find("reaper%.TrackFX_") ~= nil
+    or lua_code:find("reaper%.TakeFX_") ~= nil)
 
   -- Melodyne uses a protected manual handoff across VST3 and Audio Unit
   -- identities. If a model still emits mutation code, retry once for a prose
@@ -33437,6 +34503,16 @@ function Net.try_finish_curl()
     local relevance = Code.find_action_request_relevance_violations(
       lua_code, S.pending_orig_prompt, S.pending_snapshot,
       S.plugin_profiles_used)
+    if relaxed_plugin_lua and relevance then
+      local narrow = {}
+      for _, finding in ipairs(relevance) do
+        if finding.kind == "high_impact_action"
+            or finding.kind == "missing_requested_fx_param_write" then
+          narrow[#narrow + 1] = finding
+        end
+      end
+      relevance = #narrow > 0 and narrow or nil
+    end
     if relevance and #relevance > 0 then
       local details = {}
       for _, finding in ipairs(relevance) do
@@ -33457,23 +34533,48 @@ function Net.try_finish_curl()
         Log.line("ACTION-RELEVANCE-RETRY",
           "generated action did not match request/session; retrying\n"
             .. detail_text)
-        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous "
-          .. "script did not stay within the user's requested action. "
-          .. "Regenerate the FULL script and perform only the requested "
-          .. "task. Do not introduce plugins the request did not ask for, "
-          .. "do not target literal track names absent from both the request "
-          .. "and SESSION CONTEXT, and do not run Save, Record, Undo, Redo, "
-          .. "transport, deletion, or global-toggle actions unless the user "
-          .. "explicitly requested that exact effect. Item removal action "
-          .. "40006 deletes selected media items; it is not track deletion. "
-          .. "Preserve every requested rename, color, pan, routing, MIDI, "
-          .. "JSFX, marker, region, timing, plugin, and parameter detail. "
-          .. "Respond as if this is your FIRST reply -- do NOT apologize "
-          .. "and do NOT mention a retry.\n\nDetected mismatch(es):\n"
-          .. detail_text .. "\n\nPrevious Lua to fix:\n"
-          .. lua_code .. "\n\nUSER REQUEST:\n"
-          .. (S.pending_orig_prompt or "")
+        local only_missing_fx_setting = true
+        for _, finding in ipairs(relevance) do
+          if finding.kind ~= "missing_requested_fx_param_write" then
+            only_missing_fx_setting = false
+            break
+          end
+        end
+        local history_content
+        if only_missing_fx_setting then
+          history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
+            .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous script "
+            .. "added the requested plug-in without applying every requested "
+            .. "value. Regenerate the FULL script, keep the requested "
+            .. "plug-in target, and apply the missing value to the correct "
+            .. "host or plug-in target. Resolve the intended control safely. "
+            .. "If the request does "
+            .. "not identify the control clearly enough, ask one concise "
+            .. "clarifying question instead of guessing. Preserve every "
+            .. "other requested action. Respond as if this is your FIRST "
+            .. "reply -- do NOT apologize and do NOT mention a retry.\n\n"
+            .. "Detected omission(s):\n" .. detail_text
+            .. "\n\nPrevious Lua to fix:\n" .. lua_code
+            .. "\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+        else
+          history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+            .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous "
+            .. "script did not stay within the user's requested action. "
+            .. "Regenerate the FULL script and perform only the requested "
+            .. "task. Do not introduce plugins the request did not ask for, "
+            .. "do not target literal track names absent from both the request "
+            .. "and SESSION CONTEXT, and do not run Save, Record, Undo, Redo, "
+            .. "transport, deletion, or global-toggle actions unless the user "
+            .. "explicitly requested that exact effect. Item removal action "
+            .. "40006 deletes selected media items; it is not track deletion. "
+            .. "Preserve every requested rename, color, pan, routing, MIDI, "
+            .. "JSFX, marker, region, timing, plugin, and parameter detail. "
+            .. "Respond as if this is your FIRST reply -- do NOT apologize "
+            .. "and do NOT mention a retry.\n\nDetected mismatch(es):\n"
+            .. detail_text .. "\n\nPrevious Lua to fix:\n"
+            .. lua_code .. "\n\nUSER REQUEST:\n"
+            .. (S.pending_orig_prompt or "")
+        end
         Net.fire_validator_retry({
           kind = "action_relevance",
           findings = relevance,
@@ -33990,21 +35091,6 @@ function Net.try_finish_curl()
         .. " to append requested tracks in forward order")
     end
 
-    local repaired_proq_lua, did_proq_repair, repaired_proq_findings =
-      Code.repair_proq4_literal_mapping_mismatches(lua_code)
-    if did_proq_repair then
-      lua_code = repaired_proq_lua
-      lua_artifact_info = nil
-      local repaired_lines = {}
-      for _, finding in ipairs(repaired_proq_findings or {}) do
-        repaired_lines[#repaired_lines + 1] = tostring(finding.line or "?")
-      end
-      Log.line("PROQ4-LITERAL-REPAIR",
-        "replaced mismatched normalized literal(s) with exact documented "
-          .. "expression(s) on line(s) "
-          .. tbl_concat(repaired_lines, ", "))
-    end
-
     local repaired_folder_lua, did_folder_repair, bad_folder_boundary =
       Code.repair_folder_child_boundary_misuse(lua_code, S.pending_orig_prompt)
     if did_folder_repair then
@@ -34400,15 +35486,23 @@ function Net.try_finish_curl()
       or PROVIDERS.active() or {}
     local sidechain_model = MODELS[S.pending_model_idx or prefs.model_idx]
       or MODELS[prefs.model_idx] or MODELS[1] or {}
-    if Code.model_validator_enabled(sidechain_provider.id,
+    local sidechain_functional_required = Code.model_validator_enabled(
+      sidechain_provider.id, sidechain_model.id,
+      "sidechain_ducking_requires_functional_setup")
+    local sidechain_route_required = sidechain_functional_required
+      or Code.model_validator_enabled(sidechain_provider.id,
         sidechain_model.id, "sidechain_ducking_requires_send")
-        and not Code.lua_satisfies_sidechain_ducking_send(
-          lua_code, S.pending_orig_prompt) then
+    local sidechain_route_ok = Code.lua_satisfies_sidechain_ducking_send(
+      lua_code, S.pending_orig_prompt, sidechain_functional_required)
+    if sidechain_route_required
+        and not sidechain_route_ok then
       local sidechain_req = Code.extract_sidechain_ducking_send_request
         and Code.extract_sidechain_ducking_send_request(
           S.pending_orig_prompt) or nil
       if not S.sidechain_send_retry_used then
         S.sidechain_send_retry_used = true
+        S.sidechain_send_validator_retries =
+          (S.sidechain_send_validator_retries or 0) + 1
         local sidechain_sources = sidechain_req
           and type(sidechain_req.sources) == "table"
           and #sidechain_req.sources > 0
@@ -34416,18 +35510,21 @@ function Net.try_finish_curl()
           or (sidechain_req and sidechain_req.source or nil)
         Log.line("SIDECHAIN-SEND-RETRY",
           sidechain_req
-          and ("sidechain requested but no exact "
+          and ("sidechain requested but no valid "
             .. tostring(sidechain_sources) .. "-to-" .. sidechain_req.dest
-            .. " CreateTrackSend route found")
-          or "kick/bass ducking requested but no Kick-to-Bass CreateTrackSend found")
+            .. (sidechain_functional_required
+              and " functional route and detector setup found"
+              or " CreateTrackSend route found"))
+          or (sidechain_functional_required
+            and "kick/bass ducking requested but no functional Kick-to-Bass sidechain setup found"
+            or "kick/bass ducking requested but no Kick-to-Bass CreateTrackSend found"))
         local retry_route = sidechain_req
           and ("The user explicitly asked for direct sidechain send routing "
             .. "from the track(s) named `" .. tostring(sidechain_sources)
             .. "` to the track named `" .. sidechain_req.dest .. "`. "
             .. "Regenerate the full script with exactly ONE direct "
             .. "`reaper.CreateTrackSend(source_track, destination_track)` "
-            .. "per named source for that sidechain route, set each send's destination "
-            .. "channels to 3/4 with `I_DSTCHAN = 2`, and do NOT route "
+            .. "per named source for that sidechain route, and do NOT route "
             .. "through any other sidechain/helper track or create extra sends. "
             .. "If the prompt also asks to create a track named Sidechain "
             .. "Comp, create/name that track only; do not send the destination "
@@ -34435,12 +35532,18 @@ function Net.try_finish_curl()
             .. "destination track's master send unless the user explicitly "
             .. "says that Sidechain Comp is the bus.")
           or ("The user asked for kick/bass ducking. Regenerate the full "
-            .. "script. Create Kick and Bass tracks, set Bass to four "
-            .. "channels if needed, add the compressor to Bass, and create "
+            .. "script. Create Kick and Bass tracks, add the compressor to "
+            .. "Bass, and create "
             .. "a send with `reaper.CreateTrackSend(kick_track, bass_track)` "
-            .. "feeding the sidechain channels. Store that send index and "
-            .. "set `I_DSTCHAN` to `2` on the Kick-to-Bass send so it feeds "
-            .. "destination channels 3/4.")
+            .. "for the requested route.")
+        if sidechain_functional_required then
+          retry_route = retry_route
+            .. " Before creating the send, read the destination track's "
+            .. "`I_NCHAN` value and set it to `4` when it is lower. Store "
+            .. "the send index returned by `reaper.CreateTrackSend(...)`, "
+            .. "then set `I_DSTCHAN` to `2` on that exact send so it feeds "
+            .. "destination channels 3/4."
+        end
         local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
           .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous Lua "
           .. "did not create the required sidechain routing. "
@@ -34461,16 +35564,19 @@ function Net.try_finish_curl()
       end
       validator_gate_hit = true
       Log.line("SIDECHAIN-SEND-VALIDATOR",
-        sidechain_req
-        and "sidechain still missing exact direct source-to-destination send after retry; auto-run blocked"
-        or "kick/bass ducking still missing CreateTrackSend after retry; auto-run blocked")
-      Log.add_error(sidechain_req
-        and ("The user asked for a sidechain send from "
-          .. sidechain_req.source .. " to " .. sidechain_req.dest
-          .. ", but the script still does not create exactly one direct "
-          .. "reaper.CreateTrackSend(...) route between those tracks. "
-          .. "Auto-run is blocked; review the sidechain routing before running manually.")
-        or "The user asked for kick/bass ducking, but the script still does not create a Kick-to-Bass send with reaper.CreateTrackSend(...). Auto-run is blocked; review the sidechain routing before running manually.")
+        "sidechain setup still failed after retry: route="
+          .. tostring(sidechain_route_ok) .. "; auto-run blocked")
+      local failed_parts_text = sidechain_functional_required
+        and "the direct send, destination track channel count, or channels 3/4 assignment"
+        or "the direct source-to-destination send"
+      Log.add_error((RA and RA.t and RA.t(
+        "validator.sidechain_setup_blocked",
+        { failed_parts = failed_parts_text },
+        "The generated script still fails " .. failed_parts_text .. ". Auto-run is "
+          .. "blocked; review the sidechain setup before running manually."))
+        or ("The generated script still fails "
+          .. failed_parts_text
+          .. ". Auto-run is blocked; review the sidechain setup before running manually."))
     end
   end
 
@@ -34748,6 +35854,7 @@ function Net.try_finish_curl()
           .. "all reference data is already pinned. Respond as if this is "
           .. "your FIRST reply -- do NOT apologize, do NOT mention a "
           .. "retry.)\n\n"
+          .. (S.pending_output_note or "")
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
         Net.fire_validator_retry({
           kind = "parse",
@@ -34766,12 +35873,6 @@ function Net.try_finish_curl()
         .. tostring(lua_artifact_info.kind) .. ": "
         .. tostring(lua_artifact_info.reason))
     end
-  end
-
-  if lua_code and type(Code.register_plugin_profile_code) == "function"
-     and type(S.plugin_profiles_used) == "table"
-     and #S.plugin_profiles_used > 0 then
-    Code.register_plugin_profile_code(lua_code, S.plugin_profiles_used)
   end
 
   if lua_code and type(Code.scan_forbidden_sandbox_globals) == "function" then
@@ -35097,9 +36198,8 @@ function Net.try_finish_curl()
           or "single ```reaassist-actions fenced JSON object"
         local action_kind_hint = ""
         if missing_action_family then
-          action_kind_hint = " Do not represent requested FX, parameter "
-            .. "changes, or sends as track.ensure actions; use fx.add_stock, "
-            .. "fx.set_param, and send.create."
+          action_kind_hint = " Use the supported track, folder, and send "
+            .. "operations required by the original request."
         end
         local retry_instruction = retry_from_scratch
           and "Do not copy, expand, or repair the previous bad plan. "
@@ -35350,6 +36450,7 @@ function Net.try_finish_curl()
       -- no display_message append -- the next response produces the real
       -- assistant reply.
       Net.fire_validator_retry({
+        count_as_validator = false,
         history_content = history_content,
         ctx_label = "docs",
         retry_failed_key = "retry.reason.with_api_reference",
@@ -36964,6 +38065,72 @@ function Net.try_finish_curl()
     end
   end
 
+  -- ENVELOPE VISIBILITY CHUNK VALIDATOR: preserve every field after the first
+  -- VIS flag. A whole-line rewrite can rely on undocumented host normalization
+  -- and can fail without evidence when SetEnvelopeStateChunk is unchecked.
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+      and not arity_gate_hit then
+    local vis_bad = Code.find_destructive_envelope_vis_rewrites
+      and Code.find_destructive_envelope_vis_rewrites(lua_code) or nil
+    if vis_bad and #vis_bad > 0 then
+      if (S.envelope_vis_validator_retries or 0) < 1 then
+        S.envelope_vis_validator_retries =
+          (S.envelope_vis_validator_retries or 0) + 1
+        Log.line("ENVELOPE-VIS-VALIDATOR",
+          "destructive envelope VIS record rewrite; retrying with preserved fields and readback")
+        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
+          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous Lua "
+          .. "rewrote an entire envelope state-chunk VIS record as a "
+          .. "one-field line. Regenerate the full script. Change only the "
+          .. "first VIS flag and preserve every remaining field byte for "
+          .. "byte. Require SetEnvelopeStateChunk to return true, reread the "
+          .. "envelope chunk, verify that the first VIS flag now equals the "
+          .. "requested state, then call TrackList_AdjustWindows(false) and "
+          .. "UpdateArrange(). If any write or readback check fails, report "
+          .. "the failure and stop. Respond as if this is your FIRST reply "
+          .. "and do not mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
+          .. lua_code .. "\n```\n\nUSER REQUEST:\n"
+          .. (S.pending_orig_prompt or "")
+        Net.fire_validator_retry({
+          kind = "envelope_visibility",
+          findings = vis_bad,
+          history_content = history_content,
+          ctx_label = "envelope_visibility_retry",
+          failure_message = "Automatic repair after an unsafe envelope "
+            .. "visibility rewrite did not go through. Please resend the last message.",
+        })
+        return
+      end
+      validator_gate_hit = true
+      Log.line("ENVELOPE-VIS-VALIDATOR",
+        "destructive envelope VIS record rewrite persisted after retry; auto-run blocked")
+      local request_elapsed_s = S.request_start_time
+        and math.max(0, time_precise() - S.request_start_time) or nil
+      local validation_trace = Net._validation_trace_for_turn(
+        S.validator_retry_candidate_text)
+      Log.add_error("The script still rewrites a complete envelope VIS record "
+        .. "without preserving its remaining fields or verifying the write. "
+        .. "ReaAssist did not run it. Preserve the existing VIS fields, change "
+        .. "only the first flag, and verify SetEnvelopeStateChunk plus readback "
+        .. "before running manually.", nil, nil, nil, {
+          error_kind = "validator_blocked",
+          run_status = "blocked_validator",
+          validation_status = "blocked",
+          validation_block_kind = "envelope_visibility",
+          failed_request_latency_ms = request_elapsed_s
+            and math.floor(request_elapsed_s * 1000 + 0.5) or nil,
+          validation_trace = validation_trace,
+          error_debug = {
+            failure_kind = "validator_blocked",
+            source = "envelope_visibility_validator",
+            validation_block_kind = "envelope_visibility",
+            request_elapsed_s = request_elapsed_s,
+            retry_count = S.envelope_vis_validator_retries or 0,
+          },
+        })
+    end
+  end
+
   -- LITERAL NAME WORD REMOVAL VALIDATOR: a request to remove one plain word
   -- must not delete the same letters inside a larger name. Require token
   -- boundaries, delimiter cleanup, and an empty-result guard.
@@ -37343,82 +38510,6 @@ function Net.try_finish_curl()
     end
   end
 
-  -- STOCK-FX VALIDATOR: When the user explicitly names a stock Cockos plugin
-  -- (for example ReaEQ or ReaComp), generated code must not substitute a
-  -- another stock plugin or a curated third-party/JSFX alternative. This is
-  -- intentionally narrow: it only fires on exact stock-plugin names in the
-  -- user request and obvious AddByName substitutions.
-  local stockfx_gate_hit = false
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit
-     and not timecode_workflow_gate_hit then
-    local stockfx_bad = Code.find_stock_fx_substitutions(
-      lua_code, S.pending_orig_prompt or "")
-    if stockfx_bad and #stockfx_bad > 0 then
-      if (S.stockfx_validator_retries or 0) < 1 then
-        S.stockfx_validator_retries =
-          (S.stockfx_validator_retries or 0) + 1
-        local lines = {}
-        for _, e in ipairs(stockfx_bad) do
-          lines[#lines + 1] = "  - line " .. tostring(e.line)
-            .. ": " .. tostring(e.fn) .. " added `"
-            .. tostring(e.substitute) .. "` instead of requested stock `"
-            .. tostring(e.requested) .. "`"
-        end
-        Log.line("STOCKFX-VALIDATOR",
-          "stock plugin substitution(s) (" .. #stockfx_bad
-          .. "); retrying with hint (user-invisible)")
-        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
-          .. "ANY OF THIS IN YOUR VISIBLE REPLY: The user explicitly requested "
-          .. "stock Cockos plugin(s), but your previous reply substituted "
-          .. "a different plugin:\n"
-          .. tbl_concat(lines, "\n") .. "\n\n"
-          .. "Exact plugin names in the user request are hard requirements. "
-          .. "If the user says ReaEQ, use `reaper.TrackFX_AddByName(tr, "
-          .. "\"ReaEQ\", false, -1)` or the equivalent stock Cockos ReaEQ "
-          .. "identifier. If the user says ReaComp, ReaDelay, ReaVerbate, "
-          .. "ReaGate, or ReaLimit, use that exact stock Cockos plugin name. "
-          .. "Do NOT switch to another stock plugin, and do NOT substitute "
-          .. "FabFilter Pro-Q/Pro-C/Pro-G/Pro-L/Pro-R, Timeless, ReEQ, or "
-          .. "other alternatives unless the user explicitly asks for those "
-          .. "plugins.\n\n"
-          .. "Regenerate the FULL script with the requested stock plugins, "
-          .. "preserving the rest of the requested routing and parameter work. "
-          .. "Respond as if this is your FIRST reply -- do NOT apologize, do "
-          .. "NOT mention a retry.)\n\n"
-          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        Net.fire_validator_retry({
-          kind = "stockfx",
-          history_content = history_content,
-          ctx_label = "stockfx_retry",
-          retry_failed_key = "retry.reason.for_stock_plugin_substitution",
-          retry_failed_label = "for stock plugin substitution",
-          failure_message = "Auto-retry for stock plugin substitution did not go through. Please resend the last message.",
-        })
-        return
-      end
-      stockfx_gate_hit = true
-      Log.line("STOCKFX-VALIDATOR",
-        "stock plugin substitution persists after retry; auto-run blocked")
-      local user_lines = {}
-      for _, e in ipairs(stockfx_bad) do
-        user_lines[#user_lines + 1] = tostring(e.requested)
-          .. " -> " .. tostring(e.substitute)
-      end
-      Log.add_error((RA and RA.t and RA.t(
-        "validator.stock_fx_substitution_blocked",
-        { plugins = tbl_concat(user_lines, "; ") },
-        "The model substituted third-party or JSFX plugin(s) for "
-          .. "explicitly requested stock Cockos plugin(s), even after a retry: "
-          .. tbl_concat(user_lines, "; ")
-          .. ". Auto-run is blocked; review and edit the code before clicking "
-          .. "Run manually."))
-        or ("The model substituted third-party or JSFX plugin(s) for explicitly requested stock Cockos plugin(s), even after a retry: "
-          .. tbl_concat(user_lines, "; ")
-          .. ". Auto-run is blocked; review and edit the code before clicking Run manually."))
-    end
-  end
-
   -- TIMECODE-FX VALIDATOR: SMPTE/LTC/MTC generation is a native REAPER
   -- action/item workflow, not an FX plugin. If the model tries to load a
   -- timecode-looking TrackFX/TakeFX for a generator prompt, retry with native
@@ -37426,7 +38517,7 @@ function Net.try_finish_curl()
   local timecodefx_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit
-     and not timecode_workflow_gate_hit and not stockfx_gate_hit then
+     and not timecode_workflow_gate_hit then
     local timecodefx_bad = Code.find_timecode_generator_fx_misuse(
       lua_code, S.pending_orig_prompt or "")
     if timecodefx_bad and #timecodefx_bad > 0 then
@@ -37502,76 +38593,6 @@ function Net.try_finish_curl()
     end
   end
 
-  -- FX-IDENT VALIDATOR: Keep preferred-plugin identifiers exact, and catch
-  -- punctuation drift when a generated prefix-shaped identifier has one unique
-  -- installed-FX match. Do not guess when no installed match is unique.
-  local fxident_gate_hit = false
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit
-     and not timecode_workflow_gate_hit
-     and not stockfx_gate_hit and not timecodefx_gate_hit then
-    local fxident_bad = Code.find_preferred_fx_identifier_drift(lua_code) or {}
-    local installed_fxident_bad = Code.find_installed_fx_identifier_drift
-      and Code.find_installed_fx_identifier_drift(lua_code) or nil
-    for _, finding in ipairs(installed_fxident_bad or {}) do
-      fxident_bad[#fxident_bad + 1] = finding
-    end
-    if fxident_bad and #fxident_bad > 0 then
-      if (S.fxident_validator_retries or 0) < 1 then
-        S.fxident_validator_retries =
-          (S.fxident_validator_retries or 0) + 1
-        local lines = {}
-        for _, e in ipairs(fxident_bad) do
-          lines[#lines + 1] = "  - line " .. tostring(e.line)
-            .. ": " .. tostring(e.fn) .. " used `" .. tostring(e.plugin)
-            .. "`; use exact `" .. tostring(e.exact) .. "`"
-        end
-        Log.line("FX-IDENT-VALIDATOR",
-          "non-exact AddByName identifier(s) (" .. #fxident_bad
-          .. "); retrying with exact identifiers (user-invisible)")
-        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply "
-          .. "called TrackFX_AddByName / TakeFX_AddByName with plugin names "
-          .. "that do not match the exact installed identifiers below. "
-          .. "These names can fail on this install. Replace ONLY these plugin "
-          .. "identifier strings with the exact identifiers below; preserve "
-          .. "all track names, helper definitions, parameter values, routing, "
-          .. "and ordering:\n"
-          .. tbl_concat(lines, "\n") .. "\n\n"
-          .. "Regenerate the FULL script. Respond as if this is your FIRST "
-          .. "reply -- do NOT apologize, do NOT mention a retry.)\n\n"
-          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        Net.fire_validator_retry({
-          kind = "fxident",
-          history_content = history_content,
-          ctx_label = "fxident_retry",
-          retry_failed_key = "retry.reason.for_exact_fx_identifier_repair",
-          retry_failed_label = "for exact FX identifier repair",
-          failure_message = "Auto-retry for exact FX identifier repair did not go through. Please resend the last message.",
-        })
-        return
-      end
-      fxident_gate_hit = true
-      Log.line("FX-IDENT-VALIDATOR",
-        "non-exact AddByName identifier(s) persist after retry; auto-run blocked")
-      local user_lines = {}
-      for _, e in ipairs(fxident_bad) do
-        user_lines[#user_lines + 1] = tostring(e.plugin)
-          .. " -> " .. tostring(e.exact)
-      end
-      Log.add_error((RA and RA.t and RA.t(
-        "validator.fx_identifier_drift_blocked",
-        { plugins = tbl_concat(user_lines, "; ") },
-        "The model used plugin identifier(s) that do not match the exact "
-          .. "installed identifiers, even after a retry: "
-          .. tbl_concat(user_lines, "; ")
-          .. ". Auto-run is blocked; review and edit the code before clicking "
-          .. "Run manually."))
-        or ("The model used plugin identifier(s) that do not match the exact installed identifiers, even after a retry: "
-          .. tbl_concat(user_lines, "; ")
-          .. ". Auto-run is blocked; review and edit the code before clicking Run manually."))
-    end
-  end
 
   -- FX-RECFX VALIDATOR: TrackFX_AddByName's third argument is recFX
   -- (input/record FX), not "is instrument". Lower-tier models sometimes pass
@@ -37580,9 +38601,7 @@ function Net.try_finish_curl()
   local fxrecfx_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit
-     and not stockfx_gate_hit and not timecode_workflow_gate_hit
-     and not timecodefx_gate_hit
-     and not fxident_gate_hit then
+     and not timecode_workflow_gate_hit and not timecodefx_gate_hit then
     local recfx_bad = Code.find_trackfx_addbyname_recfx_misuse
       and Code.find_trackfx_addbyname_recfx_misuse(lua_code,
         S.pending_orig_prompt)
@@ -37670,9 +38689,7 @@ function Net.try_finish_curl()
   local fxcheck_gate_hit = false
   if lua_code and not docs_gate_hit and not validator_gate_hit
      and not arity_gate_hit and not sendidx_gate_hit
-     and not stockfx_gate_hit and not timecode_workflow_gate_hit
-     and not timecodefx_gate_hit
-     and not fxident_gate_hit then
+     and not timecode_workflow_gate_hit and not timecodefx_gate_hit then
     local unchecked = Code.find_unchecked_addbyname_results(lua_code)
     if unchecked and #unchecked > 0 then
       if (S.fxcheck_validator_retries or 0) < 1 then
@@ -37727,16 +38744,21 @@ function Net.try_finish_curl()
           .. "\"ReaAssist\", 0)\n"
           .. "    return\n"
           .. "  end\n\n"
-          .. "Finish every AddByName failure check before opening a manual "
-          .. "Undo_BeginBlock. If later state changes need an undo block, "
-          .. "begin it only after these checks; once begun, every exit path "
-          .. "must reach Undo_EndBlock.\n\n"
+          .. "Begin one Undo_BeginBlock before the first project mutation, "
+          .. "including TrackFX_AddByName. Keep each AddByName call and its "
+          .. "immediate failure check inside that block. On failure, reach "
+          .. "Undo_EndBlock before showing the message and returning.\n\n"
+          .. "Keep the complete action synchronous. Do not use "
+          .. "`reaper.defer`. Perform every TrackFX_SetParam* or "
+          .. "TakeFX_SetParam* write before `PreventUIRefresh(-1)` and "
+          .. "`Undo_EndBlock`.\n\n"
           .. "Do NOT use `if fx >= 0 then ... end` with no `else` -- that "
           .. "is the silent-skip anti-pattern this validator is catching. "
           .. "Either fail explicitly with ShowMessageBox + return on `< 0`, "
           .. "or track the failure in an errors list and report it at the "
           .. "end. Respond as if this is your FIRST reply -- do NOT "
           .. "apologize, do NOT mention a retry.)\n\n"
+          .. (S.pending_output_note or "")
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
         Net.fire_validator_retry({
           kind = "fxcheck",
@@ -37770,905 +38792,7 @@ function Net.try_finish_curl()
     end
   end
 
-  -- FX-GETBYNAME VALIDATOR: After AddByName result checks pass, scan for
-  -- dependent TrackFX_GetByName / TakeFX_GetByName results that silently skip
-  -- required parameter work when the FX is missing. This is intentionally
-  -- narrower than the AddByName check: GetByName returning -1 is legitimate
-  -- in upsert flows, but a success-only guard around parameter writes
-  -- (`if fx >= 0 then ... end`) with no failure path leaves the user with a
-  -- script that reports OK while changing nothing.
-  local getbyname_gate_hit = false
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit
-     and not stockfx_gate_hit and not timecode_workflow_gate_hit
-     and not timecodefx_gate_hit and not fxident_gate_hit
-     and not fxcheck_gate_hit then
-    local existing_add_bad =
-      Code.find_existing_fx_add_fallback_violations
-      and Code.find_existing_fx_add_fallback_violations(
-        S.pending_orig_prompt or "", lua_code, S.plugin_profiles_used)
-      or nil
-    if existing_add_bad and #existing_add_bad > 0 then
-      local existing_retry_count =
-        S.existing_fx_add_validator_retries or 0
-      if existing_retry_count < 2 then
-        S.existing_fx_add_validator_retries = existing_retry_count + 1
-        local lines = {}
-        for _, e in ipairs(existing_add_bad) do
-          if e.lookup_line then
-            lines[#lines+1] = "  - " .. tostring(e.id)
-              .. " (looked up near line " .. tostring(e.lookup_line)
-              .. ", then added if missing near line " .. tostring(e.line) .. ")"
-          else
-            lines[#lines+1] = "  - " .. tostring(e.id)
-              .. " (validated existing profile, then added a new instance "
-              .. "near line " .. tostring(e.line) .. ")"
-          end
-        end
-        Log.line("FX-EXISTING-ADD-VALIDATOR",
-          "explicit existing-effect edit added the same FX if missing; "
-            .. (existing_retry_count > 0
-              and "retrying once more with combined strict scope"
-              or "retrying with strict existing-instance scope"))
-        local repeated_note = existing_retry_count > 0
-          and ("This is the final automatic repair for this finding. "
-            .. "Discard the latest draft completely because it drifted from "
-            .. "the exact user request and dropped earlier safety repairs. "
-            .. "Re-read the USER REQUEST below. Preserve its exact target, "
-            .. "parameter names, values, and unchanged-setting limits. Do "
-            .. "not copy any different musical recipe, parameter value, or "
-            .. "track target from the discarded draft. Preserve every "
-            .. "persistent safety requirement appended below.\n\n")
-          or ""
-        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
-          .. "ANY OF THIS IN YOUR VISIBLE REPLY: The user explicitly asked "
-          .. "to modify an existing effect, but your previous script used "
-          .. "AddByName for that same effect. That can conceal a targeting "
-          .. "mistake or create an unintended duplicate.\n\nAffected "
-          .. "effect(s):\n"
-          .. tbl_concat(lines, "\n") .. "\n\nRegenerate the FULL script. "
-          .. "For each affected existing effect, keep GetByName, then use "
-          .. "`if fx < 0 then` to show a clear missing-effect message and "
-          .. "`return` before any parameter work. Do NOT call TrackFX_AddByName "
-          .. "or TakeFX_AddByName for that same effect. A separately requested "
-          .. "different effect may still be added. Respond as if this is your "
-          .. "FIRST reply -- do NOT apologize or mention a retry.\n\n"
-          .. repeated_note .. ")\n\n"
-          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        Net.fire_validator_retry({
-          kind = "existing_fx_add",
-          history_content = history_content,
-          ctx_label = "existing_fx_add_retry",
-          retry_failed_key =
-            "retry.reason.for_existing_fx_add_fallback",
-          retry_failed_label = "for existing-effect add fallback",
-          failure_message =
-            "Auto-retry for strict existing-effect scope did not go through. Please resend the last message.",
-        })
-        return
-      end
-      getbyname_gate_hit = true
-      Log.line("FX-EXISTING-ADD-VALIDATOR",
-        "same-effect AddByName fallback persisted after retry; auto-run blocked")
-      local user_lines = {}
-      for _, e in ipairs(existing_add_bad) do
-        user_lines[#user_lines+1] = tostring(e.id)
-          .. " (line ~" .. tostring(e.line) .. ")"
-      end
-      Log.add_error((RA and RA.t and RA.t(
-        "validator.existing_fx_replacement_blocked",
-        { vars = tbl_concat(user_lines, ", ") },
-        "The model tried to add a replacement for an effect the user "
-          .. "explicitly said was already present, even after a retry: "
-          .. tbl_concat(user_lines, ", ")
-          .. ". Auto-run is blocked because that fallback can conceal a "
-          .. "targeting error or create a duplicate. Review and remove the "
-          .. "same-effect AddByName fallback before running manually."))
-        or ("The model tried to add a replacement for an effect the user explicitly said was already present, even after a retry: "
-          .. tbl_concat(user_lines, ", ")
-          .. ". Auto-run is blocked because that fallback can conceal a targeting error or create a duplicate. Review and remove the same-effect AddByName fallback before running manually."))
-    end
-  end
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit
-     and not stockfx_gate_hit and not timecode_workflow_gate_hit
-     and not timecodefx_gate_hit
-     and not fxident_gate_hit
-     and not fxcheck_gate_hit and not getbyname_gate_hit then
-    local get_bad = Code.find_dependent_getbyname_silent_skips(lua_code)
-    if get_bad and #get_bad > 0 then
-      if (S.fxget_validator_retries or 0) < 1 then
-        S.fxget_validator_retries = (S.fxget_validator_retries or 0) + 1
-        local lines = {}
-        for _, e in ipairs(get_bad) do
-          lines[#lines+1] = "  - " .. e.name
-            .. " (assigned from TrackFX_GetByName / TakeFX_GetByName near line "
-            .. e.line .. ")"
-        end
-        Log.line("FX-GETBYNAME-VALIDATOR",
-          "dependent GetByName silent-skip pattern(s) (" .. #get_bad .. "): "
-          .. (function()
-              local names = {}
-              for _, e in ipairs(get_bad) do names[#names+1] = e.name end
-              return tbl_concat(names, ", ")
-            end)()
-          .. "; retrying with hint (user-invisible)")
-        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
-          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply used "
-          .. "TrackFX_GetByName / TakeFX_GetByName to find an FX, then "
-          .. "performed required parameter work only inside a success-path "
-          .. "guard such as `if fx >= 0 then ... end`, with no explicit "
-          .. "failure path. If the FX is missing, the script silently skips "
-          .. "the configuration and still appears to succeed.\n\n"
-          .. "Affected variable(s):\n"
-          .. tbl_concat(lines, "\n") .. "\n\n"
-          .. "Regenerate the code so EACH dependent GetByName result either "
-          .. "fails clearly or uses the upsert pattern:\n"
-          .. "  local fx = reaper.TrackFX_GetByName(tr, \"<display name>\", false)\n"
-          .. "  if fx < 0 then\n"
-          .. "    fx = reaper.TrackFX_AddByName(tr, \"<AddByName id>\", false, -1)\n"
-          .. "  end\n"
-          .. "  if fx < 0 then\n"
-          .. "    reaper.ShowMessageBox(\"Failed to find or add <name>.\", "
-          .. "\"ReaAssist\", 0)\n"
-          .. "    return\n"
-          .. "  end\n\n"
-          .. "If this script is ONLY supposed to modify an existing FX, skip "
-          .. "the AddByName fallback but keep the `fx < 0` ShowMessageBox + "
-          .. "return before any parameter writes. Do NOT use `if fx >= 0 "
-          .. "then ... end` with no else for required parameter work. Respond "
-          .. "as if this is your FIRST reply -- do NOT apologize, do NOT "
-          .. "mention a retry.)\n\n"
-          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        Net.fire_validator_retry({
-          kind = "fxget",
-          history_content = history_content,
-          ctx_label = "fxget_retry",
-          retry_failed_key = "retry.reason.for_dependent_getbyname_result",
-          retry_failed_label = "for dependent GetByName result",
-          failure_message = "Auto-retry for dependent GetByName result did not go through. Please resend the last message.",
-        })
-        return
-      end
-      getbyname_gate_hit = true
-      Log.line("FX-GETBYNAME-VALIDATOR",
-        "dependent GetByName silent-skip pattern(s) persist after retry; auto-run blocked")
-      local user_lines = {}
-      for _, e in ipairs(get_bad) do
-        user_lines[#user_lines+1] = e.name .. " (line ~" .. e.line .. ")"
-      end
-      Log.add_error((RA and RA.t and RA.t(
-        "validator.fx_getbyname_silent_skip_blocked",
-        { vars = tbl_concat(user_lines, ", ") },
-        "The model wrote TrackFX_GetByName / TakeFX_GetByName "
-          .. "dependent parameter code with no failure path, even after a retry: "
-          .. tbl_concat(user_lines, ", ")
-          .. ". If the FX is missing the script will silently report success "
-          .. "without changing the requested plugin. Auto-run is blocked; "
-          .. "review and edit the code before clicking Run manually."))
-        or ("The model wrote TrackFX_GetByName / TakeFX_GetByName dependent parameter code with no failure path, even after a retry: "
-          .. tbl_concat(user_lines, ", ")
-          .. ". If the FX is missing the script will silently report success without changing the requested plugin. Auto-run is blocked; review and edit the code before clicking Run manually."))
-    end
-  end
-
-  -- FX-ADD-GETONLY VALIDATOR: If the user explicitly asked to add/put/load
-  -- a named FX, GetByName-only plus "not found" is not a valid fulfillment.
-  -- The dependent GetByName validator above accepts that pattern for
-  -- modify-existing requests; this narrower pass closes the add-FX gap.
-  local fxadd_getonly_gate_hit = false
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit
-     and not stockfx_gate_hit and not timecode_workflow_gate_hit
-     and not timecodefx_gate_hit
-     and not fxident_gate_hit
-     and not fxcheck_gate_hit and not getbyname_gate_hit then
-    local fxadd_prompt = S.pending_orig_prompt or _turn_user_intent or ""
-    local getonly_bad = Code.find_add_requested_getonly_fx_violations(
-      fxadd_prompt, lua_code)
-    if getonly_bad and #getonly_bad > 0 then
-      if (S.fxadd_getonly_validator_retries or 0) < 1 then
-        S.fxadd_getonly_validator_retries =
-          (S.fxadd_getonly_validator_retries or 0) + 1
-        local lines = {}
-        for _, e in ipairs(getonly_bad) do
-          lines[#lines+1] = "  - " .. e.id
-            .. " (looked up with GetByName near line " .. e.line
-            .. " but never added if missing)"
-        end
-        Log.line("FX-ADD-GETONLY-VALIDATOR",
-          "add-request GetByName-only pattern(s) (" .. #getonly_bad
-          .. "); retrying with hint (user-invisible)")
-        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
-          .. "ANY OF THIS IN YOUR VISIBLE REPLY: The user explicitly asked "
-          .. "to add/put/load the named FX, but your previous reply only "
-          .. "looked it up with TrackFX_GetByName / TakeFX_GetByName and "
-          .. "returned if it was missing. That modifies an existing plugin; "
-          .. "it does not add the requested plugin.\n\n"
-          .. "Affected plugin lookup(s):\n"
-          .. tbl_concat(lines, "\n") .. "\n\n"
-          .. "Regenerate the code with an add-if-missing pattern for each "
-          .. "requested FX:\n"
-          .. "  local fx = reaper.TrackFX_GetByName(tr, \"<display name>\", false)\n"
-          .. "  if fx < 0 then\n"
-          .. "    fx = reaper.TrackFX_AddByName(tr, \"<exact AddByName id>\", false, -1)\n"
-          .. "  end\n"
-          .. "  if fx < 0 then\n"
-          .. "    reaper.ShowMessageBox(\"Failed to add <name>.\", "
-          .. "\"ReaAssist\", 0)\n"
-          .. "    return\n"
-          .. "  end\n\n"
-          .. "Do NOT bail with \"plugin not found\" before trying AddByName "
-          .. "when the user's verb is add/put/insert/load/apply/place/use. "
-          .. "Respond as if this is your FIRST reply -- do NOT apologize, "
-          .. "do NOT mention a retry.)\n\n"
-          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        Net.fire_validator_retry({
-          kind = "fxadd_getonly",
-          history_content = history_content,
-          ctx_label = "fxadd_getonly_retry",
-          retry_failed_key = "retry.reason.for_add_requested_getonly_fx",
-          retry_failed_label = "for add-request GetByName-only FX lookup",
-          failure_message = "Auto-retry for add-request GetByName-only FX lookup did not go through. Please resend the last message.",
-        })
-        return
-      end
-      fxadd_getonly_gate_hit = true
-      Log.line("FX-ADD-GETONLY-VALIDATOR",
-        "add-request GetByName-only pattern(s) persist after retry; auto-run blocked")
-      local user_lines = {}
-      for _, e in ipairs(getonly_bad) do
-        user_lines[#user_lines+1] = e.id .. " (line ~" .. e.line .. ")"
-      end
-      Log.add_error((RA and RA.t and RA.t(
-        "validator.fx_add_requested_getonly_blocked",
-        { vars = tbl_concat(user_lines, ", ") },
-        "The model looked up requested add-FX plugin(s) with GetByName "
-          .. "without adding them if missing, even after a retry: "
-          .. tbl_concat(user_lines, ", ")
-          .. ". Auto-run is blocked; review and edit the code before "
-          .. "clicking Run manually."))
-        or ("The model looked up requested add-FX plugin(s) with GetByName without adding them if missing, even after a retry: "
-          .. tbl_concat(user_lines, ", ")
-          .. ". Auto-run is blocked; review and edit the code before clicking Run manually."))
-    end
-  end
-
-  -- UPSERT VALIDATOR: Gated on chain-build follow-up turns -- when the
-  -- prompt matches CHAIN_PHRASE_HINTS AND fx_chains was preempted (so
-  -- prior plugins may already be on the target track from earlier
-  -- turns). In that context, every plugin name in the script must
-  -- appear in BOTH a TrackFX_GetByName AND a TrackFX_AddByName call.
-  -- Catches the two opposite anti-patterns observed across providers
-  -- in chain-build flows: Get-only with early bail (ChatGPT pattern)
-  -- and Add-only without reuse check (Claude pattern). Both fail the
-  -- user's "build me a chain" intent in different ways.
-  local upsert_gate_hit = false
-  local function _is_chain_build_prompt(t)
-    return CTX and CTX.prompt_indicates_chain_context
-      and CTX.prompt_indicates_chain_context(t) or false
-  end
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
-     and not timecode_workflow_gate_hit and not timecodefx_gate_hit
-     and not fxcheck_gate_hit and not getbyname_gate_hit
-     and not fxadd_getonly_gate_hit
-     and S.fx_chains_already_sent
-     and _is_chain_build_prompt(S.pending_orig_prompt) then
-    local upsert_bad = Code.find_chain_upsert_violations(lua_code)
-    if upsert_bad and #upsert_bad > 0 then
-      if (S.upsert_validator_retries or 0) < 1 then
-        S.upsert_validator_retries = (S.upsert_validator_retries or 0) + 1
-        local lines = {}
-        for _, e in ipairs(upsert_bad) do
-          if e.kind == "get_only" then
-            lines[#lines+1] = "  - " .. e.id
-              .. ": GetByName called but no AddByName fallback if missing"
-          else
-            lines[#lines+1] = "  - " .. e.id
-              .. ": AddByName called without GetByName reuse check"
-          end
-        end
-        Log.line("UPSERT-VALIDATOR",
-          "chain-upsert violations (" .. #upsert_bad .. "); retrying with "
-          .. "hint (user-invisible)")
-        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
-          .. "ANY OF THIS IN YOUR VISIBLE REPLY: This is a chain-build "
-          .. "follow-up turn (the prompt matched a chain phrase like "
-          .. "\"build a vocal chain\" / \"set up a chain\"), and an earlier "
-          .. "turn may have already placed plugins on the target track. "
-          .. "fx_chains is pinned above so you can see what's currently "
-          .. "there. Your previous reply violated the upsert pairing rule:\n"
-          .. tbl_concat(lines, "\n") .. "\n\n"
-          .. "Required pattern for EACH plugin in the chain:\n"
-          .. "  local fx = reaper.TrackFX_GetByName(tr, \"<bare display "
-          .. "name>\", false)\n"
-          .. "  if fx < 0 then\n"
-          .. "    fx = reaper.TrackFX_AddByName(tr, \"<format-prefixed "
-          .. "AddByName id>\", false, -1)\n"
-          .. "  end\n"
-          .. "  if fx < 0 then\n"
-          .. "    reaper.ShowMessageBox(\"Failed to load <name>.\", "
-          .. "\"ReaAssist\", 0)\n"
-          .. "    return\n"
-          .. "  end\n\n"
-          .. "Do NOT call GetByName for all plugins and bail with \"missing "
-          .. "one or more plugins\" -- that fails the user's request to "
-          .. "BUILD the chain. Do NOT call AddByName without GetByName "
-          .. "first either -- that duplicates plugins already on the track. "
-          .. "EVERY plugin in the chain needs both calls. Do NOT emit "
-          .. "<context_needed> -- all reference data is already pinned "
-          .. "(check PINNED REFERENCES manifest above). Regenerate the "
-          .. "FULL script NOW. Respond as if this is your FIRST reply -- "
-          .. "do NOT apologize, do NOT mention a retry.)\n\n"
-          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        Net.fire_validator_retry({
-          kind = "upsert",
-          history_content = history_content,
-          ctx_label = "upsert_retry",
-          retry_failed_key = "retry.reason.for_chain_upsert_violation",
-          retry_failed_label = "for chain-upsert violation",
-          failure_message = "Auto-retry for chain-upsert violation did not go through. Please resend the last message.",
-        })
-        return
-      end
-      upsert_gate_hit = true
-      Log.line("UPSERT-VALIDATOR",
-        "chain-upsert violations persist after retry; auto-run blocked")
-      Log.add_error((RA and RA.t and RA.t(
-        "validator.chain_upsert_blocked", nil,
-        "The model wrote chain-build code with an upsert "
-          .. "pairing violation, even after a retry. Each plugin in the "
-          .. "chain needs both a GetByName (reuse) and an AddByName (add "
-          .. "if missing) call. Auto-run is blocked; review and edit the "
-          .. "code before clicking Run manually."))
-        or "The model wrote chain-build code with an upsert pairing violation, even after a retry. Each plugin in the chain needs both a GetByName (reuse) and an AddByName (add if missing) call. Auto-run is blocked; review and edit the code before clicking Run manually.")
-    end
-  end
-
-  -- REAEQ LIVE-GAIN VALIDATOR: Run this domain-specific mapping gate before
-  -- the general defer and action-scope gates so one repair packet can cover
-  -- the unsafe mapping, required defer placement, exact helper source, and
-  -- existing-FX-only scope. Otherwise a single bad draft can consume two or
-  -- more sequential repair calls before it becomes safe.
-  local reeq_gain_gate_hit = false
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
-     and not timecode_workflow_gate_hit and not timecodefx_gate_hit
-     and not fxident_gate_hit and not fxcheck_gate_hit
-     and not getbyname_gate_hit and not fxadd_getonly_gate_hit
-     and not upsert_gate_hit
-     and Code.reeq_live_gain_gate_active(S.sticky_context, {
-       -- Ignore a reference added during this retry immediately, and use its
-       -- conversation-scoped provenance to keep a model-requested reference
-       -- from bypassing the gate on later turns.
-       ignore_reference = (S.reeq_gain_validator_retries or 0) > 0,
-       sticky_pin_source = S.sticky_pin_source,
-     }) then
-    local reeq_bad = Code.find_reeq_gain_mapping_violations(lua_code, {
-      user_text = S.pending_orig_prompt or "",
-    })
-    if reeq_bad and #reeq_bad > 0 then
-      if (S.reeq_gain_validator_retries or 0) < 1 then
-        S.reeq_gain_validator_retries =
-          (S.reeq_gain_validator_retries or 0) + 1
-        Log.line("REAEQ-GAIN-VALIDATOR",
-          "unsafe live-context ReaEQ gain edit(s): " .. #reeq_bad
-          .. "; retrying with combined mapping/scope requirements")
-        Net.copin_plugin_helpers(nil)
-        local helpers_ready = Net.ensure_plugin_helpers_for_retry()
-        local issue_lines = {}
-        for _, finding in ipairs(reeq_bad) do
-          issue_lines[#issue_lines + 1] = "  - line "
-            .. tostring(finding.line) .. ": " .. tostring(finding.detail)
-        end
-        local helper_instruction
-        if helpers_ready then
-          helper_instruction = "The canonical plugin-helper reference is "
-            .. "pinned above. Paste the COMPLETE canonical top-level local "
-            .. "`set_param_display(tr, fx, pidx, target)` definition before "
-            .. "the deferred callback and before its first call. Copy its "
-            .. "signature and body exactly; do not rename its parameters or "
-            .. "internal variables."
-        else
-          helper_instruction = "The canonical plugin-helper reference could "
-            .. "not be rendered in this retry. Do not claim it is pinned. "
-            .. "Include a complete safe top-level local "
-            .. "`set_param_display(tr, fx, pidx, target)` definition before "
-            .. "the deferred callback and its first call; the helper-"
-            .. "integrity validator will reject a renamed, incomplete, or "
-            .. "weakened body."
-        end
-        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous "
-          .. "script used an unsafe ReaEQ band-gain mapping under live "
-          .. "fx_params context:\n" .. tbl_concat(issue_lines, "\n")
-          .. "\n\nRegenerate the FULL script. Remove every direct "
-          .. "`TrackFX_SetParam` or `TrackFX_SetParamNormalized` write to "
-          .. "the affected ReaEQ gain index. Do not request or claim "
-          .. "`plugin_ref:ReaEQ` as a workaround. " .. helper_instruction
-          .. " Reuse only the ReaEQ already on the requested track with "
-          .. "`reaper.TrackFX_GetByName(..., \"ReaEQ\", false)`; never call "
-          .. "`TrackFX_AddByName` and never configure another band or "
-          .. "parameter. Put the current formatted-value read and the "
-          .. "`set_param_display(...)` call inside exactly one "
-          .. "`reaper.defer(function() ... end)` callback. The helper "
-          .. "definition stays above that callback; its internal parameter "
-          .. "operations run only when the helper is called from inside the "
-          .. "callback. Do not wrap `set_param_display` in "
-          .. "`PreventUIRefresh`. For a relative dB request, call "
-          .. "`reaper.TrackFX_GetFormattedParamValue` for the exact same "
-          .. "track, ReaEQ FX index, and gain parameter; parse the current "
-          .. "displayed dB, add or subtract the requested amount, and pass "
-          .. "that computed target to `set_param_display` on the same index. "
-          .. "Do not pass a hard-coded absolute target for a relative request. "
-          .. "Do NOT emit any `<context_needed>` tag; every reference needed "
-          .. "for this repair is already pinned above. "
-          .. "Keep every unrelated FX, parameter, and track unchanged. "
-          .. "Respond as if this is your FIRST reply -- do NOT apologize or "
-          .. "mention a retry.)\n\nUSER REQUEST:\n"
-          .. (S.pending_orig_prompt or "")
-        Net.fire_validator_retry({
-          kind = "reeq_gain_mapping",
-          findings = reeq_bad,
-          history_content = history_content,
-          ctx_label = "reeq_gain_retry",
-          retry_failed_key = "retry.reason.for_unsafe_reeq_gain_mapping",
-          retry_failed_label = "for unsafe ReaEQ gain mapping",
-          failure_message = "Auto-retry for unsafe ReaEQ gain mapping did not go through. Please resend the last message.",
-        })
-        return
-      end
-      reeq_gain_gate_hit = true
-      Log.line("REAEQ-GAIN-VALIDATOR",
-        "unsafe ReaEQ gain mapping persisted after retry; auto-run blocked")
-      Log.add_error((RA and RA.t and RA.t(
-        "validator.reeq_gain_mapping_blocked", nil,
-        "The generated ReaEQ gain edit still used an unsafe parameter "
-          .. "mapping after automatic repair. ReaAssist did not run it. "
-          .. "Ask ReaAssist to regenerate the edit, or review the displayed-"
-          .. "value calculation and helper use before running it manually."))
-        or "The generated ReaEQ gain edit still used an unsafe parameter mapping after automatic repair. ReaAssist did not run it. Ask ReaAssist to regenerate the edit, or review the displayed-value calculation and helper use before running it manually.")
-    end
-  end
-
-  -- PROFILE PARAMETER GUARD: a fingerprint-validated profile may contain
-  -- stored indices, but no generated write may trust one by itself. Require
-  -- the sandbox-provided all-target resolver before any mapped write. The
-  -- runtime setter shim repeats the check, so manual Run cannot bypass this
-  -- gate and a mismatch still produces zero parameter writes.
-  local plugin_profile_guard_gate_hit = false
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
-     and not timecode_workflow_gate_hit and not timecodefx_gate_hit
-     and not fxcheck_gate_hit and not getbyname_gate_hit
-     and not upsert_gate_hit and not reeq_gain_gate_hit
-     and type(S.plugin_profiles_used) == "table"
-     and #S.plugin_profiles_used > 0
-     and type(Code.find_unguarded_profile_param_writes) == "function" then
-    local profile_guard_bad =
-      Code.find_unguarded_profile_param_writes(lua_code)
-    if profile_guard_bad and #profile_guard_bad > 0 then
-      if (S.plugin_profile_guard_validator_retries or 0) < 2 then
-        S.plugin_profile_guard_validator_retries =
-          (S.plugin_profile_guard_validator_retries or 0) + 1
-        Log.line("PLUGIN-PROFILE-GUARD",
-          "unguarded mapped parameter write(s): "
-            .. tbl_concat(profile_guard_bad, ", ")
-            .. "; retrying with resolver requirement")
-        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: A validated "
-          .. "plug-in profile is pinned, but your prior script used one or "
-          .. "more stored parameter indices without ReaAssist's mandatory "
-          .. "runtime name/section guard. Regenerate the FULL script.\n\n"
-          .. "Validator findings from the prior draft: "
-          .. tbl_concat(profile_guard_bad, ", ") .. ".\n\n"
-          .. "Inside the single `reaper.defer(function() ... end)` callback "
-          .. "and BEFORE any parameter write or parameter-probing helper "
-          .. "call, resolve every mapped target in one call:\n"
-          .. "  local mapped, guard_err = "
-          .. "reaassist_resolve_profile_params(tr, fx, {\n"
-          .. "    { index = EXPECTED_INDEX, name = "
-          .. "\"EXACT PARAMETER NAME\" },\n"
-          .. "    { index = EXPECTED_INDEX, name = "
-          .. "\"EXACT PARAMETER NAME\", section = "
-          .. "\"EXACT SECTION\" },\n"
-          .. "  })\n"
-          .. "  if not mapped then error(guard_err) end\n\n"
-          .. "The `tr` and `fx` names above are placeholders. Pass the exact "
-          .. "MediaTrack and FX-index variables already defined by your "
-          .. "script. If you named the track `track_1`, call the resolver "
-          .. "with `track_1`; never reference an undefined `tr`. "
-          .. "The nil check MUST test `mapped`; never test `guard_err` or "
-          .. "another variable. "
-          .. "Use `mapped[1]`, `mapped[2]`, and so on as the parameter "
-          .. "indices in every `TrackFX_SetParam*`, `set_param_display`, "
-          .. "`set_param_enum`, or `set_param_enum_paced` call. Do not pass "
-          .. "a numeric literal as a mapped parameter index. Correct: "
-          .. "`reaper.TrackFX_SetParamNormalized(tr, fx, mapped[1], value)`. "
-          .. "Forbidden: `reaper.TrackFX_SetParamNormalized(tr, fx, "
-          .. "EXPECTED_INDEX, value)`. The stored numeric index belongs only "
-          .. "inside its resolver-table entry. Include every "
-          .. "target for a compound action in that one resolver table so "
-          .. "all names and required sections validate before the first "
-           .. "write. If the script writes N mapped parameters, provide N "
-           .. "resolver entries and use each `mapped[1]` through `mapped[N]` "
-           .. "in the matching write. Each `mapped[n]` is the 1-based "
-           .. "POSITION of the "
-           .. "corresponding entry in the resolver table, not the plug-in "
-           .. "parameter index. Reference every resolver-table entry, never "
-           .. "use an ordinal outside `1..#specs`, and keep each setting's "
-           .. "name and comment aligned with that entry. "
-           .. "`reaassist_resolve_profile_params` is provided by "
-          .. "ReaAssist's generated-code sandbox. Call that global directly; "
-          .. "do not define, copy, wrap, alias, assign, shadow, or replace it. "
-          .. "Keep unrelated tracks, FX, and parameters unchanged. "
-          .. "Respond as if this is your FIRST reply and do not mention a "
-          .. "retry.)\n\nUSER REQUEST:\n"
-          .. (S.pending_orig_prompt or "")
-        Net.fire_validator_retry({
-          kind = "plugin_profile_guard",
-          findings = profile_guard_bad,
-          history_content = history_content,
-          ctx_label = "plugin_profile_guard_retry",
-          retry_failed_key =
-            "retry.reason.for_unguarded_plugin_profile_mapping",
-          retry_failed_label = "for an unguarded plug-in profile mapping",
-          failure_message = "Automatic repair for the plug-in parameter "
-            .. "guard did not go through. Please resend the last message.",
-        })
-        return
-      end
-      plugin_profile_guard_gate_hit = true
-      Log.line("PLUGIN-PROFILE-GUARD",
-        "unguarded mapped parameter writes persisted after retry; "
-          .. "auto-run blocked")
-      Log.add_error("The generated script still contains an unchecked "
-        .. "profile parameter mapping after automatic repair. ReaAssist "
-        .. "did not run it. Ask ReaAssist to regenerate the edit, or review "
-        .. "the displayed code before running it manually.")
-    end
-  end
-
-  -- DEFER VALIDATOR: After the API validator passes, scan the generated
-  -- script for plugin-param Get/Set calls outside reaper.defer(function()
-  -- ... end). Per the MANDATORY DEFER RULE in prompt_bundle:plugin, those
-  -- calls MUST run inside a deferred callback -- some VST3 plugins silently
-  -- ignore parameter writes that arrive in the same execution frame as
-  -- TrackFX_AddByName. Without defer, the script appears to succeed (the
-  -- API-VALIDATOR scan passes, "Script completed OK" gets logged) but the
-  -- audio doesn't change. Observed in the cross-provider test matrix on
-  -- gpt-5.4-mini with thinking=none -- the script ran cleanly and was
-  -- behaviorally wrong. Same recovery shape as the API validator: model-
-  -- only nudge, scrub the bad turn from history, single retry per user
-  -- prompt, surface a visible error if the retry still fails.
-  local defer_gate_hit = false
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
-     and not timecode_workflow_gate_hit and not timecodefx_gate_hit
-     and not fxcheck_gate_hit and not getbyname_gate_hit
-     and not upsert_gate_hit and not reeq_gain_gate_hit
-     and not plugin_profile_guard_gate_hit then
-    local violations = Code.find_param_calls_outside_defer(lua_code)
-    if violations and #violations > 0 then
-      if (S.defer_validator_retries or 0) < 1 then
-        S.defer_validator_retries = (S.defer_validator_retries or 0) + 1
-        Log.line("DEFER-VALIDATOR",
-          "param-touching calls outside reaper.defer (" .. #violations
-          .. "): " .. tbl_concat(violations, ", ")
-          .. "; retrying with hint (user-invisible)")
-        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
-          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply called "
-          .. "REAPER plugin parameter functions OUTSIDE a reaper.defer() "
-          .. "block. Per the MANDATORY DEFER RULE in your plugin workflow, "
-          .. "these calls MUST run inside `reaper.defer(function() ... end)`:\n"
-          .. "  - reaper." .. tbl_concat(violations, "\n  - reaper.")
-          .. "\n\nWithout defer, some VST3 plugins silently ignore parameter "
-          .. "changes -- the script appears to succeed but the audio doesn't "
-          .. "change. Regenerate the code with all plugin param Get/Set "
-          .. "calls inside a reaper.defer block.\n\n"
-          .. "Required structure:\n"
-          .. "  1. In the main body: create tracks/items/sends, acquire any "
-          .. "required FX exactly within the user's requested existing/add "
-          .. "scope, and store returned FX/send indices in variables. Do not "
-          .. "replace an existing-instance lookup with AddByName.\n"
-          .. "  2. Then use exactly one `reaper.defer(function() ... end)` "
-          .. "callback for every plugin parameter read/write.\n"
-          .. "  3. Put `reaper.TrackFX_SetParam*`, `reaper.TrackFX_GetParam*`, "
-          .. "`reaper.TrackFX_GetFormattedParamValue`, and helper calls such "
-          .. "as `set_param_display(...)` inside that callback.\n"
-          .. "  4. `Undo_EndBlock`, `UpdateArrange`, and `PreventUIRefresh(-1)` "
-          .. "may run after the parameter writes in that same callback.\n\n"
-          .. "This is STILL WRONG and will be rejected: doing track/FX work "
-          .. "and parameter writes in the main body, then deferring only "
-          .. "`Undo_EndBlock`, `UpdateArrange`, or cleanup. Deferring cleanup "
-          .. "does not defer the parameter writes.\n\n"
-          .. "Correct skeleton:\n"
-          .. "  reaper.Undo_BeginBlock()\n"
-          .. "  reaper.PreventUIRefresh(1)\n"
-          .. "  -- main body: preserve requested FX lookup/add scope, create "
-          .. "tracks or sends as requested, store indices\n"
-          .. "  reaper.defer(function()\n"
-          .. "    -- ALL TrackFX_Get/SetParam calls go here\n"
-          .. "    reaper.PreventUIRefresh(-1)\n"
-          .. "    reaper.UpdateArrange()\n"
-          .. "    reaper.Undo_EndBlock(\"ReaAssist: ...\", -1)\n"
-          .. "  end)\n\n"
-          .. "Respond as if this is your FIRST "
-          .. "reply to the user's request -- do NOT apologize, do NOT say "
-          .. "'let me try again' or mention a retry. Just deliver the "
-          .. "correct code with a normal brief description.)\n\n"
-          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        Net.fire_validator_retry({
-          kind = "defer",
-          history_content = history_content,
-          ctx_label = "defer_retry",
-          retry_failed_key = "retry.reason.for_missing_reaper_defer_wrap",
-          retry_failed_label = "for missing reaper.defer wrap",
-          failure_message = "Auto-retry for missing reaper.defer wrap did not go through. Please resend the last message.",
-        })
-        return
-      end
-      -- Retry already used and the model STILL has param calls outside
-      -- defer. Block auto-run + surface the diagnostic so the user can
-      -- review/edit before clicking Run manually.
-      defer_gate_hit = true
-      Log.line("DEFER-VALIDATOR",
-        "param-touching calls still outside defer after retry: "
-        .. tbl_concat(violations, ", ") .. "; auto-run blocked")
-      local calls = "reaper." .. tbl_concat(violations, ", reaper.")
-      Log.add_error((RA and RA.t and RA.t(
-        "validator.defer_plugin_params_blocked", { calls = calls },
-        "The model emitted plugin parameter calls (" .. calls
-          .. ") outside a reaper.defer() block, even after a retry. "
-          .. "Some VST3 plugins silently ignore parameter changes that "
-          .. "arrive in the same execution frame as TrackFX_AddByName -- "
-          .. "the script may appear to run successfully but produce no "
-          .. "audible change. Auto-run is blocked; review the code and "
-          .. "wrap the param calls in `reaper.defer(function() ... end)` "
-          .. "before clicking Run manually."))
-        or ("The model emitted plugin parameter calls (" .. calls
-          .. ") outside a reaper.defer() block, even after a retry. Some VST3 plugins silently ignore parameter changes that arrive in the same execution frame as TrackFX_AddByName -- the script may appear to run successfully but produce no audible change. Auto-run is blocked; review the code and wrap the param calls in `reaper.defer(function() ... end)` before clicking Run manually."))
-    end
-  end
-
-  -- PRO-Q 4 PARAMETER-CONTRACT VALIDATOR: enforce both the fresh-Bell slope
-  -- requirement and high-confidence human-comment/normalized-value pairings.
-  -- The latter catches adjacent-row copy mistakes such as pairing 120 Hz with
-  -- the normalized value for 100 Hz before the script makes audible changes.
-  local proq4_slope_gate_hit = false
-  local proq4_contract_block_reason = nil
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
-     and not timecode_workflow_gate_hit and not timecodefx_gate_hit
-     and not fxcheck_gate_hit and not getbyname_gate_hit
-     and not upsert_gate_hit and not defer_gate_hit
-     and not reeq_gain_gate_hit and not plugin_profile_guard_gate_hit then
-    local slope_bad = Code.find_proq4_bell_slope_violations(lua_code)
-    local mapping_bad = Code.find_proq4_literal_mapping_mismatches
-      and Code.find_proq4_literal_mapping_mismatches(lua_code)
-      or nil
-    if (slope_bad and #slope_bad > 0)
-       or (mapping_bad and #mapping_bad > 0) then
-      if (S.proq4_slope_validator_retries or 0) < 1 then
-        S.proq4_slope_validator_retries =
-          (S.proq4_slope_validator_retries or 0) + 1
-        Log.line("PROQ4-CONTRACT-VALIDATOR",
-          "Pro-Q 4 contract issue(s): slope="
-          .. tostring(slope_bad and #slope_bad or 0)
-          .. ", mapping=" .. tostring(mapping_bad and #mapping_bad or 0)
-          .. "; retrying with hint (user-invisible)")
-        local lines = {}
-        for _, e in ipairs(slope_bad or {}) do
-          lines[#lines + 1] = "  - missing slope: Band " .. tostring(e.band)
-            .. " (Slope index " .. tostring(e.slope_idx)
-            .. ", near line " .. tostring(e.line) .. ")"
-        end
-        for _, e in ipairs(mapping_bad or {}) do
-          lines[#lines + 1] = "  - line " .. tostring(e.line) .. ": "
-            .. tostring(e.kind) .. " target " .. tostring(e.target)
-            .. " was paired with normalized " .. string.format("%.6f", e.actual)
-            .. "; expected about " .. string.format("%.6f", e.expected)
-        end
-        local correction_parts = {}
-        if slope_bad and #slope_bad > 0 then
-          correction_parts[#correction_parts + 1] =
-            "For every fresh Pro-Q 4 Bell boost/cut, include that Band N "
-            .. "Slope target in the mandatory profile resolver table and set "
-            .. "its returned `mapped[N]` index to normalized `0.2`, the "
-            .. "fingerprint-validated 12 dB/oct value. Never substitute the "
-            .. "resolver-table ordinal for the stored plug-in index, and do "
-            .. "not paste or call `set_param_display` for this validated "
-            .. "target."
-        end
-        if mapping_bad and #mapping_bad > 0 then
-          correction_parts[#correction_parts + 1] =
-            "Keep the mandatory profile resolver table and every correct "
-            .. "`mapped[N]` reference from the prior script. Do not replace "
-            .. "them with a raw stored index, a `setp` wrapper, or any local "
-            .. "parameter helper. For multi-band data tables, keep the "
-            .. "requested human values in "
-            .. "named fields (`freq_hz`, `gain_db`, and display Q), then "
-            .. "convert inside the deferred write loop with the exact Pro-Q 4 "
-            .. "formulas from `plugin_ref:Pro-Q 4`. Do not copy a nearby "
-            .. "normalized row. Use the exact frequency expression "
-            .. "`math.log(freq_hz / 10) / math.log(3000)`, the gain "
-            .. "expression `(gain_db + 30) / 60`, and the Q expression "
-            .. "`math.log(q / 0.025) / math.log(1600)` directly in their "
-            .. "mapped setters. Do not preserve any mismatched literal "
-            .. "listed above."
-        end
-        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous "
-          .. "reply violated one or more Pro-Q 4 parameter contracts:\n"
-          .. tbl_concat(lines, "\n") .. "\n\nRegenerate the FULL script. "
-          .. tbl_concat(correction_parts, "\n\n") .. " Respond as if this is your FIRST "
-          .. "reply -- do NOT apologize or mention a retry.)\n\n"
-          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        Net.fire_validator_retry({
-          kind = "proq4_parameter_contract",
-          history_content = history_content,
-          ctx_label = "proq4_contract_retry",
-          retry_failed_key = "retry.reason.for_proq4_parameter_contract",
-          retry_failed_label = "for Pro-Q 4 parameter correctness",
-          failure_message = "Auto-retry for Pro-Q 4 parameter correctness did not go through. Please resend the last message.",
-        })
-        return
-      end
-      proq4_slope_gate_hit = true
-      if slope_bad and #slope_bad > 0
-         and mapping_bad and #mapping_bad > 0 then
-        proq4_contract_block_reason = "proq4_parameter_contract_validator"
-      elseif mapping_bad and #mapping_bad > 0 then
-        proq4_contract_block_reason = "proq4_mapping_validator"
-      else
-        proq4_contract_block_reason = "proq4_bell_slope_validator"
-      end
-      Log.line("PROQ4-CONTRACT-VALIDATOR",
-        "Pro-Q 4 parameter issue persisted after retry; auto-run blocked")
-      local user_lines = {}
-      for _, e in ipairs(slope_bad or {}) do
-        user_lines[#user_lines + 1] = "Band " .. tostring(e.band)
-          .. " (Slope index " .. tostring(e.slope_idx) .. ")"
-      end
-      for _, e in ipairs(mapping_bad or {}) do
-        user_lines[#user_lines + 1] = tostring(e.kind) .. " target "
-          .. tostring(e.target) .. " near line " .. tostring(e.line)
-      end
-      Log.add_error((RA and RA.t and RA.t(
-        "validator.proq4_parameter_contract_blocked",
-        { issues = tbl_concat(user_lines, ", ") },
-        "The model emitted incorrect Pro-Q 4 parameter code even after a retry: "
-          .. tbl_concat(user_lines, ", ")
-          .. ". Auto-run is blocked; review the documented Pro-Q 4 mapping "
-          .. "and fresh-band slope before running manually."))
-        or ("The model emitted incorrect Pro-Q 4 parameter code even after a retry: "
-          .. tbl_concat(user_lines, ", ")
-          .. ". Auto-run is blocked; review the documented Pro-Q 4 mapping and fresh-band slope before running manually."))
-    end
-  end
-
-  -- NAMED MUSICAL ENUM VALIDATOR: A key/scale request such as "D minor"
-  -- requires display-verified enum selection for the scale. Raw normalized
-  -- literals can silently land on another named scale when a third-party
-  -- selector is long, partial, non-uniform, or stale in cache. Retry once
-  -- with the canonical enum helper pinned; block auto-run on a second strike.
-  local musical_enum_gate_hit = false
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
-     and not timecode_workflow_gate_hit and not timecodefx_gate_hit
-     and not fxcheck_gate_hit and not getbyname_gate_hit
-     and not upsert_gate_hit and not defer_gate_hit
-     and not proq4_slope_gate_hit and not reeq_gain_gate_hit
-     and not plugin_profile_guard_gate_hit then
-    local enum_guesses = Code.find_musical_enum_guess_violations
-      and Code.find_musical_enum_guess_violations(
-        lua_code, S.pending_orig_prompt or "")
-      or nil
-    if enum_guesses and #enum_guesses > 0 then
-      if (S.musical_enum_validator_retries or 0) < 1 then
-        S.musical_enum_validator_retries =
-          (S.musical_enum_validator_retries or 0) + 1
-        Log.line("MUSICAL-ENUM-VALIDATOR",
-          "named key/scale request used raw FX parameter writes without "
-            .. "display-verified enum selection; retrying")
-        Net.copin_plugin_helpers(nil)
-        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user requested "
-          .. "a named musical key/scale value, but your script used raw "
-          .. "TrackFX_SetParam* / TakeFX_SetParam* writes without an "
-          .. "executable `set_param_enum` or `set_param_enum_paced` call. "
-          .. "A normalized guess can silently select a different named "
-          .. "scale. Regenerate the FULL script. Select the scale by its "
-          .. "display string with the canonical enum helper, check the "
-          .. "helper result, and restore/fail visibly if it cannot find the "
-          .. "requested value. For a `[partial]` enum, use "
-          .. "`set_param_enum_paced` unless the current displayed value "
-          .. "already equals the target. A complete verified Key enum may "
-          .. "still use its documented direct mapping. Include each helper "
-          .. "definition before its first call. Respond as if this is your "
-          .. "FIRST reply -- do NOT apologize or mention a retry.)\n\n"
-          .. "Previous Lua to fix:\n```lua\n" .. lua_code
-          .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        Net.fire_validator_retry({
-          kind = "musical_enum",
-          history_content = history_content,
-          ctx_label = "musical_enum_retry",
-          retry_failed_key = "retry.reason.for_unverified_musical_enum",
-          retry_failed_label = "for unverified musical key/scale selection",
-          failure_message = "Auto-retry for named musical scale selection did not go through. Please resend the last message.",
-        })
-        return
-      end
-      musical_enum_gate_hit = true
-      Log.line("MUSICAL-ENUM-VALIDATOR",
-        "raw key/scale parameter guess persisted after retry; auto-run blocked")
-      Log.add_error((RA and RA.t and RA.t(
-        "validator.musical_enum_guess_blocked", nil,
-        "The generated key/scale edit still guessed a raw plugin parameter "
-          .. "value after automatic repair. ReaAssist did not run it because "
-          .. "that can select the wrong named scale. Ask ReaAssist to "
-          .. "regenerate the edit with display-verified enum matching before "
-          .. "running it manually."))
-        or "The generated key/scale edit still guessed a raw plugin parameter value after automatic repair. ReaAssist did not run it because that can select the wrong named scale. Ask ReaAssist to regenerate the edit with display-verified enum matching before running it manually.")
-    end
-  end
-
-  -- ADD-ONLY FX PARAM-SCOPE VALIDATOR: A passing script can still be too
-  -- aggressive if the user only asked to add/load an FX and the model invents
-  -- "helpful" default parameter writes. Retry once with an add-only correction
-  -- before the script reaches auto-run.
-  local fx_param_scope_gate_hit = false
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
-     and not timecode_workflow_gate_hit and not timecodefx_gate_hit
-     and not fxcheck_gate_hit and not getbyname_gate_hit
-     and not upsert_gate_hit and not defer_gate_hit
-     and not proq4_slope_gate_hit and not musical_enum_gate_hit
-     and not reeq_gain_gate_hit and not plugin_profile_guard_gate_hit
-     and Code.prompt_is_fx_add_only(S.pending_orig_prompt or "")
-     and Code.lua_has_fx_param_writes(lua_code) then
-    if (S.fx_param_scope_validator_retries or 0) < 1 then
-      S.fx_param_scope_validator_retries =
-        (S.fx_param_scope_validator_retries or 0) + 1
-      Log.line("FX-PARAM-SCOPE-VALIDATOR",
-        "add-only FX prompt emitted parameter writes; retrying")
-      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user only asked "
-        .. "to add/load/insert the FX. Your previous script wrote plugin "
-        .. "parameters, which is extra configuration the user did not request. "
-        .. "Regenerate the script without TrackFX_SetParam*, "
-        .. "TakeFX_SetParam*, set_param_display, set_param_enum, or "
-        .. "set_param_enum_paced. Preserve the requested tracks, FX, sends, "
-        .. "items, MIDI, markers, and ordering. Keep required plugin-load "
-        .. "checks. Respond as if this is your FIRST reply -- do NOT "
-        .. "apologize or mention a retry.)\n\nPrevious Lua to fix:\n```lua\n"
-        .. lua_code
-        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      Net.fire_validator_retry({
-        kind = "fx_param_scope",
-        history_content = history_content,
-        ctx_label = "fx_param_scope_retry",
-        retry_failed_key = "retry.reason.after_unrequested_fx_parameter_writes",
-        retry_failed_label = "after unrequested FX parameter writes",
-        failure_message = "Auto-retry after unrequested FX parameter writes did not go through. Please resend the last message.",
-      })
-      return
-    end
-    fx_param_scope_gate_hit = true
-    Log.line("FX-PARAM-SCOPE-VALIDATOR",
-      "unrequested FX parameter writes persisted after retry; auto-run blocked")
-    Log.add_error((RA and RA.t and RA.t(
-      "validator.fx_param_scope_blocked", nil,
-      "The model wrote plugin parameter changes even though the "
-        .. "request only asked to add/load the FX. Auto-run is blocked because "
-        .. "those extra parameter writes may change the sound beyond the user's "
-        .. "request. Review and remove the TrackFX_SetParam*/TakeFX_SetParam* "
-        .. "lines before running manually."))
-      or "The model wrote plugin parameter changes even though the request only asked to add/load the FX. Auto-run is blocked because those extra parameter writes may change the sound beyond the user's request. Review and remove the TrackFX_SetParam*/TakeFX_SetParam* lines before running manually.")
-  end
-
-  -- HELPER-DEFINITION VALIDATOR: After defer-compliance check, scan for
+  -- HELPER-DEFINITION VALIDATOR: Scan for
   -- helper function calls (find_param, set_param_display, set_param_enum,
   -- set_param_enum_paced) that lack a matching `local function NAME(`
   -- definition in the same script. The model has seen these helpers in
@@ -38682,14 +38806,11 @@ function Net.try_finish_curl()
   -- the aggregate per-turn retry cap remains the hard ceiling.
   -- auto-run block + visible error if it persists.
   local helper_gate_hit = false
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
+  if lua_code
+     and not docs_gate_hit and not validator_gate_hit
+     and not arity_gate_hit and not sendidx_gate_hit
      and not timecode_workflow_gate_hit and not timecodefx_gate_hit
-     and not fxcheck_gate_hit and not getbyname_gate_hit
-     and not upsert_gate_hit and not defer_gate_hit
-     and not proq4_slope_gate_hit and not musical_enum_gate_hit
-     and not fx_param_scope_gate_hit and not reeq_gain_gate_hit
-     and not plugin_profile_guard_gate_hit then
+     and not fxcheck_gate_hit then
     local missing = Code.find_helper_calls_without_definition(lua_code)
     if missing and #missing > 0 then
       if (S.helper_validator_retries or 0) < 2 then
@@ -38724,7 +38845,9 @@ function Net.try_finish_curl()
           .. Net.plugin_helpers_retry_guidance(false)
           .. "Do NOT emit "
           .. "<context_needed>prompt_bundle:plugin_helpers</context_needed> "
-          .. "or any other <context_needed> tag. Respond as if this is your "
+          .. "or any other <context_needed> tag. Put the entire replacement "
+          .. "script inside one complete ```lua code fence. Do not place any "
+          .. "Lua before or after that fence. Respond as if this is your "
           .. "FIRST reply to the user's request -- do NOT apologize, do NOT "
           .. "say 'let me try again', do NOT mention a retry.)\n\n"
           .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
@@ -38761,169 +38884,6 @@ function Net.try_finish_curl()
     end
   end
 
-  -- HELPER-INTEGRITY VALIDATOR: After the helper-validator confirms each
-  -- called helper has a definition, check that the definition matches the
-  -- canonical body in prompt_bundle:plugin_helpers. Models occasionally
-  -- rewrite or simplify pasted helper bodies in subtly broken ways --
-  -- observed: ChatGPT 5.4 Mini dropped the parens on set_param_display's
-  -- range guard ("vmin and vmax and target < vmin or target > vmax"
-  -- instead of "... and (target < vmin or target > vmax)"). Lua's and/or
-  -- precedence makes the bad form crash with "attempt to compare nil
-  -- with number" inside reaper.defer, AFTER Code.run has already logged
-  -- "Script completed OK." Same recovery shape as the other validators.
-  local helper_int_gate_hit = false
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
-     and not timecode_workflow_gate_hit and not timecodefx_gate_hit
-     and not fxcheck_gate_hit and not getbyname_gate_hit
-     and not upsert_gate_hit and not defer_gate_hit
-     and not proq4_slope_gate_hit and not musical_enum_gate_hit
-     and not fx_param_scope_gate_hit and not reeq_gain_gate_hit
-     and not plugin_profile_guard_gate_hit and not helper_gate_hit then
-    local int_bad = Code.find_helper_integrity_violations(lua_code)
-    if int_bad and #int_bad > 0 then
-      if (S.helper_int_validator_retries or 0) < 1 then
-        S.helper_int_validator_retries = (S.helper_int_validator_retries or 0) + 1
-        local lines = {}
-        for _, e in ipairs(int_bad) do
-          lines[#lines+1] = "  - " .. e.name
-            .. " (missing canonical fragment: `" .. e.missing .. "`)"
-        end
-        Log.line("HELPER-INTEGRITY-VALIDATOR",
-          "rewritten/corrupted helper body (" .. #int_bad
-          .. "); retrying with hint (user-invisible)")
-        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
-          .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply pasted "
-          .. "a parameter helper function but rewrote its body in a way that "
-          .. "drops a required safety guard. Affected helper(s):\n"
-          .. tbl_concat(lines, "\n") .. "\n\n"
-          .. Net.plugin_helpers_retry_guidance(true)
-          .. "The exact parenthesization "
-          .. "of boolean expressions matters: Lua's `and`/`or` precedence "
-          .. "makes\n"
-          .. "  vmin and vmax and target < vmin or target > vmax\n"
-          .. "parse as\n"
-          .. "  (vmin and vmax and target < vmin) or (target > vmax)\n"
-          .. "which evaluates `target > vmax` even when vmax is nil and "
-          .. "crashes inside reaper.defer with `attempt to compare nil "
-          .. "with number`. The canonical form\n"
-          .. "  vmin and vmax and vmin < vmax and (target < vmin or target > vmax)\n"
-          .. "short-circuits cleanly.\n\n"
-          .. "If this is a simple/basic vocal chain or add-only plugin "
-          .. "request where the user did not explicitly ask for exact "
-          .. "display-unit settings, remove the helper entirely and add "
-          .. "the requested EQ/compressor plugins without TrackFX_SetParam* "
-          .. "or deferred parameter-setting code. Otherwise, regenerate "
-          .. "the FULL script with every helper defined safely before its "
-          .. "first call. Respond as if this is your FIRST reply -- do "
-          .. "NOT apologize, do NOT mention a retry.)\n\n"
-          .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        Net.fire_validator_retry({
-          kind = "helper_int",
-          history_content = history_content,
-          ctx_label = "helper_int_retry",
-          retry_failed_key = "retry.reason.for_corrupted_helper_body",
-          retry_failed_label = "for corrupted helper body",
-          failure_message = "Auto-retry for corrupted helper body did not go through. Please resend the last message.",
-        })
-        return
-      end
-      helper_int_gate_hit = true
-      Log.line("HELPER-INTEGRITY-VALIDATOR",
-        "helper body corruption persists after retry; auto-run blocked")
-      local user_lines = {}
-      for _, e in ipairs(int_bad) do
-        user_lines[#user_lines+1] = e.name
-      end
-      Log.add_error((RA and RA.t and RA.t(
-        "validator.helper_integrity_blocked",
-        { helpers = tbl_concat(user_lines, ", ") },
-        "The generated script still contains an unsafe parameter helper "
-          .. "after automatic repair: "
-          .. tbl_concat(user_lines, ", ")
-          .. ". ReaAssist did not run it. Ask ReaAssist to regenerate it, or "
-          .. "review the script before running it manually."))
-        or ("The generated script still contains an unsafe parameter helper after automatic repair: "
-          .. tbl_concat(user_lines, ", ")
-          .. ". ReaAssist did not run it. Ask ReaAssist to regenerate it, or review the script before running it manually."))
-    end
-  end
-
-  -- FX PARAMETER PROVENANCE VALIDATOR: unprofiled direct setters can silently
-  -- apply a guessed normalized value to the wrong control. Exact bundled
-  -- display helpers prove the formatted target at runtime; profile-backed
-  -- writes use the separate fingerprint and resolver guard above.
-  local fx_param_provenance_gate_hit = false
-  if lua_code and not docs_gate_hit and not validator_gate_hit
-     and not arity_gate_hit and not sendidx_gate_hit and not stockfx_gate_hit
-     and not timecode_workflow_gate_hit and not timecodefx_gate_hit
-     and not fxcheck_gate_hit and not getbyname_gate_hit
-     and not upsert_gate_hit and not defer_gate_hit
-     and not proq4_slope_gate_hit and not musical_enum_gate_hit
-     and not fx_param_scope_gate_hit and not reeq_gain_gate_hit
-     and not plugin_profile_guard_gate_hit and not helper_gate_hit
-     and not helper_int_gate_hit
-     and type(Code.find_unproven_generic_param_writes) == "function" then
-    local provenance_bad = Code.find_unproven_generic_param_writes(
-      lua_code, S.plugin_profiles_used)
-    if provenance_bad and #provenance_bad > 0 then
-      if (S.fx_param_provenance_validator_retries or 0) < 1 then
-        S.fx_param_provenance_validator_retries =
-          (S.fx_param_provenance_validator_retries or 0) + 1
-        local lines = {}
-        for _, finding in ipairs(provenance_bad) do
-          lines[#lines + 1] = tostring(finding.api or "FX setter")
-            .. " at line " .. tostring(finding.line or "?")
-        end
-        Log.line("FX-PARAM-PROVENANCE-VALIDATOR",
-          "unproven direct parameter write(s): "
-            .. tbl_concat(lines, ", ") .. "; retrying")
-        Net.copin_plugin_helpers(nil)
-        local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-          .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: Your previous "
-          .. "script used direct TrackFX_SetParam* or TakeFX_SetParam* "
-          .. "writes without a fingerprint-validated profile mapping or an "
-          .. "exact bundled display helper. Regenerate the FULL script. "
-          .. "For a profile-backed TrackFX target, call "
-          .. "`reaassist_resolve_profile_params` first and use only the "
-          .. "returned `mapped[N]` indices. For any unprofiled target, use "
-          .. "the exact canonical `set_param_display`, `set_param_enum`, or "
-          .. "`set_param_enum_paced` helper from "
-          .. "`prompt_bundle:plugin_helpers`; paste the complete definition "
-          .. "before its first call and check its result. Do not rename, "
-          .. "rewrite, wrap, or replace the helper. There is no approved "
-          .. "generic TakeFX parameter-writing helper, so omit that write "
-          .. "and give a concise manual fallback. Pure parameter reads may "
-          .. "remain read-only. Keep unrelated tracks, FX, and parameters "
-          .. "unchanged. Respond as if this is your FIRST reply and do not "
-          .. "mention a retry.)\n\nUnsafe setter sites:\n  - "
-          .. tbl_concat(lines, "\n  - ")
-          .. "\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-        Net.fire_validator_retry({
-          kind = "fx_param_provenance",
-          findings = provenance_bad,
-          history_content = history_content,
-          ctx_label = "fx_param_provenance_retry",
-          retry_failed_key =
-            "retry.reason.for_unproven_plugin_parameter_write",
-          retry_failed_label =
-            "for an unproven plug-in parameter write",
-          failure_message = "Automatic repair for plug-in parameter "
-            .. "provenance did not go through. Please resend the last "
-            .. "message.",
-        })
-        return
-      end
-      fx_param_provenance_gate_hit = true
-      Log.line("FX-PARAM-PROVENANCE-VALIDATOR",
-        "unproven direct parameter writes persisted after retry; "
-          .. "auto-run and manual Run blocked")
-      Log.add_error("The generated script still contains a direct plug-in "
-        .. "parameter change that ReaAssist could not verify, so it was not "
-        .. "run. For take/item FX, adjust the value manually. For track FX, "
-        .. "ask ReaAssist to regenerate the script.")
-    end
-  end
 
   -- JSFX VALIDATOR: After the Lua-focused validators, statically analyze
   -- generated JSFX before it gets auto-saved + auto-loaded. Catches EEL2
@@ -38938,14 +38898,8 @@ function Net.try_finish_curl()
   -- JSFX); each rule's false-positive rate sits at or below ~3.5%. See
   -- Code.validate_jsfx and Dev/Tests/corpus_audit.lua for details.
   local jsfx_gate_hit = false
-  -- Single source of truth for "any validator hit its second-strike block
-  -- this turn." Replaces three open-coded "and not docs_gate_hit and not
-  -- validator_gate_hit and ..." chains that drift stale every time a new
-  -- validator is added. A bug from exactly that drift slipped past the
-  -- auto-run gate in commit 89cd276's predecessor: HELPER-INTEGRITY-VALIDATOR
-  -- correctly set helper_int_gate_hit, but auto-run still ran the corrupted
-  -- script because the gate list was stale. Defined here, after all validator
-  -- flags are in scope, so adding a new gate now means updating one place.
+  -- Single source of truth for any validator block this turn. Defined after
+  -- all validator flags so the run and reporting paths use the same list.
   local function _any_gate_hit()
     return docs_gate_hit
         or action_relevance_gate_hit
@@ -38966,23 +38920,10 @@ function Net.try_finish_curl()
         or media_item_label_gate_hit
         or sendidx_gate_hit
         or timecode_workflow_gate_hit
-        or stockfx_gate_hit
         or timecodefx_gate_hit
-        or fxident_gate_hit
         or fxrecfx_gate_hit
         or fxcheck_gate_hit
-        or getbyname_gate_hit
-        or fxadd_getonly_gate_hit
-        or upsert_gate_hit
-        or defer_gate_hit
-        or proq4_slope_gate_hit
-        or musical_enum_gate_hit
-        or fx_param_scope_gate_hit
-        or reeq_gain_gate_hit
-        or plugin_profile_guard_gate_hit
         or helper_gate_hit
-        or helper_int_gate_hit
-        or fx_param_provenance_gate_hit
         or midi_record_mode_gate_hit
         or midi_input_gate_hit
         or jsfx_format_gate_hit
@@ -39013,29 +38954,10 @@ function Net.try_finish_curl()
     if media_item_label_gate_hit then return "media_item_label_validator" end
     if sendidx_gate_hit then return "send_index_validator" end
     if timecode_workflow_gate_hit then return "timecode_workflow_validator" end
-    if stockfx_gate_hit then return "stock_fx_validator" end
     if timecodefx_gate_hit then return "timecode_fx_validator" end
-    if fxident_gate_hit then return "fx_identifier_validator" end
     if fxrecfx_gate_hit then return "trackfx_recfx_validator" end
     if fxcheck_gate_hit then return "fx_check_validator" end
-    if getbyname_gate_hit then return "get_by_name_validator" end
-    if fxadd_getonly_gate_hit then return "fx_add_getonly_validator" end
-    if upsert_gate_hit then return "chain_upsert_validator" end
-    if defer_gate_hit then return "defer_validator" end
-    if proq4_slope_gate_hit then
-      return proq4_contract_block_reason or "proq4_parameter_contract_validator"
-    end
-    if musical_enum_gate_hit then return "musical_enum_validator" end
-    if fx_param_scope_gate_hit then return "fx_param_scope_validator" end
-    if reeq_gain_gate_hit then return "reeq_gain_mapping_validator" end
-    if plugin_profile_guard_gate_hit then
-      return "plugin_profile_guard_validator"
-    end
     if helper_gate_hit then return "helper_validator" end
-    if helper_int_gate_hit then return "helper_integrity_validator" end
-    if fx_param_provenance_gate_hit then
-      return "fx_param_provenance_validator"
-    end
     if jsfx_format_gate_hit then return "jsfx_format_validator" end
     if jsfx_wrong_artifact_gate_hit then return "jsfx_wrong_artifact_validator" end
     if jsfx_gate_hit then return "jsfx_validator" end
@@ -39810,6 +39732,7 @@ function Net.try_finish_curl()
     content    = explanation,
     code_block = code,
     code_type  = code_type,
+    source_request = _turn_user_intent,
     ctx_label  = (function()
       local dmsg = S.pending_display_idx
         and S.display_messages[S.pending_display_idx] or nil
@@ -40267,6 +40190,7 @@ function RA.factory_reset_execute(opts)
   prefs.model_idx             = 2
   prefs.thinking_idx          = 0
   prefs.ui_scale_idx          = 3
+  prefs.ui_scale_by_dpi       = {}
   prefs.theme                 = "auto"
   prefs.chat_font_idx         = 2
   prefs.reply_language_idx    = 1
@@ -40346,7 +40270,13 @@ function RA.factory_reset_execute(opts)
         idx = idx + 1
       end
       for _, fn in ipairs(files) do
-        os.remove(dir .. sep .. fn)
+        -- Factory Reset preserves the internal-telemetry marker at the Data
+        -- root. A reset development or test install must not silently rejoin
+        -- the user statistics it is meant to be excluded from.
+        if not (norm_dir(dir) == norm_dir(RA.DATA_DIR)
+            and tostring(fn):lower() == "internal_telemetry.flag") then
+          os.remove(dir .. sep .. fn)
+        end
       end
 
       if type(reaper.EnumerateSubdirectories) ~= "function" then return end
@@ -40513,10 +40443,13 @@ do
           content_hash = Diag and type(Diag.content_hash) == "function"
             and Diag.content_hash(scrubbed) or nil,
           content_hash_scope = "redacted",
-          excerpt = excerpt,
-          excerpt_bytes = #excerpt,
-          excerpt_truncated = #scrubbed > #excerpt or nil,
         }
+        if not (type(meta) == "table"
+            and meta.omit_candidate_excerpt == true) then
+          event.candidate.excerpt = excerpt
+          event.candidate.excerpt_bytes = #excerpt
+          event.candidate.excerpt_truncated = #scrubbed > #excerpt or nil
+        end
       end
       events[#events + 1] = event
     end
@@ -41263,12 +41196,14 @@ end
 -- request is in flight, throttle-poll the response file (0.1s minimum).
 function Loop.pump_curl_or_retry()
   if S.retry_scheduled then
+    local schannel_retry = S.schannel_revocation_retry_pending == true
     local now = time_precise()
     if now >= S.retry_fire_time then
       S.retry_scheduled = false
+      S.schannel_revocation_retry_pending = false
       Net._set_pending_request_status("sent", nil, {
-        retry_count = S.retry_count,
-        retry_max = S.retry_max,
+        retry_count = schannel_retry and 1 or S.retry_count,
+        retry_max = schannel_retry and 1 or S.retry_max,
         clear_display_text = true,
       })
       Code.safe_write(tmp.out, "")
@@ -41278,11 +41213,14 @@ function Loop.pump_curl_or_retry()
           model_idx = S.retry_saved_model_idx,
           thinking_idx = S.retry_saved_thinking_idx,
           transport_retry = true,
+          ssl_revoke_best_effort = schannel_retry,
         })
         if ok then
           S.status = "waiting"
         else
-          if reason ~= "call_cap_exceeded" then
+          if schannel_retry then
+            Net._surface_schannel_revocation_original_error()
+          elseif reason ~= "call_cap_exceeded" then
             Log.add_error(
               "The servers are still busy and the automatic retry didn't "
               .. "go through. Please try again in a moment.")
@@ -41291,9 +41229,13 @@ function Loop.pump_curl_or_retry()
           S.retry_max = CFG.MAX_RETRIES
         end
       else
-        Log.add_error(
-          "The servers are still busy and the automatic retry didn't "
-          .. "go through. Please try again in a moment.")
+        if schannel_retry then
+          Net._surface_schannel_revocation_original_error()
+        else
+          Log.add_error(
+            "The servers are still busy and the automatic retry didn't "
+            .. "go through. Please try again in a moment.")
+        end
         S.retry_count = 0
         S.retry_max = CFG.MAX_RETRIES
       end
@@ -41340,6 +41282,7 @@ function TypedActionController.message_has_typed_actions(msg)
   return type(msg) == "table"
     and type(msg.typed_actions) == "table"
     and msg.typed_actions.present == true
+    and not (type(msg.code_block) == "string" and msg.code_block ~= "")
 end
 
 function TypedActionController.generated_code_text(msg)
@@ -41880,6 +41823,7 @@ local function loop()
   end
 
   -- Auto-update polling (independent of main API pipeline).
+  Updater.try_silent_manifest_repair()
   if update.state == "checking" then
     Updater.check_poll()
   elseif update.state == "verifying" then
@@ -41900,6 +41844,7 @@ local function loop()
   elseif update.state == "applying" then
     Updater.apply_tick()
   end
+  Updater.settle_silent_manifest_failure()
   -- Stage 3.4 auto-restart: fires once after the apply completes and a
   -- short grace window elapses so the user sees the "Applied" message
   -- before the script relaunches itself.
@@ -41913,6 +41858,9 @@ local function loop()
   -- Resources/UI.lua as Render.main_window so the UI half
   -- owns the draw path. Returns `open` so we can still detect the
   -- window's X button below (outside the visible-block scope).
+  if UI and UI.apply_remembered_ui_scale then
+    UI.apply_remembered_ui_scale()
+  end
   if OptionalFonts and OptionalFonts.apply_current_ui_font then
     OptionalFonts.apply_current_ui_font()
   end
@@ -42028,6 +41976,7 @@ function RA.pump_screen_reader_background()
     end
   end
   if Updater and update then
+    Updater.try_silent_manifest_repair()
     if update.state == "checking" then
       Updater.check_poll()
     elseif update.state == "verifying" then
@@ -42044,6 +41993,7 @@ function RA.pump_screen_reader_background()
     elseif update.state == "applying" then
       Updater.apply_tick()
     end
+    Updater.settle_silent_manifest_failure()
     Updater.try_auto_restart()
   end
   if S.gemini_auto_retest_pending and not S.curl_pid then
@@ -42651,23 +42601,24 @@ function Bootstrap.loop()
   -- the user moves it to another monitor mid-install. We re-center
   -- within the cached screen each frame (so a minimal -> styled view
   -- size change still recenters), but we never re-read mouse position.
-  if not S.bootstrap_screen_bounds then
+  if S.bootstrap_screen_bounds == nil then
     local mx, my = reaper.GetMousePosition()
-    local x1, y1, x2, y2 = reaper.my_getViewport(
-      -10000, -10000, 10000, 10000, mx, my, mx + 1, my + 1, true)
-    S.bootstrap_screen_bounds = {x1, y1, x2, y2}
+    local x1, y1, x2, y2 = RA.monitor_work_rect_native(
+      mx, my, mx + 1, my + 1)
+    S.bootstrap_screen_bounds = x1 and {x1, y1, x2, y2} or false
   end
-  local sx1, sy1, sx2, sy2 = table.unpack(S.bootstrap_screen_bounds)
   local W = use_minimal and 380 or 580
   local H = use_minimal and 175 or 410
-  local px = sx1 + math.floor((sx2 - sx1 - W) / 2)
-  local py = sy1 + math.floor((sy2 - sy1 - H) / 2)
   -- Cond_Always so the size + position track view-mode changes (minimal
   -- -> styled on failure). Position uses cached screen bounds so it
   -- doesn't follow the mouse cursor across monitors.
   ImGui.ImGui_SetNextWindowSize(RA.ctx, W, H, ImGui.ImGui_Cond_Always())
-  ImGui.ImGui_SetNextWindowPos(RA.ctx,
-    math.max(0, px), math.max(0, py), ImGui.ImGui_Cond_Always())
+  if type(S.bootstrap_screen_bounds) == "table" then
+    local sx1, sy1, sx2, sy2 = table.unpack(S.bootstrap_screen_bounds)
+    local px = sx1 + math.floor((sx2 - sx1 - W) / 2)
+    local py = sy1 + math.floor((sy2 - sy1 - H) / 2)
+    ImGui.ImGui_SetNextWindowPos(RA.ctx, px, py, ImGui.ImGui_Cond_Always())
+  end
   local n_color, n_var = bs_push_styles()
   local flags = ImGui.ImGui_WindowFlags_NoCollapse()
               + ImGui.ImGui_WindowFlags_NoDocking()

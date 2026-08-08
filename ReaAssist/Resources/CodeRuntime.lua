@@ -108,307 +108,166 @@ end
 
 -- =============================================================================
 -- Code.extract_typed_actions / Code.validate_typed_actions_plan
--- =============================================================================
--- Phase-1/2 typed action support: parse and validate provider-neutral action
--- JSON, plus a fail-closed local executor for exact-fit structured track edits.
--- The normal Lua path remains first-class for every request outside this
--- deliberately narrow stock track/FX/folder/send graph lane.
+-- Small structured lane for pure track, folder, and routing work.
 do
--- The typed-action lane is intentionally small: track creation/resolution,
--- stock FX, stock-FX parameters, folders, sends, and pan LFO automation. Anything
--- outside this whitelist should stay on the generated-Lua path.
-local _TYPED_ACTION_STOCK_FX = {
-  ReaEQ = true,
-  ReaComp = true,
-  ReaDelay = true,
-  ReaVerbate = true,
-  ReaGate = true,
-  ReaLimit = true,
+local OPS = {
+  ["track.create"] = true,
+  ["track.ensure"] = true,
+  ["track.resolve"] = true,
+  ["track.set"] = true,
+  ["track.folder"] = true,
+  ["send.create"] = true,
+}
+local OP_ORDER = {
+  "track.create", "track.ensure", "track.resolve",
+  "track.set", "track.folder", "send.create",
+}
+local FIELDS = {
+  ["track.create"] = {op=true,id=true,name=true,position=true,select=true},
+  ["track.ensure"] = {op=true,id=true,name=true,position=true,select=true},
+  ["track.resolve"] = {
+    op=true,id=true,name=true,selected=true,selected_index=true,index=true,
+  },
+  ["track.set"] = {
+    op=true,track=true,name=true,volume_db=true,pan_pct=true,
+    mute=true,solo=true,master_send=true,
+  },
+  ["track.folder"] = {op=true,parent=true,children=true},
+  ["send.create"] = {
+    op=true,id=true,["from"]=true,to=true,volume_db=true,
+    pan=true,mode=true,muted=true,
+  },
 }
 
-local _TYPED_ACTION_OP_KEYS = {
-  "track.create",
-  "track.ensure",
-  "track.resolve",
-  "track.set",
-  "track.pan_lfo",
-  "track.folder",
-  "fx.add_stock",
-  "fx.set_param",
-  "send.create",
-}
-
--- Fast membership map used by schema validation and repair.
-local _TYPED_ACTION_OP_ALLOWED = {}
-for _, op in ipairs(_TYPED_ACTION_OP_KEYS) do
-  _TYPED_ACTION_OP_ALLOWED[op] = true
+local function trim(value)
+  return tostring(value or ""):match("^%s*(.-)%s*$") or ""
 end
 
--- Supported stock-FX parameter names by action schema. Types here describe the
--- JSON contract, not the eventual normalized REAPER parameter values.
-local _TYPED_ACTION_PARAM_TYPES = {
-  ReaEQ = {
-    band = "number",
-    frequency_hz = "number",
-    gain_db = "number",
-  },
-  ReaComp = {
-    threshold_db = "number",
-    attack_ms = "number",
-    release_ms = "number",
-    wet_db = "number",
-    dry_db = "number",
-    rms_ms = "number",
-  },
-  ReaDelay = {
-    free_time_ms = "number",
-    musical_length = "number",
-    feedback_pct = "number",
-    feedback_db = "number",
-    wet_db = "number",
-    dry_db = "number",
-  },
-  ReaVerbate = {
-    wet_db = "number",
-    dry_db = "number",
-    room_size = "number",
-    dampening = "number",
-  },
-  ReaGate = {
-    threshold_db = "number",
-    hysteresis_db = "number",
-    attack_ms = "number",
-    hold_ms = "number",
-    release_ms = "number",
-  },
-  ReaLimit = {
-    threshold_db = "number",
-    ceiling_db = "number",
-  },
-}
-
--- Normalized ReaEQ parameter lookup points. The executor interpolates these
--- sparse calibration tables instead of pretending ReaEQ uses linear Hz/dB
--- scaling across its sliders.
-local _TYPED_ACTION_REAEQ_FREQ_POINTS = {
-  { 20, 0.0078 }, { 50, 0.0625 }, { 80, 0.1094 },
-  { 100, 0.1406 }, { 150, 0.1953 }, { 200, 0.2344 },
-  { 250, 0.2656 }, { 300, 0.2891 }, { 400, 0.3320 },
-  { 500, 0.3672 }, { 600, 0.3945 }, { 700, 0.4199 },
-  { 800, 0.4414 }, { 900, 0.4590 }, { 1000, 0.4766 },
-  { 1200, 0.5059 }, { 1500, 0.5410 }, { 2000, 0.5884 },
-  { 2500, 0.6250 }, { 3000, 0.6553 }, { 3500, 0.6802 },
-  { 4000, 0.7026 }, { 5000, 0.7393 }, { 6000, 0.7695 },
-  { 7000, 0.7952 }, { 8000, 0.8173 }, { 10000, 0.8542 },
-  { 12000, 0.8846 }, { 14000, 0.9103 }, { 16000, 0.9325 },
-  { 18000, 0.9521 }, { 20000, 0.9696 }, { 24000, 1.0000 },
-}
-
-local _TYPED_ACTION_REAEQ_GAIN_POINTS = {
-  { -12, 0.1250 }, { -10, 0.1582 }, { -8, 0.1992 },
-  { -6, 0.2500 }, { -5, 0.2813 }, { -4, 0.3164 },
-  { -3, 0.3555 }, { -2, 0.3984 }, { -1, 0.4453 },
-  { 0, 0.5000 }, { 1, 0.5195 }, { 2, 0.5430 },
-  { 3, 0.5684 }, { 4, 0.5977 }, { 5, 0.6289 },
-  { 6, 0.6641 }, { 7, 0.7070 }, { 8, 0.7500 },
-  { 9, 0.8047 }, { 10, 0.8594 }, { 11, 0.9219 },
-  { 12, 0.9961 },
-}
-
--- Small JSON-shape helpers shared by parser, validator, and repair code.
-local function _typed_action_error(code, path, message)
-  return { code = code, path = path or "$", message = message }
+local function nonempty(value)
+  return type(value) == "string" and value:match("%S") ~= nil
 end
 
-local function _typed_action_trim(s)
-  return (s or ""):match("^%s*(.-)%s*$") or ""
-end
-
-local function _typed_action_is_nonempty_string(v)
-  return type(v) == "string" and v:match("%S") ~= nil
-end
-
-local function _typed_action_is_array(t)
-  if type(t) ~= "table" or t == JSON.NULL then return false end
-  local n = #t
-  if n == 0 then return false end
+local function array(value)
+  if type(value) ~= "table" then return false end
   local count = 0
-  for k in pairs(t) do
-    if type(k) ~= "number" or k < 1 or k > n or k % 1 ~= 0 then
-      return false
-    end
+  for key in pairs(value) do
+    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then return false end
     count = count + 1
   end
-  return count == n
+  return count == #value
 end
 
-local function _typed_action_is_object(t)
-  if type(t) ~= "table" or t == JSON.NULL then return false end
-  if #t > 0 then return false end
-  return true
-end
-
-local function _typed_action_add_error(errors, code, path, message)
-  errors[#errors+1] = _typed_action_error(code, path, message)
-end
-
-local function _typed_action_check_fields(errors, obj, path, allowed)
-  for k in pairs(obj) do
-    if type(k) ~= "string" or not allowed[k] then
-      _typed_action_add_error(errors, "unknown_field",
-        path .. "." .. tostring(k), "Unsupported typed-action field")
-    end
-  end
-end
-
-local function _typed_action_first_error_code(errors)
-  local first = type(errors) == "table" and errors[1] or nil
-  return first and first.code or nil
-end
-
-local function _typed_action_signature_value(v)
-  if v == JSON.NULL then return "null" end
-  local tv = type(v)
-  if tv ~= "table" then return tv .. ":" .. tostring(v) end
-  if _typed_action_is_array(v) then
-    local parts = {}
-    for i = 1, #v do
-      parts[#parts+1] = _typed_action_signature_value(v[i])
-    end
-    return "array:[" .. table.concat(parts, ",") .. "]"
-  end
-  local keys, parts = {}, {}
-  for k in pairs(v) do keys[#keys+1] = k end
-  table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
-  for _, k in ipairs(keys) do
-    parts[#parts+1] = tostring(k) .. "=" .. _typed_action_signature_value(v[k])
-  end
-  return "object:{" .. table.concat(parts, ",") .. "}"
-end
-
--- Some smaller models occasionally loop exact duplicate JSON actions. Exact
--- repeats cannot express an intentional second object because ids must be
--- unique, so collapse them before validation while preserving non-identical
--- duplicate-id failures.
-function Code.normalize_typed_actions_plan(plan)
-  if not _typed_action_is_object(plan)
-     or not _typed_action_is_array(plan.actions) then
-    return plan, 0
-  end
-
-  local seen, out, dropped = {}, {}, 0
-  for _, action in ipairs(plan.actions) do
-    local sig = _typed_action_signature_value(action)
-    if seen[sig] then
-      dropped = dropped + 1
-    else
-      seen[sig] = true
-      out[#out+1] = action
-    end
-  end
-
-  if dropped > 0 then plan.actions = out end
-  return plan, dropped
-end
-
--- Prompt-intent readers used by typed-action repair, schema shaping, and
--- semantic validation. These are deliberately string-pattern based so they can
--- run before any model call and without depending on the context sidecar.
-function Code._typed_action_selected_indexes_from_user_text(user_text)
-  local text = tostring(user_text or ""):lower()
-  text = text
-    :gsub("do not use selected_index", "")
-    :gsub("do not use selected index", "")
-    :gsub("don't use selected_index", "")
-    :gsub("don't use selected index", "")
-    :gsub("without selected_index", "")
-    :gsub("without selected index", "")
-    :gsub("not selected_index", "")
-    :gsub("not selected index", "")
-  local indexes, seen = {}, {}
-  local function add(raw)
-    local n = tonumber(raw)
-    if not n or n % 1 ~= 0 or n < 1 then return end
-    if seen[n] then return end
-    seen[n] = true
-    indexes[#indexes + 1] = n
-  end
-
-  for raw in text:gmatch("selected[_%-%s]+index%s*[:=]?%s*(%d+)") do
-    add(raw)
-  end
-  for _, suffix in ipairs({ "st", "nd", "rd", "th" }) do
-    for raw in text:gmatch("%f[%d](%d+)%s*" .. suffix .. "%s+selected%s+track") do
-      add(raw)
-    end
-  end
-  for raw in text:gmatch("selected%s+track%s+(%d+)") do
-    add(raw)
-  end
-
-  local ordinals = {
-    first = 1, second = 2, third = 3, fourth = 4, fifth = 5,
-    sixth = 6, seventh = 7, eighth = 8, ninth = 9, tenth = 10,
+local function err(code, path, message)
+  return {
+    code = tostring(code or "invalid_plan"),
+    path = tostring(path or "$"),
+    message = tostring(message or "Invalid structured edit."),
   }
-  for word, n in pairs(ordinals) do
-    if text:find("%f[%a]" .. word .. "%s+selected%s+track", 1) then
-      add(n)
-    elseif text:find("%f[%a]" .. word .. "%s+selected%f[%A]", 1) then
-      add(n)
-    end
+end
+
+local function add_error(errors, code, path, message)
+  errors[#errors + 1] = err(code, path, message)
+end
+
+local function first_error(errors)
+  return type(errors) == "table" and errors[1]
+    and tostring(errors[1].code or "invalid_plan") or nil
+end
+
+local function count_ops(plan)
+  local counts = {}
+  for _, op in ipairs(OP_ORDER) do counts[op] = 0 end
+  for _, action in ipairs(type(plan) == "table" and plan.actions or {}) do
+    if counts[action.op] ~= nil then counts[action.op] = counts[action.op] + 1 end
   end
-
-  table.sort(indexes)
-  local required = #indexes > 0
-    or text:find("selected_index", 1, true) ~= nil
-    or text:find("selected index", 1, true) ~= nil
-  return indexes, required
+  return counts
 end
 
-function Code._typed_action_absolute_track_indexes_from_user_text(user_text)
-  local text = Code._typed_action_user_request_text(user_text):lower()
-  text = text
-    :gsub("selected%s+track%s+#?%s*%d+", "")
-    :gsub("selected[_%-%s]+index%s*[:=]?%s*%d+", "")
-  local indexes, seen = {}, {}
-  for raw in text:gmatch("%f[%a]track%s+#?%s*(%d+)%f[%D]") do
-    local n = tonumber(raw)
-    if n and n % 1 == 0 and n >= 1 and n <= 4096 and not seen[n] then
-      seen[n] = true
-      indexes[#indexes + 1] = n
-    end
+local function fenced_blocks(text)
+  local fence = string.char(96, 96, 96)
+  return tostring(text or ""):gmatch(
+    fence .. "([^\n]*)\n(.-)\n%s*" .. fence)
+end
+
+local function has_plugin_signal(user_text)
+  local lower = tostring(user_text or ""):lower()
+  if type(CTX) == "table"
+      and type(CTX.prompt_has_named_plugin_pack_signal) == "function"
+      and CTX.prompt_has_named_plugin_pack_signal(user_text) then
+    return true
   end
-  table.sort(indexes)
-  return indexes
+  -- "Reverb Bus" is ordinarily a track name, so routing work that mentions one
+  -- keeps its structured path. A return is different: an effect return is the
+  -- track the effect lives on, so "set up a reverb return" is a creation
+  -- request where the plug-in is the deliverable. Drop the effect word for a
+  -- return only when a determiner marks it as one that already exists.
+  lower = lower
+    :gsub("%f[%w]reverb%s+bus%f[%W]", "bus")
+    :gsub("%f[%w]delay%s+bus%f[%W]", "bus")
+  for _, det in ipairs({ "my", "the", "our", "that", "existing" }) do
+    lower = lower
+      :gsub("%f[%w]" .. det .. "%s+reverb%s+return%f[%W]", det .. " return")
+      :gsub("%f[%w]" .. det .. "%s+delay%s+return%f[%W]", det .. " return")
+  end
+  if type(CTX) == "table"
+      and type(CTX.prompt_has_plugin_pack_signal) == "function"
+      and CTX.prompt_has_plugin_pack_signal(lower) then
+    return true
+  end
+  local words = " " .. lower
+    :gsub("[^%w]+", " "):gsub("%s+", " ") .. " "
+  for _, term in ipairs({
+      "plugin", "plugins", "plug in", "plug ins", "fx", "effect", "effects",
+      "processor", "processors", "processing", "chain", "channel strip",
+      "wet", "eq", "equalizer", "compressor", "limiter",
+      "compression", "compressing", "equalization", "limiting", "gating",
+      "de essing", "deessing",
+      "gate", "reverb", "delay", "deesser", "saturation", "distortion",
+      "chorus", "phaser", "pitch correction", "amp sim", "vst", "vst3",
+      "clap", "au", "aax", "parameter", "parameters", "preset", "presets",
+    }) do
+    if words:find(" " .. term .. " ", 1, true) then return true end
+  end
+  return false
 end
 
-function Code._typed_action_forbids_positional_track_selector(user_text)
-  local text = tostring(user_text or ""):lower()
-  return text:find("do not use selected_index", 1, true) ~= nil
-    or text:find("do not use selected index", 1, true) ~= nil
-    or text:find("don't use selected_index", 1, true) ~= nil
-    or text:find("don't use selected index", 1, true) ~= nil
-    or text:find("without selected_index", 1, true) ~= nil
-    or text:find("without selected index", 1, true) ~= nil
-    or text:find("do not use absolute track index", 1, true) ~= nil
-    or text:find("do not use absolute track indexes", 1, true) ~= nil
-    or text:find("don't use absolute track index", 1, true) ~= nil
-    or text:find("don't use absolute track indexes", 1, true) ~= nil
-    or text:find("without absolute track index", 1, true) ~= nil
-    or text:find("without absolute track indexes", 1, true) ~= nil
-end
-
-function Code._typed_action_forbids_absolute_track_index(user_text)
-  local text = tostring(user_text or ""):lower()
-  return text:find("do not use absolute track index", 1, true) ~= nil
-    or text:find("do not use absolute track indexes", 1, true) ~= nil
-    or text:find("don't use absolute track index", 1, true) ~= nil
-    or text:find("don't use absolute track indexes", 1, true) ~= nil
-    or text:find("without absolute track index", 1, true) ~= nil
-    or text:find("without absolute track indexes", 1, true) ~= nil
-    or text:match("do not use[^%.\n;]*absolute track indexes?") ~= nil
-    or text:match("don't use[^%.\n;]*absolute track indexes?") ~= nil
-    or text:match("without[^%.\n;]*absolute track indexes?") ~= nil
+local function exact_nonplugin_scope(user_text)
+  local text = tostring(user_text or "")
+  local lower = text:lower()
+  if lower == "" or has_plugin_signal(text) then return false end
+  if type(Code.prompt_is_question_or_readonly) == "function"
+      and Code.prompt_is_question_or_readonly(text) then return false end
+  if type(Code.prompt_requests_reusable_action_script) == "function"
+      and Code.prompt_requests_reusable_action_script(text) then return false end
+  if lower:find("reaper lua", 1, true)
+      or lower:find("lua script", 1, true)
+      or lower:find("reascript", 1, true) then return false end
+  local words = " " .. lower:gsub("[^%w]+", " "):gsub("%s+", " ") .. " "
+  for _, term in ipairs({
+      " item ", " items ", " take ", " takes ", " media ", " midi ",
+      " marker ", " markers ", " region ", " regions ", " envelope ",
+      " automation ", " render ", " export ", " record ", " recording ",
+      " play ", " playback ", " transport ", " tempo ", " theme ", " color ",
+      " colour ", " toolbar ", " project tab ", " open project ",
+      " close project ",
+    }) do
+    if words:find(term, 1, true) then return false end
+  end
+  local action, target = false, false
+  for _, term in ipairs({
+      " create ", " add ", " make ", " insert ", " ensure ", " rename ",
+      " set ", " mute ", " unmute ", " solo ", " unsolo ", " route ",
+      " send ", " folder ",
+    }) do
+    if words:find(term, 1, true) then action = true break end
+  end
+  for _, term in ipairs({
+      " track ", " tracks ", " bus ", " buses ", " folder ", " send ",
+      " routing ",
+    }) do
+    if words:find(term, 1, true) then target = true break end
+  end
+  return action and target
 end
 
 function Code._typed_action_user_request_text(user_text)
@@ -867,19 +726,6 @@ function Code.prompt_is_ideation_advice_followup(user_text)
     or lt:find("^i%s+was%s+thinking%s+") ~= nil
 end
 
-function Code.history_has_prior_assistant(history)
-  if type(history) ~= "table" then return false end
-  for i = #history, 1, -1 do
-    local item = history[i]
-    if type(item) == "table"
-       and item.role == "assistant"
-       and tostring(item.content or ""):match("%S") then
-      return true
-    end
-  end
-  return false
-end
-
 function Code._typed_action_user_requests_master_send_state(user_text)
   local lt = Code._typed_action_user_request_text(user_text)
     :lower()
@@ -945,89 +791,6 @@ function Code._typed_action_user_requests_master_send_off(user_text)
   return false
 end
 
-function Code._typed_action_user_requests_record_ready_state(user_text)
-  local lt = Code._typed_action_user_request_text(user_text)
-    :lower()
-    :gsub("[’']", "")
-    :gsub("%s+", " ")
-  if lt == "" then return false end
-  for _, phrase in ipairs({
-    "ready for recording",
-    "ready to record",
-    "record ready",
-    "record-ready",
-    "record armed",
-    "record-armed",
-    "record arm",
-    "arm for recording",
-    "armed for recording",
-  }) do
-    if lt:find(phrase, 1, true) then return true end
-  end
-  return lt:find("%f[%w]arm%f[%W]%s+[^%.\n;:]-record") ~= nil
-end
-
-function Code._typed_action_user_requests_track_deletion(user_text)
-  local text = Code._typed_action_user_request_text(user_text)
-    :lower()
-    :gsub("[’']", "")
-    :gsub("%s+", " ")
-  if text == "" then return false end
-  for _, phrase in ipairs({
-    "do not create, delete, rename, mute, solo, pan, or change any other tracks",
-    "do not create, delete, rename, mute, solo, pan, or change any other track",
-    "do not create, delete, rename, mute, pan, or change any other tracks",
-    "do not create, delete, rename, mute, pan, or change any other track",
-    "do not create, delete, rename, solo, or change any other tracks",
-    "do not create, delete, rename, solo, or change any other track",
-    "do not create, delete, or rename any other tracks",
-    "do not create, delete, or rename any other track",
-    "do not create, delete or rename any other tracks",
-    "do not create, delete or rename any other track",
-    "do not create, delete, or rename any tracks",
-    "do not create, delete, or rename any track",
-    "do not create, delete or rename any tracks",
-    "do not create, delete or rename any track",
-    "do not delete any tracks",
-    "do not delete any track",
-    "don't delete any tracks",
-    "don't delete any track",
-    "do not remove any tracks",
-    "do not remove any track",
-    "don't remove any tracks",
-    "don't remove any track",
-    "without deleting tracks",
-    "without deleting any tracks",
-    "without removing tracks",
-    "without removing any tracks",
-  }) do
-    text = text:gsub(phrase, "")
-  end
-  local object_words = {
-    "track", "tracks", "selected", "current", "existing", "empty",
-  }
-  local function has_track_object(fragment)
-    for _, word in ipairs(object_words) do
-      if fragment:find("%f[%w]" .. word .. "%f[%W]") then return true end
-    end
-    return false
-  end
-  for clause in text:gmatch("[^%.\n;:]+") do
-    if has_track_object(clause)
-        and (clause:find("%f[%w]delete%f[%W]")
-          or clause:find("%f[%w]remove%f[%W]")
-          or clause:find("%f[%w]clear%f[%W]")
-          or clause:find("%f[%w]wipe%f[%W]")) then
-      return true
-    end
-    if clause:find("%f[%w]start%s+from%s+scratch%f[%W]")
-        or clause:find("%f[%w]clear%s+the%s+project%f[%W]")
-        or clause:find("%f[%w]empty%s+the%s+project%f[%W]") then
-      return true
-    end
-  end
-  return false
-end
 
 function Code._typed_action_track_property_intent_text(user_text)
   local text = Code._localized_action_intent_text(user_text)
@@ -1102,421 +865,6 @@ function Code._typed_action_track_property_intent_text(user_text)
   return text
 end
 
-function Code._typed_action_static_pan_value(user_text)
-  local text = Code._typed_action_track_property_intent_text(user_text):lower()
-  local first_value, value_count, conflicting = nil, 0, false
-
-  local function add_value(raw, direction)
-    local value = tonumber(raw)
-    if not value then return end
-    value = math.abs(value) * direction
-    if value == 0 then value = 0 end
-    value_count = value_count + 1
-    if first_value == nil then
-      first_value = value
-    elseif math.abs(first_value - value) > 0.000000001 then
-      conflicting = true
-    end
-  end
-
-  for raw in text:gmatch("([%+%-]?%d+%.?%d*)%s*percent%s+right") do
-    add_value(raw, 1)
-  end
-  for raw in text:gmatch("([%+%-]?%d+%.?%d*)%s*%%%s*right") do
-    add_value(raw, 1)
-  end
-  for raw in text:gmatch("([%+%-]?%d+%.?%d*)%s*percent%s+left") do
-    add_value(raw, -1)
-  end
-  for raw in text:gmatch("([%+%-]?%d+%.?%d*)%s*%%%s*left") do
-    add_value(raw, -1)
-  end
-
-  if conflicting then return nil, true, value_count end
-  return first_value, false, value_count
-end
-
-function Code._typed_action_user_requests_aggregate_track_property_target(user_text)
-  local text = Code._typed_action_track_property_intent_text(user_text)
-    :gsub("[^%w]+", " ")
-    :gsub("%s+", " ")
-    :gsub("^%s+", "")
-    :gsub("%s+$", "")
-  if text == "" then return false end
-  local words = " " .. text .. " "
-  local property_terms = {
-    "volume", "vol", "fader", "level", "pan", "panned", "mute", "muted", "unmute",
-    "solo", "soloed", "unsolo", "master send", "main send",
-    "master parent", "parent send", "master output", "rename",
-    "renamed", "call", "called",
-  }
-  local has_property = false
-  for _, term in ipairs(property_terms) do
-    if words:find(" " .. term .. " ", 1, true) then
-      has_property = true
-      break
-    end
-  end
-  if not has_property then return false end
-  for _, phrase in ipairs({
-    "all tracks",
-    "all my tracks",
-    "all the tracks",
-    "all of the tracks",
-    "all existing tracks",
-    "all project tracks",
-    "all audio tracks",
-    "all midi tracks",
-    "all selected tracks",
-    "every track",
-    "every existing track",
-    "every project track",
-    "every audio track",
-    "every midi track",
-    "every selected track",
-    "each track",
-    "each existing track",
-    "each project track",
-    "each audio track",
-    "each midi track",
-    "each selected track",
-  }) do
-    if words:find(" " .. phrase .. " ", 1, true) then return true end
-  end
-  return false
-end
-
-function Code._typed_action_strip_quoted_literals(user_text)
-  local value = tostring(user_text or "")
-
-  local function word_at(pos)
-    if pos < 1 or pos > #value then return false end
-    return value:sub(pos, pos):match("[%w]") ~= nil
-  end
-
-  local function strip_pairs(open_quote, close_quote, boundary_open, boundary_close)
-    local out, emit_pos, search_pos = {}, 1, 1
-    while true do
-      local open_pos = value:find(open_quote, search_pos, true)
-      if not open_pos then break end
-      if boundary_open and word_at(open_pos - 1) then
-        search_pos = open_pos + #open_quote
-      else
-        local line_break = value:find("[\r\n]", open_pos + #open_quote)
-        local close_pos = value:find(
-          close_quote, open_pos + #open_quote, true)
-        if close_pos and line_break and close_pos > line_break then
-          close_pos = nil
-        end
-        while close_pos
-            and boundary_close
-            and word_at(close_pos + #close_quote) do
-          close_pos = value:find(
-            close_quote, close_pos + #close_quote, true)
-          if close_pos and line_break and close_pos > line_break then
-            close_pos = nil
-          end
-        end
-        if close_pos then
-          out[#out + 1] = value:sub(emit_pos, open_pos - 1)
-          out[#out + 1] = " "
-          emit_pos = close_pos + #close_quote
-          search_pos = emit_pos
-        else
-          search_pos = open_pos + #open_quote
-        end
-      end
-    end
-    out[#out + 1] = value:sub(emit_pos)
-    value = table.concat(out)
-  end
-
-  strip_pairs('"', '"', false, false)
-  strip_pairs("'", "'", true, true)
-  strip_pairs("“", "”", false, false)
-  strip_pairs("‘", "’", false, true)
-  return value
-end
-
-function Code._typed_action_user_requests_predicate_track_property_target(user_text)
-  local raw_text = Code._typed_action_user_request_text(user_text):lower()
-  local predicate_text = Code._typed_action_strip_quoted_literals(raw_text)
-  local text = predicate_text
-    :gsub("[^%w]+", " ")
-    :gsub("%s+", " ")
-    :gsub("^%s+", "")
-    :gsub("%s+$", "")
-  if text == "" then return false end
-  local words = " " .. text .. " "
-  local has_track_target = words:find(" track ", 1, true) ~= nil
-    or words:find(" tracks ", 1, true) ~= nil
-    or words:find(" selected ", 1, true) ~= nil
-  if not has_track_target then return false end
-
-  local has_property = false
-  for _, term in ipairs({
-    "volume", "vol", "fader", "level", "pan", "panned", "mute", "muted",
-    "unmute", "solo", "soloed", "unsolo", "master send", "main send",
-    "master parent", "parent send", "master output", "rename", "renamed",
-    "call", "called",
-  }) do
-    if words:find(" " .. term .. " ", 1, true) then
-      has_property = true
-      break
-    end
-  end
-  if not has_property then
-    has_property = Code._typed_action_user_requests_track_level_change(user_text)
-  end
-  if not has_property
-      and predicate_text:find("[%+%-]?%d+%.?%d*%s*[dD][bB]") then
-    has_property = true
-  end
-  if not has_property then return false end
-
-  for _, phrase in ipairs({
-    "if a selected track", "if any selected track", "if the selected track",
-    "if selected tracks", "if a track", "if any track", "if the track",
-    "if tracks", "when a selected track", "when any selected track",
-    "when the selected track", "when selected tracks", "when a track",
-    "when any track", "when the track", "when tracks",
-    "track ends in", "track ends with", "track ending in", "track ending with",
-    "tracks end in", "tracks end with", "tracks ending in", "tracks ending with",
-    "track starts in", "track starts with", "track starting in", "track starting with",
-    "tracks start in", "tracks start with", "tracks starting in", "tracks starting with",
-    "track contains", "track containing", "tracks contain", "tracks containing",
-    "track whose name", "tracks whose name", "track name ends", "track name starts",
-    "track name contains", "tracks matching", "track matching",
-    "tracks that end", "track that ends", "tracks that start", "track that starts",
-  }) do
-    if words:find(" " .. phrase .. " ", 1, true) then return true end
-  end
-  return false
-end
-
-function Code._typed_action_user_requests_track_level_change(user_text)
-  local text = Code._typed_action_track_property_intent_text(user_text)
-    :gsub("[%c]+", " ")
-    :gsub("%s+", " ")
-  if text == "" then return false end
-
-  local function has_word(fragment, word)
-    return fragment:find("%f[%w]" .. word .. "%f[%W]") ~= nil
-  end
-
-  local function has_track_target(fragment)
-    return has_word(fragment, "track")
-      or has_word(fragment, "tracks")
-      or has_word(fragment, "bus")
-      or has_word(fragment, "buses")
-      or has_word(fragment, "aux")
-      or has_word(fragment, "selected")
-  end
-
-  local function has_db_value(fragment)
-    return fragment:find("[%+%-]?%d+%.?%d*%s*[dD][bB]") ~= nil
-  end
-
-  local function has_explicit_track_level_word(fragment)
-    return has_word(fragment, "volume")
-      or has_word(fragment, "fader")
-      or has_word(fragment, "level")
-  end
-
-  local function has_fx_db_target(fragment)
-    if fragment:find("%f[%d]%d+%.?%d*%s*[kK]?[hH][zZ]%f[%W]") then
-      return true
-    end
-    for _, word in ipairs({
-      "threshold", "ceiling", "ratio", "attack", "release", "hold",
-      "knee", "band", "filter", "frequency", "freq", "wet", "dry",
-      "mix", "feedback", "drive", "input", "output",
-    }) do
-      if has_word(fragment, word) then return true end
-    end
-    if fragment:find("%f[%w]make%W*up%f[%W]") then return true end
-    if has_word(fragment, "gain") then
-      return has_word(fragment, "eq")
-        or has_word(fragment, "band")
-        or has_word(fragment, "filter")
-        or has_word(fragment, "plugin")
-        or has_word(fragment, "fx")
-    end
-    return false
-  end
-
-  for clause in text:gmatch("[^%.\n;:,]+") do
-    if has_track_target(clause) and has_db_value(clause) then
-      if has_explicit_track_level_word(clause) then
-        return true
-      end
-      if not has_fx_db_target(clause) then
-        for _, word in ipairs({
-          "pull", "pulled", "lower", "lowered", "drop", "dropped",
-          "reduce", "reduced", "trim", "trimmed", "bring", "brought",
-          "take", "took",
-        }) do
-          if has_word(clause, word) then return true end
-        end
-      end
-    end
-  end
-
-  return false
-end
-
-function Code._typed_action_send_intent_text(user_text)
-  local text = Code._typed_action_user_request_text(user_text):lower()
-  text = text
-    :gsub("master/parent send", "")
-    :gsub("master send", "")
-    :gsub("main send", "")
-    :gsub("master parent send", "")
-    :gsub("parent send", "")
-  for _, pattern in ipairs({
-    "do not add[^%.\n;:]-sends?[^%.\n;:]*",
-    "don't add[^%.\n;:]-sends?[^%.\n;:]*",
-    "do not create[^%.\n;:]-sends?[^%.\n;:]*",
-    "don't create[^%.\n;:]-sends?[^%.\n;:]*",
-    "without[^%.\n;:]-sends?[^%.\n;:]*",
-    "no%s+other%s+sends?[^%.\n;:]*",
-    "no%s+sends?[^%.\n;:]*",
-  }) do
-    text = text:gsub(pattern, "")
-  end
-  return text
-end
-
-function Code.typed_action_user_requests_hardware_output(user_text)
-  local lt = Code._typed_action_user_request_text(user_text):lower()
-    :gsub("[%c]+", " ")
-    :gsub("%s+", " ")
-  if lt == "" then return false end
-
-  if lt:find("hardware output", 1, true)
-      or lt:find("hardware outputs", 1, true)
-      or lt:find("hardware out", 1, true)
-      or lt:find("physical output", 1, true)
-      or lt:find("physical outputs", 1, true) then
-    return true
-  end
-
-  for _, pat in ipairs({
-    "%f[%w]output%s*%d",
-    "%f[%w]outputs%s*%d",
-    "%f[%w]out%s*%d",
-    "%f[%w]outs%s*%d",
-    "%f[%w]uscita%s*%d",
-    "%f[%w]uscite%s*%d",
-    "%d%s*/%s*%d%s+output%f[%W]",
-    "%d%s*/%s*%d%s+outputs%f[%W]",
-    "%d%s*/%s*%d%s+out%f[%W]",
-    "%d%s*/%s*%d%s+outs%f[%W]",
-    "%d%s*/%s*%d%s+uscita%f[%W]",
-    "%d%s*/%s*%d%s+uscite%f[%W]",
-  }) do
-    if lt:find(pat) then return true end
-  end
-
-  return false
-end
-
-function Code.typed_action_user_requests_track_creation(user_text)
-  local u = Code._typed_action_user_request_text(user_text):lower()
-  local mentions_existing_targets =
-    u:find("existing track", 1, true) ~= nil
-    or u:find("existing tracks", 1, true) ~= nil
-    or u:find("resolve the existing", 1, true) ~= nil
-  local creation_text = u
-  for _, pattern in ipairs({
-    "do not create[^%.\n;]*tracks?",
-    "don't create[^%.\n;]*tracks?",
-    "do not add[^%.\n;]*tracks?",
-    "don't add[^%.\n;]*tracks?",
-    "do not make[^%.\n;]*tracks?",
-    "don't make[^%.\n;]*tracks?",
-  }) do
-    creation_text = creation_text:gsub(pattern, "")
-  end
-  local explicit_creation =
-    u:find("blank project", 1, true) ~= nil
-    or u:find("blank-project", 1, true) ~= nil
-    or u:find("blank reaper project", 1, true) ~= nil
-    or creation_text:match("%f[%w]create%s+[%w%-]+%s+tracks?") ~= nil
-    or creation_text:match("%f[%w]create%s+[%w%-]+%s+new%s+tracks?") ~= nil
-    or creation_text:match("%f[%w]create%s+a%s+new%s+track") ~= nil
-    or creation_text:match("%f[%w]create%s+tracks?%s+#?%d+") ~= nil
-    or creation_text:match("%f[%w]create[^%.\n;]-tracks%f[%W]") ~= nil
-    or creation_text:match("%f[%w]add%s+[%w%-]+%s+tracks?") ~= nil
-    or creation_text:match("%f[%w]add%s+[%w%-]+%s+new%s+tracks?") ~= nil
-    or creation_text:match("%f[%w]make%s+[%w%-]+%s+tracks?") ~= nil
-    or creation_text:match("%f[%w]make%s+[%w%-]+%s+new%s+tracks?") ~= nil
-    or creation_text:match("%f[%w]make[^%.\n;]-tracks%f[%W]") ~= nil
-    or creation_text:match("%f[%w]insert%s+[%w%-]+%s+tracks?") ~= nil
-    or creation_text:match("%f[%w]insert%s+[%w%-]+%s+new%s+tracks?") ~= nil
-    or creation_text:match("create exactly%s+[%w%-]+%s+tracks?") ~= nil
-    or creation_text:match("create exactly%s+[%w%-]+%s+new%s+tracks?") ~= nil
-    or creation_text:find("create one track", 1, true) ~= nil
-    or creation_text:find("create two tracks", 1, true) ~= nil
-    or creation_text:find("create three tracks", 1, true) ~= nil
-    or creation_text:find("create four tracks", 1, true) ~= nil
-    or creation_text:find("create five tracks", 1, true) ~= nil
-    or creation_text:find("create six tracks", 1, true) ~= nil
-    or creation_text:match("%f[%w]create[^%.\n;]-bus%s+named%f[%W]") ~= nil
-    or creation_text:match("%f[%w]create[^%.\n;]-buses%s+named%f[%W]") ~= nil
-    or creation_text:match("%f[%w]create[^%.\n;]-return%s+named%f[%W]") ~= nil
-    or creation_text:match("%f[%w]create[^%.\n;]-returns%s+named%f[%W]") ~= nil
-    or creation_text:match("%f[%w]create%s+one%s+[%w%-]+%s+bus%f[%W]") ~= nil
-    or creation_text:match("%f[%w]create%s+one%s+[%w%-]+%s+return%f[%W]") ~= nil
-    or creation_text:match("%f[%w]append[^%.\n;]-bus%f[%W]") ~= nil
-    or creation_text:match("%f[%w]append[^%.\n;]-buses%f[%W]") ~= nil
-    or creation_text:match("%f[%w]append[^%.\n;]-return%f[%W]") ~= nil
-    or creation_text:match("%f[%w]append[^%.\n;]-returns%f[%W]") ~= nil
-    or creation_text:match("%f[%w]set%s+up[^%.\n;]-stack%f[%W]") ~= nil
-    or creation_text:match("%f[%w]setup[^%.\n;]-stack%f[%W]") ~= nil
-    or creation_text:match("%f[%w]build[^%.\n;]-routing%s+plan%f[%W]") ~= nil
-    or creation_text:match("%f[%w]build[^%.\n;]-routing%s+setup%f[%W]") ~= nil
-    or creation_text:find("routing template", 1, true) ~= nil
-  return explicit_creation == true
-    or (mentions_existing_targets and explicit_creation == true)
-end
-
-function Code.typed_action_user_requests_track_ensure(user_text)
-  local u = Code._typed_action_user_request_text(user_text):lower()
-    :gsub("[%c]+", " ")
-    :gsub("%s+", " ")
-  if u == "" then return false end
-  return u:find("%f[%w]ensure%f[%W]") ~= nil
-    or u:find("if missing", 1, true) ~= nil
-    or u:find("if it is missing", 1, true) ~= nil
-    or u:find("if it's missing", 1, true) ~= nil
-    or u:find("%f[%w]reuse%f[%W]") ~= nil
-    or u:find("%f[%w]re%-use%f[%W]") ~= nil
-end
-
-function Code.typed_action_user_forbids_track_creation(user_text)
-  if Code.typed_action_user_requests_track_creation(user_text)
-      and not Code.typed_action_user_requests_selected_target(user_text) then
-    return false
-  end
-  local u = Code._typed_action_user_request_text(user_text):lower()
-  for _, pattern in ipairs({
-    "do not create[^%.\n;]*tracks?",
-    "don't create[^%.\n;]*tracks?",
-    "do not add[^%.\n;]*tracks?",
-    "don't add[^%.\n;]*tracks?",
-    "do not make[^%.\n;]*tracks?",
-    "don't make[^%.\n;]*tracks?",
-    "do not create[^%.\n;]*replacement%s+tracks?",
-    "don't create[^%.\n;]*replacement%s+tracks?",
-    "no%s+new%s+tracks?",
-    "no%s+replacement%s+tracks?",
-  }) do
-    if u:match(pattern) then return true end
-  end
-  return false
-end
-
 function Code.typed_action_user_requests_selected_target(user_text)
   local clean_text = Code._typed_action_user_request_text(user_text)
   local u = clean_text:lower()
@@ -1547,3504 +895,6 @@ function Code.prompt_requests_request_time_track_target(user_text)
     or u:find("track that is selected", 1, true) ~= nil
     or u:find("tracks that are selected", 1, true) ~= nil
     or u:find("current track", 1, true) ~= nil
-end
-
-function Code.typed_action_user_mentions_existing_or_source_track(user_text)
-  local u = Code._typed_action_user_request_text(user_text):lower()
-    :gsub("[%c]+", " ")
-    :gsub("%s+", " ")
-  if u == "" then return false end
-  return u:find("existing", 1, true) ~= nil
-    or u:find("source track", 1, true) ~= nil
-    or u:find("source tracks", 1, true) ~= nil
-    or u:find("selected track", 1, true) ~= nil
-    or u:find("selected tracks", 1, true) ~= nil
-    or u:find("currently selected", 1, true) ~= nil
-    or u:find("already a track", 1, true) ~= nil
-    or u:find("already tracks", 1, true) ~= nil
-    or u:find("already have a track", 1, true) ~= nil
-    or u:find("already has a track", 1, true) ~= nil
-end
-
-function Code.typed_action_user_requests_folder(user_text)
-  local u = Code._typed_action_user_request_text(user_text):lower()
-  for _, phrase in ipairs({
-    "do not create folders",
-    "do not create a folder",
-    "do not make folders",
-    "do not make a folder",
-    "don't create folders",
-    "don't create a folder",
-    "don't make folders",
-    "don't make a folder",
-    "without folders",
-    "without a folder",
-    "no folders",
-    "no folder",
-    "not folders",
-    "not a folder",
-  }) do
-    u = u:gsub(phrase, "")
-  end
-  local has_folder =
-    u:find("folder", 1, true) ~= nil
-    or u:find("folders", 1, true) ~= nil
-  if not has_folder then return false end
-  return u:find("track", 1, true) ~= nil
-    or u:find("tracks", 1, true) ~= nil
-    or u:find("parent", 1, true) ~= nil
-    or u:find("contain", 1, true) ~= nil
-    or u:find("containing", 1, true) ~= nil
-    or u:find("create", 1, true) ~= nil
-    or u:find("make", 1, true) ~= nil
-    or u:find("set up", 1, true) ~= nil
-    or u:find("setup", 1, true) ~= nil
-    or u:find("build", 1, true) ~= nil
-end
-
--- Repair pass for predictable malformed typed-action JSON. Repairs are limited
--- to shape-preserving or intent-preserving changes; ambiguous/unsafe plans stay
--- invalid and flow into the retry/escalation path instead.
-function Code.repair_typed_actions_plan(plan, opts)
-  opts = type(opts) == "table" and opts or {}
-  if not _typed_action_is_object(plan)
-     or not _typed_action_is_array(plan.actions) then
-    return plan, false
-  end
-
-  local repaired = false
-  do
-    local out, dropped = {}, 0
-    for _, action in ipairs(plan.actions) do
-      if type(action) == "table"
-         and action.op == "fx.set_param"
-         and (_typed_action_is_object(action.params)
-              and next(action.params) == nil) then
-        dropped = dropped + 1
-      else
-        out[#out + 1] = action
-      end
-    end
-    if dropped > 0 and #out > 0 then
-      plan.actions = out
-      repaired = true
-    end
-  end
-
-  do
-    local add_stock_ids_by_fx, param_actions_by_fx = {}, {}
-    for _, action in ipairs(plan.actions) do
-      if action.op == "fx.add_stock"
-         and _typed_action_is_nonempty_string(action.id)
-         and _TYPED_ACTION_STOCK_FX[action.fx] then
-        local list = add_stock_ids_by_fx[action.fx]
-        if not list then
-          list = {}
-          add_stock_ids_by_fx[action.fx] = list
-        end
-        list[#list + 1] = action.id
-      elseif action.op == "fx.set_param"
-         and _typed_action_is_nonempty_string(action.fx)
-         and _TYPED_ACTION_STOCK_FX[action.fx] then
-        local list = param_actions_by_fx[action.fx]
-        if not list then
-          list = {}
-          param_actions_by_fx[action.fx] = list
-        end
-        list[#list + 1] = action
-      end
-    end
-
-    for fx_name, param_actions in pairs(param_actions_by_fx) do
-      local fx_ids = add_stock_ids_by_fx[fx_name]
-      if fx_ids and #fx_ids == #param_actions then
-        for i, action in ipairs(param_actions) do
-          action.fx = fx_ids[i]
-          repaired = true
-        end
-      end
-    end
-  end
-
-  local user_text = tostring(opts.user_text or "")
-  if user_text == "" then return plan, repaired end
-
-  local user_text_lower = user_text:lower()
-  do
-    local absolute_indexes =
-      Code._typed_action_absolute_track_indexes_from_user_text(user_text)
-    local sole_resolve = nil
-    local resolve_count = 0
-    for _, action in ipairs(plan.actions) do
-      if type(action) == "table" and action.op == "track.resolve" then
-        resolve_count = resolve_count + 1
-        sole_resolve = action
-      end
-    end
-    if #absolute_indexes == 1
-       and resolve_count == 1
-       and not Code.typed_action_user_requests_selected_target(user_text)
-       and not Code.typed_action_user_requests_track_creation(user_text)
-       and not Code._typed_action_forbids_absolute_track_index(user_text) then
-      local target_index = absolute_indexes[1]
-      if sole_resolve.index ~= target_index
-         or sole_resolve.name ~= nil
-         or sole_resolve.selected ~= nil
-         or sole_resolve.selected_index ~= nil then
-        sole_resolve.index = target_index
-        sole_resolve.name = nil
-        sole_resolve.selected = nil
-        sole_resolve.selected_index = nil
-        repaired = true
-      end
-    end
-  end
-  if Code.typed_action_user_requests_selected_target(user_text) then
-    local selected_indexes, selected_index_required =
-      Code._typed_action_selected_indexes_from_user_text(user_text)
-    for _, action in ipairs(plan.actions) do
-      if type(action) == "table" and action.op == "track.resolve" then
-        if type(action.selected_index) == "number" then
-          if action.name ~= nil or action.index ~= nil
-             or action.selected ~= nil then
-            action.name = nil
-            action.index = nil
-            action.selected = nil
-            repaired = true
-          end
-        elseif action.selected == true then
-          if selected_index_required and #selected_indexes == 1 then
-            action.selected = nil
-            action.name = nil
-            action.index = nil
-            action.selected_index = selected_indexes[1]
-            repaired = true
-          elseif action.name ~= nil or action.index ~= nil then
-            action.selected = nil
-            action.selected_index = nil
-            repaired = true
-          elseif action.selected_index ~= nil then
-            action.selected_index = nil
-            repaired = true
-          end
-        end
-      end
-    end
-  end
-  local repair_user_words = " "
-    .. user_text_lower:gsub("[^%w]+", " ")
-    .. " "
-  local direct_new_track_request =
-    Code.typed_action_user_requests_track_creation(user_text)
-    and not Code.typed_action_user_requests_selected_target(user_text)
-    and user_text_lower:find("ensure", 1, true) == nil
-    and user_text_lower:find("if missing", 1, true) == nil
-    and user_text_lower:find("if it is missing", 1, true) == nil
-    and user_text_lower:find("if they are missing", 1, true) == nil
-  local direct_new_track_request_has_names =
-    user_text_lower:find(" named ", 1, true) ~= nil
-    or user_text_lower:find(" called ", 1, true) ~= nil
-    or user_text_lower:find('"', 1, true) ~= nil
-    or user_text_lower:find("'", 1, true) ~= nil
-    or user_text_lower:match("track%s+%d+") ~= nil
-  local direct_new_track_request_wants_names =
-    user_text_lower:find("name them", 1, true) ~= nil
-    or user_text_lower:find("name the tracks", 1, true) ~= nil
-    or user_text_lower:find("label them", 1, true) ~= nil
-    or user_text_lower:find("label the tracks", 1, true) ~= nil
-  if direct_new_track_request then
-    local create_ordinal = 0
-    local reply_lang = (I18N and I18N.prompt_language_name and I18N.prompt_language_name())
-      or (CFG and CFG.prompt_language_name_for_idx
-        and CFG.prompt_language_name_for_idx(prefs.reply_language_idx or 1))
-      or (CFG and CFG.REPLY_LANGUAGE_CODES
-        and CFG.REPLY_LANGUAGE_CODES[prefs.reply_language_idx or 1])
-      or "English"
-    for _, action in ipairs(plan.actions) do
-      if type(action) == "table"
-         and (action.op == "track.create" or action.op == "track.ensure") then
-        create_ordinal = create_ordinal + 1
-        if action.op == "track.ensure" then
-          action.op = "track.create"
-          repaired = true
-        end
-        if not direct_new_track_request_has_names then
-          local generic_n = type(action.name) == "string"
-            and action.name:match("^Track%s+(%d+)$") or nil
-          if direct_new_track_request_wants_names then
-            if generic_n or action.name == nil then
-              action.name = Code.typed_actions_localized_track_label(
-                reply_lang, generic_n or create_ordinal)
-              repaired = true
-            end
-          elseif generic_n then
-            action.name = nil
-            repaired = true
-          elseif reply_lang ~= "English" and type(action.name) == "string"
-              and action.name:match("^Track%s+%d+$") then
-            action.name = Code.typed_actions_localized_track_label(
-              reply_lang, action.name:match("%d+"))
-            repaired = true
-          end
-        end
-      end
-    end
-  end
-  local repair_mentions_stock_fx_name = false
-  local repair_literal_track_names = {}
-  for fx_name in pairs(_TYPED_ACTION_STOCK_FX) do
-    local fx_lower = tostring(fx_name):lower()
-    if user_text_lower:find(fx_lower, 1, true) then
-      repair_mentions_stock_fx_name = true
-    end
-    if repair_user_words:find(" track named " .. fx_lower .. " ", 1, true)
-       or repair_user_words:find(" track called " .. fx_lower .. " ", 1, true) then
-      repair_literal_track_names[fx_lower] = true
-    end
-  end
-  local repair_has_stock_fx_action_word =
-    repair_user_words:find(" add ", 1, true) ~= nil
-    or repair_user_words:find(" insert ", 1, true) ~= nil
-    or repair_user_words:find(" load ", 1, true) ~= nil
-    or repair_user_words:find(" put ", 1, true) ~= nil
-    or repair_user_words:find(" apply ", 1, true) ~= nil
-    or repair_user_words:find(" use ", 1, true) ~= nil
-    or repair_user_words:find(" using ", 1, true) ~= nil
-    or repair_user_words:find(" with ", 1, true) ~= nil
-  local repair_requests_stock_fx = repair_mentions_stock_fx_name
-    and repair_has_stock_fx_action_word
-  repair_requests_stock_fx = repair_requests_stock_fx
-    or user_text_lower:find("stock fx", 1, true) ~= nil
-    or user_text_lower:find("stock effect", 1, true) ~= nil
-    or user_text_lower:find("stock plugin", 1, true) ~= nil
-  local function repair_normalized_name(s)
-    return tostring(s or ""):lower()
-      :gsub("^%s+", "")
-      :gsub("%s+$", "")
-      :gsub("%s+", " ")
-  end
-  local function repair_user_mentions_name(name)
-    local n = repair_normalized_name(name):gsub("[^%w]+", " ")
-    n = n:gsub("%s+", " ")
-    return n ~= "" and repair_user_words:find(" " .. n .. " ", 1, true) ~= nil
-  end
-  local function repair_name_key(s)
-    return tostring(s or ""):lower():gsub("[^%w]+", "")
-  end
-  local function repair_requested_named_track_map(text)
-    text = tostring(text or "")
-    local found = {}
-    local function add_fragment(fragment)
-      fragment = tostring(fragment or "")
-      fragment = fragment:gsub("%f[%a][Aa]nd%f[%A]", ",")
-      fragment = fragment:gsub("%f[%a][Tt]hen%f[%A]", ",")
-      for part in fragment:gmatch("[^,]+") do
-        local name = tostring(part or "")
-          :gsub("^%s+", "")
-          :gsub("%s+$", "")
-          :gsub("^then%s+", "")
-          :gsub("^and%s+", "")
-          :gsub("^create%s+", "")
-          :gsub("^make%s+", "")
-          :gsub("^set%s+up%s+", "")
-          :gsub("^build%s+", "")
-          :gsub("^exactly%s+[%w]+%s+tracks?%s+named%s+", "")
-          :gsub("^[%w]+%s+tracks?%s+named%s+", "")
-          :gsub("^tracks?%s+named%s+", "")
-          :gsub("^named%s+", "")
-          :gsub("^the%s+", "")
-          :gsub("^a%s+", "")
-        name = name:gsub("^%s+", ""):gsub("%s+$", "")
-        local key = repair_name_key(name)
-        if key ~= "" then found[key] = name end
-      end
-    end
-    local explicit_fragment =
-      text:match("[Tt]racks?%s+named%s+([^%.\n]+)")
-      or text:match("[Tt]racks?%s+called%s+([^%.\n]+)")
-    if explicit_fragment then add_fragment(explicit_fragment) end
-    local colon_fragment = text:match(":%s*([^%.\n]+)")
-    if colon_fragment then add_fragment(colon_fragment) end
-    return next(found) and found or nil
-  end
-  local function repair_requested_folder_parent_name(text)
-    text = tostring(text or "")
-    local name =
-      text:match("[Cc]reate%s+a%s+([%w%s%-%_']-)%s+folder%s+with")
-      or text:match("[Cc]reate%s+an%s+([%w%s%-%_']-)%s+folder%s+with")
-      or text:match("[Mm]ake%s+a%s+([%w%s%-%_']-)%s+folder%s+with")
-      or text:match("[Ss]et%s+up%s+a%s+([%w%s%-%_']-)%s+folder%s+with")
-      or text:match("[Bb]uild%s+a%s+([%w%s%-%_']-)%s+folder%s+with")
-    name = tostring(name or "")
-      :gsub("^new%s+", "")
-      :gsub("^%s+", "")
-      :gsub("%s+$", "")
-    if name == "" or name:lower() == "folder" or #name > 64 then return nil end
-    return name
-  end
-  local function repair_requested_created_track_name_set(text)
-    text = tostring(text or "")
-    local found = {}
-    local function add_name(name)
-      name = tostring(name or "")
-        :gsub("^%s+", "")
-        :gsub("%s+$", "")
-        :gsub("^a%s+", "")
-        :gsub("^an%s+", "")
-        :gsub("^new%s+", "")
-      name = name:gsub("%s+with%s+.*$", "")
-        :gsub("%s+and%s+send%s+.*$", "")
-        :gsub("%s+$", "")
-      if name ~= "" and #name <= 64 then
-        found[repair_normalized_name(name)] = name
-      end
-    end
-    for name in text:gmatch("[Cc]reate%s+one%s+([%w%s%-%_']-)%s+with%s+") do
-      add_name(name)
-    end
-    for name in text:gmatch("[Cc]reate%s+one%s+([%w%s%-%_']-)[,%.\n]") do
-      add_name(name)
-    end
-    for name in text:gmatch("[Cc]reate%s+a%s+([%w%s%-%_']-)%s+with%s+") do
-      add_name(name)
-    end
-    for name in text:gmatch("[Cc]reate%s+an%s+([%w%s%-%_']-)%s+with%s+") do
-      add_name(name)
-    end
-    return next(found) and found or nil
-  end
-  local function repair_selected_existing_track_name_set(text)
-    text = tostring(text or "")
-    local found = {}
-    local function add_fragment(fragment)
-      fragment = tostring(fragment or "")
-      fragment = fragment:gsub("%f[%a][Aa]nd%f[%A]", ",")
-      for part in fragment:gmatch("[^,]+") do
-        local name = tostring(part or "")
-          :gsub("^%s+", "")
-          :gsub("%s+$", "")
-          :gsub("^only%s+", "")
-          :gsub("^the%s+", "")
-          :gsub("^selected%s+tracks?%s+", "")
-          :gsub("^are%s+", "")
-          :gsub("^is%s+", "")
-          :gsub("%s+only$", "")
-          :gsub("%s+$", "")
-        if name ~= "" and #name <= 64 then
-          found[repair_normalized_name(name)] = name
-        end
-      end
-    end
-    for fragment in text:gmatch("[Ss]elected%s+tracks%s+are%s+([^%.\n]+)") do
-      add_fragment(fragment)
-    end
-    for fragment in text:gmatch("[Ss]elected%s+track%s+is%s+([^%.\n]+)") do
-      add_fragment(fragment)
-    end
-    return next(found) and found or nil
-  end
-  local function repair_user_mentions_existing_name(name)
-    local n = repair_normalized_name(name):gsub("[^%w]+", " ")
-      :gsub("%s+", " ")
-    if n == "" then return false end
-    return repair_user_words:find(" already a track named " .. n .. " ", 1, true) ~= nil
-      or repair_user_words:find(" already track named " .. n .. " ", 1, true) ~= nil
-      or repair_user_words:find(" existing track named " .. n .. " ", 1, true) ~= nil
-      or repair_user_words:find(" existing " .. n .. " ", 1, true) ~= nil
-      or repair_user_words:find(" selected track is " .. n .. " ", 1, true) ~= nil
-      or repair_user_words:find(" selected tracks are " .. n .. " ", 1, true) ~= nil
-  end
-  local function repair_slug_id(name)
-    local id = repair_normalized_name(name):gsub("[^%w]+", "_")
-      :gsub("^_+", ""):gsub("_+$", "")
-    if id == "" then id = "track" end
-    if id:match("^%d") then id = "track_" .. id end
-    return id
-  end
-  for _, action in ipairs(plan.actions) do
-    if type(action) == "table"
-       and (action.op == "track.ensure" or action.op == "track.create")
-       and action.index ~= nil
-       and _typed_action_is_nonempty_string(action.name)
-       and repair_user_mentions_existing_name(action.name) then
-      action.op = "track.resolve"
-      action.position = nil
-      action.select = nil
-      repaired = true
-    end
-  end
-  local function repair_requested_exact_track_order(text)
-    text = tostring(text or "")
-    local function parse_order_fragment(fragment)
-      fragment = tostring(fragment or "")
-      fragment = fragment:gsub("^%s*.-:%s*", "")
-      fragment = fragment:gsub("%f[%a][Tt]hen%f[%A]", ",")
-      fragment = fragment:gsub("%f[%a][Aa]nd%f[%A]", ",")
-      local out = {}
-      for part in fragment:gmatch("[^,]+") do
-        local name = tostring(part or "")
-          :gsub("^%s+", "")
-          :gsub("%s+$", "")
-          :gsub("^then%s+", "")
-          :gsub("^and%s+", "")
-          :gsub("^create%s+", "")
-          :gsub("^make%s+", "")
-          :gsub("^set%s+up%s+", "")
-          :gsub("^build%s+", "")
-          :gsub("^exactly%s+[%w]+%s+tracks?%s+named%s+", "")
-          :gsub("^[%w]+%s+tracks?%s+named%s+", "")
-          :gsub("^tracks?%s+named%s+", "")
-          :gsub("^named%s+", "")
-          :gsub("^the%s+", "")
-          :gsub("^a%s+", "")
-        name = repair_normalized_name(name)
-        if name ~= "" then out[#out + 1] = name end
-      end
-      return #out >= 2 and out or nil
-    end
-    local explicit_fragment =
-      text:match("[Tt]rack%s+order%s+must%s+be%s+([^%.\n]+)")
-      or text:match("[Oo]rder%s+must%s+be%s+([^%.\n]+)")
-    if explicit_fragment then return parse_order_fragment(explicit_fragment) end
-    local lt = text:lower()
-    local marker = lt:find(" in that exact order", 1, true)
-      or lt:find(" in exact order", 1, true)
-      or lt:find(" in that order", 1, true)
-    if not marker then return nil end
-    local before = text:sub(1, marker - 1)
-    local cut = 0
-    for i = 1, #before do
-      local ch = before:sub(i, i)
-      if ch == "." or ch == "\n" then cut = i end
-    end
-    if cut > 0 then before = before:sub(cut + 1) end
-    before = before:gsub("^.*[Cc]reate%s+exactly%s+[%w%-]+%s+tracks?%s+named%s+", "")
-    before = before:gsub("^.*[Cc]reate%s+[%w%-]+%s+tracks?%s+named%s+", "")
-    before = before:gsub("^.*[Mm]ake%s+exactly%s+[%w%-]+%s+tracks?%s+named%s+", "")
-    before = before:gsub("^.*[Ss]et%s+up%s+exactly%s+[%w%-]+%s+tracks?%s+named%s+", "")
-    before = before:gsub("^.*%f[%a]with%s+", "")
-    return parse_order_fragment(before)
-  end
-  local function repair_user_mentions_db_value(db)
-    local want = tonumber(db)
-    if not want then return false end
-    for raw in user_text:gmatch("([%+%-]?%d+%.?%d*)%s*[dD][bB]") do
-      local got = tonumber(raw)
-      if got and math.abs(got - want) <= 0.25 then return true end
-    end
-    return false
-  end
-  local function repair_user_mentions_db_magnitude(db)
-    local want = math.abs(tonumber(db) or 0)
-    if want == 0 then return false end
-    for raw in user_text:gmatch("([%+%-]?%d+%.?%d*)%s*[dD][bB]") do
-      local got = tonumber(raw)
-      if got and math.abs(math.abs(got) - want) <= 0.25 then return true end
-    end
-    return false
-  end
-  local function repair_user_mentions_gain_direction(db)
-    local want = tonumber(db)
-    if not want or not repair_user_mentions_db_magnitude(want) then
-      return false
-    end
-    if want < 0 then
-      return user_text_lower:find("pull", 1, true) ~= nil
-        or user_text_lower:find("down", 1, true) ~= nil
-        or user_text_lower:find("reduce", 1, true) ~= nil
-        or user_text_lower:find("lower", 1, true) ~= nil
-        or user_text_lower:find("dip", 1, true) ~= nil
-        or user_text_lower:find("attenuate", 1, true) ~= nil
-        or user_text_lower:find("cut", 1, true) ~= nil
-    elseif want > 0 then
-      return user_text_lower:find("boost", 1, true) ~= nil
-        or user_text_lower:find("raise", 1, true) ~= nil
-        or user_text_lower:find("lift", 1, true) ~= nil
-        or user_text_lower:find("push", 1, true) ~= nil
-        or user_text_lower:find("up", 1, true) ~= nil
-    end
-    return false
-  end
-  local function repair_user_mentions_param(param, value, params)
-    param = tostring(param or "")
-    if param == "band" then
-      return (params.frequency_hz ~= nil
-          and repair_user_mentions_param("frequency_hz", params.frequency_hz, params))
-        or (params.gain_db ~= nil
-          and repair_user_mentions_param("gain_db", params.gain_db, params))
-    elseif param == "frequency_hz" then
-      return user_text_lower:find("frequency", 1, true) ~= nil
-        or user_text_lower:find("freq", 1, true) ~= nil
-        or user_text_lower:find(" hz", 1, true) ~= nil
-        or user_text_lower:find("khz", 1, true) ~= nil
-    elseif param == "gain_db" then
-      return user_text_lower:find("gain", 1, true) ~= nil
-        or user_text_lower:find("boost", 1, true) ~= nil
-        or user_text_lower:find("cut", 1, true) ~= nil
-        or repair_user_mentions_gain_direction(value)
-        or (user_text_lower:find("band", 1, true) ~= nil
-          and repair_user_mentions_db_value(value))
-    elseif param == "threshold_db" then
-      return user_text_lower:find("threshold", 1, true) ~= nil
-    elseif param == "ratio" then
-      return user_text_lower:find("ratio", 1, true) ~= nil
-    elseif param == "attack_ms" then
-      return user_text_lower:find("attack", 1, true) ~= nil
-    elseif param == "release_ms" then
-      return user_text_lower:find("release", 1, true) ~= nil
-    elseif param == "wet_db" then
-      return user_text_lower:find("wet", 1, true) ~= nil
-    elseif param == "dry_db" then
-      return user_text_lower:find("dry", 1, true) ~= nil
-    elseif param == "rms_ms" then
-      return user_text_lower:find("rms", 1, true) ~= nil
-    elseif param == "free_time_ms" then
-      return user_text_lower:find("free time", 1, true) ~= nil
-        or user_text_lower:find("free-time", 1, true) ~= nil
-        or user_text_lower:find("length (time)", 1, true) ~= nil
-    elseif param == "musical_length" then
-      return user_text_lower:find("musical", 1, true) ~= nil
-        or user_text_lower:find("tempo", 1, true) ~= nil
-        or user_text_lower:find("quarter", 1, true) ~= nil
-        or user_text_lower:find("half note", 1, true) ~= nil
-        or user_text_lower:find("whole note", 1, true) ~= nil
-    elseif param == "feedback_pct" or param == "feedback_db" then
-      return user_text_lower:find("feedback", 1, true) ~= nil
-    elseif param == "room_size" then
-      return user_text_lower:find("room size", 1, true) ~= nil
-        or user_text_lower:find("room", 1, true) ~= nil
-    elseif param == "dampening" then
-      return user_text_lower:find("dampening", 1, true) ~= nil
-        or user_text_lower:find("damping", 1, true) ~= nil
-    elseif param == "hysteresis_db" then
-      return user_text_lower:find("hysteresis", 1, true) ~= nil
-    elseif param == "hold_ms" then
-      return user_text_lower:find("hold", 1, true) ~= nil
-    elseif param == "ceiling_db" then
-      return user_text_lower:find("ceiling", 1, true) ~= nil
-    end
-    return false
-  end
-  local repair_exact_track_order, repair_exact_track_names
-  do
-    local order = repair_requested_exact_track_order(user_text)
-    if order then
-      repair_exact_track_order = order
-      repair_exact_track_names = {}
-      for _, name in ipairs(order) do repair_exact_track_names[name] = true end
-    end
-  end
-
-  local repair_requested_track_names = repair_requested_named_track_map(user_text)
-  if repair_requested_track_names then
-    for _, action in ipairs(plan.actions) do
-      if type(action) == "table"
-         and (action.op == "track.create" or action.op == "track.ensure")
-         and _typed_action_is_nonempty_string(action.id)
-         and (not _typed_action_is_nonempty_string(action.name)
-           or tostring(action.name):lower():gsub("%s+", "") == "null") then
-        local requested_name =
-          repair_requested_track_names[repair_name_key(action.id)]
-        if requested_name then
-          action.name = requested_name
-          repaired = true
-        end
-      end
-    end
-  end
-  do
-    local selected_existing_names = repair_selected_existing_track_name_set(user_text)
-    if selected_existing_names then
-      for _, action in ipairs(plan.actions) do
-        if type(action) == "table"
-           and (action.op == "track.create" or action.op == "track.ensure")
-           and _typed_action_is_nonempty_string(action.name)
-           and selected_existing_names[repair_normalized_name(action.name)] then
-          action.op = "track.resolve"
-          action.position = nil
-          action.select = nil
-          action.selected = nil
-          action.selected_index = nil
-          repaired = true
-        end
-      end
-    end
-  end
-
-  do
-    local folder_parent_name = repair_requested_folder_parent_name(user_text)
-    if folder_parent_name then
-      local parent_ids = {}
-      for _, action in ipairs(plan.actions) do
-        if type(action) == "table" and action.op == "track.folder"
-           and _typed_action_is_nonempty_string(action.parent) then
-          parent_ids[action.parent] = true
-        end
-      end
-      for _, action in ipairs(plan.actions) do
-        if type(action) == "table"
-           and parent_ids[action.id]
-           and (action.op == "track.create" or action.op == "track.ensure")
-           and not _typed_action_is_nonempty_string(action.name) then
-          action.name = folder_parent_name
-          repaired = true
-        end
-      end
-    end
-  end
-
-  do
-    local known_fx_ids, known_fx_type_by_id = {}, {}
-    for _, action in ipairs(plan.actions) do
-      if type(action) == "table"
-         and action.op == "fx.add_stock"
-         and _typed_action_is_nonempty_string(action.id) then
-        known_fx_ids[action.id] = true
-        known_fx_type_by_id[action.id] = tostring(action.fx or "")
-      end
-    end
-    local function user_requested_eq_shelf_or_filter()
-      return user_text_lower:find("shelf", 1, true) ~= nil
-        or user_text_lower:find("low pass", 1, true) ~= nil
-        or user_text_lower:find("high pass", 1, true) ~= nil
-        or user_text_lower:find("low%-pass") ~= nil
-        or user_text_lower:find("high%-pass") ~= nil
-        or user_text_lower:find("filter", 1, true) ~= nil
-        or user_text_lower:find("%f[%w]hp%f[%W]") ~= nil
-        or user_text_lower:find("%f[%w]lp%f[%W]") ~= nil
-    end
-    local out, dropped, stripped = {}, 0, 0
-    for _, action in ipairs(plan.actions) do
-      local drop = false
-      if type(action) == "table"
-         and action.op == "fx.set_param"
-         and known_fx_ids[action.fx]
-         and type(action.params) == "table" then
-        if known_fx_type_by_id[action.fx] == "ReaEQ"
-            and tonumber(action.params.band) == 1
-            and action.params.frequency_hz ~= nil
-            and action.params.gain_db ~= nil
-            and repair_user_mentions_gain_direction(action.params.gain_db)
-            and not user_requested_eq_shelf_or_filter() then
-          action.params.band = 2
-          repaired = true
-        end
-        local has_param, has_requested_param = false, false
-        for param, value in pairs(action.params) do
-          if value ~= nil then
-            has_param = true
-            if repair_user_mentions_param(param, value, action.params) then
-              has_requested_param = true
-            else
-              action.params[param] = nil
-              stripped = stripped + 1
-            end
-          end
-        end
-        drop = has_param and not has_requested_param
-      end
-      if drop then
-        dropped = dropped + 1
-      else
-        out[#out + 1] = action
-      end
-    end
-    if dropped > 0 and #out > 0 then
-      plan.actions = out
-      repaired = true
-    elseif stripped > 0 then
-      repaired = true
-    end
-  end
-
-  if not Code.typed_action_user_requests_folder(user_text) then
-    local out, dropped = {}, 0
-    for _, action in ipairs(plan.actions) do
-      if type(action) == "table" and action.op == "track.folder" then
-        dropped = dropped + 1
-      else
-        out[#out + 1] = action
-      end
-    end
-    if dropped > 0 then
-      plan.actions = out
-      repaired = true
-    end
-  end
-
-  local function repair_reference_state(actions)
-    local refs, non_resolve = {}, false
-    local function add_ref(ref)
-      if _typed_action_is_nonempty_string(ref) then refs[ref] = true end
-    end
-    for _, action in ipairs(actions) do
-      if type(action) ~= "table" then return nil, nil end
-      if action.op == "track.set" then
-        add_ref(action.track)
-        non_resolve = true
-      elseif action.op == "track.folder" then
-        add_ref(action.parent)
-        non_resolve = true
-        if type(action.children) == "table" then
-          for _, child in ipairs(action.children) do
-            add_ref(child)
-          end
-        end
-      elseif action.op == "fx.add_stock" then
-        add_ref(action.track)
-        non_resolve = true
-      elseif action.op == "send.create" then
-        add_ref(action["from"])
-        add_ref(action.to)
-        non_resolve = true
-      elseif action.op and action.op ~= "track.resolve" then
-        non_resolve = true
-      end
-    end
-    return refs, non_resolve
-  end
-
-  do
-    local track_ids, track_name_to_id = {}, {}
-    for _, action in ipairs(plan.actions) do
-      if type(action) == "table"
-         and (action.op == "track.create" or action.op == "track.ensure"
-           or action.op == "track.resolve")
-         and _typed_action_is_nonempty_string(action.id) then
-        track_ids[action.id] = true
-        if _typed_action_is_nonempty_string(action.name) then
-          local key = repair_normalized_name(action.name)
-          if key ~= "" and not track_name_to_id[key] then
-            track_name_to_id[key] = action.id
-          end
-        end
-      end
-    end
-
-    local inserted_resolves, inserted_resolve_names = {}, {}
-    local function unique_track_id(base)
-      local id = repair_slug_id(base)
-      local candidate, n = id, 2
-      while track_ids[candidate] do
-        candidate = id .. "_" .. tostring(n)
-        n = n + 1
-      end
-      track_ids[candidate] = true
-      return candidate
-    end
-    local function repair_ref(action, key)
-      local ref = action[key]
-      if not _typed_action_is_nonempty_string(ref) or track_ids[ref] then
-        return false
-      end
-      local name_key = repair_normalized_name(ref)
-      local existing_id = track_name_to_id[name_key]
-      if existing_id then
-        action[key] = existing_id
-        return true
-      end
-      if name_key ~= "" and ref:find("%s") and repair_user_mentions_name(ref) then
-        local id = inserted_resolves[name_key]
-        if not id then
-          id = unique_track_id(ref)
-          inserted_resolves[name_key] = id
-          inserted_resolve_names[name_key] = ref
-          track_name_to_id[name_key] = id
-        end
-        action[key] = id
-        return true
-      end
-      return false
-    end
-
-    for _, action in ipairs(plan.actions) do
-      if type(action) == "table" and action.op == "send.create" then
-        if repair_ref(action, "from") then repaired = true end
-        if repair_ref(action, "to") then repaired = true end
-      end
-    end
-    if next(inserted_resolves) then
-      local insert_at = 1
-      while insert_at <= #plan.actions do
-        local op = type(plan.actions[insert_at]) == "table"
-          and plan.actions[insert_at].op or nil
-        if op ~= "track.create" and op ~= "track.ensure"
-           and op ~= "track.resolve" then
-          break
-        end
-        insert_at = insert_at + 1
-      end
-      local prefix = {}
-      for name_key, id in pairs(inserted_resolves) do
-        prefix[#prefix + 1] = {
-          op = "track.resolve",
-          id = id,
-          name = inserted_resolve_names[name_key],
-        }
-      end
-      table.sort(prefix, function(a, b) return tostring(a.id) < tostring(b.id) end)
-      for i = #prefix, 1, -1 do
-        table.insert(plan.actions, insert_at, prefix[i])
-      end
-      repaired = true
-    end
-  end
-
-  local referenced_tracks, has_non_resolve =
-    repair_reference_state(plan.actions)
-  if not referenced_tracks then return plan, false end
-  if has_non_resolve then
-    local out, dropped = {}, 0
-    for _, action in ipairs(plan.actions) do
-      local unnamed_unreferenced_track =
-        (action.op == "track.create" or action.op == "track.ensure")
-        and _typed_action_is_nonempty_string(action.id)
-        and not referenced_tracks[action.id]
-        and not _typed_action_is_nonempty_string(action.name)
-      if unnamed_unreferenced_track then
-        dropped = dropped + 1
-      else
-        out[#out + 1] = action
-      end
-    end
-    if dropped > 0 and #out > 0 then
-      plan.actions = out
-      repaired = true
-      referenced_tracks, has_non_resolve =
-        repair_reference_state(plan.actions)
-      if not referenced_tracks then return plan, false end
-    end
-  end
-  if has_non_resolve then
-    local existing_target_only =
-      not Code.typed_action_user_requests_track_creation(user_text)
-      and (user_text_lower:find("existing track", 1, true) ~= nil
-        or user_text_lower:find("existing tracks", 1, true) ~= nil
-        or user_text_lower:find("resolve the existing", 1, true) ~= nil
-        or user_text_lower:find("do not create", 1, true) ~= nil
-        or user_text_lower:find("don't create", 1, true) ~= nil)
-    if existing_target_only then
-      local out, dropped = {}, 0
-      for _, action in ipairs(plan.actions) do
-        local name = tostring(action.name or "")
-        local id_key = tostring(action.id or ""):lower():gsub("[^%w]+", "")
-        local name_key = name:lower():gsub("[^%w]+", "")
-        local junk_ensure = (action.op == "track.create" or action.op == "track.ensure")
-          and _typed_action_is_nonempty_string(action.id)
-          and not referenced_tracks[action.id]
-          and (not _typed_action_is_nonempty_string(action.name)
-            or name:find("%w") == nil
-            or name:lower():gsub("%s+", "") == ":null"
-            or name:lower():gsub("%s+", "") == "null"
-            or id_key:find("send", 1, true) ~= nil
-            or name_key:find("send", 1, true) ~= nil)
-        if junk_ensure then
-          dropped = dropped + 1
-        else
-          out[#out + 1] = action
-        end
-      end
-      if dropped > 0 and #out > 0 then
-        plan.actions = out
-        repaired = true
-        referenced_tracks, has_non_resolve =
-          repair_reference_state(plan.actions)
-        if not referenced_tracks then return plan, false end
-      end
-    end
-  end
-  if has_non_resolve then
-    if repair_exact_track_order
-       and Code.typed_action_user_requests_track_creation(user_text)
-       and not Code.typed_action_user_requests_folder(user_text) then
-      local ensure_slots, ensure_by_name = {}, {}
-      local bad_order_repair = false
-      for i, action in ipairs(plan.actions) do
-        if type(action) ~= "table" then
-          bad_order_repair = true
-          break
-        elseif action.op == "track.create" or action.op == "track.ensure" then
-          if not _typed_action_is_nonempty_string(action.id)
-             or not _typed_action_is_nonempty_string(action.name) then
-            bad_order_repair = true
-            break
-          end
-          local name_key = repair_normalized_name(action.name)
-          if ensure_by_name[name_key] then
-            bad_order_repair = true
-            break
-          end
-          ensure_by_name[name_key] = action
-          ensure_slots[#ensure_slots + 1] = i
-        elseif action.op == "track.folder" then
-          bad_order_repair = true
-          break
-        end
-      end
-      if not bad_order_repair
-         and #ensure_slots == #repair_exact_track_order then
-        local ordered = {}
-        for _, name in ipairs(repair_exact_track_order) do
-          local action = ensure_by_name[name]
-          if not action then
-            bad_order_repair = true
-            break
-          end
-          ordered[#ordered + 1] = action
-        end
-        if not bad_order_repair then
-          local changed = false
-          for i, slot in ipairs(ensure_slots) do
-            if plan.actions[slot] ~= ordered[i] then changed = true end
-            plan.actions[slot] = ordered[i]
-          end
-          if changed then repaired = true end
-        end
-      end
-    end
-
-    if repair_exact_track_names then
-      local out, dropped = {}, 0
-      for _, action in ipairs(plan.actions) do
-        local extra_track = (action.op == "track.create" or action.op == "track.ensure")
-          and _typed_action_is_nonempty_string(action.id)
-          and not referenced_tracks[action.id]
-          and not repair_exact_track_names[repair_normalized_name(action.name)]
-        if extra_track then
-          dropped = dropped + 1
-        else
-          out[#out + 1] = action
-        end
-      end
-      if dropped > 0 then
-        plan.actions = out
-        repaired = true
-      end
-    end
-
-    local out, dropped = {}, 0
-    for _, action in ipairs(plan.actions) do
-      if action.op == "track.resolve"
-         and _typed_action_is_nonempty_string(action.id)
-         and not referenced_tracks[action.id] then
-        dropped = dropped + 1
-      else
-        out[#out + 1] = action
-      end
-    end
-    if dropped > 0 then
-      plan.actions = out
-      repaired = true
-    end
-  end
-
-  if has_non_resolve then
-    local requested_created_names = repair_requested_created_track_name_set(user_text)
-    if requested_created_names and Code.typed_action_user_requests_selected_target(user_text) then
-      local kept_name, out, dropped = {}, {}, 0
-      for _, action in ipairs(plan.actions) do
-        local drop = false
-        if (action.op == "track.create" or action.op == "track.ensure")
-           and _typed_action_is_nonempty_string(action.id)
-           and _typed_action_is_nonempty_string(action.name) then
-          local name_key = repair_normalized_name(action.name)
-          if requested_created_names[name_key] then
-            if referenced_tracks[action.id] and not kept_name[name_key] then
-              kept_name[name_key] = action.id
-              if action.op ~= "track.create" then
-                action.op = "track.create"
-                repaired = true
-              end
-            elseif not referenced_tracks[action.id] or kept_name[name_key] then
-              drop = true
-            end
-          end
-        end
-        if drop then
-          dropped = dropped + 1
-        else
-          out[#out + 1] = action
-        end
-      end
-      if dropped > 0 and #out > 0 then
-        plan.actions = out
-        repaired = true
-        referenced_tracks, has_non_resolve = repair_reference_state(plan.actions)
-        if not referenced_tracks then return plan, false end
-      end
-    end
-
-    local referenced_ensure_name = {}
-    local stock_fx_action_ids = {}
-    for _, action in ipairs(plan.actions) do
-      if (action.op == "track.create" or action.op == "track.ensure")
-         and _typed_action_is_nonempty_string(action.id)
-         and _typed_action_is_nonempty_string(action.name)
-         and referenced_tracks[action.id] then
-        referenced_ensure_name[action.name] = true
-      elseif action.op == "fx.add_stock"
-         and _typed_action_is_nonempty_string(action.id)
-         and _TYPED_ACTION_STOCK_FX[action.fx] then
-        stock_fx_action_ids[action.id] = true
-      end
-    end
-    local out, dropped = {}, 0
-    for _, action in ipairs(plan.actions) do
-      local helper_fx_id = (action.op == "track.create" or action.op == "track.ensure")
-        and _typed_action_is_nonempty_string(action.id)
-        and stock_fx_action_ids[action.id]
-      local helper_name_stock_fx = (action.op == "track.create" or action.op == "track.ensure")
-        and repair_requests_stock_fx
-        and _typed_action_is_nonempty_string(action.name)
-        and not repair_literal_track_names[tostring(action.name):lower()]
-        and _TYPED_ACTION_STOCK_FX[tostring(action.name)] == true
-      local helper_id = (action.op == "track.create" or action.op == "track.ensure")
-        and _typed_action_is_nonempty_string(action.id)
-        and (action.id:match("_[Ee][Qq]$")
-          or action.id:match("_[Cc][Oo][Mm][Pp]$")
-          or action.id:match("_[Rr][Ee][Vv][Ee][Rr][Bb]$")
-          or action.id:match("_[Dd][Ee][Ll][Aa][Yy]$")
-          or action.id:match("_[Gg][Aa][Tt][Ee]$")
-          or action.id:match("_[Ll][Ii][Mm][Ii][Tt]$")
-          or action.id:match("_[Rr][Ee][Aa][Ee][Qq]$")
-          or action.id:match("_[Rr][Ee][Aa][Cc][Oo][Mm][Pp]$")
-          or action.id:match("_[Rr][Ee][Aa][Vv][Ee][Rr][Bb][Aa][Tt][Ee]$")
-          or action.id:match("_[Rr][Ee][Aa][Dd][Ee][Ll][Aa][Yy]$")
-          or action.id:match("_[Rr][Ee][Aa][Gg][Aa][Tt][Ee]$")
-          or action.id:match("_[Rr][Ee][Aa][Ll][Ii][Mm][Ii][Tt]$")
-          or (repair_requests_stock_fx and action.id:match("_[Ff][Xx]$"))
-          or (helper_name_stock_fx and action.id:match("_[Ff][Xx]$")))
-      local helper_name_ok = _typed_action_is_nonempty_string(action.name)
-        and tostring(action.name):find("%w") ~= nil
-      local helper_id_unmentioned = helper_id
-        and repair_requests_stock_fx
-        and not repair_user_mentions_name(action.name)
-      if (helper_id or helper_name_stock_fx or helper_fx_id)
-         and not referenced_tracks[action.id]
-         and (helper_name_stock_fx
-          or helper_fx_id
-          or helper_id_unmentioned
-          or not helper_name_ok
-          or referenced_ensure_name[action.name]) then
-        dropped = dropped + 1
-      else
-        out[#out + 1] = action
-      end
-    end
-    if dropped > 0 then
-      plan.actions = out
-      repaired = true
-    end
-  end
-
-  if has_non_resolve and Code.typed_action_user_requests_track_creation(user_text) then
-    local ensured_name_by_id = {}
-    for _, action in ipairs(plan.actions) do
-      if (action.op == "track.create" or action.op == "track.ensure")
-         and _typed_action_is_nonempty_string(action.id) then
-        ensured_name_by_id[action.id] = repair_normalized_name(action.name)
-      end
-    end
-    local out, dropped = {}, 0
-    for _, action in ipairs(plan.actions) do
-      local ensured_name = action.op == "track.resolve"
-        and _typed_action_is_nonempty_string(action.id)
-        and ensured_name_by_id[action.id]
-      local resolve_name = repair_normalized_name(action.name)
-      local redundant_resolve = ensured_name
-        and action.selected ~= true
-        and action.selected_index == nil
-        and action.index == nil
-        and (resolve_name == "" or resolve_name == ensured_name)
-      if redundant_resolve then
-        dropped = dropped + 1
-      else
-        out[#out + 1] = action
-      end
-    end
-    if dropped > 0 then
-      plan.actions = out
-      repaired = true
-    end
-  end
-
-  local u = user_text:lower()
-  local preserve_mixed_existing_resolves =
-    Code.typed_action_user_requests_track_creation(user_text)
-    and (Code.typed_action_user_mentions_existing_or_source_track(user_text)
-      or Code.typed_action_user_requests_selected_target(user_text))
-  if Code.typed_action_user_requests_track_creation(user_text) then
-    for _, action in ipairs(plan.actions) do
-      if action.op == "track.resolve"
-         and _typed_action_is_nonempty_string(action.name)
-         and not preserve_mixed_existing_resolves
-         and action.selected ~= true
-         and action.selected_index == nil
-         and action.index == nil then
-        action.op = direct_new_track_request and "track.create" or "track.ensure"
-        action.position = action.position or "end"
-        action.selected = nil
-        action.selected_index = nil
-        action.index = nil
-        repaired = true
-      end
-    end
-  end
-
-  local u_words = tostring(user_text or ""):lower()
-    :gsub("[^%w]+", " ")
-    :gsub("%s+", " ")
-  local fx_order
-  if u_words:find("reaeq first and reacomp second", 1, true)
-     or u_words:find("reaeq followed by reacomp", 1, true)
-     or (u_words:find("reaeq first", 1, true)
-       and u_words:find("reacomp second", 1, true)) then
-    fx_order = { ReaEQ = 1, ReaComp = 2 }
-  elseif u_words:find("reacomp first and reaeq second", 1, true)
-      or u_words:find("reacomp followed by reaeq", 1, true)
-      or (u_words:find("reacomp first", 1, true)
-        and u_words:find("reaeq second", 1, true)) then
-    fx_order = { ReaComp = 1, ReaEQ = 2 }
-  end
-  if fx_order then
-    local track_order, seen_track, fx_actions = {}, {}, {}
-    local prefix, suffix = {}, {}
-    for i, action in ipairs(plan.actions) do
-      if action.op == "track.create" or action.op == "track.ensure"
-         or action.op == "track.resolve" then
-        if _typed_action_is_nonempty_string(action.id)
-           and not seen_track[action.id] then
-          seen_track[action.id] = #track_order + 1
-          track_order[#track_order + 1] = action.id
-        end
-        prefix[#prefix + 1] = action
-      elseif action.op == "track.set" or action.op == "track.folder" then
-        prefix[#prefix + 1] = action
-      elseif action.op == "fx.add_stock" then
-        fx_actions[#fx_actions + 1] = { action = action, index = i }
-      else
-        suffix[#suffix + 1] = action
-      end
-    end
-    if #fx_actions > 1 then
-      table.sort(fx_actions, function(a, b)
-        local aa, bb = a.action, b.action
-        local at = seen_track[aa.track] or math.huge
-        local bt = seen_track[bb.track] or math.huge
-        if at ~= bt then return at < bt end
-        local af = fx_order[aa.fx] or 1000
-        local bf = fx_order[bb.fx] or 1000
-        if af ~= bf then return af < bf end
-        return a.index < b.index
-      end)
-      local out = {}
-      for _, action in ipairs(prefix) do out[#out + 1] = action end
-      for _, item in ipairs(fx_actions) do out[#out + 1] = item.action end
-      for _, action in ipairs(suffix) do out[#out + 1] = action end
-      plan.actions = out
-      repaired = true
-    end
-  end
-
-  local selected_indexes, selected_index_required =
-    Code._typed_action_selected_indexes_from_user_text(user_text)
-  local positional_selector_forbidden =
-    Code._typed_action_forbids_positional_track_selector(user_text)
-  local function selected_send_index_order()
-    if not selected_index_required then return nil, nil end
-    local words = " " .. Code._typed_action_user_request_text(user_text):lower()
-      :gsub("[^%w]+", " ")
-      :gsub("%s+", " ") .. " "
-    local ordinals = {
-      { "first", 1 },
-      { "second", 2 },
-      { "third", 3 },
-      { "fourth", 4 },
-      { "fifth", 5 },
-      { "sixth", 6 },
-    }
-    local function has_order(from_word, from_idx, to_word, to_idx)
-      return words:find(" from the " .. from_word
-          .. " selected track to the " .. to_word .. " selected track ",
-          1, true) ~= nil
-        or words:find(" from " .. from_word
-          .. " selected track to " .. to_word .. " selected track ",
-          1, true) ~= nil
-        or words:find(" " .. from_word
-          .. " selected track to the " .. to_word .. " selected track ",
-          1, true) ~= nil
-        or words:find(" " .. from_word
-          .. " selected to " .. to_word .. " selected ", 1, true) ~= nil
-        or words:find(" from selected index " .. tostring(from_idx)
-          .. " to selected index " .. tostring(to_idx) .. " ", 1, true) ~= nil
-    end
-    for _, from in ipairs(ordinals) do
-      for _, to in ipairs(ordinals) do
-        if from[2] ~= to[2] and has_order(from[1], from[2], to[1], to[2]) then
-          return from[2], to[2]
-        end
-      end
-    end
-    return nil, nil
-  end
-  local track_property_text =
-    Code._typed_action_track_property_intent_text(user_text)
-  local requests_track_properties =
-    (track_property_text:find("volume", 1, true) ~= nil
-      or track_property_text:find("fader", 1, true) ~= nil
-      or track_property_text:find("pan", 1, true) ~= nil
-      or track_property_text:find("panned", 1, true) ~= nil
-      or track_property_text:find("mute", 1, true) ~= nil
-      or track_property_text:find("muted", 1, true) ~= nil
-      or track_property_text:find("unmute", 1, true) ~= nil
-      or track_property_text:find("solo", 1, true) ~= nil
-      or track_property_text:find("soloed", 1, true) ~= nil
-      or track_property_text:find("unsolo", 1, true) ~= nil
-      or track_property_text:find("master send", 1, true) ~= nil
-      or track_property_text:find("main send", 1, true) ~= nil
-      or track_property_text:find("master/parent", 1, true) ~= nil
-      or track_property_text:find("master parent", 1, true) ~= nil
-      or track_property_text:find("parent send", 1, true) ~= nil
-      or track_property_text:find("master output", 1, true) ~= nil
-      or Code._typed_action_user_requests_track_level_change(user_text))
-    and (track_property_text:find("track", 1, true) ~= nil
-      or track_property_text:find("bus", 1, true) ~= nil
-      or track_property_text:find("aux", 1, true) ~= nil)
-  local requests_track_rename =
-    (track_property_text:find("rename", 1, true) ~= nil
-      or track_property_text:find("renamed", 1, true) ~= nil
-      or track_property_text:find("call ", 1, true) ~= nil
-      or track_property_text:find("called", 1, true) ~= nil)
-    and (track_property_text:find("track", 1, true) ~= nil
-      or track_property_text:find("bus", 1, true) ~= nil
-      or track_property_text:find("aux", 1, true) ~= nil)
-
-  if requests_track_properties
-     and not Code.typed_action_user_requests_track_creation(user_text)
-     and selected_index_required
-     and #selected_indexes == 1 then
-    local placeholder_only, placeholder_count = true, 0
-    for _, action in ipairs(plan.actions) do
-      if type(action) ~= "table" or action.op ~= "track.ensure" then
-        placeholder_only = false
-        break
-      end
-      local name = tostring(action.name or "")
-      if _typed_action_is_nonempty_string(action.name)
-         and name:find("%w") ~= nil then
-        placeholder_only = false
-        break
-      end
-      placeholder_count = placeholder_count + 1
-    end
-    if placeholder_only and placeholder_count > 0 then
-      plan.actions = {
-        {
-          op = "track.resolve",
-          id = "target",
-          selected_index = selected_indexes[1],
-        },
-      }
-      repaired = true
-    end
-  end
-
-  do
-    local send_text = Code._typed_action_send_intent_text(user_text)
-    local requests_selected_send =
-      selected_index_required
-      and not Code.typed_action_user_requests_track_creation(user_text)
-      and (send_text:find("send", 1, true) ~= nil
-        or send_text:find("route", 1, true) ~= nil
-        or send_text:find("routing", 1, true) ~= nil)
-    if requests_selected_send then
-      local from_index, to_index = selected_send_index_order()
-      if from_index and to_index then
-        local send_action, send_count, repairable = nil, 0, true
-        for _, action in ipairs(plan.actions) do
-          if type(action) ~= "table" then
-            repairable = false
-            break
-          elseif action.op == "send.create" then
-            send_count = send_count + 1
-            send_action = send_action or action
-          elseif action.op ~= "track.resolve" then
-            repairable = false
-            break
-          end
-        end
-        if repairable and send_count == 1 and send_action then
-          plan.actions = {
-            {
-              op = "track.resolve",
-              id = "selected_send_from",
-              selected_index = from_index,
-            },
-            {
-              op = "track.resolve",
-              id = "selected_send_to",
-              selected_index = to_index,
-            },
-            {
-              op = "send.create",
-              id = send_action.id,
-              ["from"] = "selected_send_from",
-              to = "selected_send_to",
-              volume_db = send_action.volume_db,
-              pan = send_action.pan,
-              mode = send_action.mode,
-              muted = send_action.muted,
-            },
-          }
-          return plan, true
-        end
-      end
-    end
-  end
-
-  if not requests_track_properties and not requests_track_rename then
-    return plan, repaired
-  end
-
-  if requests_track_rename then
-    local exact_id, exact_names, exact_seen, exact_repairable =
-      nil, {}, {}, true
-    for _, action in ipairs(plan.actions) do
-      if type(action) ~= "table"
-         or action.op ~= "track.resolve"
-         or not _typed_action_is_nonempty_string(action.id)
-         or not _typed_action_is_nonempty_string(action.name)
-         or action.selected == true
-         or action.selected_index ~= nil
-         or action.index ~= nil then
-        exact_repairable = false
-        break
-      end
-      exact_id = exact_id or action.id
-      if action.id ~= exact_id then
-        exact_repairable = false
-        break
-      end
-      if not exact_seen[action.name] then
-        exact_seen[action.name] = true
-        exact_names[#exact_names + 1] = action.name
-      end
-    end
-    if exact_repairable and #exact_names == 2 then
-      local first_pos = track_property_text:find(exact_names[1]:lower(), 1, true)
-      local second_pos = track_property_text:find(exact_names[2]:lower(), 1, true)
-      if first_pos and second_pos and first_pos < second_pos then
-        plan.actions = {
-          {
-            op = "track.resolve",
-            id = exact_id,
-            name = exact_names[1],
-          },
-          {
-            op = "track.set",
-            track = exact_id,
-            name = exact_names[2],
-          },
-        }
-        return plan, true
-      end
-    end
-
-    local rename_target, rename_selector_key, resolved_name = nil, nil, nil
-    local rename_repairable = true
-    for _, action in ipairs(plan.actions) do
-      if type(action) ~= "table"
-         or action.op ~= "track.resolve"
-         or not _typed_action_is_nonempty_string(action.id) then
-        rename_repairable = false
-        break
-      end
-      local has_positional_selector =
-        type(action.index) == "number"
-        or type(action.selected_index) == "number"
-        or action.selected == true
-      local has_name_selector = _typed_action_is_nonempty_string(action.name)
-      if has_positional_selector then
-        if positional_selector_forbidden then
-          rename_repairable = false
-          break
-        end
-        if has_name_selector then
-          rename_repairable = false
-          break
-        end
-        local selector_key
-        if type(action.selected_index) == "number" then
-          selector_key = "selected_index:" .. tostring(action.selected_index)
-        elseif type(action.index) == "number" then
-          selector_key = "index:" .. tostring(action.index)
-        else
-          selector_key = "selected:true"
-        end
-        if rename_selector_key and rename_selector_key ~= selector_key then
-          rename_repairable = false
-          break
-        end
-        rename_selector_key = selector_key
-        rename_target = rename_target or action
-      elseif has_name_selector then
-        if resolved_name and resolved_name ~= action.name then
-          rename_repairable = false
-          break
-        end
-        resolved_name = action.name
-      else
-        rename_repairable = false
-        break
-      end
-    end
-    if rename_repairable and rename_target and resolved_name then
-      if selected_index_required then
-        local target_selected_index = tonumber(rename_target.selected_index)
-        if not target_selected_index then return plan, repaired end
-        if #selected_indexes == 1
-           and target_selected_index ~= selected_indexes[1] then
-          return plan, repaired
-        end
-      end
-
-      local resolved = {
-        op = "track.resolve",
-        id = rename_target.id,
-      }
-      if type(rename_target.index) == "number" then
-        resolved.index = rename_target.index
-      end
-      if type(rename_target.selected_index) == "number" then
-        resolved.selected_index = rename_target.selected_index
-      end
-      if rename_target.selected == true then
-        resolved.selected = true
-      end
-      plan.actions = {
-        resolved,
-        {
-          op = "track.set",
-          track = rename_target.id,
-          name = resolved_name,
-        },
-      }
-      return plan, true
-    end
-  end
-
-  local allow_noisy_resolve_only_track_set =
-    requests_track_properties
-    and not requests_track_rename
-    and not Code.typed_action_user_requests_track_creation(user_text)
-  local function resolve_matches_requested_selected_index(action)
-    if not selected_index_required then return false end
-    local n = tonumber(action and action.selected_index)
-    if not n then return false end
-    if #selected_indexes == 0 then return true end
-    for _, want in ipairs(selected_indexes) do
-      if n == want then return true end
-    end
-    return false
-  end
-
-  local target_id, target_action, rename_target_action, rename_name, has_mutation =
-    nil, nil, nil, nil, false
-  local target_action_priority = 0
-  local selector_priority_by_key = {}
-  local function resolve_selector_key(action)
-    local name = _typed_action_trim(action and action.name)
-      :lower():gsub("%s+", " ")
-    if name ~= "" then return "name:" .. name end
-    if type(action and action.selected_index) == "number" then
-      return "selected_index:" .. tostring(action.selected_index)
-    end
-    if type(action and action.index) == "number" then
-      return "index:" .. tostring(action.index)
-    end
-    if action and action.selected == true then return "selected:true" end
-    return nil
-  end
-  for _, action in ipairs(plan.actions) do
-    if type(action) ~= "table" then return plan, false end
-    if action.op == "track.resolve" then
-      if not _typed_action_is_nonempty_string(action.id) then
-        return plan, false
-      end
-      target_id = target_id or action.id
-      if action.id ~= target_id and not allow_noisy_resolve_only_track_set then
-        return plan, false
-      end
-      local has_positional_selector =
-        type(action.index) == "number"
-        or type(action.selected_index) == "number"
-        or action.selected == true
-      if has_positional_selector and not rename_target_action then
-        rename_target_action = action
-      end
-      local selector_priority = 0
-      if resolve_matches_requested_selected_index(action) then
-        selector_priority = 3
-      elseif not selected_index_required
-          and _typed_action_is_nonempty_string(action.name)
-          and repair_user_mentions_name(action.name) then
-        selector_priority = 2
-      elseif _typed_action_is_nonempty_string(action.name)
-          or type(action.index) == "number"
-          or type(action.selected_index) == "number"
-          or action.selected == true then
-        selector_priority = 1
-      end
-      local selector_key = resolve_selector_key(action)
-      if selector_key
-         and selector_priority > (selector_priority_by_key[selector_key] or 0) then
-        selector_priority_by_key[selector_key] = selector_priority
-      end
-      if selector_priority > target_action_priority then
-        target_action = action
-        target_action_priority = selector_priority
-      end
-      if requests_track_rename
-         and _typed_action_is_nonempty_string(action.name)
-         and not has_positional_selector then
-        if rename_name and action.name ~= rename_name then
-          return plan, repaired
-        end
-        rename_name = action.name
-      end
-    else
-      has_mutation = true
-    end
-  end
-  if has_mutation or not target_action then return plan, repaired end
-  if allow_noisy_resolve_only_track_set then
-    local preferred_selector_count = 0
-    for _, priority in pairs(selector_priority_by_key) do
-      if priority == target_action_priority then
-        preferred_selector_count = preferred_selector_count + 1
-      end
-    end
-    if preferred_selector_count ~= 1 then return plan, repaired end
-    target_id = target_action.id
-  end
-
-  if requests_track_rename and rename_target_action and rename_name then
-    if positional_selector_forbidden then return plan, repaired end
-    if selected_index_required then
-      local target_selected_index = tonumber(rename_target_action.selected_index)
-      if not target_selected_index then return plan, repaired end
-      if #selected_indexes == 1
-         and target_selected_index ~= selected_indexes[1] then
-        return plan, repaired
-      end
-    end
-
-    local resolved = {
-      op = "track.resolve",
-      id = target_id,
-    }
-    if type(rename_target_action.index) == "number" then
-      resolved.index = rename_target_action.index
-    end
-    if type(rename_target_action.selected_index) == "number" then
-      resolved.selected_index = rename_target_action.selected_index
-    end
-    if rename_target_action.selected == true then
-      resolved.selected = true
-    end
-    plan.actions = {
-      resolved,
-      {
-        op = "track.set",
-        track = target_id,
-        name = rename_name,
-      },
-    }
-    return plan, true
-  end
-
-  if not requests_track_properties then return plan, repaired end
-
-  if positional_selector_forbidden then
-    local uses_positional_selector =
-      type(target_action.index) == "number"
-      or type(target_action.selected_index) == "number"
-      or target_action.selected == true
-    if uses_positional_selector then return plan, repaired end
-  end
-
-  if selected_index_required then
-    local target_selected_index = tonumber(target_action.selected_index)
-    if not target_selected_index then return plan, repaired end
-    if #selected_indexes == 1
-       and target_selected_index ~= selected_indexes[1] then
-      return plan, repaired
-    end
-  end
-
-  local volume_db, volume_db_count = nil, 0
-  for raw in user_text:gmatch("([%+%-]?%d+%.?%d*)%s*[dD][bB]") do
-    volume_db_count = volume_db_count + 1
-    volume_db = tonumber(raw)
-  end
-  if volume_db_count ~= 1 then volume_db = nil end
-
-  local pan_pct, pan_conflict = Code._typed_action_static_pan_value(user_text)
-  if pan_conflict then return plan, repaired end
-
-  local mute = nil
-  if track_property_text:find("unmute", 1, true) ~= nil then
-    mute = false
-  elseif track_property_text:find("mute", 1, true) ~= nil
-      or track_property_text:find("muted", 1, true) ~= nil then
-    mute = true
-  end
-
-  local solo = nil
-  if track_property_text:find("unsolo", 1, true) ~= nil then
-    solo = false
-  elseif track_property_text:find("solo", 1, true) ~= nil
-      or track_property_text:find("soloed", 1, true) ~= nil then
-    solo = true
-  end
-
-  local master_send = nil
-  if track_property_text:find("turn off master send", 1, true) ~= nil
-      or track_property_text:find("turn off main send", 1, true) ~= nil
-      or track_property_text:find("turn off master/parent", 1, true) ~= nil
-      or track_property_text:find("disable master send", 1, true) ~= nil
-      or track_property_text:find("disable main send", 1, true) ~= nil
-      or track_property_text:find("disable master/parent", 1, true) ~= nil
-      or track_property_text:find("master_send false", 1, true) ~= nil
-      or track_property_text:find("master send false", 1, true) ~= nil
-      or track_property_text:find("no master send", 1, true) ~= nil then
-    master_send = false
-  elseif track_property_text:find("turn on master send", 1, true) ~= nil
-      or track_property_text:find("turn on main send", 1, true) ~= nil
-      or track_property_text:find("turn on master/parent", 1, true) ~= nil
-      or track_property_text:find("enable master send", 1, true) ~= nil
-      or track_property_text:find("enable main send", 1, true) ~= nil
-      or track_property_text:find("enable master/parent", 1, true) ~= nil
-      or track_property_text:find("master_send true", 1, true) ~= nil
-      or track_property_text:find("master send true", 1, true) ~= nil then
-    master_send = true
-  end
-
-  if volume_db == nil and pan_pct == nil and mute == nil
-      and solo == nil and master_send == nil then
-    return plan, repaired
-  end
-
-  local resolved = {
-    op = "track.resolve",
-    id = target_id,
-  }
-  if _typed_action_is_nonempty_string(target_action.name) then
-    resolved.name = target_action.name
-  end
-  if type(target_action.index) == "number" then
-    resolved.index = target_action.index
-  end
-  if type(target_action.selected_index) == "number" then
-    resolved.selected_index = target_action.selected_index
-  end
-  if target_action.selected == true then
-    resolved.selected = true
-  end
-  plan.actions = {
-    resolved,
-    {
-      op = "track.set",
-      track = target_id,
-      volume_db = volume_db,
-      pan_pct = pan_pct,
-      mute = mute,
-      solo = solo,
-      master_send = master_send,
-    },
-  }
-  return plan, true
-end
-
-function Code._typed_action_folder_depth_plan(plan)
-  local errors = {}
-  local track_order, track_order_index = {}, {}
-  local folder_specs = {}
-
-  for i, action in ipairs((plan and plan.actions) or {}) do
-    if type(action) == "table" then
-      if (action.op == "track.create" or action.op == "track.ensure")
-         and _typed_action_is_nonempty_string(action.id)
-         and not track_order_index[action.id] then
-        track_order[#track_order + 1] = action.id
-        track_order_index[action.id] = #track_order
-      elseif action.op == "track.folder" then
-        folder_specs[#folder_specs + 1] = {
-          parent = action.parent,
-          children = action.children,
-          path = "$.actions[" .. tostring(i) .. "]",
-        }
-      end
-    end
-  end
-
-  local children_by_parent, parent_by_child = {}, {}
-  local parent_order = {}
-
-  for _, spec in ipairs(folder_specs) do
-    local parent = spec.parent
-    local children = spec.children
-    if _typed_action_is_nonempty_string(parent)
-       and track_order_index[parent]
-       and _typed_action_is_array(children) then
-      if children_by_parent[parent] then
-        _typed_action_add_error(errors, "duplicate_folder_parent",
-          spec.path .. ".parent",
-          "A typed-action folder parent can be declared only once")
-      else
-        children_by_parent[parent] = {}
-        parent_order[#parent_order + 1] = parent
-      end
-
-      local seen_children = {}
-      for cidx, child in ipairs(children) do
-        local cpath = spec.path .. ".children[" .. tostring(cidx) .. "]"
-        if _typed_action_is_nonempty_string(child)
-           and track_order_index[child] then
-          if child == parent then
-            _typed_action_add_error(errors, "folder_self_child", cpath,
-              "A folder parent cannot also be its child")
-          elseif seen_children[child] then
-            _typed_action_add_error(errors, "duplicate_folder_child", cpath,
-              "Duplicate folder child: " .. tostring(child))
-          elseif parent_by_child[child] and parent_by_child[child] ~= parent then
-            _typed_action_add_error(errors, "overlapping_folder", cpath,
-              "A typed-action folder child can have only one direct parent")
-          else
-            seen_children[child] = true
-            parent_by_child[child] = parent
-            if children_by_parent[parent] then
-              children_by_parent[parent][#children_by_parent[parent] + 1] = child
-            end
-          end
-        end
-      end
-    end
-  end
-
-  local visiting, visited = {}, {}
-  local function visit(id, path)
-    if visiting[id] then
-      _typed_action_add_error(errors, "folder_cycle", path or "$.actions",
-        "Nested typed-action folders cannot form a cycle")
-      return
-    end
-    if visited[id] then return end
-    visiting[id] = true
-    for _, child in ipairs(children_by_parent[id] or {}) do
-      visit(child, path)
-    end
-    visiting[id] = nil
-    visited[id] = true
-  end
-  for _, parent in ipairs(parent_order) do visit(parent) end
-
-  local function append_subtree(id, out)
-    out[#out + 1] = id
-    for _, child in ipairs(children_by_parent[id] or {}) do
-      append_subtree(child, out)
-    end
-  end
-
-  if #errors == 0 then
-    for _, parent in ipairs(parent_order) do
-      local expected = {}
-      append_subtree(parent, expected)
-      local pidx = track_order_index[parent]
-      for offset, id in ipairs(expected) do
-        if track_order[pidx + offset - 1] ~= id then
-          _typed_action_add_error(errors, "folder_order_mismatch",
-            "$.actions",
-            "track.folder requires each parent to be followed immediately by "
-              .. "its full nested child subtree in track creation order")
-          break
-        end
-      end
-    end
-  end
-
-  if #errors > 0 then return nil, errors end
-
-  local depths, touched, touched_set = {}, {}, {}
-  local function mark(id)
-    if not touched_set[id] then
-      touched_set[id] = true
-      touched[#touched + 1] = id
-    end
-  end
-  local function mark_subtree(id)
-    mark(id)
-    for _, child in ipairs(children_by_parent[id] or {}) do
-      mark_subtree(child)
-    end
-  end
-  local function last_descendant(id)
-    local children = children_by_parent[id]
-    if children and #children > 0 then
-      return last_descendant(children[#children])
-    end
-    return id
-  end
-
-  for _, parent in ipairs(parent_order) do
-    depths[parent] = (depths[parent] or 0) + 1
-    local last = last_descendant(parent)
-    depths[last] = (depths[last] or 0) - 1
-    mark_subtree(parent)
-  end
-
-  table.sort(touched, function(a, b)
-    return (track_order_index[a] or 0) < (track_order_index[b] or 0)
-  end)
-
-  return { depths = depths, order = touched }, nil
-end
-
-local function _typed_action_db_to_amp(db)
-  return 10 ^ ((tonumber(db) or 0) / 20)
-end
-
-local function _typed_action_clamp01(v)
-  v = tonumber(v) or 0
-  if v < 0 then return 0 end
-  if v > 1 then return 1 end
-  return v
-end
-
-local function _typed_action_ms_to_norm(ms, full_scale_ms)
-  return _typed_action_clamp01((tonumber(ms) or 0) / (tonumber(full_scale_ms) or 1000))
-end
-
-local function _typed_action_percent_to_norm(v)
-  v = tonumber(v) or 0
-  if v > 1 then v = v / 100 end
-  return _typed_action_clamp01(v)
-end
-
-local function _typed_action_interp(points, x)
-  x = tonumber(x)
-  if not x or x < points[1][1] or x > points[#points][1] then return nil end
-  for i = 1, #points do
-    if x == points[i][1] then return points[i][2] end
-  end
-  for i = 1, #points - 1 do
-    local ax, ay = points[i][1], points[i][2]
-    local bx, by = points[i + 1][1], points[i + 1][2]
-    if x >= ax and x <= bx then
-      local t = (x - ax) / (bx - ax)
-      return ay + (by - ay) * t
-    end
-  end
-  return nil
-end
-
-local function _typed_action_param_setters(fx_name, params, path)
-  local setters, errors = {}, {}
-  local function add_error(code, p, msg)
-    errors[#errors+1] = _typed_action_error(code, p or path, msg)
-  end
-  local function add(method, index, value)
-    setters[#setters+1] = { method = method, index = index, value = value }
-  end
-  local function unsupported(param, why)
-    add_error("unsupported_param", path .. ".params." .. tostring(param),
-      why or ("Typed-action executor does not support " .. tostring(fx_name)
-        .. "." .. tostring(param)))
-  end
-
-  if type(params) ~= "table" then
-    add_error("invalid_type", path .. ".params", "params must be an object")
-    return nil, errors
-  end
-
-  for param, value in pairs(params) do
-    local norm_idx = type(param) == "string"
-      and param:match("^normalized_(%d+)$") or nil
-    if norm_idx then
-      add("normalized", tonumber(norm_idx), value)
-
-    elseif fx_name == "ReaEQ" then
-      if param == "band" then
-        -- Selector for the other ReaEQ params in this action.
-      elseif param == "frequency_hz" then
-        local band = tonumber(params.band or 1)
-        if not band or band % 1 ~= 0 or band < 1 or band > 4 then
-          add_error("out_of_range", path .. ".params.band",
-            "ReaEQ typed actions support bands 1-4")
-        else
-          local norm = _typed_action_interp(_TYPED_ACTION_REAEQ_FREQ_POINTS, value)
-          if not norm then
-            add_error("out_of_range", path .. ".params.frequency_hz",
-              "ReaEQ frequency_hz must be between 20 and 24000")
-          else
-            add("normalized", (band - 1) * 3, norm)
-          end
-        end
-      elseif param == "gain_db" then
-        local band = tonumber(params.band or 1)
-        if not band or band % 1 ~= 0 or band < 1 or band > 4 then
-          add_error("out_of_range", path .. ".params.band",
-            "ReaEQ typed actions support bands 1-4")
-        else
-          local norm = _typed_action_interp(_TYPED_ACTION_REAEQ_GAIN_POINTS, value)
-          if not norm then
-            add_error("out_of_range", path .. ".params.gain_db",
-              "ReaEQ gain_db must be between -12 and +12")
-          else
-            add("normalized", (band - 1) * 3 + 1, norm)
-          end
-        end
-      else
-        unsupported(param, param == "type"
-          and "ReaEQ band type is UI-only and is not scriptable"
-          or nil)
-      end
-
-    elseif fx_name == "ReaComp" then
-      if param == "threshold_db" then
-        add("raw", 0, _typed_action_db_to_amp(value))
-      elseif param == "attack_ms" then
-        add("normalized", 2, _typed_action_ms_to_norm(value, 500))
-      elseif param == "release_ms" then
-        add("normalized", 3, _typed_action_ms_to_norm(value, 5000))
-      elseif param == "dry_db" then
-        add("raw", 10, _typed_action_db_to_amp(value))
-      elseif param == "wet_db" then
-        add("raw", 11, _typed_action_db_to_amp(value))
-      elseif param == "rms_ms" then
-        add("raw", 13, (tonumber(value) or 0) / 1000)
-      else
-        unsupported(param)
-      end
-
-    elseif fx_name == "ReaDelay" then
-      if param == "wet_db" then
-        add("raw", 0, _typed_action_db_to_amp(value))
-      elseif param == "dry_db" then
-        add("raw", 1, _typed_action_db_to_amp(value))
-      elseif param == "free_time_ms" then
-        local ms = tonumber(value)
-        if not ms or ms < 0 or ms > 1000 then
-          add_error("out_of_range", path .. ".params.free_time_ms",
-            "ReaDelay free_time_ms must be between 0 and 1000")
-        else
-          add("raw", 3, ms / 1000)
-        end
-      elseif param == "musical_length" then
-        local whole_notes = tonumber(value)
-        if not whole_notes or whole_notes < 0 or whole_notes > 256 then
-          add_error("out_of_range", path .. ".params.musical_length",
-            "ReaDelay musical_length must be between 0 and 256 whole notes")
-        else
-          add("raw", 4, whole_notes / 256)
-        end
-      elseif param == "feedback_pct" then
-        add("raw", 5, _typed_action_clamp01((tonumber(value) or 0) / 100))
-      elseif param == "feedback_db" then
-        add("raw", 5, _typed_action_db_to_amp(value))
-      else
-        unsupported(param)
-      end
-
-    elseif fx_name == "ReaVerbate" then
-      if param == "wet_db" then
-        add("raw", 0, _typed_action_db_to_amp(value))
-      elseif param == "dry_db" then
-        add("raw", 1, _typed_action_db_to_amp(value))
-      elseif param == "room_size" then
-        add("normalized", 2, _typed_action_percent_to_norm(value))
-      elseif param == "dampening" then
-        add("normalized", 3, _typed_action_percent_to_norm(value))
-      else
-        unsupported(param)
-      end
-
-    elseif fx_name == "ReaGate" then
-      if param == "threshold_db" then
-        add("raw", 0, _typed_action_db_to_amp(value))
-      elseif param == "attack_ms" then
-        add("normalized", 1, _typed_action_ms_to_norm(value, 500))
-      elseif param == "release_ms" then
-        add("normalized", 2, _typed_action_ms_to_norm(value, 5000))
-      elseif param == "hold_ms" then
-        add("normalized", 4, _typed_action_ms_to_norm(value))
-      elseif param == "hysteresis_db" then
-        add("raw", 12, _typed_action_db_to_amp(value))
-      else
-        unsupported(param)
-      end
-
-    elseif fx_name == "ReaLimit" then
-      if param == "threshold_db" then
-        add("normalized", 0, _typed_action_clamp01(((tonumber(value) or 0) + 60) / 72))
-      elseif param == "ceiling_db" then
-        add("normalized", 1, _typed_action_clamp01(((tonumber(value) or 0) + 24) / 24))
-      else
-        unsupported(param)
-      end
-
-    else
-      unsupported("*", "Typed-action executor has no parameter map for "
-        .. tostring(fx_name))
-    end
-  end
-
-  if #errors > 0 then return nil, errors end
-  if #setters == 0 then
-    add_error("unsupported_param", path .. ".params",
-      "fx.set_param contains no executable parameter writes")
-    return nil, errors
-  end
-  return setters, nil
-end
-
-local function _typed_action_blank_op_counts()
-  local counts = {}
-  for _, op in ipairs(_TYPED_ACTION_OP_KEYS) do counts[op] = 0 end
-  return counts
-end
-
-local function _typed_action_count_ops(plan)
-  local counts = _typed_action_blank_op_counts()
-  local actions = type(plan) == "table" and plan.actions or nil
-  if type(actions) ~= "table" then return counts end
-  for _, action in ipairs(actions) do
-    local op = type(action) == "table" and action.op or nil
-    if _TYPED_ACTION_OP_ALLOWED[op] then
-      counts[op] = counts[op] + 1
-    end
-  end
-  return counts
-end
-
-local function _typed_action_strip_json_nulls(value)
-  if value == JSON.NULL then return nil end
-  if type(value) ~= "table" then return value end
-  for k, v in pairs(value) do
-    if v == JSON.NULL then
-      value[k] = nil
-    else
-      value[k] = _typed_action_strip_json_nulls(v)
-    end
-  end
-  return value
-end
-
-local function _typed_action_single_json_object(raw)
-  local s = _typed_action_trim(raw)
-  if s == "" then
-    return false, "Typed action block is empty"
-  end
-  if s:sub(1, 1) ~= "{" then
-    return false, "Typed action JSON must be a top-level object"
-  end
-
-  local depth, in_string, escaped = 0, false, false
-  for i = 1, #s do
-    local ch = s:sub(i, i)
-    if in_string then
-      if escaped then
-        escaped = false
-      elseif ch == "\\" then
-        escaped = true
-      elseif ch == "\"" then
-        in_string = false
-      end
-    else
-      if ch == "\"" then
-        in_string = true
-      elseif ch == "{" or ch == "[" then
-        depth = depth + 1
-      elseif ch == "}" or ch == "]" then
-        depth = depth - 1
-        if depth < 0 then
-          return false, "Typed action JSON has an unmatched closing bracket"
-        end
-        if depth == 0 and i ~= #s then
-          return false, "Typed action JSON has trailing content after the object"
-        end
-      end
-    end
-  end
-  if in_string then
-    return false, "Typed action JSON has an unterminated string"
-  end
-  if depth ~= 0 then
-    return false, "Typed action JSON has unbalanced brackets"
-  end
-  return true, nil
-end
-
--- Public typed-action parser/validator entry points. Extraction prefers the
--- canonical ```reaassist-actions fence, then accepts a few common malformed
--- wrappers from small models when the payload is still one clean JSON object.
-function Code.extract_typed_actions(text)
-  if type(text) ~= "string" or text == "" then return nil, nil end
-  local blocks = {}
-  for block in text:gmatch("```reaassist%-actions%s*\n(.-)\n%s*```") do
-    blocks[#blocks+1] = block
-  end
-  if #blocks == 0 then
-    for block in text:gmatch("```%s*\n(.-)\n%s*```") do
-      local payload = block:match("^%s*reaassist%-actions%s*\n(.*)$")
-      if payload then blocks[#blocks+1] = payload end
-    end
-  end
-  if #blocks == 0 then
-    for block in text:gmatch("<reaassist%-actions>%s*(.-)%s*</reaassist%-actions>") do
-      blocks[#blocks+1] = block
-    end
-  end
-  if #blocks == 0 then
-    local marker_start, marker_end =
-      text:find("reaassist%-actions%s*[\r\n]+")
-    if marker_start then
-      local rest = text:sub(marker_end + 1)
-      local object_start = rest:find("{", 1, true)
-      if object_start then
-        local depth, in_string, escaped = 0, false, false
-        for i = object_start, #rest do
-          local ch = rest:sub(i, i)
-          if in_string then
-            if escaped then
-              escaped = false
-            elseif ch == "\\" then
-              escaped = true
-            elseif ch == "\"" then
-              in_string = false
-            end
-          else
-            if ch == "\"" then
-              in_string = true
-            elseif ch == "{" or ch == "[" then
-              depth = depth + 1
-            elseif ch == "}" or ch == "]" then
-              depth = depth - 1
-              if depth == 0 then
-                blocks[#blocks+1] = rest:sub(object_start, i)
-                break
-              end
-            end
-          end
-        end
-      end
-    end
-  end
-  if #blocks == 0 then return nil, nil end
-  if #blocks > 1 then
-    local first = tostring(blocks[1] or ""):match("^%s*(.-)%s*$") or ""
-    local all_same = true
-    for i = 2, #blocks do
-      local b = tostring(blocks[i] or ""):match("^%s*(.-)%s*$") or ""
-      if b ~= first then
-        all_same = false
-        break
-      end
-    end
-    if all_same then
-      blocks = { first }
-    else
-      return nil, {
-        _typed_action_error("multiple_action_blocks", "$",
-          "Use exactly one reaassist-actions block")
-      }
-    end
-  end
-  return blocks[1], nil
-end
-
-function Code.parse_typed_actions_block(raw)
-  local ok_shape, shape_err = _typed_action_single_json_object(raw)
-  if not ok_shape then
-    return nil, {
-      _typed_action_error("invalid_json_shape", "$", shape_err)
-    }
-  end
-
-  local plan, err = JSON.decode(_typed_action_trim(raw))
-  if not plan then
-    return nil, {
-      _typed_action_error("invalid_json", "$",
-        "Typed action block is not valid JSON: " .. tostring(err))
-    }
-  end
-  if _typed_action_is_object(plan)
-     and _typed_action_is_object(plan["reaassist-actions"]) then
-    local wrapper_keys = 0
-    for _ in pairs(plan) do wrapper_keys = wrapper_keys + 1 end
-    if wrapper_keys == 1 then plan = plan["reaassist-actions"] end
-  end
-  plan = _typed_action_strip_json_nulls(plan)
-  Code.normalize_typed_actions_plan(plan)
-  return plan, nil
-end
-
-function Code.validate_typed_actions_plan(plan)
-  local errors = {}
-  if not _typed_action_is_object(plan) then
-    _typed_action_add_error(errors, "invalid_top_level", "$",
-      "Typed action plan must be a JSON object")
-    return false, errors
-  end
-
-  _typed_action_check_fields(errors, plan, "$", {
-    version = true,
-    actions = true,
-  })
-
-  if plan.version ~= 1 then
-    _typed_action_add_error(errors, "invalid_version", "$.version",
-      "Typed action plan version must be 1")
-  end
-
-  if not _typed_action_is_array(plan.actions) then
-    _typed_action_add_error(errors, "invalid_actions", "$.actions",
-      "Typed action plan actions must be a non-empty array")
-    return false, errors
-  end
-
-  local action_ids, track_ids, track_id_kind = {}, {}, {}
-  local fx_ids, send_ids, fx_type_by_id = {}, {}, {}
-  local resolve_count, has_non_resolve_action = 0, false
-
-  local function require_string(action, field, path)
-    if not _typed_action_is_nonempty_string(action[field]) then
-      _typed_action_add_error(errors, "invalid_type", path .. "." .. field,
-        field .. " must be a non-empty string")
-      return nil
-    end
-    return action[field]
-  end
-
-  local function require_number(action, field, path)
-    if type(action[field]) ~= "number" then
-      _typed_action_add_error(errors, "invalid_type", path .. "." .. field,
-        field .. " must be a number")
-      return nil
-    end
-    return action[field]
-  end
-
-  local function require_ref(refs, value, path, kind)
-    if not _typed_action_is_nonempty_string(value) then
-      _typed_action_add_error(errors, "invalid_type", path,
-        kind .. " reference must be a non-empty string")
-      return false
-    end
-    if not refs[value] then
-      _typed_action_add_error(errors, "unknown_ref", path,
-        "Unknown " .. kind .. " reference: " .. value)
-      return false
-    end
-    return true
-  end
-
-  local function require_created_track_ref(value, path)
-    if not require_ref(track_ids, value, path, "track") then return false end
-    if track_id_kind[value] ~= "create" and track_id_kind[value] ~= "ensure" then
-      _typed_action_add_error(errors, "unsupported_existing_folder_target", path,
-        "track.folder currently supports only track ids created by track.create or track.ensure")
-      return false
-    end
-    return true
-  end
-
-  local function validate_track_name(name, path)
-    if not name then return end
-    if not tostring(name):find("%w") then
-      _typed_action_add_error(errors, "invalid_track_name", path,
-        "track name must contain at least one letter or number")
-    end
-  end
-
-  local function register_id(set, id, path, kind, id_kind)
-    if not id then return end
-    if set[id] then
-      _typed_action_add_error(errors, "duplicate_id", path,
-        "Duplicate " .. kind .. " id: " .. id)
-      return
-    end
-    if action_ids[id] then
-      _typed_action_add_error(errors, "duplicate_id", path,
-        "Duplicate typed-action id: " .. id
-          .. " was already used for " .. tostring(action_ids[id]))
-      return
-    end
-    action_ids[id] = kind
-    set[id] = true
-    if kind == "track" then track_id_kind[id] = id_kind or "ensure" end
-  end
-
-  for i, action in ipairs(plan.actions) do
-    local path = "$.actions[" .. tostring(i) .. "]"
-    if not _typed_action_is_object(action) then
-      _typed_action_add_error(errors, "invalid_action", path,
-        "Each action must be a JSON object")
-    else
-      local op = require_string(action, "op", path)
-      if op == "track.resolve" then
-        resolve_count = resolve_count + 1
-      elseif _TYPED_ACTION_OP_ALLOWED[op] then
-        has_non_resolve_action = true
-      end
-      if op == "track.create" then
-        _typed_action_check_fields(errors, action, path, {
-          op = true,
-          id = true,
-          name = true,
-          select = true,
-          position = true,
-        })
-        local id = require_string(action, "id", path)
-        if action.name ~= nil then
-          require_string(action, "name", path)
-          validate_track_name(action.name, path .. ".name")
-        end
-        if action.select ~= nil and type(action.select) ~= "boolean" then
-          _typed_action_add_error(errors, "invalid_type", path .. ".select",
-            "select must be a boolean")
-        end
-        if action.position ~= nil then
-          if type(action.position) ~= "string" then
-            _typed_action_add_error(errors, "invalid_type", path .. ".position",
-              "position must be a string")
-          elseif action.position ~= "end" then
-            local dir, ref = action.position:match("^(after):(.-)$")
-            if not dir then dir, ref = action.position:match("^(before):(.-)$") end
-            if not dir or not track_ids[ref] then
-              _typed_action_add_error(errors, "unknown_ref", path .. ".position",
-                "position must be end, after:<existing-track-id>, or before:<existing-track-id>")
-            end
-          end
-        end
-        register_id(track_ids, id, path .. ".id", "track", "create")
-
-      elseif op == "track.ensure" then
-        _typed_action_check_fields(errors, action, path, {
-          op = true,
-          id = true,
-          name = true,
-          select = true,
-          position = true,
-        })
-        local id = require_string(action, "id", path)
-        local name = require_string(action, "name", path)
-        validate_track_name(name, path .. ".name")
-        if action.select ~= nil and type(action.select) ~= "boolean" then
-          _typed_action_add_error(errors, "invalid_type", path .. ".select",
-            "select must be a boolean")
-        end
-        if action.position ~= nil then
-          if type(action.position) ~= "string" then
-            _typed_action_add_error(errors, "invalid_type", path .. ".position",
-              "position must be a string")
-          elseif action.position ~= "end" then
-            local dir, ref = action.position:match("^(after):(.-)$")
-            if not dir then dir, ref = action.position:match("^(before):(.-)$") end
-            if not dir or not track_ids[ref] then
-              _typed_action_add_error(errors, "unknown_ref", path .. ".position",
-                "position must be end, after:<existing-track-id>, or before:<existing-track-id>")
-            end
-          end
-        end
-        register_id(track_ids, id, path .. ".id", "track", "ensure")
-
-      elseif op == "track.resolve" then
-        _typed_action_check_fields(errors, action, path, {
-          op = true,
-          id = true,
-          name = true,
-          selected = true,
-          selected_index = true,
-          index = true,
-        })
-        local id = require_string(action, "id", path)
-        local has_name = false
-        local has_selected = false
-        local has_selected_index = false
-        local has_index = false
-        if action.name ~= nil then
-          has_name = true
-          require_string(action, "name", path)
-        end
-        if action.selected ~= nil then
-          has_selected = true
-          if action.selected ~= true then
-            _typed_action_add_error(errors, "invalid_type",
-              path .. ".selected", "selected must be true when provided")
-          end
-        end
-        if action.selected_index ~= nil then
-          has_selected_index = true
-          if type(action.selected_index) ~= "number"
-             or action.selected_index % 1 ~= 0
-             or action.selected_index < 1 then
-            _typed_action_add_error(errors, "out_of_range",
-              path .. ".selected_index",
-              "selected_index must be a positive 1-based selected-track number")
-          end
-        end
-        if action.index ~= nil then
-          has_index = true
-          if type(action.index) ~= "number"
-             or action.index % 1 ~= 0
-             or action.index < 1 then
-            _typed_action_add_error(errors, "out_of_range", path .. ".index",
-              "index must be a positive 1-based track number")
-          end
-        end
-        if has_selected and (has_name or has_index or has_selected_index) then
-          _typed_action_add_error(errors, "invalid_target_selector", path,
-            "track.resolve selected:true cannot be combined with other selectors")
-        elseif has_selected_index and (has_name or has_index) then
-          _typed_action_add_error(errors, "invalid_target_selector", path,
-            "track.resolve selected_index cannot be combined with name or index")
-        elseif not has_selected and not has_selected_index
-            and not (has_name or has_index) then
-          _typed_action_add_error(errors, "invalid_target_selector", path,
-            "track.resolve must include name, index, name+index, "
-              .. "selected:true, or selected_index")
-        end
-        register_id(track_ids, id, path .. ".id", "track", "resolve")
-
-      elseif op == "track.set" then
-        _typed_action_check_fields(errors, action, path, {
-          op = true,
-          track = true,
-          volume_db = true,
-          pan_pct = true,
-          name = true,
-          mute = true,
-          solo = true,
-          master_send = true,
-        })
-        require_ref(track_ids, action.track, path .. ".track", "track")
-        local has_property = false
-        if action.name ~= nil then
-          has_property = true
-          require_string(action, "name", path)
-        end
-        if action.volume_db ~= nil then
-          has_property = true
-          local volume_db = require_number(action, "volume_db", path)
-          if volume_db and (volume_db < -150 or volume_db > 24) then
-            _typed_action_add_error(errors, "out_of_range", path .. ".volume_db",
-              "volume_db must be between -150 and +24")
-          end
-        end
-        if action.pan_pct ~= nil then
-          has_property = true
-          local pan_pct = require_number(action, "pan_pct", path)
-          if pan_pct and (pan_pct < -100 or pan_pct > 100) then
-            _typed_action_add_error(errors, "out_of_range", path .. ".pan_pct",
-              "pan_pct must be between -100 and 100")
-          end
-        end
-        if action.mute ~= nil then
-          has_property = true
-          if type(action.mute) ~= "boolean" then
-            _typed_action_add_error(errors, "invalid_type", path .. ".mute",
-              "mute must be a boolean")
-          end
-        end
-        if action.solo ~= nil then
-          has_property = true
-          if type(action.solo) ~= "boolean" then
-            _typed_action_add_error(errors, "invalid_type", path .. ".solo",
-              "solo must be a boolean")
-          end
-        end
-        if action.master_send ~= nil then
-          has_property = true
-          if type(action.master_send) ~= "boolean" then
-            _typed_action_add_error(errors, "invalid_type",
-              path .. ".master_send", "master_send must be a boolean")
-          end
-        end
-        if not has_property then
-          _typed_action_add_error(errors, "missing_track_property", path,
-            "track.set must include name, volume_db, pan_pct, mute, solo, or master_send")
-        end
-
-      elseif op == "track.pan_lfo" then
-        _typed_action_check_fields(errors, action, path, {
-          op = true,
-          track = true,
-          start = true,
-          bars = true,
-          cycles_per_bar = true,
-          depth_pct = true,
-          resolution = true,
-          clear_existing = true,
-        })
-        require_ref(track_ids, action.track, path .. ".track", "track")
-        if action.start ~= nil then
-          if type(action.start) ~= "string" then
-            _typed_action_add_error(errors, "invalid_type", path .. ".start",
-              "start must be cursor, project_start, or null")
-          else
-            local st = action.start:lower():gsub("%s+", "_"):gsub("%-", "_")
-            if st ~= "cursor" and st ~= "project_start" then
-              _typed_action_add_error(errors, "unsupported_start", path .. ".start",
-                "start must be cursor or project_start")
-            end
-          end
-        end
-        local bars = require_number(action, "bars", path)
-        if bars and (bars <= 0 or bars > 256) then
-          _typed_action_add_error(errors, "out_of_range", path .. ".bars",
-            "bars must be greater than 0 and no more than 256")
-        end
-        local cycles_per_bar = require_number(action, "cycles_per_bar", path)
-        if cycles_per_bar and (cycles_per_bar <= 0 or cycles_per_bar > 32) then
-          _typed_action_add_error(errors, "out_of_range",
-            path .. ".cycles_per_bar",
-            "cycles_per_bar must be greater than 0 and no more than 32")
-        end
-        if bars and cycles_per_bar and bars * cycles_per_bar > 2048 then
-          _typed_action_add_error(errors, "out_of_range",
-            path .. ".cycles_per_bar",
-            "track.pan_lfo supports no more than 2048 total cycles")
-        end
-        if action.depth_pct ~= nil then
-          local depth_pct = require_number(action, "depth_pct", path)
-          if depth_pct and (depth_pct <= 0 or depth_pct > 100) then
-            _typed_action_add_error(errors, "out_of_range",
-              path .. ".depth_pct",
-              "depth_pct must be greater than 0 and no more than 100")
-          end
-        end
-        if action.resolution ~= nil then
-          if type(action.resolution) ~= "string" then
-            _typed_action_add_error(errors, "invalid_type", path .. ".resolution",
-              "resolution must be eighth, 16th, 32nd, 64th, or null")
-          else
-            local res = action.resolution:lower():gsub("%s+", ""):gsub("%-", "")
-            if res ~= "eighth" and res ~= "8th" and res ~= "16th"
-                and res ~= "32nd" and res ~= "64th" then
-              _typed_action_add_error(errors, "unsupported_resolution",
-                path .. ".resolution",
-                "resolution must be eighth, 16th, 32nd, or 64th")
-            end
-          end
-        end
-        if action.clear_existing ~= nil
-           and type(action.clear_existing) ~= "boolean" then
-          _typed_action_add_error(errors, "invalid_type",
-            path .. ".clear_existing",
-            "clear_existing must be a boolean")
-        end
-
-      elseif op == "track.folder" then
-        _typed_action_check_fields(errors, action, path, {
-          op = true,
-          parent = true,
-          children = true,
-        })
-        require_created_track_ref(action.parent, path .. ".parent")
-
-        if not _typed_action_is_array(action.children) then
-          _typed_action_add_error(errors, "invalid_type", path .. ".children",
-            "children must be a non-empty array of track ids")
-        else
-          local seen_children = {}
-          for cidx, child in ipairs(action.children) do
-            local cpath = path .. ".children[" .. tostring(cidx) .. "]"
-            require_created_track_ref(child, cpath)
-            if child == action.parent then
-              _typed_action_add_error(errors, "folder_self_child", cpath,
-                "A folder parent cannot also be its child")
-            end
-            if _typed_action_is_nonempty_string(child) and seen_children[child] then
-              _typed_action_add_error(errors, "duplicate_folder_child", cpath,
-                "Duplicate folder child: " .. tostring(child))
-            end
-            if _typed_action_is_nonempty_string(child) then
-              seen_children[child] = true
-            end
-          end
-        end
-
-      elseif op == "fx.add_stock" then
-        _typed_action_check_fields(errors, action, path, {
-          op = true,
-          track = true,
-          id = true,
-          fx = true,
-        })
-        require_ref(track_ids, action.track, path .. ".track", "track")
-        local id = require_string(action, "id", path)
-        local fx = require_string(action, "fx", path)
-        if fx and not _TYPED_ACTION_STOCK_FX[fx] then
-          _typed_action_add_error(errors, "unsupported_stock_fx", path .. ".fx",
-            "Unsupported or non-stock FX for typed actions: " .. fx)
-        end
-        register_id(fx_ids, id, path .. ".id", "fx")
-        if id and fx and _TYPED_ACTION_STOCK_FX[fx] then
-          fx_type_by_id[id] = fx
-        end
-
-      elseif op == "fx.set_param" then
-        _typed_action_check_fields(errors, action, path, {
-          op = true,
-          fx = true,
-          params = true,
-        })
-        local fx = require_string(action, "fx", path)
-        require_ref(fx_ids, fx, path .. ".fx", "fx")
-        if not _typed_action_is_object(action.params) or next(action.params) == nil then
-          _typed_action_add_error(errors, "invalid_type", path .. ".params",
-            "params must be a non-empty object")
-        else
-          local fx_name = fx and fx_type_by_id[fx]
-          local allowed_params = fx_name and _TYPED_ACTION_PARAM_TYPES[fx_name] or nil
-          for param, value in pairs(action.params) do
-            local ppath = path .. ".params." .. tostring(param)
-            if type(param) ~= "string" then
-              _typed_action_add_error(errors, "unknown_param", ppath,
-                "Parameter name must be a string")
-            elseif param:match("^normalized_") then
-              if type(value) ~= "number" then
-                _typed_action_add_error(errors, "invalid_type", ppath,
-                  "Normalized parameter values must be numeric")
-              elseif value < 0 or value > 1 then
-                _typed_action_add_error(errors, "out_of_range", ppath,
-                  "Normalized parameter values must be between 0 and 1")
-              end
-            elseif not allowed_params or not allowed_params[param] then
-              _typed_action_add_error(errors, "unknown_param", ppath,
-                "Unknown parameter for " .. tostring(fx_name or "FX") .. ": " .. param)
-            elseif type(value) ~= allowed_params[param] then
-              _typed_action_add_error(errors, "invalid_type", ppath,
-                param .. " must be a " .. allowed_params[param])
-            end
-          end
-        end
-
-      elseif op == "send.create" then
-        _typed_action_check_fields(errors, action, path, {
-          op = true,
-          id = true,
-          ["from"] = true,
-          ["to"] = true,
-          volume_db = true,
-          pan = true,
-          mode = true,
-          muted = true,
-        })
-        local id = nil
-        if action.id ~= nil then
-          id = require_string(action, "id", path)
-        end
-        require_ref(track_ids, action["from"], path .. ".from", "track")
-        require_ref(track_ids, action["to"], path .. ".to", "track")
-        if action.volume_db ~= nil then require_number(action, "volume_db", path) end
-        if action.pan ~= nil then
-          local pan = require_number(action, "pan", path)
-          if pan and (pan < -1 or pan > 1) then
-            _typed_action_add_error(errors, "out_of_range", path .. ".pan",
-              "pan must be between -1 and 1")
-          end
-        end
-        if action.mode ~= nil
-           and type(action.mode) ~= "string"
-           and type(action.mode) ~= "number" then
-          _typed_action_add_error(errors, "invalid_type", path .. ".mode",
-            "mode must be a string or number")
-        end
-        if action.muted ~= nil and type(action.muted) ~= "boolean" then
-          _typed_action_add_error(errors, "invalid_type", path .. ".muted",
-            "muted must be a boolean")
-        end
-        register_id(send_ids, id, path .. ".id", "send")
-
-      elseif op then
-        _typed_action_add_error(errors, "unknown_op", path .. ".op",
-          "Unsupported typed action op: " .. tostring(op))
-      end
-    end
-  end
-
-  if resolve_count > 0 and not has_non_resolve_action then
-    _typed_action_add_error(errors, "missing_mutation_action", "$.actions",
-      "track.resolve only binds target ids; add track.set, fx.add_stock, "
-        .. "track.pan_lfo, send.create, or another supported mutation action")
-  end
-
-  if #errors == 0 then
-    local _, folder_errors = Code._typed_action_folder_depth_plan(plan)
-    for _, err in ipairs(folder_errors or {}) do errors[#errors + 1] = err end
-  end
-
-  return #errors == 0, errors
-end
-
-function Code.find_typed_actions_wrong_fence(text)
-  if type(text) ~= "string" or text == "" then return nil end
-  local raw_text = _typed_action_trim(text)
-  local raw_plan = Code.parse_typed_actions_block(raw_text)
-  if raw_plan then
-    local raw_valid = Code.validate_typed_actions_plan(raw_plan)
-    if raw_valid then
-      return {
-        label = "(unfenced)",
-        raw = raw_text,
-        op_counts = _typed_action_count_ops(raw_plan),
-      }
-    end
-  end
-
-  for label, block in text:gmatch("```([^\n]*)\n(.-)\n%s*```") do
-    local lowered = string.lower(label or "")
-    local trimmed = lowered:gsub("^%s+", ""):gsub("%s+$", "")
-    if trimmed == "json" or trimmed == ""
-       or (trimmed ~= "reaassist-actions"
-           and trimmed:find("reaassist%-actions") ~= nil) then
-      local plan = Code.parse_typed_actions_block(block)
-      if plan then
-        local valid = Code.validate_typed_actions_plan(plan)
-        if valid then
-          return {
-            label = trimmed ~= "" and label or "(unlabeled)",
-            raw = block,
-            op_counts = _typed_action_count_ops(plan),
-          }
-        end
-      end
-    end
-  end
-  return nil
-end
-
-function Code.typed_actions_dev_gate_enabled()
-  if type(reaper) ~= "table" or type(reaper.file_exists) ~= "function" then
-    return false
-  end
-  if type(reaper.GetExePath) ~= "function" then
-    return false
-  end
-  local exe_path = tostring(reaper.GetExePath() or ""):lower():gsub("/", "\\")
-  exe_path = exe_path:gsub("\\+$", "")
-  if exe_path ~= "c:\\reaper - test"
-     and not exe_path:find("c:\\reaper - test\\", 1, true) then
-    return false
-  end
-  if type(RA) ~= "table" or type(RA.script_path) ~= "string" then
-    return false
-  end
-  local sep = RA.SEP or package.config:sub(1, 1)
-  local cache = Code._typed_actions_dev_gate_cache
-  if type(cache) ~= "table" then
-    cache = {}
-    Code._typed_actions_dev_gate_cache = cache
-  end
-  local cache_key = exe_path .. "\n" .. tostring(RA.script_path) .. "\n"
-    .. tostring(sep)
-  if cache[cache_key] ~= nil then return cache[cache_key] == true end
-  local function file_exists_normalized(path)
-    local exists_raw = reaper.file_exists(path)
-    if exists_raw == true or exists_raw == 1 then return true end
-    for _ = 1, 32 do
-      local normalized, n = path:gsub("[^\\/]+[\\/]%.%.[\\/]", "")
-      path = normalized
-      if n == 0 then break end
-    end
-    exists_raw = reaper.file_exists(path)
-    if exists_raw == true or exists_raw == 1 then return true end
-    local f = io.open(path, "rb")
-    if f then
-      f:close()
-      return true
-    end
-    return false
-  end
-  local candidates = {
-    RA.script_path .. "Dev" .. sep .. "typed_actions_enabled",
-    RA.script_path .. ".." .. sep .. "typed_actions_enabled",
-    RA.script_path .. ".." .. sep .. ".." .. sep .. "typed_actions_enabled",
-  }
-  for _, path in ipairs(candidates) do
-    if file_exists_normalized(path) then
-      cache[cache_key] = true
-      return true
-    end
-  end
-  cache[cache_key] = false
-  return false
-end
-
-function Code.typed_actions_public_force_off()
-  return type(reaper) == "table"
-    and type(reaper.GetExtState) == "function"
-    and type(CFG) == "table"
-    and reaper.GetExtState(CFG.EXT_NS, "typed_actions_force_off") == "1"
-end
-
-function Code.typed_actions_executor_enabled()
-  if Code.typed_actions_dev_gate_enabled() then return true end
-  if Code.typed_actions_public_force_off() then return false end
-  return true
-end
-
-function Code.typed_actions_executor_disabled_message()
-  if Code.typed_actions_public_force_off() then
-    local fallback = "Structured track edits are temporarily disabled."
-    return (RA and RA.t and RA.t("typed_actions.error.executor_disabled", nil,
-      fallback)) or fallback
-  end
-  local fallback = "Structured track edits are unavailable in this install."
-  return (RA and RA.t and RA.t("typed_actions.error.executor_unavailable",
-    nil, fallback)) or fallback
-end
-
--- OpenAI receives these operation shapes through its strict response schema.
--- Keep the examples for fenced-output providers, but do not resend that schema
--- in the OpenAI prompt body.
-local _TYPED_ACTION_CONTRACT_OPERATION_SHAPES = [[
-- Do not emit `<context_needed>` when this contract fits; include the complete track, FX, parameter, folder, and send plan in this one response.
-- Supported ops only:
-  - {"op":"track.create","id":"new_track","name":"New Track","position":"end","select":true}
-  - {"op":"track.ensure","id":"lead","name":"Lead Vocal","position":"end","select":true}
-  - {"op":"track.resolve","id":"lead","name":"Lead Vocal","selected":null,"selected_index":null,"index":null}
-  - {"op":"track.set","track":"lead","name":null,"volume_db":-6,"pan_pct":null,"mute":false,"solo":null,"master_send":null}
-  - {"op":"track.pan_lfo","track":"lead","start":"cursor","bars":8,"cycles_per_bar":1,"depth_pct":100,"resolution":"32nd","clear_existing":true}
-  - {"op":"track.folder","parent":"drums","children":["kick","snare"]}
-  - {"op":"fx.add_stock","track":"lead","id":"lead_eq","fx":"ReaEQ"}
-  - {"op":"fx.set_param","fx":"lead_eq","params":{"band":2,"frequency_hz":300,"gain_db":-3}}
-  - {"op":"fx.add_stock","track":"lead","id":"delay_fx","fx":"ReaDelay"}
-  - {"op":"fx.set_param","fx":"delay_fx","params":{"free_time_ms":0,"musical_length":0.25,"feedback_db":-12,"wet_db":-12}}
-  - {"op":"send.create","from":"lead","to":"bus","volume_db":-12,"pan":0,"mode":"post_fader","muted":false}
-- Supported stock FX: ReaEQ, ReaComp, ReaDelay, ReaVerbate, ReaGate, ReaLimit.
-]]
-
-local _TYPED_ACTION_CONTRACT_COMMON_BODY = [[
-- Use `track.resolve` for existing tracks only. It supports exactly one selector:
-  exact unique `name`, `selected`:true for exactly one selected track, 1-based
-  `selected_index` for the Nth selected track when multiple tracks are selected,
-  1-based `index`, or `name`+`index` as a checked lookup. If the target is
-  ambiguous or missing, do not use typed actions.
-- A `name`+`index` lookup is one checked target identity. Both fields must
-  match at execution time. A name mismatch fails the complete plan before any
-  mutation; never substitute live selection or the track now at that index.
-- If the user says "first selected track", "second selected track", or similar,
-  use `selected_index`:N. Do not use `selected`:true for ordinal selected-track
-  requests.
-- `track.resolve` only binds a target id; it does not change the track. Follow it
-  with `track.set`, `track.pan_lfo`, `fx.add_stock`, or `send.create` for the requested change.
-- When the user says a named track is selected, existing, or already present,
-  resolve that track with `track.resolve`; do not recreate it with `track.create`.
-- Use `track.create` when the user asks to create, add, make, or insert new tracks. It always inserts new tracks. If the user names the new track, put that exact display name in `name`; use `"name":null` only for truly generic unnamed tracks.
-- Treat named setup/build requests for stacks, routing plans, buses, returns, and folders as new track creation unless the user says existing/ensure/if missing.
-- If a request mixes an existing selected source with a new return/bus, use `track.resolve` for the selected source and `track.create` for the new return/bus.
-- Use `track.ensure` only when the user means ensure/reuse-if-present/if-missing, or when a named setup/routing track should be reused if it already exists.
-- FX ids are created only by `fx.add_stock`. Never use `track.resolve` for ids
-  like `lead_eq`, `lead_comp`, `verb_fx`, or send ids.
-- Add only the stock FX the user named for each target track; do not infer extra EQ/compressor chain members.
-- `track.set` supports `name`, `volume_db`, `pan_pct` (-100 left to 100 right), `mute`, `solo`, and `master_send`. At least one value must be non-null.
-- Use `track.set` only when the user explicitly requests track rename/name, volume, fader, pan, mute, unmute, solo, unsolo, or master/parent send state.
-- In `track.set`, use JSON null for every supported property the user did not request. Do not fill unused booleans with false.
-- Use `track.pan_lfo` only for requested track-pan/autopan/sine/LFO envelope motion over bars. It writes the track Pan envelope, not send pan, JSFX, or audio-rate modulation.
-- In `track.pan_lfo`, `start` is `cursor` or `project_start`; `bars` and `cycles_per_bar` must be explicit numbers; `depth_pct` defaults to 100 if null; `resolution` is eighth, 16th, 32nd, or 64th.
-- `track.pan_lfo.clear_existing` defaults to true; pass false only when the user explicitly wants to layer onto existing pan automation.
-- Do not set `master_send`:true or `master_send`:false unless the user explicitly requests master/parent send state.
-- Use `track.folder` only when the user explicitly requests a folder. Children are immediate child tracks only. For nested folders, emit one `track.folder` action per folder parent and create tracks in depth-first order so every parent is followed immediately by its full child subtree.
-- Emit actions in dependency order: all `track.create`, `track.ensure`, and `track.resolve` before `track.folder`, FX after tracks, params after FX, and sends after tracks.
-- The examples above show JSON shape only. Do not copy placeholder ids/names like `lead` or `Lead Vocal` unless the user requested them.
-- Every `id` must be unique across track, FX, and send actions.
-]]
-
-local _TYPED_ACTION_CONTRACT_SUPPORTED_PARAMS = [[
-- Supported params:
-  - ReaEQ: band, frequency_hz, gain_db
-  - ReaComp: threshold_db, attack_ms, release_ms, wet_db, dry_db, rms_ms
-  - ReaDelay: free_time_ms, musical_length, feedback_pct, feedback_db, wet_db, dry_db
-  - ReaVerbate: wet_db, dry_db, room_size, dampening
-  - ReaGate: threshold_db, hysteresis_db, attack_ms, hold_ms, release_ms
-  - ReaLimit: threshold_db, ceiling_db
-- ReaDelay `musical_length` uses displayed whole-note units: 0.25 is a quarter note, 0.5 is a half note, and 1 is a whole note. Do not convert it to a normalized value.
-- ReaDelay `free_time_ms` uses milliseconds. Set it to 0 when the requested tempo-synced delay should have no additional free-time length.
-]]
-
-local _TYPED_ACTION_CONTRACT_REFERENCE_BODY = [[
-- References must point to ids created by earlier `track.create`, `track.ensure`,
-  `track.resolve`, `fx.add_stock`, or `send.create` actions. Do not embed Lua in JSON fields.
-- For `track`, `from`, and `to`, reference the earlier action id, never the
-  display name. If the source/destination is an existing named track, add a
-  `track.resolve` action first and use that id.
-- If the request needs MIDI, JSFX authoring, third-party plugins, items/takes, envelopes other than `track.pan_lfo`, markers, regions, colors, presets, unsupported FX, or unsupported params, ignore this contract and write normal Lua instead.
-]]
-
-local _TYPED_ACTION_PROMPT_CONTRACT = [[
-TYPED ACTION CONTRACT (use only when the request is an exact fit):
-- If this contract fits the user request, output exactly one fenced block whose label is `reaassist-actions`.
-- Do not output Lua, ReaScript, JSFX, prose, apologies, raw JSON, `json`, `json reaassist-actions`, or any other code fence when using this contract.
-- The block must contain one JSON object: {"version":1,"actions":[...]}.
-]] .. _TYPED_ACTION_CONTRACT_OPERATION_SHAPES
-  .. _TYPED_ACTION_CONTRACT_COMMON_BODY
-  .. _TYPED_ACTION_CONTRACT_SUPPORTED_PARAMS
-  .. _TYPED_ACTION_CONTRACT_REFERENCE_BODY
-
-local _TYPED_ACTION_RESPONSE_FORMAT_FULL_PROMPT_CONTRACT = [[
-TYPED ACTION CONTRACT (use only when the request is an exact fit):
-- If this contract fits the user request, output the action plan as the raw JSON object required by the API response schema.
-- Do not output Lua, ReaScript, JSFX, prose, apologies, markdown, code fences, or a `reaassist-actions` wrapper when using this contract.
-- The JSON object must be {"version":1,"actions":[...]}.
-]] .. _TYPED_ACTION_CONTRACT_OPERATION_SHAPES
-  .. _TYPED_ACTION_CONTRACT_COMMON_BODY
-  .. _TYPED_ACTION_CONTRACT_REFERENCE_BODY
-
-local _TYPED_ACTION_RESPONSE_FORMAT_COMPACT_PROMPT_CONTRACT = [[
-TYPED ACTION CONTRACT (use only when the request is an exact fit):
-- If this contract fits the user request, output the action plan as the raw JSON object required by the API response schema.
-- Do not output Lua, ReaScript, JSFX, prose, apologies, markdown, code fences, or a `reaassist-actions` wrapper when using this contract.
-- The JSON object must be {"version":1,"actions":[...]}.
-- Do not emit `<context_needed>` when this contract fits; include the complete track, FX, parameter, folder, and send plan in this one response.
-]] .. _TYPED_ACTION_CONTRACT_COMMON_BODY
-  .. _TYPED_ACTION_CONTRACT_REFERENCE_BODY
-
-local _TYPED_ACTION_ROUTING_SEMANTIC_HELP = [[
-
-MODEL-SCOPED ROUTING CHECKLIST:
-- Complete graph requests must include every requested family:
-  tracks/resolves, `fx.add_stock`, `fx.set_param`, and `send.create`.
-- Plugin/FX names are never tracks. Use `fx.add_stock`; do not create helper
-  tracks named like Kick EQ, Snare Comp, or Vocal Reverb unless requested.
-- For bus routing, use `volume_db`:0 unless the user gives another bus level.
-  Wet effect sends use only their requested negative dB values.
-- Keep exact graphs exact: no inferred sends, return-to-bus edges, extra bus FX,
-  duplicate same-track stock FX, or cross-group FX spreading.
-- Put source-chain FX on source tracks, return FX on return tracks, and bus FX
-  on bus tracks only when requested.
-- Preserve requested track order, exact names, and exact track counts. Generic
-  "N tracks" uses `name`:null unless the user asks to label them.
-- Folder requests use depth-first track order and immediate-child folder lists.
-- Routing order: tracks/resolves, track properties/pan LFO, folders,
-  `fx.add_stock`, `fx.set_param`, then `send.create`.
-- For each requested parameter, target the same-track `fx.add_stock.id`; never
-  use the track id, plugin name, blank string, or example placeholder.
-- Resolve a track once, then reuse that id for requested mutations. Do not
-  create helper ids like `lead_set`, and never stop with only resolves.
-- Re-emit the complete plan; do not omit sends, FX, or parameter actions.
-]]
-
-local _TYPED_ACTION_MINIMAL_PLAN_HELP = [[
-
-MODEL-SCOPED MINIMAL ACTION CHECKLIST:
-- Emit the shortest complete action list that satisfies the request.
-- Do not repeat actions, ids, track/FX pairs, or send edges.
-- Add each requested stock FX exactly once per named target track unless the
-  user explicitly asks for multiple copies.
-- If the user says exactly N new tracks, emit exactly N `track.create` actions;
-  plugin names and FX ids are not tracks.
-- For blank-project or create-track requests, use `track.create` for each requested new track. Do not use `track.resolve` for tracks that do not exist yet.
-- For selected-track source requests that also create a named return/bus, resolve the selected source with `track.resolve` and create the return/bus with `track.create`.
-- For requested track rename/name, volume, pan, mute, unmute, solo, unsolo, or master/parent send state, emit one `track.set` action for the already-created track id.
-- In `track.set`, set only requested properties; unused properties must be null.
-- For requested track-pan/autopan/sine/LFO envelope motion over bars, emit one `track.pan_lfo` action for the already-created or resolved track id.
-- If the target is an existing track, emit one valid `track.resolve` first, then
-  the requested mutation using that same id; resolve-only plans do nothing.
-- For requested FX, create real `fx.add_stock` actions. Ids like `lead_eq`,
-  `lead_comp`, or `verb_fx` belong there, not in `track.resolve`.
-- If the user did not request track rename/name, volume, pan, mute, unmute, solo, unsolo, or master/parent send state, do not emit `track.set`.
-- Emit exactly the requested folders, parameter settings, and routes once each,
-  after their referenced tracks/FX exist.
-]]
-
-local _TYPED_ACTION_LUNA_TARGETING_HELP = [[
-
-LUNA TARGETING CHECKLIST:
-- When a request applies to multiple currently selected tracks, never use
-  `track.resolve` with `selected:true`. Resolve each target by exact name when
-  known, or use a distinct 1-based `selected_index` for each selected track.
-- Existing selected tracks must not also receive `track.create` or
-  `track.ensure`. Resolve each target once, then reuse that id for `track.set`,
-  `fx.add_stock`, `fx.set_param`, and `send.create`.
-- FX/plugin names are never tracks or track ids.
-]]
-
-local _TYPED_ACTION_STRICT_FENCE_HELP = [[
-
-MODEL-SCOPED ACTION FORMAT CHECKLIST:
-- When this typed-action contract is present, it overrides normal context-bucket requests for supported stock track, stock FX, parameter, and send actions.
-- Do not emit `<context_needed>` for requests that fit the typed-action contract; use the stock FX names and values already present in the user request.
-- Emit exactly one `reaassist-actions` fenced JSON block.
-- Do not omit the fence, change the fence label, emit raw JSON, emit Lua, or add prose outside the fence.
-- The JSON object must contain only top-level fields `version` and `actions`.
-- Do not include `pinned`, metadata, comments, explanations, or any other top-level field.
-- For `track.create` and `track.ensure`, use `"position":"end"` or `null`; do not use numeric positions.
-- For `fx.set_param`, `fx` must be the earlier `fx.add_stock.id`, not the track id, plugin name, blank string, or example placeholder.
-- Re-emit the complete action plan in that single block.
-]]
-
-local _TYPED_ACTION_PROFILE_ROUTING_HELP = {
-  key = "routing_semantic_help",
-  extra_prompt = _TYPED_ACTION_ROUTING_SEMANTIC_HELP,
-  semantic_retry = true,
-  semantic_retry_from_scratch = true,
-  schema_fast_escalate = true,
-  semantic_fast_escalate = true,
-  fallback = {
-    provider_id = "openai",
-    model_id = "gpt-5.6-terra",
-    thinking_value = "low",
-    reason = "typed_action_semantic_retry_failed",
-  },
-}
-
-local _TYPED_ACTION_PROFILE_MINIMAL_PLAN_HELP = {
-  key = "minimal_plan_help",
-  extra_prompt = _TYPED_ACTION_MINIMAL_PLAN_HELP,
-  semantic_retry = true,
-  fallback = {
-    provider_id = "openai",
-    model_id = "gpt-5.6-terra",
-    thinking_value = "none",
-    reason = "typed_action_semantic_retry_failed",
-  },
-}
-
-local _TYPED_ACTION_PROFILE_LUNA_ROUTING_HELP = {
-  key = "luna_routing_semantic_help",
-  extra_prompt = _TYPED_ACTION_ROUTING_SEMANTIC_HELP
-    .. _TYPED_ACTION_MINIMAL_PLAN_HELP
-    .. _TYPED_ACTION_LUNA_TARGETING_HELP,
-  semantic_retry = true,
-  semantic_retry_from_scratch = false,
-  semantic_max_retries = 1,
-  response_format_omit_operation_shapes = true,
-  fallback = {
-    provider_id = "openai",
-    model_id = "gpt-5.6-terra",
-    thinking_value = "none",
-    reason = "typed_action_semantic_retry_failed",
-  },
-}
-
-local _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP = {
-  key = "strict_fence_help",
-  extra_prompt = _TYPED_ACTION_STRICT_FENCE_HELP,
-  semantic_retry = true,
-}
-
-local _TYPED_ACTION_PROFILE_BASELINE_SEMANTIC = {
-  key = "baseline_destructive_semantic",
-  semantic_retry = true,
-  destructive_mismatch_only = true,
-}
-
-local _TYPED_ACTION_PROFILE_COMPACT_RESPONSE_SCHEMA = {
-  key = "compact_response_schema",
-  response_format_omit_operation_shapes = true,
-  semantic_retry = true,
-  destructive_mismatch_only = true,
-}
-
-local _TYPED_ACTION_BASELINE_DESTRUCTIVE_CODES = {
-  ambiguous_selected_track = true,
-  ambiguous_property_value = true,
-  bus_send_not_unity = true,
-  duplicate_track_fx = true,
-  extra_inferred_return_bus_send = true,
-  forbidden_selected_index = true,
-  forbidden_track_index = true,
-  fx_as_track = true,
-  incomplete_multi_target_plan = true,
-  missing_selected_index = true,
-  resolve_after_planned_track = true,
-  return_fx_mismatch = true,
-  track_order_mismatch = true,
-  unrequested_master_send_action = true,
-  unrequested_param_action = true,
-  unexpected_folder_actions = true,
-  unexpected_pan_lfo_action = true,
-  unexpected_track_create_existing_target = true,
-  unexpected_track_ensure_actions = true,
-  unexpected_track_fx = true,
-  unexpected_track_resolve_target = true,
-  unexpected_track_set_actions = true,
-  unsupported_record_arm_typed_action = true,
-}
-
-local function _typed_action_filter_semantic_errors_for_profile(errors, profile)
-  if type(profile) ~= "table" or profile.destructive_mismatch_only ~= true
-      or type(errors) ~= "table" or #errors == 0 then
-    return errors
-  end
-  local filtered = {}
-  for _, err in ipairs(errors) do
-    if _TYPED_ACTION_BASELINE_DESTRUCTIVE_CODES[
-        tostring(err and err.code or "")] then
-      filtered[#filtered + 1] = err
-    end
-  end
-  return filtered
-end
-
-local _TYPED_ACTION_PROFILES_BY_KEY = {
-  routing_semantic_help = _TYPED_ACTION_PROFILE_ROUTING_HELP,
-  routing_semantic_retry_help = {
-    key = "routing_semantic_retry_help",
-    extra_prompt = _TYPED_ACTION_ROUTING_SEMANTIC_HELP,
-    semantic_retry = true,
-    semantic_retry_from_scratch = true,
-    fallback = {
-      provider_id = "openai",
-      model_id = "gpt-5.6-terra",
-      thinking_value = "low",
-      reason = "typed_action_semantic_retry_failed",
-    },
-  },
-  luna_routing_semantic_help = _TYPED_ACTION_PROFILE_LUNA_ROUTING_HELP,
-  minimal_plan_help = _TYPED_ACTION_PROFILE_MINIMAL_PLAN_HELP,
-  strict_fence_help = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
-  compact_response_schema = _TYPED_ACTION_PROFILE_COMPACT_RESPONSE_SCHEMA,
-}
-
-local _TYPED_ACTION_MODEL_PROFILES = {
-  openai = {
-    ["gpt-5.6-luna"] = _TYPED_ACTION_PROFILE_LUNA_ROUTING_HELP,
-    ["gpt-5.6-terra"] = _TYPED_ACTION_PROFILE_COMPACT_RESPONSE_SCHEMA,
-    ["gpt-5.6-sol"] = _TYPED_ACTION_PROFILE_COMPACT_RESPONSE_SCHEMA,
-    ["gpt-5.4-mini"] = {
-      key = "mini_routing_semantic_help",
-      extra_prompt = _TYPED_ACTION_ROUTING_SEMANTIC_HELP,
-      semantic_retry = true,
-      schema_fast_escalate = true,
-      semantic_fast_escalate = true,
-      fallback = {
-        provider_id = "openai",
-        model_id = "gpt-5.6-terra",
-        thinking_value = "none",
-        reason = "typed_action_semantic_retry_failed",
-      },
-    },
-  },
-  deepseek = {
-    ["deepseek-v4-flash"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
-  },
-  anthropic = {
-    ["claude-haiku-4-5"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
-  },
-  google = {
-    ["gemini-3.6-flash"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
-    ["gemini-3.1-flash-lite"] = _TYPED_ACTION_PROFILE_STRICT_FENCE_HELP,
-  },
-}
-_TYPED_ACTION_PROFILES_BY_KEY.mini_routing_semantic_help =
-  _TYPED_ACTION_MODEL_PROFILES.openai["gpt-5.4-mini"]
-assert(_TYPED_ACTION_PROFILES_BY_KEY.mini_routing_semantic_help,
-  "missing typed-action mini routing profile")
-
--- Model-specific typed-action prompt profiles. These add stricter fence/schema
--- guidance or automatic escalation for models that tend to omit helper actions,
--- use prose fences, or need a stronger semantic retry.
-function Code.typed_actions_model_profile(provider_id, model_id)
-  local by_provider = _TYPED_ACTION_MODEL_PROFILES[tostring(provider_id or "")]
-  if not by_provider then return nil end
-  return by_provider[tostring(model_id or "")]
-end
-
-function Code.typed_actions_model_profile_by_key(key)
-  return _TYPED_ACTION_PROFILES_BY_KEY[tostring(key or "")]
-end
-
-local function _typed_action_contract_for_profile(contract, profile)
-  if not contract or contract == "" then return contract end
-  if type(profile) ~= "table" then return contract end
-  local extra = profile.extra_prompt
-  if type(extra) ~= "string" or extra == "" then return contract end
-  return contract .. extra
-end
-
-function Code.typed_action_request_specific_help(user_text)
-  local rules = {}
-  local absolute_indexes =
-    Code._typed_action_absolute_track_indexes_from_user_text(user_text)
-  if #absolute_indexes == 1
-     and not Code.typed_action_user_requests_selected_target(user_text)
-     and not Code.typed_action_user_requests_track_creation(user_text)
-     and not Code._typed_action_forbids_absolute_track_index(user_text) then
-    local n = tostring(absolute_indexes[1])
-    rules[#rules + 1] = "- The user targeted existing Track " .. n
-      .. " by absolute 1-based track number. Emit exactly "
-      .. "`{\"op\":\"track.resolve\",\"id\":\"target_track\",\"index\":"
-      .. n .. "}` for that target before mutations. Do not add `name`, "
-      .. "`selected`, or `selected_index` to that action. Do not emit "
-      .. "`track.create` or `track.ensure` for this target. Reuse "
-      .. "`target_track` in each mutation that targets it."
-  end
-  if Code.typed_action_user_forbids_track_creation(user_text) then
-    rules[#rules + 1] = "- The user explicitly forbids creating tracks. Do "
-      .. "not emit `track.create` or `track.ensure`. Resolve existing target "
-      .. "tracks with `track.resolve`, then apply the requested `track.set`, "
-      .. "`track.pan_lfo`, `fx.add_stock`, or `send.create` action."
-  end
-  if #rules == 0 then return "" end
-  return "\n\nREQUEST-SPECIFIC TYPED ACTION RULE:\n"
-    .. table.concat(rules, "\n") .. "\n"
-end
-
-local _TYPED_ACTION_SCHEMA_PARAM_KEYS = {
-  "band",
-  "frequency_hz",
-  "gain_db",
-  "threshold_db",
-  "ceiling_db",
-  "attack_ms",
-  "release_ms",
-  "wet_db",
-  "dry_db",
-  "rms_ms",
-  "free_time_ms",
-  "musical_length",
-  "feedback_pct",
-  "feedback_db",
-  "room_size",
-  "dampening",
-  "hysteresis_db",
-  "hold_ms",
-}
-
-local function _typed_action_json_type(...)
-  local out = {}
-  for i = 1, select("#", ...) do out[#out+1] = select(i, ...) end
-  return { type = out }
-end
-
-local function _typed_action_string_enum(value)
-  return { type = "string", enum = { value } }
-end
-
-local function _typed_action_required_from_properties(properties)
-  local required = {}
-  for key in pairs(properties or {}) do required[#required+1] = key end
-  table.sort(required)
-  return required
-end
-
-local function _typed_action_schema_object(properties, required)
-  return {
-    type = "object",
-    properties = properties,
-    required = required or _typed_action_required_from_properties(properties),
-    additionalProperties = false,
-  }
-end
-
-local function _typed_action_schema_action(properties, required)
-  return _typed_action_schema_object(properties, required)
-end
-
-local function _typed_action_schema_params_object()
-  local props = {}
-  for _, name in ipairs(_TYPED_ACTION_SCHEMA_PARAM_KEYS) do
-    props[name] = _typed_action_json_type("number", "null")
-  end
-  return _typed_action_schema_object(props, _TYPED_ACTION_SCHEMA_PARAM_KEYS)
-end
-
--- OpenAI response_format schema builder for typed actions. The schema narrows
--- track selectors and helper-action availability based on the current prompt so
--- constrained decoding cannot pick obviously disallowed structures.
-function Code.typed_actions_openai_response_format_field(user_text)
-  user_text = tostring(user_text
-    or (type(S) == "table" and S.pending_orig_prompt) or "")
-  local selected_indexes, selected_index_required =
-    Code._typed_action_selected_indexes_from_user_text(user_text)
-  local selected_target_requested =
-    Code.typed_action_user_requests_selected_target(user_text)
-  local requests_track_creation =
-    Code.typed_action_user_requests_track_creation(user_text)
-  local requests_track_ensure =
-    Code.typed_action_user_requests_track_ensure(user_text)
-  local mixed_existing_track_request =
-    requests_track_creation
-    and Code.typed_action_user_mentions_existing_or_source_track(user_text)
-  local include_track_resolve = true
-  local include_track_ensure = true
-  local include_absolute_index_resolve =
-    not Code._typed_action_forbids_absolute_track_index(user_text)
-  if requests_track_creation
-     and not selected_target_requested
-     and not mixed_existing_track_request then
-    include_track_resolve = false
-  elseif Code.typed_action_user_forbids_track_creation(user_text) then
-    include_track_ensure = false
-  end
-  local selected_index_schema = { type = "number" }
-  if #selected_indexes > 0 then
-    selected_index_schema = { type = "number", enum = selected_indexes }
-  end
-  local include_track_create = requests_track_creation
-  if include_track_create then
-    if not selected_target_requested
-       and not mixed_existing_track_request then
-      include_track_resolve = false
-    end
-  end
-  if Code.typed_action_user_forbids_track_creation(user_text) then
-    include_track_create = false
-  end
-
-  local action_variants = {}
-  local function add_action(schema)
-    action_variants[#action_variants + 1] = schema
-  end
-
-  if include_track_create then
-    add_action(_typed_action_schema_action({
-      op = _typed_action_string_enum("track.create"),
-      id = { type = "string" },
-      name = _typed_action_json_type("string", "null"),
-      position = _typed_action_json_type("string", "null"),
-      select = _typed_action_json_type("boolean", "null"),
-    }))
-  end
-
-  if include_track_ensure
-      and (not include_track_create or requests_track_ensure) then
-    add_action(_typed_action_schema_action({
-      op = _typed_action_string_enum("track.ensure"),
-      id = { type = "string" },
-      name = { type = "string" },
-      position = _typed_action_json_type("string", "null"),
-      select = _typed_action_json_type("boolean", "null"),
-    }))
-  end
-
-  -- For blank-project/create-track requests, the model has no existing target
-  -- to resolve. Do not offer track.resolve in the structured-output schema:
-  -- weak models were legally choosing that branch as a fake FX/send placeholder
-  -- and then failing semantic validation before any safe mutation could run.
-  if include_track_resolve then
-    add_action(_typed_action_schema_action({
-      op = _typed_action_string_enum("track.resolve"),
-      id = { type = "string" },
-      name = { type = "string" },
-      selected = _typed_action_json_type("null"),
-      selected_index = _typed_action_json_type("null"),
-      index = _typed_action_json_type("null"),
-    }))
-    if not selected_index_required then
-      add_action(_typed_action_schema_action({
-        op = _typed_action_string_enum("track.resolve"),
-        id = { type = "string" },
-        name = _typed_action_json_type("null"),
-        selected = { type = "boolean", enum = { true } },
-        selected_index = _typed_action_json_type("null"),
-        index = _typed_action_json_type("null"),
-      }))
-    end
-    add_action(_typed_action_schema_action({
-      op = _typed_action_string_enum("track.resolve"),
-      id = { type = "string" },
-      name = _typed_action_json_type("null"),
-      selected = _typed_action_json_type("null"),
-      selected_index = selected_index_schema,
-      index = _typed_action_json_type("null"),
-    }))
-    if include_absolute_index_resolve then
-      add_action(_typed_action_schema_action({
-        op = _typed_action_string_enum("track.resolve"),
-        id = { type = "string" },
-        name = _typed_action_json_type("null"),
-        selected = _typed_action_json_type("null"),
-        selected_index = _typed_action_json_type("null"),
-        index = { type = "number" },
-      }))
-      add_action(_typed_action_schema_action({
-        op = _typed_action_string_enum("track.resolve"),
-        id = { type = "string" },
-        name = { type = "string" },
-        selected = _typed_action_json_type("null"),
-        selected_index = _typed_action_json_type("null"),
-        index = { type = "number" },
-      }))
-    end
-  end
-
-  add_action(_typed_action_schema_action({
-    op = _typed_action_string_enum("track.set"),
-    track = { type = "string" },
-    name = _typed_action_json_type("string", "null"),
-    volume_db = _typed_action_json_type("number", "null"),
-    pan_pct = _typed_action_json_type("number", "null"),
-    mute = _typed_action_json_type("boolean", "null"),
-    solo = _typed_action_json_type("boolean", "null"),
-    master_send = _typed_action_json_type("boolean", "null"),
-  }))
-  add_action(_typed_action_schema_action({
-    op = _typed_action_string_enum("track.pan_lfo"),
-    track = { type = "string" },
-    start = _typed_action_json_type("string", "null"),
-    bars = _typed_action_json_type("number", "null"),
-    cycles_per_bar = _typed_action_json_type("number", "null"),
-    depth_pct = _typed_action_json_type("number", "null"),
-    resolution = _typed_action_json_type("string", "null"),
-    clear_existing = _typed_action_json_type("boolean", "null"),
-  }))
-  add_action(_typed_action_schema_action({
-    op = _typed_action_string_enum("track.folder"),
-    parent = { type = "string" },
-    children = {
-      type = "array",
-      items = { type = "string" },
-    },
-  }))
-  add_action(_typed_action_schema_action({
-    op = _typed_action_string_enum("fx.add_stock"),
-    track = { type = "string" },
-    id = { type = "string" },
-    fx = {
-      type = "string",
-      enum = { "ReaEQ", "ReaComp", "ReaDelay", "ReaVerbate", "ReaGate", "ReaLimit" },
-    },
-  }))
-  add_action(_typed_action_schema_action({
-    op = _typed_action_string_enum("fx.set_param"),
-    fx = { type = "string" },
-    params = _typed_action_schema_params_object(),
-  }))
-  add_action(_typed_action_schema_action({
-    op = _typed_action_string_enum("send.create"),
-    id = _typed_action_json_type("string", "null"),
-    ["from"] = { type = "string" },
-    to = { type = "string" },
-    volume_db = _typed_action_json_type("number", "null"),
-    pan = _typed_action_json_type("number", "null"),
-    mode = _typed_action_json_type("string", "number", "null"),
-    muted = _typed_action_json_type("boolean", "null"),
-  }))
-
-  local action_schema = { anyOf = action_variants }
-  local schema = _typed_action_schema_object({
-    version = { type = "integer", enum = { 1 } },
-    actions = {
-      type = "array",
-      items = action_schema,
-      maxItems = 64,
-    },
-  }, { "version", "actions" })
-  local encoded = JSON.encode({
-    type = "json_schema",
-    json_schema = {
-      name = "reaassist_actions_v1",
-      strict = true,
-      schema = schema,
-    },
-  })
-  if not encoded then return "" end
-  return ',"response_format":' .. encoded
 end
 
 local function _typed_action_text_has_any(lt, terms)
@@ -5098,2326 +948,581 @@ function Code.selected_track_rename_numbered_range(user_text)
   }
 end
 
-function Code.prompt_requests_pan_lfo_automation(user_text)
-  local lt = tostring(user_text or ""):lower():gsub("%s+", " ")
-  if lt == "" then return false end
-  local has_track_pan =
-    not (lt:find("send pan", 1, true)
-      or lt:find("pan the send", 1, true)
-      or lt:find("pan send", 1, true))
-    and (lt:find("%f[%w]pan%f[%W]") ~= nil
-      or lt:find("%f[%w]panner%f[%W]") ~= nil
-      or lt:find("%f[%w]autopan%f[%W]") ~= nil
-      or lt:find("auto%-pan") ~= nil
-      or lt:find("percent left", 1, true) ~= nil
-      or lt:find("percent right", 1, true) ~= nil)
-  local has_lfo =
-    lt:find("%f[%w]lfo%f[%W]") ~= nil
-    or lt:find("%f[%w]autopan%f[%W]") ~= nil
-    or lt:find("auto%-pan") ~= nil
-    or lt:find("%f[%w]sine%f[%W]") ~= nil
-    or lt:find("%f[%w]sinewave%f[%W]") ~= nil
-    or lt:find("%f[%w]oscillat") ~= nil
-  if not has_lfo then return false end
-  if has_track_pan then
-    for n in lt:gmatch("%f[%w](%d+%.?%d*)%s*hz%f[%W]") do
-      local hz = tonumber(n)
-      if hz and hz >= 15
-          and not lt:find("%f[%w]jsfx%f[%W]")
-          and not lt:find("%f[%w]plugin%f[%W]") then
-        return false
-      end
+
+function Code.history_has_prior_assistant(history)
+  if type(history) ~= "table" then return false end
+  for i = #history, 1, -1 do
+    local item = history[i]
+    if type(item) == "table"
+        and item.role == "assistant"
+        and tostring(item.content or ""):match("%S") then
+      return true
     end
-  elseif lt:find("%f[%w]sine%s*wave%s+per%s+bar%f[%W]") == nil
-      and lt:find("%f[%w]sinewave%s+per%s+bar%f[%W]") == nil then
-    return false
   end
-  if lt:find("%f[%w]jsfx%f[%W]")
-      or lt:find("%f[%w]plugin%f[%W]")
-      or lt:find("%f[%w]audio rate%f[%W]")
-      or lt:find("audio%-rate") then
-    return false
-  end
-  return lt:find("%f[%w]bar%f[%W]") ~= nil
-    or lt:find("%f[%w]bars%f[%W]") ~= nil
-    or lt:find("%f[%w]measure%f[%W]") ~= nil
-    or lt:find("%f[%w]measures%f[%W]") ~= nil
+  return false
 end
+
+function Code.typed_actions_public_force_off()
+  return type(reaper) == "table"
+    and type(reaper.GetExtState) == "function"
+    and type(CFG) == "table"
+    and reaper.GetExtState(CFG.EXT_NS, "typed_actions_force_off") == "1"
+end
+
+function Code.typed_actions_executor_enabled()
+  return not Code.typed_actions_public_force_off()
+end
+
+function Code.typed_actions_executor_disabled_message()
+  return "Structured track edits are temporarily unavailable."
+end
+
+function Code._typed_action_selected_indexes_from_user_text()
+  return {}, false
+end
+
+function Code.typed_action_user_requests_folder(user_text)
+  return tostring(user_text or ""):lower()
+    :find("%f[%w]folder%f[%W]") ~= nil
+end
+
+local CONTRACT = [[
+STRUCTURED TRACK EDIT CONTRACT:
+The complete request contains only track, folder, or routing work.
+Return one fenced reaassist-actions block containing
+{"version":1,"actions":[...]}.
+Supported operations are track.create, track.ensure, track.resolve, track.set,
+track.folder, and send.create. Use track.create for new tracks, track.ensure
+only for reuse-if-present wording, and track.resolve for existing targets.
+References must use ids from earlier track actions. Use dependency order.
+Use `op` for every operation. Every track.create, track.ensure, and
+track.resolve declares an `id` that later actions reference.
+track.set names its target with `track`, not `id`, and changes only name,
+volume_db, pan_pct, mute, solo, or master_send.
+Folder nesting uses track.folder with `parent` and `children`. There is no
+folder field on track.set.
+A send uses `from` and `to`, with optional `volume_db`, for example
+{"op":"send.create","from":"vocal","to":"reverb","volume_db":-6}.
+Worked example for an existing track that becomes a folder:
+{"version":1,"actions":[
+{"op":"track.resolve","id":"drums","name":"Drum Bus"},
+{"op":"track.create","id":"kick","name":"Kick"},
+{"op":"track.create","id":"snare","name":"Snare"},
+{"op":"track.folder","parent":"drums","children":["kick","snare"]}]}
+Do not output Lua, prose, plug-in work, parameter work, or another code fence.
+]]
 
 function Code.typed_actions_prompt_contract(user_text, opts)
   opts = type(opts) == "table" and opts or {}
   if not opts.force_enabled and not Code.typed_actions_executor_enabled() then
     return nil, "executor_disabled"
   end
-  if type(user_text) ~= "string" or user_text == "" then
-    return nil, "empty_prompt"
+  if not exact_nonplugin_scope(user_text) then
+    return nil, has_plugin_signal(user_text)
+      and "plugin_work_requires_lua" or "uncertain_or_unsupported_scope"
   end
-
-  local lt = Code._localized_action_intent_text(user_text)
-  local words = " " .. lt:gsub("[^%w]+", " "):gsub("%s+", " ") .. " "
-  local function has_word_phrase(term)
-    return words:find(" " .. term .. " ", 1, true) ~= nil
-  end
-  if CTX
-      and type(CTX.explicit_validated_plugin_profile_names) == "function" then
-    for _, profile_name in ipairs(
-        CTX.explicit_validated_plugin_profile_names(user_text)) do
-      if not _TYPED_ACTION_STOCK_FX[profile_name] then
-        return nil, "validated_plugin_profile_requires_lua"
-      end
-    end
-  end
-  local predicate_track_property_request =
-    Code._typed_action_user_requests_predicate_track_property_target(user_text)
-  local first_word = lt:match("^%s*([%a]+)")
-  local question_prefixes = {
-    what = true, why = true, how = true, should = true, would = true,
-    could = true, can = true, is = true, are = true, ["do"] = true,
-    does = true, did = true, will = true, where = true, who = true,
-  }
-  local when_second_word = first_word == "when"
-    and lt:match("^%s*when%s+([%a]+)") or nil
-  local when_question_prefixes = {
-    is = true, are = true, ["do"] = true, does = true, did = true,
-    will = true, would = true, should = true, can = true, could = true,
-  }
-  local explicit_question_prefix = question_prefixes[first_word] == true
-    or when_question_prefixes[when_second_word] == true
-  if predicate_track_property_request
-      and lt:find("?", 1, true) == nil
-      and not explicit_question_prefix then
-    return nil, "unsupported_multi_track_property_target"
-  end
-  local question_or_readonly = Code.prompt_is_question_or_readonly(user_text)
-  if question_or_readonly then
-    return nil, "question_or_readonly"
-  end
-
-  if Code.prompt_requests_reusable_action_script(user_text) then
-    return nil, "deferred_reusable_action"
-  end
-
-  local explicit_lua_request =
-       lt:find("reaper lua", 1, true) ~= nil
-    or lt:find("lua script", 1, true) ~= nil
-    or lt:find("lua code", 1, true) ~= nil
-    or lt:find("reascript", 1, true) ~= nil
-    or lt:find("return only lua", 1, true) ~= nil
-    or lt:find("return only the lua", 1, true) ~= nil
-    or (has_word_phrase("write") and has_word_phrase("script")
-      and (has_word_phrase("reaper") or has_word_phrase("lua")))
-    or (has_word_phrase("generate") and has_word_phrase("script")
-      and (has_word_phrase("reaper") or has_word_phrase("lua")))
-  if explicit_lua_request then
-    return nil, "explicit_lua_request"
-  end
-
-  if CTX and type(CTX.prompt_indicates_timecode_generator) == "function"
-      and CTX.prompt_indicates_timecode_generator(user_text) then
-    return nil, "unsupported_timecode_generator"
-  end
-
-  if type(Code.typed_action_user_requests_hardware_output) == "function"
-      and Code.typed_action_user_requests_hardware_output(user_text) then
-    return nil, "unsupported_hardware_output"
-  end
-
-  if Code._typed_action_user_requests_record_ready_state(user_text)
-      or has_word_phrase("arm")
-      or has_word_phrase("armed")
-      or has_word_phrase("record arm")
-      or has_word_phrase("record armed")
-      or has_word_phrase("recording") then
-    return nil, "unsupported_record_arm"
-  end
-
-  if Code._typed_action_user_requests_track_deletion(user_text) then
-    return nil, "unsupported_track_delete"
-  end
-
-  local has_pan_lfo =
-    type(Code.prompt_requests_pan_lfo_automation) == "function"
-    and Code.prompt_requests_pan_lfo_automation(user_text)
-  local has_readelay_tempo_sync = lt:find("readelay", 1, true) ~= nil
-    and _typed_action_text_has_any(lt, {
-      "tempo sync", "tempo-sync", "tempo synced", "tempo-synced",
-    })
-
-  local blocked_terms = {
-    "midi", "jsfx", "eel2", "reajs", "theme", "marker", "region",
-    "item", "take",
-    "render", "export", "install", "download", "color", "colors",
-    "colour", "colours", "third-party", "third party",
-    "vst3", "fabfilter", "pro-q", "pro q", "waves", "uad", "kontakt",
-    "serum", "vital", "omnisphere", "ozone", "soothe",
-  }
-  if not has_pan_lfo then
-    blocked_terms[#blocked_terms + 1] = "envelope"
-    blocked_terms[#blocked_terms + 1] = "automation"
-    if not has_readelay_tempo_sync then
-      blocked_terms[#blocked_terms + 1] = "tempo"
-    end
-    blocked_terms[#blocked_terms + 1] = "time signature"
-  end
-  if _typed_action_text_has_any(lt, blocked_terms) then
-    return nil, "unsupported_scope"
-  end
-
-  local has_stock_fx = _typed_action_text_has_any(lt, {
-    "reaeq", "reacomp", "readelay", "reaverbate", "reagate", "realimit",
-  })
-  if has_stock_fx then
-    -- The typed-action lane is an exact command executor, not a substitute for
-    -- plugin knowledge. Qualitative requests need the unified plugin profile
-    -- and generated-Lua path so the model can choose musically appropriate
-    -- settings and can reach parameters outside the deliberately small schema.
-    local qualitative_stock_fx_terms = {
-      "gentle", "gently", "natural", "transparent", "controlled",
-      "more even", "even out", "squashed", "punchy", "punchier",
-      "punch", "dense", "aggressive", "subtle", "warm", "warmer",
-      "bright", "brighter", "dark", "darker", "muddy", "mud",
-      "boxy", "boxiness", "harsh", "harshness", "rumble",
-      "clean up", "tasteful", "musical", "smooth", "smoother",
-      "open up", "airy", "air", "sheen", "glue", "polish",
-      "restrained", "sits behind", "sit behind", "crowd", "clutter",
-      "sound good", "sound better", "feel better",
-    }
-    if _typed_action_text_has_any(lt, qualitative_stock_fx_terms) then
-      return nil, "qualitative_stock_fx_requires_profile"
-    end
-
-    -- Route named parameter requests that the typed-action schema cannot
-    -- express through the same profile/Lua path. This prevents a partial plan
-    -- from silently satisfying only the easy controls.
-    local unsupported_stock_fx_parameter = false
-    if lt:find("reacomp", 1, true) then
-      unsupported_stock_fx_parameter = _typed_action_text_has_any(lt, {
-        "ratio", "knee", "makeup", "make up", "auto release",
-        "pre comp", "pre-comp", "lookahead", "sidechain", "detector",
-        "lowpass", "low pass", "highpass", "high pass", "bypass",
-        "delta", "legacy", "filter preview",
-      })
-    end
-    if not unsupported_stock_fx_parameter
-        and lt:find("reaeq", 1, true) then
-      unsupported_stock_fx_parameter = _typed_action_text_has_any(lt, {
-        "q value", "bandwidth", "slope", "shape", "filter type",
-        "band type", "high pass", "highpass", "low pass", "lowpass",
-        "shelf", "notch", "bypass", "enabled",
-      })
-    end
-    if not unsupported_stock_fx_parameter
-        and lt:find("readelay", 1, true) then
-      unsupported_stock_fx_parameter = _typed_action_text_has_any(lt, {
-        "stereo width", "low pass", "lowpass",
-        "high pass", "highpass", "bypass",
-      })
-      local tap_mentioned = lt:find("%f[%w]tap%f[%W]") ~= nil
-      local supported_tap_mentioned = false
-      for tap_number in lt:gmatch("%f[%w]tap%s*(%d+)") do
-        if tonumber(tap_number) == 1 then
-          supported_tap_mentioned = true
-        else
-          unsupported_stock_fx_parameter = true
-        end
-      end
-      if tap_mentioned and not supported_tap_mentioned then
-        unsupported_stock_fx_parameter = true
-      end
-    end
-    if not unsupported_stock_fx_parameter
-        and lt:find("reaverbate", 1, true) then
-      unsupported_stock_fx_parameter = _typed_action_text_has_any(lt, {
-        "pre delay", "pre-delay", "stereo width", "initial delay",
-        "low pass", "lowpass", "high pass", "highpass", "bypass",
-      })
-    end
-    if not unsupported_stock_fx_parameter
-        and lt:find("reagate", 1, true) then
-      unsupported_stock_fx_parameter = _typed_action_text_has_any(lt, {
-        "pre open", "pre-open", "lookahead", "sidechain", "detector",
-        "low pass", "lowpass", "high pass", "highpass", "bypass",
-      })
-    end
-    if not unsupported_stock_fx_parameter
-        and lt:find("realimit", 1, true) then
-      unsupported_stock_fx_parameter = _typed_action_text_has_any(lt, {
-        "release", "lookahead", "true peak", "true-peak", "link",
-        "stereo", "bypass",
-      })
-    end
-    if unsupported_stock_fx_parameter then
-      return nil, "unsupported_stock_fx_parameter_requires_profile"
-    end
-
-    -- The v1 typed-action contract can add stock FX, but it cannot bind and
-    -- edit an instance already in the chain. Keep explicit existing-instance
-    -- requests in the profile-aware Lua lane so they cannot add a duplicate.
-    local existing_stock_fx_instance = false
-    for _, fx_name in ipairs({
-      "reaeq", "reacomp", "readelay", "reaverbate", "reagate", "realimit",
-    }) do
-      if lt:find("existing " .. fx_name, 1, true)
-          or lt:find(fx_name .. " already", 1, true)
-          or lt:find("already loaded " .. fx_name, 1, true)
-          or lt:find("already inserted " .. fx_name, 1, true) then
-        existing_stock_fx_instance = true
-        break
-      end
-    end
-    if existing_stock_fx_instance then
-      return nil, "existing_stock_fx_requires_profile"
-    end
-  end
-  if not has_stock_fx then
-    local generic_fx_lt = lt
-    for _, phrase in ipairs({
-      "do not add any effects",
-      "do not add effects",
-      "do not add any effect",
-      "do not add effect",
-      "do not add any fx",
-      "do not add fx",
-      "add no effects",
-      "add no effect",
-      "add no fx",
-      "no effects",
-      "no effect",
-      "no fx",
-    }) do
-      generic_fx_lt = generic_fx_lt:gsub(phrase, "")
-    end
-    local generic_fx_words = " "
-      .. generic_fx_lt:gsub("[^%w]+", " "):gsub("%s+", " ") .. " "
-    local function has_generic_fx_word_phrase(term)
-      return generic_fx_words:find(" " .. term .. " ", 1, true) ~= nil
-    end
-    local generic_fx_terms = {
-      "chain", "fx", "effect", "effects", "plugin", "plugins",
-      "compressor", "eq", "equalizer", "reverb", "delay", "gate",
-      "limiter", "deesser", "saturation", "saturator", "chorus",
-      "phaser", "pitch correction", "pitch shift", "vocal chain",
-      "rock vocal", "suitable", "suitable for", "processing",
-      "processor", "rack", "strip", "channel strip", "mix ready",
-      "mixready", "sound good", "sound better", "amp", "amp sim",
-      "distortion", "drive", "auto tune", "autotune",
-    }
-    for _, term in ipairs(generic_fx_terms) do
-      if has_generic_fx_word_phrase(term) then
-        return nil, "generic_fx_chain"
-      end
-    end
-  end
-  local has_routing = _typed_action_text_has_any_word(lt, {
-    "route", "routing", "send", "sends", "bus", "buss", "aux",
-  })
-  local has_track_setup =
-    _typed_action_text_has_any(lt, { "create", "add", "make", "set up", "setup", "build" })
-    and _typed_action_text_has_any_word(lt, { "track", "tracks", "bus", "aux" })
-  local track_property_lt =
-    Code._typed_action_track_property_intent_text(user_text)
-  local has_track_property =
-    _typed_action_text_has_any_word(track_property_lt, {
-      "track", "tracks", "bus", "aux", "selected", "current", "existing",
-    })
-    and _typed_action_text_has_any(track_property_lt, {
-      "volume", "vol ", "fader", "level", "pan", "panned", "mute", "muted", "unmute",
-      "solo", "soloed", "unsolo",
-      "master send", "main send", "master/parent", "master parent",
-      "parent send", "master output", "rename", "renamed", "call ", "called",
-    })
-  if has_track_property
-      and (Code._typed_action_user_requests_aggregate_track_property_target(
-        user_text)
-        or Code._typed_action_user_requests_predicate_track_property_target(
-          user_text)) then
-    return nil, "unsupported_multi_track_property_target"
-  end
-  local has_folder = Code.typed_action_user_requests_folder(user_text)
-
-  if not (has_stock_fx or has_routing or has_track_setup
-      or has_track_property or has_folder) then
-    if not has_pan_lfo then
-      return nil, "no_typed_action_intent"
-    end
-  end
-
-  if opts.response_format then
-    local response_contract =
-      _TYPED_ACTION_RESPONSE_FORMAT_FULL_PROMPT_CONTRACT
-    if type(opts.profile) == "table"
-       and opts.profile.response_format_omit_operation_shapes == true then
-      response_contract = _TYPED_ACTION_RESPONSE_FORMAT_COMPACT_PROMPT_CONTRACT
-    end
-    local contract = _typed_action_contract_for_profile(
-      response_contract, opts.profile)
-    return contract .. Code.typed_action_request_specific_help(user_text),
-      "eligible"
-  end
-  local contract = _typed_action_contract_for_profile(
-    _TYPED_ACTION_PROMPT_CONTRACT, opts.profile)
-  return contract .. Code.typed_action_request_specific_help(user_text),
-    "eligible"
+  return CONTRACT, "eligible"
 end
 
--- Convert assistant text into a repaired plan, then run request-aware semantic
--- validation. This catches plans that are syntactically valid but do not satisfy
--- the user's requested edit.
-function Code.typed_actions_plan_from_text(text, opts)
-  opts = type(opts) == "table" and opts or {}
-  if opts.allow_raw_json then
-    local raw_json = _typed_action_trim(text)
-    if raw_json:sub(1, 1) == "{" then
-      local plan, errors = Code.parse_typed_actions_block(raw_json)
-      if plan then Code.repair_typed_actions_plan(plan, opts) end
-      return plan, errors
+function Code.typed_actions_openai_response_format_field()
+  return ""
+end
+
+function Code.extract_typed_actions(text)
+  local blocks = {}
+  for label, body in fenced_blocks(text) do
+    if trim(label):lower() == "reaassist-actions" then
+      blocks[#blocks + 1] = body
     end
   end
-  local raw, extract_errors = Code.extract_typed_actions(text)
-  if not raw then return nil, extract_errors end
-  local plan, errors = Code.parse_typed_actions_block(raw)
-  if plan then Code.repair_typed_actions_plan(plan, opts) end
-  return plan, errors
+  if #blocks == 1 then return blocks[1] end
+  if #blocks > 1 then
+    return nil, {err("multiple_action_blocks", "$",
+      "Only one structured edit block is allowed.")}
+  end
+  return nil, {}
+end
+
+function Code.parse_typed_actions_block(raw)
+  local source = trim(raw)
+  if source:sub(1, 1) ~= "{" or source:sub(-1) ~= "}" then
+    return nil, {err("invalid_json_shape", "$",
+      "The structured edit must be one JSON object.")}
+  end
+  local plan, decode_error = JSON.decode(source)
+  if type(plan) ~= "table" then
+    return nil, {err("invalid_json", "$",
+      tostring(decode_error or "Invalid JSON."))}
+  end
+  if type(plan["reaassist-actions"]) == "table" then
+    plan = plan["reaassist-actions"]
+  end
+  return plan
+end
+
+function Code.validate_typed_actions_plan(plan)
+  local errors, ids = {}, {}
+  if type(plan) ~= "table" then
+    return false, {err("invalid_top_level", "$", "Plan must be an object.")}
+  end
+  if tonumber(plan.version) ~= 1 then
+    add_error(errors, "invalid_version", "$.version", "Version must be 1.")
+  end
+  if not array(plan.actions) or #plan.actions < 1 then
+    add_error(errors, "invalid_actions", "$.actions",
+      "Actions must be a non-empty array.")
+    return false, errors
+  end
+  for index, action in ipairs(plan.actions) do
+    local path = "$.actions[" .. tostring(index) .. "]"
+    local op = type(action) == "table" and tostring(action.op or "") or ""
+    if not OPS[op] then
+      add_error(errors, "unsupported_op", path .. ".op",
+        "Unsupported track-lane operation.")
+    else
+      for key in pairs(action) do
+        if not FIELDS[op][key] then
+          add_error(errors, "unknown_field", path .. "." .. tostring(key),
+            "Unsupported field for " .. op .. ".")
+        end
+      end
+      if op == "track.create" or op == "track.ensure"
+          or op == "track.resolve" then
+        if not nonempty(action.id) then
+          add_error(errors, "missing_id", path .. ".id", "Track id is required.")
+        elseif ids[action.id] then
+          add_error(errors, "duplicate_id", path .. ".id", "Ids must be unique.")
+        else
+          ids[action.id] = true
+        end
+        if op == "track.ensure" and not nonempty(action.name) then
+          add_error(errors, "missing_name", path .. ".name",
+            "track.ensure needs an exact name.")
+        elseif op == "track.resolve" then
+          local selectors = (nonempty(action.name) and 1 or 0)
+            + (action.selected == true and 1 or 0)
+            + (tonumber(action.selected_index) and 1 or 0)
+            + (tonumber(action.index) and 1 or 0)
+          if selectors ~= 1 then
+            add_error(errors, "invalid_selector", path,
+              "track.resolve needs exactly one selector.")
+          end
+        end
+      elseif op == "track.set" then
+        if not ids[action.track] then
+          add_error(errors, "unknown_track_ref", path .. ".track",
+            "track.set must reference an earlier track action.")
+        end
+        if action.name == nil and action.volume_db == nil
+            and action.pan_pct == nil and action.mute == nil
+            and action.solo == nil and action.master_send == nil then
+          add_error(errors, "empty_track_set", path,
+            "track.set needs at least one property.")
+        end
+      elseif op == "track.folder" then
+        if not ids[action.parent] then
+          add_error(errors, "unknown_track_ref", path .. ".parent",
+            "Folder parent must reference an earlier track action.")
+        end
+        if not array(action.children) or #action.children < 1 then
+          add_error(errors, "invalid_children", path .. ".children",
+            "Folder children must be a non-empty array.")
+        else
+          for child_index, child in ipairs(action.children) do
+            if not ids[child] then
+              add_error(errors, "unknown_track_ref",
+                path .. ".children[" .. tostring(child_index) .. "]",
+                "Folder child must reference an earlier track action.")
+            end
+          end
+        end
+      elseif op == "send.create"
+          and (not ids[action["from"]] or not ids[action.to]) then
+        add_error(errors, "unknown_track_ref", path,
+          "Send endpoints must reference earlier track actions.")
+      end
+    end
+  end
+  return #errors == 0, errors
+end
+
+function Code.repair_typed_actions_plan(plan)
+  if type(plan) ~= "table" or type(plan.actions) ~= "table" then return plan end
+  for _, action in ipairs(plan.actions) do
+    if type(action) == "table" then
+      if action.op == nil and type(action.action) == "string" then
+        action.op = action.action
+      end
+      action.action = nil
+      if action.op == "send.create" then
+        if action["from"] == nil and type(action.source) == "string" then
+          action["from"] = action.source
+        end
+        if action.to == nil and type(action.destination) == "string" then
+          action.to = action.destination
+        end
+        action.source = nil
+        action.destination = nil
+      end
+    end
+  end
+  return plan
+end
+
+function Code.typed_actions_plan_from_text(text, opts)
+  opts = type(opts) == "table" and opts or {}
+  local raw, errors
+  if opts.allow_raw_json and trim(text):sub(1, 1) == "{" then
+    raw = trim(text)
+  else
+    raw, errors = Code.extract_typed_actions(text)
+  end
+  if not raw then return nil, errors end
+  local plan, parse_errors = Code.parse_typed_actions_block(raw)
+  if not plan then return nil, parse_errors end
+  plan = Code.repair_typed_actions_plan(plan)
+  local valid, validation_errors = Code.validate_typed_actions_plan(plan)
+  if not valid then return nil, validation_errors end
+  return plan
 end
 
 function Code.validate_typed_actions_semantics(plan, opts)
   opts = type(opts) == "table" and opts or {}
-  local profile = opts.profile
-  if type(profile) == "string" then
-    profile = Code.typed_actions_model_profile_by_key(profile)
+  if has_plugin_signal(opts.user_text) then
+    return false, {err("plugin_work_requires_lua", "$",
+      "Plug-in work must use ordinary Lua as one complete request.")}
   end
-  if type(profile) ~= "table"
-     and tostring(opts.user_text or "") ~= "" then
-    profile = _TYPED_ACTION_PROFILE_BASELINE_SEMANTIC
-  end
-  if type(profile) ~= "table" or profile.semantic_retry ~= true then
-    return true, nil
-  end
-
-  local tracks, track_order, fx_seen_by_track, fx_by_track, op_counts, errors =
-    {}, {}, {}, {}, {}, {}
-  local fx_type_by_id = {}
-  local folder_children_by_parent = {}
-  local send_seen_by_names = {}
-  local static_pan_targets = {}
-  local planned_track_id_by_name = {}
-  local function lower(s) return tostring(s or ""):lower() end
-  local function trim(s) return Code._lua_trim_expr(s) end
-  local function normalized_name(s)
-    return lower(trim(s)):gsub("%s+", " ")
-  end
-  local function name_has(name, needle)
-    return lower(name):find(tostring(needle or ""), 1, true) ~= nil
-  end
-  local function is_bus_name(name)
-    local n = lower(name)
-    return n:find("bus", 1, true) ~= nil or n:find("buss", 1, true) ~= nil
-  end
-  local function is_return_name(name)
-    local n = lower(name)
-    return n:find("verb", 1, true) ~= nil
-      or n:find("reverb", 1, true) ~= nil
-      or n:find("delay", 1, true) ~= nil
-      or n:find("return", 1, true) ~= nil
-      or n:find("aux", 1, true) ~= nil
-  end
-  local function is_aux_like_name(name)
-    local n = lower(name)
-    return is_return_name(name)
-      or n:find("crush", 1, true) ~= nil
-      or n:find("parallel", 1, true) ~= nil
-  end
-  local function word_text(s)
-    return normalized_name(tostring(s or ""):gsub("[^%w]+", " "))
-  end
-  local function send_route_key(src_name, dst_name)
-    local src = word_text(src_name)
-    local dst = word_text(dst_name)
-    if src == "" or dst == "" then return nil end
-    return src .. "->" .. dst
-  end
-  local u = lower(opts.user_text)
-  local u_words = word_text(opts.user_text)
-  local exact_send_graph_requested =
-    u:find("keep the graph exact", 1, true) ~= nil
-    or u:find("do not add any other", 1, true) ~= nil
-    or u:find("do not add extra", 1, true) ~= nil
-    or u:find("no other sends", 1, true) ~= nil
-  local function explicit_send_requested(src_name, dst_name)
-    local src = word_text(src_name)
-    local dst = word_text(dst_name)
-    if src == "" or dst == "" then return false end
-    local phrases = {
-      src .. " to " .. dst,
-      src .. " into " .. dst,
-      src .. " feed " .. dst,
-      src .. " feeds " .. dst,
-      src .. " feeding " .. dst,
-      "route " .. src .. " to " .. dst,
-      "route " .. src .. " into " .. dst,
-      "send " .. src .. " to " .. dst,
-      "send " .. src .. " into " .. dst,
-    }
-    for _, phrase in ipairs(phrases) do
-      if u_words:find(phrase, 1, true) then return true end
-    end
-    return false
-  end
-  local function user_mentions_db_value(db)
-    local want = tonumber(db)
-    if not want then return false end
-    for raw in tostring(opts.user_text or ""):gmatch("([%+%-]?%d+%.?%d*)%s*[dD][bB]") do
-      local got = tonumber(raw)
-      if got and math.abs(got - want) <= 0.25 then return true end
-    end
-    return false
-  end
-  local function user_mentions_db_magnitude(db)
-    local want = math.abs(tonumber(db) or 0)
-    if want == 0 then return false end
-    for raw in tostring(opts.user_text or ""):gmatch("([%+%-]?%d+%.?%d*)%s*[dD][bB]") do
-      local got = tonumber(raw)
-      if got and math.abs(math.abs(got) - want) <= 0.25 then return true end
-    end
-    return false
-  end
-  local track_level_change_requested =
-    Code._typed_action_user_requests_track_level_change(opts.user_text)
-  local function user_mentions_gain_direction(db)
-    local want = tonumber(db)
-    if not want or not user_mentions_db_magnitude(want) then return false end
-    if track_level_change_requested
-        and not (u:find("band", 1, true) ~= nil
-          or u:find("eq", 1, true) ~= nil
-          or u:find("filter", 1, true) ~= nil
-          or u:find("frequency", 1, true) ~= nil
-          or u:find("freq", 1, true) ~= nil
-          or u:find("gain", 1, true) ~= nil) then
-      return false
-    end
-    if want < 0 then
-      return u:find("pull", 1, true) ~= nil
-        or u:find("down", 1, true) ~= nil
-        or u:find("reduce", 1, true) ~= nil
-        or u:find("lower", 1, true) ~= nil
-        or u:find("dip", 1, true) ~= nil
-        or u:find("attenuate", 1, true) ~= nil
-        or u:find("cut", 1, true) ~= nil
-    elseif want > 0 then
-      return u:find("boost", 1, true) ~= nil
-        or u:find("raise", 1, true) ~= nil
-        or u:find("lift", 1, true) ~= nil
-        or u:find("push", 1, true) ~= nil
-        or u:find("up", 1, true) ~= nil
-    end
-    return false
-  end
-  local required_selected_indexes, selected_index_required =
-    Code._typed_action_selected_indexes_from_user_text(opts.user_text)
-  local positional_selector_forbidden =
-    Code._typed_action_forbids_positional_track_selector(opts.user_text)
-  local seen_selected_indexes, any_selected_index_resolve = {}, false
-  local allow_duplicate_fx =
-    u:find("duplicate", 1, true) ~= nil
-    or u:find("another", 1, true) ~= nil
-    or u:find("two ", 1, true) ~= nil
-    or u:find("multiple", 1, true) ~= nil
-  local function user_mentions_name(name)
-    local n = word_text(name)
-    return n ~= "" and u_words:find(n, 1, true) ~= nil
-  end
-  local function requested_supported_stock_fx()
-    for fx_name in pairs(_TYPED_ACTION_STOCK_FX) do
-      if u:find(lower(fx_name), 1, true) ~= nil then return true end
-    end
-    return u:find("stock fx", 1, true) ~= nil
-      or u:find("stock effect", 1, true) ~= nil
-      or u:find("stock plugin", 1, true) ~= nil
-  end
-  local requests_stock_fx = requested_supported_stock_fx()
-  local requests_params =
-    requests_stock_fx
-    and (u:find("threshold", 1, true) ~= nil
-      or u:find("frequency", 1, true) ~= nil
-      or u:find(" hz", 1, true) ~= nil
-      or u:find("khz", 1, true) ~= nil
-      or u:find("band", 1, true) ~= nil
-      or u:find("gain", 1, true) ~= nil
-      or (not track_level_change_requested
-        and (u:find("pull", 1, true) ~= nil
-          or u:find("push", 1, true) ~= nil
-          or u:find("lower", 1, true) ~= nil
-          or u:find("raise", 1, true) ~= nil
-          or u:find("dip", 1, true) ~= nil))
-      or u:find("ratio", 1, true) ~= nil
-      or u:find("attack", 1, true) ~= nil
-      or u:find("release", 1, true) ~= nil
-      or u:find("feedback", 1, true) ~= nil
-      or u:find("wet", 1, true) ~= nil
-      or u:find("dry", 1, true) ~= nil
-      or u:find("ceiling", 1, true) ~= nil)
-  local function user_mentions_param(param, value, params)
-    param = tostring(param or "")
-    if param == "band" then
-      return (params.frequency_hz ~= nil
-          and user_mentions_param("frequency_hz", params.frequency_hz, params))
-        or (params.gain_db ~= nil
-          and user_mentions_param("gain_db", params.gain_db, params))
-    elseif param == "frequency_hz" then
-      return u:find("frequency", 1, true) ~= nil
-        or u:find("freq", 1, true) ~= nil
-        or u:find(" hz", 1, true) ~= nil
-        or u:find("khz", 1, true) ~= nil
-    elseif param == "gain_db" then
-      return u:find("gain", 1, true) ~= nil
-        or u:find("boost", 1, true) ~= nil
-        or u:find("cut", 1, true) ~= nil
-        or user_mentions_gain_direction(value)
-        or (u:find("band", 1, true) ~= nil
-          and user_mentions_db_value(value))
-    elseif param == "threshold_db" then
-      return u:find("threshold", 1, true) ~= nil
-    elseif param == "ratio" then
-      return u:find("ratio", 1, true) ~= nil
-    elseif param == "attack_ms" then
-      return u:find("attack", 1, true) ~= nil
-    elseif param == "release_ms" then
-      return u:find("release", 1, true) ~= nil
-    elseif param == "wet_db" then
-      return u:find("wet", 1, true) ~= nil
-    elseif param == "dry_db" then
-      return u:find("dry", 1, true) ~= nil
-    elseif param == "rms_ms" then
-      return u:find("rms", 1, true) ~= nil
-    elseif param == "free_time_ms" then
-      return u:find("free time", 1, true) ~= nil
-        or u:find("free-time", 1, true) ~= nil
-        or u:find("length (time)", 1, true) ~= nil
-    elseif param == "musical_length" then
-      return u:find("musical", 1, true) ~= nil
-        or u:find("tempo", 1, true) ~= nil
-        or u:find("quarter", 1, true) ~= nil
-        or u:find("half note", 1, true) ~= nil
-        or u:find("whole note", 1, true) ~= nil
-    elseif param == "feedback_pct" or param == "feedback_db" then
-      return u:find("feedback", 1, true) ~= nil
-    elseif param == "room_size" then
-      return u:find("room size", 1, true) ~= nil
-        or u:find("room", 1, true) ~= nil
-    elseif param == "dampening" then
-      return u:find("dampening", 1, true) ~= nil
-        or u:find("damping", 1, true) ~= nil
-    elseif param == "hysteresis_db" then
-      return u:find("hysteresis", 1, true) ~= nil
-    elseif param == "hold_ms" then
-      return u:find("hold", 1, true) ~= nil
-    elseif param == "ceiling_db" then
-      return u:find("ceiling", 1, true) ~= nil
-    end
-    return false
-  end
-  local send_intent_text =
-    Code._typed_action_send_intent_text(opts.user_text)
-  local send_intent_words = " " .. word_text(send_intent_text) .. " "
-  local requests_sends =
-    (send_intent_words:find(" send ", 1, true) ~= nil
-      or send_intent_words:find(" sends ", 1, true) ~= nil
-      or send_intent_words:find(" route ", 1, true) ~= nil
-      or send_intent_words:find(" routes ", 1, true) ~= nil
-      or send_intent_words:find(" routed ", 1, true) ~= nil
-      or send_intent_words:find(" routing ", 1, true) ~= nil
-      or send_intent_words:find(" feed ", 1, true) ~= nil
-      or send_intent_words:find(" feeds ", 1, true) ~= nil
-      or send_intent_words:find(" feeding ", 1, true) ~= nil)
-  local function explicit_send_required(src_name, dst_name)
-    local src = word_text(src_name)
-    local dst = word_text(dst_name)
-    if src == "" or dst == "" then return false end
-    for _, phrase in ipairs({
-      "do not send " .. src .. " to " .. dst,
-      "do not send " .. src .. " into " .. dst,
-      "don t send " .. src .. " to " .. dst,
-      "don t send " .. src .. " into " .. dst,
-      "without sending " .. src .. " to " .. dst,
-      "without sending " .. src .. " into " .. dst,
-    }) do
-      if u_words:find(phrase, 1, true) then return false end
-    end
-    for _, phrase in ipairs({
-      "send " .. src .. " to " .. dst,
-      "send " .. src .. " into " .. dst,
-      "route " .. src .. " to " .. dst,
-      "route " .. src .. " into " .. dst,
-      "feed " .. src .. " to " .. dst,
-      "feed " .. src .. " into " .. dst,
-      src .. " to " .. dst,
-      src .. " into " .. dst,
-    }) do
-      if send_intent_words:find(phrase, 1, true) then return true end
-    end
-    return false
-  end
-  local track_property_text =
-    Code._typed_action_track_property_intent_text(opts.user_text)
-  local requests_master_send_state =
-    Code._typed_action_user_requests_master_send_state(opts.user_text)
-  local requests_master_send_off =
-    Code._typed_action_user_requests_master_send_off(opts.user_text)
-  local requests_record_ready_state =
-    Code._typed_action_user_requests_record_ready_state(opts.user_text)
-  local requests_track_properties =
-    (track_property_text:find("volume", 1, true) ~= nil
-      or track_property_text:find("fader", 1, true) ~= nil
-      or track_property_text:find("pan", 1, true) ~= nil
-      or track_property_text:find("panned", 1, true) ~= nil
-      or track_property_text:find("mute", 1, true) ~= nil
-      or track_property_text:find("muted", 1, true) ~= nil
-      or track_property_text:find("unmute", 1, true) ~= nil
-      or track_property_text:find("solo", 1, true) ~= nil
-      or track_property_text:find("soloed", 1, true) ~= nil
-      or track_property_text:find("unsolo", 1, true) ~= nil
-      or requests_master_send_state
-      or track_property_text:find("rename", 1, true) ~= nil
-      or track_property_text:find("renamed", 1, true) ~= nil
-      or track_property_text:find("call ", 1, true) ~= nil
-      or track_property_text:find("called", 1, true) ~= nil
-      or track_level_change_requested)
-    and (track_property_text:find("track", 1, true) ~= nil
-      or track_property_text:find("bus", 1, true) ~= nil
-      or track_property_text:find("aux", 1, true) ~= nil)
-  local predicate_track_property_request =
-    Code._typed_action_user_requests_predicate_track_property_target(
-      opts.user_text)
-  local _, conflicting_static_pan =
-    Code._typed_action_static_pan_value(opts.user_text)
-  local requests_track_creation =
-    Code.typed_action_user_requests_track_creation(opts.user_text)
-  local user_text_lower = lower(opts.user_text)
-  local existing_target_only =
-    not requests_track_creation
-    and (user_text_lower:find("existing track", 1, true) ~= nil
-      or user_text_lower:find("existing tracks", 1, true) ~= nil
-      or user_text_lower:find("resolve the existing", 1, true) ~= nil
-      or user_text_lower:find("do not create", 1, true) ~= nil
-      or user_text_lower:find("don't create", 1, true) ~= nil)
-  local selected_target_requested =
-    Code.typed_action_user_requests_selected_target(opts.user_text)
-  local mixed_existing_track_request =
-    requests_track_creation
-    and Code.typed_action_user_mentions_existing_or_source_track(opts.user_text)
-  local requests_folders =
-    Code.typed_action_user_requests_folder(opts.user_text)
-  local requests_pan_lfo =
-    type(Code.prompt_requests_pan_lfo_automation) == "function"
-    and Code.prompt_requests_pan_lfo_automation(opts.user_text)
-  local master_send_off_seen = false
-  local function is_fx_like_track_name(name)
-    local n = " " .. word_text(name) .. " "
-    return n:find(" eq ", 1, true) ~= nil
-      or n:find(" comp ", 1, true) ~= nil
-      or n:find(" compressor ", 1, true) ~= nil
-      or n:find(" reverb ", 1, true) ~= nil
-      or n:find(" delay ", 1, true) ~= nil
-      or n:find(" gate ", 1, true) ~= nil
-      or n:find(" limiter ", 1, true) ~= nil
-  end
-  local function requested_exact_track_order(text)
-    text = tostring(text or "")
-    local lt = lower(text)
-    local stock_fx_order_name = {}
-    for fx_name in pairs(_TYPED_ACTION_STOCK_FX) do
-      stock_fx_order_name[normalized_name(fx_name)] = true
-    end
-    local function is_stock_fx_order(order)
-      if type(order) ~= "table" or #order < 2 then return false end
-      for _, name in ipairs(order) do
-        if not stock_fx_order_name[normalized_name(name)] then return false end
-      end
-      return true
-    end
-    local function parse_order_fragment(fragment)
-      fragment = tostring(fragment or "")
-      fragment = fragment:gsub("^%s*.-:%s*", "")
-      fragment = fragment:gsub("%f[%a][Tt]hen%f[%A]", ",")
-      fragment = fragment:gsub("%f[%a][Aa]nd%f[%A]", ",")
-      local out = {}
-      for part in fragment:gmatch("[^,]+") do
-        local name = trim(part)
-          :gsub("^then%s+", "")
-          :gsub("^and%s+", "")
-          :gsub("^create%s+", "")
-          :gsub("^make%s+", "")
-          :gsub("^set%s+up%s+", "")
-          :gsub("^build%s+", "")
-          :gsub("^exactly%s+[%w]+%s+tracks?%s+named%s+", "")
-          :gsub("^[%w]+%s+tracks?%s+named%s+", "")
-          :gsub("^tracks?%s+named%s+", "")
-          :gsub("^named%s+", "")
-          :gsub("^the%s+", "")
-          :gsub("^a%s+", "")
-        name = trim(name)
-        if name ~= "" then out[#out + 1] = normalized_name(name) end
-      end
-      return #out >= 2 and out or nil
-    end
-    local explicit_fragment =
-      text:match("[Tt]rack%s+order%s+must%s+be%s+([^%.\n]+)")
-      or text:match("[Oo]rder%s+must%s+be%s+([^%.\n]+)")
-    if explicit_fragment then
-      local explicit_order = parse_order_fragment(explicit_fragment)
-      if explicit_order and not is_stock_fx_order(explicit_order) then
-        return explicit_order
-      end
-    end
-    local marker = lt:find(" in that exact order", 1, true)
-      or lt:find(" in exact order", 1, true)
-      or lt:find(" in that order", 1, true)
-    if not marker then return nil end
-    local before = text:sub(1, marker - 1)
-    local cut = 0
-    for i = 1, #before do
-      local ch = before:sub(i, i)
-      if ch == "." or ch == "\n" then cut = i end
-    end
-    if cut > 0 then before = before:sub(cut + 1) end
-    before = before:gsub("^.*[Cc]reate%s+exactly%s+[%w%-]+%s+tracks?%s+named%s+", "")
-    before = before:gsub("^.*[Cc]reate%s+[%w%-]+%s+tracks?%s+named%s+", "")
-    before = before:gsub("^.*[Mm]ake%s+exactly%s+[%w%-]+%s+tracks?%s+named%s+", "")
-    before = before:gsub("^.*[Ss]et%s+up%s+exactly%s+[%w%-]+%s+tracks?%s+named%s+", "")
-    before = before:gsub("^.*%f[%a]with%s+", "")
-    local order = parse_order_fragment(before)
-    if order and is_stock_fx_order(order) then return nil end
-    return order
-  end
-
-  local function requested_folder_memberships(text)
-    text = tostring(text or "")
-    local wanted = {}
-    local by_parent = {}
-    local function add_membership(parent, children)
-      parent = normalized_name(parent)
-      if parent == "" or type(children) ~= "table" then return end
-      local item = by_parent[parent]
-      if not item then
-        item = { parent = parent, children = {}, seen = {} }
-        by_parent[parent] = item
-        wanted[#wanted + 1] = item
-      end
-      for _, child in ipairs(children) do
-        child = normalized_name(child)
-        if child ~= "" and child ~= parent and not item.seen[child] then
-          item.children[#item.children + 1] = child
-          item.seen[child] = true
-        end
-      end
-    end
-    local function mentioned_names(fragment)
-      local f_words = " " .. word_text(fragment) .. " "
-      local out, seen = {}, {}
-      for _, name in ipairs(track_order) do
-        local key = word_text(name)
-        if key ~= "" and f_words:find(" " .. key .. " ", 1, true)
-            and not seen[key] then
-          out[#out + 1] = normalized_name(name)
-          seen[key] = true
-        end
-      end
-      return out
-    end
-    local function pattern_escape(value)
-      return tostring(value or ""):gsub("([^%w])", "%%%1")
-    end
-    for sentence in text:gmatch("[^%.\n]+") do
-      local sentence_l = lower(sentence)
-      for _, name in ipairs(track_order) do
-        local parent = normalized_name(name)
-        if parent ~= "" then
-          local pat = pattern_escape(parent) .. "%s+folder%s+with%s+"
-          local _s, e = sentence_l:find(pat)
-          if e then
-            local fragment = sentence:sub(e + 1)
-            fragment = fragment:gsub("%f[%a][Ii]nside%s+it.*$", "")
-            fragment = fragment:gsub("%f[%a][Aa]s%s+normal%s+.-$", "")
-            local children = mentioned_names(fragment)
-            add_membership(parent, children)
-          end
-        end
-      end
-      local start_pos, end_pos = lower(sentence):find("folder%s+containing")
-      if start_pos then
-        local parents = mentioned_names(sentence:sub(1, start_pos - 1))
-        local children = mentioned_names(sentence:sub(end_pos + 1))
-        local parent = parents[#parents]
-        if parent and #children > 0 then
-          add_membership(parent, children)
-        end
-      end
-    end
-    local nested_children_by_parent = {}
-    for _, item in ipairs(wanted) do
-      nested_children_by_parent[item.parent] = nested_children_by_parent[item.parent] or {}
-      for _, child in ipairs(item.children) do
-        nested_children_by_parent[item.parent][child] = true
-      end
-    end
-    for _, item in ipairs(wanted) do
-      local immediate_set = {}
-      for _, child in ipairs(item.children) do immediate_set[child] = true end
-      local filtered = {}
-      for _, child in ipairs(item.children) do
-        local nested_descendant = false
-        for nested_parent in pairs(immediate_set) do
-          if nested_parent ~= item.parent
-              and nested_children_by_parent[nested_parent]
-              and nested_children_by_parent[nested_parent][child] then
-            nested_descendant = true
-            break
-          end
-        end
-        if not nested_descendant then filtered[#filtered + 1] = child end
-      end
-      item.children = filtered
-      item.seen = nil
-    end
-    return wanted
-  end
-
-  for i, action in ipairs((type(plan) == "table" and plan.actions) or {}) do
-    local path = "$.actions[" .. tostring(i) .. "]"
-    local op = tostring(action.op or "")
-    op_counts[op] = (op_counts[op] or 0) + 1
-    if (action.op == "track.create" or action.op == "track.ensure")
-       and action.id then
-      tracks[action.id] = action.name or action.id
-      track_order[#track_order + 1] = action.name or action.id
-      local planned_name = normalized_name(action.name)
-      if planned_name ~= "" then
-        planned_track_id_by_name[planned_name] = action.id
-      end
-      if (requests_track_creation or action.op == "track.create")
-         and not _typed_action_is_nonempty_string(action.name)
-         and user_mentions_name(action.id) then
-        errors[#errors + 1] = _typed_action_error(
-          "missing_requested_track_name", path .. ".name",
-          "The user named this new track; put the requested display name "
-            .. "directly in track.create.name instead of name:null")
-      end
-      if requests_stock_fx
-         and is_fx_like_track_name(action.name)
-         and not user_mentions_name(action.name) then
-        errors[#errors + 1] = _typed_action_error(
-          "fx_as_track", path .. ".name",
-          tostring(action.name) .. " looks like an effect track, but the user "
-            .. "asked for stock FX; use fx.add_stock on the intended track")
-      end
-    elseif action.op == "track.resolve" and action.id then
-      local resolve_name = normalized_name(action.name)
-      local planned_id = resolve_name ~= ""
-        and planned_track_id_by_name[resolve_name] or nil
-      if planned_id and planned_id ~= action.id then
-        errors[#errors + 1] = _typed_action_error(
-          "resolve_after_planned_track", path,
-          "track.resolve is only for tracks that existed before this plan. "
-            .. "Use the planned track id " .. tostring(planned_id)
-            .. " instead of resolving " .. tostring(action.name)
-            .. " under a second id")
-      end
-      local selected_track_count = tonumber(opts.selected_track_count)
-      if action.selected == true and selected_track_count
-          and selected_track_count ~= 1 then
-        errors[#errors + 1] = _typed_action_error(
-          "ambiguous_selected_track", path .. ".selected",
-          "selected:true requires exactly one selected track, but the project "
-            .. "currently has " .. tostring(selected_track_count)
-            .. "; resolve each target by exact name or distinct selected_index")
-      end
-      if positional_selector_forbidden
-         and type(action.selected_index) == "number" then
-        errors[#errors + 1] = _typed_action_error(
-          "forbidden_selected_index", path .. ".selected_index",
-          "User explicitly said not to use selected_index; use the requested "
-            .. "non-positional selector instead")
-      end
-      if positional_selector_forbidden
-         and type(action.index) == "number" then
-        errors[#errors + 1] = _typed_action_error(
-          "forbidden_track_index", path .. ".index",
-          "User explicitly said not to use absolute track indexes; use the "
-            .. "requested non-positional selector instead")
-      end
-      if requests_track_creation
-         and not selected_target_requested
-         and not mixed_existing_track_request
-         and (action.selected == true
-           or type(action.selected_index) == "number"
-           or type(action.index) == "number") then
-        errors[#errors + 1] = _typed_action_error(
-          "unexpected_track_resolve_target", path,
-          "User requested creating tracks in a blank/project template; do not "
-            .. "target selected or indexed existing tracks")
-      end
-      if requests_stock_fx
-         and is_fx_like_track_name(action.id)
-         and not _typed_action_is_nonempty_string(action.name) then
-        errors[#errors + 1] = _typed_action_error(
-          "track_resolve_used_for_fx", path,
-          "Do not create FX ids with track.resolve. Use fx.add_stock with this "
-            .. "id on the intended track, then use fx.set_param if needed")
-      end
-      if _typed_action_is_nonempty_string(action.name) then
-        tracks[action.id] = action.name
-      elseif type(action.index) == "number" then
-        tracks[action.id] = "track " .. tostring(action.index)
-      elseif type(action.selected_index) == "number" then
-        any_selected_index_resolve = true
-        seen_selected_indexes[action.selected_index] = true
-        tracks[action.id] = "selected track " .. tostring(action.selected_index)
-      elseif action.selected == true then
-        tracks[action.id] = "selected track"
-      else
-        tracks[action.id] = action.id
-      end
-    elseif action.op == "track.set" then
-      if action.pan_pct ~= nil and action.track ~= nil then
-        static_pan_targets[tostring(action.track)] = true
-      end
-      if action.master_send ~= nil and not requests_master_send_state then
-        local track_name = tracks[action.track] or action.track
-        errors[#errors + 1] = _typed_action_error(
-          "unrequested_master_send_action", path .. ".master_send",
-          "User did not explicitly request master/parent send state for "
-            .. tostring(track_name)
-            .. "; leave master_send null and use send.create for routing")
-      end
-      if action.master_send == false then
-        master_send_off_seen = true
-      end
-    elseif action.op == "track.pan_lfo" then
-      if not requests_pan_lfo then
-        errors[#errors + 1] = _typed_action_error(
-          "unexpected_pan_lfo_action", path,
-          "User did not request track pan LFO/automation; do not emit "
-            .. "track.pan_lfo actions")
-      end
-    elseif action.op == "fx.add_stock" then
-      local track_id = action.track
-      local track_name = tracks[track_id] or track_id
-      local fx = tostring(action.fx or "")
-      if _typed_action_is_nonempty_string(action.id) then
-        fx_type_by_id[action.id] = fx
-      end
-      local track_key = tostring(track_id or "")
-      fx_seen_by_track[track_key] = fx_seen_by_track[track_key] or {}
-      fx_by_track[track_key] = fx_by_track[track_key] or {}
-      fx_by_track[track_key][fx] = true
-      if fx_seen_by_track[track_key][fx] and not allow_duplicate_fx then
-        errors[#errors + 1] = _typed_action_error(
-          "duplicate_track_fx", path .. ".fx",
-          "Duplicate " .. fx .. " on " .. tostring(track_name)
-            .. "; add each requested source-chain FX once per track")
-      end
-      fx_seen_by_track[track_key][fx] = true
-
-      if name_has(track_name, "verb") and fx ~= "ReaVerbate" then
-        errors[#errors + 1] = _typed_action_error(
-          "return_fx_mismatch", path .. ".fx",
-          tostring(track_name) .. " is a reverb return; use ReaVerbate only "
-            .. "unless the user asks for more")
-      elseif name_has(track_name, "delay") and fx ~= "ReaDelay" then
-        errors[#errors + 1] = _typed_action_error(
-          "return_fx_mismatch", path .. ".fx",
-          tostring(track_name) .. " is a delay return; use ReaDelay only "
-            .. "unless the user asks for more")
-      end
-    elseif action.op == "send.create" then
-      local src_name = tracks[action["from"]] or action["from"]
-      local dst_name = tracks[action.to] or action.to
-      local volume_db = tonumber(action.volume_db)
-      local route_key = send_route_key(src_name, dst_name)
-      if route_key then send_seen_by_names[route_key] = true end
-      if exact_send_graph_requested
-         and is_aux_like_name(src_name)
-         and is_bus_name(dst_name)
-         and not explicit_send_requested(src_name, dst_name) then
-        errors[#errors + 1] = _typed_action_error(
-          "extra_inferred_return_bus_send", path,
-          tostring(src_name) .. " -> " .. tostring(dst_name)
-            .. " was not explicitly requested; exact routing graphs must not "
-            .. "invent return/parallel-track sends")
-      end
-      if is_bus_name(dst_name)
-         and not is_return_name(src_name)
-         and volume_db ~= nil
-         and math.abs(volume_db) > 0.7
-         and not user_mentions_db_value(volume_db) then
-        errors[#errors + 1] = _typed_action_error(
-          "bus_send_not_unity", path .. ".volume_db",
-          tostring(src_name) .. " -> " .. tostring(dst_name)
-            .. " is bus routing and should use volume_db 0 unless the user "
-            .. "asks for a different bus level")
-      end
-    elseif action.op == "fx.set_param" and type(action.params) == "table" then
-      for param, value in pairs(action.params) do
-        if value ~= nil and not user_mentions_param(param, value, action.params) then
-          errors[#errors + 1] = _typed_action_error(
-            "unrequested_param_action", path .. ".params." .. tostring(param),
-            "User did not request " .. tostring(fx_type_by_id[action.fx] or "FX")
-              .. "." .. tostring(param) .. "; do not emit extra parameter writes")
-        end
-      end
-    elseif action.op == "track.folder" then
-      local children = {}
-      if type(action.children) == "table" then
-        for _, child in ipairs(action.children) do
-          children[#children + 1] = child
-        end
-      end
-      folder_children_by_parent[action.parent] = children
-    end
-  end
-
-  if selected_index_required then
-    if #required_selected_indexes == 0 then
-      if not any_selected_index_resolve then
-        errors[#errors + 1] = _typed_action_error(
-          "missing_selected_index", "$.actions",
-          "User explicitly requested selected_index targeting; use "
-            .. "track.resolve with selected_index and do not substitute name, "
-            .. "index, or selected:true")
-      end
-    else
-      for _, selected_index in ipairs(required_selected_indexes) do
-        if not seen_selected_indexes[selected_index] then
-          errors[#errors + 1] = _typed_action_error(
-            "missing_selected_index", "$.actions",
-            "User requested selected track " .. tostring(selected_index)
-              .. "; use track.resolve with selected_index="
-              .. tostring(selected_index)
-              .. " and do not substitute name, index, or selected:true")
-        end
-      end
-    end
-  end
-
-  local track_creation_count = (op_counts["track.create"] or 0)
-    + (op_counts["track.ensure"] or 0)
-  if requests_track_creation and track_creation_count == 0 then
-    errors[#errors + 1] = _typed_action_error(
-      "missing_track_create_actions", "$.actions",
-      "User requested creating tracks or a blank-project template; use "
-        .. "track.create for the requested new tracks, not track.resolve")
-  end
-  if existing_target_only and track_creation_count > 0 then
-    errors[#errors + 1] = _typed_action_error(
-      "unexpected_track_create_existing_target", "$.actions",
-      "User requested existing-track targets; use track.resolve for those "
-        .. "tracks and do not create replacement tracks")
-  end
-  if requests_stock_fx and (op_counts["fx.add_stock"] or 0) == 0 then
-    errors[#errors + 1] = _typed_action_error(
-      "missing_fx_actions", "$.actions",
-      "User requested supported stock FX; the typed-action plan must include "
-        .. "fx.add_stock actions, not only track creation actions")
-  end
-  if requests_params and (op_counts["fx.set_param"] or 0) == 0 then
-    errors[#errors + 1] = _typed_action_error(
-      "missing_param_actions", "$.actions",
-      "User requested FX parameter settings; the typed-action plan must include "
-        .. "fx.set_param actions")
-  end
-  if requests_sends and (op_counts["send.create"] or 0) == 0 then
-    errors[#errors + 1] = _typed_action_error(
-      "missing_send_actions", "$.actions",
-      "User requested routing/sends; the typed-action plan must include "
-        .. "send.create actions")
-  end
-  if requests_sends then
-    local checked_routes = {}
-    for src_id, src_name in pairs(tracks) do
-      for dst_id, dst_name in pairs(tracks) do
-        if src_id ~= dst_id and explicit_send_required(src_name, dst_name) then
-          local route_key = send_route_key(src_name, dst_name)
-          if route_key and not checked_routes[route_key] then
-            checked_routes[route_key] = true
-            if not send_seen_by_names[route_key] then
-              errors[#errors + 1] = _typed_action_error(
-                "missing_send_actions", "$.actions",
-                "User explicitly requested a send from "
-                  .. tostring(src_name) .. " to " .. tostring(dst_name)
-                  .. "; include one send.create action with from="
-                  .. tostring(src_id) .. " and to=" .. tostring(dst_id))
-            end
-          end
-        end
-      end
-    end
-  end
-  if predicate_track_property_request then
-    errors[#errors + 1] = _typed_action_error(
-      "incomplete_multi_target_plan", "$.actions",
-      "Conditional or predicate-based track property requests cannot be "
-        .. "represented safely as a fixed typed-action plan; use Lua instead")
-  end
-  local static_pan_target_count = 0
-  for _ in pairs(static_pan_targets) do
-    static_pan_target_count = static_pan_target_count + 1
-  end
-  if requests_track_properties
-      and conflicting_static_pan
-      and not requests_pan_lfo
-      and static_pan_target_count <= 1 then
-    errors[#errors + 1] = _typed_action_error(
-      "ambiguous_property_value", "$.actions",
-      "User requested conflicting static pan directions or values; do not "
-        .. "choose one value or execute a partial typed-action plan")
-  end
-  if requests_pan_lfo and (op_counts["track.pan_lfo"] or 0) == 0 then
-    errors[#errors + 1] = _typed_action_error(
-      "missing_pan_lfo_action", "$.actions",
-      "User requested track pan LFO/automation over bars; the typed-action "
-        .. "plan must include track.pan_lfo actions")
-  end
-  local function pan_lfo_request_still_needs_track_set()
-    if not requests_track_properties then return false end
-    if not requests_pan_lfo then return true end
-    local t = track_property_text
-    local non_lfo_property =
-      t:find("volume", 1, true) ~= nil
-      or t:find("fader", 1, true) ~= nil
-      or t:find("mute", 1, true) ~= nil
-      or t:find("muted", 1, true) ~= nil
-      or t:find("unmute", 1, true) ~= nil
-      or t:find("solo", 1, true) ~= nil
-      or t:find("soloed", 1, true) ~= nil
-      or t:find("unsolo", 1, true) ~= nil
-      or requests_master_send_state
-      or t:find("rename", 1, true) ~= nil
-      or t:find("renamed", 1, true) ~= nil
-      or t:find("call ", 1, true) ~= nil
-      or t:find("called", 1, true) ~= nil
-    if non_lfo_property then return true end
-    return t:find("set%s+[^%.\n]*pan%s+to") ~= nil
-      or t:find("pan%s+to%s*[%+%-]?%d") ~= nil
-      or t:find("pan%s*[%+%-]%d") ~= nil
-      or t:find("panned%s+[^%.\n]*to") ~= nil
-  end
-  if pan_lfo_request_still_needs_track_set()
-      and (op_counts["track.set"] or 0) == 0 then
-    errors[#errors + 1] = _typed_action_error(
-      "missing_track_set_actions", "$.actions",
-      "User requested track rename/name, volume, pan, mute, unmute, solo, unsolo, or "
-        .. "master/parent send state; the typed-action plan must include "
-        .. "track.set actions")
-  end
-  if requests_master_send_off and not master_send_off_seen then
-    errors[#errors + 1] = _typed_action_error(
-      "missing_master_send_off_action", "$.actions",
-      "User requested a track/bus not feed the master; include a track.set "
-        .. "action with master_send=false on the requested track id")
-  end
-  if requests_record_ready_state then
-    errors[#errors + 1] = _typed_action_error(
-      "unsupported_record_arm_typed_action", "$.actions",
-      "User requested a track ready for recording/record arm, but the "
-        .. "typed-action schema cannot arm tracks yet; use Lua instead of "
-        .. "executing an incomplete typed-action plan")
-  end
-  if requests_folders and (op_counts["track.folder"] or 0) == 0 then
-    errors[#errors + 1] = _typed_action_error(
-      "missing_folder_actions", "$.actions",
-      "User requested a track folder; the typed-action plan must include "
-        .. "track.folder actions")
-  end
-  if not requests_folders and (op_counts["track.folder"] or 0) > 0 then
-    errors[#errors + 1] = _typed_action_error(
-      "unexpected_folder_actions", "$.actions",
-      "User did not request a track folder; do not emit track.folder actions")
-  end
-  if not requests_track_properties and (op_counts["track.set"] or 0) > 0 then
-    errors[#errors + 1] = _typed_action_error(
-      "unexpected_track_set_actions", "$.actions",
-      "User did not request track rename/name, volume, pan, mute, unmute, solo, unsolo, or "
-        .. "master/parent send state; do not emit track.set actions")
-  end
-  if not requests_pan_lfo and (op_counts["track.pan_lfo"] or 0) > 0 then
-    errors[#errors + 1] = _typed_action_error(
-      "unexpected_pan_lfo_action", "$.actions",
-      "User did not request track pan LFO/automation; do not emit "
-        .. "track.pan_lfo actions")
-  end
-
-  local requested_order = requested_exact_track_order(opts.user_text)
-  if requested_order then
-    if exact_send_graph_requested and #track_order > #requested_order then
-      errors[#errors + 1] = _typed_action_error(
-        "unexpected_track_ensure_actions", "$.actions",
-        "User requested an exact track order with "
-          .. tostring(#requested_order)
-          .. " tracks, but the plan creates "
-          .. tostring(#track_order)
-          .. "; do not create extra tracks for FX, folders, or helper ids")
-    end
-    for i, want in ipairs(requested_order) do
-      local got = normalized_name(track_order[i])
-      if got ~= want then
-        errors[#errors + 1] = _typed_action_error(
-          "track_order_mismatch", "$.actions",
-          "User requested exact track order; expected track "
-            .. tostring(i) .. " to be " .. tostring(want)
-            .. ", got " .. tostring(track_order[i] or "missing"))
-        break
-      end
-    end
-  end
-
-  if requests_folders then
-    local child_names_by_parent = {}
-    for parent_id, child_ids in pairs(folder_children_by_parent) do
-      local parent_name = normalized_name(tracks[parent_id] or parent_id)
-      child_names_by_parent[parent_name] = child_names_by_parent[parent_name] or {}
-      for _, child_id in ipairs(child_ids) do
-        child_names_by_parent[parent_name][normalized_name(tracks[child_id] or child_id)] = true
-      end
-    end
-    for _, want in ipairs(requested_folder_memberships(opts.user_text)) do
-      local got = child_names_by_parent[want.parent] or {}
-      for _, child_name in ipairs(want.children) do
-        if not got[child_name] then
-          errors[#errors + 1] = _typed_action_error(
-            "missing_folder_child", "$.actions",
-            "User requested " .. tostring(want.parent)
-              .. " to contain " .. tostring(child_name)
-              .. "; include that id in the parent track.folder children list")
-        end
-      end
-    end
-  end
-
-  local repeated_source_chain_requested =
-    (u_words:find("reaeq first and reacomp second", 1, true) ~= nil)
-    or (u_words:find("reaeq first", 1, true) ~= nil
-      and u_words:find("reacomp second", 1, true) ~= nil)
-    or (u_words:find("reacomp first and reaeq second", 1, true) ~= nil)
-    or (u_words:find("reacomp first", 1, true) ~= nil
-      and u_words:find("reaeq second", 1, true) ~= nil)
-    or (u_words:find("reaeq followed by reacomp", 1, true) ~= nil)
-    or (u_words:find("reacomp followed by reaeq", 1, true) ~= nil)
-    or (u_words:find("reaeq then reacomp", 1, true) ~= nil)
-    or (u_words:find("reacomp then reaeq", 1, true) ~= nil)
-    or (u_words:find("reaeq and reacomp to", 1, true) ~= nil)
-    or (u_words:find("reaeq and reacomp on", 1, true) ~= nil)
-    or (u_words:find("reacomp and reaeq to", 1, true) ~= nil)
-    or (u_words:find("reacomp and reaeq on", 1, true) ~= nil)
-  if repeated_source_chain_requested then
-    for track_id, name in pairs(tracks) do
-      if not is_bus_name(name)
-         and not is_return_name(name)
-         and not is_aux_like_name(name) then
-        local fx = fx_by_track[tostring(track_id)] or {}
-        if fx.ReaComp and not fx.ReaEQ then
-          errors[#errors + 1] = _typed_action_error(
-            "incomplete_source_fx_chain", "$.actions",
-            tostring(name) .. " has ReaComp but is missing ReaEQ; source "
-              .. "tracks in this repeated chain need both requested FX")
-        end
-      end
-    end
-  end
-
-  if exact_send_graph_requested and requests_stock_fx then
-    local requested_fx_by_track = {}
-    for sentence in tostring(opts.user_text or ""):gmatch("[^%.%!%?]+") do
-      local sw = word_text(sentence)
-      if sw ~= "" then
-        local sentence_fx = {}
-        for fx_name in pairs(_TYPED_ACTION_STOCK_FX) do
-          if sw:find(word_text(fx_name), 1, true) then
-            sentence_fx[fx_name] = true
-          end
-        end
-        if next(sentence_fx) then
-          local broad =
-            sw:find("all tracks", 1, true) ~= nil
-            or sw:find("every track", 1, true) ~= nil
-            or sw:find("each track", 1, true) ~= nil
-          for track_id, name in pairs(tracks) do
-            if broad or sw:find(word_text(name), 1, true) then
-              requested_fx_by_track[track_id] =
-                requested_fx_by_track[track_id] or {}
-              for fx_name in pairs(sentence_fx) do
-                requested_fx_by_track[track_id][fx_name] = true
-              end
-            end
-          end
-        end
-      end
-    end
-    for track_id, fx_set in pairs(fx_by_track) do
-      local requested = requested_fx_by_track[track_id]
-      if requested then
-        local track_name = tracks[track_id] or track_id
-        for fx_name in pairs(fx_set) do
-          if not requested[fx_name] then
-            errors[#errors + 1] = _typed_action_error(
-              "unexpected_track_fx", "$.actions",
-              tostring(track_name) .. " has " .. tostring(fx_name)
-                .. ", but the user did not request that stock FX for this "
-                .. "track; keep exact graph FX assignments separate")
-          end
-        end
-      end
-    end
-  end
-
-  errors = _typed_action_filter_semantic_errors_for_profile(errors, profile)
-  return #errors == 0, (#errors > 0 and errors or nil)
+  return Code.validate_typed_actions_plan(plan)
 end
 
 function Code.format_typed_action_semantic_errors(errors, limit)
-  if type(errors) ~= "table" or #errors == 0 then return "semantic_mismatch" end
-  limit = tonumber(limit) or 3
   local parts = {}
-  for i = 1, math.min(#errors, limit) do
-    local e = errors[i]
-    parts[#parts + 1] = tostring(e.code or "semantic_mismatch")
-      .. " at " .. tostring(e.path or "$")
-      .. ": " .. tostring(e.message or "")
-  end
-  if #errors > limit then
-    parts[#parts + 1] = tostring(#errors - limit) .. " more"
+  for index, item in ipairs(type(errors) == "table" and errors or {}) do
+    if index > (tonumber(limit) or 4) then break end
+    parts[#parts + 1] = tostring(item.path or "$") .. ": "
+      .. tostring(item.message or item.code or "invalid plan")
   end
   return table.concat(parts, "; ")
 end
 
-function Code.typed_action_semantic_detail_missing_action_family(detail)
-  detail = tostring(detail or "")
-  return detail:find("missing_fx_actions", 1, true) ~= nil
-    or detail:find("missing_param_actions", 1, true) ~= nil
-    or detail:find("missing_send_actions", 1, true) ~= nil
-end
-
-function Code.typed_action_semantic_detail_allows_lua_fallback(detail, user_text)
-  detail = tostring(detail or "")
-  if Code.typed_action_semantic_detail_missing_action_family(detail) then
-    return true
-  end
-  if not detail:find("unexpected_track_set_actions", 1, true) then
-    return false
-  end
-  if not Code.prompt_likely_needs_lua_action(user_text) then return false end
-  local text = Code._typed_action_track_property_intent_text(user_text)
-  local words = " " .. text:gsub("[^%w]+", " "):gsub("%s+", " ") .. " "
-  local has_target =
-    words:find(" track ", 1, true) ~= nil
-    or words:find(" tracks ", 1, true) ~= nil
-    or words:find(" bus ", 1, true) ~= nil
-    or words:find(" selected ", 1, true) ~= nil
-  local has_property = false
-  for _, term in ipairs({
-    "volume", "vol", "fader", "level", "pan", "mute", "muted",
-    "unmute", "solo", "soloed", "unsolo", "rename", "renamed",
-  }) do
-    if words:find(" " .. term .. " ", 1, true) then
-      has_property = true
-      break
-    end
-  end
-  return has_target and has_property
-end
-
-function Code.typed_action_semantic_retry_from_scratch(profile, detail)
-  detail = tostring(detail or "")
-  if type(profile) == "table"
-     and profile.semantic_retry_from_scratch == false then
-    return false
-  end
-  if type(profile) == "table"
-     and profile.semantic_retry_from_scratch == true then
-    return true
-  end
-  if detail:find("unexpected_track_create_existing_target", 1, true)
-     or detail:find("unexpected_track_ensure_existing_target", 1, true) then
-    return true
-  end
-  if Code.typed_action_semantic_detail_missing_action_family(detail)
-     and type(S) == "table"
-     and (S.typed_action_escalation_used == true
-       or (tonumber(S.typed_action_escalation_count or 0) or 0) > 0) then
-    return true
-  end
+function Code.typed_action_semantic_detail_missing_action_family()
   return false
 end
 
+function Code.typed_action_semantic_detail_allows_lua_fallback()
+  return true
+end
+
+function Code.typed_action_semantic_retry_from_scratch()
+  return true
+end
+
 function Code._typed_action_schema_retry_detail(text, opts)
+  local _, errors = Code.typed_actions_plan_from_text(text, opts)
+  return Code.format_typed_action_semantic_errors(errors, 4)
+end
+
+function Code.find_typed_actions_wrong_fence(text)
+  for label, body in fenced_blocks(text) do
+    local clean = trim(label):lower()
+    if clean == "json" or clean == "" then
+      local plan = Code.parse_typed_actions_block(body)
+      if plan and Code.validate_typed_actions_plan(plan) then
+        return {label=clean ~= "" and clean or "(unlabelled)", raw=body}
+      end
+    end
+  end
+  return nil
+end
+
+local PROFILE = {key="track_only", semantic_max_retries=1}
+function Code.typed_actions_model_profile() return PROFILE end
+function Code.typed_actions_model_profile_by_key() return PROFILE end
+
+function Code.typed_actions_artifact_text(text, allow_raw_json)
+  if allow_raw_json and trim(text):sub(1, 1) == "{" then return trim(text) end
+  local raw = Code.extract_typed_actions(text)
+  return raw or ""
+end
+
+function Code.inspect_typed_actions(text, opts)
   opts = type(opts) == "table" and opts or {}
-  local plan, plan_errors = Code.typed_actions_plan_from_text(text, {
-    allow_raw_json = opts.allow_raw_json == true,
-  })
-  local detail = nil
-  if plan then
-    local valid, validate_errors = Code.validate_typed_actions_plan(plan)
-    if not valid then
-      detail = Code.format_typed_action_semantic_errors(validate_errors, 4)
-    end
-  else
-    detail = Code.format_typed_action_semantic_errors(plan_errors, 4)
-  end
-
-  local u = tostring(opts.user_text or ""):lower()
-  local track_property_text = u
-    :gsub("post%-fader", "")
-    :gsub("post fader", "")
-    :gsub("pre%-fader", "")
-    :gsub("pre fader", "")
-    :gsub("do not rename", "")
-    :gsub("don't rename", "")
-    :gsub("without renaming", "")
-    :gsub("rename any tracks", "")
-    :gsub("rename any track", "")
-    :gsub("no rename", "")
-    :gsub("not rename", "")
-  local requests_track_properties =
-    (track_property_text:find("volume", 1, true) ~= nil
-      or track_property_text:find("fader", 1, true) ~= nil
-      or track_property_text:find("pan", 1, true) ~= nil
-      or track_property_text:find("panned", 1, true) ~= nil
-      or track_property_text:find("mute", 1, true) ~= nil
-      or track_property_text:find("muted", 1, true) ~= nil
-      or track_property_text:find("unmute", 1, true) ~= nil
-      or track_property_text:find("solo", 1, true) ~= nil
-      or track_property_text:find("soloed", 1, true) ~= nil
-      or track_property_text:find("unsolo", 1, true) ~= nil
-      or track_property_text:find("master send", 1, true) ~= nil
-      or track_property_text:find("main send", 1, true) ~= nil
-      or track_property_text:find("master/parent", 1, true) ~= nil
-      or track_property_text:find("master parent", 1, true) ~= nil
-      or track_property_text:find("parent send", 1, true) ~= nil
-      or track_property_text:find("master output", 1, true) ~= nil
-      or track_property_text:find("rename", 1, true) ~= nil
-      or track_property_text:find("renamed", 1, true) ~= nil
-      or track_property_text:find("call ", 1, true) ~= nil
-      or track_property_text:find("called", 1, true) ~= nil
-      or Code._typed_action_user_requests_track_level_change(user_text))
-  if plan and requests_track_properties then
-    local counts = _typed_action_count_ops(plan)
-    if (counts["track.resolve"] or 0) > 0
-       and (counts["track.set"] or 0) == 0 then
-      local hint = "User requested track property changes; keep one valid "
-        .. "track.resolve for the target, then add one track.set using that "
-        .. "same id"
-      detail = detail and detail ~= "" and (detail .. "; " .. hint) or hint
-    end
-  end
-  return detail and detail ~= "" and detail or "invalid_plan"
-end
-
-local function _typed_action_executor_validate(plan)
-  local valid, errors = Code.validate_typed_actions_plan(plan)
-  if not valid then return false, errors end
-
-  local fx_type_by_id, exec_errors = {}, {}
-  for i, action in ipairs(plan.actions or {}) do
-    local path = "$.actions[" .. tostring(i) .. "]"
-    if action.op == "fx.add_stock" and action.id and action.fx then
-      fx_type_by_id[action.id] = action.fx
-    elseif action.op == "fx.set_param" then
-      local fx_name = fx_type_by_id[action.fx]
-      local setters, perr = _typed_action_param_setters(
-        fx_name, action.params, path)
-      if not setters then
-        for _, e in ipairs(perr or {}) do exec_errors[#exec_errors+1] = e end
-      end
-    elseif action.op == "send.create" and action.mode ~= nil
-       and type(action.mode) == "string" then
-      local m = tostring(action.mode):lower():gsub("%s+", "_"):gsub("%-", "_")
-      local ok_mode = m == "post_fader"
-        or m == "post_fader_post_pan"
-        or m == "pre_fx"
-        or m == "pre_fader"
-        or m == "post_fx"
-      if not ok_mode then
-        exec_errors[#exec_errors+1] = _typed_action_error(
-          "unsupported_send_mode", path .. ".mode",
-          "Unsupported send mode: " .. tostring(action.mode))
-      end
-    end
-  end
-  return #exec_errors == 0, exec_errors
-end
-
-local function _typed_action_find_existing_track(api, name)
-  local found = {}
-  local n = api.CountTracks(0)
-  for i = 0, n - 1 do
-    local tr = api.GetTrack(0, i)
-    local _, tname = api.GetTrackName(tr, "")
-    if tname == name then found[#found+1] = tr end
-  end
-  return found
-end
-
-function Code._typed_action_resolve_existing_track(api, action)
-  if action.selected_index ~= nil then
-    if type(api.CountSelectedTracks) ~= "function"
-       or type(api.GetSelectedTrack) ~= "function" then
-      return nil, "selected_track_unavailable",
-        "REAPER selected-track APIs are unavailable"
-    end
-    local idx = tonumber(action.selected_index)
-    local count = api.CountSelectedTracks(0)
-    if not idx or idx % 1 ~= 0 or idx < 1 or idx > count then
-      return nil, "missing_selected_track",
-        "No selected track at 1-based selected index "
-          .. tostring(action.selected_index) .. "; found "
-          .. tostring(count or 0)
-    end
-    local tr = api.GetSelectedTrack(0, idx - 1)
-    if not tr then
-      return nil, "missing_selected_track",
-        "Could not resolve selected track index "
-          .. tostring(action.selected_index)
-    end
-    return tr
-  end
-
-  if action.selected == true then
-    if type(api.CountSelectedTracks) ~= "function"
-       or type(api.GetSelectedTrack) ~= "function" then
-      return nil, "selected_track_unavailable",
-        "REAPER selected-track APIs are unavailable"
-    end
-    local count = api.CountSelectedTracks(0)
-    if count ~= 1 then
-      return nil, "ambiguous_selected_track",
-        "track.resolve selected requires exactly one selected track; found "
-          .. tostring(count or 0)
-    end
-    local tr = api.GetSelectedTrack(0, 0)
-    if not tr then
-      return nil, "missing_selected_track",
-        "Could not resolve the selected track"
-    end
-    return tr
-  end
-
-  if action.index ~= nil then
-    local idx = tonumber(action.index)
-    local count = api.CountTracks(0)
-    if not idx or idx % 1 ~= 0 or idx < 1 or idx > count then
-      return nil, "missing_track",
-        "No existing track at 1-based index " .. tostring(action.index)
-    end
-    local tr = api.GetTrack(0, idx - 1)
-    if not tr then
-      return nil, "missing_track",
-        "Could not resolve track index " .. tostring(action.index)
-    end
-    if action.name ~= nil then
-      local _, tname = api.GetTrackName(tr, "")
-      if tname ~= action.name then
-        return nil, "track_name_mismatch",
-          "Track index " .. tostring(action.index) .. " is named "
-            .. tostring(tname) .. ", not " .. tostring(action.name)
-      end
-    end
-    return tr
-  end
-
-  if action.name ~= nil then
-    local found = _typed_action_find_existing_track(api, action.name)
-    if #found == 0 then
-      return nil, "missing_track",
-        "No existing track is named " .. tostring(action.name)
-    end
-    if #found > 1 then
-      return nil, "ambiguous_track",
-        "Multiple existing tracks are named " .. tostring(action.name)
-    end
-    return found[1]
-  end
-
-  return nil, "invalid_target_selector",
-    "track.resolve needs name, selected, selected_index, or index"
-end
-
-local function _typed_action_track_insert_index(api, action, tracks)
-  local count = api.CountTracks(0)
-  local pos = action.position
-  if not pos or pos == "" or pos == "end" then return count end
-  local dir, ref = pos:match("^(after):(.-)$")
-  if not dir then dir, ref = pos:match("^(before):(.-)$") end
-  local ref_tr = ref and tracks[ref] or nil
-  if not ref_tr then return nil, "Unknown position reference: " .. tostring(pos) end
-  local ref_num = api.GetMediaTrackInfo_Value(ref_tr, "IP_TRACKNUMBER")
-  if not ref_num or ref_num < 1 then
-    return nil, "Could not resolve position reference: " .. tostring(pos)
-  end
-  if dir == "before" then return math.max(0, ref_num - 1) end
-  return math.min(count, ref_num)
-end
-
-local function _typed_action_send_mode(mode)
-  if mode == nil then return nil, nil end
-  if type(mode) == "number" then return mode, nil end
-  local m = tostring(mode):lower():gsub("%s+", "_"):gsub("%-", "_")
-  local map = {
-    post_fader = 0,
-    post_fader_post_pan = 0,
-    pre_fx = 1,
-    pre_fader = 3,
-    post_fx = 3,
+  local metrics = {
+    present=false, valid=false, executed=false, fallback_to_lua=false,
+    raw_json=false, retry_count=0, error=nil, op_counts=count_ops(nil),
   }
-  if map[m] == nil then return nil, "Unsupported send mode: " .. tostring(mode) end
-  return map[m], nil
+  local artifact = Code.typed_actions_artifact_text(text, opts.allow_raw_json)
+  if type(artifact) ~= "string" or artifact == "" then return metrics end
+  metrics.present = true
+  metrics.raw_json = opts.allow_raw_json == true and trim(text):sub(1,1) == "{"
+  local plan, errors = Code.typed_actions_plan_from_text(text, opts)
+  if not plan then
+    metrics.error = first_error(errors) or "invalid_plan"
+    return metrics
+  end
+  metrics.valid, metrics.op_counts = true, count_ops(plan)
+  return metrics
 end
 
-function Code._typed_action_pan_lfo_resolution_steps(resolution)
-  local r = tostring(resolution or "32nd"):lower()
-    :gsub("%s+", "")
-    :gsub("%-", "")
-  if r == "" or r == "null" then r = "32nd" end
-  if r == "eighth" or r == "8th" then return 8 end
-  if r == "16th" then return 16 end
-  if r == "64th" then return 64 end
-  return 32
+function Code.typed_actions_action_count(metrics, plan_text)
+  local total, counts = 0, type(metrics) == "table" and metrics.op_counts or nil
+  if type(counts) == "table" then
+    for _, count in pairs(counts) do total = total + (tonumber(count) or 0) end
+    return total
+  end
+  local plan = Code.typed_actions_plan_from_text(plan_text or "",
+    {allow_raw_json=true})
+  return plan and #plan.actions or 0
 end
 
-function Code._typed_action_pan_lfo_start(api, start)
-  local st = tostring(start or "cursor"):lower():gsub("%s+", "_"):gsub("%-", "_")
-  if st == "project_start" then return 0 end
-  if type(api.GetCursorPosition) == "function" then
-    local ok, pos = pcall(api.GetCursorPosition)
-    if ok and tonumber(pos) then return tonumber(pos) end
+function Code.typed_actions_op_counts_text(counts)
+  local parts = {}
+  for _, op in ipairs(OP_ORDER) do
+    local count = type(counts) == "table" and tonumber(counts[op]) or 0
+    if count and count > 0 then
+      parts[#parts + 1] = op .. "=" .. tostring(count)
+    end
   end
-  return 0
+  return table.concat(parts, ", ")
 end
 
-function Code._typed_action_project_bpm_bpi(api, t)
-  local bpm, bpi = 120, 4
-  if type(api.GetProjectTimeSignature2) == "function" then
-    local ok, got_bpm, got_bpi = pcall(api.GetProjectTimeSignature2, 0)
-    if ok and tonumber(got_bpm) and tonumber(got_bpm) > 0 then
-      bpm = tonumber(got_bpm)
-    end
-    if ok and tonumber(got_bpi) and tonumber(got_bpi) > 0 then
-      bpi = tonumber(got_bpi)
-    end
-  elseif type(api.Master_GetTempo) == "function" then
-    local ok, got_bpm = pcall(api.Master_GetTempo)
-    if ok and tonumber(got_bpm) and tonumber(got_bpm) > 0 then
-      bpm = tonumber(got_bpm)
-    end
-  end
-  if type(api.TimeMap_GetDividedBpmAtTime) == "function" then
-    local ok, got_bpm = pcall(api.TimeMap_GetDividedBpmAtTime, t or 0)
-    if ok and tonumber(got_bpm) and tonumber(got_bpm) > 0 then
-      bpm = tonumber(got_bpm)
-    end
-  end
-  return bpm, bpi
+function Code.typed_actions_kind_label()
+  return "Track and routing edit"
 end
 
-function Code._typed_action_pan_lfo_finish(api, start, bars)
-  bars = tonumber(bars)
-  if not bars or bars <= 0 then return nil end
-  if type(api.TimeMap2_timeToBeats) == "function"
-      and type(api.TimeMap2_beatsToTime) == "function" then
-    local ok1, beat, measure = pcall(api.TimeMap2_timeToBeats, 0, start)
-    if ok1 and tonumber(beat) and tonumber(measure) then
-      local target_beat = tonumber(beat)
-      local target_measure = tonumber(measure)
-      if bars % 1 == 0 then
-        target_measure = target_measure + bars
-      else
-        local _, bpi = Code._typed_action_project_bpm_bpi(api, start)
-        target_beat = target_beat + bars * bpi
-      end
-      local ok2, finish = pcall(api.TimeMap2_beatsToTime, 0,
-        target_beat, target_measure)
-      if ok2 and tonumber(finish) and tonumber(finish) > start then
-        return tonumber(finish)
-      end
-    end
-  end
-  local bpm, bpi = Code._typed_action_project_bpm_bpi(api, start)
-  return start + (60 / bpm) * bpi * bars
-end
-
-function Code._typed_action_track_pan_envelope(api, tr)
-  local env = nil
-  if type(api.GetTrackEnvelopeByName) == "function" then
-    for _, name in ipairs({
-      "Pan",
-      "Pan (Left)",
-      "Pan (L)",
-      "Pan L",
-      "Left Pan",
-      "Pan (Right)",
-      "Pan (R)",
-      "Pan R",
-      "Right Pan",
-    }) do
-      local ok, got = pcall(api.GetTrackEnvelopeByName, tr, name)
-      if ok and got then return got end
-    end
-  end
-  if type(api.GetTrackEnvelopeByChunkName) == "function" then
-    for _, chunk_name in ipairs({ "<PANENV", "<PANENV2" }) do
-      local ok, got = pcall(api.GetTrackEnvelopeByChunkName, tr, chunk_name)
-      if ok and got then return got end
-    end
-  end
-  return env
-end
-
-function Code._typed_action_apply_track_pan_lfo(api, tr, action)
-  if type(api.InsertEnvelopePoint) ~= "function"
-      or type(api.Envelope_SortPoints) ~= "function" then
-    return false, "envelope_api_unavailable",
-      "REAPER envelope point APIs are unavailable"
-  end
-  local env = Code._typed_action_track_pan_envelope(api, tr)
-  if not env then
-    return false, "pan_envelope_unavailable",
-      "Could not access the target track Pan envelope"
-  end
-  local start = Code._typed_action_pan_lfo_start(api, action.start)
-  local finish = Code._typed_action_pan_lfo_finish(api, start, action.bars)
-  if not finish or finish <= start then
-    return false, "invalid_pan_lfo_span",
-      "Could not compute a positive pan LFO time span"
-  end
-  local steps_per_bar =
-    Code._typed_action_pan_lfo_resolution_steps(action.resolution)
-  local steps = math.max(2,
-    math.ceil((tonumber(action.bars) or 0) * steps_per_bar))
-  if steps > 8192 then
-    return false, "pan_lfo_too_dense",
-      "track.pan_lfo would write too many envelope points"
-  end
-  local depth = tonumber(action.depth_pct)
-  if not depth then depth = 100 end
-  depth = math.max(0.001, math.min(100, depth)) / 100
-  local cycles = (tonumber(action.cycles_per_bar) or 1)
-    * (tonumber(action.bars) or 1)
-  local mode = 0
-  if type(api.GetEnvelopeScalingMode) == "function" then
-    local ok, got = pcall(api.GetEnvelopeScalingMode, env)
-    if ok and tonumber(got) then mode = tonumber(got) end
-  end
-  if action.clear_existing ~= false then
-    if type(api.DeleteEnvelopePointRange) ~= "function" then
-      return false, "envelope_clear_unavailable",
-        "REAPER envelope delete API is unavailable"
-    end
-    api.DeleteEnvelopePointRange(env, start, finish)
-  end
-  for i = 0, steps do
-    local frac = i / steps
-    local t = start + (finish - start) * frac
-    local pan = math.sin(frac * cycles * 2 * math.pi) * depth
-    local value = pan
-    if type(api.ScaleToEnvelopeMode) == "function" then
-      value = api.ScaleToEnvelopeMode(mode, pan)
-    end
-    api.InsertEnvelopePoint(env, t, value, 0, 0, false, true)
-  end
-  api.Envelope_SortPoints(env)
-  return true, nil, nil, steps + 1
-end
-
-function Code._typed_action_error_result(code, path, message, result)
-  return false, {
-    code = code or "execution_error",
-    path = path or "$",
-    message = message or "Structured edit failed",
-    result = result,
-  }
+function Code.typed_actions_display_text(plan_text, action_results)
+  local plan = Code.typed_actions_plan_from_text(plan_text or "",
+    {allow_raw_json=true})
+  if not plan then return "Structured track edit" end
+  local labels = {}
+  for _, action in ipairs(plan.actions) do labels[#labels + 1] = action.op end
+  return table.concat(labels, ", ")
+    .. (type(action_results) == "table" and #action_results > 0
+      and " completed" or "")
 end
 
 function Code.typed_actions_user_failure_message(exec_result)
-  local code = exec_result and exec_result.code or "execution_failed"
-  local detail = exec_result and exec_result.message or nil
-  local result = exec_result and exec_result.result or nil
-  local changed = type(result) == "table"
-    and type(result.action_results) == "table"
-    and #result.action_results > 0
-  if code == "executor_disabled" then
-    return Code.typed_actions_executor_disabled_message()
+  local result = type(exec_result) == "table" and exec_result or {}
+  local detail = tostring(result.message or result.code
+    or "The edit did not complete.")
+  if type(result.action_results) == "table" and #result.action_results > 0 then
+    return "The track or routing edit stopped after making part of the change. "
+      .. "Use REAPER Undo, then retry the request. Details: " .. detail
   end
-  local function add_detail(msg)
-    if detail and detail ~= "" then
-      local fallback = "Details: " .. tostring(detail)
-      msg = msg .. " " .. ((RA and RA.t and RA.t(
-        "typed_actions.error.details", { detail = tostring(detail) },
-        fallback)) or fallback)
-    end
-    return msg
-  end
-  if code == "invalid_json" or code == "missing_action_block"
-     or code == "invalid_plan" or code == "semantic_mismatch" then
-    local msg = (RA and RA.t and RA.t(
-      "typed_actions.error.blocked_before_change", nil,
-      "I blocked this structured edit before it changed the project because the plan did not match the request safely. No changes were made."))
-      or "I blocked this structured edit before it changed the project because the plan did not match the request safely. No changes were made."
-    return add_detail(msg)
-  end
-  if changed then
-    local msg = (RA and RA.t and RA.t(
-      "typed_actions.error.partial_failed", nil,
-      "Structured edit failed after making part of the change. ReaAssist stopped immediately; use REAPER Undo if the project is not in the state you want."))
-      or "Structured edit failed after making part of the change. ReaAssist stopped immediately; use REAPER Undo if the project is not in the state you want."
-    return add_detail(msg)
-  end
-  local msg = (RA and RA.t and RA.t(
-    "typed_actions.error.failed_before_change", nil,
-    "Structured edit failed before it changed the project. No changes were made."))
-    or "Structured edit failed before it changed the project. No changes were made."
-  return add_detail(msg)
+  return "The track or routing edit was not applied. Check the named or selected "
+    .. "track, then retry the request. Details: " .. detail
 end
 
--- Fail-closed local executor for accepted typed-action plans. It opens one undo
--- block, applies actions in dependency order, and stops immediately on the first
--- validation or REAPER API failure.
-function Code.execute_typed_actions_plan(plan, opts)
-  opts = opts or {}
-  local api = opts.reaper or reaper
-  local result = {
-    executed = false,
-    completed = false,
-    deferred = false,
-    op_counts = _typed_action_count_ops(plan),
-    action_results = {},
-  }
-
-  if not opts.allow_dev_executor and not Code.typed_actions_executor_enabled() then
-    return Code._typed_action_error_result("executor_disabled", "$",
-      Code.typed_actions_executor_disabled_message(), result)
-  end
-
-  if type(api) ~= "table" then
-    return Code._typed_action_error_result("executor_unavailable", "$",
-      "REAPER API table is unavailable", result)
-  end
-
-  local valid, validation_errors = _typed_action_executor_validate(plan)
-  if not valid then
-    result.validation_errors = validation_errors
-    return Code._typed_action_error_result("invalid_plan", "$",
-      "Typed action plan failed executor validation", result)
-  end
-  local folder_depth_plan, folder_depth_errors =
-    Code._typed_action_folder_depth_plan(plan)
-  if folder_depth_errors and #folder_depth_errors > 0 then
-    result.validation_errors = folder_depth_errors
-    return Code._typed_action_error_result("invalid_plan", "$",
-      "Typed action folder plan failed executor validation", result)
-  end
-
-  local tracks, fx_by_id, param_actions = {}, {}, {}
-  local undo_open, refresh_open = false, false
-
-  local function close_block(label, flags)
-    if refresh_open then
-      pcall(api.PreventUIRefresh, -1)
-      refresh_open = false
-    end
-    if type(api.TrackList_AdjustWindows) == "function" then
-      pcall(api.TrackList_AdjustWindows, false)
-    end
-    if type(api.UpdateArrange) == "function" then pcall(api.UpdateArrange) end
-    if undo_open then
-      pcall(api.Undo_EndBlock, label or "ReaAssist: typed actions", flags or -1)
-      undo_open = false
+local function find_named_track(name)
+  local matches = {}
+  for index = 0, reaper.CountTracks(0) - 1 do
+    local track = reaper.GetTrack(0, index)
+    local _, track_name = reaper.GetTrackName(track, "")
+    if tostring(track_name or "") == tostring(name or "") then
+      matches[#matches + 1] = track
     end
   end
+  if #matches == 1 then return matches[1] end
+  return nil, #matches > 1 and "ambiguous_track" or "missing_track"
+end
 
-  local function fail(code, path, message)
-    close_block("ReaAssist: typed actions failed", -1)
-    local fallback = "Structured edit failed: " .. tostring(message)
-    local msg = (RA and RA.t and RA.t("typed_actions.error.failed",
-      { message = tostring(message) }, fallback)) or fallback
-    if type(Log) == "table" and type(Log.add_error) == "function" then
-      Log.add_error(msg)
+local function resolve_track(action)
+  if nonempty(action.name) then return find_named_track(action.name) end
+  if action.selected == true then
+    if reaper.CountSelectedTracks(0) ~= 1 then
+      return nil, "selected_track_count"
     end
-    if type(api.ShowMessageBox) == "function" then
-      pcall(api.ShowMessageBox, msg, "ReaAssist", 0)
+    return reaper.GetSelectedTrack(0, 0)
+  end
+  if tonumber(action.selected_index) then
+    local index = math.floor(tonumber(action.selected_index))
+    if index < 1 or index > reaper.CountSelectedTracks(0) then
+      return nil, "selected_track_missing"
     end
-    return Code._typed_action_error_result(code, path, message, result)
+    return reaper.GetSelectedTrack(0, index - 1)
   end
-
-  local function complete(ok, done_result)
-    result.completed = true
-    result.executed = ok == true
-    if type(opts.on_done) == "function" then
-      local cb_ok, cb_err = pcall(opts.on_done, ok == true,
-        done_result or { result = result })
-      if not cb_ok and type(Log) == "table"
-         and type(Log.add_error) == "function" then
-        local fallback = "Structured edit completion callback failed: "
-          .. tostring(cb_err)
-        Log.add_error((RA and RA.t and RA.t(
-          "typed_actions.error.callback_failed",
-          { error = tostring(cb_err) }, fallback)) or fallback)
-      end
+  if tonumber(action.index) then
+    local index = math.floor(tonumber(action.index))
+    if index < 1 or index > reaper.CountTracks(0) then
+      return nil, "track_index_missing"
     end
+    return reaper.GetTrack(0, index - 1)
   end
+  return nil, "invalid_selector"
+end
 
-  local pre_resolved_tracks = {}
-  for i, action in ipairs(plan.actions or {}) do
-    if action.op == "track.resolve" then
-      local path = "$.actions[" .. tostring(i) .. "]"
-      local tr, code, err =
-        Code._typed_action_resolve_existing_track(api, action)
-      if not tr then
-        return fail(code or "track_resolve_failed", path,
-          err or ("Could not resolve track " .. tostring(action.id)))
-      end
-      pre_resolved_tracks[action.id] = tr
-    end
-  end
+local function db_to_amp(db)
+  return 10 ^ ((tonumber(db) or 0) / 20)
+end
 
-  api.Undo_BeginBlock()
-  undo_open = true
-  api.PreventUIRefresh(1)
-  refresh_open = true
-
-  for i, action in ipairs(plan.actions or {}) do
-    local path = "$.actions[" .. tostring(i) .. "]"
-    local op = action.op
-    if op == "track.create" or op == "track.ensure" then
-      local existing = op == "track.ensure"
-        and _typed_action_find_existing_track(api, action.name) or {}
-      local tr
-      local created = false
-      if #existing > 1 then
-        return fail("ambiguous_track", path .. ".name",
-          "Multiple existing tracks are named " .. tostring(action.name))
-      elseif #existing == 1 then
-        tr = existing[1]
-      else
-        local idx, pos_err = _typed_action_track_insert_index(api, action, tracks)
-        if not idx then return fail("unknown_ref", path .. ".position", pos_err) end
-        api.InsertTrackAtIndex(idx, true)
-        tr = api.GetTrack(0, idx)
-        if not tr then
-          return fail("track_create_failed", path,
-            "Could not create track " .. tostring(action.name))
-        end
-        created = true
-      end
-      if _typed_action_is_nonempty_string(action.name) then
-        api.GetSetMediaTrackInfo_String(tr, "P_NAME", action.name, true)
-      end
-      if action.select == true then
-        api.SetTrackSelected(tr, true)
-      end
-      tracks[action.id] = tr
-      local result_name = action.name
-      if (not _typed_action_is_nonempty_string(result_name))
-         and type(api.GetTrackName) == "function" then
-        local name_ok, display_name = api.GetTrackName(tr, "")
-        if name_ok and _typed_action_is_nonempty_string(display_name) then
-          result_name = display_name
-        end
-      end
-      result.action_results[#result.action_results+1] = {
-        op = op, id = action.id, name = result_name, created = created,
-        selected = action.select == true or nil, status = "ok"
-      }
-
-    elseif op == "track.resolve" then
-      local tr = pre_resolved_tracks[action.id]
-      tracks[action.id] = tr
-      result.action_results[#result.action_results+1] = {
-        op = op, id = action.id, name = action.name, index = action.index,
-        selected = action.selected == true or nil,
-        selected_index = action.selected_index, status = "ok"
-      }
-
-    elseif op == "track.set" then
-      local tr = tracks[action.track]
-      if not tr then
-        return fail("unknown_ref", path .. ".track",
-          "Unknown track id " .. tostring(action.track))
-      end
-      if action.name ~= nil then
-        api.GetSetMediaTrackInfo_String(tr, "P_NAME", action.name, true)
-      end
-      if action.volume_db ~= nil then
-        api.SetMediaTrackInfo_Value(tr, "D_VOL",
-          _typed_action_db_to_amp(action.volume_db))
-      end
-      if action.pan_pct ~= nil then
-        api.SetMediaTrackInfo_Value(tr, "D_PAN", action.pan_pct / 100)
-      end
-      if action.mute ~= nil then
-        api.SetMediaTrackInfo_Value(tr, "B_MUTE", action.mute and 1 or 0)
-      end
-      if action.solo ~= nil then
-        api.SetMediaTrackInfo_Value(tr, "I_SOLO", action.solo and 1 or 0)
-      end
-      if action.master_send ~= nil then
-        api.SetMediaTrackInfo_Value(tr, "B_MAINSEND",
-          action.master_send and 1 or 0)
-      end
-      result.action_results[#result.action_results+1] = {
-        op = op, id = action.track, name = action.name,
-        volume_db = action.volume_db, pan_pct = action.pan_pct,
-        mute = action.mute, solo = action.solo,
-        master_send = action.master_send, status = "ok"
-      }
-
-    elseif op == "track.pan_lfo" then
-      local tr = tracks[action.track]
-      if not tr then
-        return fail("unknown_ref", path .. ".track",
-          "Unknown track id " .. tostring(action.track))
-      end
-      local ok, code, msg, points =
-        Code._typed_action_apply_track_pan_lfo(api, tr, action)
-      if not ok then
-        return fail(code or "pan_lfo_failed", path, msg)
-      end
-      result.action_results[#result.action_results+1] = {
-        op = op, id = action.track, start = action.start, bars = action.bars,
-        cycles_per_bar = action.cycles_per_bar,
-        depth_pct = action.depth_pct, resolution = action.resolution,
-        clear_existing = action.clear_existing, status = "ok", points = points
-      }
-
-    elseif op == "track.folder" then
-      result.action_results[#result.action_results+1] = {
-        op = op, id = action.parent, children = action.children, status = "ok"
-      }
-
-    elseif op == "fx.add_stock" then
-      local tr = tracks[action.track]
-      if not tr then
-        return fail("unknown_ref", path .. ".track",
-          "Unknown track id " .. tostring(action.track))
-      end
-      local existed = false
-      if type(api.TrackFX_GetByName) == "function" then
-        local before_fx = api.TrackFX_GetByName(tr, action.fx, false)
-        existed = type(before_fx) == "number" and before_fx >= 0
-      end
-      local fx = api.TrackFX_AddByName(tr, action.fx, false, -1)
-      if not fx or fx < 0 then
-        return fail("fx_add_failed", path .. ".fx",
-          "Could not add " .. tostring(action.fx))
-      end
-      fx_by_id[action.id] = { track = tr, fx = fx, fx_name = action.fx }
-      result.action_results[#result.action_results+1] = {
-        op = op, id = action.id, track = action.track, fx = action.fx,
-        existed = existed, status = "ok"
-      }
-
-    elseif op == "fx.set_param" then
-      param_actions[#param_actions+1] = { action = action, path = path }
-
-    elseif op == "send.create" then
-      local src, dst = tracks[action["from"]], tracks[action.to]
-      if not src then
-        return fail("unknown_ref", path .. ".from",
-          "Unknown source track id " .. tostring(action["from"]))
-      end
-      if not dst then
-        return fail("unknown_ref", path .. ".to",
-          "Unknown destination track id " .. tostring(action.to))
-      end
-      local sidx = api.CreateTrackSend(src, dst)
-      if not sidx or sidx < 0 then
-        return fail("send_create_failed", path,
-          "Could not create send " .. tostring(action.id))
-      end
-      if action.volume_db ~= nil then
-        api.SetTrackSendInfo_Value(src, 0, sidx, "D_VOL",
-          _typed_action_db_to_amp(action.volume_db))
-      end
-      if action.pan ~= nil then
-        api.SetTrackSendInfo_Value(src, 0, sidx, "D_PAN", action.pan)
-      end
-      if action.muted ~= nil then
-        api.SetTrackSendInfo_Value(src, 0, sidx, "B_MUTE",
-          action.muted and 1 or 0)
-      end
-      if action.mode ~= nil then
-        local mode, mode_err = _typed_action_send_mode(action.mode)
-        if mode == nil then return fail("unsupported_send_mode", path .. ".mode", mode_err) end
-        api.SetTrackSendInfo_Value(src, 0, sidx, "I_SENDMODE", mode)
-      end
-      result.action_results[#result.action_results+1] = {
-        op = op, id = action.id, from = action["from"], to = action.to,
-        volume_db = action.volume_db, pan = action.pan, mode = action.mode,
-        muted = action.muted, status = "ok"
-      }
-    end
-  end
-
-  for _, track_id in ipairs((folder_depth_plan and folder_depth_plan.order) or {}) do
-    local tr = tracks[track_id]
-    if not tr then
-      return fail("unknown_ref", "$.actions",
-        "Unknown folder track id " .. tostring(track_id))
-    end
-    api.SetMediaTrackInfo_Value(tr, "I_FOLDERDEPTH",
-      folder_depth_plan.depths[track_id] or 0)
-  end
-
-  local function apply_params_and_close()
-    local ok, err = xpcall(function()
-      for _, item in ipairs(param_actions) do
-        local action, path = item.action, item.path
-        local fx_ref = fx_by_id[action.fx]
-        if not fx_ref then error(path .. ": unknown FX id " .. tostring(action.fx)) end
-        local setters = assert(_typed_action_param_setters(
-          fx_ref.fx_name, action.params, path))
-        for _, setter in ipairs(setters) do
-          if setter.method == "raw" then
-            api.TrackFX_SetParam(fx_ref.track, fx_ref.fx, setter.index, setter.value)
-          else
-            api.TrackFX_SetParamNormalized(fx_ref.track, fx_ref.fx,
-              setter.index, setter.value)
-          end
-        end
-        result.action_results[#result.action_results+1] = {
-          op = action.op, id = action.fx, params = action.params, status = "ok"
-        }
-      end
-    end, debug and debug.traceback or tostring)
-    if not ok then
-      close_block("ReaAssist: typed actions failed", -1)
-      local fallback = "Structured edit parameter write failed: " .. tostring(err)
-      local msg = (RA and RA.t and RA.t(
-        "typed_actions.error.param_write_failed",
-        { error = tostring(err) }, fallback)) or fallback
-      if type(Log) == "table" and type(Log.add_error) == "function" then
-        Log.add_error(msg)
-      end
-      if type(api.ShowMessageBox) == "function" then
-        pcall(api.ShowMessageBox, msg, "ReaAssist", 0)
-      end
-      local _, err_result = Code._typed_action_error_result(
-        "param_write_failed", "$.actions", tostring(err), result)
-      complete(false, err_result)
-      return false, err_result
-    end
-    close_block("ReaAssist: typed actions", -1)
-    complete(true, { result = result })
-    return true
-  end
-
-  if #param_actions > 0 then
-    -- Supported stock FX expose their typed-action parameters immediately
-    -- after TrackFX_AddByName. Keep insertion and parameter writes in the same
-    -- REAPER cycle so Undo_BeginBlock/Undo_EndBlock owns one complete edit.
-    -- An undo block that crosses reaper.defer cycles does not reliably group
-    -- the native FX-parameter undo entries.
-    local applied, apply_err = apply_params_and_close()
-    if not applied then return false, apply_err end
-  else
-    close_block("ReaAssist: typed actions", -1)
-    complete(true, { result = result })
-  end
-
-  return true, result
+local function send_mode(value)
+  if value == nil or value == "post_fader" then return 0 end
+  if value == "pre_fx" then return 1 end
+  if value == "pre_fader" or value == "post_fx" then return 3 end
+  return tonumber(value) or 0
 end
 
 function Code.execute_typed_actions_from_text(text, opts)
   opts = type(opts) == "table" and opts or {}
   local plan, errors = Code.typed_actions_plan_from_text(text, opts)
   if not plan then
-    local code = _typed_action_first_error_code(errors)
-    local result_code = (code == "invalid_json" or code == "invalid_json_shape")
-      and "invalid_json" or "missing_action_block"
-    return Code._typed_action_error_result(result_code, "$",
-      code or "No reaassist-actions block found", nil)
+    return false, {
+      code=first_error(errors) or "invalid_plan",
+      message=Code.format_typed_action_semantic_errors(errors, 4),
+      action_results={},
+    }
   end
-  local api = opts.api or (type(reaper) == "table" and reaper or nil)
-  local selected_track_count = nil
-  if type(api) == "table" and type(api.CountSelectedTracks) == "function" then
-    selected_track_count = api.CountSelectedTracks(0)
-  end
-  local semantic_ok, semantic_errors = Code.validate_typed_actions_semantics(
-    plan, {
-      profile = opts.profile,
-      user_text = opts.user_text or "",
-      selected_track_count = selected_track_count,
-    })
+  local semantic_ok, semantic_errors =
+    Code.validate_typed_actions_semantics(plan, opts)
   if not semantic_ok then
-    return Code._typed_action_error_result("semantic_mismatch", "$.actions",
-      Code.format_typed_action_semantic_errors(semantic_errors, 4), nil)
+    return false, {
+      code=first_error(semantic_errors) or "semantic_mismatch",
+      message=Code.format_typed_action_semantic_errors(semantic_errors, 4),
+      action_results={},
+    }
   end
-  return Code.execute_typed_actions_plan(plan, opts)
-end
 
--- Lightweight inspection path used before deciding whether to retry/escalate or
--- execute. It returns parsed plan metrics and validation details without
--- mutating the project.
-function Code.inspect_typed_actions(text, opts)
-  opts = type(opts) == "table" and opts or {}
-  local metrics = {
-    present = false,
-    valid = false,
-    executed = false,
-    fallback_to_lua = false,
-    raw_json = false,
-    retry_count = 0,
-    error = nil,
-    op_counts = _typed_action_blank_op_counts(),
-  }
-
-  if opts.allow_raw_json then
-    local raw_json = _typed_action_trim(text)
-    if raw_json:sub(1, 1) == "{" then
-      metrics.present = true
-      metrics.raw_json = true
-      local plan, parse_errors = Code.parse_typed_actions_block(raw_json)
-      if not plan then
-        metrics.error = _typed_action_first_error_code(parse_errors) or "invalid_json"
-        return metrics
+  local tracks = {}
+  for _, action in ipairs(plan.actions) do
+    if action.op == "track.resolve" then
+      local track, reason = resolve_track(action)
+      if not track then
+        return false, {code=reason, message="Could not resolve the requested track.",
+          action_results={}}
       end
-      Code.repair_typed_actions_plan(plan, opts)
-      metrics.op_counts = _typed_action_count_ops(plan)
-      local valid, validate_errors = Code.validate_typed_actions_plan(plan)
-      if not valid then
-        metrics.error = _typed_action_first_error_code(validate_errors) or "invalid_plan"
-        return metrics
+      tracks[action.id] = track
+    elseif action.op == "track.ensure" then
+      local track, reason = find_named_track(action.name)
+      if reason == "ambiguous_track" then
+        return false, {code=reason,
+          message="More than one track has the requested name.",
+          action_results={}}
       end
-      metrics.valid = true
-      return metrics
+      if track then tracks[action.id] = track end
     end
   end
 
-  local raw, extract_errors = Code.extract_typed_actions(text)
-  if not raw then
-    if extract_errors and #extract_errors > 0 then
-      metrics.present = true
-      metrics.error = _typed_action_first_error_code(extract_errors)
+  local results, undo_open, refresh_open = {}, false, false
+  local function close_undo(label)
+    if not undo_open then return end
+    if type(reaper.Undo_EndBlock2) == "function" then
+      reaper.Undo_EndBlock2(0, label, -1)
+    else
+      reaper.Undo_EndBlock(label, -1)
     end
-    return metrics
+    undo_open = false
+  end
+  local function result(action, status)
+    results[#results + 1] = {
+      op=action.op, id=action.id, status=status or "completed",
+    }
   end
 
-  metrics.present = true
-  local plan, parse_errors = Code.parse_typed_actions_block(raw)
-  if not plan then
-    metrics.error = _typed_action_first_error_code(parse_errors) or "invalid_json"
-    return metrics
+  if type(reaper.Undo_BeginBlock2) == "function" then
+    reaper.Undo_BeginBlock2(0)
+  else
+    reaper.Undo_BeginBlock()
   end
+  undo_open = true
+  reaper.PreventUIRefresh(1)
+  refresh_open = true
 
-  Code.repair_typed_actions_plan(plan, opts)
-  metrics.op_counts = _typed_action_count_ops(plan)
-  local valid, validate_errors = Code.validate_typed_actions_plan(plan)
-  if not valid then
-    metrics.error = _typed_action_first_error_code(validate_errors) or "invalid_plan"
-    return metrics
+  local ok, run_error = xpcall(function()
+    for _, action in ipairs(plan.actions) do
+      if action.op == "track.create" or action.op == "track.ensure" then
+        local track, created = tracks[action.id], false
+        if not track then
+          local index = reaper.CountTracks(0)
+          reaper.InsertTrackAtIndex(index, true)
+          track, created = reaper.GetTrack(0, index), true
+          if not track then error("Could not create the requested track.") end
+          tracks[action.id] = track
+        end
+        if nonempty(action.name) then
+          reaper.GetSetMediaTrackInfo_String(track, "P_NAME", action.name, true)
+        end
+        if action.select == true then reaper.SetTrackSelected(track, true) end
+        result(action, created and "created" or "reused")
+      elseif action.op == "track.resolve" then
+        result(action, "resolved")
+      elseif action.op == "track.set" then
+        local track = tracks[action.track]
+        if not track then error("A track reference became unavailable.") end
+        if action.name ~= nil then
+          reaper.GetSetMediaTrackInfo_String(track, "P_NAME",
+            tostring(action.name), true)
+        end
+        if action.volume_db ~= nil then
+          reaper.SetMediaTrackInfo_Value(track, "D_VOL", db_to_amp(action.volume_db))
+        end
+        if action.pan_pct ~= nil then
+          local pan = math.max(-100, math.min(100, tonumber(action.pan_pct) or 0))
+          reaper.SetMediaTrackInfo_Value(track, "D_PAN", pan / 100)
+        end
+        if action.mute ~= nil then
+          reaper.SetMediaTrackInfo_Value(track, "B_MUTE", action.mute and 1 or 0)
+        end
+        if action.solo ~= nil then
+          reaper.SetMediaTrackInfo_Value(track, "I_SOLO", action.solo and 1 or 0)
+        end
+        if action.master_send ~= nil then
+          reaper.SetMediaTrackInfo_Value(track, "B_MAINSEND",
+            action.master_send and 1 or 0)
+        end
+        result(action)
+      elseif action.op == "track.folder" then
+        local parent = tracks[action.parent]
+        local last_child = tracks[action.children[#action.children]]
+        if not parent or not last_child then
+          error("A folder track reference became unavailable.")
+        end
+        reaper.SetMediaTrackInfo_Value(parent, "I_FOLDERDEPTH",
+          reaper.GetMediaTrackInfo_Value(parent, "I_FOLDERDEPTH") + 1)
+        reaper.SetMediaTrackInfo_Value(last_child, "I_FOLDERDEPTH",
+          reaper.GetMediaTrackInfo_Value(last_child, "I_FOLDERDEPTH") - 1)
+        result(action)
+      elseif action.op == "send.create" then
+        local source, destination = tracks[action["from"]], tracks[action.to]
+        if not source or not destination then
+          error("A send track reference became unavailable.")
+        end
+        local index = reaper.CreateTrackSend(source, destination)
+        if not index or index < 0 then error("REAPER could not create the send.") end
+        if action.volume_db ~= nil then
+          reaper.SetTrackSendInfo_Value(source, 0, index, "D_VOL",
+            db_to_amp(action.volume_db))
+        end
+        if action.pan ~= nil then
+          reaper.SetTrackSendInfo_Value(source, 0, index, "D_PAN",
+            math.max(-1, math.min(1, tonumber(action.pan) or 0)))
+        end
+        if action.mode ~= nil then
+          reaper.SetTrackSendInfo_Value(source, 0, index, "I_SENDMODE",
+            send_mode(action.mode))
+        end
+        if action.muted ~= nil then
+          reaper.SetTrackSendInfo_Value(source, 0, index, "B_MUTE",
+            action.muted and 1 or 0)
+        end
+        result(action)
+      end
+    end
+  end, debug and debug.traceback or tostring)
+
+  if refresh_open then reaper.PreventUIRefresh(-1) end
+  reaper.TrackList_AdjustWindows(false)
+  reaper.UpdateArrange()
+  close_undo(ok and "ReaAssist: Track and routing edit"
+    or "ReaAssist: Track and routing edit stopped")
+  if not ok then
+    return false, {code="execution_failed", message=tostring(run_error),
+      action_results=results, completed=true}
   end
-
-  metrics.valid = true
-  return metrics
+  return true, {code="ok", message="Track and routing edit completed.",
+    action_results=results, completed=true}
 end
-end -- close typed action validator scope
+end -- close small structured track-edit scope
+
 
 -- =============================================================================
 -- Code safety: risky-call scanner + execution gate
@@ -7492,61 +1597,6 @@ end
 -- ignoring comments and code-looking text inside arbitrary strings. Preserve
 -- byte/newline offsets, reduce quoted ReaEQ names to one canonical literal,
 -- reduce other quoted strings to an empty literal, and blank long strings.
-function Code._lua_reeq_scan_source(lua_code)
-  local src = tostring(lua_code or "")
-  if type(Code.tokenize_lua) ~= "function" then
-    return _lua_code_only_preserving_offsets(src)
-  end
-  local out, has_reeq_literal = {}, false
-  for _, token in ipairs(Code.tokenize_lua(src) or {}) do
-    if token.type == "com" then
-      out[#out + 1] = _blank_non_newlines(token.text)
-    elseif token.type == "str" then
-      local raw = tostring(token.text or "")
-      local value = raw
-      local chunk = load("return " .. raw, "=(ReaEQ scan literal)", "t", {})
-      if chunk then
-        local ok, parsed = pcall(chunk)
-        if ok and type(parsed) == "string" then value = parsed end
-      end
-      local normalized = tostring(value):lower():gsub("[^%a%d]", "")
-      local marker = normalized:find("reaeq", 1, true) and '"ReaEQ"' or nil
-      local blank = _blank_non_newlines(raw)
-      if marker then
-        has_reeq_literal = true
-        -- Preserve every newline and byte offset. Long strings can begin with
-        -- a newline, so place the marker in the first sufficiently long
-        -- non-newline run instead of overwriting the token prefix.
-        local marker_pos = blank:find(
-          "[^\r\n][^\r\n][^\r\n][^\r\n][^\r\n][^\r\n][^\r\n]")
-        if marker_pos then
-          out[#out + 1] = blank:sub(1, marker_pos - 1) .. marker
-            .. blank:sub(marker_pos + #marker)
-        else
-          -- A long string can split every run (for example, [[\nReaEQ\n]]).
-          -- Spread a bare canonical marker across five existing non-newline
-          -- bytes; literal_reeq_name normalizes the intervening whitespace.
-          local marker_chars, marker_idx, pieces = "ReaEQ", 1, {}
-          for i = 1, #blank do
-            local ch = blank:sub(i, i)
-            if marker_idx <= #marker_chars and ch ~= "\r" and ch ~= "\n" then
-              pieces[#pieces + 1] = marker_chars:sub(marker_idx, marker_idx)
-              marker_idx = marker_idx + 1
-            else
-              pieces[#pieces + 1] = ch
-            end
-          end
-          out[#out + 1] = table.concat(pieces)
-        end
-      else
-        out[#out + 1] = blank
-      end
-    else
-      out[#out + 1] = token.text
-    end
-  end
-  return table.concat(out), has_reeq_literal
-end
 
 function Code.find_unknown_reaper_calls(lua_code)
   if not lua_code or lua_code == "" then return nil, 0 end
@@ -9123,6 +3173,71 @@ function Code.find_media_item_p_name_misuse(lua_code)
   return findings
 end
 
+-- Flag only high-confidence state-chunk rewrites that consume the remainder of
+-- an envelope VIS record and replace it with a one-field record. REAPER on
+-- Windows currently normalizes `VIS 1` back to `VIS 1 1 1`, but the state
+-- chunk contract is not documented as accepting that shorthand on every host.
+-- Preserve the remaining fields instead of relying on host normalization.
+function Code.find_destructive_envelope_vis_rewrites(lua_code)
+  if not lua_code or lua_code == "" then return nil end
+  local stripped = lua_code
+    :gsub("%-%-%[%[.-%]%]", function(s) return s:gsub("[^\n]", "") end)
+    :gsub("%-%-[^\n]*", "")
+  if not stripped:find("reaper%.SetEnvelopeStateChunk%s*%(")
+     or not stripped:find("reaper%.GetEnvelopeStateChunk%s*%(") then
+    return nil
+  end
+
+  local findings = {}
+  local pos = 1
+  while true do
+    local start_pos, open_pos = stripped:find("[:%.]gsub%s*%(", pos)
+    if not start_pos then break end
+    local args, close_pos = Code._parse_lua_call_args(stripped, open_pos)
+    local pattern_arg = args and tostring(args[1] or "") or ""
+    local replacement_arg = args and tostring(args[2] or "") or ""
+    local vis_pos = pattern_arg:find("VIS", 1, true)
+    local quote = replacement_arg:sub(1, 1)
+    local literal_replacement = (quote == '"' or quote == "'")
+      and replacement_arg:sub(-1) == quote
+    local replacement_body = literal_replacement
+      and replacement_arg:sub(2, -2) or ""
+    if vis_pos and literal_replacement
+       and replacement_body:find("VIS%s+[01]") then
+      local pattern_tail = pattern_arg:sub(vis_pos + 3)
+      local _, numeric_fields = pattern_tail:gsub("%%d[%*+]?", "")
+      local consumes_record_tail = pattern_tail:find("%.%*", 1) ~= nil
+        or pattern_tail:find("%.%-", 1) ~= nil
+        or pattern_tail:find("%[%^[^%]]+%][%*+]", 1) ~= nil
+        or numeric_fields >= 2
+      local tail_has_capture = false
+      local scan_pos = 1
+      while scan_pos <= #pattern_tail do
+        local char = pattern_tail:sub(scan_pos, scan_pos)
+        if char == "%" then
+          scan_pos = scan_pos + 2
+        elseif char == "(" then
+          tail_has_capture = true
+          break
+        else
+          scan_pos = scan_pos + 1
+        end
+      end
+      local preserves_suffix = tail_has_capture
+        and replacement_body:find("%%[1-9]", 1) ~= nil
+      if consumes_record_tail and not preserves_suffix then
+        findings[#findings + 1] = {
+          kind = "envelope_vis_line_collapse",
+          line = Code._lua_line_for_pos(stripped, start_pos),
+          detail = "Envelope VIS rewrite consumes the remaining record fields without preserving them.",
+        }
+      end
+    end
+    pos = (close_pos or open_pos) + 1
+  end
+  return #findings > 0 and findings or nil
+end
+
 -- =============================================================================
 -- Code.find_untracked_createtracksend_results
 -- =============================================================================
@@ -10648,6 +4763,11 @@ function Code.prompt_requests_bus_or_return_send_routing(user_text)
     routing_text = routing_text:gsub(phrase, "")
   end
   for _, pat in ipairs({
+    "%f[%w]do%s+not%s+create%s+sends?%f[%W]",
+    "%f[%w]don't%s+create%s+sends?%f[%W]",
+    "%f[%w]dont%s+create%s+sends?%f[%W]",
+    "%f[%w]no%s+sends?%f[%W]",
+    "%f[%w]without%s+sends?%f[%W]",
     "%f[%w]do%s+not%s+[^%.%!%?;]*routing[^%.%!%?;]*",
     "%f[%w]don't%s+[^%.%!%?;]*routing[^%.%!%?;]*",
     "%f[%w]dont%s+[^%.%!%?;]*routing[^%.%!%?;]*",
@@ -10775,7 +4895,8 @@ function Code.prompt_requests_sidechain_ducking(user_text)
     or lt:find("%f[%w]side%-chain%f[%W]") ~= nil
 end
 
-function Code.lua_satisfies_sidechain_ducking_send(lua_code, user_text)
+function Code.lua_satisfies_sidechain_ducking_send(
+    lua_code, user_text, require_functional_channels)
   if not lua_code or lua_code == "" then return false end
   local stripped = lua_code
     :gsub("%-%-%[%[.-%]%]", "")
@@ -10824,6 +4945,20 @@ function Code.lua_satisfies_sidechain_ducking_send(lua_code, user_text)
       add_alias(role, source)
       add_endpoint_variants(role, source)
     end
+    -- A single explicit route is often resolved through generic variables
+    -- populated by a name-matching loop. The requested endpoint names remain
+    -- visible in that loop, but the final CreateTrackSend call only contains
+    -- source_track/destination_track. Accept those conventional role names
+    -- for one-source requests while keeping multi-source routes strict.
+    if #explicit_sources == 1 then
+      for _, name in ipairs({ "source", "source_track", "src", "src_track" }) do
+        add_alias("source1", name)
+      end
+      for _, name in ipairs({
+          "destination", "destination_track", "dest", "dest_track" }) do
+        add_alias("dest", name)
+      end
+    end
   end
   local function short_alias_matches(text_value, alias)
     local norm = "_" .. tostring(text_value or "")
@@ -10869,6 +5004,11 @@ function Code.lua_satisfies_sidechain_ducking_send(lua_code, user_text)
       "getsetmediatrackinfo_string%s*%(%s*([%a_][%w_]*)%s*,%s*[\"']p_name[\"']%s*,%s*[\"']([^\"']+)[\"']") do
     local role = role_for_text(quoted)
     if role then add_alias(role, var) end
+  end
+  for indexed, quoted in lowered:gmatch(
+      "getsetmediatrackinfo_string%s*%(%s*([%a_][%w_]*%s*%[%s*%d+%s*%])%s*,%s*[\"']p_name[\"']%s*,%s*[\"']([^\"']+)[\"']") do
+    local role = role_for_text(quoted)
+    if role then add_alias(role, indexed) end
   end
   local named_tables = {}
   for table_var, body in lowered:gmatch(
@@ -10921,6 +5061,21 @@ function Code.lua_satisfies_sidechain_ducking_send(lua_code, user_text)
         end
       end
     end
+    local loop_name_pat =
+      "getsetmediatrackinfo_string%s*%(%s*([%a_][%w_]*)%s*,%s*[\"']p_name[\"']%s*,%s*"
+      .. names_var .. "%[%s*([%a_][%w_]*)%s*%+%s*1%s*%]"
+    for track_var, index_var in lowered:gmatch(loop_name_pat) do
+      local store_pat = "([%a_][%w_]*)%s*%[%s*" .. index_var
+        .. "%s*%+%s*1%s*%]%s*=%s*" .. track_var
+      for track_table in lowered:gmatch(store_pat) do
+        for idx, quoted in ipairs(entries) do
+          local role = role_for_text(quoted)
+          if role then
+            add_alias(role, track_table .. "[" .. tostring(idx) .. "]")
+          end
+        end
+      end
+    end
   end
   local function expr_matches_role(expr, role)
     expr = tostring(expr or ""):lower()
@@ -10954,28 +5109,67 @@ function Code.lua_satisfies_sidechain_ducking_send(lua_code, user_text)
         if expr_matches_role(rhs, "bass") then add_alias("bass", lhs) end
       end
     end
+    for lhs, rhs in lowered:gmatch(
+        "([%a_][%w_]*%s*%[%s*%d+%s*%])%s*=%s*([%a_][%w_]*)") do
+      if explicit then
+        for i = 1, #explicit_sources do
+          local role = "source" .. tostring(i)
+          if expr_matches_role(rhs, role) then add_alias(role, lhs) end
+        end
+        if expr_matches_role(rhs, "dest") then add_alias("dest", lhs) end
+      else
+        if expr_matches_role(rhs, "kick") then add_alias("kick", lhs) end
+        if expr_matches_role(rhs, "bass") then add_alias("bass", lhs) end
+      end
+    end
   end
   local send_count = 0
   local exact_send = false
   local explicit_matches = {}
-  local function note_send(src, dst)
+  local matched_sends = {}
+  local function note_send(src, dst, send_var)
     send_count = send_count + 1
     if explicit then
       for i = 1, #explicit_sources do
         local role = "source" .. tostring(i)
         if expr_matches_role(src, role) and expr_matches_role(dst, "dest") then
           explicit_matches[role] = true
+          if send_var then
+            matched_sends[#matched_sends + 1] = {
+              role = role,
+              source = src,
+              dest = dst,
+              send_var = send_var,
+            }
+          end
         end
       end
     elseif expr_matches_role(src, "kick") and expr_matches_role(dst, "bass") then
       exact_send = true
+      if send_var then
+        matched_sends[#matched_sends + 1] = {
+          role = "kick",
+          source = src,
+          dest = dst,
+          send_var = send_var,
+        }
+      end
     end
+  end
+  for send_var, src, dst in lowered:gmatch(
+      "local%s+([%a_][%w_]*)%s*=%s*reaper%.createtracksend%s*%(%s*([^,%)]-)%s*,%s*([^%)]+)%)") do
+    note_send(src, dst, send_var)
+  end
+  for send_var, src, dst in lowered:gmatch(
+      "[%s;]([%a_][%w_]*)%s*=%s*reaper%.createtracksend%s*%(%s*([^,%)]-)%s*,%s*([^%)]+)%)") do
+    note_send(src, dst, send_var)
   end
   for src, dst in lowered:gmatch(
       "reaper%.createtracksend%s*%(%s*([^,%)]-)%s*,%s*([^%)]+)%)") do
     note_send(src, dst)
   end
   local send_helpers = {}
+  local local_helpers = {}
   local function local_function_body(start_pos)
     local depth = 1
     local pos = start_pos
@@ -10993,10 +5187,15 @@ function Code.lua_satisfies_sidechain_ducking_send(lua_code, user_text)
   end
   local helper_pos = 1
   while true do
-    local s, e, fname = lowered:find(
-      "local%s+function%s+([%a_][%w_]*)%s*%b()%s*", helper_pos)
+    local s, e, fname, params = lowered:find(
+      "local%s+function%s+([%a_][%w_]*)%s*(%b())%s*", helper_pos)
     if not s then break end
     local body = local_function_body(e + 1)
+    local_helpers[fname] = {
+      body = body,
+      first_param = tostring(params or ""):match(
+        "^%(%s*([%a_][%w_]*)"),
+    }
     if body:find("reaper%.createtracksend%s*%(") then
       send_helpers[fname] = true
     end
@@ -11008,14 +5207,136 @@ function Code.lua_satisfies_sidechain_ducking_send(lua_code, user_text)
       if src and dst then note_send(src, dst) end
     end
   end
+  local routes_ok = exact_send
   if explicit then
     for i = 1, #explicit_sources do
       if not explicit_matches["source" .. tostring(i)] then return false end
     end
-    return #explicit_sources > 0
+    routes_ok = #explicit_sources > 0
   end
-  return exact_send
+  if not routes_ok or not require_functional_channels then return routes_ok end
+
+  local simple_numbers = {}
+  for name, value in lowered:gmatch(
+      "local%s+([%a_][%w_]*)%s*=%s*([%+%-]?%d*%.?%d+)%f[^%d%.]") do
+    simple_numbers[name] = tonumber(value)
+  end
+  local function numeric_value(expr)
+    expr = tostring(expr or ""):match("^%s*(.-)%s*$")
+    return tonumber(expr) or simple_numbers[expr]
+  end
+  local function quoted_key(expr)
+    return tostring(expr or ""):match("^%s*[\"']([^\"']+)[\"']%s*$")
+  end
+  local function compact_expr(expr)
+    return tostring(expr or ""):lower():gsub("%s+", "")
+  end
+  local function split_call_args(call)
+    call = tostring(call or "")
+    if call:sub(1, 1) == "(" and call:sub(-1) == ")" then
+      call = call:sub(2, -2)
+    end
+    local args, start_pos = {}, 1
+    local paren, brace, bracket = 0, 0, 0
+    local quote, escaped = nil, false
+    for i = 1, #call do
+      local char = call:sub(i, i)
+      if quote then
+        if escaped then
+          escaped = false
+        elseif char == "\\" then
+          escaped = true
+        elseif char == quote then
+          quote = nil
+        end
+      elseif char == "\"" or char == "'" then
+        quote = char
+      elseif char == "(" then
+        paren = paren + 1
+      elseif char == ")" then
+        paren = paren - 1
+      elseif char == "{" then
+        brace = brace + 1
+      elseif char == "}" then
+        brace = brace - 1
+      elseif char == "[" then
+        bracket = bracket + 1
+      elseif char == "]" then
+        bracket = bracket - 1
+      elseif char == "," and paren == 0 and brace == 0 and bracket == 0 then
+        args[#args + 1] = call:sub(start_pos, i - 1)
+        start_pos = i + 1
+      end
+    end
+    args[#args + 1] = call:sub(start_pos)
+    return args
+  end
+
+  local destination_role = explicit and "dest" or "bass"
+  local destination_channels_ok = false
+  for call in lowered:gmatch(
+      "reaper%.setmediatrackinfo_value%s*(%b())") do
+    local args = split_call_args(call)
+    if expr_matches_role(args[1], destination_role)
+        and quoted_key(args[2]) == "i_nchan"
+        and (numeric_value(args[3]) or 0) >= 4 then
+      destination_channels_ok = true
+      break
+    end
+  end
+  if not destination_channels_ok then
+    local channel_helpers = {}
+    for fname, helper in pairs(local_helpers) do
+      if helper.first_param then
+        for call in helper.body:gmatch(
+            "reaper%.setmediatrackinfo_value%s*(%b())") do
+          local args = split_call_args(call)
+          if compact_expr(args[1]) == compact_expr(helper.first_param)
+              and quoted_key(args[2]) == "i_nchan"
+              and (numeric_value(args[3]) or 0) >= 4 then
+            channel_helpers[fname] = true
+            break
+          end
+        end
+      end
+    end
+    for fname, args_text in lowered:gmatch(
+        "([%a_][%w_]*)%s*%(([^%)]*)%)") do
+      if channel_helpers[fname] then
+        local args = split_call_args("(" .. args_text .. ")")
+        if expr_matches_role(args[1], destination_role) then
+          destination_channels_ok = true
+          break
+        end
+      end
+    end
+  end
+  if not destination_channels_ok then return false end
+
+  local functional_roles = {}
+  for call in lowered:gmatch(
+      "reaper%.settracksendinfo_value%s*(%b())") do
+    local args = split_call_args(call)
+    if quoted_key(args[4]) == "i_dstchan"
+        and numeric_value(args[2]) == 0
+        and numeric_value(args[5]) == 2 then
+      for _, matched in ipairs(matched_sends) do
+        if compact_expr(args[3]) == compact_expr(matched.send_var)
+            and expr_matches_role(args[1], matched.role) then
+          functional_roles[matched.role] = true
+        end
+      end
+    end
+  end
+  if explicit then
+    for i = 1, #explicit_sources do
+      if not functional_roles["source" .. tostring(i)] then return false end
+    end
+    return true
+  end
+  return functional_roles.kick == true
 end
+
 
 function Code.prompt_requests_podcast_bus_all_sources(user_text)
   local lt = tostring(user_text or ""):lower():gsub("%s+", " ")
@@ -12588,6 +6909,10 @@ function Code.prompt_requests_track_creation(user_text)
     "%f[%w]creates%s+exactly%s+.-%f[%w]tracks%f[%W]",
     "%f[%w]create%s+one%s+track%f[%W]",
     "%f[%w]creates%s+one%s+track%f[%W]",
+    "%f[%w]create%s+a%s+new%s+track%f[%W]",
+    "%f[%w]creates%s+a%s+new%s+track%f[%W]",
+    "%f[%w]create%s+new%s+track%f[%W]",
+    "%f[%w]creates%s+new%s+track%f[%W]",
     "%f[%w]create%s+a%s+track%f[%W]",
     "%f[%w]creates%s+a%s+track%f[%W]",
     "%f[%w]create%s+track%s+named%f[%W]",
@@ -12595,8 +6920,10 @@ function Code.prompt_requests_track_creation(user_text)
     "%f[%w]create%s+tracks%s+named%f[%W]",
     "%f[%w]creates%s+tracks%s+named%f[%W]",
     "%f[%w]insert%s+a%s+track%f[%W]",
+    "%f[%w]insert%s+a%s+new%s+track%f[%W]",
     "%f[%w]insert%s+tracks%s+named%f[%W]",
     "%f[%w]add%s+a%s+track%f[%W]",
+    "%f[%w]add%s+a%s+new%s+track%f[%W]",
     "%f[%w]add%s+tracks%s+named%f[%W]",
     "%f[%w]make%s+.-%f[%w]folder%f[%W]",
     "%f[%w]make%s+.-%f[%w]tracks%f[%W]%s+with",
@@ -12875,6 +7202,72 @@ function Code.find_unsafe_item_duplication(lua_code, user_text)
   return nil
 end
 
+-- Shared vocabulary for the two narrow validators that still need to
+-- distinguish a requested effect family from an unrelated plug-in choice.
+Code.PLUGIN_FAMILY_INTENT_PATTERNS = {
+  eq = {
+    "%f[%w]eq%f[%W]", "equaliz", "equalis", "%f[%w]filter%f[%W]",
+    "%f[%w]muddy%f[%W]", "%f[%w]harsh%f[%W]", "%f[%w]bright%f[%W]",
+    "%f[%w]dark%f[%W]", "%f[%w]tone%f[%W]", "%f[%w]tonal%f[%W]",
+  },
+  compressor = {
+    "compress", "%f[%w]dynamics%f[%W]", "%f[%w]threshold%f[%W]",
+    "%f[%w]ratio%f[%W]", "%f[%w]glue%f[%W]", "%f[%w]leveler%f[%W]",
+  },
+  multiband_compressor = {
+    "multiband", "multi%-band",
+  },
+  delay = {
+    "%f[%w]delay%f[%W]", "%f[%w]echo%f[%W]", "%f[%w]slap%f[%W]",
+    "%f[%w]slapback%f[%W]",
+  },
+  reverb = {
+    "%f[%w]reverb%f[%W]", "%f[%w]verb%f[%W]", "%f[%w]room%f[%W]",
+    "%f[%w]hall%f[%W]", "%f[%w]plate%f[%W]",
+  },
+  gate = {
+    "%f[%w]gate%f[%W]", "%f[%w]gating%f[%W]",
+    "%f[%w]expander%f[%W]", "%f[%w]bleed%f[%W]",
+  },
+  limiter = {
+    "%f[%w]limit%f[%W]", "%f[%w]limiter%f[%W]",
+    "%f[%w]limiting%f[%W]", "%f[%w]ceiling%f[%W]",
+    "%f[%w]loudness%f[%W]", "maximiz",
+  },
+  deesser = {
+    "de%-esser", "de%s+esser", "%f[%w]deesser%f[%W]",
+  },
+  saturation = {
+    "saturat", "%f[%w]exciter%f[%W]", "%f[%w]distort",
+    "%f[%w]drive%f[%W]",
+  },
+  chorus = {
+    "%f[%w]chorus%f[%W]",
+  },
+  phaser = {
+    "%f[%w]phaser%f[%W]",
+  },
+  pitch_shift = {
+    "pitch%s+shift",
+  },
+  instrument = {
+    "%f[%w]instrument%f[%W]", "%f[%w]vsti%f[%W]",
+    "%f[%w]synth%f[%W]", "%f[%w]sampler%f[%W]",
+    "%f[%w]kontakt%f[%W]",
+  },
+}
+
+function Code.prompt_expresses_plugin_family_intent(user_prompt, family)
+  local prompt = tostring(user_prompt or ""):lower()
+  local patterns = Code.PLUGIN_FAMILY_INTENT_PATTERNS[
+    tostring(family or ""):lower()]
+  if prompt == "" or not patterns then return false end
+  for _, pattern in ipairs(patterns) do
+    if prompt:find(pattern) then return true end
+  end
+  return false
+end
+
 Code.MANUAL_ONLY_PLUGIN_POLICIES = {
   melodyne = {
     key = "melodyne",
@@ -12975,19 +7368,6 @@ function Code.manual_only_plugin_guidance(policy)
     .. "ReaPitch, ReaTune, or another effect."
 end
 
-function Code.manual_only_plugin_runtime_message(policy, operation)
-  policy = policy or Code.MANUAL_ONLY_PLUGIN_POLICIES.melodyne
-  return "ReaAssist blocked " .. tostring(operation or "this operation")
-    .. " for " .. tostring(policy.display_name or "this plug-in")
-    .. " before any project change. Its ARA state and Undo behavior are not "
-    .. "safe enough for ReaScript automation. Insert it manually as the first "
-    .. "Track FX and make the requested edit in its editor."
-end
-
--- Return generated-code operations that conflict with a manual-only product.
--- Prompt identity catches index-based writes whose code contains no plug-in
--- string. Code identity catches direct insertion even when the original prompt
--- is unavailable during a later manual Run.
 function Code.find_manual_only_plugin_operations(lua_code, user_text)
   if type(lua_code) ~= "string" or lua_code == "" then return nil end
   local stripped = lua_code:gsub("%-%-%[%[.-%]%]", "")
@@ -13165,6 +7545,15 @@ function Code.prompt_forbids_fx_addition(user_text)
         _mask_partial_fx_constraint(
           "%f[%w]" .. lead .. "%s+" .. qualifier .. "%s+"
             .. obj .. "%f[%W]")
+        _mask_partial_fx_constraint(
+          "%f[%w]" .. lead .. "%s+" .. qualifier
+            .. "%s+[^%.;\n]-[,/]%s*" .. obj .. "%f[%W]")
+        _mask_partial_fx_constraint(
+          "%f[%w]" .. lead .. "%s+" .. qualifier
+            .. "%s+[^%.;\n]-%s+or%s+" .. obj .. "%f[%W]")
+        _mask_partial_fx_constraint(
+          "%f[%w]" .. lead .. "%s+" .. qualifier
+            .. "%s+[^%.;\n]-%s+and%s+" .. obj .. "%f[%W]")
       end
     end
   end
@@ -13744,7 +8133,19 @@ function Code.find_track_creation_index_misuse(lua_code, user_text, snapshot)
         first = tonumber(loop_first),
         last = tonumber(loop_last),
         counted_insert = false,
+        index_aliases = {},
       }
+    end
+    if active_loop then
+      local alias, source = line:match(
+        "^%s*local%s+([%a_][%w_]*)%s*=%s*([%a_][%w_]*)%s*[%+%-]%s*%d+")
+      if not alias then
+        alias, source = line:match(
+          "^%s*local%s+([%a_][%w_]*)%s*=%s*([%a_][%w_]*)%s*$")
+      end
+      if alias and source == active_loop.var then
+        active_loop.index_aliases[alias] = true
+      end
     end
     local insert_idx =
       tonumber(line:match("reaper%.InsertTrackAtIndex%s*%(%s*(%d+)%s*,"))
@@ -13756,9 +8157,27 @@ function Code.find_track_creation_index_misuse(lua_code, user_text, snapshot)
       local insert_var = line:match(
         "reaper%.InsertTrackAtIndex%s*%(%s*([%a_][%w_]*)%s*,")
       local known_count = insert_var and counttracks_vars[insert_var]
-      if known_count then
+      if insert_var and active_loop and not active_loop.counted_insert
+          and active_loop.first and active_loop.last
+          and (known_count ~= nil
+            or active_loop.index_aliases[insert_var]) then
+        track_count = track_count
+          + math.abs(active_loop.last - active_loop.first) + 1
+        active_loop.counted_insert = true
+        if known_count ~= nil then counttracks_append_vars[insert_var] = true end
+        handled_insert = true
+      elseif known_count then
         track_count = math.max(track_count, known_count + 1)
         counttracks_append_vars[insert_var] = true
+        handled_insert = true
+      end
+    end
+    if not handled_insert then
+      local table_var, op, offset = line:match(
+        "reaper%.InsertTrackAtIndex%s*%(%s*#([%a_][%w_]*)%s*([%+%-])%s*(%d+)%s*,")
+      local table_len = table_var and table_lengths[table_var]
+      if table_len and op and offset then
+        track_count = track_count + 1
         handled_insert = true
       end
     end
@@ -13799,6 +8218,22 @@ function Code.find_track_creation_index_misuse(lua_code, user_text, snapshot)
     end
     for idx_text in line:gmatch("reaper%.GetTrack%s*%(%s*0%s*,%s*(%d+)%s*%)") do
       local api_idx = tonumber(idx_text)
+      if api_idx and api_idx >= track_count then
+        violations[#violations + 1] = {
+          line = line_no,
+          api_idx = api_idx,
+          expected_api_idx = track_count > 0 and (track_count - 1) or 0,
+          reason = "created_track_out_of_range",
+          source = line:match("^%s*(.-)%s*$"),
+        }
+      end
+    end
+    for table_var, op, offset in line:gmatch(
+        "reaper%.GetTrack%s*%(%s*0%s*,%s*#([%a_][%w_]*)%s*([%+%-])%s*(%d+)%s*%)") do
+      local table_len = table_lengths[table_var]
+      local delta = tonumber(offset)
+      local api_idx = table_len and delta
+        and (op == "+" and (table_len + delta) or (table_len - delta))
       if api_idx and api_idx >= track_count then
         violations[#violations + 1] = {
           line = line_no,
@@ -14564,284 +8999,6 @@ function Code.find_nil_prone_settrackselected_args(lua_code)
 end
 
 -- =============================================================================
--- Code.find_stock_fx_substitutions
--- =============================================================================
--- If the user explicitly names a stock Cockos plugin, do not let the generated
--- script silently substitute a third-party or JSFX alternative from the same
--- plugin family. This is intentionally narrow and only checks Track/Take
--- FX_AddByName string literals: explicit exact plugin requests are user intent,
--- not preference-hint suggestions.
---
--- Keep family-intent vocabulary in one matcher. The stock-substitution and
--- action-relevance validators previously maintained separate lists with
--- different matching rules, so ordinary intent such as "bleed", "glue", or
--- "hall" could authorize a plugin in one validator and be rejected by the
--- other. Patterns here intentionally preserve the broader prefix/frontier
--- matching already used by the stock-FX validator.
-Code.PLUGIN_FAMILY_INTENT_PATTERNS = {
-  eq = {
-    "%f[%w]eq%f[%W]", "equaliz", "equalis", "%f[%w]filter%f[%W]",
-    "%f[%w]muddy%f[%W]", "%f[%w]harsh%f[%W]", "%f[%w]bright%f[%W]",
-    "%f[%w]dark%f[%W]", "%f[%w]tone%f[%W]", "%f[%w]tonal%f[%W]",
-  },
-  compressor = {
-    "compress", "%f[%w]dynamics%f[%W]", "%f[%w]threshold%f[%W]",
-    "%f[%w]ratio%f[%W]", "%f[%w]glue%f[%W]", "%f[%w]leveler%f[%W]",
-  },
-  -- Currently used only to release an unrelated Melodyne-following clause.
-  -- Review this generic wording before adding the key to another classifier.
-  multiband_compressor = {
-    "multiband", "multi%-band",
-  },
-  delay = {
-    "%f[%w]delay%f[%W]", "%f[%w]echo%f[%W]", "%f[%w]slap%f[%W]",
-    "%f[%w]slapback%f[%W]",
-  },
-  reverb = {
-    "%f[%w]reverb%f[%W]", "%f[%w]verb%f[%W]", "%f[%w]room%f[%W]",
-    "%f[%w]hall%f[%W]", "%f[%w]plate%f[%W]",
-  },
-  gate = {
-    "%f[%w]gate%f[%W]", "%f[%w]gating%f[%W]",
-    "%f[%w]expander%f[%W]", "%f[%w]bleed%f[%W]",
-  },
-  limiter = {
-    "%f[%w]limit%f[%W]", "%f[%w]limiter%f[%W]",
-    "%f[%w]limiting%f[%W]", "%f[%w]ceiling%f[%W]",
-    -- Maximizer wording deliberately counts as limiter intent across the
-    -- existing stock-substitution and action-relevance validators.
-    "%f[%w]loudness%f[%W]", "maximiz",
-  },
-  -- These additional family keys currently release an unrelated effect clause
-  -- after a declarative Melodyne mention. Existing stock-substitution and
-  -- action-relevance classifiers do not emit these keys. Review their generic
-  -- wording before adding any of them to those classifiers.
-  deesser = {
-    "de%-esser", "de%s+esser", "%f[%w]deesser%f[%W]",
-  },
-  saturation = {
-    "saturat", "%f[%w]exciter%f[%W]", "%f[%w]distort",
-    "%f[%w]drive%f[%W]",
-  },
-  chorus = {
-    "%f[%w]chorus%f[%W]",
-  },
-  phaser = {
-    "%f[%w]phaser%f[%W]",
-  },
-  pitch_shift = {
-    "pitch%s+shift",
-  },
-  instrument = {
-    "%f[%w]instrument%f[%W]", "%f[%w]vsti%f[%W]",
-    "%f[%w]synth%f[%W]", "%f[%w]sampler%f[%W]",
-    "%f[%w]kontakt%f[%W]",
-  },
-}
-
-function Code.prompt_expresses_plugin_family_intent(user_prompt, family)
-  local prompt = tostring(user_prompt or ""):lower()
-  local patterns = Code.PLUGIN_FAMILY_INTENT_PATTERNS[
-    tostring(family or ""):lower()]
-  if prompt == "" or not patterns then return false end
-  for _, pattern in ipairs(patterns) do
-    if prompt:find(pattern) then return true end
-  end
-  return false
-end
-
-function Code.find_stock_fx_substitutions(lua_code, user_prompt)
-  if not lua_code or lua_code == "" then return nil end
-  local prompt = tostring(user_prompt or ""):lower()
-  if prompt == "" then return nil end
-
-  local specs = {
-    {
-      requested = "ReaEQ",
-      prompt_token = "reaeq",
-      family = "eq",
-      substitutes = {
-        { pattern = "pro%-q", label = "FabFilter Pro-Q" },
-        { pattern = "reeq",  label = "ReEQ" },
-      },
-    },
-    {
-      requested = "ReaComp",
-      prompt_token = "reacomp",
-      family = "compressor",
-      substitutes = {
-        { pattern = "pro%-c", label = "FabFilter Pro-C" },
-      },
-    },
-    {
-      requested = "ReaDelay",
-      prompt_token = "readelay",
-      family = "delay",
-      substitutes = {
-        { pattern = "timeless", label = "FabFilter Timeless" },
-      },
-    },
-    {
-      requested = "ReaVerbate",
-      prompt_token = "reaverbate",
-      family = "reverb",
-      substitutes = {
-        { pattern = "pro%-r", label = "FabFilter Pro-R" },
-      },
-    },
-    {
-      requested = "ReaGate",
-      prompt_token = "reagate",
-      family = "gate",
-      substitutes = {
-        { pattern = "pro%-g", label = "FabFilter Pro-G" },
-      },
-    },
-    {
-      requested = "ReaLimit",
-      prompt_token = "realimit",
-      family = "limiter",
-      substitutes = {
-        { pattern = "pro%-l", label = "FabFilter Pro-L" },
-      },
-    },
-  }
-
-  local requested, requested_order = {}, {}
-  for _, spec in ipairs(specs) do
-    if prompt:find(spec.prompt_token, 1, true) then
-      requested[spec.requested] = true
-      requested_order[#requested_order + 1] = spec.requested
-    end
-  end
-  if next(requested) == nil then return nil end
-
-  local stripped = lua_code:gsub("%-%-[^\n]*", "")
-
-  local function line_for_pos(pos)
-    return Code._lua_line_for_pos(stripped, pos)
-  end
-
-  local function parse_args(open_pos)
-    return Code._parse_lua_call_args(stripped, open_pos)
-  end
-
-  local function string_literal_value(v)
-    v = tostring(v or ""):match("^%s*(.-)%s*$") or ""
-    local q = v:sub(1, 1)
-    if q ~= '"' and q ~= "'" then return nil end
-    local out = {}
-    local i = 2
-    while i <= #v do
-      local c = v:sub(i, i)
-      if c == "\\" then
-        i = i + 1
-        if i <= #v then out[#out + 1] = v:sub(i, i) end
-      elseif c == q then
-        return table.concat(out)
-      else
-        out[#out + 1] = c
-      end
-      i = i + 1
-    end
-    return nil
-  end
-
-  -- Best effort only: catch simple `local id = "Plugin"` aliases so explicit
-  -- stock-plugin substitutions cannot hide behind a one-hop variable.
-  local string_vars = {}
-  for name, expr in stripped:gmatch("local%s+([%a_][%w_]*)%s*=%s*([\"'][^\n]-[\"'])") do
-    local value = string_literal_value(expr)
-    if value and value ~= "" then string_vars[name] = value end
-  end
-
-  local calls = {}
-  for _, fn in ipairs({ "TrackFX_AddByName", "TakeFX_AddByName" }) do
-    local pos = 1
-    while true do
-      local s, open_pos = stripped:find("reaper%." .. fn .. "%s*%(", pos)
-      if not s then break end
-      local args = parse_args(open_pos)
-      local plugin = args and string_literal_value(args[2])
-      if (not plugin or plugin == "") and args then
-        local var_name = tostring(args[2] or ""):match("^%s*([%a_][%w_]*)%s*$")
-        if var_name then plugin = string_vars[var_name] end
-      end
-      if plugin and plugin ~= "" then
-        calls[#calls + 1] = {
-          fn = fn,
-          plugin = plugin,
-          plugin_lower = plugin:lower(),
-          line = line_for_pos(s),
-        }
-      end
-      pos = open_pos + 1
-    end
-  end
-  if #calls == 0 then return nil end
-
-  local violations, seen = {}, {}
-  local function prompt_allows_generic_stock(spec)
-    if prompt:find(spec.prompt_token, 1, true) then return true end
-    return Code.prompt_expresses_plugin_family_intent(prompt, spec.family)
-  end
-
-  local requested_anchor = requested_order[1] or "requested stock FX"
-  for _, spec in ipairs(specs) do
-    if requested[spec.requested] then
-      for _, call in ipairs(calls) do
-        for _, sub in ipairs(spec.substitutes) do
-          if call.plugin_lower:find(sub.pattern)
-             and not prompt:find(sub.pattern) then
-            local key = spec.requested .. ":" .. call.plugin_lower .. ":"
-              .. tostring(call.line)
-            if not seen[key] then
-              seen[key] = true
-              violations[#violations + 1] = {
-                requested = spec.requested,
-                substitute = call.plugin,
-                substitute_label = sub.label,
-                fn = call.fn,
-                line = call.line,
-              }
-            end
-          end
-        end
-      end
-    end
-  end
-
-  for _, call in ipairs(calls) do
-    for _, spec in ipairs(specs) do
-      if call.plugin_lower:find(spec.prompt_token, 1, true)
-          and not requested[spec.requested]
-          and not prompt_allows_generic_stock(spec) then
-        local key = "unrequested:" .. spec.requested .. ":"
-          .. call.plugin_lower .. ":" .. tostring(call.line)
-        if not seen[key] then
-          seen[key] = true
-          violations[#violations + 1] = {
-            requested = requested_anchor,
-            substitute = call.plugin,
-            substitute_label = "unrequested " .. spec.requested,
-            fn = call.fn,
-            line = call.line,
-          }
-        end
-      end
-    end
-  end
-
-  if #violations == 0 then return nil end
-  table.sort(violations, function(a, b)
-    if a.line ~= b.line then return a.line < b.line end
-    if a.requested ~= b.requested then return a.requested < b.requested end
-    return tostring(a.substitute) < tostring(b.substitute)
-  end)
-  return violations
-end
-
--- =============================================================================
 -- Code.find_timecode_generator_fx_misuse
 -- =============================================================================
 -- SMPTE/LTC/MTC generation is a native REAPER action/item workflow, not a
@@ -14927,349 +9084,6 @@ function Code.find_timecode_generator_fx_misuse(lua_code, user_prompt)
             plugin = plugin,
             reason = "timecode_generator_as_fx",
           }
-        end
-      end
-      pos = open_pos + 1
-    end
-  end
-
-  if #findings == 0 then return nil end
-  table.sort(findings, function(a, b)
-    if a.line ~= b.line then return a.line < b.line end
-    if a.fn ~= b.fn then return a.fn < b.fn end
-    return tostring(a.plugin) < tostring(b.plugin)
-  end)
-  return findings
-end
-
--- =============================================================================
--- Code.find_preferred_fx_identifier_drift
--- =============================================================================
--- Preferred-plugin context gives the model exact AddByName identifiers such as
--- "VST3: Pro-G". After hidden repair retries, weaker models sometimes strip the
--- prefix/vendor and fall back to bare names like "Pro-G", which can fail on
--- installs where REAPER requires the exact identifier. Catch those before
--- auto-run and ask for a focused identifier-only repair.
-function Code.find_preferred_fx_identifier_drift(lua_code)
-  if not lua_code or lua_code == "" then return nil end
-  if not FXCache or not FXCache.get_preferred_types then return nil end
-
-  local prefs_map = FXCache.get_preferred_types() or {}
-  local preferred = {}
-  local function strip_prefix(s)
-    return tostring(s or ""):gsub("^[A-Za-z][A-Za-z0-9]*:%s*", "")
-  end
-  local function strip_vendor(s)
-    return tostring(s or ""):gsub("%s+%b()", "")
-  end
-  local function has_prefix(s)
-    return tostring(s or ""):find("^[A-Za-z][A-Za-z0-9]*:%s*") ~= nil
-  end
-  local function identifier_loose_match(a, b)
-    a = tostring(a or ""):lower()
-    b = tostring(b or ""):lower()
-    if a == "" or b == "" then return false end
-    if a == b then return true end
-    if #a < 4 or #b < 4 then return false end
-    local pa = "%f[%w_]" .. a:gsub("(%W)", "%%%1") .. "%f[^%w_]"
-    local pb = "%f[%w_]" .. b:gsub("(%W)", "%%%1") .. "%f[^%w_]"
-    return b:find(pa) ~= nil or a:find(pb) ~= nil
-  end
-  for type_key, ident in pairs(prefs_map) do
-    ident = tostring(ident or "")
-    if ident ~= "" and FXCache.canonicalize_identifier then
-      ident = FXCache.canonicalize_identifier(type_key, ident)
-    end
-    if ident ~= "" and has_prefix(ident) then
-      local bare = strip_vendor(strip_prefix(ident)):lower()
-      if bare ~= "" then
-        preferred[#preferred + 1] = {
-          type_key = tostring(type_key or ""),
-          exact = ident,
-          bare = bare,
-        }
-      end
-    end
-  end
-  if #preferred == 0 then return nil end
-
-  local stripped = lua_code:gsub("%-%-[^\n]*", "")
-  local function line_for_pos(pos)
-    return Code._lua_line_for_pos(stripped, pos)
-  end
-
-  local function parse_args(open_pos)
-    return Code._parse_lua_call_args(stripped, open_pos)
-  end
-
-  local function string_literal_value(v)
-    v = tostring(v or ""):match("^%s*(.-)%s*$") or ""
-    local q = v:sub(1, 1)
-    if q ~= '"' and q ~= "'" then return nil end
-    local out = {}
-    local i = 2
-    while i <= #v do
-      local c = v:sub(i, i)
-      if c == "\\" then
-        i = i + 1
-        if i <= #v then out[#out + 1] = v:sub(i, i) end
-      elseif c == q then
-        return table.concat(out)
-      else
-        out[#out + 1] = c
-      end
-      i = i + 1
-    end
-    return nil
-  end
-
-  local violations, seen = {}, {}
-  for _, fn in ipairs({ "TrackFX_AddByName", "TakeFX_AddByName" }) do
-    local pos = 1
-    while true do
-      local s, open_pos = stripped:find("reaper%." .. fn .. "%s*%(", pos)
-      if not s then break end
-      local args = parse_args(open_pos)
-      local plugin = args and string_literal_value(args[2])
-      if plugin and plugin ~= "" and not has_prefix(plugin) then
-        local normalized = strip_vendor(plugin):lower()
-        for _, pref in ipairs(preferred) do
-          if identifier_loose_match(normalized, pref.bare) then
-            local key = fn .. ":" .. normalized .. ":" .. pref.exact .. ":"
-              .. tostring(line_for_pos(s))
-            if not seen[key] then
-              seen[key] = true
-              violations[#violations + 1] = {
-                fn = fn,
-                plugin = plugin,
-                exact = pref.exact,
-                type_key = pref.type_key,
-                line = line_for_pos(s),
-              }
-            end
-          end
-        end
-      end
-      pos = open_pos + 1
-    end
-  end
-  if #violations == 0 then return nil end
-  table.sort(violations, function(a, b)
-    if a.line ~= b.line then return a.line < b.line end
-    return tostring(a.plugin) < tostring(b.plugin)
-  end)
-  return violations
-end
-
--- =============================================================================
--- Code.find_installed_fx_identifier_drift
--- =============================================================================
--- Memoized derived installed-FX index (built once per installed-FX snapshot,
--- reused across every generated-code candidate in the same response). Building
--- installed_entries pcalls FXCache.canonicalize_identifier once per installed
--- plugin, so a multi-thousand-plugin install must not pay that pass on each
--- candidate. populate_installed_fx rebuilds its source tables wholesale on
--- repopulation, so table identity is a correct invalidation signal: a fresh
--- CTX._installed_fx_entries (or the fallback list when raw entries are absent)
--- misses the memo and rebuilds; the same table hits it.
-local _installed_fx_index_memo_key = nil
-local _installed_fx_index_memo = nil
---
--- Models sometimes preserve the requested plugin words but invent punctuation
--- inside an otherwise prefix-shaped AddByName identifier, for example:
---
---   local fx_ident = "JS: Tukan/Tape_Recorder_S_2"
---   reaper.TrackFX_AddByName(track, fx_ident, false, -1)
---
--- That is relevant to the user's request, but it is not an installed REAPER
--- identifier. Before Auto-Run, resolve only a unique punctuation-insensitive
--- match from EnumInstalledFX and ask the model to copy that exact identifier.
--- Zero or multiple matches are left alone rather than guessed. A first-pass
--- punctuation-sensitive comparison (with trailing vendor metadata removed)
--- preserves already-loadable forms such as `VST3: Pro-Q 4` when the installed
--- display entry is `VST3: Pro-Q 4 (FabFilter)`.
-function Code.find_installed_fx_identifier_drift(lua_code)
-  if not lua_code or lua_code == "" then return nil end
-  local stripped = lua_code:gsub("%-%-[^\n]*", "")
-  if not stripped:find("FX_AddByName", 1, true) then return nil end
-  if not CTX or not CTX.populate_installed_fx then return nil end
-  local ok_installed, installed = pcall(CTX.populate_installed_fx)
-  if not ok_installed or type(installed) ~= "table" or #installed == 0 then
-    return nil
-  end
-
-  local function trim(s)
-    return tostring(s or ""):match("^%s*(.-)%s*$") or ""
-  end
-  local function strip_vendor(s)
-    return trim(tostring(s or ""):gsub("%s*%b()%s*$", ""))
-  end
-  local function parts(identifier)
-    local prefix, rest = trim(identifier):match(
-      "^([A-Za-z][A-Za-z0-9]*):%s*(.+)$")
-    if not prefix or not rest then return nil end
-    local raw_base = trim(rest):lower():gsub("%s+", " ")
-    local base = strip_vendor(rest):lower():gsub("%s+", " ")
-    local compact = base:gsub("[^%w]", "")
-    return {
-      prefix = prefix:lower(),
-      raw_base = raw_base,
-      raw_compact = raw_base:gsub("[^%w]", ""),
-      base = base,
-      compact = compact,
-    }
-  end
-
-  -- Memo key: the raw-entries table identity when present, otherwise the
-  -- installed list identity. Both are rebuilt wholesale on repopulation, so a
-  -- new identity is a correct miss.
-  local raw_entries = CTX._installed_fx_entries
-  local memo_key = (type(raw_entries) == "table" and #raw_entries > 0)
-    and raw_entries or installed
-
-  local installed_entries
-  if _installed_fx_index_memo_key == memo_key and _installed_fx_index_memo then
-    installed_entries = _installed_fx_index_memo
-  else
-    installed_entries = {}
-    if type(raw_entries) ~= "table" or #raw_entries == 0 then
-      raw_entries = {}
-      for _, identifier in ipairs(installed) do
-        raw_entries[#raw_entries + 1] = { name = identifier }
-      end
-    end
-    for _, row in ipairs(raw_entries) do
-      local identifier = type(row) == "table" and row.name or row
-      local p = parts(identifier)
-      if p and #p.compact >= 4 then
-        local exact = tostring(identifier)
-        if FXCache and FXCache.canonicalize_identifier then
-          local ok_canonical, canonical = pcall(
-            FXCache.canonicalize_identifier, nil, exact)
-          if ok_canonical and type(canonical) == "string"
-             and canonical ~= "" then exact = canonical end
-        end
-        installed_entries[#installed_entries + 1] = {
-          prefix = p.prefix,
-          base = p.base,
-          compact = p.compact,
-          exact = exact,
-          match_kind = "display",
-        }
-        -- EnumInstalledFX's JS display name is loadable but does not include
-        -- the relative Effects/ path. Its raw ident does. Keep that ident
-        -- verbatim: parentheses and punctuation are literal JSFX path content,
-        -- not vendor metadata. Binary-format idents are filesystem paths and
-        -- intentionally remain outside this AddByName repair path.
-        local raw_ident = type(row) == "table"
-          and tostring(row.ident or "") or ""
-        local ident_compact = raw_ident:lower():gsub("[^%w]", "")
-        if p.prefix == "js" and raw_ident:match("%S")
-           and #ident_compact >= 4 then
-          installed_entries[#installed_entries + 1] = {
-            prefix = p.prefix,
-            compact = ident_compact,
-            exact = "JS: " .. raw_ident,
-            match_kind = "js_ident",
-          }
-        end
-      end
-    end
-    _installed_fx_index_memo_key = memo_key
-    _installed_fx_index_memo = installed_entries
-  end
-  if #installed_entries == 0 then return nil end
-
-  local function string_literal_value(v)
-    v = trim(v)
-    local q = v:sub(1, 1)
-    if q ~= '"' and q ~= "'" then return nil end
-    local out = {}
-    local i = 2
-    while i <= #v do
-      local c = v:sub(i, i)
-      if c == "\\" then
-        i = i + 1
-        if i <= #v then out[#out + 1] = v:sub(i, i) end
-      elseif c == q then
-        return table.concat(out)
-      else
-        out[#out + 1] = c
-      end
-      i = i + 1
-    end
-    return nil
-  end
-
-  -- One-hop literal aliases cover the common generated-code shape without
-  -- treating unrelated message/documentation strings as plugin identifiers.
-  local string_vars = {}
-  for name, expr in stripped:gmatch(
-      "local%s+([%a_][%w_]*)%s*=%s*([\"'][^\n]-[\"'])") do
-    local value = string_literal_value(expr)
-    if value and value ~= "" then string_vars[name] = value end
-  end
-
-  local findings, seen = {}, {}
-  for _, fn in ipairs({ "TrackFX_AddByName", "TakeFX_AddByName" }) do
-    local pos = 1
-    while true do
-      local s, open_pos = stripped:find("reaper%." .. fn .. "%s*%(", pos)
-      if not s then break end
-      local args = Code._parse_lua_call_args(stripped, open_pos)
-      local plugin = args and string_literal_value(args[2])
-      if (not plugin or plugin == "") and args then
-        local var_name = trim(args[2]):match("^([%a_][%w_]*)$")
-        if var_name then plugin = string_vars[var_name] end
-      end
-      local candidate = plugin and parts(plugin) or nil
-      if candidate and #candidate.compact >= 4 then
-        local already_loadable = false
-        local candidate_exact = trim(plugin):lower()
-        for _, entry in ipairs(installed_entries) do
-          if entry.prefix == candidate.prefix then
-            if entry.match_kind == "display"
-               and entry.base == candidate.base then
-              already_loadable = true
-              break
-            elseif entry.match_kind == "js_ident"
-               and trim(entry.exact):lower() == candidate_exact then
-              already_loadable = true
-              break
-            end
-          end
-        end
-        if not already_loadable then
-          local matches = {}
-          for _, entry in ipairs(installed_entries) do
-            local candidate_compact = entry.match_kind == "js_ident"
-              and candidate.raw_compact or candidate.compact
-            if entry.prefix == candidate.prefix
-               and entry.compact == candidate_compact then
-              matches[entry.exact:lower()] = entry.exact
-            end
-          end
-          local exact, match_count = nil, 0
-          for _, installed_exact in pairs(matches) do
-            exact = installed_exact
-            match_count = match_count + 1
-          end
-          if match_count == 1
-             and trim(exact):lower() ~= candidate_exact then
-            local line = Code._lua_line_for_pos(stripped, s)
-            local key = fn .. ":" .. tostring(plugin):lower() .. ":"
-              .. tostring(exact):lower() .. ":" .. tostring(line)
-            if not seen[key] then
-              seen[key] = true
-              findings[#findings + 1] = {
-                fn = fn,
-                plugin = plugin,
-                exact = exact,
-                line = line,
-                source = "installed_fx",
-              }
-            end
-          end
         end
       end
       pos = open_pos + 1
@@ -15588,722 +9402,6 @@ function Code.find_trackfx_addbyname_recfx_misuse(lua_code, user_text)
   return findings
 end
 
--- =============================================================================
--- Code.find_proq4_bell_slope_violations
--- =============================================================================
--- Pro-Q 4's GUI-created Bell bands default to 12 dB/oct slope. Generated
--- scripts that create/configure a fresh Bell boost/cut through raw parameter
--- writes can leave the slope at the host/plugin state instead, observed as
--- 48 dB/oct on DeepSeek output. Catch the high-confidence literal-index case:
--- Pro-Q 4 is being added, a Bell band has Gain + Shape writes, but that same
--- band does not set Slope via the fingerprint-validated current Pro-Q 4
--- direct-normalized 12 dB/oct value. The display-helper form remains accepted
--- for generic/live-discovery scripts, but the validated profile should prefer
--- the compact direct mapping so weaker models do not need to paste a long
--- probe helper.
-function Code.profile_resolver_spec_bindings(lua_code)
-  if type(lua_code) ~= "string" or lua_code == "" then return nil end
-  local stripped = _lua_code_only_preserving_offsets(lua_code)
-  local bindings = {}
-  local search_pos = 1
-  while true do
-    local call_start, call_open = stripped:find(
-      "%f[%w_]reaassist_resolve_profile_params%s*%(", search_pos)
-    if not call_start then break end
-    local before = stripped:sub(1, call_start - 1)
-    local line_start = (before:match(".*()\n") or 0) + 1
-    local assignment = stripped:sub(line_start, call_start - 1)
-    local mapped_var, error_var = assignment:match(
-      "^%s*local%s+([%a_][%w_]*)%s*,%s*([%a_][%w_]*)%s*=%s*$")
-    if not mapped_var then
-      mapped_var, error_var = assignment:match(
-        "^%s*([%a_][%w_]*)%s*,%s*([%a_][%w_]*)%s*=%s*$")
-    end
-    if not mapped_var then
-      mapped_var = assignment:match(
-        "^%s*local%s+([%a_][%w_]*)%s*=%s*$")
-        or assignment:match("^%s*([%a_][%w_]*)%s*=%s*$")
-    end
-
-    local args, call_close = Code._parse_lua_call_args(stripped, call_open)
-    local binding = {
-      mapped_var = mapped_var,
-      error_var = error_var,
-      call_start = call_start,
-      call_close = call_close,
-      track_expr = args and Code._lua_trim_expr(args[1]) or nil,
-      fx_expr = args and Code._lua_trim_expr(args[2]) or nil,
-      specs = {},
-    }
-    local specs_src = args and args[3] or nil
-    if mapped_var and specs_src then
-      local depth, entry_start = 0, nil
-      for i = 1, #specs_src do
-        local char = specs_src:sub(i, i)
-        if char == "{" then
-          depth = depth + 1
-          if depth == 2 then entry_start = i end
-        elseif char == "}" then
-          if depth == 2 and entry_start then
-            local entry = specs_src:sub(entry_start, i)
-            binding.specs[#binding.specs + 1] = {
-              index = tonumber(entry:match(
-                "%f[%w_]index%s*=%s*([%+%-]?%d+)")),
-            }
-            entry_start = nil
-          end
-          depth = depth - 1
-        end
-      end
-    end
-    bindings[#bindings + 1] = binding
-    search_pos = (call_close or call_open) + 1
-  end
-  if #bindings == 0 then return nil end
-  return bindings
-end
-
-function Code.find_proq4_bell_slope_violations(lua_code)
-  if not lua_code or lua_code == "" then return nil end
-  local stripped = lua_code:gsub("%-%-[^\n]*", "")
-  local lower = stripped:lower()
-  if not (lower:find("trackfx_addbyname", 1, true)
-          and lower:find("pro%-q%s*4")) then
-    return nil
-  end
-
-  local lines = {}
-  for line in (stripped .. "\n"):gmatch("([^\n]*)\n") do
-    lines[#lines + 1] = line
-  end
-
-  local function split_args(src)
-    return Code._split_lua_args(src)
-  end
-
-  local function call_args(line, name)
-    local s, e = line:find(name .. "%s*%(")
-    if not s then return nil end
-    local rest = line:sub(e + 1)
-    local close = rest:match("^(.*)%)%s*$")
-    if not close then close = rest:match("^(.*)%)") end
-    return split_args(close or rest)
-  end
-
-  local function literal_number(expr)
-    expr = tostring(expr or ""):match("^%s*(.-)%s*$") or ""
-    return tonumber(expr)
-  end
-
-  local function trim_expr(expr)
-    return tostring(expr or ""):match("^%s*(.-)%s*$") or ""
-  end
-
-  local function base_for_idx(idx, offset)
-    idx = tonumber(idx)
-    if not idx then return nil end
-    local base = idx - offset
-    if base < 0 or (base % 23) ~= 0 then return nil end
-    return base
-  end
-
-  local function band_for_base(base)
-    return math.floor(base / 23) + 1
-  end
-
-  local function is_slope_norm_12(value)
-    value = tonumber(value)
-    return value and math.abs(value - 0.2) <= 0.0005
-  end
-
-  local bands = {}
-  local function ensure_band(base)
-    bands[base] = bands[base] or {
-      base = base,
-      band = band_for_base(base),
-      slope_idx = base + 6,
-    }
-    return bands[base]
-  end
-
-  local proq_fx_exprs = {}
-  for _, line in ipairs(lines) do
-    local args = call_args(line, "reaper%.TrackFX_AddByName")
-    if args and args[2]
-       and tostring(args[2]):lower():find("pro%-q%s*4") then
-      local lhs = line:match(
-        "^%s*local%s+([%a_][%w_]*)%s*=%s*reaper%.TrackFX_AddByName%s*%(")
-        or line:match(
-          "^%s*([%a_][%w_]*)%s*=%s*reaper%.TrackFX_AddByName%s*%(")
-      if lhs then proq_fx_exprs[lhs] = true end
-    end
-  end
-
-  if not next(proq_fx_exprs) then return nil end
-
-  local function is_proq_fx_expr(expr)
-    return proq_fx_exprs[trim_expr(expr)] == true
-  end
-
-  local resolved_indices = {}
-  for _, binding in ipairs(
-      Code.profile_resolver_spec_bindings(lua_code) or {}) do
-    if binding.mapped_var and is_proq_fx_expr(binding.fx_expr) then
-      for ordinal, spec in ipairs(binding.specs or {}) do
-        if spec.index ~= nil then
-          resolved_indices[
-            binding.mapped_var .. "[" .. tostring(ordinal) .. "]"
-          ] = spec.index
-        end
-      end
-    end
-  end
-
-  local function parameter_index(expr)
-    local literal = literal_number(expr)
-    if literal ~= nil then return literal end
-    return resolved_indices[trim_expr(expr):gsub("%s+", "")]
-  end
-
-  for line_no, line in ipairs(lines) do
-    for _, name in ipairs({
-      "reaper%.TrackFX_SetParamNormalized",
-      "reaper%.TrackFX_SetParam",
-    }) do
-      local args = call_args(line, name)
-      if args and is_proq_fx_expr(args[2]) then
-        local idx = parameter_index(args[3])
-        local val = literal_number(args[4])
-        local shape_base = base_for_idx(idx, 5)
-        if shape_base and val and math.abs(val) < 0.000001 then
-          local b = ensure_band(shape_base)
-          b.shape_bell = true
-          b.shape_line = b.shape_line or line_no
-        end
-        local gain_base = base_for_idx(idx, 3)
-        if gain_base and args[4] and tostring(args[4]):match("%S") then
-          local b = ensure_band(gain_base)
-          b.gain = true
-          b.gain_line = b.gain_line or line_no
-        end
-        local slope_base = base_for_idx(idx, 6)
-        if slope_base then
-          local b = ensure_band(slope_base)
-          b.slope_direct = true
-          b.slope_direct_line = b.slope_direct_line or line_no
-          if name:find("SetParamNormalized", 1, true)
-             and is_slope_norm_12(val) then
-            b.slope_direct_12 = true
-          end
-        end
-      end
-    end
-
-    local args = call_args(line, "set_param_display")
-    if args and is_proq_fx_expr(args[2]) then
-      local idx = parameter_index(args[3])
-      local target = literal_number(args[4])
-      local slope_base = base_for_idx(idx, 6)
-      if slope_base then
-        local b = ensure_band(slope_base)
-        if target and math.abs(target - 12) < 0.000001 then
-          b.slope_display_12 = true
-          b.slope_display_line = b.slope_display_line or line_no
-        else
-          b.slope_other_display = true
-          b.slope_other_line = b.slope_other_line or line_no
-        end
-      end
-    end
-  end
-
-  local violations = {}
-  for _, b in pairs(bands) do
-    if b.shape_bell and b.gain
-       and not b.slope_display_12
-       and not b.slope_direct_12 then
-      violations[#violations + 1] = {
-        band = b.band,
-        line = b.shape_line or b.gain_line or b.slope_direct_line or 1,
-        slope_idx = b.slope_idx,
-        direct_norm = b.slope_direct == true,
-        wrong_display = b.slope_other_display == true,
-      }
-    end
-  end
-
-  if #violations == 0 then return nil end
-  table.sort(violations, function(a, b)
-    if a.line ~= b.line then return a.line < b.line end
-    return tostring(a.band) < tostring(b.band)
-  end)
-  return violations
-end
-
--- =============================================================================
--- Code.find_reeq_gain_mapping_violations
--- =============================================================================
--- ReaEQ band-gain parameters do not share the generic raw or normalized
--- mappings that models often invent. When only live fx_params context is
--- available, the safe contract is to work in displayed dB through the
--- canonical set_param_display helper. Keep this scanner intentionally narrow:
--- literal or simple-literal-aliased ReaEQ lookups, literal/simple-literal
--- band-gain indices, and direct TrackFX writes or helper calls whose target
--- can be classified confidently.
-
-function Code.prompt_requests_relative_db_adjustment(user_text)
-  local text = tostring(user_text or ""):lower():gsub("%s+", " ")
-  if text == "" then return false end
-  local by_db = text:find(
-    "%f[%a]by%f[%A]%s*[+-]?%s*%d*%.?%d+%s*d%s*b%f[%A]")
-    or text:find(
-      "%f[%a]by%f[%A]%s*[+-]?%s*%d*%.?%d+%s*decibel%f[%A]")
-    or text:find(
-      "%f[%a]by%f[%A]%s*[+-]?%s*%d*%.?%d+%s*decibels%f[%A]")
-  if not by_db then return false end
-  for _, pattern in ipairs({
-    "lower", "lowered", "reduce", "reduced", "decrease", "decreased",
-    "drop", "dropped", "cut", "raise", "raised", "increase", "increased",
-    "boost", "boosted", "bump", "bumped", "nudge", "nudged",
-    "lift", "lifted", "turn%s+down", "turn%s+up",
-  }) do
-    if text:find("%f[%a]" .. pattern .. "%f[%A]") then return true end
-  end
-  return false
-end
-
-function Code.reeq_live_gain_gate_active(sticky_context, opts)
-  if type(sticky_context) ~= "table" then return false end
-  opts = type(opts) == "table" and opts or {}
-  local live_values = false
-  local reference_pinned = false
-
-  local function mentions_reeq(payload, require_scope)
-    for part in tostring(payload or ""):gmatch("[^/]+") do
-      local name = part
-      if require_scope then
-        if not name:match("@%s*%d+%s*$") then goto continue_part end
-        name = name:gsub("@%s*%d+%s*$", "")
-      end
-      local normalized = name:lower():gsub("[^%a%d]", "")
-      if normalized:find("reaeq", 1, true) then return true end
-      ::continue_part::
-    end
-    return false
-  end
-
-  for key in pairs(sticky_context) do
-    local lower = tostring(key or ""):lower()
-    local fx_payload = lower:match("^fx:(.+)$")
-    if fx_payload and mentions_reeq(fx_payload, false) then
-      -- The mapping risk comes from using live ReaEQ values for a generated
-      -- write, not from whether the read was scoped to one track. Keep
-      -- unscoped read-only inspection available; the downstream scanner only
-      -- reports an actual unsafe gain write.
-      live_values = true
-    end
-    local ref_payload = lower:match("^plugin_ref:(.+)$")
-    if ref_payload and mentions_reeq(ref_payload, false) then
-      -- A reference pulled only because the model requested more context must
-      -- not become a conversation-long escape hatch from the live-value gate.
-      -- Deliberately pre-pinned/copy-pinned references retain their existing
-      -- behavior, and callers without provenance remain backward-compatible.
-      local source = type(opts.sticky_pin_source) == "table"
-        and opts.sticky_pin_source[key] or nil
-      if source ~= "context_needed" then reference_pinned = true end
-    end
-  end
-  return live_values and (opts.ignore_reference == true or not reference_pinned)
-end
-
-function Code.find_reeq_gain_mapping_violations(lua_code, opts)
-  if type(lua_code) ~= "string" or lua_code == "" then return nil end
-  opts = type(opts) == "table" and opts or {}
-  local relative_request = opts.relative_request
-  if relative_request == nil then
-    relative_request = Code.prompt_requests_relative_db_adjustment(opts.user_text)
-  end
-  local absolute_db_targets = {}
-  do
-    local prompt = tostring(opts.user_text or ""):lower()
-    local function collect(pattern)
-      for value in prompt:gmatch(pattern) do
-        value = tonumber(value)
-        if value ~= nil then
-          absolute_db_targets[#absolute_db_targets + 1] = value
-        end
-      end
-    end
-    collect("%f[%a]to%f[%A]%s*([+-]?%d*%.?%d+)%s*d%s*b%f[%A]")
-    collect("%f[%a]to%f[%A]%s*([+-]?%d*%.?%d+)%s*decibels?%f[%A]")
-  end
-
-  -- Preserve newlines and byte positions for finding line numbers while
-  -- removing every Lua comment form and code-looking string content. Real
-  -- quoted ReaEQ names remain as canonical string literals for FX lookup.
-  local stripped, has_reeq_literal = Code._lua_reeq_scan_source(lua_code)
-  if not has_reeq_literal then return nil end
-
-  local assignment_counts = {}
-  local numeric_assignment = {}
-  local string_assignment = {}
-  for line in (stripped .. "\n"):gmatch("([^\n]*)\n") do
-    local name, rhs = line:match(
-      "^%s*local%s+([%a_][%w_]*)%s*=%s*(.-)%s*$")
-    if not name then
-      name, rhs = line:match("^%s*([%a_][%w_]*)%s*=%s*(.-)%s*$")
-    end
-    if name then
-      rhs = Code._lua_trim_expr(tostring(rhs or ""):gsub(";%s*$", ""))
-      assignment_counts[name] = (assignment_counts[name] or 0) + 1
-      local number = tonumber(rhs)
-      if number ~= nil then numeric_assignment[name] = number end
-      local quote = rhs:sub(1, 1)
-      if (quote == '"' or quote == "'") and rhs:sub(-1) == quote then
-        string_assignment[name] = rhs
-      end
-    end
-  end
-  local literal_vars = {}
-  for name, number in pairs(numeric_assignment) do
-    if assignment_counts[name] == 1 then literal_vars[name] = number end
-  end
-  local literal_string_vars = {}
-  for name, value in pairs(string_assignment) do
-    if assignment_counts[name] == 1 then literal_string_vars[name] = value end
-  end
-
-  local function literal_number(expr)
-    expr = Code._lua_trim_expr(expr)
-    return tonumber(expr) or literal_vars[expr]
-  end
-
-  local gain_indices = { [1] = true, [4] = true, [7] = true,
-    [10] = true, [13] = true }
-  local function gain_index(expr)
-    local value = literal_number(expr)
-    if not value or value % 1 ~= 0 or not gain_indices[value] then return nil end
-    return value
-  end
-
-  local function literal_reeq_name(expr)
-    expr = Code._lua_trim_expr(expr)
-    expr = literal_string_vars[expr] or expr
-    local quote = expr:sub(1, 1)
-    if (quote == '"' or quote == "'") and expr:sub(-1) == quote then
-      local normalized = expr:sub(2, -2):lower():gsub("[^%a%d]", "")
-      return normalized:find("reaeq", 1, true) ~= nil
-    end
-    -- Newline-split long strings use the scanner's whitespace-separated bare
-    -- sentinel. Require the exact normalized sentinel so ordinary variables
-    -- and expressions cannot be mistaken for an FX-name literal.
-    if expr:match("^[%a_][%w_]*$") then return false end
-    return expr:lower():gsub("[^%a%d]", "") == "reaeq"
-  end
-
-  local reeq_fx_vars = {}
-  local function scan_fx_lookup(api_name)
-    local pos = 1
-    local pattern = "reaper%." .. api_name .. "%s*%("
-    while true do
-      local call_start, open_pos = stripped:find(pattern, pos)
-      if not call_start then break end
-      local args, close_pos = Code._parse_lua_call_args(stripped, open_pos)
-      if args and literal_reeq_name(args[2]) then
-        local before = stripped:sub(math.max(1, call_start - 240), call_start - 1)
-        local lhs = before:match("local%s+([%a_][%w_]*)%s*=%s*$")
-          or before:match("([%a_][%w_]*)%s*=%s*$")
-        if lhs then reeq_fx_vars[lhs] = true end
-      end
-      pos = (close_pos or open_pos) + 1
-    end
-  end
-  scan_fx_lookup("TrackFX_GetByName")
-  scan_fx_lookup("TrackFX_AddByName")
-  if not next(reeq_fx_vars) then return nil end
-
-  local function resolved_triplet(args)
-    if not args then return nil, nil, nil end
-    local track_expr = Code._lua_trim_expr(args[1])
-    local fx_expr = Code._lua_trim_expr(args[2])
-    if not reeq_fx_vars[fx_expr] then return nil, nil, nil end
-    return track_expr, fx_expr, gain_index(args[3])
-  end
-
-  local function access_key(track_expr, fx_expr, idx)
-    return track_expr .. "\0" .. fx_expr .. "\0" .. tostring(idx)
-  end
-
-  local formatted_reads = {}
-  do
-    local pos = 1
-    while true do
-      local call_start, open_pos = stripped:find(
-        "reaper%.TrackFX_GetFormattedParamValue%s*%(", pos)
-      if not call_start then break end
-      local args, close_pos = Code._parse_lua_call_args(stripped, open_pos)
-      local track_expr, fx_expr, idx = resolved_triplet(args)
-      if track_expr and fx_expr and idx then
-        formatted_reads[access_key(track_expr, fx_expr, idx)] = true
-      end
-      pos = (close_pos or open_pos) + 1
-    end
-  end
-
-  local findings = {}
-  local function add(kind, pos, fx_expr, idx, detail)
-    findings[#findings + 1] = {
-      kind = kind,
-      line = Code._lua_line_for_pos(stripped, pos),
-      fx = fx_expr,
-      param_index = idx,
-      detail = detail,
-    }
-  end
-
-  local function scan_direct(api_name, kind)
-    local pos = 1
-    local pattern = "reaper%." .. api_name .. "%s*%("
-    while true do
-      local call_start, open_pos = stripped:find(pattern, pos)
-      if not call_start then break end
-      local args, close_pos = Code._parse_lua_call_args(stripped, open_pos)
-      local _, fx_expr, idx = resolved_triplet(args)
-      if fx_expr and idx then
-        add(kind, call_start, fx_expr, idx,
-          "ReaEQ gain index " .. idx .. " uses reaper." .. api_name
-            .. " instead of set_param_display")
-      end
-      pos = (close_pos or open_pos) + 1
-    end
-  end
-  scan_direct("TrackFX_SetParamNormalized", "direct_normalized_gain_write")
-  scan_direct("TrackFX_SetParam", "direct_raw_gain_write")
-
-  local pos = 1
-  while true do
-    local call_start, open_pos = stripped:find(
-      "%f[%w_]set_param_display%s*%(", pos)
-    if not call_start then break end
-    local before = stripped:sub(math.max(1, call_start - 32), call_start - 1)
-    local args, close_pos = Code._parse_lua_call_args(stripped, open_pos)
-    if not before:match("function%s+$") then
-      local track_expr, fx_expr, idx = resolved_triplet(args)
-      if relative_request and fx_expr and idx then
-        local target = Code._lua_trim_expr(args[4])
-        local target_number = literal_number(target)
-        local explicit_absolute = false
-        if target_number ~= nil then
-          for _, value in ipairs(absolute_db_targets) do
-            if math.abs(target_number - value) <= 0.000001 then
-              explicit_absolute = true
-              break
-            end
-          end
-        end
-        if target_number ~= nil and not explicit_absolute then
-          add("relative_literal_target", call_start, fx_expr, idx,
-            "relative ReaEQ gain edit uses an absolute literal display target")
-        end
-        if not explicit_absolute
-           and not formatted_reads[access_key(track_expr, fx_expr, idx)] then
-          add("relative_missing_formatted_read", call_start, fx_expr, idx,
-            "relative ReaEQ gain edit does not read the current displayed value for the same track/FX/index")
-        end
-      end
-    end
-    pos = (close_pos or open_pos) + 1
-  end
-
-  if #findings == 0 then return nil end
-  table.sort(findings, function(a, b)
-    if a.line ~= b.line then return a.line < b.line end
-    return tostring(a.kind) < tostring(b.kind)
-  end)
-  return findings
-end
-
--- =============================================================================
--- Code.find_proq4_literal_mapping_mismatches
--- =============================================================================
--- Models often keep a helpful human target in a table-row comment but copy the
--- normalized value from the adjacent reference row (for example 100 Hz's
--- value beside a `120 Hz` comment). The script compiles and runs, yet lands on
--- the wrong audible value. For Pro-Q 4 only, verify literal normalized
--- `freq*`, `gain*`, and `q*` named fields against a same-line human comment.
--- Human-unit fields such as `freq_hz` and `gain_db`, nonliteral expressions,
--- and uncommented values are intentionally outside this high-confidence gate.
-function Code.find_proq4_literal_mapping_mismatches(lua_code)
-  if not lua_code or lua_code == "" then return nil end
-  local lower = lua_code:gsub("%-%-[^\n]*", ""):lower()
-  if not lower:find("pro%-q%s*4") then return nil end
-
-  local findings = {}
-  local function add(kind, line_no, actual, target, expected, tolerance)
-    -- Accept a value deliberately rounded to two decimal places. The maximum
-    -- nearest-hundredth error is 0.005; a small epsilon avoids binary-float
-    -- edge noise without concealing adjacent reference-row mistakes. Direct
-    -- setter literals with an explicit human target use a much tighter
-    -- tolerance so a value such as 0.444 cannot masquerade as exact 350 Hz
-    -- (it displays about 349.82 Hz); those should use the documented formula.
-    if math.abs(actual - expected) <= (tolerance or 0.0051) then return end
-    findings[#findings + 1] = {
-      kind = kind,
-      line = line_no,
-      actual = actual,
-      target = target,
-      expected = expected,
-    }
-  end
-
-  local line_no = 0
-  for line in (lua_code .. "\n"):gmatch("([^\n]*)\n") do
-    line_no = line_no + 1
-    local code_part, comment = line:match("^(.-)%-%-(.*)$")
-    if code_part and comment then
-      local field, value = code_part:match(
-        "%f[%w_]([Ff][Rr][Ee][Qq][%w_]*)%s*=%s*([%d%.]+)")
-      value = tonumber(value)
-      if field and value and value >= 0 and value <= 1
-         and not field:lower():find("hz", 1, true) then
-        local khz = tonumber(comment:match("([%d%.]+)%s*[kK]%s*[hH][zZ]"))
-        local hz = khz and (khz * 1000)
-          or tonumber(comment:match("([%d%.]+)%s*[hH][zZ]"))
-        if hz and hz >= 10 and hz <= 30000 then
-          add("frequency", line_no, value, hz,
-            math.log(hz / 10) / math.log(3000))
-        end
-      end
-
-      field, value = code_part:match(
-        "%f[%w_]([Gg][Aa][Ii][Nn][%w_]*)%s*=%s*([%d%.]+)")
-      value = tonumber(value)
-      if field and value and value >= 0 and value <= 1
-         and not field:lower():find("db", 1, true) then
-        local db = tonumber(comment:match("([+-]?[%d%.]+)%s*[dD][bB]"))
-        if db and db >= -30 and db <= 30 then
-          add("gain", line_no, value, db, (db + 30) / 60)
-        end
-      end
-
-      field, value = code_part:match(
-        "%f[%w_]([Qq][%w_]*)%s*=%s*([%d%.]+)")
-      value = tonumber(value)
-      if field and value and value >= 0 and value <= 1
-         and not field:lower():find("display", 1, true) then
-        -- Remove the product name before looking for an explicit Q target;
-        -- otherwise the "Q 4" in "Pro-Q 4" becomes a fabricated target.
-        local q_comment = comment
-          :gsub("[Pp][Rr][Oo][%s%-]*[Qq]%s*4", "")
-        local q = tonumber(q_comment:match("[Qq]%s*=?%s*([%d%.]+)"))
-        if q and q >= 0.025 and q <= 40 then
-          add("q", line_no, value, q,
-            math.log(q / 0.025) / math.log(1600))
-        end
-      end
-
-      local direct = code_part:match(
-        "reaper%.TrackFX_SetParamNormalized%s*%([^,]+,[^,]+,[^,]+,%s*([%d%.]+)%s*%)")
-        or code_part:match(
-          "[%a_][%w_]*%s*%(%s*mapped%s*%[%s*%d+%s*%]%s*,%s*"
-            .. "([%d%.]+)%s*%)")
-      direct = tonumber(direct)
-      if direct and direct >= 0 and direct <= 1 then
-        local khz = tonumber(comment:match("([%d%.]+)%s*[kK]%s*[hH][zZ]"))
-        local hz = khz and (khz * 1000)
-          or tonumber(comment:match("([%d%.]+)%s*[hH][zZ]"))
-        if hz and hz >= 10 and hz <= 30000 then
-          add("frequency", line_no, direct, hz,
-            math.log(hz / 10) / math.log(3000), 0.000001)
-        elseif not comment:lower():find("db%s*/%s*oct") then
-          local db = tonumber(comment:match("([+-]?[%d%.]+)%s*[dD][bB]"))
-          if db and db >= -30 and db <= 30 then
-            add("gain", line_no, direct, db, (db + 30) / 60, 0.000001)
-          else
-            local q_comment = comment
-              :gsub("[Pp][Rr][Oo][%s%-]*[Qq]%s*4", "")
-            local q = tonumber(
-              q_comment:match("[Qq]%s*=?%s*([%d%.]+)"))
-            if q and q >= 0.025 and q <= 40 then
-              add("q", line_no, direct, q,
-                math.log(q / 0.025) / math.log(1600), 0.000001)
-            end
-          end
-        end
-      end
-    end
-  end
-
-  if #findings == 0 then return nil end
-  table.sort(findings, function(a, b)
-    if a.line ~= b.line then return a.line < b.line end
-    return tostring(a.kind) < tostring(b.kind)
-  end)
-  return findings
-end
-
--- Deterministically repair only the highest-confidence form caught above:
--- a direct Pro-Q 4 SetParamNormalized call whose literal fourth argument is
--- paired with an explicit human target in the same-line comment. Replace the
--- guessed literal with the exact documented expression, then let the normal
--- validator re-check the whole script. Named table fields are left to the
--- retry/block path because their eventual parameter destination is not
--- provable from one line.
-function Code.repair_proq4_literal_mapping_mismatches(lua_code)
-  local findings = Code.find_proq4_literal_mapping_mismatches(lua_code)
-  if not findings or #findings == 0 then
-    return lua_code, false, nil
-  end
-
-  local by_line = {}
-  for _, finding in ipairs(findings) do
-    local n = tonumber(finding.line)
-    if n then by_line[n] = finding end
-  end
-
-  local newline = lua_code:find("\r\n", 1, true) and "\r\n" or "\n"
-  local lines = {}
-  for line in (lua_code:gsub("\r\n", "\n") .. "\n"):gmatch("([^\n]*)\n") do
-    lines[#lines + 1] = line
-  end
-
-  local repaired = {}
-  for line_no, finding in pairs(by_line) do
-    local line = lines[line_no]
-    local expression
-    if finding.kind == "frequency" then
-      expression = ("math.log(%s / 10) / math.log(3000)")
-        :format(tostring(finding.target))
-    elseif finding.kind == "gain" then
-      expression = ("(%s + 30) / 60"):format(tostring(finding.target))
-    elseif finding.kind == "q" then
-      expression = ("math.log(%s / 0.025) / math.log(1600)")
-        :format(tostring(finding.target))
-    end
-
-    if line and expression then
-      local prefix, literal, suffix = line:match(
-        "^(.-reaper%.TrackFX_SetParamNormalized%s*%("
-          .. "[^,]+,[^,]+,[^,]+,%s*)([%d%.]+)(%s*%).*)$")
-      if not prefix then
-        prefix, literal, suffix = line:match(
-          "^(.-[%a_][%w_]*%s*%(%s*mapped%s*%[%s*%d+%s*%]%s*,%s*)"
-            .. "([%d%.]+)(%s*%).*)$")
-      end
-      if prefix and literal and suffix
-         and math.abs((tonumber(literal) or -1)
-           - (tonumber(finding.actual) or -2)) <= 0.000000000001 then
-        lines[line_no] = prefix .. expression .. suffix
-        repaired[#repaired + 1] = finding
-      end
-    end
-  end
-
-  if #repaired == 0 then return lua_code, false, findings end
-  table.sort(repaired, function(a, b) return a.line < b.line end)
-  return table.concat(lines, newline), true, repaired
-end
-
 -- Code.prompt_targets_existing_fx
 -- True only when the prompt structurally targets an FX instance that is
 -- already present. This keeps musical-result wording such as "use the existing
@@ -16338,1055 +9436,7 @@ function Code.prompt_targets_existing_fx(text)
 end
 
 -- =============================================================================
--- Code.find_dependent_getbyname_silent_skips
--- =============================================================================
--- Static check for TrackFX_GetByName / TakeFX_GetByName results that drive
--- required parameter work but only have a success-direction guard:
---
---   local fx = reaper.TrackFX_GetByName(tr, "Pro-Q 4", false)
---   if fx >= 0 then
---     set_param_display(tr, fx, ...)
---   end                            -- no else, no error, no return
---
--- GetByName is allowed to return -1 in upsert code, so this intentionally
--- does NOT require every GetByName call to fail immediately. It only flags
--- the dependent-use case when there is no real failure path (`fx < 0` with
--- return/message/error, or the canonical GetByName -> AddByName
--- fallback followed by that final failure path).
---
--- Returns a sorted list of `{name, line}` entries, or nil if every dependent
--- GetByName result has an explicit failure path.
-function Code.find_dependent_getbyname_silent_skips(lua_code)
-  if not lua_code or lua_code == "" then return nil end
-  local stripped = lua_code:gsub("%-%-[^\n]*", "")
-  local lines = {}
-  for line in (stripped .. "\n"):gmatch("([^\n]*)\n") do
-    lines[#lines+1] = line
-  end
 
-  local function _var_pat(name)
-    return "%f[%w_]" .. tostring(name or "") .. "%f[^%w_]"
-  end
-
-  local function _is_failure_cmp(line, name)
-    local v = _var_pat(name)
-    return line:find(v .. "%s*<%s*0")
-        or line:find(v .. "%s*==%s*%-%s*1")
-        or line:find(v .. "%s*<=%s*%-%s*1")
-        or line:find(v .. "%s*<%s*%-%s*1")
-  end
-
-  local function _failure_path_reports(assign_line, name)
-    for i = assign_line, #lines do
-      if _is_failure_cmp(lines[i], name) then
-        local stop = math.min(#lines, i + 16)
-        local chunk = table.concat(lines, "\n", i, stop)
-        if chunk:find("error%s*%(")
-           or chunk:find("%f[%w_]return%f[^%w_]")
-           or chunk:find("ShowMessageBox", 1, true)
-           or chunk:find("errors%s*%[")
-           or chunk:find("failed%s*%[")
-           or chunk:find("failures%s*%[")
-           or chunk:find("missing%s*%[") then
-          return true
-        end
-      end
-    end
-    return false
-  end
-
-  local param_api = {
-    "TrackFX_SetParam", "TrackFX_SetParamNormalized",
-    "TrackFX_GetParam", "TrackFX_GetParamNormalized",
-    "TrackFX_GetParamName", "TrackFX_GetFormattedParamValue",
-    "TrackFX_GetNumParams",
-    "TakeFX_SetParam", "TakeFX_SetParamNormalized",
-    "TakeFX_GetParam", "TakeFX_GetParamNormalized",
-    "TakeFX_GetParamName", "TakeFX_GetFormattedParamValue",
-    "TakeFX_GetNumParams",
-  }
-
-  local param_helpers = {
-    find_param = true,
-    set_param_display = true,
-    set_param_enum = true,
-    set_param_enum_paced = true,
-  }
-
-  local function _mark_param_helper(name, body)
-    if not name or param_helpers[name] then return end
-    for _, api in ipairs(param_api) do
-      if body:find(api, 1, true) then
-        param_helpers[name] = true
-        return
-      end
-    end
-  end
-
-  do
-    local pos = 1
-    while true do
-      local s, e, name = stripped:find("local%s+function%s+([%a_][%w_]*)%s*%(", pos)
-      if not s then break end
-      local next_s = stripped:find("\n%s*local%s+function%s+", e + 1)
-        or stripped:find("\n%s*function%s+", e + 1)
-        or (#stripped + 1)
-      _mark_param_helper(name, stripped:sub(e + 1, next_s - 1))
-      pos = e + 1
-    end
-    pos = 1
-    while true do
-      local s, e, name = stripped:find("\n%s*function%s+([%a_][%w_]*)%s*%(", pos)
-      if not s then break end
-      local next_s = stripped:find("\n%s*local%s+function%s+", e + 1)
-        or stripped:find("\n%s*function%s+", e + 1)
-        or (#stripped + 1)
-      _mark_param_helper(name, stripped:sub(e + 1, next_s - 1))
-      pos = e + 1
-    end
-  end
-
-  local function _has_dependent_param_use(text, name)
-    local v = _var_pat(name)
-    local in_named_function = 0
-    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
-      local starts_named_function =
-        line:match("^%s*local%s+function%s+[%a_][%w_]*%s*%(")
-        or line:match("^%s*function%s+[%a_][%w_]*%s*%(")
-      if starts_named_function then
-        in_named_function = in_named_function + 1
-      end
-      if in_named_function == 0 then
-        for _, api in ipairs(param_api) do
-          if line:find(api, 1, true) and line:find(v) then
-            return true
-          end
-        end
-        for helper in pairs(param_helpers) do
-          if line:find("%f[%w_]" .. helper .. "%s*%([^%)]*" .. v) then
-            return true
-          end
-        end
-      end
-      if in_named_function > 0 and line:match("^%s*end%s*$") then
-        in_named_function = in_named_function - 1
-      end
-    end
-    return false
-  end
-
-  local function _get_assignment(line)
-    local name = line:match("^%s*local%s+([%a_][%w_]*)%s*=%s*reaper%.TrackFX_GetByName%s*%(")
-      or line:match("^%s*([%a_][%w_]*)%s*=%s*reaper%.TrackFX_GetByName%s*%(")
-      or line:match("^%s*local%s+([%a_][%w_]*)%s*=%s*reaper%.TakeFX_GetByName%s*%(")
-      or line:match("^%s*([%a_][%w_]*)%s*=%s*reaper%.TakeFX_GetByName%s*%(")
-    return name
-  end
-
-  local violations, seen = {}, {}
-  for i, line in ipairs(lines) do
-    local name = _get_assignment(line)
-    if name and not seen[name .. ":" .. tostring(i)] then
-      seen[name .. ":" .. tostring(i)] = true
-      local after = table.concat(lines, "\n", i + 1)
-      if _has_dependent_param_use(after, name)
-         and not _failure_path_reports(i, name) then
-        violations[#violations+1] = { name = name, line = i }
-      end
-    end
-  end
-
-  if #violations == 0 then return nil end
-  table.sort(violations, function(a, b)
-    if a.line ~= b.line then return a.line < b.line end
-    return a.name < b.name
-  end)
-  return violations
-end
-
--- An explicit existing-effect edit must fail clearly when the named instance is
--- absent. Adding a replacement can conceal a bad target and create a duplicate
--- in another location. Flag only GetByName/AddByName pairs for the same
--- normalized identifier so a mixed request may still add a different effect.
--- A validated profile receipt may also prove that a definite-article request
--- such as "make the chorus..." targets the existing live instance even though
--- the prompt does not literally say "existing".
-function Code.find_existing_fx_add_fallback_violations(
-    user_text, lua_code, profile_receipts)
-  if type(lua_code) ~= "string" or lua_code == "" then
-    return nil
-  end
-  local stripped = lua_code:gsub("%-%-[^\n]*", "")
-  local string_consts = {}
-  for name, value in stripped:gmatch(
-      "local%s+([%w_]+)%s*=%s*\"([^\"]+)\"") do
-    string_consts[name] = value
-  end
-  for name, value in stripped:gmatch(
-      "local%s+([%w_]+)%s*=%s*'([^']+)'") do
-    string_consts[name] = value
-  end
-  local function resolve_arg(value)
-    if value and value:match("^[%w_]+$") and string_consts[value] then
-      return string_consts[value]
-    end
-    return value
-  end
-  local function norm(value)
-    local n = tostring(value or ""):lower()
-    n = n:match("^[a-z][a-z0-9]*:%s*(.+)$") or n
-    n = n:gsub("%s*%b()%s*$", "")
-    return n:gsub("[^%w]+", "")
-  end
-  local existing_profile_keys = {}
-  for _, receipt in ipairs(type(profile_receipts) == "table"
-      and profile_receipts or {}) do
-    if type(receipt) == "table" and receipt.existing_request == true then
-      local key = norm(receipt.identifier)
-      if key ~= "" then existing_profile_keys[key] = true end
-    end
-  end
-  if not Code.prompt_targets_existing_fx(user_text)
-     and next(existing_profile_keys) == nil then
-    return nil
-  end
-  local gets, adds = {}, {}
-  local function call_arg(text, api)
-    return text:match(api .. "%s*%([^,]+,%s*\"([^\"]+)\"")
-      or text:match(api .. "%s*%([^,]+,%s*'([^']+)'")
-      or resolve_arg(text:match(
-        api .. "%s*%([^,]+,%s*([%w_]+)%s*,"))
-  end
-  local function collect_calls(api, callback)
-    local position = 1
-    while true do
-      local first, last = stripped:find(api .. "%s*%(", position)
-      if not first then return end
-      local chunk = stripped:sub(first, math.min(#stripped, first + 1000))
-      local id = call_arg(chunk, api)
-      if id then
-        local _, newline_count = stripped:sub(1, first):gsub("\n", "\n")
-        callback(id, newline_count + 1)
-      end
-      position = math.max(last + 1, first + #api)
-    end
-  end
-  for _, api in ipairs({ "TrackFX_GetByName", "TakeFX_GetByName" }) do
-    collect_calls(api, function(id, line)
-      local key = norm(id)
-      if key ~= "" then
-        gets[key] = gets[key] or { id = id, line = line }
-      end
-    end)
-  end
-  for _, api in ipairs({ "TrackFX_AddByName", "TakeFX_AddByName" }) do
-    collect_calls(api, function(id, line)
-      local key = norm(id)
-      if key ~= "" then
-        adds[#adds + 1] = { id = id, key = key, line = line }
-      end
-    end)
-  end
-  local violations = {}
-  for _, add in ipairs(adds) do
-    if gets[add.key] or existing_profile_keys[add.key] then
-      violations[#violations + 1] = {
-        id = add.id,
-        line = add.line,
-        lookup_line = gets[add.key] and gets[add.key].line or nil,
-        existing_profile = existing_profile_keys[add.key] == true,
-      }
-    end
-  end
-  if #violations == 0 then return nil end
-  table.sort(violations, function(a, b)
-    if a.line ~= b.line then return a.line < b.line end
-    return tostring(a.id) < tostring(b.id)
-  end)
-  return violations
-end
-
--- =============================================================================
--- Code.find_add_requested_getonly_fx_violations
--- =============================================================================
--- When the user explicitly says to add/put/load/apply/use a named FX, a
--- GetByName-only script with a "not found" return does not satisfy the
--- request. "Use <plugin> to..." also needs an add-if-missing fallback: it
--- safely reuses an existing instance while still fulfilling the request on a
--- track where that plugin is absent. This catches that narrow intent while
--- leaving ordinary modify-existing GetByName scripts alone.
-function Code.find_add_requested_getonly_fx_violations(user_text, lua_code)
-  if not lua_code or lua_code == "" then return nil end
-  if Code.prompt_targets_existing_fx(user_text) then return nil end
-  local prompt = tostring(user_text or ""):lower():gsub("%s+", " ")
-  if prompt == "" then return nil end
-
-  local known = {
-    { key = "reaeq", labels = { "reaeq", "rea eq" } },
-    { key = "reacomp", labels = { "reacomp", "rea comp" } },
-    { key = "reaxcomp", labels = { "reaxcomp", "rea xcomp", "rea x-comp" } },
-    { key = "reagate", labels = { "reagate", "rea gate" } },
-    { key = "readelay", labels = { "readelay", "rea delay" } },
-    { key = "realimit", labels = { "realimit", "rea limit" } },
-    { key = "reapitch", labels = { "reapitch", "rea pitch" } },
-    { key = "reatune", labels = { "reatune", "rea tune" } },
-    { key = "reasynth", labels = { "reasynth", "rea synth" } },
-    { key = "reaverbate", labels = { "reaverbate", "rea verbate" } },
-    { key = "proq4", labels = { "pro-q 4", "pro q 4", "pro-q", "pro q" } },
-    { key = "proc3", labels = { "pro-c 3", "pro c 3", "pro-c", "pro c" } },
-    { key = "prog", labels = { "pro-g", "pro g" } },
-    { key = "prol2", labels = { "pro-l 2", "pro l 2", "pro-l", "pro l" } },
-    { key = "promb", labels = { "pro-mb", "pro mb" } },
-    { key = "prods", labels = { "pro-ds", "pro ds" } },
-    { key = "pror2", labels = { "pro-r 2", "pro r 2", "pro-r", "pro r" } },
-    { key = "saturn2", labels = { "saturn 2" } },
-    { key = "timeless3", labels = { "timeless 3" } },
-  }
-  local verbs = { "add", "put", "insert", "load", "place", "apply", "use" }
-  local requested = {}
-  for _, fx in ipairs(known) do
-    for _, label in ipairs(fx.labels) do
-      for _, verb in ipairs(verbs) do
-        if prompt:find(verb .. " " .. label, 1, true)
-           or prompt:find(verb .. " a " .. label, 1, true)
-           or prompt:find(verb .. " an " .. label, 1, true)
-           or prompt:find(verb .. " the " .. label, 1, true) then
-          requested[fx.key] = label
-        end
-      end
-    end
-  end
-  if not next(requested) then return nil end
-
-  local stripped = lua_code:gsub("%-%-[^\n]*", "")
-  local string_consts = {}
-  for ident, val in stripped:gmatch("local%s+([%w_]+)%s*=%s*\"([^\"]+)\"") do
-    string_consts[ident] = val
-  end
-  for ident, val in stripped:gmatch("local%s+([%w_]+)%s*=%s*'([^']+)'") do
-    string_consts[ident] = val
-  end
-
-  local function norm(id)
-    local n = tostring(id or ""):lower()
-    n = n:match("^[a-z][a-z0-9]*:%s*(.+)$") or n
-    n = n:gsub("%s*%b()%s*$", "")
-    return n:gsub("[^%w]+", "")
-  end
-  local function requested_key_for(n)
-    if n == "" then return false end
-    for key in pairs(requested) do
-      if n == key or n:find(key, 1, true)
-         or key:find(n, 1, true) == 1 then
-        return key
-      end
-    end
-    return nil
-  end
-  local function resolve_arg(cap)
-    if cap and cap:match("^[%w_]+$") and string_consts[cap] then
-      return string_consts[cap]
-    end
-    return cap
-  end
-
-  local add_keys, get_entries = {}, {}
-  local lines = {}
-  for line in (stripped .. "\n"):gmatch("([^\n]*)\n") do
-    lines[#lines + 1] = line
-  end
-  for i, line in ipairs(lines) do
-    for _, api in ipairs({ "TrackFX_AddByName", "TakeFX_AddByName" }) do
-      local cap = line:match(api .. "%s*%([^,]+,%s*\"([^\"]+)\"")
-        or line:match(api .. "%s*%([^,]+,%s*'([^']+)'")
-        or resolve_arg(line:match(api .. "%s*%([^,]+,%s*([%w_]+)%s*,"))
-      if cap then
-        local add_key = requested_key_for(norm(cap))
-        if add_key then add_keys[add_key] = true end
-      end
-    end
-    for _, api in ipairs({ "TrackFX_GetByName", "TakeFX_GetByName" }) do
-      local cap = line:match(api .. "%s*%([^,]+,%s*\"([^\"]+)\"")
-        or line:match(api .. "%s*%([^,]+,%s*'([^']+)'")
-        or resolve_arg(line:match(api .. "%s*%([^,]+,%s*([%w_]+)%s*,"))
-      if cap then
-        local get_key = requested_key_for(norm(cap))
-        if get_key then
-          get_entries[#get_entries + 1] = {
-            id = cap,
-            key = norm(cap),
-            requested_key = get_key,
-            line = i,
-          }
-        end
-      end
-    end
-  end
-
-  local violations = {}
-  for _, e in ipairs(get_entries) do
-    if not add_keys[e.requested_key] then
-      violations[#violations + 1] = e
-    end
-  end
-  if #violations == 0 then return nil end
-  table.sort(violations, function(a, b)
-    if a.line ~= b.line then return a.line < b.line end
-    return a.id < b.id
-  end)
-  return violations
-end
-
--- =============================================================================
--- Code.find_chain_upsert_violations
--- =============================================================================
--- Strict-pairing check for chain-build follow-up turns: every plugin name
--- referenced via TrackFX_GetByName MUST also appear in a TrackFX_AddByName
--- call (and vice-versa). Catches two opposite anti-patterns observed
--- across providers when fx_chains is pinned and the user said "build a
--- vocal chain" / "set up a chain":
---
---   GET-ONLY (ChatGPT pattern): GetByName for all required plugins,
---   then if any returns < 0, ShowMessageBox "missing one or more chain
---   plugins" and return. Misses the "add the missing ones" half of the
---   upsert -- the script bails when the chain is incomplete instead of
---   completing it.
---
---   ADD-ONLY (Claude pattern): AddByName for every plugin without
---   checking whether the plugin is already on the track. Silently
---   duplicates plugins that an earlier turn already placed.
---
--- The canonical pattern requires BOTH calls for the same plugin:
---   local fx = reaper.TrackFX_GetByName(tr, "Pro-Q 4", false)
---   if fx < 0 then
---     fx = reaper.TrackFX_AddByName(tr, "VST3: Pro-Q 4", false, -1)
---   end
---   if fx < 0 then -- report failure end
---
--- Caller is responsible for gating: only run when the prompt is a chain-
--- build (CHAIN_PHRASE_HINTS matched) AND fx_chains was preempted/pinned
--- this turn. In other contexts both patterns can be legitimate
--- (modifying an existing instance, adding a new plugin to a fresh track,
--- etc.) and this validator would false-positive.
---
--- Returns a list of `{kind, bare, id}` entries (kind is "get_only" or
--- "add_only", bare is the lowercased name without format prefix or
--- vendor suffix, id is the original string from the call) or nil if
--- every plugin name appears in both call types.
-function Code.find_chain_upsert_violations(lua_code)
-  if not lua_code or lua_code == "" then return nil end
-  local stripped = lua_code:gsub("%-%-[^\n]*", "")
-  local function _bare(id)
-    if not id then return nil end
-    local n = id:match("^[A-Za-z][A-Za-z0-9]*:%s*(.+)$") or id
-    n = n:gsub("%s*%(.-%)%s*$", "")
-    return n:lower()
-  end
-  -- Resolve simple `local NAME = "literal"` constants so AddByName /
-  -- GetByName calls that pass a variable instead of a literal still
-  -- match. Observed in a Gemini session that hoisted the identifier
-  -- into local id_eq = "VST3: Pro-Q 4"; reaper.TrackFX_AddByName(tr,
-  -- id_eq, ...) and slipped past the literal-only scan. Only resolves
-  -- single-line `local X = "..."` -- not concatenations, function
-  -- calls, table indexing, or reassignment.
-  local string_consts = {}
-  for ident, val in stripped:gmatch("local%s+([%w_]+)%s*=%s*\"([^\"]+)\"") do
-    string_consts[ident] = val
-  end
-  for ident, val in stripped:gmatch("local%s+([%w_]+)%s*=%s*'([^']+)'") do
-    string_consts[ident] = val
-  end
-  local function _resolve_arg(captured)
-    -- captured may be a quoted string content (already resolved by the
-    -- gmatch pattern that captured between quotes) or a bare identifier
-    -- (when the pattern matched the variable form). Caller passes both
-    -- shapes through this helper -- if it looks like an identifier and
-    -- we have a constant for it, return the constant; otherwise return
-    -- the captured value as-is.
-    if not captured then return nil end
-    if captured:match("^[%w_]+$") and string_consts[captured] then
-      return string_consts[captured]
-    end
-    return captured
-  end
-  local get_names, add_names = {}, {}
-  -- Match: TrackFX_GetByName(track_arg, "name"|'name'|IDENT, ...)
-  for cap in stripped:gmatch("TrackFX_GetByName%s*%([^,]+,%s*\"([^\"]+)\"") do
-    local b = _bare(cap); if b then get_names[b] = cap end
-  end
-  for cap in stripped:gmatch("TrackFX_GetByName%s*%([^,]+,%s*'([^']+)'") do
-    local b = _bare(cap); if b then get_names[b] = cap end
-  end
-  for cap in stripped:gmatch("TrackFX_GetByName%s*%([^,]+,%s*([%w_]+)%s*,") do
-    local resolved = _resolve_arg(cap)
-    if resolved and resolved ~= cap then  -- only count if we resolved a const
-      local b = _bare(resolved); if b then get_names[b] = resolved end
-    end
-  end
-  for cap in stripped:gmatch("TrackFX_AddByName%s*%([^,]+,%s*\"([^\"]+)\"") do
-    local b = _bare(cap); if b then add_names[b] = cap end
-  end
-  for cap in stripped:gmatch("TrackFX_AddByName%s*%([^,]+,%s*'([^']+)'") do
-    local b = _bare(cap); if b then add_names[b] = cap end
-  end
-  for cap in stripped:gmatch("TrackFX_AddByName%s*%([^,]+,%s*([%w_]+)%s*,") do
-    local resolved = _resolve_arg(cap)
-    if resolved and resolved ~= cap then
-      local b = _bare(resolved); if b then add_names[b] = resolved end
-    end
-  end
-  local violations = {}
-  for bare, id in pairs(get_names) do
-    if not add_names[bare] then
-      violations[#violations+1] = { kind = "get_only", bare = bare, id = id }
-    end
-  end
-  for bare, id in pairs(add_names) do
-    if not get_names[bare] then
-      violations[#violations+1] = { kind = "add_only", bare = bare, id = id }
-    end
-  end
-  if #violations == 0 then return nil end
-  table.sort(violations, function(a, b)
-    if a.bare ~= b.bare then return a.bare < b.bare end
-    return a.kind < b.kind
-  end)
-  return violations
-end
-
--- =============================================================================
--- Code.find_helper_integrity_violations
--- =============================================================================
--- Narrow check for known-corrupted bundled helper bodies. The plugin_helpers
--- bundle's source is the canonical form; helpers are meant to be pasted
--- verbatim. Models occasionally rewrite or simplify the body in ways that
--- break safety -- the observed case from a ChatGPT 5.4 Mini session was the
--- range-guard on set_param_display:
---
---   GOOD: vmin and vmax and vmin < vmax and (target < vmin or target > vmax)
---   BAD:  vmin and vmax and target < vmin or target > vmax
---
--- Lua's and/or precedence makes the bad form parse as
--- `(vmin and vmax and target < vmin) or (target > vmax)`, so the second
--- disjunct evaluates `target > vmax` even when vmax is nil, producing
--- "attempt to compare nil with number" inside reaper.defer (after Code.run
--- has already logged "Script completed OK").
---
--- Detection keeps the canonical public/safety contract while tolerating
--- harmless formatting, statement separators, and internal-variable names.
--- Algorithm checks are scoped to the called helper's own function span so
--- unrelated code cannot lend a corrupted helper the fragments it is missing.
---
--- Returns a list of `{name, missing}` entries (missing is the canonical
--- fragment the helper body lacks), or nil if every defined helper looks
--- intact.
-function Code.find_helper_integrity_violations(lua_code)
-  if not lua_code or lua_code == "" then return nil end
-  -- Treat descriptive variants such as `set_param_display_inverted` as the
-  -- same safety-critical helper family. The observed recovery script renamed
-  -- the helper and thereby skipped the old exact-name validator entirely.
-  lua_code = tostring(lua_code):gsub(
-    "%f[%w_]set_param_display[_%w]*%f[^%w_]", "set_param_display")
-  -- Inlined to avoid a file-scope local slot (we're at the 200-local
-  -- limit). Trivial reconstruction cost; this validator runs at most
-  -- once per turn.
-  local required_fragments = {
-    set_param_display = {
-      -- The helper is a tested source artifact, not a loose recipe. Keep its
-      -- safety-critical parsing, unit conversion and range guards. The public
-      -- signature and
-      -- search/refinement structure are checked separately below so harmless
-      -- declaration forms, internal-variable renames, and statement formatting
-      -- do not turn a safe helper into a false positive.
-      "local text = tostring(s or \"\"):gsub(\",\", \"\")",
-      -- Nil-safe parse helper. The bare `s:gsub(...)` form crashes when
-      -- TrackFX_GetFormattedParamValue returns nil (some VST3 plugins
-      -- return that during the binary-search probe phase). The `(s or "")`
-      -- guard turns a nil into a no-op match.
-      "tostring(s or \"\"):gsub",
-      -- Display units can change across one parameter's range. Comparing
-      -- 10.00 ms to 2.500 sec as raw 10 and 2.5 reverses the range and rejects
-      -- valid targets. Require base-unit conversion for time and frequency.
-      "return value * 1000, \"frequency\", 1000",
-      "return value, \"frequency\", 1",
-      "return value, \"time\", 1",
-      "return value * 1000, \"time\", 1000",
-      -- Unit-bearing targets are authoritative. Legacy numeric targets on a
-      -- mixed-unit range are accepted only when one interpretation is in
-      -- range; ambiguous cases fail closed.
-      "local target_value, target_family = parse(target_input)",
-      "\"numeric target has ambiguous units; pass a unit-bearing string\"",
-    },
-  }
-  -- Strip ALL whitespace and optional statement separators from haystack and
-  -- required fragments before matching. A semicolon and a line break are
-  -- equivalent between Lua statements; treating them differently rejected
-  -- safe pretty-printed copies of the canonical helper.
-  local function _normws(s) return (s:gsub("[%s;]+", "")) end
-
-  -- Normalize executable Lua tokens while preserving string VALUES as opaque
-  -- length-prefixed hex markers. A quoted or long-string decoy therefore
-  -- cannot lend the surrounding helper executable syntax, while semantically
-  -- equivalent single/double-quoted literals compare the same. Comments,
-  -- whitespace, and optional statement separators are ignored.
-  local function _token_norm(s)
-    if type(Code.tokenize_lua) ~= "function" then
-      return _normws(_lua_code_only_preserving_offsets(s))
-    end
-    local out = {}
-    for _, token in ipairs(Code.tokenize_lua(tostring(s or "")) or {}) do
-      if token.type == "str" then
-        local value = token.text
-        local chunk = load("return " .. tostring(token.text or ""),
-          "=(helper string literal)", "t", {})
-        if chunk then
-          local ok, parsed = pcall(chunk)
-          if ok and type(parsed) == "string" then value = parsed end
-        end
-        local hex = tostring(value or ""):gsub(".", function(ch)
-          return string.format("%02x", string.byte(ch))
-        end)
-        out[#out + 1] = "<str:" .. tostring(#tostring(value or ""))
-          .. ":" .. hex .. ">"
-      elseif token.type ~= "com" and token.type ~= "ws"
-          and token.text ~= ";" then
-        out[#out + 1] = token.text
-      end
-    end
-    return table.concat(out)
-  end
-
-  -- Walk a code-only span from just after a function/loop header to its
-  -- matching end/until. Strings and comments have already been replaced with
-  -- same-length spaces by _lua_code_only_preserving_offsets, so byte offsets
-  -- map back to the original script and keyword-looking text cannot interfere.
-  local function _matching_block_end(src, start_i, initial_depth)
-    local depth = initial_depth or 1
-    local pos = start_i
-    while pos <= #src and depth > 0 do
-      local s, e, word = src:find("([_%a][_%w]*)", pos)
-      if not s then break end
-      if word == "function" or word == "if" or word == "repeat"
-         or word == "do" then
-        depth = depth + 1
-      elseif word == "end" or word == "until" then
-        depth = depth - 1
-        if depth == 0 then return e end
-      end
-      pos = e + 1
-    end
-    return nil
-  end
-
-  local code_only = _lua_code_only_preserving_offsets(lua_code)
-  local violations = {}
-  for name, fragments in pairs(required_fragments) do
-    -- Only check helpers that are BOTH defined AND called. A pasted-
-    -- but-uncalled helper is dead code -- its corruption never executes,
-    -- so forcing a retry is wasted cost. Mirrors the dead-code exemption
-    -- the defer-validator already has. Call-site detection: NAME(
-    -- preceded by a non-identifier, non-`.` byte (so `obj.NAME(` doesn't
-    -- count and we don't false-positive on field access).
-    local defined, header_end
-    local family_definition_count = 0
-    for _ in code_only:gmatch(
-        "function%s+" .. name .. "%s*%b()") do
-      family_definition_count = family_definition_count + 1
-    end
-    for _ in (" " .. code_only):gmatch(
-        "[^%w_%.]" .. name .. "%s*=%s*function%s*%b()") do
-      family_definition_count = family_definition_count + 1
-    end
-    local definition_patterns = {
-      "local%s+function%s+" .. name .. "%s*%b()",
-      "function%s+" .. name .. "%s*%b()",
-      "local%s+" .. name .. "%s*=%s*function%s*%b()",
-      "%f[%w_]" .. name .. "%f[^%w_]%s*=%s*function%s*%b()",
-    }
-    for _, pattern in ipairs(definition_patterns) do
-      local candidate, candidate_end = code_only:find(pattern)
-      if candidate and (not defined or candidate < defined) then
-        defined, header_end = candidate, candidate_end
-      end
-    end
-    if defined and header_end then
-      local function_end = _matching_block_end(code_only, header_end + 1, 1)
-      local call_tail = function_end and code_only:sub(function_end + 1) or ""
-      local called = (" " .. call_tail):find(
-        "[^%w_%.]" .. name .. "%s*%(") ~= nil
-      if called and function_end then
-        local helper_source = lua_code:sub(defined, function_end)
-        local helper_code = code_only:sub(defined, function_end)
-        local token_hay = _token_norm(helper_source)
-        local helper_hay = _normws(helper_code)
-        local violations_before = #violations
-        local header_args = code_only:sub(defined, header_end)
-          :match("(%b())%s*$")
-        if family_definition_count > 1 then
-          violations[#violations+1] = {
-            name = name,
-            missing = "exactly one set_param_display family definition",
-          }
-        elseif name == "set_param_display"
-           and _normws(header_args or "") ~= "(tr,fx,pidx,target)" then
-          violations[#violations+1] = {
-            name = name,
-            missing = "local function set_param_display(tr, fx, pidx, target)",
-          }
-        end
-        for _, frag in ipairs(fragments) do
-          if #violations > violations_before then break end
-          if not token_hay:find(_token_norm(frag), 1, true) then
-            violations[#violations+1] = { name = name, missing = frag }
-            break  -- one violation per helper is enough to trigger retry
-          end
-        end
-        if name == "set_param_display" and #violations == violations_before then
-          -- Prove the 30-step search inside its own loop: initialize [0,1],
-          -- write the midpoint, read/parse the same parameter, and narrow the
-          -- same bounds. A loop header with an empty/gutted body must not pass.
-          local _, _, binary_iter, binary_body_start = helper_code:find(
-            "for%s+([%a_][%w_]*)%s*=%s*1%s*,%s*30%s+do()")
-          local binary_end = binary_body_start and _matching_block_end(
-            helper_code, binary_body_start, 1)
-          local binary_body = binary_end
-            and helper_code:sub(binary_body_start, binary_end) or ""
-          local binary_hay = _normws(binary_body)
-          local mid, low, high = binary_hay:match(
-            "local([%a_][%w_]*)=%(([%a_][%w_]*)%+"
-              .. "([%a_][%w_]*)%)/2")
-          local bounds_initialized = false
-          local endpoint_low, endpoint_high
-          if low and high then
-            local low_init, high_init = helper_hay:match(
-              "local" .. low .. "," .. high .. "="
-                .. "([%+%-]?[%d%.]+[eE]?[%+%-]?%d*),"
-                .. "([%+%-]?[%d%.]+[eE]?[%+%-]?%d*)")
-            bounds_initialized =
-              tonumber(low_init) == 0 and tonumber(high_init) == 1
-            if not bounds_initialized then
-              endpoint_low, endpoint_high = helper_hay:match(
-                "local" .. low .. "," .. high
-                  .. "=([%a_][%w_]*),([%a_][%w_]*)local")
-              if endpoint_low and endpoint_high then
-                local endpoint_low_init, endpoint_high_init =
-                  helper_hay:match(
-                    "local" .. endpoint_low .. "," .. endpoint_high .. "="
-                      .. "([%+%-]?[%d%.]+[eE]?[%+%-]?%d*),"
-                      .. "([%+%-]?[%d%.]+[eE]?[%+%-]?%d*)")
-                bounds_initialized = tonumber(endpoint_low_init) == 0
-                  and tonumber(endpoint_high_init) == 1
-              end
-            end
-          end
-          local display = mid and binary_hay:match(
-            "local[%a_][%w_]*,([%a_][%w_]*)="
-              .. "reaper%.TrackFX_GetFormattedParamValue%"
-              .. "(tr,fx,pidx,")
-          local current = display and binary_hay:match(
-            "local([%a_][%w_]*)=parse%(" .. display .. "%)")
-          local original = helper_hay:match(
-            "local([%a_][%w_]*)="
-              .. "reaper%.TrackFX_GetParamNormalized%(tr,fx,pidx%)")
-          local orientation = helper_hay:match(
-            "local([%a_][%w_]*)=[%a_][%w_]*>[%a_][%w_]*")
-          local low_value, high_value
-          if low and high then
-            low_value, high_value = helper_hay:match(
-              "local" .. low .. "," .. high
-                .. "=[%+%-]?[%d%.]+[eE]?[%+%-]?%d*,"
-                .. "[%+%-]?[%d%.]+[eE]?[%+%-]?%d*"
-                .. "local([%a_][%w_]*),"
-                .. "([%a_][%w_]*)=")
-            if not low_value then
-              local assigned_endpoint_low, assigned_endpoint_high,
-                assigned_low_value, assigned_high_value =
-                helper_hay:match(
-                  "local" .. low .. "," .. high
-                    .. "=[%+%-]?[%d%.]+[eE]?[%+%-]?%d*,"
-                    .. "[%+%-]?[%d%.]+[eE]?[%+%-]?%d*"
-                    .. low .. "," .. high .. "="
-                    .. "([%a_][%w_]*),([%a_][%w_]*)"
-                    .. "local([%a_][%w_]*),([%a_][%w_]*)=")
-              if assigned_endpoint_low and assigned_endpoint_high then
-                endpoint_low, endpoint_high =
-                  assigned_endpoint_low, assigned_endpoint_high
-                low_value, high_value =
-                  assigned_low_value, assigned_high_value
-              end
-            end
-            if not low_value and endpoint_low and endpoint_high then
-              low_value, high_value = helper_hay:match(
-                "local" .. low .. "," .. high .. "="
-                  .. endpoint_low .. "," .. endpoint_high
-                  .. "local([%a_][%w_]*),([%a_][%w_]*)=")
-            end
-          end
-          local binary_probe = mid and binary_hay:find(
-            "reaper.TrackFX_SetParamNormalized(tr,fx,pidx," .. mid .. ")",
-            1, true)
-          local parse_guard_start = current and select(3, binary_body:find(
-            "if%s+not%s+" .. current .. "%s+then()"))
-          local parse_guard_end = parse_guard_start
-            and _matching_block_end(binary_body, parse_guard_start, 1)
-          local parse_guard_hay = parse_guard_end
-            and _normws(binary_body:sub(parse_guard_start, parse_guard_end))
-            or ""
-          local restore_and_fail = original
-            and ("reaper.TrackFX_SetParamNormalized(tr,fx,pidx,"
-              .. original .. ")returnfalse")
-          local parse_guard = parse_guard_start and restore_and_fail
-            and parse_guard_hay:find(restore_and_fail, 1, true)
-          local descending_guard_start = current and low_value and high_value
-            and select(3, binary_body:find(
-              "if%s+" .. current .. "%s*>%s*" .. low_value
-                .. "%s+or%s+" .. current .. "%s*<%s*" .. high_value
-                .. "%s+then()"))
-          local descending_guard_end = descending_guard_start
-            and _matching_block_end(binary_body, descending_guard_start, 1)
-          local descending_guard_hay = descending_guard_end
-            and _normws(binary_body:sub(
-              descending_guard_start, descending_guard_end))
-            or ""
-          local ascending_guard_start = current and low_value and high_value
-            and select(3, binary_body:find(
-              "if%s+" .. current .. "%s*<%s*" .. low_value
-                .. "%s+or%s+" .. current .. "%s*>%s*" .. high_value
-                .. "%s+then()"))
-          local ascending_guard_end = ascending_guard_start
-            and _matching_block_end(binary_body, ascending_guard_start, 1)
-          local ascending_guard_hay = ascending_guard_end
-            and _normws(binary_body:sub(
-              ascending_guard_start, ascending_guard_end))
-            or ""
-          local monotonic_guards = restore_and_fail
-            and descending_guard_start and ascending_guard_start
-            and descending_guard_hay:find(restore_and_fail, 1, true)
-            and ascending_guard_hay:find(restore_and_fail, 1, true)
-          local descending_narrow = current and low and high and mid
-            and low_value and high_value
-            and (binary_hay:find(
-              "if" .. current .. ">targetthen"
-                .. low .. "," .. low_value .. "=" .. mid .. "," .. current
-                .. "else" .. high .. "," .. high_value .. "="
-                .. mid .. "," .. current .. "end",
-              1, true)
-              or binary_hay:find(
-                "if" .. current .. ">targetthen"
-                  .. low .. "=" .. mid .. low_value .. "=" .. current
-                  .. "else" .. high .. "=" .. mid
-                  .. high_value .. "=" .. current .. "end",
-                1, true))
-          local ascending_narrow = current and low and high and mid
-            and low_value and high_value
-            and (binary_hay:find(
-              "if" .. current .. "<targetthen"
-                .. low .. "," .. low_value .. "=" .. mid .. "," .. current
-                .. "else" .. high .. "," .. high_value .. "="
-                .. mid .. "," .. current .. "end",
-              1, true)
-              or binary_hay:find(
-                "if" .. current .. "<targetthen"
-                  .. low .. "=" .. mid .. low_value .. "=" .. current
-                  .. "else" .. high .. "=" .. mid
-                  .. high_value .. "=" .. current .. "end",
-                1, true))
-          local narrowing = orientation
-            and binary_hay:find("if" .. orientation .. "then", 1, true)
-            and descending_narrow and ascending_narrow
-          local binary_ok = binary_iter and bounds_initialized
-            and low and high and mid and display
-            and current and binary_probe and parse_guard
-            and monotonic_guards and narrowing
-
-          -- Scope refinement checks to the -5..+5 loop. Allow its base and
-          -- best-value initializer to be either a local name (`conv`) or an
-          -- inline expression (`(lo + hi) / 2`), while keeping the candidate,
-          -- closest-difference update, and final write linked by captured names.
-          local _, _, nudge_iter, nudge_body_start = helper_code:find(
-            "for%s+([%a_][%w_]*)%s*=%s*%-5%s*,%s*5%s+do()")
-          local nudge_end = nudge_body_start and _matching_block_end(
-            helper_code, nudge_body_start, 1)
-          local nudge_body = nudge_end
-            and helper_code:sub(nudge_body_start, nudge_end) or ""
-          local nudge_hay = _normws(nudge_body)
-          local candidate = nudge_iter and nudge_body:match(
-            "local%s+([%a_][%w_]*)%s*=%s*[^\r\n;,]+%+%s*"
-              .. "%(*%s*" .. nudge_iter
-              .. "%s*%*%s*0%.0001%s*%)*")
-          local best_value, best_diff = helper_code:match(
-            "local%s+([%a_][%w_]*)%s*,%s*([%a_][%w_]*)%s*=%s*"
-              .. "[^\r\n;,]+%s*,%s*math%.huge")
-          local best_display = best_value and best_diff
-            and helper_hay:match(
-              "local" .. best_value .. "," .. best_diff
-                .. "=[%a_][%w_]*,math%.hugelocal([%a_][%w_]*)=")
-          local refine_display = candidate and nudge_hay:match(
-            "local[%a_][%w_]*,([%a_][%w_]*)="
-              .. "reaper%.TrackFX_GetFormattedParamValue%"
-              .. "(tr,fx,pidx,")
-          local refined = refine_display and nudge_hay:match(
-            "local([%a_][%w_]*)=parse%(" .. refine_display .. "%)")
-          local candidate_diff = refined and nudge_hay:match(
-            "local([%a_][%w_]*)=math%.abs%(" .. refined .. "%-target%)")
-          local candidate_probe = candidate and nudge_hay:find(
-            "reaper.TrackFX_SetParamNormalized(tr,fx,pidx," .. candidate .. ")",
-            1, true)
-          local candidate_bounds = candidate and nudge_hay:find(
-            "if" .. candidate .. ">=0%.?0*and" .. candidate
-              .. "<=1%.?0*then",
-            1)
-          if candidate and not candidate_bounds
-              and endpoint_low and endpoint_high then
-            candidate_bounds = nudge_hay:find(
-              "if" .. candidate .. ">=" .. endpoint_low
-                .. "and" .. candidate .. "<=" .. endpoint_high .. "then",
-              1, true)
-          end
-          local closest_update = candidate and best_value and best_diff
-            and candidate_diff
-            and nudge_hay:find(
-              "if" .. candidate_diff .. "<" .. best_diff .. "then",
-              1, true)
-            and ((nudge_hay:find(
-                best_diff .. "=" .. candidate_diff, 1, true)
-              and nudge_hay:find(
-                best_value .. "=" .. candidate, 1, true))
-              or (best_display and refine_display
-                and nudge_hay:find(
-                  best_diff .. "," .. best_value .. "," .. best_display
-                    .. "=" .. candidate_diff .. "," .. candidate .. ","
-                    .. refine_display,
-                  1, true)))
-          local final_best_write = best_value and helper_hay:find(
-            "reaper.TrackFX_SetParamNormalized(tr,fx,pidx,"
-              .. best_value .. ")",
-            1, true)
-          local final_display = best_value and helper_hay:match(
-            "reaper%.TrackFX_SetParamNormalized%(tr,fx,pidx,"
-              .. best_value .. "%)local[%a_][%w_]*,([%a_][%w_]*)="
-              .. "reaper%.TrackFX_GetFormattedParamValue%(tr,fx,pidx,")
-          local final_value = final_display and helper_hay:match(
-            "local([%a_][%w_]*)=parse%(" .. final_display .. "%)")
-          local exact_tolerance = final_value and helper_hay:match(
-            "local([%a_][%w_]*)=0%.0+1")
-          if final_value and not exact_tolerance then
-            exact_tolerance = helper_hay:match(
-              "local([%a_][%w_]*)=1[eE]%-0?9")
-          end
-          local final_diff = final_value and helper_hay:match(
-            "local([%a_][%w_]*)=math%.abs%("
-              .. final_value .. "%-target%)")
-          local below = helper_code:match(
-            "local%s+([%a_][%w_]*)%s*=%s*nil%s*"
-              .. "if%s+[%a_][%w_]*%s*<=%s*target%s+then")
-          local above = helper_code:match(
-            "local%s+([%a_][%w_]*)%s*=%s*nil%s*"
-              .. "if%s+[%a_][%w_]*%s*>=%s*target%s+then")
-          if not below or not above then
-            local paired_below, paired_above = helper_code:match(
-              "local%s+([%a_][%w_]*)%s*,%s*([%a_][%w_]*)%s*"
-                .. "=%s*nil%s*,%s*nil")
-            below = below or paired_below
-            above = above or paired_above
-          end
-          local range_low, range_high = helper_hay:match(
-            "local([%a_][%w_]*),([%a_][%w_]*)="
-              .. "math%.min%([%a_][%w_]*,[%a_][%w_]*%),"
-              .. "math%.max%([%a_][%w_]*,[%a_][%w_]*%)")
-          local local_step = below and above and helper_hay:match(
-            "local([%a_][%w_]*)=" .. below .. "and" .. above
-              .. "and" .. above .. ">" .. below
-              .. "and%(" .. above .. "%-" .. below .. "%)ornil")
-          local max_local_step = exact_tolerance and range_low and range_high
-            and helper_hay:match(
-              "local([%a_][%w_]*)=math%.max%("
-                .. exact_tolerance .. ",%(" .. range_high .. "%-"
-                .. range_low .. "%)%*0%.1%)")
-          if exact_tolerance and range_low and range_high
-             and not max_local_step then
-            max_local_step = helper_hay:match(
-              "local([%a_][%w_]*)=math%.max%("
-                .. exact_tolerance .. ",%(" .. range_high .. "%-"
-                .. range_low .. "%)/10%)")
-          end
-          local final_branch_start
-          if final_diff and exact_tolerance then
-            final_branch_start = select(3, helper_code:find(
-              "if%s+" .. final_diff .. "%s*>%s*" .. exact_tolerance
-                .. "%s+then()"))
-          end
-          local final_branch_end = final_branch_start
-            and _matching_block_end(helper_code, final_branch_start, 1)
-          local final_branch_hay = final_branch_end
-            and _normws(helper_code:sub(final_branch_start, final_branch_end))
-            or ""
-          local final_unreadable_guard = final_value and original
-            and helper_hay:find("ifnot" .. final_value .. "then"
-              .. "reaper.TrackFX_SetParamNormalized(tr,fx,pidx,"
-              .. original .. ")returnfalse", 1, true)
-          local final_failure = local_step and max_local_step and final_diff
-            and exact_tolerance and original
-            and (final_branch_hay:find(
-              "ifnot" .. local_step .. "or" .. local_step .. ">"
-                .. max_local_step .. "or" .. final_diff .. ">"
-                .. local_step .. "/2+" .. exact_tolerance .. "then",
-              1, true)
-              or final_branch_hay:find(
-                "ifnot" .. local_step .. "or" .. local_step .. ">"
-                  .. max_local_step .. "or" .. final_diff .. ">"
-                  .. local_step .. "%*0%.5%+" .. exact_tolerance .. "then",
-                1))
-            and final_branch_hay:find(
-              "reaper.TrackFX_SetParamNormalized(tr,fx,pidx,"
-                .. original .. ")returnfalse",
-              1, true)
-          local function assigned_once(var)
-            if not var then return false end
-            local count = 0
-            for _ in helper_code:gmatch(
-                "[^%w_]" .. var .. "%s*=%s*[^=]") do
-              count = count + 1
-            end
-            return count == 1
-          end
-          local final_verified = final_value and exact_tolerance and final_diff
-            and final_branch_start and final_failure
-            and assigned_once(original)
-            and assigned_once(exact_tolerance)
-            and assigned_once(final_diff)
-            and assigned_once(local_step)
-            and assigned_once(max_local_step)
-            and helper_hay:find("returntrue", 1, true)
-          local missing
-          if not binary_iter then
-            missing = "30-iteration normalized binary search"
-          elseif not binary_ok then
-            missing = "direction-aware 30-iteration normalized binary search body"
-          elseif not nudge_iter or not candidate or not candidate_probe
-              or not candidate_bounds or not refine_display or not refined then
-            missing = "-5 through +5 normalized refinement loop"
-          elseif not best_value or not best_diff or not candidate_diff
-              or not closest_update then
-            missing = "closest formatted-value candidate update"
-          elseif not final_best_write then
-            missing = "final normalized write of the closest candidate"
-          elseif not final_value or not final_unreadable_guard then
-            missing = "formatted-value postcondition readback"
-          elseif not final_verified then
-            missing = "bounded nearest-value verification and failure restore"
-          end
-          if missing then
-            violations[#violations+1] = { name = name, missing = missing }
-          end
-        end
-      end
-    end
-  end
-  if #violations == 0 then return nil end
-  table.sort(violations, function(a, b) return a.name < b.name end)
-  return violations
-end
 
 -- For a hallucinated reaper.X name, return up to N real function names that
 -- look similar (share a substring of >=4 chars, case-insensitive). Sorted
@@ -17582,210 +9632,6 @@ end
 -- Comments, whitespace, and optional statement separators are ignored. String
 -- token spelling remains significant because helper error text and formatted
 -- target parsing are part of the safety contract.
-function Code.normalized_lua_tokens(lua_code)
-  lua_code = tostring(lua_code or "")
-  if type(Code.tokenize_lua) ~= "function" then
-    return _lua_code_only_preserving_offsets(lua_code):gsub("[%s;]+", "")
-  end
-  local out = {}
-  for _, token in ipairs(Code.tokenize_lua(lua_code) or {}) do
-    if token.type ~= "com" and token.type ~= "ws"
-       and token.text ~= ";" then
-      out[#out + 1] = tostring(token.type or "") .. ":"
-        .. tostring(token.text or "")
-    end
-  end
-  return table.concat(out, "\31")
-end
-
--- Return every exact-name parameter-helper function region in a source string.
--- The prompt bundle contains a short presentation example before the full
--- set_param_display definition, so callers select the longest canonical region.
-function Code.parameter_helper_regions(lua_code)
-  if type(lua_code) ~= "string" or lua_code == "" then return {} end
-  local stripped = _lua_code_only_preserving_offsets(lua_code)
-  local wanted = {
-    set_param_display = true,
-    set_param_enum = true,
-    set_param_enum_paced = true,
-  }
-  local regions = {}
-  for _, fn in ipairs(_find_local_function_regions(stripped)) do
-    if wanted[fn.name] then
-      local source = lua_code:sub(fn.def_start, fn.body_end)
-      regions[fn.name] = regions[fn.name] or {}
-      regions[fn.name][#regions[fn.name] + 1] = {
-        name = fn.name,
-        def_start = fn.def_start,
-        body_start = fn.body_start,
-        body_end = fn.body_end,
-        source = source,
-        normalized = Code.normalized_lua_tokens(source),
-      }
-    end
-  end
-  return regions
-end
-
-function Code.parameter_helper_region_is_line_isolated(lua_code, region)
-  if type(lua_code) ~= "string" or type(region) ~= "table" then return false end
-  local def_start = tonumber(region.def_start)
-  local body_end = tonumber(region.body_end)
-  if not def_start or not body_end then return false end
-  local before = lua_code:sub(1, math.max(0, def_start - 1))
-    :match("([^\r\n]*)$") or ""
-  local after = lua_code:sub(body_end + 1):match("^([^\r\n]*)") or ""
-  local prefix_isolated = before:match("^%s*$") ~= nil
-    or before:match("^%s*local%s+$") ~= nil
-  return prefix_isolated and after:match("^%s*$") ~= nil
-end
-
-function Code.canonical_parameter_helper_tokens()
-  local content = nil
-  if type(CTX) == "table" and type(CTX.prompt_bundle) == "function" then
-    content = select(1, CTX.prompt_bundle("plugin_helpers"))
-  end
-  if (type(content) ~= "string" or content == "")
-     and type(S) == "table" and type(S.prompt_bundle_cache) == "table" then
-    content = S.prompt_bundle_cache.plugin_helpers
-  end
-  if type(content) ~= "string" or content == "" then return {} end
-
-  local canonical = {}
-  for name, candidates in pairs(Code.parameter_helper_regions(content)) do
-    local longest = nil
-    for _, candidate in ipairs(candidates) do
-      if not longest or #candidate.normalized > #longest.normalized then
-        longest = candidate
-      end
-    end
-    if longest then canonical[name] = longest.normalized end
-  end
-  return canonical
-end
-
--- Classify every generated TrackFX/TakeFX parameter setter source line.
--- Runtime enforcement uses this map at the sandbox setter boundary. The static
--- response and manual-run gates use the findings list to reject direct generic
--- writes before generated code starts.
-function Code.parameter_write_authorization_map(lua_code, profile_receipts)
-  if type(lua_code) ~= "string" or lua_code == "" then return {}, nil end
-  local stripped = _lua_code_only_preserving_offsets(lua_code)
-  local canonical = Code.canonical_parameter_helper_tokens()
-  local helper_regions = Code.parameter_helper_regions(lua_code)
-  local helper_bad = {}
-  for _, finding in ipairs(
-      Code.find_helper_integrity_violations(lua_code) or {}) do
-    helper_bad[tostring(finding.name or "")] = true
-  end
-
-  local verified_helpers = {}
-  for name, candidates in pairs(helper_regions) do
-    if #candidates == 1 and canonical[name]
-       and candidates[1].normalized == canonical[name]
-       and Code.parameter_helper_region_is_line_isolated(
-         lua_code, candidates[1])
-       and not helper_bad[name] then
-      verified_helpers[#verified_helpers + 1] = candidates[1]
-    end
-  end
-
-  local profile_active =
-    (profile_receipts == true)
-    or (type(profile_receipts) == "table" and #profile_receipts > 0)
-  local profile_safe = false
-  local resolver_vars = {}
-  if profile_active
-     and type(Code.find_unguarded_profile_param_writes) == "function" then
-    profile_safe =
-      Code.find_unguarded_profile_param_writes(lua_code) == nil
-    if profile_safe then
-      for _, binding in ipairs(
-          Code.profile_resolver_spec_bindings(lua_code) or {}) do
-        if binding.mapped_var then
-          resolver_vars[binding.mapped_var] = true
-        end
-      end
-    end
-  end
-
-  local all_functions = _find_local_function_regions(stripped)
-  local authorization = {}
-  local findings = {}
-  local finding_lines = {}
-  local setter_names = {
-    "TrackFX_SetParamNormalized",
-    "TrackFX_SetParam",
-    "TakeFX_SetParamNormalized",
-    "TakeFX_SetParam",
-  }
-
-  for _, api_name in ipairs(setter_names) do
-    local search_pos = 1
-    while true do
-      local call_start, call_open = stripped:find(
-        "reaper%." .. api_name .. "%s*%(", search_pos)
-      if not call_start then break end
-      local args, call_close =
-        Code._parse_lua_call_args(stripped, call_open)
-      local line = Code._lua_line_for_pos(stripped, call_start)
-      local helper_name = nil
-      for _, region in ipairs(verified_helpers) do
-        if call_start >= region.body_start
-           and call_start <= region.body_end then
-          helper_name = region.name
-          break
-        end
-      end
-
-      local classification = nil
-      if helper_name then
-        classification = {
-          kind = "canonical_helper",
-          helper = helper_name,
-        }
-      elseif profile_safe and api_name:find("^TrackFX_") then
-        local index_expr = args and Code._lua_trim_expr(args[3]) or ""
-        index_expr = index_expr:gsub("%s+", "")
-        local mapped_var = index_expr:match(
-          "^([%a_][%w_]*)%[%d+%]$")
-        if mapped_var and resolver_vars[mapped_var] then
-          classification = { kind = "profile_resolver" }
-        else
-          for _, fn in ipairs(all_functions) do
-            if call_start >= fn.body_start and call_start <= fn.body_end then
-              classification = {
-                kind = "profile_wrapper",
-                helper = fn.name,
-              }
-              break
-            end
-          end
-        end
-      end
-
-      if classification then
-        authorization[line] = classification
-      else
-        finding_lines[line] = true
-        findings[#findings + 1] = {
-          api = api_name,
-          line = line,
-          kind = "generic_raw",
-        }
-      end
-      search_pos = (call_close or call_open) + 1
-    end
-  end
-
-  for line in pairs(finding_lines) do authorization[line] = nil end
-  if #findings == 0 then return authorization, nil end
-  table.sort(findings, function(a, b)
-    if a.line ~= b.line then return a.line < b.line end
-    return a.api < b.api
-  end)
-  return authorization, findings
-end
 
 function Code.find_param_calls_outside_defer(lua_code)
   if not lua_code or lua_code == "" then return nil end
@@ -17961,8 +9807,6 @@ local _HELPER_NAMES = {
 local _HELPER_CALL_ALLOWED_GLOBALS = {
   assert = true, collectgarbage = true, error = true, getmetatable = true,
   ipairs = true, next = true, pairs = true, pcall = true, print = true,
-  reaassist_resolve_profile_params = true,
-  reaassist_schedule_autokey_send_reset = true,
   rawequal = true, rawget = true, rawlen = true, rawset = true,
   select = true, setmetatable = true, tonumber = true, tostring = true,
   type = true, xpcall = true,
@@ -18202,61 +10046,6 @@ function Code.prompt_has_plugin_musical_config_intent(text)
     end
   end
   return false
-end
-
--- A named musical key/scale request (for example "set Auto-Tune to D minor")
--- cannot safely derive the scale from a raw normalized literal unless the
--- entire selector mapping is independently verified. Long selectors are often
--- sampled/partial, and the exact observed failure mapped a guessed 1.0 to
--- HARMONIC instead of MINOR. Require an executable enum-matching helper call
--- whenever such a request also emits direct FX parameter writes.
-function Code.find_musical_enum_guess_violations(lua_code, user_text)
-  if type(lua_code) ~= "string" or lua_code == ""
-     or not Code.prompt_has_plugin_musical_config_intent(user_text) then
-    return nil
-  end
-  local stripped = _lua_code_only_preserving_offsets(lua_code)
-
-  local function has_helper_call(name)
-    local pos = 1
-    while true do
-      local first, last = stripped:find(
-        "%f[%w_]" .. name .. "%s*%(", pos)
-      if not first then return false end
-      local before = stripped:sub(math.max(1, first - 32), first - 1)
-      if not before:match("function%s+$") then return true end
-      pos = last + 1
-    end
-  end
-
-  if has_helper_call("set_param_enum")
-     or has_helper_call("set_param_enum_paced") then
-    return nil
-  end
-
-  local findings = {}
-  for _, api_name in ipairs({
-    "TrackFX_SetParamNormalized", "TrackFX_SetParam",
-    "TakeFX_SetParamNormalized", "TakeFX_SetParam",
-  }) do
-    local pos = 1
-    while true do
-      local first, last = stripped:find(
-        "reaper%." .. api_name .. "%s*%(", pos)
-      if not first then break end
-      findings[#findings + 1] = {
-        api = api_name,
-        line = Code._lua_line_for_pos(stripped, first),
-      }
-      pos = last + 1
-    end
-  end
-  if #findings == 0 then return nil end
-  table.sort(findings, function(a, b)
-    if a.line ~= b.line then return a.line < b.line end
-    return a.api < b.api
-  end)
-  return findings
 end
 
 -- Bare integers are intentionally excluded from the broad numeric write
@@ -18667,11 +10456,9 @@ function Code.prompt_can_use_plugin_add_only_bundle(text)
   return true
 end
 
-function Code.lua_has_fx_param_writes(lua_code)
+function Code.lua_has_fx_param_value_writes(lua_code)
   if type(lua_code) ~= "string" or lua_code == "" then return false end
-  local stripped = lua_code
-    :gsub("%-%-%[%[.-%]%]", "")
-    :gsub("%-%-[^\n]*", "")
+  local stripped = _lua_code_only_preserving_offsets(lua_code)
   return stripped:find("reaper%.TrackFX_SetParam%s*%(") ~= nil
     or stripped:find("reaper%.TrackFX_SetParamNormalized%s*%(") ~= nil
     or stripped:find("reaper%.TakeFX_SetParam%s*%(") ~= nil
@@ -18679,6 +10466,138 @@ function Code.lua_has_fx_param_writes(lua_code)
     or stripped:find("%f[%w]set_param_display%s*%(") ~= nil
     or stripped:find("%f[%w]set_param_enum%s*%(") ~= nil
     or stripped:find("%f[%w]set_param_enum_paced%s*%(") ~= nil
+end
+
+function Code.lua_has_fx_named_config_value_write(lua_code)
+  if type(lua_code) ~= "string" or lua_code == "" then return false end
+  local code_only = _lua_code_only_preserving_offsets(lua_code)
+  for _, api_name in ipairs({
+    "TrackFX_SetNamedConfigParm", "TakeFX_SetNamedConfigParm",
+  }) do
+    local search_pos = 1
+    while true do
+      local _, open_pos = code_only:find(
+        "reaper%." .. api_name .. "%s*%(", search_pos)
+      if not open_pos then break end
+      local inner, close_pos = Code._lua_call_inner(lua_code, open_pos)
+      if inner and (inner:find('\"param%.%d+%.value\"')
+          or inner:find("'param%.%d+%.value'")) then
+        return true
+      end
+      search_pos = (close_pos or open_pos) + 1
+    end
+  end
+  return false
+end
+
+function Code.lua_has_fx_param_writes(lua_code)
+  if Code.lua_has_fx_param_value_writes(lua_code)
+      or Code.lua_has_fx_named_config_value_write(lua_code) then
+    return true
+  end
+  if type(lua_code) ~= "string" or lua_code == "" then return false end
+  local stripped = _lua_code_only_preserving_offsets(lua_code)
+  return stripped:find("reaper%.TrackFX_SetPreset%s*%(") ~= nil
+    or stripped:find("reaper%.TakeFX_SetPreset%s*%(") ~= nil
+end
+
+function Code.find_omitted_fx_param_write(lua_code, user_text)
+  if type(lua_code) ~= "string" or lua_code == "" then return nil end
+  local code_only = _lua_code_only_preserving_offsets(lua_code)
+  local add_pos = code_only:find("reaper%.TrackFX_AddByName%s*%(")
+    or code_only:find("reaper%.TakeFX_AddByName%s*%(")
+  if not add_pos or Code.lua_has_fx_param_value_writes(lua_code)
+      or Code.lua_has_fx_named_config_value_write(lua_code) then
+    return nil
+  end
+
+  -- Quoted text is commonly a track name. Ignore unit-like names such as
+  -- "Vocal +6 dB" when deciding whether the prompt requested a value write.
+  local prompt = Code._typed_action_user_request_text(user_text)
+    :gsub('"[^"\r\n]*"', " ")
+  local localized = Code._localized_action_intent_text(prompt):lower()
+
+  local function has_live_literal_property(api_name, property_name)
+    local search_pos = 1
+    while true do
+      local _, open_pos = code_only:find(
+        "reaper%." .. api_name .. "%s*%(", search_pos)
+      if not open_pos then return false end
+      local inner, close_pos = Code._lua_call_inner(lua_code, open_pos)
+      if inner and (inner:find('"' .. property_name .. '"', 1, true)
+          or inner:find("'" .. property_name .. "'", 1, true)) then
+        return true
+      end
+      search_pos = (close_pos or open_pos) + 1
+    end
+  end
+
+  -- Blank implemented host-property clauses, then evaluate the joined
+  -- remainder. This keeps the effect name available to qualify a later
+  -- request such as "set its Rate to 2 Hz" without joining distant words.
+  local split = localized
+    :gsub("[,;.!?\r\n]+", "\n")
+    :gsub("%s+and%s+", "\n")
+    :gsub("%s+y%s+", "\n")
+    :gsub("%s+e%s+", "\n")
+  local filtered_clauses = {}
+  local inherited_scope = nil
+  local has_preset_write = code_only:find("reaper%.TrackFX_SetPreset%s*%(")
+    or code_only:find("reaper%.TakeFX_SetPreset%s*%(")
+  for clause in (split .. "\n"):gmatch("(.-)\n") do
+    local has_track_scope = clause:find("%f[%w]track%f[%W]") ~= nil
+      or clause:find("%f[%w]master%f[%W]") ~= nil
+      or clause:find("%f[%w]fader%f[%W]") ~= nil
+    local has_item_scope = clause:find("%f[%w]item%f[%W]") ~= nil
+      or clause:find("%f[%w]take%f[%W]") ~= nil
+    local has_send_scope = clause:find("%f[%w]send%f[%W]") ~= nil
+    if has_send_scope then
+      inherited_scope = "send"
+    elseif has_item_scope then
+      inherited_scope = "item"
+    elseif has_track_scope then
+      inherited_scope = "track"
+    end
+    local has_volume_word = clause:find("%f[%w]volume%f[%W]") ~= nil
+    local has_level_word = clause:find("%f[%w]level%f[%W]") ~= nil
+    local has_gain_word = clause:find("%f[%w]gain%f[%W]") ~= nil
+    local has_fader_word = clause:find("%f[%w]fader%f[%W]") ~= nil
+    local local_level_word = has_volume_word or has_level_word
+      or has_gain_word or has_fader_word
+    local inherited_level_word = has_volume_word or has_fader_word
+    local implemented_host_write =
+      ((has_track_scope and local_level_word
+          or inherited_scope == "track" and inherited_level_word)
+        and has_live_literal_property("SetMediaTrackInfo_Value", "D_VOL"))
+      or ((has_item_scope and local_level_word
+          or inherited_scope == "item" and inherited_level_word)
+        and has_live_literal_property("SetMediaItemInfo_Value", "D_VOL"))
+      or ((has_send_scope and local_level_word
+          or inherited_scope == "send"
+            and (inherited_level_word or has_level_word))
+        and has_live_literal_property("SetTrackSendInfo_Value", "D_VOL"))
+      or ((has_track_scope or inherited_scope == "track")
+        and clause:find("%f[%w]pan%f[%W]")
+        and has_live_literal_property("SetMediaTrackInfo_Value", "D_PAN"))
+      or (has_track_scope and clause:find("%f[%w]width%f[%W]")
+        and has_live_literal_property("SetMediaTrackInfo_Value", "D_WIDTH"))
+      or (has_preset_write
+        and (clause:find("%f[%w]preset%f[%W]")
+          or clause:find("%f[%w]program%f[%W]")))
+    filtered_clauses[#filtered_clauses + 1] = implemented_host_write
+      and string.rep(" ", #clause) or clause
+  end
+  local fx_prompt = table.concat(filtered_clauses, " ")
+
+  if not Code.prompt_has_param_write_intent(fx_prompt)
+     and not Code.prompt_requests_named_param_value(fx_prompt) then
+    return nil
+  end
+
+  return {
+    line = Code._lua_line_for_pos(code_only, add_pos),
+    detail = "FX was inserted without writing every requested value",
+  }
 end
 
 function Code.strip_inapplicable_fx_param_tip(response_text, lua_code, user_text)
@@ -19025,6 +10944,12 @@ function Code.find_action_request_relevance_violations(
       detail = detail,
       review_only = review_only == true,
     }
+  end
+
+  local omitted_fx_param = Code.find_omitted_fx_param_write(lua_code, prompt)
+  if omitted_fx_param then
+    add("missing_requested_fx_param_write", omitted_fx_param.line,
+      omitted_fx_param.detail, false)
   end
 
   local function mentions_number(id)
@@ -19512,6 +11437,24 @@ function Code.find_action_request_relevance_violations(
       for lit in lua_code:gmatch("%f[%w_]" .. escaped .. "%s*=%s*'(.-)'") do
         local n = normalize_name(lit)
         if n ~= "" then pname_write_names[n] = true end
+      end
+      -- Third shape: a loop variable bound over a table of name literals, as
+      -- in `for _, name in ipairs(track_names) do`. Without this the names a
+      -- script gives the tracks it just created look like lookup targets.
+      for tbl in lua_code:gmatch("%f[%w_]for%s+[%w_%s,]-%f[%w_]" .. escaped
+          .. "%s+in%s+[%w_%.]-pairs%s*%(%s*([%a_][%w_]*)%s*%)") do
+        local escaped_tbl = tbl:gsub("(%W)", "%%%1")
+        for body in lua_code:gmatch(
+            "%f[%w_]" .. escaped_tbl .. "%s*=%s*{(.-)}") do
+          for lit in body:gmatch('"(.-)"') do
+            local n = normalize_name(lit)
+            if n ~= "" then pname_write_names[n] = true end
+          end
+          for lit in body:gmatch("'(.-)'") do
+            local n = normalize_name(lit)
+            if n ~= "" then pname_write_names[n] = true end
+          end
+        end
       end
     end
   end
@@ -21080,9 +13023,9 @@ function Code.safety_backup()
   return true
 end
 
--- Redirects print() to reaper.ShowConsoleMsg so output from assistant-generated
--- code is visible in REAPER's console window rather than going to stdout
--- (which REAPER hides).
+-- Captures print() from Assistant-generated code in Debug.log without opening
+-- REAPER's ReaScript console. Direct actions already report completion in the
+-- ReaAssist conversation, so a console window is unwanted UI.
 --
 -- Sandboxed environment: generated code only sees a curated whitelist of Lua
 -- builtins plus the reaper/gfx APIs. Dangerous modules (os, io, debug,
@@ -21209,17 +13152,10 @@ Code.AUTO_RUN_MANUAL_LUA_BLOCK_REASONS = {
   arity_validator = true,
   audio_accessor_samples_nil_validator = true,
   audio_sync_validator = true,
-  chain_upsert_validator = true,
-  defer_validator = true,
   docs_gate = true,
   drum_marker_sync_validator = true,
   drum_quantize_validator = true,
-  fx_add_getonly_validator = true,
   fx_check_validator = true,
-  fx_identifier_validator = true,
-  fx_param_scope_validator = true,
-  get_by_name_validator = true,
-  helper_integrity_validator = true,
   helper_validator = true,
   jsfx_format_validator = true,
   jsfx_validator = true,
@@ -21231,17 +13167,9 @@ Code.AUTO_RUN_MANUAL_LUA_BLOCK_REASONS = {
   midi_input_validator = true,
   record_arm_property_validator = true,
   project_tempo_validator = true,
-  proq4_bell_slope_validator = true,
-  proq4_mapping_validator = true,
-  proq4_parameter_contract_validator = true,
-  plugin_profile_guard_validator = true,
-  musical_enum_validator = true,
-  fx_param_provenance_validator = true,
-  reeq_gain_mapping_validator = true,
   ruler_timebase_validator = true,
   sandbox_forbidden_global = true,
   send_index_validator = true,
-  stock_fx_validator = true,
   tempo_marker_validator = true,
   timecode_fx_validator = true,
   timecode_workflow_validator = true,
@@ -21307,23 +13235,106 @@ function Code.parameter_change_evidence(writes)
     unchanged_target_count = 0,
     returned_to_initial_count = 0,
     unknown_target_count = 0,
+    requested_value_match_count = 0,
+    requested_value_mismatch_count = 0,
+    requested_value_confirmed_mismatch_count = 0,
+    requested_value_quantized_match_count = 0,
+    requested_value_unknown_count = 0,
+    setter_rejected_target_count = 0,
     profile_guarded_target_count = 0,
   }
   local guarded_products = {}
+  local function value_tolerance(entry)
+    if entry.value_domain == "raw" then
+      local min_value = tonumber(entry.min_value)
+      local max_value = tonumber(entry.max_value)
+      local range = min_value and max_value and math.abs(max_value - min_value)
+        or 0
+      return math.max(0.0000001, range * 0.000001)
+    end
+    return 0.000001
+  end
+  local function preset_name(value)
+    if type(value) ~= "string" then return nil end
+    local normalized = value:lower():gsub("^%s+", ""):gsub("%s+$", "")
+    return normalized ~= "" and normalized or nil
+  end
   for _, entry in pairs(writes) do
     if type(entry) == "table" then
       out.target_count = out.target_count + 1
       out.write_count = out.write_count + (tonumber(entry.write_count) or 0)
-      local initial, final =
-        tonumber(entry.initial_normalized), tonumber(entry.final_normalized)
-      if initial == nil or final == nil then
-        out.unknown_target_count = out.unknown_target_count + 1
-      elseif math.abs(final - initial) > 0.0000001 then
-        out.changed_target_count = out.changed_target_count + 1
-      elseif entry.changed_during == true then
-        out.returned_to_initial_count = out.returned_to_initial_count + 1
+      local target_changed = false
+      if entry.value_domain == "preset" then
+        local initial_preset = preset_name(entry.initial_preset)
+        local final_preset = preset_name(entry.final_preset)
+        if final_preset == nil then
+          out.unknown_target_count = out.unknown_target_count + 1
+        elseif initial_preset ~= final_preset then
+          target_changed = true
+          out.changed_target_count = out.changed_target_count + 1
+        elseif entry.changed_during == true then
+          out.returned_to_initial_count = out.returned_to_initial_count + 1
+        else
+          out.unchanged_target_count = out.unchanged_target_count + 1
+        end
+        local requested_preset = preset_name(entry.requested_preset)
+        if requested_preset and final_preset then
+          if requested_preset == final_preset then
+            out.requested_value_match_count =
+              out.requested_value_match_count + 1
+          else
+            out.requested_value_mismatch_count =
+              out.requested_value_mismatch_count + 1
+            out.requested_value_confirmed_mismatch_count =
+              out.requested_value_confirmed_mismatch_count + 1
+          end
+        elseif entry.requested_preset_captured == true then
+          out.requested_value_unknown_count =
+            out.requested_value_unknown_count + 1
+        end
       else
-        out.unchanged_target_count = out.unchanged_target_count + 1
+        local initial = tonumber(entry.initial_value)
+          or tonumber(entry.initial_normalized)
+        local final = tonumber(entry.final_value)
+          or tonumber(entry.final_normalized)
+        local tolerance = value_tolerance(entry)
+        if initial == nil or final == nil then
+          out.unknown_target_count = out.unknown_target_count + 1
+        elseif math.abs(final - initial) > tolerance then
+          target_changed = true
+          out.changed_target_count = out.changed_target_count + 1
+        elseif entry.changed_during == true then
+          out.returned_to_initial_count = out.returned_to_initial_count + 1
+        else
+          out.unchanged_target_count = out.unchanged_target_count + 1
+        end
+        local requested = tonumber(entry.requested_value)
+        if requested ~= nil and final ~= nil then
+          local numeric_match = math.abs(final - requested) <= tolerance
+          if numeric_match or entry.requested_display_match == true then
+            out.requested_value_match_count =
+              out.requested_value_match_count + 1
+            if not numeric_match and entry.requested_display_match == true then
+              out.requested_value_quantized_match_count =
+                out.requested_value_quantized_match_count + 1
+            end
+          else
+            out.requested_value_mismatch_count =
+              out.requested_value_mismatch_count + 1
+            if entry.requested_display_match == false
+                or entry.setter_result == false or not target_changed then
+              out.requested_value_confirmed_mismatch_count =
+                out.requested_value_confirmed_mismatch_count + 1
+            end
+          end
+        elseif entry.requested_value_captured == true then
+          out.requested_value_unknown_count =
+            out.requested_value_unknown_count + 1
+        end
+      end
+      if entry.setter_result == false then
+        out.setter_rejected_target_count =
+          out.setter_rejected_target_count + 1
       end
       if entry.plugin_profile_guard == "validated" then
         out.profile_guarded_target_count =
@@ -21335,7 +13346,15 @@ function Code.parameter_change_evidence(writes)
     end
   end
   if out.target_count == 0 then return nil end
-  if out.changed_target_count > 0 then
+  if out.requested_value_confirmed_mismatch_count > 0
+      or out.requested_value_unknown_count > 0 then
+    if out.returned_to_initial_count == out.target_count
+        and out.unknown_target_count == 0 then
+      out.status = "returned_to_initial"
+    else
+      out.status = "partially_changed"
+    end
+  elseif out.changed_target_count > 0 then
     -- A target that was already at the requested value is a successful
     -- no-op, not a partial failure. Reserve partially_changed for evidence
     -- that really is unresolved or returned to its starting value.
@@ -21360,15 +13379,7 @@ function Code.parameter_change_evidence(writes)
   return out
 end
 
--- Return the exact validated profile record for a live track FX target.
---
--- A profile receipt authorizes behavior guidance only for the fingerprint that
--- was validated before generation. Re-checking that same fingerprint at the
--- write boundary closes the race where the plug-in binary or instance layout
--- changes between prompt preparation and execution. A target that does not
--- correspond to any injected profile is deliberately reported as
--- `not_profile_target`; generic live-discovery writes remain available in
--- mixed-product scripts.
+-- Stable diagnostic key for generated source.
 function Code.plugin_profile_code_key(code)
   if type(RA) == "table" and type(RA.sha256_hex) == "function" then
     return RA.sha256_hex(tostring(code or ""))
@@ -21421,553 +13432,14 @@ function Code.plugin_test_runtime_event(stage, extra)
   end
 end
 
-function Code.register_plugin_profile_code(code, receipts)
-  if type(S) ~= "table" or type(code) ~= "string"
-     or type(receipts) ~= "table" or #receipts == 0 then
-    return false
-  end
-  S.plugin_profile_code_authorizations =
-    S.plugin_profile_code_authorizations or {}
-  S.plugin_profile_code_authorization_order =
-    S.plugin_profile_code_authorization_order or {}
-  local key = Code.plugin_profile_code_key(code)
-  local copied = {}
-  for _, receipt in ipairs(receipts) do
-    if type(receipt) == "table"
-       and (receipt.validation_state == "validated"
-         or receipt.validation_state == "approved_stock_pending")
-       and receipt.injected == true then
-      local item = {}
-      for field, value in pairs(receipt) do item[field] = value end
-      copied[#copied + 1] = item
-    end
-  end
-  if #copied == 0 then return false end
-  if S.plugin_profile_code_authorizations[key] == nil then
-    local order = S.plugin_profile_code_authorization_order
-    order[#order + 1] = key
-    while #order > 32 do
-      local expired = table.remove(order, 1)
-      S.plugin_profile_code_authorizations[expired] = nil
-    end
-  end
-  S.plugin_profile_code_authorizations[key] = copied
-  Code.plugin_test_runtime_event("code_registered", {
-    code_sha256 = key,
-    profile_authorization_count = #copied,
-  })
-  return true
-end
-
-function Code.plugin_profile_receipts_for_code(code)
-  if type(S) ~= "table" then return nil end
-  local saved = type(S.plugin_profile_code_authorizations) == "table"
-    and S.plugin_profile_code_authorizations[
-      Code.plugin_profile_code_key(code)] or nil
-  if type(saved) == "table" and #saved > 0 then return saved end
-  local current = S.plugin_profiles_used
-  if type(current) == "table" and #current > 0 then return current end
-  return nil
-end
-
-function Code.plugin_profile_code_mentions_receipt(code, receipts)
-  if type(code) ~= "string" or code == ""
-     or type(receipts) ~= "table" then
-    return false
-  end
-  local lower = code:lower()
-  for _, receipt in ipairs(receipts) do
-    if type(receipt) == "table" then
-      for _, value in ipairs({
-          receipt.identifier, receipt.display_name, receipt.product_key }) do
-        local needle = tostring(value or ""):lower()
-          :match("^%s*(.-)%s*$") or ""
-        if #needle >= 4 and lower:find(needle, 1, true) then
-          return true
-        end
-      end
-    end
-  end
-  return false
-end
-
-function Code.plugin_profile_target_validation(track, fx, receipts,
-    target_project)
-  receipts = receipts
-    or (type(S) == "table" and S.plugin_profiles_used or nil)
-  if type(receipts) ~= "table" or #receipts == 0 then
-    return nil, "profiles_inactive"
-  end
-  if type(CTX) ~= "table"
-     or type(CTX.plugin_profile_key) ~= "function"
-     or type(CTX.plugin_profile_inventory) ~= "function"
-     or type(CTX.plugin_profile_match) ~= "function" then
-    return nil, "profile_runtime_unavailable"
-  end
-  if track == nil or fx == nil or tonumber(fx) == nil
-     or tonumber(fx) < 0 then
-    return nil, "invalid_fx_target"
-  end
-  if type(reaper.ValidatePtr2) == "function"
-     and not reaper.ValidatePtr2(target_project or 0, track, "MediaTrack*") then
-    return nil, "invalid_track"
-  end
-
-  local ok_name, _, loaded_name =
-    pcall(reaper.TrackFX_GetFXName, track, fx, "")
-  if not ok_name then return nil, "fx_name_unavailable" end
-  loaded_name = tostring(loaded_name or "")
-  local normalize = type(CTX.plugin_profile_normalize) == "function"
-    and CTX.plugin_profile_normalize
-    or function(value)
-      return (tostring(value or ""):lower():match("^%s*(.-)%s*$") or "")
-        :gsub("%s+", " ")
-    end
-  local loaded_key = normalize(loaded_name)
-  local function canonical_plugin_name(value)
-    local key = normalize(value)
-    key = key:gsub("^vst3i?%s*:%s*", "")
-      :gsub("^vsti?%s*:%s*", "")
-      :gsub("^clapi?%s*:%s*", "")
-      :gsub("^js%s*:%s*", "")
-      :gsub("^au%s*:%s*", "")
-      :gsub("%s*%([^()]-%)%s*$", "")
-    return key:match("^%s*(.-)%s*$") or ""
-  end
-  local loaded_canonical = canonical_plugin_name(loaded_name)
-  local function name_matches_loaded(value)
-    local key = normalize(value)
-    if key == "" then return false end
-    if key == loaded_key then return true end
-    local canonical = canonical_plugin_name(value)
-    return canonical ~= "" and canonical == loaded_canonical
-  end
-  local function receipt_name_matches(receipt, meta)
-    if name_matches_loaded(receipt and receipt.identifier)
-       or name_matches_loaded(receipt and receipt.display_name) then
-      return true
-    end
-    if type(meta) ~= "table" then return false end
-    if name_matches_loaded(meta.display_name) then return true end
-    local identifiers = type(meta.identifiers) == "table"
-      and meta.identifiers or {}
-    for _, field in ipairs({ "add_by_name", "aliases", "curated" }) do
-      for _, value in ipairs(
-          type(identifiers[field]) == "table" and identifiers[field] or {}) do
-        if name_matches_loaded(value) then return true end
-      end
-    end
-    -- JSFX registry paths can differ from the title REAPER reports for the
-    -- loaded instance. Accept the declared loaded name only from the exact
-    -- fingerprint row that produced this validated receipt. The later live
-    -- inventory check still has to reproduce that fingerprint before a write.
-    local receipt_identifier = normalize(receipt and receipt.identifier)
-    local receipt_fingerprint = tostring(receipt and receipt.fingerprint or "")
-    for _, fingerprint in ipairs(
-        type(meta.fingerprints) == "table" and meta.fingerprints or {}) do
-      if type(fingerprint) == "table"
-         and receipt_identifier ~= ""
-         and normalize(fingerprint.identifier) == receipt_identifier
-         and receipt_fingerprint ~= ""
-         and tostring(fingerprint.observed_fingerprint_sha256 or "")
-           == receipt_fingerprint
-         and name_matches_loaded(fingerprint.loaded_name) then
-        return true
-      end
-    end
-    return false
-  end
-  local name_candidates = {}
-  local candidate_signatures = {}
-  local matched_profile_name = false
-  local name_match_reason = "profile_receipt_not_current"
-
-  for _, receipt in ipairs(receipts) do
-    if type(receipt) == "table"
-       and (receipt.validation_state == "validated"
-         or receipt.validation_state == "approved_stock_pending")
-       and receipt.injected == true
-       and receipt.product_key then
-      local profile_key = CTX.plugin_profile_key(receipt.product_key)
-      local meta = type(CTX._plugin_profile_metadata) == "table"
-        and profile_key and CTX._plugin_profile_metadata[profile_key] or nil
-      if receipt_name_matches(receipt, meta) then
-        matched_profile_name = true
-        local receipt_pack_revision = tostring(receipt.pack_revision or "")
-        local current_pack_revision = tostring(CTX._plugin_pack_revision or "")
-        local receipt_section_revision = tostring(receipt.section_revision or "")
-        local current_section_revision = tostring(
-          type(CTX._plugin_profile_section_revisions) == "table"
-            and profile_key
-            and CTX._plugin_profile_section_revisions[profile_key] or "")
-        local receipt_identifier = tostring(receipt.identifier or "")
-        local receipt_fingerprint = tostring(receipt.fingerprint or "")
-        if type(meta) ~= "table" then
-          name_match_reason = "profile_metadata_unavailable"
-        elseif receipt_pack_revision == "" or current_pack_revision == ""
-            or receipt_section_revision == ""
-            or current_section_revision == "" then
-          name_match_reason = "profile_pack_identity_unavailable"
-        elseif receipt_pack_revision ~= current_pack_revision then
-          name_match_reason = "profile_pack_changed"
-        elseif receipt_section_revision ~= current_section_revision then
-          name_match_reason = "profile_section_changed"
-        elseif receipt_identifier == "" then
-          name_match_reason = "profile_receipt_identifier_unavailable"
-        elseif receipt_fingerprint == "" then
-          name_match_reason = "profile_receipt_fingerprint_unavailable"
-        else
-          local signature = table.concat({
-            tostring(profile_key),
-            receipt_pack_revision,
-            receipt_section_revision,
-            receipt_identifier,
-            receipt_fingerprint,
-          }, "\31")
-          if not candidate_signatures[signature] then
-            candidate_signatures[signature] = true
-            name_candidates[#name_candidates + 1] = {
-              receipt = receipt,
-              profile_key = profile_key,
-              metadata = meta,
-            }
-          end
-        end
-      end
-    end
-  end
-
-  if #name_candidates == 0 then
-    return nil, matched_profile_name and name_match_reason
-      or "not_profile_target"
-  end
-
-  local matched = {}
-  local last_reason = "profile_fingerprint_mismatch"
-  for _, candidate in ipairs(name_candidates) do
-    local inventory, inventory_err =
-      CTX.plugin_profile_inventory(
-        track, fx, candidate.receipt.identifier)
-    if inventory then
-      local fingerprint, match_err =
-        CTX.plugin_profile_match(candidate.profile_key, inventory)
-      local live_hash = tostring(
-        inventory.observed_fingerprint_sha256 or "")
-      local receipt_hash = tostring(candidate.receipt.fingerprint or "")
-      if fingerprint
-         and live_hash ~= ""
-         and live_hash == receipt_hash then
-        matched[#matched + 1] = {
-          receipt = candidate.receipt,
-          profile_key = candidate.profile_key,
-          metadata = candidate.metadata,
-          inventory = inventory,
-          fingerprint = fingerprint,
-          loaded_name = loaded_name,
-        }
-      else
-        last_reason = match_err
-          or (live_hash ~= receipt_hash and "receipt_fingerprint_changed")
-          or "profile_fingerprint_mismatch"
-      end
-    else
-      last_reason = inventory_err or "inventory_failed"
-    end
-  end
-
-  if #matched == 1 then return matched[1] end
-  if #matched > 1 then return nil, "profile_target_ambiguous" end
-  return nil, last_reason
-end
-
--- Static first gate for a profile-backed response. The runtime resolver below
--- is the authority, but catching a missing resolver here gives the model one
--- invisible repair attempt instead of letting an unsafe script reach Run.
-function Code.find_unguarded_profile_param_writes(lua_code)
-  if type(lua_code) ~= "string" or lua_code == "" then return nil end
-  local stripped = _lua_code_only_preserving_offsets(lua_code)
-  local has_write =
-    stripped:find("reaper%.TrackFX_SetParam%s*%(") ~= nil
-    or stripped:find("reaper%.TrackFX_SetParamNormalized%s*%(") ~= nil
-    or stripped:find("%f[%w_]set_param_display%s*%(") ~= nil
-    or stripped:find("%f[%w_]set_param_enum%s*%(") ~= nil
-    or stripped:find("%f[%w_]set_param_enum_paced%s*%(") ~= nil
-  if not has_write then return nil end
-  if stripped:find(
-      "%f[%w_]local%s+function%s+reaassist_resolve_profile_params%s*%(")
-     or stripped:find(
-       "%f[%w_]function%s+reaassist_resolve_profile_params%s*%(")
-     or stripped:find(
-       "%f[%w_]local%s+reaassist_resolve_profile_params%s*=")
-     or stripped:find(
-       "%f[%w_]reaassist_resolve_profile_params%s*=") then
-    return { "shadowed_profile_parameter_resolver" }
-  end
-  if not stripped:find(
-      "%f[%w_]reaassist_resolve_profile_params%s*%(") then
-    return { "missing_profile_parameter_resolver" }
-  end
-
-  local findings = {}
-  local resolver_variables = {}
-  local resolver_order = {}
-  local resolver_search = 1
-  while true do
-    local call_start, call_open = stripped:find(
-      "%f[%w_]reaassist_resolve_profile_params%s*%(", resolver_search)
-    if not call_start then break end
-    local before = stripped:sub(1, call_start - 1)
-    local line_start = (before:match(".*()\n") or 0) + 1
-    local assignment = stripped:sub(line_start, call_start - 1)
-    local variable, error_variable = assignment:match(
-      "^%s*local%s+([%a_][%w_]*)%s*,%s*([%a_][%w_]*)%s*=%s*$")
-    if not variable then
-      variable, error_variable = assignment:match(
-        "^%s*([%a_][%w_]*)%s*,%s*([%a_][%w_]*)%s*=%s*$")
-    end
-    if not variable then
-      variable = assignment:match(
-        "^%s*local%s+([%a_][%w_]*)%s*=%s*$")
-        or assignment:match("^%s*([%a_][%w_]*)%s*=%s*$")
-    end
-    local call_args, call_close = Code._parse_lua_call_args(stripped, call_open)
-    if call_args then
-      local function declared_targets(pattern)
-        local names = {}
-        for name in before:gmatch(pattern) do names[name] = true end
-        return names
-      end
-      local function bare_identifier(expr)
-        return tostring(expr or ""):match(
-          "^%s*([%a_][%w_]*)%s*$")
-      end
-      local track_arg = bare_identifier(call_args[1])
-      local declared_tracks = declared_targets(
-        "%f[%w_]local%s+([%a_][%w_]*)%s*=%s*reaper%.GetTrack%s*%(")
-      for name in before:gmatch(
-          "%f[%w_]local%s+([%a_][%w_]*)%s*=%s*reaper%.GetSelectedTrack%s*%(") do
-        declared_tracks[name] = true
-      end
-      for name in before:gmatch(
-          "%f[%w_]local%s+([%a_][%w_]*)%s*=%s*reaper%.GetMasterTrack%s*%(") do
-        declared_tracks[name] = true
-      end
-      local has_declared_track = next(declared_tracks) ~= nil
-      if track_arg and has_declared_track and not declared_tracks[track_arg] then
-        findings[#findings + 1] =
-          "profile_track_argument_mismatches_declared_track_" .. track_arg
-      end
-
-      local fx_arg = bare_identifier(call_args[2])
-      local declared_fx = declared_targets(
-        "%f[%w_]local%s+([%a_][%w_]*)%s*=%s*reaper%.TrackFX_GetByName%s*%(")
-      for name in before:gmatch(
-          "%f[%w_]local%s+([%a_][%w_]*)%s*=%s*reaper%.TrackFX_AddByName%s*%(") do
-        declared_fx[name] = true
-      end
-      local has_declared_fx = next(declared_fx) ~= nil
-      if fx_arg and has_declared_fx and not declared_fx[fx_arg] then
-        findings[#findings + 1] =
-          "profile_fx_argument_mismatches_declared_fx_" .. fx_arg
-      end
-    end
-    local specs_open = nil
-    local paren_depth = 1
-    local cursor = call_open + 1
-    while cursor <= #stripped and paren_depth > 0 do
-      local char = stripped:sub(cursor, cursor)
-      if char == "(" then
-        paren_depth = paren_depth + 1
-      elseif char == ")" then
-        paren_depth = paren_depth - 1
-      elseif char == "{" and paren_depth == 1 then
-        specs_open = cursor
-        break
-      end
-      cursor = cursor + 1
-    end
-    if not specs_open and call_args then
-      local specs_variable = tostring(call_args[3] or ""):match(
-        "^%s*([%a_][%w_]*)%s*$")
-      if specs_variable then
-        local declaration_pattern =
-          "%f[%w_]local%s+" .. specs_variable .. "%s*=%s*{"
-        local declaration_search = 1
-        while true do
-          local declaration_start, declaration_open = stripped:find(
-            declaration_pattern, declaration_search)
-          if not declaration_start or declaration_open >= line_start then break end
-          local declaration_depth = 0
-          local declaration_close = nil
-          local declaration_cursor = declaration_open
-          while declaration_cursor < line_start do
-            local declaration_char = stripped:sub(
-              declaration_cursor, declaration_cursor)
-            if declaration_char == "{" then
-              declaration_depth = declaration_depth + 1
-            elseif declaration_char == "}" then
-              declaration_depth = declaration_depth - 1
-              if declaration_depth == 0 then
-                declaration_close = declaration_cursor
-                break
-              end
-            end
-            declaration_cursor = declaration_cursor + 1
-          end
-          if declaration_close
-             and stripped:sub(
-               declaration_close + 1, line_start - 1):match("^%s*$") then
-            specs_open = declaration_open
-          end
-          declaration_search = declaration_open + 1
-        end
-      end
-    end
-    if not variable then
-      findings[#findings + 1] =
-        "profile_mapping_result_not_assigned_at_line_"
-          .. tostring(select(2,
-            stripped:sub(1, call_start):gsub("\n", "\n")) + 1)
-    elseif resolver_variables[variable] then
-      findings[#findings + 1] =
-        "profile_mapping_variable_reused_" .. variable
-    elseif not specs_open then
-      findings[#findings + 1] =
-        "profile_mapping_specs_unavailable_" .. variable
-    else
-      local brace_depth = 0
-      local spec_count = 0
-      local specs_close = nil
-      cursor = specs_open
-      while cursor <= #stripped do
-        local char = stripped:sub(cursor, cursor)
-        if char == "{" then
-          brace_depth = brace_depth + 1
-          if brace_depth == 2 then spec_count = spec_count + 1 end
-        elseif char == "}" then
-          brace_depth = brace_depth - 1
-          if brace_depth == 0 then
-            specs_close = cursor
-            break
-          end
-        end
-        cursor = cursor + 1
-      end
-      if not specs_close or spec_count == 0 then
-        findings[#findings + 1] =
-          "profile_mapping_specs_unavailable_" .. variable
-      else
-        resolver_variables[variable] = {
-          spec_count = spec_count,
-          error_variable = error_variable,
-          call_close = call_close,
-        }
-        resolver_order[#resolver_order + 1] = variable
-      end
-    end
-    resolver_search = call_open + 1
-  end
-  for _, variable in ipairs(resolver_order) do
-    local resolver_info = resolver_variables[variable]
-    local spec_count = resolver_info.spec_count
-    local referenced = {}
-    for ordinal in stripped:gmatch(
-        "%f[%w_]" .. variable .. "%s*%[%s*(%d+)%s*%]") do
-      local numeric = tonumber(ordinal)
-      if numeric then
-        referenced[numeric] = true
-        if numeric < 1 or numeric > spec_count then
-          findings[#findings + 1] =
-            "profile_mapping_ordinal_out_of_range_" .. variable .. "_"
-              .. tostring(numeric) .. "_of_" .. tostring(spec_count)
-        end
-      end
-    end
-    for ordinal = 1, spec_count do
-      if not referenced[ordinal] then
-        findings[#findings + 1] =
-          "profile_mapping_ordinal_unused_" .. variable .. "_"
-            .. tostring(ordinal) .. "_of_" .. tostring(spec_count)
-      end
-    end
-    if not resolver_info.error_variable then
-      findings[#findings + 1] =
-        "profile_mapping_error_result_missing_" .. variable
-    else
-      local after_call = (resolver_info.call_close or 0) + 1
-      local first_use = stripped:find(
-        "%f[%w_]" .. variable .. "%s*%[", after_call)
-      local guard_region = stripped:sub(
-        after_call, first_use and (first_use - 1) or #stripped)
-      local correct_guard =
-        "if%s+not%s+" .. variable
-          .. "%s+then%s+error%s*%(%s*" .. resolver_info.error_variable
-          .. "%s*%)%s*end"
-      local return_guard_body = guard_region:match(
-        "if%s+not%s+" .. variable
-          .. "%s+then%s*(.-)%s*%f[%w_]end%f[%W]")
-      local simple_return_guard =
-        return_guard_body
-        and return_guard_body:find("%f[%w_]return%f[%W]")
-        and not return_guard_body:find("%f[%w_]else%f[%W]")
-        and not return_guard_body:find("%f[%w_]elseif%f[%W]")
-        and not return_guard_body:find("%f[%w_]if%f[%W]")
-        and not return_guard_body:find("%f[%w_]for%f[%W]")
-        and not return_guard_body:find("%f[%w_]while%f[%W]")
-        and not return_guard_body:find("%f[%w_]repeat%f[%W]")
-        and not return_guard_body:find("%f[%w_]function%f[%W]")
-      if not guard_region:find(correct_guard) and not simple_return_guard then
-        findings[#findings + 1] =
-          "profile_mapping_guard_missing_" .. variable .. "_"
-            .. resolver_info.error_variable
-      end
-    end
-  end
-
-  local line_no = 0
-  for line in (stripped .. "\n"):gmatch("([^\n]*)\n") do
-    line_no = line_no + 1
-    local third = line:match(
-      "reaper%.TrackFX_SetParamNormalized%s*%([^,]+,[^,]+,%s*([^,%)]*)")
-      or line:match(
-        "reaper%.TrackFX_SetParam%s*%([^,]+,[^,]+,%s*([^,%)]*)")
-      or line:match(
-        "%f[%w_]set_param_display%s*%([^,]+,[^,]+,%s*([^,%)]*)")
-      or line:match(
-        "%f[%w_]set_param_enum%s*%([^,]+,[^,]+,%s*([^,%)]*)")
-      or line:match(
-        "%f[%w_]set_param_enum_paced%s*%([^,]+,[^,]+,%s*([^,%)]*)")
-    if third and third:match("^%s*[%+%-]?%d+%s*$") then
-      findings[#findings + 1] =
-        "literal_parameter_index_at_line_" .. tostring(line_no)
-    elseif third then
-      for _, variable in ipairs(resolver_order) do
-        if third:find(
-            "%f[%w_]" .. variable .. "%s*%[")
-           and not third:match(
-             "^%s*" .. variable .. "%s*%[%s*%d+%s*%]%s*$") then
-          findings[#findings + 1] =
-            "profile_mapping_index_expression_at_line_" .. tostring(line_no)
-          break
-        end
-      end
-    end
-  end
-  if #findings == 0 then return nil end
-  return findings
-end
-
-function Code.find_unproven_generic_param_writes(lua_code, profile_receipts)
-  local _, findings =
-    Code.parameter_write_authorization_map(lua_code, profile_receipts)
-  return findings
-end
 
 function Code.build_run_result(code_type, code, run_status, validation_status,
                                opts)
   opts = opts or {}
   local before = tonumber(opts.change_count_before)
   local after  = tonumber(opts.change_count_after)
+  local attributed_delta = tonumber(opts.attributed_change_delta)
+  local interval_overlapped = opts.change_interval_contaminated == true
   local result = {
     code_type = code_type or "lua",
     byte_count = type(code) == "string" and #code or tonumber(code) or 0,
@@ -22001,6 +13473,25 @@ function Code.build_run_result(code_type, code, run_status, validation_status,
     result.parameter_change_status =
       tostring(opts.parameter_change_evidence.status or "unknown")
   end
+  if type(opts.fx_insert_failure_evidence) == "table" then
+    result.fx_insert_failure_evidence = opts.fx_insert_failure_evidence
+  end
+  if type(opts.protected_call_failure_evidence) == "table" then
+    result.protected_call_failure_evidence = {
+      failure_count = math.max(0,
+        math.floor(tonumber(opts.protected_call_failure_evidence.failure_count)
+          or 0)),
+      pcall_count = math.max(0,
+        math.floor(tonumber(opts.protected_call_failure_evidence.pcall_count)
+          or 0)),
+      xpcall_count = math.max(0,
+        math.floor(tonumber(opts.protected_call_failure_evidence.xpcall_count)
+          or 0)),
+    }
+  end
+  if type(opts.plugin_profile_equivalence) == "table" then
+    result.plugin_profile_equivalence = opts.plugin_profile_equivalence
+  end
   if opts.runtime_error then
     result.runtime_error = Log.scrub_url_secrets(tostring(opts.runtime_error))
   end
@@ -22008,13 +13499,33 @@ function Code.build_run_result(code_type, code, run_status, validation_status,
     result.change_evidence = {
       project_state_change_count_before = before,
       project_state_change_count_after = after,
+      attribution = interval_overlapped
+        and "interval_overlapped" or "direct",
     }
-    if after ~= before then
+    if interval_overlapped then
+      result.raw_project_state_change_delta = after - before
+      if attributed_delta ~= nil then
+        result.project_state_change_delta = attributed_delta
+        result.observable_change_status = attributed_delta ~= 0
+          and "changed" or "unchanged"
+      end
+    elseif after ~= before then
       result.observable_change_status = "changed"
       result.project_state_change_delta = after - before
     else
       result.observable_change_status = "unchanged"
       result.project_state_change_delta = 0
+    end
+    local insert_evidence = result.fx_insert_failure_evidence
+    if not interval_overlapped and type(insert_evidence) == "table"
+        and insert_evidence.other_project_change_detected ~= nil then
+      result.raw_project_state_change_delta = after - before
+      if insert_evidence.other_project_change_detected == true then
+        result.observable_change_status = "changed"
+      else
+        result.observable_change_status = "unchanged"
+        result.project_state_change_delta = 0
+      end
     end
   end
   return result
@@ -22075,8 +13586,8 @@ end
 function Code.typed_actions_op_counts_text(counts)
   if type(counts) ~= "table" then return "" end
   local order = {
-    "track.create", "track.ensure", "track.resolve", "track.set", "track.pan_lfo",
-    "track.folder", "fx.add_stock", "fx.set_param", "send.create",
+    "track.create", "track.ensure", "track.resolve", "track.set",
+    "track.folder", "send.create",
   }
   local parts = {}
   for _, op in ipairs(order) do
@@ -22101,17 +13612,11 @@ function Code.typed_actions_kind_label(metrics)
     return label("typed_actions.kind.project_edit", "Project edit")
   end
   local function n(op) return tonumber(counts[op]) or 0 end
-  if n("track.pan_lfo") > 0 then
-    return label("typed_actions.kind.pan_automation", "Pan automation")
-  end
   if n("send.create") > 0 then
     return label("typed_actions.kind.routing", "Routing")
   end
   if n("track.folder") > 0 then
     return label("typed_actions.kind.folder_setup", "Folder setup")
-  end
-  if n("fx.add_stock") > 0 or n("fx.set_param") > 0 then
-    return label("typed_actions.kind.fx_setup", "FX setup")
   end
   if n("track.set") > 0 then
     return label("typed_actions.kind.track_update", "Track update")
@@ -22576,312 +14081,16 @@ function Code.typed_actions_localized_selected_track_label(lang)
 end
 
 function Code.typed_actions_display_text(plan_text, action_results)
-  if type(plan_text) ~= "string" or plan_text == ""
-     or type(Code.typed_actions_plan_from_text) ~= "function" then
-    return nil
-  end
-  local plan = Code.typed_actions_plan_from_text(plan_text,
+  local plan = Code.typed_actions_plan_from_text(plan_text or "",
     { allow_raw_json = true })
-  if type(plan) ~= "table" or type(plan.actions) ~= "table" then
-    return nil
-  end
-  local tr, receipt_lang = Code.typed_actions_receipt_language()
-  -- Avoid mixed-language receipts until every detailed phrase has native copy.
-  local detail_language_is_english = receipt_lang == "English"
-
-  local results = {}
-  for _, r in ipairs(type(action_results) == "table" and action_results or {}) do
-    if type(r) == "table" then
-      local id = r.id or r.track or r.fx or r.parent
-      if r.op and id then
-        results[tostring(r.op) .. "|" .. tostring(id)] = r
-      end
-    end
-  end
-
-  local function default_track_number(name)
-    if type(name) ~= "string" then return nil end
-    return name:match("^Track%s+(%d+)$") or name:match("^track%s+(%d+)$")
-  end
-
-  local function display_track_name(name, action)
-    local n = default_track_number(name)
-    if n and type(action) == "table"
-       and (action.op == "track.create" or action.op == "track.ensure") then
-      return Code.typed_actions_localized_track_label(receipt_lang, n)
-    end
-    return name
-  end
-
-  local track_names, fx_names, fx_tracks = {}, {}, {}
+  if not plan then return "Structured track edit" end
+  local labels = {}
   for _, action in ipairs(plan.actions) do
-    if type(action) == "table" then
-      if (action.op == "track.create" or action.op == "track.ensure"
-          or action.op == "track.resolve")
-         and action.id then
-        local r = results[tostring(action.op) .. "|" .. tostring(action.id)]
-        local display_name = action.name or (r and r.name)
-        display_name = display_track_name(display_name, action)
-        track_names[action.id] = display_name
-          or (action.selected == true
-            and Code.typed_actions_localized_selected_track_label(receipt_lang))
-          or (action.selected_index and Code.typed_actions_localized_track_label(
-            receipt_lang, action.selected_index))
-          or (action.index and Code.typed_actions_localized_track_label(
-            receipt_lang, action.index))
-          or tostring(action.id)
-      elseif action.op == "fx.add_stock" and action.id then
-        fx_names[action.id] = action.fx or tostring(action.id)
-        fx_tracks[action.id] = action.track
-      end
-    end
+    labels[#labels + 1] = tostring(action.op)
   end
-
-  local function track_label(id)
-    return track_names[id] or tostring(id or "?")
-  end
-
-  local function join(list, sep)
-    return table.concat(list, sep or ", ")
-  end
-
-  local function fmt_num(n, suffix)
-    if n == nil then return nil end
-    local s
-    if type(n) == "number" and math.floor(n) == n then
-      s = tostring(math.floor(n))
-    else
-      s = tostring(n)
-    end
-    return suffix and (s .. suffix) or s
-  end
-
-  local function plural(n, singular, plural_form)
-    return tostring(n) .. " " .. (n == 1 and singular
-      or (plural_form or (singular .. "s")))
-  end
-
-  local function append_if(value, list)
-    if value and value ~= "" then list[#list + 1] = value end
-  end
-
-  local function param_label(k, v)
-    local labels = {
-      band = "band",
-      frequency_hz = "frequency",
-      gain_db = "gain",
-      threshold_db = "threshold",
-      ceiling_db = "ceiling",
-      feedback_pct = "feedback",
-      feedback_db = "feedback",
-      wet_db = "wet",
-      dry_db = "dry",
-      attack_ms = "attack",
-      release_ms = "release",
-      hold_ms = "hold",
-      rms_ms = "RMS",
-      hysteresis_db = "hysteresis",
-      room_size = "room size",
-      dampening = "dampening",
-    }
-    local suffix = k:match("_hz$") and " Hz"
-      or k:match("_db$") and " dB"
-      or k:match("_ms$") and " ms"
-      or k:match("_pct$") and "%"
-      or nil
-    return (labels[k] or tostring(k)) .. " " .. fmt_num(v, suffix)
-  end
-
-  local created_tracks, existing_tracks, ensured_tracks = {}, {}, {}
-  for _, action in ipairs(plan.actions) do
-    if type(action) == "table"
-       and (action.op == "track.create" or action.op == "track.ensure") then
-      local r = results[tostring(action.op) .. "|" .. tostring(action.id)]
-      local name = display_track_name((r and r.name) or action.name, action)
-        or tostring(action.id)
-      if action.op == "track.create" or (r and r.created == true) then
-        created_tracks[#created_tracks + 1] = name
-      elseif r and r.created == false then
-        existing_tracks[#existing_tracks + 1] = name
-      else
-        ensured_tracks[#ensured_tracks + 1] = name
-      end
-    end
-  end
-
-  local detail_lines = {}
-  local track_action_total =
-    #created_tracks + #existing_tracks + #ensured_tracks
-  local headline = nil
-  if track_action_total > 0 then
-    if #created_tracks == track_action_total then
-      headline = tr("created_tracks", { n = #created_tracks })
-      detail_lines[#detail_lines + 1] =
-        tr("names", { value = join(created_tracks) })
-    elseif #existing_tracks == track_action_total then
-      headline = tr("reused_tracks", { n = #existing_tracks })
-      detail_lines[#detail_lines + 1] = tr("no_tracks_created")
-      detail_lines[#detail_lines + 1] =
-        tr("names", { value = join(existing_tracks) })
-    elseif #ensured_tracks == track_action_total then
-      headline = tr("checked_tracks", { n = #ensured_tracks })
-      detail_lines[#detail_lines + 1] = tr("created_missing_reused")
-      detail_lines[#detail_lines + 1] =
-        tr("names", { value = join(ensured_tracks) })
-    else
-      local parts = {}
-      if #created_tracks > 0 then
-        parts[#parts + 1] = tr("part_created", { n = #created_tracks })
-      end
-      if #existing_tracks > 0 then
-        parts[#parts + 1] = tr("part_reused", { n = #existing_tracks })
-      end
-      if #ensured_tracks > 0 then
-        parts[#parts + 1] = tr("part_checked", { n = #ensured_tracks })
-      end
-      headline = tr("setup_tracks", {
-        n = track_action_total,
-        parts = join(parts),
-      })
-      if #created_tracks > 0 then
-        detail_lines[#detail_lines + 1] =
-          tr("created", { value = join(created_tracks) })
-      end
-      if #existing_tracks > 0 then
-        detail_lines[#detail_lines + 1] =
-          tr("already_existed", { value = join(existing_tracks) })
-      end
-      if #ensured_tracks > 0 then
-        detail_lines[#detail_lines + 1] =
-          tr("created_or_found", { value = join(ensured_tracks) })
-      end
-    end
-  end
-
-  for _, action in ipairs(plan.actions) do
-    if type(action) == "table"
-       and action.op ~= "track.create"
-       and action.op ~= "track.ensure" then
-      if action.op == "track.resolve" then
-        detail_lines[#detail_lines + 1] =
-          tr("target", { value = track_label(action.id) })
-
-      elseif action.op == "track.set" then
-        if detail_language_is_english then
-          local props = {}
-          append_if(action.name ~= nil and ("renamed to " .. tostring(action.name)) or nil, props)
-          append_if(action.volume_db ~= nil and ("volume " .. fmt_num(action.volume_db, " dB")) or nil, props)
-          append_if(action.pan_pct ~= nil and ("pan " .. fmt_num(action.pan_pct, "%")) or nil, props)
-          append_if(action.mute ~= nil and (action.mute and "muted" or "unmuted") or nil, props)
-          append_if(action.solo ~= nil and (action.solo and "soloed" or "unsoloed") or nil, props)
-          if action.master_send ~= nil then
-            props[#props + 1] = action.master_send and "master send on" or "master send off"
-          end
-          headline = headline or ("Updated " .. track_label(action.track) .. ".")
-          detail_lines[#detail_lines + 1] = "Changed settings: "
-            .. join(props)
-        else
-          headline = headline or tr("applied")
-          detail_lines[#detail_lines + 1] =
-            tr("target", { value = track_label(action.track) })
-        end
-
-      elseif action.op == "track.pan_lfo" then
-        if detail_language_is_english then
-          local parts = {
-            fmt_num(action.bars, " bars"),
-            fmt_num(action.cycles_per_bar, " cycles/bar"),
-            fmt_num(action.depth_pct or 100, "% depth"),
-            tostring(action.resolution or "32nd") .. " resolution",
-          }
-          headline = headline or ("Wrote pan automation on " .. track_label(action.track) .. ".")
-          detail_lines[#detail_lines + 1] = "Pan LFO: " .. join(parts)
-        else
-          headline = headline or tr("applied")
-          detail_lines[#detail_lines + 1] =
-            tr("target", { value = track_label(action.track) })
-        end
-
-      elseif action.op == "track.folder" then
-        local children = {}
-        for _, child in ipairs(type(action.children) == "table" and action.children or {}) do
-          children[#children + 1] = track_label(child)
-        end
-        if detail_language_is_english then
-          headline = headline or ("Created folder " .. track_label(action.parent) .. ".")
-          detail_lines[#detail_lines + 1] = "Folder children: " .. join(children)
-        else
-          headline = headline or tr("applied")
-          detail_lines[#detail_lines + 1] =
-            tr("target", { value = track_label(action.parent) })
-          if #children > 0 then
-            detail_lines[#detail_lines + 1] =
-              tr("names", { value = join(children) })
-          end
-        end
-
-      elseif action.op == "fx.add_stock" then
-        local r = results["fx.add_stock|" .. tostring(action.id)]
-        if detail_language_is_english then
-          local verb = (r and r.existed == true) and "Used existing" or "Added"
-          headline = headline or (verb .. " stock FX.")
-          detail_lines[#detail_lines + 1] = verb .. " " .. tostring(action.fx)
-            .. " on " .. track_label(action.track)
-        else
-          headline = headline or tr("applied")
-          detail_lines[#detail_lines + 1] =
-            tr("target", {
-              value = track_label(action.track) .. ": " .. tostring(action.fx),
-            })
-        end
-
-      elseif action.op == "fx.set_param" then
-        local fx_name = fx_names[action.fx] or tostring(action.fx)
-        local track_id = fx_tracks[action.fx]
-        if detail_language_is_english then
-          local params = {}
-          for k, v in pairs(type(action.params) == "table" and action.params or {}) do
-            params[#params + 1] = param_label(k, v)
-          end
-          table.sort(params)
-          local suffix = track_id and (" on " .. track_label(track_id)) or ""
-          headline = headline or ("Set " .. fx_name .. ".")
-          detail_lines[#detail_lines + 1] = "Set " .. fx_name .. suffix
-            .. ": " .. join(params)
-        else
-          local target = track_id and (track_label(track_id) .. ": " .. fx_name)
-            or fx_name
-          headline = headline or tr("applied")
-          detail_lines[#detail_lines + 1] =
-            tr("target", { value = target })
-        end
-
-      elseif action.op == "send.create" then
-        if detail_language_is_english then
-          local props = {}
-          if action.volume_db ~= nil then props[#props + 1] = fmt_num(action.volume_db, " dB") end
-          if action.pan ~= nil then props[#props + 1] = "pan " .. tostring(action.pan) end
-          if action.mode ~= nil then props[#props + 1] = tostring(action.mode) end
-          if action.muted ~= nil then props[#props + 1] = action.muted and "muted" or "unmuted" end
-          local tail = #props > 0 and (" (" .. join(props) .. ")") or ""
-          headline = headline or "Created routing."
-          detail_lines[#detail_lines + 1] = "Send: " .. track_label(action["from"])
-            .. " -> " .. track_label(action.to) .. tail
-        else
-          headline = headline or tr("applied")
-          detail_lines[#detail_lines + 1] =
-            tr("target", {
-              value = track_label(action["from"]) .. " -> "
-                .. track_label(action.to),
-            })
-        end
-      end
-    end
-  end
-
-  headline = headline or tr("applied")
-  if #detail_lines == 0 then return headline end
-  return headline .. "\n" .. join(detail_lines, "\n")
+  local suffix = type(action_results) == "table" and #action_results > 0
+    and " completed" or ""
+  return table.concat(labels, ", ") .. suffix
 end
 
 function Code.apply_run_result_to_message(msg, ok, code_type, code, auto_ran,
@@ -22910,6 +14119,7 @@ function Code.apply_run_result_to_message(msg, ok, code_type, code, auto_ran,
   msg.change_evidence = rr.change_evidence
   msg.parameter_change_status = rr.parameter_change_status
   msg.parameter_change_evidence = rr.parameter_change_evidence
+  msg.fx_insert_failure_evidence = rr.fx_insert_failure_evidence
   msg.runtime_error = rr.runtime_error
   if rr.error_kind then msg.error_kind = rr.error_kind end
   if rr.error_debug and not msg.error_debug then msg.error_debug = rr.error_debug end
@@ -22998,30 +14208,12 @@ local function run_lua_chunk_with_instruction_guard(fn)
 end
 
 function Code.run(code)
-  -- A one-shot generated defer keeps ReaAssist's real undo block open until
-  -- the callback completes on the next REAPER cycle. Do not let a second run
-  -- nest inside that short window or both logical actions could collapse into
-  -- one undo entry. In normal UI use this window is shorter than one frame.
-  if type(S) == "table" and type(S.lua_defer_run) == "table"
-     and (tonumber(S.lua_defer_run.pending) or 0) > 0 then
-    local msg = "ReaAssist is still finishing the previous action. "
-      .. "Wait a moment, then run this script again."
-    Log.line("SCRIPT", "Blocked overlapping run while deferred action pending")
-    Log.add_error(msg, nil, nil, nil, {
-      error_kind = "runtime_busy",
-      error_debug = {
-        failure_kind = "runtime_busy",
-        source = "generated_lua_defer_overlap_guard",
-      },
-    })
-    return false
-  end
   -- A bound deferred callback owns its message through its closure and no
   -- longer needs to monopolize the global slot. Detach it before a later
   -- manual run so its eventual completion cannot overwrite the newer run's
   -- global result; apply_completed_result still finalizes the original row.
   if type(S) == "table" and type(S.lua_defer_run) == "table"
-     and S.lua_defer_run.message_idx then
+     and S.lua_defer_run.bound then
     S.lua_defer_run = nil
   end
   local artifact = Code.classify_lua_artifact(code)
@@ -23053,34 +14245,6 @@ function Code.run(code)
         error_kind = "validator_blocked",
         error_debug = block_debug,
         runtime_error = S.last_run_error,
-      })
-    return false
-  end
-
-  local manual_only_findings =
-    type(Code.find_manual_only_plugin_operations) == "function"
-      and Code.find_manual_only_plugin_operations(code) or nil
-  if manual_only_findings and #manual_only_findings > 0 then
-    local policy = Code.manual_only_plugin_policy(code)
-    local msg = Code.manual_only_plugin_runtime_message(
-      policy, "generated plug-in automation")
-    local block_debug = {
-      failure_kind = "validator_blocked",
-      source = "manual_only_plugin_runtime_preflight",
-      validation_block_kind = "manual_only_plugin_validator",
-      findings = manual_only_findings,
-      generated_code_bytes = #code,
-    }
-    Log.line("SCRIPT", "Blocked manual-only plug-in automation")
-    Log.add_error(msg, nil, nil, nil,
-      { error_kind = "validator_blocked", error_debug = block_debug })
-    S.last_run_error = msg
-    S.last_run_result = Code.build_run_result("lua", code,
-      "blocked_manual_only_plugin", "blocked", {
-        validation_block_kind = "manual_only_plugin_validator",
-        error_kind = "validator_blocked",
-        error_debug = block_debug,
-        runtime_error = msg,
       })
     return false
   end
@@ -23132,1111 +14296,354 @@ function Code.run(code)
     local buf = {}
     for i = 1, n do
       local v = tostring((select(i, ...)))
-      if i > 1 then reaper.ShowConsoleMsg("\t"); buf[#buf+1] = "\t" end
-      reaper.ShowConsoleMsg(v)
+      if i > 1 then buf[#buf+1] = "\t" end
       buf[#buf+1] = v
     end
-    reaper.ShowConsoleMsg("\n")
     Log.line("SCRIPT", "print: " .. table.concat(buf))
   end
 
-  -- Undo capture state. Generated Begin/End calls are always intercepted so
-  -- a throw cannot leave REAPER's undo stack unbalanced. Most scripts use one
-  -- real outer block. Fingerprint-authorized, track-FX-only profile edits use
-  -- an isolated staging project instead: configure a copied/new FX there,
-  -- then apply the verified final parameter values to an existing instance or
-  -- copy a newly added instance into the user's project inside one synchronous
-  -- Undo block. Existing FX keep their GUID and non-parameter state. The user
-  -- project is untouched until that commit, and a failed preparation can be
-  -- discarded without rewinding user state.
+  -- Undo capture state. The outer wrapper (below) is the ONLY real Begin/End
+  -- pair against REAPER's undo stack; the shim intercepts the generated
+  -- code's own Begin/End calls so a throw between them cannot unbalance the
+  -- stack. We still capture the descriptive label the code passed to
+  -- Undo_EndBlock and forward it to the outer End, so REAPER's undo history
+  -- reads "ReaAssist: Create 10 tracks" rather than a generic "ReaAssist".
+  -- Later captures overwrite earlier ones; generated code that issues
+  -- multiple Begin/End pairs collapses into one outer entry with the last
+  -- non-empty label (typical generations are one logical operation).
   local inner_undo_label = nil
   local inner_undo_flags = -1
   local change_count_before = Code.project_change_count()
-  local profile_receipts = Code.plugin_profile_receipts_for_code(code)
-  local param_write_authorization, param_write_findings =
-    Code.parameter_write_authorization_map(code, profile_receipts)
-  local function profile_track_fx_staging_eligible()
-    if type(profile_receipts) ~= "table" or #profile_receipts == 0 then
-      return false, "no_profile_receipt"
+  local code_uses_fx_insertion = code:find("TrackFX_AddByName", 1, true)
+    or code:find("TakeFX_AddByName", 1, true)
+  local function project_shape_snapshot()
+    local shape = {}
+    local function safe_count(fn, ...)
+      if type(fn) ~= "function" then return nil end
+      local ok, value = pcall(fn, ...)
+      if ok then return tonumber(value) end
+      return nil
     end
-    if code:find("reaassist_schedule_autokey_send_reset", 1, true) then
-      return false, "autokey_momentary_send"
-    end
-    if not code:find("TrackFX_SetParam", 1, true)
-       or code:find("TakeFX_", 1, true) then
-      return false, "not_track_parameter_only"
-    end
-    if type(reaper.EnumProjects) ~= "function"
-       or type(reaper.Main_OnCommand) ~= "function"
-       or type(reaper.SelectProjectInstance) ~= "function"
-       or type(reaper.InsertTrackInProject) ~= "function"
-       or type(reaper.GetSetProjectInfo) ~= "function"
-       or type(reaper.PreventUIRefresh) ~= "function"
-       or type(reaper.GetTrack) ~= "function"
-       or type(reaper.CountTracks) ~= "function"
-       or type(reaper.GetMasterTrack) ~= "function"
-       or type(reaper.GetTrackGUID) ~= "function"
-       or type(reaper.TrackFX_GetCount) ~= "function"
-       or type(reaper.TrackFX_GetFXGUID) ~= "function"
-       or type(reaper.TrackFX_GetFXName) ~= "function"
-       or type(reaper.TrackFX_CopyToTrack) ~= "function"
-       or type(reaper.TrackFX_Delete) ~= "function"
-       or type(reaper.Undo_DoUndo2) ~= "function"
-       or type(reaper.Undo_BeginBlock2) ~= "function"
-       or type(reaper.Undo_EndBlock2) ~= "function" then
-      return false, "required_api_unavailable"
-    end
-
-    local allowed = {
-      defer = true,
-      GetTrack = true,
-      GetSelectedTrack = true,
-      GetMasterTrack = true,
-      CountTracks = true,
-      GetTrackName = true,
-      GetTrackGUID = true,
-      GetProjectStateChangeCount = true,
-      EnumProjects = true,
-      ValidatePtr = true,
-      ValidatePtr2 = true,
-      TrackFX_AddByName = true,
-      TrackFX_GetByName = true,
-      TrackFX_GetCount = true,
-      TrackFX_GetFXName = true,
-      TrackFX_GetNumParams = true,
-      TrackFX_GetParam = true,
-      TrackFX_GetParamEx = true,
-      TrackFX_GetParamName = true,
-      TrackFX_GetParamNormalized = true,
-      TrackFX_GetFormattedParamValue = true,
-      TrackFX_GetNamedConfigParm = true,
-      TrackFX_SetParam = true,
-      TrackFX_SetParamNormalized = true,
-      TrackFX_Show = true,
-      ShowMessageBox = true,
-      ShowConsoleMsg = true,
-      PreventUIRefresh = true,
-      UpdateArrange = true,
-      TrackList_AdjustWindows = true,
-      Undo_BeginBlock = true,
-      Undo_BeginBlock2 = true,
-      Undo_EndBlock = true,
-      Undo_EndBlock2 = true,
-    }
-    for api in code:gmatch("reaper%.([%a_][%w_]*)%s*%(") do
-      if not allowed[api] then
-        return false, "non_track_fx_api:" .. tostring(api)
+    shape.track_count = safe_count(reaper.CountTracks, 0)
+    shape.item_count = safe_count(reaper.CountMediaItems, 0)
+    shape.marker_count = safe_count(reaper.CountProjectMarkers, 0)
+    shape.tempo_marker_count = safe_count(
+      reaper.CountTempoTimeSigMarkers, 0)
+    if code_uses_fx_insertion and shape.track_count
+        and type(reaper.GetTrack) == "function"
+        and type(reaper.GetTrackName) == "function" then
+      local identities = {}
+      for index = 0, shape.track_count - 1 do
+        local track = reaper.GetTrack(0, index)
+        local ok, valid, name = pcall(reaper.GetTrackName, track, "")
+        identities[#identities + 1] = tostring(track) .. "\31"
+          .. (ok and valid and tostring(name or "") or "")
+          .. "\31" .. tostring(type(reaper.TrackFX_GetCount) == "function"
+            and reaper.TrackFX_GetCount(track) or "")
+          .. "\31" .. tostring(type(reaper.TrackFX_GetRecCount) == "function"
+            and reaper.TrackFX_GetRecCount(track) or "")
       end
+      shape.track_identity = table.concat(identities, "\30")
     end
-    return true
+    return shape
   end
-  local profile_fx_staging_enabled, profile_fx_staging_reason =
-    profile_track_fx_staging_eligible()
-  if type(profile_receipts) == "table" and #profile_receipts > 0
-     and type(Code.find_unguarded_profile_param_writes) == "function" then
-    local guard_findings = Code.find_unguarded_profile_param_writes(code)
-    local preflight_unsafe = false
-    for _, finding in ipairs(guard_findings or {}) do
-      if finding == "shadowed_profile_parameter_resolver"
-         or tostring(finding):match("^profile_mapping_")
-         or (finding == "missing_profile_parameter_resolver"
-           and Code.plugin_profile_code_mentions_receipt(
-             code, profile_receipts)) then
-        preflight_unsafe = true
-        break
-      end
-    end
-    if preflight_unsafe then
-      local guard_error = "ReaAssist profile parameter guard refused the "
-        .. "script because its mapped parameter references were not safe."
-      S.last_run_error = guard_error
-      S.last_run_result = Code.build_run_result("lua", code,
-        "blocked_profile_guard", "blocked", {
-          validation_block_kind = "plugin_profile_guard_validator",
-          error_kind = "validator_blocked",
-          error_debug = {
-            failure_kind = "validator_blocked",
-            source = "plugin_profile_runtime_preflight",
-            findings = guard_findings,
-          },
-          runtime_error = guard_error,
-        })
-      Log.add_error("ReaAssist did not run this script because its plug-in "
-        .. "parameter mapping could not be verified. Ask ReaAssist to "
-        .. "regenerate the track FX script, or adjust the value manually.")
-      Code.plugin_test_runtime_event("run_error", {
-        code_sha256 = Code.plugin_profile_code_key(code),
-        run_result = S.last_run_result,
-      })
-      return false
-    end
-  end
-  if type(param_write_findings) == "table"
-     and #param_write_findings > 0 then
-    local guard_error = "ReaAssist parameter provenance validation refused "
-      .. "the script because it contains a direct plug-in parameter write "
-      .. "without a validated profile mapping or canonical parameter helper."
-    S.last_run_error = guard_error
-    S.last_run_result = Code.build_run_result("lua", code,
-      "blocked_parameter_provenance", "blocked", {
-        validation_block_kind = "fx_param_provenance_validator",
-        error_kind = "validator_blocked",
-        error_debug = {
-          failure_kind = "validator_blocked",
-          source = "fx_param_provenance_runtime_preflight",
-          findings = param_write_findings,
-        },
-        runtime_error = guard_error,
-      })
-    Log.add_error("ReaAssist did not run this script because it contains a "
-      .. "plug-in parameter change that could not be verified. For "
-      .. "take/item FX, adjust the value manually. For track FX, ask "
-      .. "ReaAssist to regenerate the script.")
-    Code.plugin_test_runtime_event("run_error", {
-      code_sha256 = Code.plugin_profile_code_key(code),
-      run_result = S.last_run_result,
-    })
-    return false
-  end
-  Code.plugin_test_runtime_event("run_started", {
-    code_sha256 = Code.plugin_profile_code_key(code),
-    profile_authorization_count =
-      type(profile_receipts) == "table" and #profile_receipts or 0,
-  })
+  local project_shape_before = project_shape_snapshot()
   local defer_state = {
     code = code,
     pending = 0,
     failed = false,
     in_callback = false,
-    undo_open = false,
-    undo_closed = false,
-    undo_project = nil,
-    undo_project_api = false,
-    profile_fx_staging_enabled = profile_fx_staging_enabled == true,
-    profile_fx_staging_reason = profile_fx_staging_reason,
-    profile_fx_stage_project = nil,
-    profile_fx_stage_track = nil,
-    profile_fx_stage_entries = {},
-    profile_fx_stage_proxy_map = {},
-    profile_fx_stage_real_map = {},
-    profile_fx_stage_write_sequence = {},
-    profile_fx_stage_next_proxy = 1000000000,
-    profile_fx_stage_committed = false,
-    profile_fx_stage_focus = nil,
+    bound = false,
+    message_ref = nil,
+    protected_call_failures = {
+      failure_count = 0,
+      pcall_count = 0,
+      xpcall_count = 0,
+    },
     change_count_before = change_count_before,
     parameter_writes = {},
-    profile_resolutions = {},
-    profile_target_checks = {},
-    param_write_authorization = param_write_authorization or {},
+    fx_insert_failures = {},
+    fx_insert_failure_order = {},
+    successful_fx_insert_count = 0,
     generated_refresh_balance = 0,
     generated_refresh_recovery_count = 0,
-    autokey_send_reset_pending = false,
+    attributed_change_delta = 0,
+    last_segment_change_delta = nil,
+    change_interval_contaminated = false,
   }
-
-  if type(reaper.EnumProjects) == "function" then
-    defer_state.undo_project = reaper.EnumProjects(-1, "")
-  end
-
-  local function close_run_undo()
-    if defer_state.undo_open and not defer_state.undo_closed then
-      if defer_state.undo_project_api
-         and type(reaper.Undo_EndBlock2) == "function" then
-        if Code.project_pointer_exists(defer_state.undo_project) then
-          reaper.Undo_EndBlock2(defer_state.undo_project,
-            inner_undo_label or "ReaAssist", inner_undo_flags or -1)
-        else
-          Log.line("SCRIPT",
-            "Skipped Undo_EndBlock2 because the run project no longer exists")
-        end
-      else
-        reaper.Undo_EndBlock(inner_undo_label or "ReaAssist",
-          inner_undo_flags or -1)
-      end
-      defer_state.undo_closed = true
-      defer_state.undo_open = false
+  local function record_change_segment(segment_before, segment_after)
+    segment_before = tonumber(segment_before)
+    segment_after = tonumber(segment_after)
+    if segment_before == nil or segment_after == nil then
+      defer_state.last_segment_change_delta = nil
+      defer_state.attributed_change_delta = nil
+      return
+    end
+    local delta = segment_after - segment_before
+    defer_state.last_segment_change_delta = delta
+    if defer_state.attributed_change_delta ~= nil then
+      defer_state.attributed_change_delta =
+        defer_state.attributed_change_delta + delta
     end
   end
-
+  local function record_protected_call_result(kind, ok)
+    if ok ~= false then return end
+    local counts = defer_state.protected_call_failures
+    counts.failure_count = counts.failure_count + 1
+    if kind == "xpcall" then
+      counts.xpcall_count = counts.xpcall_count + 1
+    else
+      counts.pcall_count = counts.pcall_count + 1
+    end
+  end
+  local function protected_call_failure_evidence()
+    local counts = defer_state.protected_call_failures
+    if counts.failure_count < 1 then return nil end
+    return {
+      failure_count = counts.failure_count,
+      pcall_count = counts.pcall_count,
+      xpcall_count = counts.xpcall_count,
+    }
+  end
+  code_env.pcall = function(fn, ...)
+    local result = table.pack(pcall(fn, ...))
+    record_protected_call_result("pcall", result[1])
+    return table.unpack(result, 1, result.n)
+  end
+  code_env.xpcall = function(fn, msgh, ...)
+    local result = table.pack(xpcall(fn, msgh, ...))
+    record_protected_call_result("xpcall", result[1])
+    return table.unpack(result, 1, result.n)
+  end
   local function recover_generated_refresh()
     local held = math.max(0,
       math.floor(tonumber(defer_state.generated_refresh_balance) or 0))
-    if held <= 0 then return 0 end
     for _ = 1, held do pcall(reaper.PreventUIRefresh, -1) end
     defer_state.generated_refresh_balance = 0
     defer_state.generated_refresh_recovery_count =
-      (tonumber(defer_state.generated_refresh_recovery_count) or 0) + held
-    Log.line("SCRIPT", "Recovered " .. tostring(held)
-      .. " generated PreventUIRefresh hold(s)")
+      defer_state.generated_refresh_recovery_count + held
+    if held > 0 then
+      Log.line("SCRIPT", "Recovered " .. tostring(held)
+        .. " unmatched PreventUIRefresh call(s)")
+    end
     return held
   end
-
-  local function profile_stage_pair_key(track, fx)
-    return tostring(track) .. "\31" .. tostring(fx)
-  end
-
-  local function profile_project_exists(project)
-    return Code.project_pointer_exists(project)
-  end
-
-  local function restore_profile_stage_focus()
-    if defer_state.profile_fx_stage_focus
-       and type(reaper.JS_Window_SetFocus) == "function"
-       and (type(reaper.JS_Window_IsWindow) ~= "function"
-         or reaper.JS_Window_IsWindow(
-           defer_state.profile_fx_stage_focus)) then
-      pcall(reaper.JS_Window_SetFocus, defer_state.profile_fx_stage_focus)
-    end
-  end
-
-  local function resolve_profile_target_track(entry)
-    local project = defer_state.undo_project
-    local track = entry and entry.target_track
-    if track and type(reaper.ValidatePtr2) == "function"
-       and reaper.ValidatePtr2(project, track, "MediaTrack*")
-       and reaper.GetTrackGUID(track) == entry.target_guid then
-      return track
-    end
-    local master = type(reaper.GetMasterTrack) == "function"
-      and reaper.GetMasterTrack(project) or nil
-    if master and reaper.GetTrackGUID(master) == entry.target_guid then
-      entry.target_track = master
-      return master
-    end
-    for i = 0, reaper.CountTracks(project) - 1 do
-      local candidate = reaper.GetTrack(project, i)
-      if candidate and reaper.GetTrackGUID(candidate) == entry.target_guid then
-        entry.target_track = candidate
-        return candidate
-      end
-    end
-    return nil
-  end
-
-  local function cleanup_profile_fx_stage()
-    local stage_project = defer_state.profile_fx_stage_project
-    if not stage_project then return true end
-    local refresh_held = false
-    local stage_closed = false
-    local ok, cleanup_err = pcall(function()
-      reaper.PreventUIRefresh(1)
-      refresh_held = true
-      if profile_project_exists(stage_project) then
-        reaper.SelectProjectInstance(stage_project)
-        reaper.GetSetProjectInfo(stage_project, "DIRTY", 0, true)
-        if reaper.GetSetProjectInfo(
-            stage_project, "DIRTY", 0, false) ~= 0 then
-          error("temporary staging project remained dirty")
-        end
-        reaper.Main_OnCommand(40860, 0)
-        if profile_project_exists(stage_project) then
-          error("temporary staging project did not close")
-        end
-        stage_closed = true
-      else
-        stage_closed = true
-      end
-    end)
-    if defer_state.undo_project
-       and profile_project_exists(defer_state.undo_project) then
-      pcall(reaper.SelectProjectInstance, defer_state.undo_project)
-    end
-    if refresh_held then reaper.PreventUIRefresh(-1) end
-    restore_profile_stage_focus()
-    if stage_closed then
-      defer_state.profile_fx_stage_project = nil
-      defer_state.profile_fx_stage_track = nil
-    end
-    return ok and stage_closed, cleanup_err
-  end
-
-  local function ensure_profile_fx_stage()
-    if defer_state.profile_fx_stage_track then return true end
-    if not defer_state.profile_fx_staging_enabled then
-      return false, defer_state.profile_fx_staging_reason
-    end
-    defer_state.profile_fx_stage_focus =
-      type(reaper.JS_Window_GetFocus) == "function"
-      and reaper.JS_Window_GetFocus() or nil
-    local refresh_held = false
-    local ok, stage_err = pcall(function()
-      reaper.PreventUIRefresh(1)
-      refresh_held = true
-      reaper.Main_OnCommand(40859, 0)
-      local stage_project = reaper.EnumProjects(-1, "")
-      if not stage_project or stage_project == defer_state.undo_project then
-        error("temporary project tab did not open")
-      end
-      defer_state.profile_fx_stage_project = stage_project
-      reaper.InsertTrackInProject(stage_project, 0, 0)
-      local stage_track = reaper.GetTrack(stage_project, 0)
-      if not stage_track then error("temporary track was not created") end
-      defer_state.profile_fx_stage_track = stage_track
-      reaper.SelectProjectInstance(defer_state.undo_project)
-      if reaper.EnumProjects(-1, "") ~= defer_state.undo_project then
-        error("original project tab was not restored")
-      end
-    end)
-    if refresh_held then reaper.PreventUIRefresh(-1) end
-    restore_profile_stage_focus()
-    if not ok then
-      cleanup_profile_fx_stage()
-      return false, tostring(stage_err)
-    end
-    return true
-  end
-
-  local function register_profile_stage_entry(target_track, target_real_fx,
-      target_fx_guid, stage_fx, mode, loaded_name, requested_name)
-    local guid = reaper.GetTrackGUID(target_track)
-    if type(guid) ~= "string" or guid == "" then
-      return nil, "target_track_guid_unavailable"
-    end
-    local proxy = defer_state.profile_fx_stage_next_proxy
-    defer_state.profile_fx_stage_next_proxy = proxy + 1
-    local entry = {
-      target_track = target_track,
-      target_guid = guid,
-      target_real_fx = target_real_fx,
-      target_fx_guid = target_fx_guid,
-      stage_fx = stage_fx,
-      proxy_fx = proxy,
-      mode = mode,
-      loaded_name = loaded_name,
-      requested_name = requested_name,
-    }
-    defer_state.profile_fx_stage_entries[
-      #defer_state.profile_fx_stage_entries + 1] = entry
-    defer_state.profile_fx_stage_proxy_map[
-      profile_stage_pair_key(target_track, proxy)] = entry
-    if target_real_fx ~= nil then
-      defer_state.profile_fx_stage_real_map[
-        profile_stage_pair_key(target_track, target_real_fx)] = entry
-    end
-    return entry
-  end
-
-  local function stage_existing_profile_fx(target_track, target_fx,
-      requested_name)
-    local real_key = profile_stage_pair_key(target_track, target_fx)
-    local existing = defer_state.profile_fx_stage_real_map[real_key]
-    if existing then return existing end
-    local ok, stage_err = ensure_profile_fx_stage()
-    if not ok then return nil, stage_err end
-    local name_ok, loaded_name =
-      reaper.TrackFX_GetFXName(target_track, target_fx, "")
-    if not name_ok then return nil, "target_fx_unavailable" end
-    local target_fx_guid = reaper.TrackFX_GetFXGUID(target_track, target_fx)
-    if type(target_fx_guid) ~= "string" or target_fx_guid == "" then
-      return nil, "target_fx_guid_unavailable"
-    end
-    local stage_fx = reaper.TrackFX_GetCount(
-      defer_state.profile_fx_stage_track)
-    reaper.TrackFX_CopyToTrack(target_track, target_fx,
-      defer_state.profile_fx_stage_track, stage_fx, false)
-    if reaper.TrackFX_GetCount(defer_state.profile_fx_stage_track)
-       ~= stage_fx + 1 then
-      return nil, "target_fx_copy_to_stage_failed"
-    end
-    local entry, entry_err = register_profile_stage_entry(
-      target_track, target_fx, target_fx_guid, stage_fx, "replace", loaded_name,
-      requested_name)
-    return entry, entry_err
-  end
-
-  local function stage_new_profile_fx(target_track, add_name)
-    local ok, stage_err = ensure_profile_fx_stage()
-    if not ok then return nil, stage_err end
-    local stage_track = defer_state.profile_fx_stage_track
-    local before_count = reaper.TrackFX_GetCount(stage_track)
-    local stage_fx = reaper.TrackFX_AddByName(
-      stage_track, add_name, false, -1)
-    if not stage_fx or stage_fx < 0
-       or reaper.TrackFX_GetCount(stage_track) ~= before_count + 1 then
-      return nil, "plugin_add_to_stage_failed"
-    end
-    local _, loaded_name = reaper.TrackFX_GetFXName(stage_track, stage_fx, "")
-    local entry, entry_err = register_profile_stage_entry(
-      target_track, nil, nil, stage_fx, "append",
-      loaded_name or tostring(add_name), tostring(add_name))
-    return entry, entry_err
-  end
-
-  local function profile_fx_name_key(value)
-    local key = tostring(value or ""):lower()
-      :gsub("^%s+", ""):gsub("%s+$", "")
-      :gsub("^[%w%d]+:%s*", "")
-      :gsub("%s*%([^()]+%)%s*$", "")
-      :gsub("[^%w]+", "")
-    return key
-  end
-
-  local function find_profile_stage_by_name(target_track, name)
-    local requested = profile_fx_name_key(name)
-    if requested == "" then return nil end
-    for _, entry in ipairs(defer_state.profile_fx_stage_entries) do
-      if entry.target_track == target_track then
-        local requested_key = profile_fx_name_key(entry.requested_name)
-        local loaded_key = profile_fx_name_key(entry.loaded_name)
-        if requested == requested_key or requested == loaded_key
-           or (loaded_key ~= "" and (loaded_key:find(requested, 1, true)
-             or requested:find(loaded_key, 1, true))) then
-          return entry
-        end
-      end
-    end
-    return nil
-  end
-
-  local function profile_stage_entry(target_track, fx, stage_if_missing)
-    if not defer_state.profile_fx_staging_enabled then return nil end
-    local key = profile_stage_pair_key(target_track, fx)
-    local entry = defer_state.profile_fx_stage_proxy_map[key]
-      or defer_state.profile_fx_stage_real_map[key]
-    if entry or not stage_if_missing then return entry end
-    return stage_existing_profile_fx(target_track, fx)
-  end
-
-  local function profile_stage_target(target_track, fx, stage_if_missing)
-    local entry, stage_err =
-      profile_stage_entry(target_track, fx, stage_if_missing)
-    if not entry then return nil, nil, stage_err end
-    return defer_state.profile_fx_stage_track, entry.stage_fx, nil, entry
-  end
-
-  local function show_committed_profile_fx()
-    for _, entry in ipairs(defer_state.profile_fx_stage_entries) do
-      if entry.show_flag ~= nil then
-        local target_track = resolve_profile_target_track(entry)
-        if target_track then
-          pcall(reaper.TrackFX_Show, target_track, entry.committed_fx,
-            entry.show_flag)
-        end
-      end
-    end
-  end
-
-  local function profile_formatted_parameter_value(track, fx, pidx)
-    if type(reaper.TrackFX_GetFormattedParamValue) ~= "function" then
-      return nil
-    end
-    local ok, first, second = pcall(
-      reaper.TrackFX_GetFormattedParamValue, track, fx, pidx, "")
-    if not ok then return nil end
-    if type(second) == "string" then return second end
-    if type(first) == "string" then return first end
-    return nil
-  end
-
-  -- A generated edit may deliberately set a value that is already present.
-  -- The staged copy then proves the request is satisfied, but copying that
-  -- identical FX back would still change its GUID, dirty the project, and add
-  -- a misleading Undo entry. Suppress that commit only when every staged entry
-  -- is an existing FX and every witnessed parameter has a known unchanged final
-  -- value. This lane permits no other FX-state mutators, so discarding the
-  -- staging project preserves the complete user-project state.
-  local function profile_stage_is_verified_noop()
-    local evidence = Code.parameter_change_evidence(
-      defer_state.parameter_writes)
-    if not evidence or (tonumber(evidence.target_count) or 0) < 1
-       or (tonumber(evidence.changed_target_count) or 0) ~= 0
-       or (tonumber(evidence.unknown_target_count) or 0) ~= 0
-       or #defer_state.profile_fx_stage_entries < 1 then
-      return false
-    end
-    for _, entry in ipairs(defer_state.profile_fx_stage_entries) do
-      if entry.mode ~= "replace" then return false end
-      local target_track = resolve_profile_target_track(entry)
-      local target_fx = tonumber(entry.target_real_fx)
-      local count = target_track and reaper.TrackFX_GetCount(target_track) or 0
-      if not target_track or not target_fx or target_fx < 0
-         or target_fx >= count then
-        return nil, "replacement_target_missing"
-      end
-      local current_guid = reaper.TrackFX_GetFXGUID(target_track, target_fx)
-      if type(current_guid) ~= "string"
-         or current_guid ~= entry.target_fx_guid then
-        return nil, "replacement_target_identity_changed"
-      end
-      entry.committed_fx = target_fx
-    end
-    return true
-  end
-
-  local record_runtime_error
-  local finish_deferred_lua_run
-
-  local function commit_profile_fx_stage()
-    if defer_state.profile_fx_stage_committed then return true end
-    if not defer_state.profile_fx_stage_project then return true end
-    local no_op, no_op_err = profile_stage_is_verified_noop()
-    if no_op == nil then
-      cleanup_profile_fx_stage()
-      return false, tostring(no_op_err or "profile_fx_noop_check_failed")
-    end
-    if no_op then
-      local cleanup_ok, cleanup_err = cleanup_profile_fx_stage()
-      if not cleanup_ok then
-        return false, "stage_cleanup_failed:" .. tostring(cleanup_err)
-      end
-      defer_state.profile_fx_stage_committed = true
-      show_committed_profile_fx()
-      Log.line("SCRIPT",
-        "Discarded verified no-op profile staging without changing the user project")
-      return true
-    end
-    local project = defer_state.undo_project
-    local block_open = false
-    local block_started = false
-    local refresh_held = false
-    local committed = false
-    local has_delayed_readback = false
-    for _, witness in pairs(defer_state.parameter_writes) do
-      if witness.delayed_readback == true then
-        has_delayed_readback = true
-        break
-      end
-    end
-    local ok, commit_err = pcall(function()
-      reaper.PreventUIRefresh(1)
-      refresh_held = true
-      reaper.SelectProjectInstance(project)
-      reaper.Undo_BeginBlock2(project)
-      block_open = true
-      block_started = true
-      for _, entry in ipairs(defer_state.profile_fx_stage_entries) do
-        local target_track = resolve_profile_target_track(entry)
-        if not target_track then error("target_track_not_found") end
-        local before_count = reaper.TrackFX_GetCount(target_track)
-        local dest_fx
-        if entry.mode == "replace" then
-          dest_fx = tonumber(entry.target_real_fx)
-          if not dest_fx or dest_fx < 0 or dest_fx >= before_count then
-            error("replacement_target_missing")
-          end
-          local current_guid =
-            reaper.TrackFX_GetFXGUID(target_track, dest_fx)
-          if type(current_guid) ~= "string"
-             or current_guid ~= entry.target_fx_guid then
-            error("replacement_target_identity_changed")
-          end
-          entry.committed_fx = dest_fx
-        else
-          dest_fx = before_count
-        end
-        if entry.mode ~= "replace" then
-          reaper.TrackFX_CopyToTrack(defer_state.profile_fx_stage_track,
-            entry.stage_fx, target_track, dest_fx, false)
-          if reaper.TrackFX_GetCount(target_track) ~= before_count + 1 then
-            error("profile_fx_commit_copy_failed")
-          end
-          entry.committed_fx = dest_fx
-        end
-      end
-      for _, staged_write in ipairs(
-          defer_state.profile_fx_stage_write_sequence) do
-        local entry = staged_write.stage_entry
-        if entry and entry.mode == "replace" then
-          if staged_write.final_normalized == nil then
-            error("replacement_parameter_final_value_unavailable")
-          end
-          local target_track = resolve_profile_target_track(entry)
-          if not target_track then error("target_track_not_found") end
-          reaper.TrackFX_SetParamNormalized(
-            target_track, entry.committed_fx,
-            staged_write.parameter_index, staged_write.final_normalized)
-        end
-      end
-      if not has_delayed_readback then
-        reaper.Undo_EndBlock2(project,
-          inner_undo_label or "ReaAssist", 2)
-        block_open = false
-      end
-      committed = true
-    end)
-    if refresh_held then reaper.PreventUIRefresh(-1) end
-    if block_open and not (ok and committed and has_delayed_readback) then
-      pcall(reaper.Undo_EndBlock2, project,
-        inner_undo_label or "ReaAssist", 2)
-      block_open = false
-    end
-    if not ok or not committed then
-      if block_started then
-        pcall(reaper.Undo_DoUndo2, project)
-      end
-      cleanup_profile_fx_stage()
-      return false, tostring(commit_err or "profile_fx_commit_failed")
-    end
-
-    local delayed_witnesses = {}
-    for _, witness in pairs(defer_state.parameter_writes) do
-      local entry = witness.stage_entry
-      if entry and witness.final_normalized ~= nil then
-        if witness.delayed_readback == true then
-          delayed_witnesses[#delayed_witnesses + 1] = witness
-          goto continue_commit_witness
-        end
-        local target_track = resolve_profile_target_track(entry)
-        local actual = target_track and reaper.TrackFX_GetParamNormalized(
-          target_track, entry.committed_fx, witness.parameter_index) or nil
-        local normalized_match = actual ~= nil
-          and math.abs(actual - witness.final_normalized) <= 0.0000001
-        local actual_formatted = nil
-        local formatted_match = false
-        if not normalized_match
-           and type(witness.final_formatted) == "string" then
-          actual_formatted = target_track
-            and profile_formatted_parameter_value(
-              target_track, entry.committed_fx, witness.parameter_index)
-            or nil
-          formatted_match = actual_formatted == witness.final_formatted
-        end
-        if not normalized_match and not formatted_match then
-          Log.line("SCRIPT", string.format(
-            "Profile commit verification mismatch product=%s parameter=%s "
-              .. "index=%s expected_norm=%s actual_norm=%s "
-              .. "expected_display=%s actual_display=%s",
-            tostring(witness.plugin_product_key or ""),
-            tostring(witness.parameter_name or ""),
-            tostring(witness.parameter_index),
-            tostring(witness.final_normalized), tostring(actual),
-            tostring(witness.final_formatted),
-            tostring(actual_formatted)))
-          if block_open then
-            pcall(reaper.Undo_EndBlock2, project,
-              inner_undo_label or "ReaAssist", 2)
-            block_open = false
-          end
-          pcall(reaper.Undo_DoUndo2, project)
-          cleanup_profile_fx_stage()
-          return false, "committed_parameter_verification_failed"
-        end
-      end
-      ::continue_commit_witness::
-    end
-    if #delayed_witnesses > 0 then
-      defer_state.profile_fx_stage_committed = true
-      defer_state.pending = defer_state.pending + 1
-      local function verify_delayed_commit()
-        local verified, verify_err = pcall(function()
-          reaper.SelectProjectInstance(project)
-          for _, witness in ipairs(delayed_witnesses) do
-            local entry = witness.stage_entry
-            local target_track = resolve_profile_target_track(entry)
-            local actual = target_track and reaper.TrackFX_GetParamNormalized(
-              target_track, entry.committed_fx, witness.parameter_index) or nil
-            if actual == nil
-               or math.abs(actual - witness.final_normalized) > 0.0000001 then
-              error("delayed_parameter_verification_failed product="
-                .. tostring(witness.plugin_product_key or "")
-                .. " parameter=" .. tostring(witness.parameter_name or "")
-                .. " index=" .. tostring(witness.parameter_index)
-                .. " expected=" .. tostring(witness.final_normalized)
-                .. " actual=" .. tostring(actual))
-            end
-          end
-        end)
-        if block_open then
-          local close_ok, close_err = pcall(reaper.Undo_EndBlock2, project,
-            inner_undo_label or "ReaAssist", 2)
-          block_open = false
-          if not close_ok then
-            verified = false
-            verify_err = "delayed_undo_close_failed:" .. tostring(close_err)
-          end
-        end
-        if not verified then
-          pcall(reaper.Undo_DoUndo2, project)
-          defer_state.failed = true
-        end
-        local cleanup_ok, cleanup_err = cleanup_profile_fx_stage()
-        if not cleanup_ok then
-          if verified then pcall(reaper.Undo_DoUndo2, project) end
-          verified = false
-          verify_err = "stage_cleanup_failed:" .. tostring(cleanup_err)
-          defer_state.failed = true
-        end
-        if verified then show_committed_profile_fx() end
-        defer_state.pending = math.max(0, defer_state.pending - 1)
-        if not verified and type(record_runtime_error) == "function" then
-          record_runtime_error(
-            "ReaAssist could not verify a delayed plug-in parameter write: "
-              .. tostring(verify_err),
-            false, nil, "plugin_profile_staging_delayed_verification")
-        end
-        if type(finish_deferred_lua_run) == "function" then
-          finish_deferred_lua_run()
-        end
-      end
-      local scheduled, schedule_err = pcall(reaper.defer,
-        verify_delayed_commit)
-      if not scheduled then
-        defer_state.pending = math.max(0, defer_state.pending - 1)
-        if block_open then
-          pcall(reaper.Undo_EndBlock2, project,
-            inner_undo_label or "ReaAssist", 2)
-          block_open = false
-        end
-        pcall(reaper.Undo_DoUndo2, project)
-        cleanup_profile_fx_stage()
-        return false, "delayed_verification_schedule_failed:"
-          .. tostring(schedule_err)
-      end
-      Log.line("SCRIPT", "Scheduled one-frame verification for delayed "
-        .. "profile parameter readback")
-      return true, "pending"
-    end
-    defer_state.profile_fx_stage_committed = true
-    local cleanup_ok, cleanup_err = cleanup_profile_fx_stage()
-    if not cleanup_ok then
-      pcall(reaper.Undo_DoUndo2, project)
-      return false, "stage_cleanup_failed:" .. tostring(cleanup_err)
-    end
-    show_committed_profile_fx()
-    Log.line("SCRIPT",
-      "Committed deferred profile FX edit from isolated staging while preserving existing FX identity")
-    return true
-  end
-
-  local function profile_target_key(kind, target_ref, fx)
-    return tostring(kind) .. "\31" .. tostring(target_ref)
-      .. "\31" .. tostring(fx)
-  end
-
-  local function profile_guard_error(reason)
-    return "ReaAssist profile parameter guard refused the write: "
-      .. tostring(reason or "unknown_profile_guard_failure")
-  end
-
-  local function profile_parameter_label_key(value)
-    local text = tostring(value or ""):lower()
-      :gsub("^%s+", ""):gsub("%s+$", "")
-    local key = text:gsub("[^%w]+", " ")
-      :gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
-    return key ~= "" and key or text
-  end
-
-  local function manual_only_fx_policy(kind, target_ref, fx)
-    local getter = kind == "take" and reaper.TakeFX_GetFXName
-      or reaper.TrackFX_GetFXName
-    if type(getter) ~= "function" then return nil end
-    local ok, first, second = pcall(getter, target_ref, fx, "")
-    if not ok then return nil end
-    local loaded_name = type(second) == "string" and second
-      or (type(first) == "string" and first or nil)
-    return Code.manual_only_plugin_policy(loaded_name)
-  end
-
-  local function manual_only_chain_policy(kind, target_ref)
-    local counter = kind == "take" and reaper.TakeFX_GetCount
-      or reaper.TrackFX_GetCount
-    if type(counter) ~= "function" then return nil end
-    local ok, count = pcall(counter, target_ref)
-    if not ok then return nil end
-    for fx = 0, (tonumber(count) or 0) - 1 do
-      local policy = manual_only_fx_policy(kind, target_ref, fx)
-      if policy then return policy end
-    end
-    return nil
-  end
-
-  local function refuse_manual_only(policy, operation, level)
-    if policy then
-      error(Code.manual_only_plugin_runtime_message(policy, operation),
-        level or 3)
-    end
-  end
-
-  local function guard_manual_only_fx(kind, target_ref, fx, operation, level)
-    refuse_manual_only(
-      manual_only_fx_policy(kind, target_ref, fx), operation, level)
-  end
-
-  local function guard_manual_only_chain(kind, target_ref, operation, level)
-    refuse_manual_only(
-      manual_only_chain_policy(kind, target_ref), operation, level)
-  end
-
-  local function guarded_dynamic_reaper_api(key, api)
-    if type(api) ~= "function" then return nil end
-    local kind, operation = tostring(key):match("^(TrackFX)_(.+)$")
-    if kind then kind = "track" end
-    if not kind then
-      kind, operation = tostring(key):match("^(TakeFX)_(.+)$")
-      if kind then kind = "take" end
-    end
-    if not kind then return nil end
-    local mutates = operation == "NavigatePresets"
-      or (operation:find("^Set") ~= nil and operation ~= "SetOpen")
-    if not mutates then return nil end
-    return function(target_ref, fx, ...)
-      guard_manual_only_fx(kind, target_ref, fx,
-        tostring(key), 2)
-      return api(target_ref, fx, ...)
-    end
-  end
-
-  local function validate_profile_write_target(kind, target_ref, fx, pidx,
-      caller_line)
-    if kind == "track" then
-      local target_key = profile_target_key(kind, target_ref, fx)
-      local target = defer_state.profile_target_checks[target_key]
-      if target ~= false then
-        if not target then
-          local validated, reason =
-            Code.plugin_profile_target_validation(
-              target_ref, fx, profile_receipts)
-          if not validated then
-            if reason == "profiles_inactive"
-               or reason == "not_profile_target" then
-              defer_state.profile_target_checks[target_key] = false
-              target = false
-            else
-              error(profile_guard_error(reason), 3)
-            end
-          else
-            target = validated
-            defer_state.profile_target_checks[target_key] = target
-          end
-        end
-
-        if target then
-          local resolution = defer_state.profile_resolutions[target_key]
-          local index = tonumber(pidx)
-          if not resolution or index == nil or index % 1 ~= 0
-             or not resolution.indices[index] then
-            error(profile_guard_error(
-              "unresolved mapped parameter index " .. tostring(pidx)
-                .. " for " .. tostring(target.loaded_name)), 3)
-          end
-          return true
-        end
-      end
-    end
-
-    local authorization = defer_state.param_write_authorization[
-      tonumber(caller_line)]
-    if authorization and authorization.kind == "canonical_helper" then
-      return true
-    end
-    error("ReaAssist parameter provenance guard refused the "
-      .. tostring(kind) .. " FX write at generated line "
-      .. tostring(caller_line or "unknown")
-      .. ": use a validated plug-in profile mapping or an exact bundled "
-      .. "parameter helper.", 3)
-  end
-
-  -- ReaAssist-provided generated-code helper. Unlike the generic probing
-  -- helpers, this function is part of the per-run sandbox and does not need
-  -- to be pasted into generated Lua. It validates every requested mapping in
-  -- one pass and returns no indices unless the whole compound target set is
-  -- safe. Generated code must call it before any mapped write.
-  code_env.reaassist_resolve_profile_params = function(track, fx, specs)
-    if type(specs) ~= "table" or #specs == 0 then
-      return nil, profile_guard_error("empty parameter specification")
-    end
-    local validation_track, validation_fx = track, fx
-    local stage_entry = nil
-    if defer_state.profile_fx_staging_enabled then
-      local stage_err
-      validation_track, validation_fx, stage_err, stage_entry =
-        profile_stage_target(track, fx, true)
-      if not validation_track then
-        return nil, profile_guard_error(
-          stage_err or "plugin_staging_unavailable")
-      end
-    end
-    local validated, reason =
-      Code.plugin_profile_target_validation(
-        validation_track, validation_fx, profile_receipts,
-        stage_entry and defer_state.profile_fx_stage_project or nil)
-    if not validated then
-      return nil, profile_guard_error(reason)
-    end
-    local inventory = validated.inventory
-    local params = type(inventory) == "table" and inventory.params or nil
-    if type(params) ~= "table" then
-      return nil, profile_guard_error("inventory unavailable")
-    end
-
-    local resolved = {}
-    local resolved_by_index = {}
-    for position, spec in ipairs(specs) do
-      if type(spec) ~= "table" then
-        return nil, profile_guard_error(
-          "invalid parameter specification at position " .. position)
-      end
-      local expected_index = tonumber(spec.index)
-      local expected_name = tostring(spec.name or "")
-      local expected_section = spec.section ~= nil
-        and tostring(spec.section) or nil
-      local expected_name_key = profile_parameter_label_key(expected_name)
-      local expected_section_key = expected_section ~= nil
-        and profile_parameter_label_key(expected_section) or nil
-      if expected_index == nil or expected_index % 1 ~= 0
-         or expected_index < 0 or expected_name == "" then
-        return nil, profile_guard_error(
-          "invalid parameter specification at position " .. position)
-      end
-
-      local name_matches = {}
-      for _, live in ipairs(params) do
-        if profile_parameter_label_key(live.name) == expected_name_key
-           and (expected_section == nil
-             or profile_parameter_label_key(live.section)
-               == expected_section_key) then
-          name_matches[#name_matches + 1] = live
-        end
-      end
-      if expected_section == nil and #name_matches > 1 then
-        return nil, profile_guard_error(
-          "parameter name is ambiguous without a section: " .. expected_name)
-      end
-
-      local live = params[expected_index + 1]
-      local direct_ok = live
-        and profile_parameter_label_key(live.name) == expected_name_key
-        and (expected_section == nil
-          or (live.section_available == true
-            and profile_parameter_label_key(live.section)
-              == expected_section_key))
-      if direct_ok and expected_section ~= nil
-         and live.section_available ~= true then
-        direct_ok = false
-      end
-      if not direct_ok then
-        if #name_matches ~= 1 then
-          return nil, profile_guard_error(
-            "expected index/name/section did not match uniquely: "
-              .. tostring(expected_index) .. " / " .. expected_name
-              .. (expected_section ~= nil
-                and (" / " .. expected_section) or ""))
-        end
-        live = name_matches[1]
-      end
-      resolved[position] = live.index
-      resolved_by_index[live.index] = {
-        expected_name = expected_name,
-        expected_section = expected_section,
-      }
-    end
-
-    local target_key = profile_target_key("track", track, fx)
-    defer_state.profile_target_checks[target_key] = validated
-    defer_state.profile_resolutions[target_key] = {
-      indices = resolved_by_index,
-      product_key = validated.receipt
-        and validated.receipt.product_key or nil,
-      fingerprint = inventory.observed_fingerprint_sha256,
-      stage_entry = stage_entry,
-    }
-    return resolved
-  end
-
   defer_state.record_parameter_write = function(kind, target_ref, fx, pidx,
-      getter, setter, value, caller_line, value_is_normalized)
-    guard_manual_only_fx(kind, target_ref, fx,
-      tostring(kind) .. " FX parameter write", 3)
-    validate_profile_write_target(
-      kind, target_ref, fx, pidx, caller_line)
-    local write_target, write_fx = target_ref, fx
-    local stage_entry = nil
-    if kind == "track" and defer_state.profile_fx_staging_enabled then
-      local stage_err
-      write_target, write_fx, stage_err, stage_entry =
-        profile_stage_target(target_ref, fx, true)
-      if not write_target then
-        error("ReaAssist could not stage the target plug-in before the "
-          .. "parameter write: " .. tostring(stage_err), 3)
-      end
-    end
+      getter, setter, value, value_domain, formatter, formatted_getter)
     local key = tostring(kind) .. "\31" .. tostring(target_ref)
       .. "\31" .. tostring(fx) .. "\31" .. tostring(pidx)
+      .. "\31" .. tostring(value_domain or "normalized")
     local entry = defer_state.parameter_writes[key]
     if not entry then
       entry = {
         write_count = 0,
         changed_during = false,
-        stage_entry = stage_entry,
-        parameter_index = tonumber(pidx),
+        value_domain = value_domain or "normalized",
       }
-      if kind == "track" then
-        local target_key = profile_target_key(kind, target_ref, fx)
-        local target = defer_state.profile_target_checks[target_key]
-        local resolution = defer_state.profile_resolutions[target_key]
-        local resolved = resolution and resolution.indices[tonumber(pidx)]
-        if target and resolved then
-          entry.plugin_profile_guard = "validated"
-          entry.plugin_product_key = resolution.product_key
-          entry.plugin_fingerprint = resolution.fingerprint
-          entry.plugin_loaded_name = target.loaded_name
-          entry.parameter_name = resolved.expected_name
-          entry.parameter_section = resolved.expected_section
-        end
-      end
       defer_state.parameter_writes[key] = entry
       if type(getter) == "function" then
-        local before_ok, before =
-          pcall(getter, write_target, write_fx, pidx)
-        if before_ok then entry.initial_normalized = tonumber(before) end
+        local before = table.pack(pcall(getter, target_ref, fx, pidx))
+        if before[1] then
+          entry.initial_value = tonumber(before[2])
+          if entry.value_domain == "raw" then
+            entry.min_value = tonumber(before[3])
+            entry.max_value = tonumber(before[4])
+          end
+          if entry.value_domain == "normalized" then
+            entry.initial_normalized = entry.initial_value
+          end
+        end
       end
     end
-    local packed = table.pack(setter(write_target, write_fx, pidx, value))
+    entry.requested_value_captured = true
+    entry.requested_value = tonumber(value)
+    -- Raw-to-normalized mappings can be nonlinear. Formatted comparison is
+    -- reliable only when the generated setter itself used normalized values.
+    local requested_normalized = entry.value_domain == "normalized"
+      and entry.requested_value or nil
+    local function formatted_text(packed)
+      if not packed[1] then return nil end
+      local value_text = type(packed[3]) == "string" and packed[3]
+        or (type(packed[2]) == "string" and packed[2] or nil)
+      if packed[2] == false or not value_text then return nil end
+      value_text = value_text:lower():gsub("^%s+", ""):gsub("%s+$", "")
+      return value_text ~= "" and value_text or nil
+    end
+    if type(formatter) == "function" and requested_normalized ~= nil then
+      entry.requested_display = formatted_text(table.pack(
+        pcall(formatter, target_ref, fx, pidx, requested_normalized)))
+    else
+      entry.requested_display = nil
+    end
+    local packed = table.pack(setter(target_ref, fx, pidx, value))
     entry.write_count = entry.write_count + 1
-    local write_final_normalized = nil
+    if type(packed[1]) == "boolean" then entry.setter_result = packed[1] end
     if type(getter) == "function" then
-      local after_ok, after =
-        pcall(getter, write_target, write_fx, pidx)
-      if after_ok then
-        entry.final_normalized = tonumber(after)
-        write_final_normalized = entry.final_normalized
-        entry.final_formatted = profile_formatted_parameter_value(
-          write_target, write_fx, pidx)
-        if entry.initial_normalized ~= nil
-           and entry.final_normalized ~= nil
-           and math.abs(entry.final_normalized - entry.initial_normalized)
-             > 0.0000001 then
+      local after = table.pack(pcall(getter, target_ref, fx, pidx))
+      if after[1] then
+        entry.final_value = tonumber(after[2])
+        if entry.value_domain == "raw" then
+          entry.min_value = tonumber(after[3]) or entry.min_value
+          entry.max_value = tonumber(after[4]) or entry.max_value
+        end
+        if entry.value_domain == "normalized" then
+          entry.final_normalized = entry.final_value
+        end
+        if type(formatted_getter) == "function" then
+          entry.final_display = formatted_text(table.pack(
+            pcall(formatted_getter, target_ref, fx, pidx, "")))
+          if entry.requested_display and entry.final_display then
+            entry.requested_display_match =
+              entry.requested_display == entry.final_display
+          else
+            entry.requested_display_match = nil
+          end
+        end
+        local change_tolerance = entry.value_domain == "raw"
+          and math.max(0.0000001,
+            math.abs((entry.max_value or 0) - (entry.min_value or 0))
+              * 0.000001)
+          or 0.000001
+        if entry.initial_value ~= nil
+           and entry.final_value ~= nil
+           and math.abs(entry.final_value - entry.initial_value)
+              > change_tolerance then
           entry.changed_during = true
         end
       end
     end
-    if stage_entry and value_is_normalized then
-      local requested = tonumber(value)
-      local initial = tonumber(entry.initial_normalized)
-      local observed = tonumber(entry.final_normalized)
-      if requested ~= nil and initial ~= nil
-         and math.abs(requested - initial) > 0.0000001
-         and (observed == nil
-           or math.abs(observed - initial) <= 0.0000001) then
-        entry.delayed_readback = true
-        entry.final_normalized = requested
-        entry.final_formatted = nil
-        entry.changed_during = true
-        write_final_normalized = requested
+    return table.unpack(packed, 1, packed.n)
+  end
+
+  defer_state.record_preset_write = function(kind, target_ref, fx, preset_name,
+      getter, setter)
+    local key = tostring(kind) .. "\31" .. tostring(target_ref)
+      .. "\31" .. tostring(fx) .. "\31preset"
+    local entry = defer_state.parameter_writes[key]
+    if not entry then
+      entry = {
+        write_count = 0,
+        changed_during = false,
+        value_domain = "preset",
+      }
+      defer_state.parameter_writes[key] = entry
+      if type(getter) == "function" then
+        local before = table.pack(pcall(getter, target_ref, fx, ""))
+        if before[1] and before[2] ~= false and type(before[3]) == "string" then
+          entry.initial_preset = before[3]
+        end
       end
     end
-    if stage_entry then
-      -- Replaying a staged readback can quantize the value a second time in
-      -- some plug-ins. A normalized setter must therefore replay the original
-      -- requested value. Verification below still compares the real result
-      -- with the staging result and rolls back any genuine mismatch.
-      local commit_normalized = value_is_normalized
-        and tonumber(value) or write_final_normalized
-      defer_state.profile_fx_stage_write_sequence[
-        #defer_state.profile_fx_stage_write_sequence + 1] = {
-          stage_entry = stage_entry,
-          parameter_index = tonumber(pidx),
-          final_normalized = commit_normalized,
-        }
+    entry.requested_preset_captured = true
+    entry.requested_preset = tostring(preset_name or "")
+    local packed = table.pack(setter(target_ref, fx, preset_name))
+    entry.write_count = entry.write_count + 1
+    if type(packed[1]) == "boolean" then entry.setter_result = packed[1] end
+    if type(getter) == "function" then
+      local after = table.pack(pcall(getter, target_ref, fx, ""))
+      if after[1] and after[2] ~= false and type(after[3]) == "string" then
+        entry.final_preset = after[3]
+        if entry.initial_preset ~= nil
+            and entry.final_preset ~= entry.initial_preset then
+          entry.changed_during = true
+        end
+      end
     end
     return table.unpack(packed, 1, packed.n)
+  end
+
+  local fx_host_prefixes = {
+    au = true, aui = true, auv3 = true, auv3i = true,
+    clap = true, clapi = true, dx = true, dxi = true,
+    js = true, lv2 = true, lv2i = true,
+    vst = true, vsti = true, vst3 = true, vst3i = true,
+  }
+  local function normalized_fx_insert_name(name)
+    local text = tostring(name or ""):match("^%s*(.-)%s*$") or ""
+    local lower = text:lower()
+    local prefix = lower:match("^([%w]+)%s*:%s*")
+    if prefix and fx_host_prefixes[prefix] then
+      lower = lower:gsub("^[%w]+%s*:%s*", "", 1)
+    end
+    return lower:match("^%s*(.-)%s*$") or lower, text
+  end
+  defer_state.record_fx_insert_result = function(kind, target_ref, name,
+      instantiate, result)
+    if (tonumber(instantiate) or 0) == 0 then return end
+    local normalized, display_name = normalized_fx_insert_name(name)
+    if normalized == "" then normalized = display_name:lower() end
+    local key = tostring(kind) .. "\31" .. tostring(target_ref)
+      .. "\31" .. normalized
+    local entry = defer_state.fx_insert_failures[key]
+    if tonumber(result) and tonumber(result) >= 0 then
+      defer_state.successful_fx_insert_count =
+        defer_state.successful_fx_insert_count + 1
+      if entry then entry.active = false end
+      return
+    end
+    if not (tonumber(result) and tonumber(result) < 0) then return end
+    if not entry then
+      entry = {
+        active = true,
+        display_name = display_name ~= "" and display_name or tostring(name),
+        normalized_name = normalized,
+      }
+      defer_state.fx_insert_failures[key] = entry
+      defer_state.fx_insert_failure_order[
+        #defer_state.fx_insert_failure_order + 1] = key
+    else
+      entry.active = true
+    end
+  end
+  defer_state.fx_insert_failure_evidence = function()
+    local failed_names, seen_names = {}, {}
+    local failed_target_count = 0
+    for _, key in ipairs(defer_state.fx_insert_failure_order) do
+      local entry = defer_state.fx_insert_failures[key]
+      if entry and entry.active then
+        failed_target_count = failed_target_count + 1
+        if not seen_names[entry.normalized_name] then
+          seen_names[entry.normalized_name] = true
+          failed_names[#failed_names + 1] = entry.display_name
+        end
+      end
+    end
+    if failed_target_count == 0 then return nil end
+    local shape_after = project_shape_snapshot()
+    local shape_changed = false
+    for key, before_value in pairs(project_shape_before) do
+      if before_value ~= nil and shape_after[key] ~= nil
+          and shape_after[key] ~= before_value then
+        shape_changed = true
+        break
+      end
+    end
+    local parameter_evidence =
+      Code.parameter_change_evidence(defer_state.parameter_writes)
+    local parameter_changed = parameter_evidence
+      and (parameter_evidence.status == "changed"
+        or parameter_evidence.status == "partially_changed") or false
+    return {
+      failure_count = failed_target_count,
+      failed_target_count = failed_target_count,
+      failed_name_count = #failed_names,
+      failed_names = failed_names,
+      other_project_change_detected =
+        (not defer_state.change_interval_contaminated and shape_changed)
+        or parameter_changed
+        or defer_state.successful_fx_insert_count > 0,
+    }
   end
 
   defer_state.apply_completed_result = function()
     local rr = defer_state.completed_result
     if type(rr) ~= "table" then return end
-    local msg = defer_state.message_idx
-      and type(S.display_messages) == "table"
-      and S.display_messages[defer_state.message_idx] or nil
+    local msg = defer_state.message_ref
+    if type(msg) ~= "table" then
+      msg = defer_state.message_idx
+        and type(S.display_messages) == "table"
+        and S.display_messages[defer_state.message_idx] or nil
+    end
     if msg and not defer_state.message_finalized then
       msg.run_status = rr.run_status
       msg.validation_status = rr.validation_status
@@ -24272,28 +14679,65 @@ function Code.run(code)
     end
 
     if type(S) == "table" and S.lua_defer_run == defer_state
-       and defer_state.message_idx then
+       and defer_state.bound then
       S.lua_defer_run = nil
     end
   end
 
   defer_state.bind = function(message_idx, history_idx, auto_ran, probe_turn)
     defer_state.message_idx = message_idx
+    defer_state.message_ref = type(S.display_messages) == "table"
+      and S.display_messages[message_idx] or nil
+    defer_state.bound = true
     defer_state.history_idx = history_idx
     defer_state.auto_ran = auto_ran == true
     defer_state.probe_turn = probe_turn
     defer_state.apply_completed_result()
   end
 
-  record_runtime_error = function(run_err, instruction_timeout,
-      instruction_count, source)
-    recover_generated_refresh()
+  local function record_runtime_error(run_err, instruction_timeout,
+      instruction_count, source, failure_kind)
     local err_str, short, user_msg =
       lua_runtime_error_strings(run_err, instruction_timeout)
     local change_count_after = Code.project_change_count()
+    local error_fx_insert_evidence =
+      defer_state.fx_insert_failure_evidence()
+    local detached = defer_state.bound
+      and (type(S) ~= "table" or S.lua_defer_run ~= defer_state)
+    local project_changed = error_fx_insert_evidence
+      and error_fx_insert_evidence.other_project_change_detected == true
+      or (not error_fx_insert_evidence
+        and change_count_after ~= change_count_before)
+    local callback_delta = tonumber(defer_state.last_segment_change_delta)
+    if detached and callback_delta == nil then
+      user_msg = user_msg
+        .. "\n\nReaAssist could not measure whether this action changed the "
+        .. "project. Check the project before using Undo, then ask ReaAssist "
+        .. "to fix and retry it."
+    elseif detached and callback_delta ~= 0 then
+      user_msg = user_msg
+        .. "\n\nThis older action changed the project before it failed, and "
+        .. "a newer action has run since. Use Undo now if you do not want to "
+        .. "keep the older action's partial work, then ask ReaAssist to fix "
+        .. "and retry it."
+    elseif detached then
+      user_msg = user_msg
+        .. "\n\nThis older action failed without changing the project, and "
+        .. "a newer action has run since. Do not use Undo. Ask ReaAssist to "
+        .. "fix and retry that action."
+    elseif project_changed then
+      user_msg = user_msg
+        .. "\n\nThe project changed before the error, so the result may be "
+        .. "partial. Use Undo if you do not want to keep it, then ask "
+        .. "ReaAssist to fix and retry the last action."
+    else
+      user_msg = user_msg
+        .. "\n\nNo project change was detected. Ask ReaAssist to fix and "
+        .. "retry the last action."
+    end
     local err_debug = {
-      failure_kind = instruction_timeout
-        and "lua_instruction_budget_exceeded" or "runtime_error",
+      failure_kind = failure_kind or (instruction_timeout
+        and "lua_instruction_budget_exceeded" or "runtime_error"),
       source = source or "generated_lua_runtime",
       runtime_error = Log.scrub_url_secrets(err_str),
       stack_excerpt = Log.scrub_url_secrets(short),
@@ -24303,63 +14747,50 @@ function Code.run(code)
       generated_code_bytes = type(code) == "string" and #code or 0,
       project_state_change_count_before = change_count_before,
       project_state_change_count_after = change_count_after,
-      generated_refresh_recovered =
-        (defer_state.generated_refresh_recovery_count or 0) > 0,
-      generated_refresh_recovery_count =
-        defer_state.generated_refresh_recovery_count or 0,
+      protected_call_failure_evidence =
+        failure_kind == "protected_call_failure"
+          and protected_call_failure_evidence() or nil,
     }
     Log.line("SCRIPT", "Runtime error: " .. err_str:gsub("\n", " \\n "))
     Diag.add_error(err_str, nil, code)
     Log.add_error(user_msg, nil, nil, nil,
       { error_kind = "runtime_error", error_debug = err_debug })
-    S.last_run_error = "runtime error: " .. Log.scrub_url_secrets(short)
+    local runtime_error = "runtime error: " .. Log.scrub_url_secrets(short)
+    local owns_global_result = type(S) == "table"
+      and ((S.lua_defer_run == nil and not defer_state.bound)
+        or S.lua_defer_run == defer_state)
+    if owns_global_result then S.last_run_error = runtime_error end
     local error_result = Code.build_run_result("lua", code,
       "errored", "failed", {
         change_count_before = change_count_before,
         change_count_after = change_count_after,
+        attributed_change_delta = defer_state.attributed_change_delta,
+        change_interval_contaminated =
+          defer_state.change_interval_contaminated,
         parameter_change_evidence =
           Code.parameter_change_evidence(defer_state.parameter_writes),
+        fx_insert_failure_evidence = error_fx_insert_evidence,
+        generated_refresh_recovered =
+          defer_state.generated_refresh_recovery_count > 0,
+        generated_refresh_recovery_count =
+          defer_state.generated_refresh_recovery_count,
         error_kind = "runtime_error",
         error_debug = err_debug,
-        runtime_error = S.last_run_error,
-        generated_refresh_recovered =
-          (defer_state.generated_refresh_recovery_count or 0) > 0,
-        generated_refresh_recovery_count =
-          defer_state.generated_refresh_recovery_count or 0,
+        protected_call_failure_evidence =
+          failure_kind == "protected_call_failure"
+            and protected_call_failure_evidence() or nil,
+        runtime_error = runtime_error,
       })
     defer_state.error_result = error_result
-    if type(S) == "table"
-       and (S.lua_defer_run == nil or S.lua_defer_run == defer_state) then
-      S.last_run_result = error_result
-    end
-    Code.plugin_test_runtime_event("run_error", {
-      code_sha256 = Code.plugin_profile_code_key(code),
-      run_result = error_result,
-    })
+    if owns_global_result then S.last_run_result = error_result end
   end
 
-  finish_deferred_lua_run = function()
+  local function finish_deferred_lua_run()
     if defer_state.pending > 0 then return end
-    recover_generated_refresh()
-    close_run_undo()
-    if not defer_state.failed then
-      local call_ok, commit_ok, commit_err =
-        pcall(commit_profile_fx_stage)
-      if not call_ok or not commit_ok then
-        defer_state.failed = true
-        cleanup_profile_fx_stage()
-        record_runtime_error(
-          "ReaAssist could not commit this plug-in edit from isolated "
-            .. "staging in one verified Undo entry: "
-            .. tostring(call_ok and commit_err or commit_ok),
-          false, nil, "plugin_profile_staging_commit")
-      end
-      if defer_state.pending > 0 then return end
-    else
-      cleanup_profile_fx_stage()
-    end
     local parameter_evidence =
       Code.parameter_change_evidence(defer_state.parameter_writes)
+    local fx_insert_failure_evidence =
+      defer_state.fx_insert_failure_evidence()
     local completed_result
     if not defer_state.failed then
       local change_count_after = Code.project_change_count()
@@ -24367,13 +14798,17 @@ function Code.run(code)
         "ran_ok", "passed", {
           change_count_before = change_count_before,
           change_count_after = change_count_after,
+          attributed_change_delta = defer_state.attributed_change_delta,
+          change_interval_contaminated =
+            defer_state.change_interval_contaminated,
           parameter_change_evidence = parameter_evidence,
+          fx_insert_failure_evidence = fx_insert_failure_evidence,
           deferred = true,
           deferred_pending = false,
           generated_refresh_recovered =
-            (defer_state.generated_refresh_recovery_count or 0) > 0,
+            defer_state.generated_refresh_recovery_count > 0,
           generated_refresh_recovery_count =
-            defer_state.generated_refresh_recovery_count or 0,
+            defer_state.generated_refresh_recovery_count,
         })
     elseif type(defer_state.error_result) == "table" then
       completed_result = defer_state.error_result
@@ -24384,6 +14819,9 @@ function Code.run(code)
       completed_result.parameter_change_status =
         completed_result.parameter_change_status
         or (parameter_evidence and parameter_evidence.status)
+      completed_result.fx_insert_failure_evidence =
+        completed_result.fx_insert_failure_evidence
+        or fx_insert_failure_evidence
     end
     if type(completed_result) == "table" then
       defer_state.completed_result = completed_result
@@ -24391,336 +14829,13 @@ function Code.run(code)
         S.last_run_result = completed_result
       end
       defer_state.apply_completed_result()
-      Code.plugin_test_runtime_event("run_completed", {
-        code_sha256 = Code.plugin_profile_code_key(code),
-        run_result = completed_result,
-      })
     end
-  end
-
-  -- Auto-Key's Send parameter is a momentary broadcast. The installed build
-  -- ignores an immediate On/Off pair, while leaving the parameter On prevents
-  -- a reliable later trigger. Keep its required timing and unconditional reset
-  -- inside the guarded runtime instead of asking generated Lua to run a sleep
-  -- loop or a persistent defer chain.
-  code_env.reaassist_schedule_autokey_send_reset = function(track, fx, pidx,
-      hold_ms, approved_receiver_count, receivers)
-    if defer_state.in_callback ~= true then
-      return nil, "Auto-Key Send scheduling must run inside reaper.defer"
-    end
-    if defer_state.profile_fx_staging_enabled then
-      return nil, "Auto-Key Send cannot run through isolated FX staging"
-    end
-    if defer_state.autokey_send_reset_pending then
-      return nil, "only one Auto-Key Send pulse is allowed per action"
-    end
-    if type(reaper.defer) ~= "function"
-       or type(reaper.time_precise) ~= "function"
-       or type(reaper.TrackFX_GetFXName) ~= "function"
-       or type(reaper.TrackFX_GetFXGUID) ~= "function"
-       or type(reaper.TrackFX_GetParamNormalized) ~= "function"
-       or type(reaper.TrackFX_SetParamNormalized) ~= "function"
-       or type(reaper.TrackFX_GetFormattedParamValue) ~= "function" then
-      return nil, "required Auto-Key Send runtime APIs are unavailable"
-    end
-
-    local send_index = tonumber(pidx)
-    local hold = tonumber(hold_ms)
-    local approved = tonumber(approved_receiver_count)
-    if not send_index or send_index % 1 ~= 0 or send_index < 0
-       or not hold or hold < 250 or hold > 1000
-       or not approved or approved % 1 ~= 0 or approved < 1
-       or type(receivers) ~= "table" or #receivers ~= approved then
-      return nil, "invalid Auto-Key Send schedule or receiver approval"
-    end
-
-    local send_target_key = profile_target_key("track", track, fx)
-    local send_resolution = defer_state.profile_resolutions[send_target_key]
-    local send_spec = send_resolution
-      and send_resolution.indices[send_index] or nil
-    if not send_resolution or send_resolution.product_key ~= "auto-key-2"
-       or not send_spec
-       or profile_parameter_label_key(send_spec.expected_name) ~= "send" then
-      return nil, "Auto-Key Send was not resolved by its validated profile"
-    end
-    local initial_send = tonumber(
-      reaper.TrackFX_GetParamNormalized(track, fx, send_index))
-    if not initial_send or initial_send > 0.0000001 then
-      return nil, "Auto-Key Send must be Off before the pulse starts"
-    end
-
-    local active_project = reaper.EnumProjects(-1, "")
-    if not active_project then return nil, "active project unavailable" end
-    if type(reaper.ValidatePtr2) == "function"
-       and not reaper.ValidatePtr2(active_project, track, "MediaTrack*") then
-      return nil, "Auto-Key is not in the active project"
-    end
-
-    local actual_receivers = {}
-    local container_seen = false
-    local function inspect_track(project, candidate_track)
-      if not candidate_track then return end
-      local function inspect_fx(candidate_fx)
-        local name_ok, loaded_name =
-          reaper.TrackFX_GetFXName(candidate_track, candidate_fx, "")
-        if not name_ok then return end
-        if type(reaper.TrackFX_GetNamedConfigParm) == "function" then
-          local count_ok, count_text = reaper.TrackFX_GetNamedConfigParm(
-            candidate_track, candidate_fx, "container_count")
-          if count_ok and (tonumber(count_text) or 0) > 0 then
-            container_seen = true
-          end
-        end
-        local name_key = tostring(loaded_name or ""):lower()
-          :gsub("[^%w]+", "")
-        if name_key:find("autotune", 1, true) then
-          actual_receivers[#actual_receivers + 1] = {
-            project = project,
-            track = candidate_track,
-            fx = candidate_fx,
-            loaded_name = tostring(loaded_name or ""),
-          }
-        end
-      end
-      for candidate_fx = 0, reaper.TrackFX_GetCount(candidate_track) - 1 do
-        inspect_fx(candidate_fx)
-      end
-      if type(reaper.TrackFX_GetRecCount) == "function" then
-        for candidate_fx = 0,
-            reaper.TrackFX_GetRecCount(candidate_track) - 1 do
-          inspect_fx(0x1000000 + candidate_fx)
-        end
-      end
-    end
-    local project_index = 0
-    while true do
-      local project = reaper.EnumProjects(project_index, "")
-      if not project then break end
-      inspect_track(project, reaper.GetMasterTrack(project))
-      for track_index = 0, reaper.CountTracks(project) - 1 do
-        inspect_track(project, reaper.GetTrack(project, track_index))
-      end
-      project_index = project_index + 1
-    end
-    if container_seen then
-      return nil, "Auto-Key Send is blocked while an FX container may hide an undisclosed receiver"
-    end
-    if #actual_receivers ~= approved then
-      return nil, "Auto-Key Send detected " .. tostring(#actual_receivers)
-        .. " compatible AutoTune receiver(s) across open project tabs, but "
-        .. tostring(approved) .. " were disclosed and approved"
-    end
-
-    local checks = {}
-    local receiver_seen = {}
-    for receiver_index, receiver in ipairs(receivers) do
-      if type(receiver) ~= "table" then
-        return nil, "invalid AutoTune receiver at position " .. receiver_index
-      end
-      local receiver_track = receiver.track
-      local receiver_fx = tonumber(receiver.fx)
-      local key_index = tonumber(receiver.key_index)
-      local scale_index = tonumber(receiver.scale_index)
-      local expected_key = tostring(receiver.expected_key or "")
-      local expected_scale = tostring(receiver.expected_scale or "")
-      if not receiver_track or not receiver_fx or receiver_fx % 1 ~= 0
-         or not key_index or key_index % 1 ~= 0
-         or not scale_index or scale_index % 1 ~= 0
-         or expected_key == "" or expected_scale == "" then
-        return nil, "invalid AutoTune receiver details at position "
-          .. receiver_index
-      end
-      local matched = nil
-      for actual_index, actual in ipairs(actual_receivers) do
-        if actual.project == active_project
-           and actual.track == receiver_track and actual.fx == receiver_fx then
-          if receiver_seen[actual_index] then
-            return nil, "AutoTune receiver list contains a duplicate"
-          end
-          receiver_seen[actual_index] = true
-          matched = actual
-          break
-        end
-      end
-      if not matched then
-        return nil, "an approved AutoTune receiver is missing from the active "
-          .. "project, or another open project contains an undisclosed receiver"
-      end
-      local receiver_target_key =
-        profile_target_key("track", receiver_track, receiver_fx)
-      local receiver_resolution =
-        defer_state.profile_resolutions[receiver_target_key]
-      local key_spec = receiver_resolution
-        and receiver_resolution.indices[key_index] or nil
-      local scale_spec = receiver_resolution
-        and receiver_resolution.indices[scale_index] or nil
-      if not receiver_resolution
-         or receiver_resolution.product_key ~= "autotune"
-         or not key_spec or not scale_spec
-         or profile_parameter_label_key(key_spec.expected_name) ~= "key"
-         or profile_parameter_label_key(scale_spec.expected_name) ~= "scale" then
-        return nil, "an AutoTune receiver lacks validated Key and Scale mappings"
-      end
-      checks[#checks + 1] = {
-        track = receiver_track,
-        fx = receiver_fx,
-        fx_guid = reaper.TrackFX_GetFXGUID(receiver_track, receiver_fx),
-        key_index = key_index,
-        scale_index = scale_index,
-        expected_key = expected_key,
-        expected_scale = expected_scale,
-      }
-    end
-    if #checks ~= #actual_receivers then
-      return nil, "every detected AutoTune receiver must be disclosed and approved"
-    end
-
-    defer_state.autokey_send_reset_pending = true
-    defer_state.pending = defer_state.pending + 1
-    local deadline = reaper.time_precise() + hold / 1000
-    local verify_deadline = nil
-    local reset_done = false
-    local completed = false
-    local traceback = debug and debug.traceback or tostring
-
-    local function complete(ok, runtime_err)
-      if completed then return end
-      completed = true
-      defer_state.autokey_send_reset_pending = false
-      defer_state.pending = math.max(0, defer_state.pending - 1)
-      if not ok then
-        if not defer_state.failed then
-          defer_state.failed = true
-          record_runtime_error(runtime_err, false, nil,
-            "autokey_send_reset")
-        else
-          Log.line("SCRIPT", "Auto-Key Send reset also failed: "
-            .. tostring(runtime_err))
-        end
-      end
-      if defer_state.pending == 0 then close_run_undo() end
-      finish_deferred_lua_run()
-    end
-
-    local function reset_send()
-      local reset_ok, reset_err = xpcall(function()
-        defer_state.record_parameter_write("track", track, fx, send_index,
-          reaper.TrackFX_GetParamNormalized,
-          reaper.TrackFX_SetParamNormalized, 0.0, nil, true)
-        local final_send = tonumber(
-          reaper.TrackFX_GetParamNormalized(track, fx, send_index))
-        if not final_send or final_send > 0.0000001 then
-          error("Auto-Key Send did not return to Off")
-        end
-      end, traceback)
-      if not reset_ok then
-        complete(false, reset_err)
-        return false
-      end
-      reset_done = true
-      verify_deadline = reaper.time_precise() + 2.0
-      return true
-    end
-
-    local function receivers_match()
-      for _, check in ipairs(checks) do
-        if type(reaper.ValidatePtr2) == "function"
-           and not reaper.ValidatePtr2(
-             active_project, check.track, "MediaTrack*") then
-          return false, "AutoTune receiver track changed during Send"
-        end
-        if reaper.TrackFX_GetFXGUID(check.track, check.fx) ~= check.fx_guid then
-          return false, "AutoTune receiver identity changed during Send"
-        end
-        local _, key_display = reaper.TrackFX_GetFormattedParamValue(
-          check.track, check.fx, check.key_index, "")
-        local _, scale_display = reaper.TrackFX_GetFormattedParamValue(
-          check.track, check.fx, check.scale_index, "")
-        local actual_key = tostring(key_display or ""):lower()
-          :gsub("^%s+", ""):gsub("%s+$", "")
-        local actual_scale = tostring(scale_display or ""):lower()
-          :gsub("^%s+", ""):gsub("%s+$", "")
-        if actual_key ~= check.expected_key:lower()
-           or actual_scale ~= check.expected_scale:lower() then
-          return false, "AutoTune receiver did not accept the confirmed key and scale"
-        end
-      end
-      return true
-    end
-
-    local function tick()
-      if completed then return end
-      local now = reaper.time_precise()
-      if not reset_done and now >= deadline then
-        local write_key = "track\31" .. tostring(track) .. "\31"
-          .. tostring(fx) .. "\31" .. tostring(send_index)
-        local write_entry = defer_state.parameter_writes[write_key]
-        local was_armed = write_entry and write_entry.changed_during == true
-          and (tonumber(write_entry.final_normalized) or 0) > 0.5
-        if not reset_send() then return end
-        if not was_armed then
-          complete(false, "Auto-Key Send was not armed before its guarded reset")
-          return
-        end
-      end
-      if reset_done then
-        local matched, match_err = receivers_match()
-        if matched then
-          complete(true)
-          return
-        end
-        if now >= verify_deadline then
-          complete(false, match_err)
-          return
-        end
-      end
-      local scheduled, schedule_err = pcall(reaper.defer, tick)
-      if not scheduled then
-        if not reset_done then reset_send() end
-        complete(false, schedule_err)
-      end
-    end
-
-    local scheduled, schedule_err = pcall(reaper.defer, tick)
-    if not scheduled then
-      defer_state.autokey_send_reset_pending = false
-      defer_state.pending = math.max(0, defer_state.pending - 1)
-      return nil, "could not schedule the Auto-Key Send reset: "
-        .. tostring(schedule_err)
-    end
-    local armed, arm_err = xpcall(function()
-      defer_state.record_parameter_write("track", track, fx, send_index,
-        reaper.TrackFX_GetParamNormalized,
-        reaper.TrackFX_SetParamNormalized, 1.0, nil, true)
-      local _, send_display = reaper.TrackFX_GetFormattedParamValue(
-        track, fx, send_index, "")
-      if tostring(send_display) ~= "On" then
-        error("Auto-Key Send did not turn On")
-      end
-    end, traceback)
-    if not armed then
-      return nil, "could not arm Auto-Key Send: " .. tostring(arm_err)
-    end
-    return true
   end
 
   -- Wrap `reaper` so user-facing calls (dialogs, console output) are logged
   -- when debug logging is enabled. Every other allowed reaper.* call falls
   -- through to the real API via __index; denied APIs are blocked even when the
   -- code aliases `reaper` or builds a function name dynamically.
-  local function route_staged_track_fx(api, tr, fx, ...)
-    if not defer_state.profile_fx_staging_enabled then
-      return api(tr, fx, ...)
-    end
-    local staged_track, staged_fx, stage_err =
-      profile_stage_target(tr, fx, true)
-    if not staged_track then
-      error("ReaAssist could not route the plug-in operation through "
-        .. "isolated staging: " .. tostring(stage_err), 3)
-    end
-    return api(staged_track, staged_fx, ...)
-  end
-
   local reaper_shim = sandbox_api_proxy(reaper, {
     defer = function(fn)
       if type(fn) ~= "function" or type(reaper.defer) ~= "function" then
@@ -24733,24 +14848,53 @@ function Code.run(code)
       end
       defer_state.pending = defer_state.pending + 1
       local wrapped = function()
+        if defer_state.bound
+            and (type(S) ~= "table" or S.lua_defer_run ~= defer_state) then
+          defer_state.change_interval_contaminated = true
+        end
         if defer_state.failed then
           defer_state.pending = math.max(0, defer_state.pending - 1)
-          finish_deferred_lua_run()
+          if type(S) == "table"
+              and (S.lua_defer_run == defer_state
+                or defer_state.bound) then
+            finish_deferred_lua_run()
+          end
           return
         end
+        local callback_undo_label = inner_undo_label
+        local callback_undo_flags = inner_undo_flags
+        inner_undo_label = nil
+        inner_undo_flags = -1
+        reaper.Undo_BeginBlock()
+        local callback_change_count_before = Code.project_change_count()
         defer_state.in_callback = true
+        local protected_failures_before =
+          defer_state.protected_call_failures.failure_count
         local ok, run_err, instruction_timeout, instruction_count =
           run_lua_chunk_with_instruction_guard(fn)
         defer_state.in_callback = false
+        recover_generated_refresh()
+        local undo_label = inner_undo_label or callback_undo_label
+          or "ReaAssist"
+        local undo_flags = inner_undo_label and inner_undo_flags
+          or callback_undo_flags or -1
+        reaper.Undo_EndBlock(undo_label, undo_flags)
+        local callback_change_count_after = Code.project_change_count()
+        record_change_segment(callback_change_count_before,
+          callback_change_count_after)
         if not ok then
           defer_state.failed = true
-        end
-        defer_state.pending = math.max(0, defer_state.pending - 1)
-        if defer_state.pending == 0 then close_run_undo() end
-        if not ok then
           record_runtime_error(run_err, instruction_timeout, instruction_count,
             "generated_lua_defer_callback")
+        elseif defer_state.protected_call_failures.failure_count
+            > protected_failures_before then
+          defer_state.failed = true
+          record_runtime_error(
+            "Generated Lua caught a failed pcall or xpcall without stopping.",
+            false, nil, "generated_lua_defer_callback",
+            "protected_call_failure")
         end
+        defer_state.pending = math.max(0, defer_state.pending - 1)
         finish_deferred_lua_run()
       end
       local schedule_ok, schedule_result = pcall(reaper.defer, wrapped)
@@ -24766,236 +14910,77 @@ function Code.run(code)
       return reaper.ShowMessageBox(msg, title, btn_type)
     end,
     ShowConsoleMsg = function(msg)
-      Log.line("SCRIPT", "ShowConsoleMsg: " .. tostring(msg):gsub("\n$", ""):gsub("\n", " \\n "))
-      return reaper.ShowConsoleMsg(msg)
+      Log.line("SCRIPT", "ShowConsoleMsg suppressed: "
+        .. tostring(msg):gsub("\n$", ""):gsub("\n", " \\n "))
+      return nil
     end,
-    PreventUIRefresh = function(adjust)
-      local delta = tonumber(adjust) or 0
-      local packed = table.pack(reaper.PreventUIRefresh(adjust))
-      defer_state.generated_refresh_balance = math.max(0,
-        (tonumber(defer_state.generated_refresh_balance) or 0) + delta)
+    ClearConsole = function()
+      Log.line("SCRIPT", "ClearConsole suppressed")
+      return nil
+    end,
+    PreventUIRefresh = function(direction)
+      local value = tonumber(direction) or 0
+      if value > 0 then
+        defer_state.generated_refresh_balance =
+          defer_state.generated_refresh_balance + value
+        return reaper.PreventUIRefresh(direction)
+      end
+      if value < 0 then
+        if defer_state.generated_refresh_balance <= 0 then return 0 end
+        defer_state.generated_refresh_balance = math.max(0,
+          defer_state.generated_refresh_balance + value)
+        return reaper.PreventUIRefresh(direction)
+      end
+      return reaper.PreventUIRefresh(direction)
+    end,
+    TrackFX_AddByName = function(tr, name, rec_fx, instantiate)
+      local packed = table.pack(
+        reaper.TrackFX_AddByName(tr, name, rec_fx, instantiate))
+      defer_state.record_fx_insert_result(
+        "track:" .. tostring(rec_fx == true), tr, name, instantiate,
+        packed[1])
+      return table.unpack(packed, 1, packed.n)
+    end,
+    TakeFX_AddByName = function(take, name, instantiate)
+      local packed = table.pack(
+        reaper.TakeFX_AddByName(take, name, instantiate))
+      defer_state.record_fx_insert_result(
+        "take", take, name, instantiate, packed[1])
       return table.unpack(packed, 1, packed.n)
     end,
     TrackFX_SetParamNormalized = function(tr, fx, pidx, value)
-      local caller = debug.getinfo(2, "l")
       return defer_state.record_parameter_write("track", tr, fx, pidx,
         reaper.TrackFX_GetParamNormalized,
-        reaper.TrackFX_SetParamNormalized, value,
-        caller and caller.currentline or nil, true)
-    end,
-    TrackFX_AddByName = function(tr, name, rec_fx, instantiate)
-      local requested_policy = Code.manual_only_plugin_policy(name)
-      local mode = tonumber(instantiate)
-      if mode ~= 0 then
-        refuse_manual_only(requested_policy, "TrackFX_AddByName", 2)
-        guard_manual_only_chain("track", tr,
-          "FX insertion on a track containing Melodyne", 2)
-      end
-      if not defer_state.profile_fx_staging_enabled then
-        return reaper.TrackFX_AddByName(tr, name, rec_fx, instantiate)
-      end
-      if rec_fx then
-        error("isolated profile staging supports normal track FX only", 2)
-      end
-      local staged = find_profile_stage_by_name(tr, name)
-      if staged and mode ~= nil and mode >= 0 then
-        return staged.proxy_fx
-      end
-      local existing = reaper.TrackFX_AddByName(tr, name, false, 0)
-      if existing and existing >= 0 and mode ~= nil and mode >= 0 then
-        local entry, stage_err =
-          stage_existing_profile_fx(tr, existing, name)
-        if not entry then
-          error("ReaAssist could not stage the existing plug-in: "
-            .. tostring(stage_err), 2)
-        end
-        return entry.proxy_fx
-      end
-      if mode == 0 then return -1 end
-      if mode == nil then
-        error("TrackFX_AddByName instantiate mode is required", 2)
-      end
-      if mode < 0 and mode ~= -1 then
-        error("isolated profile staging does not support positional "
-          .. "TrackFX_AddByName insertion", 2)
-      end
-      local entry, stage_err = stage_new_profile_fx(tr, name)
-      if not entry then
-        error("ReaAssist could not add the plug-in in isolated staging: "
-          .. tostring(stage_err), 2)
-      end
-      return entry.proxy_fx
-    end,
-    TrackFX_GetByName = function(tr, name, instantiate)
-      if instantiate then
-        refuse_manual_only(Code.manual_only_plugin_policy(name),
-          "TrackFX_GetByName insertion", 2)
-        guard_manual_only_chain("track", tr,
-          "FX insertion on a track containing Melodyne", 2)
-      end
-      if not defer_state.profile_fx_staging_enabled then
-        return reaper.TrackFX_GetByName(tr, name, instantiate)
-      end
-      local staged = find_profile_stage_by_name(tr, name)
-      if staged then return staged.proxy_fx end
-      local existing = reaper.TrackFX_GetByName(tr, name, false)
-      if existing and existing >= 0 then
-        local entry, stage_err =
-          stage_existing_profile_fx(tr, existing, name)
-        if not entry then
-          error("ReaAssist could not stage the existing plug-in: "
-            .. tostring(stage_err), 2)
-        end
-        return entry.proxy_fx
-      end
-      if not instantiate then return -1 end
-      local entry, stage_err = stage_new_profile_fx(tr, name)
-      if not entry then
-        error("ReaAssist could not add the plug-in in isolated staging: "
-          .. tostring(stage_err), 2)
-      end
-      return entry.proxy_fx
-    end,
-    TrackFX_GetCount = function(tr)
-      local count = reaper.TrackFX_GetCount(tr)
-      if not defer_state.profile_fx_staging_enabled then return count end
-      for _, entry in ipairs(defer_state.profile_fx_stage_entries) do
-        if entry.target_track == tr and entry.mode == "append" then
-          count = count + 1
-        end
-      end
-      return count
-    end,
-    TrackFX_GetParamNormalized = function(tr, fx, pidx)
-      return route_staged_track_fx(
-        reaper.TrackFX_GetParamNormalized, tr, fx, pidx)
-    end,
-    TrackFX_GetParam = function(tr, fx, pidx)
-      return route_staged_track_fx(reaper.TrackFX_GetParam, tr, fx, pidx)
-    end,
-    TrackFX_GetParamEx = function(tr, fx, pidx)
-      return route_staged_track_fx(reaper.TrackFX_GetParamEx, tr, fx, pidx)
-    end,
-    TrackFX_GetFormattedParamValue = function(tr, fx, pidx, value)
-      return route_staged_track_fx(
-        reaper.TrackFX_GetFormattedParamValue, tr, fx, pidx, value)
-    end,
-    TrackFX_GetParamName = function(tr, fx, pidx, name)
-      return route_staged_track_fx(
-        reaper.TrackFX_GetParamName, tr, fx, pidx, name)
-    end,
-    TrackFX_GetNumParams = function(tr, fx)
-      return route_staged_track_fx(reaper.TrackFX_GetNumParams, tr, fx)
-    end,
-    TrackFX_GetFXName = function(tr, fx, name)
-      return route_staged_track_fx(reaper.TrackFX_GetFXName, tr, fx, name)
-    end,
-    TrackFX_GetNamedConfigParm = function(tr, fx, parmname)
-      return route_staged_track_fx(
-        reaper.TrackFX_GetNamedConfigParm, tr, fx, parmname)
-    end,
-    TrackFX_Show = function(tr, fx, show_flag)
-      if not defer_state.profile_fx_staging_enabled then
-        return reaper.TrackFX_Show(tr, fx, show_flag)
-      end
-      local entry, stage_err = profile_stage_entry(tr, fx, true)
-      if not entry then
-        error("ReaAssist could not defer the plug-in window request: "
-          .. tostring(stage_err), 2)
-      end
-      entry.show_flag = show_flag
-    end,
-    TrackFX_Delete = function(tr, fx)
-      guard_manual_only_chain("track", tr,
-        "FX deletion on a track containing Melodyne", 2)
-      return reaper.TrackFX_Delete(tr, fx)
-    end,
-    TrackFX_CopyToTrack = function(
-        source_track, source_fx, target_track, target_fx, is_move)
-      guard_manual_only_chain("track", source_track,
-        "FX copy or move on a track containing Melodyne", 2)
-      guard_manual_only_chain("track", target_track,
-        "FX copy or move on a track containing Melodyne", 2)
-      return reaper.TrackFX_CopyToTrack(
-        source_track, source_fx, target_track, target_fx, is_move)
-    end,
-    TrackFX_CopyToTake = function(
-        source_track, source_fx, target_take, target_fx, is_move)
-      guard_manual_only_chain("track", source_track,
-        "FX copy or move on a track containing Melodyne", 2)
-      guard_manual_only_chain("take", target_take,
-        "FX copy or move on a take containing Melodyne", 2)
-      return reaper.TrackFX_CopyToTake(
-        source_track, source_fx, target_take, target_fx, is_move)
+        reaper.TrackFX_SetParamNormalized, value, "normalized",
+        reaper.TrackFX_FormatParamValueNormalized,
+        reaper.TrackFX_GetFormattedParamValue)
     end,
     TrackFX_SetParam = function(tr, fx, pidx, value)
-      local caller = debug.getinfo(2, "l")
       return defer_state.record_parameter_write("track", tr, fx, pidx,
-        reaper.TrackFX_GetParamNormalized, reaper.TrackFX_SetParam, value,
-        caller and caller.currentline or nil)
+        reaper.TrackFX_GetParam, reaper.TrackFX_SetParam, value, "raw",
+        reaper.TrackFX_FormatParamValueNormalized,
+        reaper.TrackFX_GetFormattedParamValue)
     end,
     TakeFX_SetParamNormalized = function(take, fx, pidx, value)
-      local caller = debug.getinfo(2, "l")
       return defer_state.record_parameter_write("take", take, fx, pidx,
         reaper.TakeFX_GetParamNormalized,
-        reaper.TakeFX_SetParamNormalized, value,
-        caller and caller.currentline or nil, true)
+        reaper.TakeFX_SetParamNormalized, value, "normalized",
+        reaper.TakeFX_FormatParamValueNormalized,
+        reaper.TakeFX_GetFormattedParamValue)
     end,
     TakeFX_SetParam = function(take, fx, pidx, value)
-      local caller = debug.getinfo(2, "l")
       return defer_state.record_parameter_write("take", take, fx, pidx,
-        reaper.TakeFX_GetParamNormalized, reaper.TakeFX_SetParam, value,
-        caller and caller.currentline or nil)
+        reaper.TakeFX_GetParam, reaper.TakeFX_SetParam, value, "raw",
+        reaper.TakeFX_FormatParamValueNormalized,
+        reaper.TakeFX_GetFormattedParamValue)
     end,
-    TakeFX_AddByName = function(take, name, instantiate)
-      local mode = tonumber(instantiate)
-      if mode ~= 0 then
-        refuse_manual_only(Code.manual_only_plugin_policy(name),
-          "TakeFX_AddByName", 2)
-        guard_manual_only_chain("take", take,
-          "FX insertion on a take containing Melodyne", 2)
-      end
-      return reaper.TakeFX_AddByName(take, name, instantiate)
+    TrackFX_SetPreset = function(tr, fx, preset_name)
+      return defer_state.record_preset_write("track", tr, fx, preset_name,
+        reaper.TrackFX_GetPreset, reaper.TrackFX_SetPreset)
     end,
-    TakeFX_GetByName = function(take, name, instantiate)
-      if instantiate then
-        refuse_manual_only(Code.manual_only_plugin_policy(name),
-          "TakeFX_GetByName insertion", 2)
-        guard_manual_only_chain("take", take,
-          "FX insertion on a take containing Melodyne", 2)
-      end
-      return reaper.TakeFX_GetByName(take, name, instantiate)
-    end,
-    TakeFX_Delete = function(take, fx)
-      guard_manual_only_chain("take", take,
-        "FX deletion on a take containing Melodyne", 2)
-      return reaper.TakeFX_Delete(take, fx)
-    end,
-    TakeFX_CopyToTrack = function(
-        source_take, source_fx, target_track, target_fx, is_move)
-      guard_manual_only_chain("take", source_take,
-        "FX copy or move on a take containing Melodyne", 2)
-      guard_manual_only_chain("track", target_track,
-        "FX copy or move on a track containing Melodyne", 2)
-      return reaper.TakeFX_CopyToTrack(
-        source_take, source_fx, target_track, target_fx, is_move)
-    end,
-    TakeFX_CopyToTake = function(
-        source_take, source_fx, target_take, target_fx, is_move)
-      guard_manual_only_chain("take", source_take,
-        "FX copy or move on a take containing Melodyne", 2)
-      guard_manual_only_chain("take", target_take,
-        "FX copy or move on a take containing Melodyne", 2)
-      return reaper.TakeFX_CopyToTake(
-        source_take, source_fx, target_take, target_fx, is_move)
-    end,
-    Main_OnCommand = function(command_id, flag)
-      if tonumber(command_id) == 40860 then close_run_undo() end
-      return reaper.Main_OnCommand(command_id, flag)
-    end,
-    Main_OnCommandEx = function(command_id, flag, project)
-      if tonumber(command_id) == 40860 then close_run_undo() end
-      return reaper.Main_OnCommandEx(command_id, flag, project)
+    TakeFX_SetPreset = function(take, fx, preset_name)
+      return defer_state.record_preset_write("take", take, fx, preset_name,
+        reaper.TakeFX_GetPreset, reaper.TakeFX_SetPreset)
     end,
     -- Undo shim: no-op on REAPER's side, capture the label on End so the
     -- outer wrapper can apply it. Return 0 from EndBlock to match REAPER's
@@ -25018,7 +15003,7 @@ function Code.run(code)
       end
       return 0
     end,
-  }, "reaper", guarded_dynamic_reaper_api)
+  }, "reaper")
   code_env.reaper = reaper_shim
 
   if Log.enabled() then
@@ -25049,6 +15034,8 @@ function Code.run(code)
     -- user clicks OK, so they have nothing to reference when they type a
     -- follow-up. Inline lets them read the trace, copy parts, and keep going.
     local fallback = "Lua compile error in generated code:\n\n" .. err_str
+      .. "\n\nThe script did not run, so no project change was made. Ask "
+      .. "ReaAssist to fix and retry the last action."
     Log.add_error((RA and RA.t and RA.t("code.compile_error",
       { error = err_str }, fallback)) or fallback,
       nil, nil, nil, { error_kind = "runtime_error", error_debug = err_debug })
@@ -25064,44 +15051,45 @@ function Code.run(code)
       error_debug = err_debug,
       parameter_change_evidence =
         Code.parameter_change_evidence(defer_state.parameter_writes),
+      fx_insert_failure_evidence =
+        defer_state.fx_insert_failure_evidence(),
       runtime_error = S.last_run_error,
       })
-    Code.plugin_test_runtime_event("run_completed", {
-      code_sha256 = Code.plugin_profile_code_key(code),
-      run_result = S.last_run_result,
-    })
     return false
   end
 
-  -- Plugin-level undo wrapper. Generated Undo calls are intercepted above.
-  -- General scripts receive one real outer block. Profile-authorized,
-  -- track-FX-only scripts do not touch the user project here; their completed
-  -- staged state is committed later in one short synchronous block. Existing
-  -- FX receive only verified parameter values so their GUIDs remain stable;
-  -- newly added FX are copied into place.
-  if not defer_state.profile_fx_staging_enabled then
-    if defer_state.undo_project
-       and type(reaper.Undo_BeginBlock2) == "function"
-       and type(reaper.Undo_EndBlock2) == "function" then
-      reaper.Undo_BeginBlock2(defer_state.undo_project)
-      defer_state.undo_project_api = true
-    else
-      reaper.Undo_BeginBlock()
-    end
-    defer_state.undo_open = true
-  end
+  -- Plugin-level undo wrapper. The generated code's own Undo_Begin/EndBlock
+  -- calls are intercepted by reaper_shim above (no-op + label capture), so
+  -- this pair is the ONLY real interaction with REAPER's undo stack and a
+  -- throw anywhere inside fn() cannot leave the stack unbalanced. The label
+  -- the inner code passed to Undo_EndBlock ("ReaAssist: Create 10 tracks"
+  -- etc.) is surfaced in REAPER's undo history via inner_undo_label.
+  reaper.Undo_BeginBlock()
   local ok, run_err, instruction_timeout, instruction_count =
     run_lua_chunk_with_instruction_guard(fn)
+  local protected_failed =
+    defer_state.protected_call_failures.failure_count > 0
+  if defer_state.pending == 0 or not ok or protected_failed then
+    recover_generated_refresh()
+  end
+  reaper.Undo_EndBlock(inner_undo_label or "ReaAssist", inner_undo_flags)
+  local change_count_after = Code.project_change_count()
+  record_change_segment(change_count_before, change_count_after)
   if not ok then
     defer_state.failed = true
-    close_run_undo()
-    cleanup_profile_fx_stage()
     record_runtime_error(run_err, instruction_timeout, instruction_count,
       "generated_lua_runtime")
     return false
   end
+  if protected_failed then
+    defer_state.failed = true
+    record_runtime_error(
+      "Generated Lua caught a failed pcall or xpcall without stopping.",
+      false, nil, "generated_lua_runtime", "protected_call_failure")
+    reaper.UpdateArrange()
+    return false
+  end
   Log.line("SCRIPT", "Script completed OK")
-  if defer_state.pending == 0 then recover_generated_refresh() end
   reaper.UpdateArrange()
   if defer_state.pending > 0 then
     S.lua_defer_run = defer_state
@@ -25109,55 +15097,28 @@ function Code.run(code)
       "pending", "pending", {
         deferred = true,
         deferred_pending = true,
+        generated_refresh_recovered =
+          defer_state.generated_refresh_recovery_count > 0,
+        generated_refresh_recovery_count =
+          defer_state.generated_refresh_recovery_count,
+        fx_insert_failure_evidence =
+          defer_state.fx_insert_failure_evidence(),
       })
-    Code.plugin_test_runtime_event("run_pending", {
-      code_sha256 = Code.plugin_profile_code_key(code),
-      run_result = S.last_run_result,
-    })
     return true, "pending"
   end
-  close_run_undo()
-  local commit_call_ok, commit_ok, commit_err =
-    pcall(commit_profile_fx_stage)
-  if not commit_call_ok or not commit_ok then
-    defer_state.failed = true
-    cleanup_profile_fx_stage()
-    record_runtime_error(
-      "ReaAssist could not commit this plug-in edit from isolated staging "
-        .. "in one verified Undo entry: "
-        .. tostring(commit_call_ok and commit_err or commit_ok),
-      false, nil, "plugin_profile_staging_commit")
-    return false
-  end
-  if defer_state.pending > 0 then
-    S.lua_defer_run = defer_state
-    S.last_run_result = Code.build_run_result("lua", code,
-      "pending", "pending", {
-        deferred = true,
-        deferred_pending = true,
-      })
-    Code.plugin_test_runtime_event("run_pending", {
-      code_sha256 = Code.plugin_profile_code_key(code),
-      run_result = S.last_run_result,
-    })
-    return true, "pending"
-  end
-  local change_count_after = Code.project_change_count()
   S.last_run_result = Code.build_run_result("lua", code,
     "ran_ok", "passed", {
       change_count_before = change_count_before,
       change_count_after = change_count_after,
       parameter_change_evidence =
         Code.parameter_change_evidence(defer_state.parameter_writes),
+      fx_insert_failure_evidence =
+        defer_state.fx_insert_failure_evidence(),
       generated_refresh_recovered =
-        (defer_state.generated_refresh_recovery_count or 0) > 0,
+        defer_state.generated_refresh_recovery_count > 0,
       generated_refresh_recovery_count =
-        defer_state.generated_refresh_recovery_count or 0,
+        defer_state.generated_refresh_recovery_count,
     })
-  Code.plugin_test_runtime_event("run_completed", {
-    code_sha256 = Code.plugin_profile_code_key(code),
-    run_result = S.last_run_result,
-  })
   return true
 end
 

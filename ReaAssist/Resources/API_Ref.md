@@ -268,7 +268,7 @@ local _, name = reaper.GetTrackName(tr)
 
 -- TrackFX_GetFXName: retval=true if FX exists; name is second:
 local ok, fx_name = reaper.TrackFX_GetFXName(tr, 0, "")
-if ok then reaper.ShowConsoleMsg(fx_name .. "\n") end
+if not ok then return end
 
 -- TrackFX_GetParam: returns value, min, max:
 local val, min_val, max_val = reaper.TrackFX_GetParam(tr, 0, 0)
@@ -1087,10 +1087,12 @@ Useful string keys:
   prevent>0 suspends UI updates, <=0 restores. Nestable.
 
 `reaper.ShowConsoleMsg(string msg)`
-  Print to ReaScript console.
+  Opens the ReaScript console and prints a message. Do not use it in ordinary
+  ReaAssist actions or for success receipts. ReaAssist already reports the
+  result in the conversation and captures diagnostics in Debug.log.
 
 `reaper.ClearConsole()`
-  Clear ReaScript console.
+  Clear the ReaScript console. Do not use it in ordinary ReaAssist actions.
 
 `integer reaper.ShowMessageBox(string msg, string title, integer type)`
   type: 0=OK, 1=OK/Cancel, 4=Yes/No.
@@ -1845,12 +1847,48 @@ end
 ```
 
 ```lua
--- Pattern: force an envelope lane visible without running a UI action.
-local ok, chunk = reaper.GetEnvelopeStateChunk(env, "", false)
-if ok then
-  chunk = chunk:gsub("\nVIS %d", "\nVIS 1", 1)
-  reaper.SetEnvelopeStateChunk(env, chunk, false)
+-- Pattern: show or hide the selected envelope lane without a UI action.
+local env = reaper.GetSelectedEnvelope(0)
+if not env then
+  reaper.ShowMessageBox("Select an envelope first.", "ReaAssist", 0)
+  return
 end
+local requested_visible = true -- Use false to hide the lane.
+local requested_vis = requested_visible and 1 or 0
+local ok, chunk = reaper.GetEnvelopeStateChunk(env, "", false)
+if not ok then
+  reaper.ShowMessageBox("Could not read the envelope state.", "ReaAssist", 0)
+  return
+end
+
+-- A VIS record normally has three fields, such as `VIS 0 1 1`. Change only
+-- the first flag and preserve every remaining field.
+local changed, count = chunk:gsub(
+  "([\r\n]VIS%s+)[01]([^\r\n]*)",
+  function(prefix, suffix)
+    return prefix .. tostring(requested_vis) .. suffix
+  end, 1)
+if count ~= 1 then
+  reaper.ShowMessageBox("Could not find the envelope VIS record.", "ReaAssist", 0)
+  return
+end
+if not reaper.SetEnvelopeStateChunk(env, changed, false) then
+  reaper.ShowMessageBox("Could not write the envelope state.", "ReaAssist", 0)
+  return
+end
+
+-- Confirm the host accepted the requested state. Do not rely only on a
+-- project-state change or the absence of a runtime exception.
+local read_ok, readback = reaper.GetEnvelopeStateChunk(env, "", false)
+local visible = read_ok and tonumber(
+  readback:match("[\r\n]VIS%s+(%-?%d+)")) or nil
+if visible ~= requested_vis then
+  reaper.ShowMessageBox("The envelope visibility change was not confirmed.",
+    "ReaAssist", 0)
+  return
+end
+reaper.TrackList_AdjustWindows(false)
+reaper.UpdateArrange()
 ```
 <!-- /SECTION:envelopes -->
 
@@ -2224,17 +2262,15 @@ IMPORTANT:
 `string reaper.CF_GetSWSVersion(optional string versionOut)`
   Return the loaded SWS version string. In Lua bindings, host code may call
   either `reaper.CF_GetSWSVersion()` or `reaper.CF_GetSWSVersion("")`; the
-  empty-string fallback covers bindings that expose output buffers that way.
+  empty-string form covers bindings that expose output buffers that way and
+  avoids a failing protected-call probe in generated actions.
 
 ```lua
 local has_sws = type(reaper.CF_GetSWSVersion) == "function"
 local sws_version = nil
 if has_sws then
-  local ok, version = pcall(reaper.CF_GetSWSVersion)
-  if not ok or not version or version == "" then
-    ok, version = pcall(reaper.CF_GetSWSVersion, "")
-  end
-  sws_version = ok and version or nil
+  local version = reaper.CF_GetSWSVersion("")
+  sws_version = version and version ~= "" and version or nil
 end
 ```
 

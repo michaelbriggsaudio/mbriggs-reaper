@@ -213,7 +213,7 @@ I18N.catalogs = {
         "Connected and ready. Type a prompt or pick a card to begin.",
       ["chat.hero.new_chat"] = "new chat",
       ["chat.hero.new_chat.tooltip"] =
-        "Clear the current conversation and start fresh.",
+        "Start a new chat. ReaAssist confirms before clearing a nonempty current chat.",
       ["chat.hero.tagline.ask"] = "Ask anything.",
       ["chat.hero.tagline.automate"] = "Automate everything.",
       ["home.section.session"] = "SESSION & AUTOMATION",
@@ -336,8 +336,8 @@ I18N.catalogs = {
         "Higher-cost GPT-5.6. Use None thinking. Choose Terra when Luna struggles or extra quality is worth the price.",
       ["mode.model_tip.gpt-5.6-sol"] =
         "Premium GPT-5.6. Use None thinking. Flagship tier; higher effort added cost without a measured improvement.",
-      ["mode.model_tip.gemini-3.1-flash-lite"] =
-        "Cheapest Gemini. Use Low thinking. Budget pick; Flash 3.6 Minimal is stronger for scripts and edits.",
+      ["mode.model_tip.gemini-3.5-flash-lite"] =
+        "Cheapest Gemini. Use Low thinking. Budget default based on ReaAssist testing; Flash 3.6 Minimal remains the stronger general recommendation.",
       ["mode.model_tip.gemini-3.6-flash"] =
         "Recommended Gemini default. Use Minimal thinking. Best tested balance for scripts and edits; try Low only if Minimal struggles.",
       ["mode.model_tip.gemini-3.1-pro-preview"] =
@@ -400,14 +400,14 @@ I18N.catalogs = {
         "Avoid for routine work | Generated a runtime error in testing | Higher cost and latency",
       ["mode.combo_hint.openai.gpt-5.6-sol.high"] =
         "Untested and most expensive | Reserve for a measured quality-first need",
-      ["mode.combo_hint.google.gemini-3.1-flash-lite.MINIMAL"] =
-        "Simple tasks only | Cheap | Fast | Low is more reliable on complex routing",
-      ["mode.combo_hint.google.gemini-3.1-flash-lite.LOW"] =
-        "Recommended Level | Simple and complex | Cheap | Fast",
-      ["mode.combo_hint.google.gemini-3.1-flash-lite.MEDIUM"] =
-        "Simple and complex | Cheap | Slow | Flash 3.6 Minimal is usually better value",
-      ["mode.combo_hint.google.gemini-3.1-flash-lite.HIGH"] =
-        "Avoid complex prompts | Cheap | Very slow | Runtime-error risk; pick Flash Lite Low or Flash 3.6 Minimal",
+      ["mode.combo_hint.google.gemini-3.5-flash-lite.MINIMAL"] =
+        "Simple and common scripts | Lowest Gemini cost | Fast | Low was faster in ReaAssist testing",
+      ["mode.combo_hint.google.gemini-3.5-flash-lite.LOW"] =
+        "Recommended Level | Simple and complex | Lowest Gemini cost | Fastest tested Lite setting",
+      ["mode.combo_hint.google.gemini-3.5-flash-lite.MEDIUM"] =
+        "Simple and complex | Low cost | Slower | No measured gain over Low",
+      ["mode.combo_hint.google.gemini-3.5-flash-lite.HIGH"] =
+        "Hard reasoning only | Low cost | Slowest | No measured gain over Low",
       ["mode.combo_hint.google.gemini-3.6-flash.MINIMAL"] =
         "Recommended Level | Simple and complex | Best tested Flash balance | Fast",
       ["mode.combo_hint.google.gemini-3.6-flash.LOW"] =
@@ -717,8 +717,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Reasoning effort level used for this response (only relevant for models that support extended thinking).",
       ["details.tip.fx_cache"] =
         "Filter applied to the FX cache this turn (limits which plugins contribute to the Context bundle).",
-      ["chat.clear.title"] = "Confirm Clear",
-      ["chat.clear.prompt"] = "Clear the entire conversation?",
+      ["chat.clear.title"] = "Start a New Chat?",
+      ["chat.clear.prompt"] =
+        "Clear the current chat and start a new one?\nThis only clears the current ReaAssist session.",
+      ["chat.clear.confirm"] = "Start New Chat",
       ["message.truncated.structured_cap"] =
         "Structured edit cut off at its compact action-token cap.",
       ["message.truncated.output_cap"] =
@@ -1272,11 +1274,11 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.clear_chat"] = "Clear Chat",
       ["a11y.sr.clear_chat.meaning"] =
         "Clears the current ReaAssist conversation after confirmation.",
-      ["a11y.sr.clear_confirm_title"] = "Clear Chat?",
+      ["a11y.sr.clear_confirm_title"] = "Clear Current Chat?",
       ["a11y.sr.clear_confirm_title.meaning"] =
         "Confirmation before clearing the current conversation.",
       ["a11y.sr.clear_confirm_body"] =
-        "Clear the current conversation? This removes the visible chat and resets the running chat totals.",
+        "Clear the current chat from this ReaAssist session? This removes the visible chat and resets current-session totals.",
       ["a11y.sr.clear_confirm_body.meaning"] =
         "Explains what clearing the current conversation does.",
       ["a11y.sr.clear_confirm_opened"] =
@@ -2585,6 +2587,18 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "ReaAssist could not write the server response to its temporary file. Check that your REAPER resource folder is writable.",
       ["network.curl.timeout"] =
         "The connection timed out. Please check your internet connection and try again.",
+      ["network.curl.connect_timeout"] =
+        "The connection to {provider} did not finish before the connection time limit. The provider or network path may be temporarily delayed. Check your internet connection, then try again in a moment.",
+      ["network.curl.connect_timeout_retry"] =
+        "Retry Same Model below to resend the original message. The connection to {provider} did not finish before the connection time limit. The provider or network path may be temporarily delayed. Check your internet connection before retrying.",
+      ["network.curl.custom_request_timeout"] =
+        "The custom provider did not finish before its configured Request Timeout of {seconds} seconds. If this repeats while the server is still working, increase Request Timeout in Custom LLM settings.",
+      ["network.curl.custom_request_timeout_retry"] =
+        "Retry Same Model below to resend the original message. The custom provider did not finish before its configured Request Timeout of {seconds} seconds. If this repeats while the server is still working, increase Request Timeout in Custom LLM settings.",
+      ["network.curl.custom_test_timeout"] =
+        "The custom provider did not respond within the {seconds}-second connection test. Check that the server is running and that its URL and port are correct, then try the test again.",
+      ["network.curl.custom_test_connect_timeout"] =
+        "The custom provider could not connect within the {seconds}-second connection test. Check that the server is running and that its URL and port are correct, then try the test again.",
       ["network.curl.secure_failed"] =
         "Couldn't establish a secure connection. A firewall or network setting may be blocking it.",
       ["network.curl.no_response"] =
@@ -2605,10 +2619,20 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Tried to load additional project info but the follow-up request didn't go through. Please try again.",
       ["response.context_loop"] =
         "The model re-requested context that was already provided. Try rephrasing your request, or switch to a different model.",
+      ["response.plugin_pack_integrity_failure"] =
+        "Specific plug-in guidance could not be verified, and the generic parameter check did not complete. No project changes were run. Repair or update ReaAssist, then try again.",
       ["response.resume_failed"] =
         "Couldn't resume the request after your selection. Please try sending the message again.",
       ["response.preparation_resume_failed"] =
         "Couldn't resume the request after preparation. Please try sending the message again.",
+      ["plugin_pack.notice.readiness_timeout"] =
+        "Specific plug-in guidance was not ready in time for this request. Generic discovery will be used.",
+      ["plugin_pack.notice.integrity_mismatch"] =
+        "Specific plug-in guidance is unavailable because the installed pack did not match the local manifest. Generic discovery will be used.",
+      ["plugin_pack.notice.integrity_unavailable"] =
+        "Specific plug-in guidance could not be verified for this request. Generic discovery will be used.",
+      ["plugin_pack.notice.load_failed"] =
+        "Specific plug-in guidance could not be loaded safely for this request. Generic discovery will be used.",
       ["net.cap.call"] =
         "Stopped after {calls} API calls in one turn to avoid runaway cost. {hint}",
       ["net.cap.call.hint_haiku"] =
@@ -2622,17 +2646,21 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["net.cap.call.hint_flagship"] =
         "Unusual on a flagship model. Try starting a new chat or rephrasing. If it repeats, please use Help -> {help}.",
       ["net.cap.validator_retry"] =
-        "No project changes were run. ReaAssist stopped when the automatic repair budget was exhausted to avoid runaway cost. Start a new chat or try another model. If it happens again, please use Help -> {help}.",
+        "No project changes were made. ReaAssist could not safely complete this request after its automatic correction attempts.",
       ["net.cap.validator_retry_streak"] =
         "No project changes were run. The automatic repair budget failed again on consecutive turns. Rephrasing is unlikely to help. Please use Help -> {help}; starting a new chat or choosing another model may work around it.",
+      ["net.cap.validator_retry_next_resend"] =
+        "Send the same request again. If it fails again, switch models. If the problem repeats, use Help -> {help}. The rejected draft was kept out of this chat.",
       ["net.cap.validator_retry_candidate_review"] =
-        "The latest blocked draft is included below for review only. It did not pass validation, and this message cannot run it.",
+        "The rejected draft is available only in diagnostics and was kept out of the conversation.",
       ["net.cap.context_fetch"] =
         "No project changes were run. The model kept asking for additional project details after {cap} context fetches, so ReaAssist stopped to avoid runaway cost. Start a new chat or try another model. If it happens again, please use Help -> {help}.",
       ["retry.failed"] =
         "Auto-retry {reason} did not go through. Please resend the last message.",
       ["retry.reason.after_empty_length_capped_reply"] =
         "after empty length-capped reply",
+      ["retry.reason.after_plugin_guidance_unavailable"] =
+        "after plug-in guidance was unavailable",
       ["retry.reason.after_empty_response"] =
         "after empty response",
       ["retry.reason.after_unclosed_lua_fence"] =
@@ -2949,16 +2977,36 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Some parameter targets did not finish with a verified new value ({changed} of {total} changed). Confirm the unchanged or restored plugin values before continuing.",
       ["code.run.parameter_returned_to_initial"] =
         "Parameter probing finished at the original value. The requested state may already have been set, or a helper restored it after failing verification. Review any message shown by the script and confirm the displayed plugin value.",
+      ["code.run.fx_insert_failed_unchanged"] =
+        "ReaAssist could not add: {plugins}. No project changes were detected. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
+      ["code.run.fx_insert_failed_partial"] =
+        "ReaAssist could not add: {plugins}. Other project changes were made, so the action may be partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
+      ["code.run.fx_insert_failed_overlapped"] =
+        "ReaAssist could not add: {plugins}. A newer action ran before this older action finished, so ReaAssist cannot tell which change REAPER's Undo would remove. Review the project and REAPER's Undo history before undoing anything. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
       ["a11y.sr.response_ready_no_parameter_change"] =
         "Generated code finished, but no parameter value change was detected. The requested value may already have been set or the write was a no-op. Confirm the displayed plugin value before continuing.",
       ["a11y.sr.response_ready_partial_parameter_change"] =
         "Generated code finished, but some parameter targets did not finish with a verified new value. {changed} of {total} targets changed. Confirm the unchanged or restored plugin values before continuing.",
       ["a11y.sr.response_ready_parameter_returned_to_initial"] =
         "Generated code finished with the parameter at its original value. The requested state may already have been set, or a helper restored it after failing verification. Review the response and confirm the displayed plugin value before continuing.",
+      ["a11y.sr.response_ready_fx_insert_failed_unchanged"] =
+        "Generated code finished, but ReaAssist could not add: {plugins}. No project changes were detected. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
+      ["a11y.sr.response_ready_fx_insert_failed_partial"] =
+        "Generated code finished, but ReaAssist could not add: {plugins}. Other project changes were made, so the action may be partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
+      ["a11y.sr.response_ready_fx_insert_failed_overlapped"] =
+        "Generated code finished, but ReaAssist could not add: {plugins}. A newer action ran before this older action finished, so ReaAssist cannot tell which change REAPER's Undo would remove. Review the project and REAPER's Undo history before undoing anything. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
       ["code.run.no_project_change"] =
         "No project change was detected. The script may have exited early because a target was missing or the requested state was already set. Review any message shown by the script and confirm the project result.",
+      ["code.run.no_project_change_overlapped"] =
+        "This older action finished without changing the project, and a newer action has run since. It may have exited early because a target was missing or the requested state was already set. Review the project and REAPER's Undo history before undoing anything.",
       ["a11y.sr.response_ready_no_project_change"] =
         "Generated code finished, but no project change was detected. It may have exited early because a target was missing or the requested state was already set. Review the response and project before continuing.",
+      ["a11y.sr.response_ready_no_project_change_overlapped"] =
+        "Generated code finished without changing the project, and a newer action has run since. It may have exited early because a target was missing or the requested state was already set. Review the project and REAPER's Undo history before undoing anything.",
+      ["a11y.sr.response_state_ready_jsfx_added_overlapped"] =
+        "Response ready. JSFX has been added to the selected tracks, but a newer action ran before this older action finished. Review the project and REAPER's Undo history before undoing anything, or Read or Save JSFX to review it.",
+      ["a11y.sr.response_state_ready_code_ran_manual_overlapped"] =
+        "Response ready. Generated code ran successfully, but a newer action ran before this older action finished. Review the project and REAPER's Undo history before undoing anything, or Read or Save Code to review it.",
       ["code.compile_error"] =
         "Lua compile error in generated code:\n\n{error}",
       ["code.runtime_error"] =
@@ -3660,8 +3708,11 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.pref.theme.tooltip"] =
         "Color theme: Auto follows your OS dark/light mode setting",
       ["settings.pref.ui_scale.label"] = "UI Scale",
+      ["settings.pref.ui_scale.auto"] = "AUTO (100%)",
       ["settings.pref.ui_scale.tooltip"] =
-        "Scale the entire interface (clamped to your monitor size)",
+        "Auto keeps the original interface size. Manual percentages scale "
+        .. "the entire interface; ReaAssist remembers the choice for the "
+        .. "current monitor scale.",
       ["settings.pref.chat_font.label"] = "Chat Font",
       ["settings.pref.chat_font.small"] = "Small",
       ["settings.pref.chat_font.medium"] = "Medium",
@@ -3700,7 +3751,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.adv.diagnostics.basic"] = "Basic",
       ["settings.adv.diagnostics.extended"] = "Extended",
       ["settings.adv.diagnostics.tooltip"] =
-        "Basic anonymous diagnostics are enabled by default and can be turned off. Basic includes the selected ReaAssist language, language-pack version, interface mode and fixed-category counts for errors, outcomes, recovery, prompt mode and cache use, without chat text or names. Extended adds redacted chat, diagnostics and log/report detail. Sent on the next launch, never during an active request.",
+        "Basic diagnostics are enabled by default and can be turned off. Basic includes the selected ReaAssist language, language-pack version, interface mode, exact display, work-area and ReaAssist-window sizes, display and REAPER DPI scaling, Interface Size settings, Screen Reader visual text size and fixed-category usage and reliability counts. It does not include chat text or names. Extended adds redacted chat, diagnostics and log/report detail. Sent on the next launch, never during an active request.",
       ["settings.adv.cloud_timeout.label"] = "Cloud Timeout",
       ["settings.adv.cloud_timeout.tooltip"] =
         "How long to wait for a Claude/ChatGPT/Gemini response before timing out. Default 180s. Reasoning models on large prompts may need 300+",
@@ -3757,7 +3808,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.diag.popup.extended_body"] =
         "Extended includes Basic metrics plus redacted chat, diagnostics, recent errors, and redacted Advanced Log/report detail.",
       ["settings.diag.popup.basic_body"] =
-        "Basic includes anonymous structured metrics only: counts, providers, model tiers, tokens, cache, latency, and outcomes.",
+        "Basic includes text-free structured metrics: exact display, work-area and ReaAssist-window sizes; display and REAPER DPI scaling; Interface Size and Screen Reader visual text settings; counts, providers, model tiers, tokens, cache, latency and outcomes.",
       ["settings.diag.popup.enable"] = "Enable {tier}",
       ["settings.unsaved.popup.title"] = "Unsaved Changes",
       ["settings.unsaved.prompt"] =
@@ -4241,7 +4292,7 @@ I18N.local_overrides.id = {
       "Sematkan referensi API Lua REAPER ke setiap permintaan, bukan membiarkan model mengambilnya saat diperlukan. Aktif = tanpa perjalanan tambahan, tetapi sekitar 10 ribu token ekstra setiap giliran. Nonaktif = hemat token pada giliran non-kode; model mengambil dokumentasi saat membutuhkannya.",
     ["settings.adv.cloud_timeout.label"] = "Batas waktu awan",
     ["settings.adv.diagnostics.tooltip"] =
-      "Diagnostik anonim dasar aktif secara bawaan dan dapat dimatikan. Diperluas menambahkan obrolan, diagnostik, serta detail log/laporan yang disamarkan. Dikirim pada peluncuran berikutnya, tidak pernah saat permintaan aktif.",
+      "Diagnostik Dasar aktif secara bawaan dan dapat dimatikan. Dasar mencakup bahasa, versi paket bahasa, mode antarmuka, ukuran persis layar, area kerja, dan jendela ReaAssist, skala DPI layar dan REAPER, pengaturan Ukuran Antarmuka, ukuran teks visual Pembaca Layar, serta hitungan penggunaan dan keandalan tanpa teks atau nama obrolan. Diperluas menambahkan obrolan, diagnostik, serta detail log/laporan yang disamarkan. Dikirim pada peluncuran berikutnya, tidak pernah saat permintaan aktif.",
     ["settings.adv.factory_reset.label"] = "Setel ulang pabrik",
     ["settings.adv.factory_reset.tooltip"] =
       "Hapus semua kunci, preferensi, dan pengaturan untuk memulai dari awal",
@@ -4278,9 +4329,10 @@ I18N.local_overrides.id = {
     ["settings.pref.theme.light"] = "Terang",
     ["settings.pref.theme.tooltip"] =
       "Tema warna: Otomatis mengikuti pengaturan mode gelap/terang sistem operasi Anda",
+    ["settings.pref.ui_scale.auto"] = "OTOMATIS (100%)",
     ["settings.pref.ui_scale.label"] = "Skala antarmuka",
     ["settings.pref.ui_scale.tooltip"] =
-      "Skalakan seluruh antarmuka (dibatasi sesuai ukuran monitor Anda)",
+      "Otomatis mempertahankan ukuran antarmuka asli. Persentase manual menskalakan seluruh antarmuka; ReaAssist mengingat pilihan tersebut untuk skala monitor Anda saat ini.",
     ["settings.pref.update_check.label"] =
       "Periksa pembaruan saat mulai",
     ["settings.pref.update_check.tooltip"] =

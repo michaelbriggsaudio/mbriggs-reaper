@@ -112,6 +112,9 @@ local function prompt_for_screen_reader_preference()
     "Choose Cancel if you only want to open Screen Reader Mode from its own REAPER action.",
     1)
   set_prefer_screen_reader(choice == 1)
+  -- Read by ReaAssist.lua in this same Lua state to record how this launch
+  -- reached Screen Reader Mode.
+  if choice == 1 then REAASSIST_SCREEN_READER_ENTRY_VIA = "setting" end
 end
 
 local function safe_url(url)
@@ -1393,32 +1396,80 @@ function ScreenReader.payload_auto_ran(payload)
 end
 
 function ScreenReader.response_ready_ran_text(payload, long_form)
+  local notices = {}
+  local fx_insert_evidence = payload and payload.fx_insert_failure_evidence
+  local failed_fx_names = type(fx_insert_evidence) == "table"
+    and fx_insert_evidence.failed_names or nil
+  local interval_overlapped = payload
+    and type(payload.change_evidence) == "table"
+    and payload.change_evidence.attribution == "interval_overlapped"
+  if payload and payload.run_status == "ran_ok"
+      and type(failed_fx_names) == "table" and #failed_fx_names > 0 then
+    local plugins = table.concat(failed_fx_names, ", ")
+    if interval_overlapped then
+      notices[#notices + 1] = ScreenReader.t(
+        "a11y.sr.response_ready_fx_insert_failed_overlapped", {
+          plugins = plugins,
+        },
+        "Generated code finished, but ReaAssist could not add: {plugins}. A newer action ran before this older action finished, so ReaAssist cannot tell which change REAPER's Undo would remove. Review the project and REAPER's Undo history before undoing anything. Confirm each named plug-in is installed and available in REAPER, then resend the request.")
+    elseif payload.observable_change_status == "changed" then
+      notices[#notices + 1] = ScreenReader.t(
+        "a11y.sr.response_ready_fx_insert_failed_partial", {
+          plugins = plugins,
+        },
+        "Generated code finished, but ReaAssist could not add: {plugins}. Other project changes were made, so the action may be partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request.")
+    else
+      notices[#notices + 1] = ScreenReader.t(
+        "a11y.sr.response_ready_fx_insert_failed_unchanged", {
+          plugins = plugins,
+        },
+        "Generated code finished, but ReaAssist could not add: {plugins}. No project changes were detected. Confirm each named plug-in is installed and available in REAPER, then resend the request.")
+    end
+  end
   if payload and payload.parameter_change_status == "partially_changed" then
-    return ScreenReader.t(
-      "a11y.sr.response_ready_partial_parameter_change", {
-        changed = payload.parameter_change_evidence
-          and payload.parameter_change_evidence.changed_target_count or 0,
-        total = payload.parameter_change_evidence
-          and payload.parameter_change_evidence.target_count or 0,
-      },
-      "Generated code finished, but some parameter targets did not finish with a verified new value. {changed} of {total} targets changed. Confirm the unchanged or restored plugin values before continuing.")
-  end
-  if payload and payload.parameter_change_status == "unchanged" then
-    return ScreenReader.t("a11y.sr.response_ready_no_parameter_change", nil,
+    local parameter_evidence = payload.parameter_change_evidence or {}
+    local changed_count = parameter_evidence.changed_target_count or 0
+    local target_count = parameter_evidence.target_count or 0
+    if (parameter_evidence.requested_value_confirmed_mismatch_count or 0) > 0
+        and changed_count == target_count then
+      notices[#notices + 1] = ScreenReader.t(
+        "a11y.sr.response_ready_parameter_changed_missed_request", nil,
+        "Generated code changed the parameter values, but at least one did not finish at the requested setting. Confirm the displayed plug-in values before continuing.")
+    else
+      notices[#notices + 1] = ScreenReader.t(
+        "a11y.sr.response_ready_partial_parameter_change", {
+          changed = changed_count,
+          total = target_count,
+        },
+        "Generated code finished, but some parameter targets could not be verified. {changed} of {total} targets changed. Confirm the unchanged, restored, or mismatched plug-in values before continuing.")
+    end
+  elseif payload and payload.parameter_change_status == "unchanged" then
+    notices[#notices + 1] = ScreenReader.t(
+      "a11y.sr.response_ready_no_parameter_change", nil,
       "Generated code finished, but no parameter value change was detected. The requested value may already have been set or the write was a no-op. Confirm the displayed plugin value before continuing.")
-  end
-  if payload and payload.parameter_change_status == "returned_to_initial" then
-    return ScreenReader.t(
+  elseif payload and payload.parameter_change_status == "returned_to_initial" then
+    notices[#notices + 1] = ScreenReader.t(
       "a11y.sr.response_ready_parameter_returned_to_initial", nil,
       "Generated code finished with the parameter at its original value. The requested state may already have been set, or a helper restored it after failing verification. Review the response and confirm the displayed plugin value before continuing.")
   end
+  if #notices > 0 then return table.concat(notices, "\n\n") end
   if payload and payload.parameter_change_status ~= "changed"
       and payload.observable_change_status == "unchanged" then
+    if interval_overlapped then
+      return ScreenReader.t(
+        "a11y.sr.response_ready_no_project_change_overlapped", nil,
+        "Generated code finished without changing the project, and a newer action has run since. It may have exited early because a target was missing or the requested state was already set. Review the project and REAPER's Undo history before undoing anything.")
+    end
     return ScreenReader.t("a11y.sr.response_ready_no_project_change", nil,
       "Generated code finished, but no project change was detected. It may have exited early because a target was missing or the requested state was already set. Review the response and project before continuing.")
   end
   local auto_ran = payload and payload.auto_ran == true
   if ScreenReader.payload_is_jsfx(payload) then
+    if long_form and interval_overlapped then
+      return ScreenReader.t(
+        "a11y.sr.response_state_ready_jsfx_added_overlapped", nil,
+        "Response ready. JSFX has been added to the selected tracks, but a newer action ran before this older action finished. Review the project and REAPER's Undo history before undoing anything, or Read or Save JSFX to review it.")
+    end
     return long_form
       and ScreenReader.t("a11y.sr.response_state_ready_jsfx_added", nil,
         "Response ready. JSFX has been added to the selected tracks. Use Undo Run if you need to revert it, or Read or Save JSFX to review it.")
@@ -1441,6 +1492,11 @@ function ScreenReader.response_ready_ran_text(payload, long_form)
         "Auto-run has already run the structured edit successfully.")
   end
   if not auto_ran then
+    if long_form and interval_overlapped then
+      return ScreenReader.t(
+        "a11y.sr.response_state_ready_code_ran_manual_overlapped", nil,
+        "Response ready. Generated code ran successfully, but a newer action ran before this older action finished. Review the project and REAPER's Undo history before undoing anything, or Read or Save Code to review it.")
+    end
     return long_form
       and ScreenReader.t("a11y.sr.response_state_ready_code_ran_manual",
         nil,
@@ -3536,7 +3592,8 @@ function ScreenReader.save_reader()
       ScreenReader.save_latest_jsfx()
       return
     end
-    path = AppController.write_code(payload.code or "", payload.code_type)
+    path = AppController.write_code(
+      payload.code or "", payload.code_type, payload.message_idx)
   else
     path = AppController.write_transcript(data.text)
   end
@@ -3598,7 +3655,7 @@ function ScreenReader.save_chat()
   end
   local text = AppController.chat_transcript_text()
   local path = text ~= "" and AppController.write_transcript(text,
-    "ScreenReader_Chat_Log.txt") or nil
+    "ScreenReader_Chat_Log.txt", { non_overwriting = true }) or nil
   ScreenReader.set_status(path and ScreenReader.t("a11y.sr.chat_saved", {
       path = path,
     }, "Chat log saved to " .. tostring(path) .. ".")
@@ -3682,7 +3739,8 @@ function ScreenReader.save_code()
     ScreenReader.save_latest_jsfx()
     return
   end
-  local path = code ~= "" and AppController.write_code(code, payload.code_type)
+  local path = code ~= "" and AppController.write_code(
+    code, payload.code_type, payload.message_idx)
     or nil
   if ScreenReader.confirm_code_save_status(path) then return end
   if ScreenReader.offer_add_saved_script(path, payload) then return end
@@ -5123,6 +5181,12 @@ end
 
 function ScreenReader.confirm_visual_switch()
   set_prefer_screen_reader(false)
+  -- Persist before the relauncher fires: it closes this script immediately, so
+  -- no payload assembled here could ever carry the switch.
+  if type(Diag) == "table"
+      and type(Diag.record_screen_reader_visual_switch) == "function" then
+    pcall(Diag.record_screen_reader_visual_switch)
+  end
   ScreenReader.announce(ScreenReader.t("a11y.sr.visual_switch_starting", nil,
     "Switching to the visual ReaAssist interface."))
   if Updater and Updater.fire_relauncher_now
@@ -5312,7 +5376,8 @@ function ScreenReader.view_title()
       "Add to Actions?")
   end
   if view == "clear_confirm" then
-    return ScreenReader.t("a11y.sr.clear_confirm_title", nil, "Clear Chat?")
+    return ScreenReader.t("a11y.sr.clear_confirm_title", nil,
+      "Clear Current Chat?")
   end
   if view == "factory_reset_confirm" then
     return ScreenReader.t("settings.factory_reset.heading", nil,
@@ -5615,6 +5680,10 @@ end
 
 function ScreenReader.update_prompt_state()
   local state = update and tostring(update.state or "idle") or "idle"
+  if state == "repair_available"
+      and update.silent_manifest_repair == true then
+    return nil
+  end
   if state == "available" or state == "repair_available" then
     return state
   end
@@ -7479,11 +7548,11 @@ function ScreenReader.build_settings_ui()
       "Automatic diagnostics"),
     ScreenReader.caption_width_px(140),
     ScreenReader.t("settings.adv.diagnostics.tooltip", nil,
-      "Basic anonymous diagnostics are enabled by default and can be turned "
-      .. "off. Basic includes the selected ReaAssist language, language-pack "
-      .. "version, interface mode and fixed-category counts for errors, "
-      .. "outcomes, recovery, prompt mode and cache use, "
-      .. "without chat text or names."),
+      "Basic diagnostics are enabled by default and can be turned "
+      .. "off. Basic includes language, interface mode, exact display, work-area "
+      .. "and ReaAssist-window sizes, display and REAPER DPI scaling, Interface "
+      .. "Size settings, Screen Reader visual text size, and fixed-category "
+      .. "usage and reliability counts. It does not include chat text or names."),
     labels, selected,
     function(_, menu_idx) ScreenReader.select_diagnostics_tier(menu_idx) end,
     "diagnostics_tier")
@@ -9887,7 +9956,7 @@ function ScreenReader.build_clear_confirm_ui()
   reagirl.NextLine()
   ui.ids.body = reagirl.Label_Add(nil, nil,
     ScreenReader.t("a11y.sr.clear_confirm_body", nil,
-      "Clear the current conversation? This removes the visible chat and resets the running chat totals."),
+      "Clear the current chat from this ReaAssist session? This removes the visible chat and resets current-session totals."),
     ScreenReader.t("a11y.sr.clear_confirm_body.meaning", nil,
       "Explains what clearing the current conversation does."),
     false, nil, "clear_confirm_body")
@@ -10701,6 +10770,10 @@ end
 function ScreenReader.start()
   local title = ScreenReader.t("a11y.sr.title", nil,
     "ReaAssist Screen Reader Mode")
+  if type(Diag) == "table"
+      and type(Diag.note_screen_reader_ui_opened) == "function" then
+    pcall(Diag.note_screen_reader_ui_opened)
+  end
   if api_keys then api_keys.screen = nil end
   if CFG and reaper.GetExtState then
     S._screen_reader_report_name = reaper.GetExtState(CFG.EXT_NS,
@@ -11291,6 +11364,9 @@ function AppController.request_is_active()
 end
 
 function AppController.conversation_has_content()
+  if Net and Net.conversation_has_content then
+    return Net.conversation_has_content()
+  end
   return (S.display_messages and #S.display_messages > 0)
     or (S.history and #S.history > 0)
     or S.pending_code ~= nil
@@ -11687,6 +11763,12 @@ function AppController.latest_response_payload()
     code_label = AppController.code_type_label(code_type),
     has_code = code ~= "",
     run_status = msg and msg.run_status or nil,
+    observable_change_status = msg and msg.observable_change_status or nil,
+    change_evidence = msg and msg.change_evidence or nil,
+    parameter_change_status = msg and msg.parameter_change_status or nil,
+    parameter_change_evidence = msg and msg.parameter_change_evidence or nil,
+    fx_insert_failure_evidence = msg
+      and msg.fx_insert_failure_evidence or nil,
     auto_ran = msg and msg.auto_ran == true,
     typed_action = typed_action,
     typed_action_has_results = typed_action
@@ -11822,35 +11904,13 @@ function AppController.run_latest_code(opts)
   end
   if info.message_idx == #S.display_messages then S.pending_code = nil end
   S.status = ok and "idle" or "error"
-  local parameter_change_status =
-    ok and type(S.last_run_result) == "table"
-      and S.last_run_result.parameter_change_status or nil
-  local no_project_change = ok and type(S.last_run_result) == "table"
-    and parameter_change_status ~= "changed"
-    and S.last_run_result.observable_change_status == "unchanged"
-  return ok == true, ok and nil or "run_failed",
-    parameter_change_status == "partially_changed" and AppController.t(
-      "a11y.sr.response_ready_partial_parameter_change", {
-        changed = S.last_run_result.parameter_change_evidence
-          and S.last_run_result.parameter_change_evidence
-            .changed_target_count or 0,
-        total = S.last_run_result.parameter_change_evidence
-          and S.last_run_result.parameter_change_evidence.target_count or 0,
-      },
-      "Generated code finished, but some parameter targets did not finish with a verified new value. {changed} of {total} targets changed. Confirm the unchanged or restored plugin values before continuing.")
-      or parameter_change_status == "unchanged" and AppController.t(
-      "a11y.sr.response_ready_no_parameter_change", nil,
-      "Generated code finished, but no parameter value change was detected. The requested value may already have been set or the write was a no-op. Confirm the displayed plugin value before continuing.")
-      or parameter_change_status == "returned_to_initial" and AppController.t(
-        "a11y.sr.response_ready_parameter_returned_to_initial", nil,
-        "Generated code finished with the parameter at its original value. The requested state may already have been set, or a helper restored it after failing verification. Review the response and confirm the displayed plugin value before continuing.")
-      or no_project_change and AppController.t(
-      "a11y.sr.response_ready_no_project_change", nil,
-      "Generated code finished, but no project change was detected. It may have exited early because a target was missing or the requested state was already set. Review the response and project before continuing.")
-      or ok and AppController.t("a11y.sr.run_code_ok", nil,
-        "Generated code ran.")
-      or AppController.t("a11y.sr.run_code_failed", nil,
-        "Generated code failed. Check the response and debug log.")
+  if ok then
+    return true, nil, ScreenReader.response_ready_ran_text(
+      AppController.latest_response_payload(), false)
+  end
+  return false, "run_failed", AppController.t(
+    "a11y.sr.run_code_failed", nil,
+    "Generated code failed. Check the response and debug log.")
 end
 
 function AppController.apply_latest_typed_action(opts)
@@ -12241,20 +12301,46 @@ function AppController.copy_text(text)
   return false
 end
 
-function AppController.write_transcript(text, filename)
+function AppController.unique_transcript_filename(filename)
+  filename = tostring(filename or "ScreenReader_Transcript.txt")
+  local stem, extension = filename:match("^(.*)(%.[^.]*)$")
+  if not stem or stem == "" then
+    stem, extension = filename, ""
+  end
+  local stamped = stem .. "_" .. os.date("%Y-%m-%d_%H-%M-%S")
+  for attempt = 1, 999 do
+    local suffix = attempt == 1 and "" or ("_" .. tostring(attempt))
+    local candidate = stamped .. suffix .. extension
+    local path = RA.TEMP_DIR .. candidate
+    local exists = reaper.file_exists and reaper.file_exists(path)
+    if not exists then
+      local f = io.open(path, "rb")
+      if f then f:close() exists = true end
+    end
+    if not exists then return candidate end
+  end
+  return nil
+end
+
+function AppController.write_transcript(text, filename, opts)
   filename = filename or "ScreenReader_Last_Response.txt"
+  if type(opts) == "table" and opts.non_overwriting == true then
+    filename = AppController.unique_transcript_filename(filename)
+    if not filename then return nil end
+  end
   local path = RA.TEMP_DIR .. filename
   if Code.safe_write(path, tostring(text or "")) then return path end
   return nil
 end
 
-function AppController.write_code(code, code_type)
+function AppController.write_code(code, code_type, message_idx)
   code = tostring(code or "")
   if code == "" then return nil end
   if S then S._screen_reader_last_code_save_status = nil end
   if S and S.screen_reader_mode and code_type == "lua"
       and Code.auto_save_lua then
-    local path, action_name, filename = Code.auto_save_lua(code)
+    local request_text = AppController.user_prompt_before_message(message_idx)
+    local path, action_name, filename = Code.auto_save_lua(code, request_text)
     if not path then return nil end
     local add_ok, add_msg = AppController.add_script_to_actions(path)
     S._screen_reader_last_code_save_status = {
@@ -12266,7 +12352,8 @@ function AppController.write_code(code, code_type)
     }
     return path
   elseif code_type == "lua" and Code.save_file then
-    return Code.save_file(code, Code.derive_filename(code))
+    local request_text = AppController.user_prompt_before_message(message_idx)
+    return Code.save_file(code, Code.derive_filename(code, request_text))
   elseif code_type == "jsfx" and Code.save_file_jsfx then
     return Code.save_file_jsfx(code, Code.derive_filename_jsfx(code))
   elseif code_type == "typed_actions" then

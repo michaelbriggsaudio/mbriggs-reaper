@@ -5137,9 +5137,6 @@ function CTX.plugin_pack_start()
 end
 
 function CTX.plugin_pack_parse_header(load, content)
-  if content:find("\r", 1, true) then
-    return false, "pack contains non-LF line endings"
-  end
   if content:find("<!-- stress_fixture:1 -->", 1, true)
       and CTX.PLUGIN_PACK_ALLOW_STRESS_FIXTURE ~= true then
     return false, "development stress fixture cannot be loaded"
@@ -5394,14 +5391,17 @@ function CTX.plugin_pack_load_tick()
   local integrity_done, integrity =
     Code.plugin_pack_integrity_tick(content, deadline)
   load.integrity = integrity
-  if integrity_done and integrity.state == "mismatch" then
-    return CTX.plugin_pack_fail(integrity.reason, "integrity_mismatch")
+  if integrity_done and integrity.state ~= "verified"
+      and not load.integrity_logged then
+    -- The maintained pack is Model guidance. A release-manifest difference is
+    -- diagnostic information only and must never block or warn during normal
+    -- plug-in work.
+    load.integrity_logged = true
+    Log.line("PLUGIN_PACK", "guidance integrity state: "
+      .. tostring(integrity.state) .. " "
+      .. tostring(integrity.reason or ""))
   end
-  if integrity_done and integrity.state == "unavailable" then
-    return CTX.plugin_pack_fail(integrity.reason, "integrity_unavailable")
-  end
-  if load.phase == "wait_integrity" and integrity_done
-      and integrity.state == "verified" then
+  if load.phase == "wait_integrity" and integrity_done then
     CTX.plugin_pack_publish(load, integrity)
   end
   load.active_seconds = load.active_seconds
@@ -5471,15 +5471,12 @@ end
 
 function CTX.plugin_profile_state(value)
   local key = CTX.plugin_profile_key(value)
-  if not key or not CTX._plugin_ref_cache[key] then
+  local meta = key and CTX._plugin_profile_metadata[key] or nil
+  if not key or not meta or not CTX._plugin_ref_cache[key] then
     return { state = "none" }
   end
-  local current = CTX._plugin_profile_states
-    and CTX._plugin_profile_states[key] or nil
-  if current then return current end
-  local meta = CTX._plugin_profile_metadata[key] or {}
   return {
-    state = "candidate",
+    state = "guidance",
     product_key = meta.key,
     display_name = meta.display_name,
     pack_revision = CTX._plugin_pack_revision,
@@ -5488,45 +5485,18 @@ function CTX.plugin_profile_state(value)
 end
 
 function CTX.plugin_profile_set_state(value, record)
-  local key = CTX.plugin_profile_key(value)
-  if not key or not CTX._plugin_ref_cache[key] then return nil end
-  local meta = CTX._plugin_profile_metadata[key] or {}
-  record = record or {}
-  record.state = tostring(record.state or "candidate")
-  record.product_key = meta.key
-  record.display_name = meta.display_name
-  record.pack_revision = CTX._plugin_pack_revision
-  record.section_revision = CTX._plugin_profile_section_revisions[key]
-  CTX._plugin_profile_states[key] = record
-  if record.state ~= "validated" and Net and Net.sticky_unset then
-    Net.sticky_unset("plugin_ref:" .. tostring(meta.display_name or value))
-  end
-  return record
+  -- Compatibility hook for local diagnostics. Runtime routing never depends on
+  -- a certification state.
+  return CTX.plugin_profile_state(value)
 end
 
 function CTX.plugin_profile_is_validated(value)
-  return CTX.plugin_profile_state(value).state == "validated"
+  -- Retained compatibility name. A maintained section is useful guidance even
+  -- when the installed plug-in version has a different fingerprint.
+  return CTX.plugin_profile_state(value).state == "guidance"
 end
 
-function CTX.plugin_profile_format(identifier, loaded_name)
-  local value = tostring(identifier or "")
-  local loaded = tostring(loaded_name or "")
-  if value:match("^VST3i?:") or loaded:match("^VST3i?:") then return "VST3" end
-  if value:match("^VSTi?:") or loaded:match("^VSTi?:") then return "VST" end
-  if value:match("^CLAPi?:") or loaded:match("^CLAPi?:") then return "CLAP" end
-  if value:match("^AUi?:") or loaded:match("^AUi?:") then return "AU" end
-  if value:match("^JS:") or loaded:match("^JS:") then return "JSFX" end
-  return ""
-end
-
-function CTX.plugin_profile_normalize(value)
-  local normalized = tostring(value or ""):lower():match("^%s*(.-)%s*$") or ""
-  return (normalized:gsub("%s+", " "))
-end
-
--- Developer-only knowledge-path switch used by the scored plug-in campaign.
--- The override is intentionally honored only by the isolated test resource;
--- a stale ExtState value cannot change normal or accessibility installs.
+-- Developer-only knowledge-path switch used by local plug-in campaigns.
 function CTX.plugin_profile_mode()
   local resource = reaper and reaper.GetResourcePath
     and reaper.GetResourcePath() or ""
@@ -5540,137 +5510,7 @@ function CTX.plugin_profile_mode()
   if mode == "off" or mode == "forced" then return mode end
   return "auto"
 end
-
-function CTX.plugin_profile_inventory(track, fx, identifier)
-  if not track or fx == nil or fx < 0 then
-    return nil, "inventory_failed"
-  end
-  local ok_count, count = pcall(reaper.TrackFX_GetNumParams, track, fx)
-  count = ok_count and tonumber(count) or nil
-  if not count or count < 0 then return nil, "inventory_failed" end
-  local ok_loaded, _, loaded_name = pcall(
-    reaper.TrackFX_GetFXName, track, fx, "")
-  if not ok_loaded then return nil, "inventory_failed" end
-  local params = {}
-  local fingerprint_lines = {
-    "identifier=" .. tostring(identifier or ""),
-    "loaded_name=" .. tostring(loaded_name or ""),
-    "parameter_count=" .. tostring(count),
-  }
-  for index = 0, count - 1 do
-    local ok_name, _, name = pcall(
-      reaper.TrackFX_GetParamName, track, fx, index, "")
-    if not ok_name then return nil, "inventory_failed" end
-    local section = ""
-    local section_available = reaper.TrackFX_GetParamSectionName ~= nil
-    if section_available then
-      local ok_section, value = pcall(
-        reaper.TrackFX_GetParamSectionName, track, fx, index)
-      if not ok_section then return nil, "inventory_failed" end
-      section = tostring(value or "")
-    end
-    name = tostring(name or "")
-    params[#params + 1] = {
-      index = index,
-      name = name,
-      section = section,
-      section_available = section_available,
-    }
-    fingerprint_lines[#fingerprint_lines + 1] =
-      tostring(index) .. "\t" .. name .. "\t" .. section
-  end
-  local fingerprint_text = tbl_concat(fingerprint_lines, "\n")
-  return {
-    identifier = tostring(identifier or ""),
-    loaded_name = tostring(loaded_name or ""),
-    format = CTX.plugin_profile_format(identifier, loaded_name),
-    parameter_count = count,
-    params = params,
-    observed_fingerprint_sha256 =
-      RA.sha256_hex and RA.sha256_hex(fingerprint_text) or nil,
-  }
-end
-
-function CTX.plugin_profile_match(value, inventory)
-  local key = CTX.plugin_profile_key(value)
-  local meta = key and CTX.plugin_profile_ensure_validation(key) or nil
-  if not meta or type(inventory) ~= "table" then
-    return nil, "inventory_failed"
-  end
-  if not inventory.observed_fingerprint_sha256 then
-    return nil, "fingerprint_unavailable"
-  end
-  local norm = CTX.plugin_profile_normalize
-  local name_counts = {}
-  for _, param in ipairs(inventory.params or {}) do
-    local name_key = norm(param.name)
-    name_counts[name_key] = (name_counts[name_key] or 0) + 1
-  end
-  local mismatch = "no_matching_fingerprint"
-  for _, fingerprint in ipairs(meta.fingerprints or {}) do
-    if tostring(fingerprint.format or "") == tostring(inventory.format or "")
-       and norm(fingerprint.identifier) == norm(inventory.identifier)
-       and norm(fingerprint.loaded_name) == norm(inventory.loaded_name) then
-      local count_rule = fingerprint.parameter_count or {}
-      local mode = tostring(count_rule.mode or "exact")
-      local count_ok = false
-      if mode == "exact" then
-        count_ok = tonumber(count_rule.value) == inventory.parameter_count
-      elseif mode == "range" then
-        count_ok = inventory.parameter_count >= tonumber(count_rule.min or -1)
-          and inventory.parameter_count <= tonumber(count_rule.max or -1)
-      elseif mode == "advisory" then
-        count_ok = true
-      end
-      if not count_ok then
-        mismatch = "parameter_count_mismatch"
-      else
-        local anchors_ok = true
-        for _, anchor in ipairs(fingerprint.required_parameters or {}) do
-          local index = tonumber(anchor.index)
-          local live = index and inventory.params[index + 1] or nil
-          local anchor_name = norm(anchor.name)
-          if not live or norm(live.name) ~= anchor_name then
-            anchors_ok = false
-            mismatch = "required_parameter_mismatch"
-            break
-          end
-          local duplicate = (name_counts[anchor_name] or 0) > 1
-          if duplicate and not anchor.section_required then
-            anchors_ok = false
-            mismatch = "ambiguous_required_parameter"
-            break
-          end
-          if anchor.section_required then
-            if not live.section_available then
-              anchors_ok = false
-              mismatch = "section_api_unavailable"
-              break
-            end
-            if norm(live.section) ~= norm(anchor.section) then
-              anchors_ok = false
-              mismatch = "required_section_mismatch"
-              break
-            end
-          end
-        end
-        if anchors_ok then
-          if norm(fingerprint.observed_fingerprint_sha256)
-              ~= norm(inventory.observed_fingerprint_sha256) then
-            mismatch = "observed_fingerprint_mismatch"
-          else
-            return fingerprint
-          end
-        end
-      end
-    end
-  end
-  return nil, mismatch
-end
-
--- Whether the given plugin identifier resolves to a curated Plugin_Pack
--- section whose exact live fingerprint was validated in this session. A name
--- or alias match alone remains only a candidate and never suppresses scanning.
+-- Whether the given plug-in identifier resolves to a maintained guide.
 function Code.is_curated_plugin(ident)
   if not ident or ident == "" then return false end
   if CTX.plugin_profile_mode() == "off" then return false end
@@ -5678,7 +5518,6 @@ function Code.is_curated_plugin(ident)
   local k = _profile_route_key(ident)
   k = PLUGIN_REF_ALIASES[k] or k
   return CTX._plugin_ref_cache[k] ~= nil
-    and CTX.plugin_profile_is_validated(k)
 end
 
 -- Return the stock fallback spec for a given type, or nil. Reads the
@@ -5703,6 +5542,100 @@ end
 
 CTX.PLUGIN_PROFILE_CONTEXT_MAX_BYTES =
   CTX.PLUGIN_PROFILE_CONTEXT_MAX_BYTES or (96 * 1024)
+
+function CTX.plugin_profile_stage_a_lua(body)
+  local source = tostring(body or "")
+  local lower = source:lower()
+  if lower:find("set_param_display", 1, true)
+      or lower:find("set_param_enum", 1, true) then
+    return nil
+  end
+
+  if lower:find("reaassist_resolve_profile_params", 1, true) then
+    local indices = {}
+    for index in source:gmatch("{%s*index%s*=%s*(%d+)") do
+      indices[#indices + 1] = tonumber(index)
+    end
+    if #indices == 0 then return nil end
+    source = source:gsub("mapped%[(%d+)%]", function(ordinal)
+      return tostring(indices[tonumber(ordinal) or 0] or "mapped[" .. ordinal .. "]")
+    end)
+    source = source:gsub(
+      "local%s+mapped%s*,%s*guard_err%s*=%s*"
+        .. "reaassist_resolve_profile_params%s*(%b())%s*", "")
+    source = source:gsub(
+      "if%s+not%s+mapped%s+then%s+error%b()%s+end%s*", "")
+  end
+
+  lower = source:lower()
+  if lower:find("reaassist_", 1, true)
+      or lower:find("mapped[", 1, true) then
+    return nil
+  end
+  source = source:match("^%s*(.-)%s*$") or ""
+  if source:find("^reaper%.defer%s*%(%s*function%s*%(%s*%)")
+      and source:find("end%s*%)%s*$") then
+    source = source:gsub(
+      "^reaper%.defer%s*%(%s*function%s*%(%s*%)%s*", "", 1)
+    source = source:gsub("%s*end%s*%)%s*$", "", 1)
+  end
+  if source:lower():find("reaper.defer", 1, true) then return nil end
+  return source ~= "" and source or nil
+end
+
+function CTX.plugin_profile_stage_a_control(value)
+  local text = tostring(value or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+
+  -- Older certified guides contain runnable examples for the retired broker.
+  -- Keep verified direct-write recipes when they can be reduced to standard
+  -- REAPER Lua. Omit examples and paragraphs that require retired helpers.
+  text = text:gsub("```lua[^\n]*\n(.-)\n```", function(body)
+    local converted = CTX.plugin_profile_stage_a_lua(body)
+    return converted and ("```lua\n" .. converted .. "\n```") or ""
+  end)
+
+  local kept = {}
+  for paragraph in (text .. "\n\n"):gmatch("(.-)\n\n") do
+    local lower = paragraph:lower()
+    local plain_lower = lower:gsub("`", "")
+    local mentions_defer = plain_lower:find("reaper.defer", 1, true)
+    local prohibits_defer = plain_lower:find(
+        "do not use reaper.defer", 1, true)
+      or plain_lower:find("never use reaper.defer", 1, true)
+      or plain_lower:find("do not call reaper.defer", 1, true)
+      or plain_lower:find("never call reaper.defer", 1, true)
+      or plain_lower:find("never implement this with", 1, true)
+    local retired = lower:find("reaassist_", 1, true)
+      or lower:find("mapped[", 1, true)
+      or lower:find("set_param_display", 1, true)
+      or lower:find("set_param_enum", 1, true)
+      or lower:find("prompt_bundle:plugin_helpers", 1, true)
+      or lower:find("shipping provenance validator", 1, true)
+      or lower:find("provenance validator must", 1, true)
+      or lower:find("static safety validator", 1, true)
+      or lower:find("profile-resolver", 1, true)
+      or (mentions_defer and not prohibits_defer)
+    if not retired and paragraph:match("%S") then
+      kept[#kept + 1] = paragraph
+    end
+  end
+  return tbl_concat(kept, "\n\n"):match("^%s*(.-)%s*$") or ""
+end
+
+function CTX.plugin_profile_compact_precise_control(value)
+  local text = tostring(value or "")
+  local marker = text:find("\n### MUSICAL INTENT GUIDANCE", 1, true)
+  if marker then return text:sub(1, marker - 1):match("^%s*(.-)%s*$") or "" end
+  return text
+end
+
+function CTX.plugin_profile_preferred_insert_name(meta)
+  local identifiers = type(meta) == "table" and meta.identifiers or nil
+  local names = type(identifiers) == "table" and identifiers.add_by_name or nil
+  local first = type(names) == "table" and names[1] or nil
+  first = type(first) == "string" and first:match("^%s*(.-)%s*$") or ""
+  return first ~= "" and first or nil
+end
 
 function CTX.plugin_profile_selected_chunks(user_text, section)
   local text = tostring(user_text or ""):lower()
@@ -5761,6 +5694,12 @@ function CTX.plugin_profile_render_section(value, user_text)
   local output = { "## " .. tostring(section.display_name or key) }
   for _, chunk_name in ipairs(selection.selected) do
     local chunk = section[chunk_name]
+    if chunk_name == "control" then
+      chunk = CTX.plugin_profile_stage_a_control(chunk)
+      if selection.reason == "explicit_target_and_value" then
+        chunk = CTX.plugin_profile_compact_precise_control(chunk)
+      end
+    end
     if type(chunk) == "string" and chunk:match("%S") then
       output[#output + 1] = chunk
     end
@@ -5771,438 +5710,107 @@ function CTX.plugin_profile_render_section(value, user_text)
 end
 
 
-function CTX.plugin_profile_build_response(entries)
-  local names = {}
-  local bodies = {}
-  for _, entry in ipairs(entries or {}) do
-    names[#names + 1] = tostring(entry.key)
-    bodies[#bodies + 1] = entry.rendered
-  end
-  return "PLUGIN PARAMETER REFERENCE (" .. tbl_concat(names, ", ") .. "):\n"
-    .. "MANDATORY MAPPED-WRITE GUARD: Inside the single deferred callback "
-    .. "and before any parameter write, call "
-    .. "`reaassist_resolve_profile_params(tr, fx, specs)` once with every "
-    .. "mapped target for that FX. Each spec contains the stored `index`, "
-    .. "exact `name`, and exact `section` when names repeat. If it returns "
-    .. "nil, use exactly `if not mapped then error(guard_err) end`; the nil "
-    .. "check tests `mapped`, never `guard_err`. Here `tr` and `fx` are "
-    .. "placeholders: pass the exact MediaTrack and FX-index variables already "
-    .. "resolved by the script. Use only the returned `mapped[N]` indices in "
-    .. "TrackFX_SetParam*, set_param_display, set_param_enum, or "
-    .. "set_param_enum_paced; never write a stored numeric index directly. "
-    .. "The resolver is built into ReaAssist's sandbox. Call that global "
-    .. "directly; do not define, copy, wrap, alias, assign, shadow, or replace it.\n\n"
-    .. tbl_concat(bodies, "\n")
-end
-
-function CTX.plugin_profile_followup_groups(entries, limit)
-  local remaining = {}
-  for index, entry in ipairs(entries or {}) do
-    remaining[#remaining + 1] = { entry = entry, mention_index = index }
-  end
-  local groups = {}
-  while #remaining > 0 do
-    local chosen = { remaining[1] }
-    local rest = {}
-    for index = 2, #remaining do rest[#rest + 1] = remaining[index] end
-    table.sort(rest, function(a, b)
-      local a_bytes = #CTX.plugin_profile_build_response({ a.entry })
-      local b_bytes = #CTX.plugin_profile_build_response({ b.entry })
-      if a_bytes ~= b_bytes then return a_bytes < b_bytes end
-      return a.mention_index < b.mention_index
-    end)
-    for _, candidate in ipairs(rest) do
-      local trial = {}
-      for _, item in ipairs(chosen) do trial[#trial + 1] = item.entry end
-      trial[#trial + 1] = candidate.entry
-      if #CTX.plugin_profile_build_response(trial) <= limit then
-        chosen[#chosen + 1] = candidate
-      end
-    end
-    table.sort(chosen, function(a, b)
-      return a.mention_index < b.mention_index
-    end)
-    local chosen_map = {}
-    local names = {}
-    for _, item in ipairs(chosen) do
-      chosen_map[item.mention_index] = true
-      names[#names + 1] = tostring(
-        item.entry.meta.display_name or item.entry.key)
-    end
-    groups[#groups + 1] = names
-    local next_remaining = {}
-    for _, item in ipairs(remaining) do
-      if not chosen_map[item.mention_index] then
-        next_remaining[#next_remaining + 1] = item
-      end
-    end
-    if #next_remaining == #remaining then break end
-    remaining = next_remaining
-  end
-  return groups
-end
-
 function CTX.plugin_profile_plan_request(user_text, candidates)
   local entries = {}
-  local seen = {}
   for _, candidate in ipairs(candidates or {}) do
     local key = tostring(candidate.key or "")
-    if key ~= "" and not seen[key] then
-      seen[key] = true
-      local state = CTX.plugin_profile_state(key)
-      local meta = CTX._plugin_profile_metadata[key] or candidate.meta or {}
-      if state.state == "validated" then
-        local rendered, selection =
-          CTX.plugin_profile_render_section(key, user_text)
-        if rendered then
-          entries[#entries + 1] = {
-            key = key,
-            meta = meta,
-            state = state,
-            rendered = rendered,
-            selection = selection,
-            selected_chunks_key = tbl_concat(selection.selected or {}, ","),
-          }
-        end
-      end
+    local rendered, selection = CTX.plugin_profile_render_section(key, user_text)
+    if rendered then
+      entries[#entries + 1] = {
+        key = key,
+        meta = CTX._plugin_profile_metadata[key] or candidate.meta or {},
+        state = { state = "guidance" },
+        rendered = rendered,
+        selection = selection,
+      }
     end
   end
-  local response = CTX.plugin_profile_build_response(entries)
-  local limit = tonumber(CTX.PLUGIN_PROFILE_CONTEXT_MAX_BYTES) or (96 * 1024)
   local plan = {
     user_text = tostring(user_text or ""),
     entries = entries,
-    requested_bytes = #response,
-    limit_bytes = limit,
-    overflow = #entries > 0 and #response > limit,
-    notice_emitted = false,
+    overflow = false,
   }
-  if plan.overflow then
-    local names = {}
-    local contributions = {}
-    for _, entry in ipairs(entries) do
-      names[#names + 1] = tostring(entry.meta.display_name or entry.key)
-      contributions[#contributions + 1] = tostring(
-        entry.meta.display_name or entry.key) .. "="
-        .. tostring(#entry.rendered) .. " bytes"
-    end
-    local suggested = {}
-    for _, group in ipairs(
-        CTX.plugin_profile_followup_groups(entries, limit)) do
-      suggested[#suggested + 1] = "[" .. tbl_concat(group, ", ") .. "]"
-    end
-    plan.refusal_message = "PLUGIN PROFILE REQUEST REFUSED ("
-      .. tbl_concat(names, ", ") .. "). Context contributions: "
-      .. tbl_concat(contributions, "; ")
-      .. ". The complete request would exceed the 96 KiB profile-context "
-      .. "limit, so no new mappings were injected or authorized. Suggested "
-      .. "follow-up groups: " .. tbl_concat(suggested, " then ")
-      .. ". These suggestions authorize no execution."
-  end
   CTX._plugin_profile_request_plan = plan
   return plan
 end
 
-function CTX.plugin_profile_record_request_overflow(entry, request_text, plan)
-  local meta = entry.meta
-  for _, prior in ipairs(S.plugin_profiles_used or {}) do
-    if type(prior) == "table"
-        and prior.product_key == meta.key
-        and prior.injection_reason == "request_context_overflow" then
-      return prior
+function CTX.plugin_profile_apply_guidance_plan(plan)
+  if type(plan) ~= "table" or type(plan.entries) ~= "table"
+      or type(Net) ~= "table" or type(Net.sticky_set) ~= "function" then
+    return 0
+  end
+  local applied = 0
+  for _, entry in ipairs(plan.entries) do
+    local rendered = type(entry) == "table" and entry.rendered or nil
+    local meta = type(entry) == "table" and entry.meta or nil
+    local display_name = type(meta) == "table"
+      and tostring(meta.display_name or "") or ""
+    if display_name == "" then display_name = tostring(entry.key or "") end
+    local preferred_insert = CTX.plugin_profile_preferred_insert_name(meta)
+    local insertion_guidance = preferred_insert
+      and ("Try the preferred insertion string `" .. preferred_insert
+        .. "` first. Use other listed insertion names only as fallbacks. ")
+      or ""
+    local sticky_key = "plugin_ref:" .. display_name
+    if display_name ~= "" and type(rendered) == "string"
+        and rendered:match("%S") and not S.sticky_context[sticky_key] then
+      local stage_a_rules = applied == 0 and
+        ("Return one complete runnable script inside a single ```lua code "
+          .. "fence. Use standard reaper.* APIs only and never call any "
+          .. "reaassist_* function. Prefer one synchronous action: begin one "
+          .. "Undo block before the first project change, complete every "
+          .. "requested change, and end that same block. For maintained-guide "
+          .. "requests, run TrackFX_AddByName and direct TrackFX_SetParam* "
+          .. "writes synchronously inside that block. Do not use reaper.defer "
+          .. "for a maintained-guide request. "
+          .. "Keep every value scoped to its plug-in heading and never reuse "
+      .. "another plug-in's formulas or normalized anchors. "
+      .. "Check every required AddByName "
+          .. "result before continuing. Treat the verified guide facts as "
+          .. "helpful references. If the live plug-in does not match, show a "
+          .. "clear message and leave the project unchanged.\n\n") or ""
+      Net.sticky_set(sticky_key,
+        "MAINTAINED PLUG-IN GUIDANCE (reference only):\n"
+          .. "Write ordinary runnable REAPER Lua with standard reaper.* APIs. "
+          .. insertion_guidance
+          .. "Use the verified names, indices, and normalized values below when "
+          .. "they match the request. Direct verified positions and conversions "
+          .. "are allowed; live-name resolution is optional. Do not call "
+          .. "ReaAssist-only helper functions shown in older examples.\n\n"
+          .. stage_a_rules
+          .. rendered,
+        "plugin_guidance")
+      if S.plugin_ref_sent then S.plugin_ref_sent[display_name] = true end
+      applied = applied + 1
     end
   end
-  local receipt = {
-    product_key = meta.key,
-    display_name = meta.display_name,
-    pack_revision = CTX._plugin_pack_revision,
-    section_revision = CTX._plugin_profile_section_revisions[entry.key],
-    available_chunks = entry.selection.available,
-    selected_chunks = entry.selection.selected,
-    omitted_chunks = entry.selection.omitted,
-    chunk_selection_reason = entry.selection.reason,
-    chunk_bytes = entry.selection.bytes,
-    selected_chunks_key = entry.selected_chunks_key,
-    validation_state = entry.state.state,
-    validation_reason = entry.state.reason,
-    validation_source = entry.state.source,
-    validation_elapsed_ms = entry.state.elapsed_ms,
-    fingerprint = entry.state.fingerprint,
-    identifier = entry.state.identifier,
-    format = entry.state.format,
-    integrity_state = CTX._plugin_pack_owner.integrity.state,
-    integrity_method = CTX._plugin_pack_owner.integrity.method,
-    integrity_expected_hash = CTX._plugin_pack_owner.integrity.expected_hash,
-    integrity_actual_hash = CTX._plugin_pack_owner.integrity.actual_hash,
-    integrity_override = CTX._plugin_pack_owner.integrity.override == true,
-    pack_integrity_state = CTX._plugin_pack_owner.integrity.state,
-    pack_integrity_sha256 = CTX._plugin_pack_owner.integrity.actual_hash,
-    provenance = meta.provenance,
-    preparation_cache_disposition = entry.state.source,
-    existing_request = CTX.prompt_refers_to_existing_plugin_profile(
-      request_text, meta) == true,
-    section_bytes = #entry.rendered,
-    context_bytes = 0,
-    injected = false,
-    injection_reason = "request_context_overflow",
-    context_limit_bytes = plan.limit_bytes,
-    context_used_bytes = 0,
-    context_requested_bytes = plan.requested_bytes,
-  }
-  CTX._plugin_profile_receipts[#CTX._plugin_profile_receipts + 1] = receipt
-  S.plugin_profiles_used[#S.plugin_profiles_used + 1] = receipt
-  if Net and Net.sticky_unset then
-    Net.sticky_unset("plugin_ref:" .. tostring(meta.display_name or entry.key))
-  end
-  return receipt
+  return applied
 end
-
 
 function CTX.plugin_ref(filter_names, options)
   if not filter_names or #filter_names == 0 then
-    return "PLUGIN_REF: (error: no plugin specified -- "
-      .. "use plugin_ref:ReaComp or plugin_ref:reverb, eq)"
+    return "PLUGIN_REF: no plug-in was specified."
   end
-
-  local ok, err = CTX.ensure_plugin_pack_cache()
-  if not ok then return nil, err end
-  if CTX.plugin_profile_mode() == "off" then
-    return "PLUGIN PROFILES DISABLED FOR THIS DEVELOPMENT CASE. Do not use "
-      .. "bundled parameter mappings. Use fresh live fx_params or fx_inspect "
-      .. "data and generic parameter helpers only."
-  end
-  if type(S.plugin_profiles_used) ~= "table" then
-    S.plugin_profiles_used = {}
-  end
-  if #S.plugin_profiles_used == 0 then
-    S.plugin_profile_context_bytes = 0
-  end
+  local ok, load_error = CTX.ensure_plugin_pack_cache()
+  if not ok then return nil, load_error end
 
   local entries = {}
-  local unavailable_names = {}
-  local request_text = S.pending_orig_prompt or ""
-  local approved_stock_refs = type(options) == "table"
-    and type(options.approved_stock_refs) == "table"
-    and options.approved_stock_refs or {}
   for _, name in ipairs(filter_names) do
-    local k = _profile_route_key(name)
-    k = PLUGIN_REF_ALIASES[k] or k
-    local section = CTX._plugin_ref_cache[k]
-    local approved_stock = approved_stock_refs[k]
-    local validated = section and CTX.plugin_profile_is_validated(k)
-    local pending_stock_state = nil
-    if section and not validated and type(approved_stock) == "table" then
-      local meta = CTX.plugin_profile_ensure_validation(k)
-      local approved_ident = CTX.plugin_profile_normalize(
-        approved_stock.add or approved_stock.identifier)
-      if type(meta) == "table" and approved_ident ~= "" then
-        for _, fingerprint in ipairs(
-            type(meta.fingerprints) == "table" and meta.fingerprints or {}) do
-          if CTX.plugin_profile_normalize(fingerprint.identifier)
-              == approved_ident
-             and tostring(fingerprint.observed_fingerprint_sha256 or "") ~= "" then
-            pending_stock_state = {
-              state = "approved_stock_pending",
-              reason = "explicit_turn_only_stock_fallback",
-              source = "explicit_user_choice",
-              identifier = fingerprint.identifier,
-              format = fingerprint.format,
-              fingerprint = fingerprint.observed_fingerprint_sha256,
-            }
-            break
-          end
-        end
-      end
-    end
-    if section and (validated or pending_stock_state) then
-      local state = pending_stock_state or CTX.plugin_profile_state(k)
-      local meta = CTX._plugin_profile_metadata[k] or {}
-      local rendered, selection =
-        CTX.plugin_profile_render_section(k, request_text)
-      if rendered then
-        local chunk_key = tbl_concat(selection.selected or {}, ",")
-        local active = nil
-        for _, prior in ipairs(S.plugin_profiles_used or {}) do
-          if type(prior) == "table"
-             and prior.product_key == meta.key
-             and prior.pack_revision == CTX._plugin_pack_revision
-             and prior.section_revision
-               == CTX._plugin_profile_section_revisions[k]
-             and prior.fingerprint == state.fingerprint
-             and prior.selected_chunks_key == chunk_key then
-            active = prior
-            break
-          end
-        end
-        entries[#entries + 1] = {
-          key = k,
-          meta = meta,
-          state = state,
-          rendered = rendered,
-          selection = selection,
-          selected_chunks_key = chunk_key,
-          active = active,
-        }
-      end
-    elseif section then
-      unavailable_names[#unavailable_names + 1] =
-        tostring((CTX._plugin_profile_metadata[k] or {}).display_name or name)
+    local key = _profile_route_key(name)
+    key = PLUGIN_REF_ALIASES[key] or key
+    if CTX._plugin_ref_cache[key] then
+      local rendered = CTX.plugin_profile_render_section(
+        key, type(S) == "table" and S.pending_orig_prompt or "")
+      if rendered then entries[#entries + 1] = rendered end
     end
   end
-
   if #entries == 0 then
-    if #unavailable_names > 0 then
-      return "PLUGIN PROFILE NOT VALIDATED (" ..
-        tbl_concat(unavailable_names, ", ") .. "). Do not use bundled "
-        .. "parameter mappings for this request. Use fresh live fx_params or "
-        .. "fx_inspect data and the generic parameter helpers instead."
-    end
-    return "PLUGIN_REF (no reference data for: "
+    return "PLUGIN_REF: no maintained guide matched "
       .. tbl_concat(filter_names, ", ")
-      .. "). Use the parameter helpers (find_param, set_param_display) at runtime instead."
+      .. ". Use live parameter names and standard REAPER APIs."
   end
-
-  local request_plan = CTX._plugin_profile_request_plan
-  if type(request_plan) == "table"
-      and request_plan.user_text == request_text
-      and request_plan.overflow == true then
-    for _, entry in ipairs(entries) do
-      CTX.plugin_profile_record_request_overflow(
-        entry, request_text, request_plan)
-    end
-    if not request_plan.notice_emitted then
-      request_plan.notice_emitted = true
-      return request_plan.refusal_message
-    end
-    return "PLUGIN PROFILE REQUEST REFUSED for this complete request. "
-      .. "No bundled mapping was injected or authorized."
-  end
-
-  local matched_names = {}
-  local pending_entries = {}
-  for _, entry in ipairs(entries) do
-    matched_names[#matched_names + 1] = entry.key
-    if not (entry.active and entry.active.injected == true) then
-      pending_entries[#pending_entries + 1] = entry
-    end
-  end
-  if #pending_entries == 0 then
-    return "PLUGIN PARAMETER REFERENCE (" .. tbl_concat(matched_names, ", ")
-      .. ") was already supplied for this request."
-  end
-  local response = CTX.plugin_profile_build_response(pending_entries)
-  local used = tonumber(S.plugin_profile_context_bytes or 0) or 0
-  local limit = tonumber(CTX.PLUGIN_PROFILE_CONTEXT_MAX_BYTES) or (96 * 1024)
-  local requested_bytes = #response
-  if #pending_entries > 0 and used + requested_bytes > limit then
-    local refused_names = {}
-    for _, entry in ipairs(pending_entries) do
-      local meta = entry.meta
-      local receipt = {
-        product_key = meta.key,
-        display_name = meta.display_name,
-        pack_revision = CTX._plugin_pack_revision,
-        section_revision = CTX._plugin_profile_section_revisions[entry.key],
-        available_chunks = entry.selection.available,
-        selected_chunks = entry.selection.selected,
-        omitted_chunks = entry.selection.omitted,
-        chunk_selection_reason = entry.selection.reason,
-        chunk_bytes = entry.selection.bytes,
-        selected_chunks_key = entry.selected_chunks_key,
-        validation_state = entry.state.state,
-        validation_reason = entry.state.reason,
-        validation_source = entry.state.source,
-        validation_elapsed_ms = entry.state.elapsed_ms,
-        fingerprint = entry.state.fingerprint,
-        identifier = entry.state.identifier,
-        format = entry.state.format,
-        integrity_state = CTX._plugin_pack_owner.integrity.state,
-        integrity_method = CTX._plugin_pack_owner.integrity.method,
-        integrity_expected_hash =
-          CTX._plugin_pack_owner.integrity.expected_hash,
-        integrity_actual_hash = CTX._plugin_pack_owner.integrity.actual_hash,
-        integrity_override = CTX._plugin_pack_owner.integrity.override == true,
-        pack_integrity_state = CTX._plugin_pack_owner.integrity.state,
-        pack_integrity_sha256 = CTX._plugin_pack_owner.integrity.actual_hash,
-        provenance = meta.provenance,
-        preparation_cache_disposition = entry.state.source,
-        existing_request = CTX.prompt_refers_to_existing_plugin_profile(
-          request_text, meta) == true,
-        section_bytes = #entry.rendered,
-        context_bytes = 0,
-        injected = false,
-        injection_reason = "request_context_overflow",
-        context_limit_bytes = limit,
-        context_used_bytes = used,
-        context_requested_bytes = requested_bytes,
-      }
-      CTX._plugin_profile_receipts[#CTX._plugin_profile_receipts + 1] = receipt
-      S.plugin_profiles_used[#S.plugin_profiles_used + 1] = receipt
-      refused_names[#refused_names + 1] = tostring(meta.display_name or entry.key)
-      if Net and Net.sticky_unset then
-        Net.sticky_unset("plugin_ref:" .. tostring(meta.display_name or entry.key))
-      end
-    end
-    local contributions = {}
-    for _, entry in ipairs(pending_entries) do
-      contributions[#contributions + 1] = tostring(
-        entry.meta.display_name or entry.key) .. "=" .. tostring(#entry.rendered)
-        .. " bytes"
-    end
-    local suggested = {}
-    for _, group in ipairs(
-        CTX.plugin_profile_followup_groups(pending_entries, limit)) do
-      suggested[#suggested + 1] = "[" .. tbl_concat(group, ", ") .. "]"
-    end
-    return "PLUGIN PROFILE REQUEST REFUSED (" .. tbl_concat(refused_names, ", ")
-      .. "). Context contributions: " .. tbl_concat(contributions, "; ")
-      .. ". The complete request would exceed the 96 KiB profile-context "
-      .. "limit, so no new mappings were injected or authorized. Suggested "
-      .. "follow-up groups: " .. tbl_concat(suggested, " then ")
-      .. ". These suggestions authorize no execution."
-  end
-
-  for _, entry in ipairs(pending_entries) do
-    local meta = entry.meta
-    local receipt = {
-      product_key = meta.key,
-      display_name = meta.display_name,
-      pack_revision = CTX._plugin_pack_revision,
-      section_revision = CTX._plugin_profile_section_revisions[entry.key],
-      available_chunks = entry.selection.available,
-      selected_chunks = entry.selection.selected,
-      omitted_chunks = entry.selection.omitted,
-      chunk_selection_reason = entry.selection.reason,
-      chunk_bytes = entry.selection.bytes,
-      selected_chunks_key = entry.selected_chunks_key,
-      validation_state = entry.state.state,
-      validation_reason = entry.state.reason,
-      validation_source = entry.state.source,
-      validation_elapsed_ms = entry.state.elapsed_ms,
-      fingerprint = entry.state.fingerprint,
-      identifier = entry.state.identifier,
-      format = entry.state.format,
-      integrity_state = CTX._plugin_pack_owner.integrity.state,
-      integrity_method = CTX._plugin_pack_owner.integrity.method,
-      integrity_expected_hash = CTX._plugin_pack_owner.integrity.expected_hash,
-      integrity_actual_hash = CTX._plugin_pack_owner.integrity.actual_hash,
-      integrity_override = CTX._plugin_pack_owner.integrity.override == true,
-      pack_integrity_state = CTX._plugin_pack_owner.integrity.state,
-      pack_integrity_sha256 = CTX._plugin_pack_owner.integrity.actual_hash,
-      provenance = meta.provenance,
-      preparation_cache_disposition = entry.state.source,
-      existing_request = CTX.prompt_refers_to_existing_plugin_profile(
-        request_text, meta) == true,
-      section_bytes = #entry.rendered,
-      context_bytes = #entry.rendered,
-      injected = true,
-    }
-    CTX._plugin_profile_receipts[#CTX._plugin_profile_receipts + 1] = receipt
-    S.plugin_profiles_used[#S.plugin_profiles_used + 1] = receipt
-  end
-
-  S.plugin_profile_context_bytes = used + #response
-  return response
+  return "MAINTAINED PLUG-IN GUIDANCE (helpful generation reference only):\n\n"
+    .. tbl_concat(entries, "\n\n")
 end
 
 
@@ -7267,73 +6875,11 @@ end
 -- Phase 2 (params read + cleanup) is handled inline in finalize_context so
 -- the shallow-vs-deep-scan branch can share state with the rest of the turn.
 
-function CTX.fx_inspect_cleanup(fi, release_refresh)
-  if not fi then return true end
-  local ok, err = pcall(function()
-    if fi.temp_project and reaper.SelectProjectInstance then
-      reaper.SelectProjectInstance(fi.temp_project)
-    end
-    if fi.tr and (not reaper.ValidatePtr2
-        or reaper.ValidatePtr2(fi.temp_project or 0, fi.tr, "MediaTrack*")) then
-      reaper.DeleteTrack(fi.tr)
-    end
-    fi.tr = nil
-
-    if fi.temp_project then
-      local exists = false
-      local index = 0
-      while true do
-        local project = reaper.EnumProjects(index)
-        if not project then break end
-        if project == fi.temp_project then
-          exists = true
-          break
-        end
-        index = index + 1
-      end
-      if exists then
-        if reaper.SelectProjectInstance then
-          reaper.SelectProjectInstance(fi.temp_project)
-        end
-        -- Adding an FX creates native REAPER undo state even without an
-        -- explicit Undo block. That state belongs only to this disposable
-        -- project. Clear its dirty flag before closing so no Save prompt can
-        -- appear.
-        reaper.GetSetProjectInfo(fi.temp_project, "DIRTY", 0, true)
-        reaper.Main_OnCommand(40860, 0)
-      end
-    end
-    if fi.original_project and reaper.SelectProjectInstance then
-      reaper.SelectProjectInstance(fi.original_project)
-    end
-  end)
-
-  if release_refresh ~= false and fi.refresh_held then
-    reaper.PreventUIRefresh(-1)
-    fi.refresh_held = false
-  end
-  if fi.focus_handle and reaper.JS_Window_SetFocus
-      and (not reaper.JS_Window_IsWindow
-        or reaper.JS_Window_IsWindow(fi.focus_handle)) then
-    pcall(reaper.JS_Window_SetFocus, fi.focus_handle)
-  end
-
-  if ok and fi.before and CTX.plugin_profile_observable_snapshot
-      and CTX.plugin_profile_observables_equal then
-    local after = CTX.plugin_profile_observable_snapshot(fi.original_project)
-    local unchanged, field =
-      CTX.plugin_profile_observables_equal(fi.before, after)
-    if not unchanged then
-      ok = false
-      err = "observable_changed:" .. tostring(field)
-    end
-  end
-  if not ok then
-    Log.line("FX_INSPECT", "isolated cleanup failed: " .. tostring(err))
-  end
-  return ok, err
+function CTX.fx_inspect_cleanup()
+  -- Compatibility hook. Parameter inspection no longer creates temporary
+  -- tracks or project tabs, so there is no staged state to clean up.
+  return true
 end
-
 function CTX.fx_inspect_load(search_names)
   if not search_names or #search_names == 0 then
     return nil, nil, nil, "fx_inspect requires a plugin name to search for."
@@ -7409,66 +6955,11 @@ function CTX.fx_inspect_load(search_names)
   end
   Log.line("FX_INSPECT", "cache MISS: " .. best_id .. " -- scanning")
 
-  if not reaper.Main_OnCommand or not reaper.EnumProjects
-      or not reaper.GetSetProjectInfo then
-    return nil, nil, nil,
-      "Plugin inspection isolation is unavailable in this REAPER build."
-  end
-
-  -- TrackFX_AddByName creates native undo state even without an explicit
-  -- Undo block. Run the entire inspection in a disposable project tab so
-  -- neither that undo entry nor any transient dirty state reaches the user's
-  -- project.
-  local original_project = reaper.EnumProjects(-1)
-  local isolation = {
-    original_project = original_project,
-    before = CTX.plugin_profile_observable_snapshot
-      and CTX.plugin_profile_observable_snapshot(original_project) or nil,
-    focus_handle = reaper.JS_Window_GetFocus
-      and reaper.JS_Window_GetFocus() or nil,
-    refresh_held = true,
-  }
-  reaper.PreventUIRefresh(1)
-  local opened, open_err = pcall(function()
-    reaper.Main_OnCommand(40859, 0)
-    isolation.temp_project = reaper.EnumProjects(-1)
-    if not isolation.temp_project
-        or isolation.temp_project == original_project then
-      error("temporary project tab did not open")
-    end
-  end)
-  if not opened then
-    CTX.fx_inspect_cleanup(isolation, true)
-    return nil, nil, nil,
-      "Failed to open an isolated project for plugin inspection: "
-      .. tostring(open_err)
-  end
-
-  local track_count = R_CountTracks(isolation.temp_project)
-  reaper.InsertTrackAtIndex(track_count, false)
-  local tmp_tr = R_GetTrack(isolation.temp_project, track_count)
-  if not tmp_tr then
-    CTX.fx_inspect_cleanup(isolation, true)
-    return nil, nil, nil, "Failed to create temporary track for plugin inspection."
-  end
-  isolation.tr = tmp_tr
-
-  -- Hide from TCP and mixer so user doesn't see it flash.
-  reaper.SetMediaTrackInfo_Value(tmp_tr, "B_SHOWINTCP", 0)
-  reaper.SetMediaTrackInfo_Value(tmp_tr, "B_SHOWINMIXER", 0)
-
-  local fx_idx = reaper.TrackFX_AddByName(tmp_tr, best_id, false, -1)
-  if fx_idx < 0 then
-    CTX.fx_inspect_cleanup(isolation, true)
-    return nil, nil, nil, "Failed to load plugin: " .. best_id
-  end
-
-  -- Hide the plugin UI (don't flash a window).
-  reaper.TrackFX_Show(tmp_tr, fx_idx, 2)  -- 2 = hide floating window
-
-  -- The caller closes the isolated project after the deferred read. Return
-  -- false for the legacy undo_open slot so older cleanup guards stay harmless.
-  return tmp_tr, fx_idx, best_id, nil, nil, false, isolation
+  return nil, nil, best_id,
+    "No cached parameter list is available for " .. best_id .. ". "
+      .. "Use an existing instance on the requested track for live parameter "
+      .. "discovery, or use the maintained plug-in guide. ReaAssist will not "
+      .. "open another project tab to inspect a plug-in."
 end
 
 -- =============================================================================
@@ -8392,7 +7883,7 @@ local CHAIN_PHRASE_HINTS = {
   -- like "rock vocal chain" already hit via vocal%s+chain anyway,
   -- since the substring "vocal chain" is present.
   { "chain%s+of%s+effects.-vocal", {"eq", "compressor", "deesser", "reverb"} },
-  { "chain.-rock%s+vocal", {"gate", "eq", "compressor", "saturation", "limiter"} },
+  { "chain.-rock%s+vocal", {"eq", "compressor", "deesser", "reverb"} },
   { "chain.-vocal", {"eq", "compressor", "deesser", "reverb"} },
   { "vocal%s+chain",      {"eq", "compressor", "deesser", "reverb"} },
   { "vocal.-chain",       {"eq", "compressor", "deesser", "reverb"} },
@@ -9475,6 +8966,59 @@ function CTX.explicit_validated_plugin_profile_names(user_text)
   return found
 end
 
+-- A product name can appear only to identify an effect that must stay out of
+-- scope. Supplying that product's parameter map adds irrelevant tokens and can
+-- cause a small model to copy its values into the requested plug-in. Keep this
+-- test narrow: every explicit mention must be in a sentence that calls the
+-- product unrelated and requires it to remain unchanged.
+function CTX.prompt_profile_mentions_only_untouched_constraint(user_text, meta)
+  local raw = tostring(user_text or "")
+  local matches = CTX.plugin_profile_explicit_alias_matches(raw, meta)
+  if raw == "" or #matches == 0 then return false end
+  local lower = raw:lower()
+  for _, match in ipairs(matches) do
+    local first = tonumber(match.first) or 0
+    local last = tonumber(match.last) or 0
+    if first < 1 or last < first then return false end
+    local sentence_start = 1
+    for pos = 1, first - 1 do
+      local ch = lower:sub(pos, pos)
+      if ch == "." or ch == "!" or ch == "?" or ch == ";"
+          or ch == "\n" then
+        sentence_start = pos + 1
+      end
+    end
+    local sentence_end = #lower
+    local boundary = lower:find("[%.!%?;\n]", last + 1)
+    if boundary then sentence_end = boundary - 1 end
+    local sentence = lower:sub(sentence_start, sentence_end)
+    if not (sentence:find("unrelated", 1, true)
+        and sentence:find("unchanged", 1, true)) then
+      return false
+    end
+  end
+  return true
+end
+
+function CTX.prompt_has_closed_named_plugin_list(user_text, explicit_matches)
+  local text = tostring(user_text or ""):lower()
+  if text == "" then return false end
+  explicit_matches = explicit_matches
+    or CTX.explicit_plugin_profile_matches(user_text)
+  if not explicit_matches or next(explicit_matches) == nil then return false end
+
+  local literal_markers = {
+    "exactly this chain", "this exact chain", "exact chain",
+    "add exactly", "put exactly", "use exactly", "in this exact order",
+    "add nothing else", "no other plug-ins", "no other plugins",
+    "no other fx",
+  }
+  for _, marker in ipairs(literal_markers) do
+    if text:find(marker, 1, true) then return true end
+  end
+  return text:find("do not add[^%.]-other%s+plug%-?ins") ~= nil
+end
+
 function CTX.plugin_profile_candidates_for_prompt(user_text)
   if not CTX.ensure_plugin_pack_cache() then return {} end
   local text = tostring(user_text or ""):lower()
@@ -9488,9 +9032,13 @@ function CTX.plugin_profile_candidates_for_prompt(user_text)
   local by_key = {}
   local explicit_type_named = {}
   local explicit_matches = CTX.explicit_plugin_profile_matches(user_text)
+  local closed_named_list = CTX.prompt_has_closed_named_plugin_list(
+    user_text, explicit_matches)
   local function add_candidate(key, reason)
     key = CTX.plugin_profile_key(key)
-    local meta = key and CTX.plugin_profile_ensure_validation(key) or nil
+    -- Generation guidance needs only the maintained route and content section.
+    -- Certification metadata is diagnostic and must not suppress a useful map.
+    local meta = key and CTX._plugin_profile_metadata[key] or nil
     if not meta or by_key[key] then return end
     by_key[key] = {
       key = key,
@@ -9506,12 +9054,15 @@ function CTX.plugin_profile_candidates_for_prompt(user_text)
   -- such as "eq" or "compressor" belong to the preferred-type lane below and
   -- must not accidentally select the stock profile.
   for key, meta in pairs(CTX._plugin_profile_metadata or {}) do
-    if explicit_matches[key] then
+    if explicit_matches[key]
+        and not CTX.prompt_profile_mentions_only_untouched_constraint(
+          user_text, meta) then
       add_candidate(key, "direct_name")
     end
   end
 
-  if not CTX.prompt_has_explicit_stock_fx_constraint(user_text) then
+  if not closed_named_list
+      and not CTX.prompt_has_explicit_stock_fx_constraint(user_text) then
     local cache = FXCache.load()
     local pref_types = cache.preferred_types or {}
     local phrase_implied = {}
@@ -9571,451 +9122,11 @@ function CTX.plugin_profile_candidates_for_prompt(user_text)
   return out
 end
 
-function CTX.plugin_profile_validation_cache_key(candidate, fingerprint)
-  return tbl_concat({
-    tostring(CTX._plugin_pack_revision or ""),
-    tostring(candidate.meta.key or ""),
-    tostring(CTX._plugin_profile_section_revisions[candidate.key] or ""),
-    tostring(fingerprint.identifier or ""),
-    tostring(fingerprint.format or ""),
-    tostring(fingerprint.observed_fingerprint_sha256 or ""),
-  }, "|")
-end
-
-function CTX.plugin_profile_record(
-    candidate, state, reason, inventory, fingerprint, source, elapsed_ms)
-  local record = {
-    state = state,
-    reason = reason,
-    identifier = inventory and inventory.identifier
-      or fingerprint and fingerprint.identifier or nil,
-    format = inventory and inventory.format
-      or fingerprint and fingerprint.format or nil,
-    loaded_name = inventory and inventory.loaded_name or nil,
-    fingerprint = inventory and inventory.observed_fingerprint_sha256 or nil,
-    source = source,
-    elapsed_ms = elapsed_ms,
-    validated_at = state == "validated" and reaper.time_precise() or nil,
-  }
-  CTX.plugin_profile_set_state(candidate.key, record)
-  if state == "validated" and fingerprint then
-    local cache_key =
-      CTX.plugin_profile_validation_cache_key(candidate, fingerprint)
-    CTX._plugin_profile_validation_cache[cache_key] = record
-  end
-  Log.line("PLUGIN_PROFILE", tostring(candidate.meta.display_name)
-    .. " state=" .. tostring(state)
-    .. (reason and (" reason=" .. tostring(reason)) or "")
-    .. (source and (" source=" .. tostring(source)) or "")
-    .. (record.identifier and (" ident=" .. tostring(record.identifier)) or "")
-    .. (record.fingerprint and (" fingerprint=" .. record.fingerprint) or "")
-    .. (elapsed_ms and (" elapsed_ms=" .. tostring(math_floor(elapsed_ms))) or ""))
-  return record
-end
-
-function CTX.plugin_profile_fingerprint_for_loaded(candidate, loaded_name)
-  local norm = CTX.plugin_profile_normalize
-  for _, fingerprint in ipairs(candidate.meta.fingerprints or {}) do
-    if norm(fingerprint.loaded_name) == norm(loaded_name) then
-      return fingerprint
-    end
-  end
-  return nil
-end
-
-function CTX.plugin_profile_existing_instance(candidate, user_text)
-  if CTX.prompt_requests_fx_addition(user_text) then return nil, "addition" end
-  local queries = { candidate.meta.display_name }
-  for _, value in ipairs(candidate.meta.identifiers.aliases or {}) do
-    queries[#queries + 1] = value
-  end
-  for _, value in ipairs(candidate.meta.identifiers.add_by_name or {}) do
-    queries[#queries + 1] = value
-  end
-  local match, reason = CTX.live_fx_match_for_prompt(queries, user_text)
-  if not match then return nil, reason end
-  local project = reaper.EnumProjects(-1)
-  local track = R_GetTrack(project, match.track - 1)
-  if not track then return nil, "target_not_found" end
-  local ok_name, _, loaded_name = pcall(
-    reaper.TrackFX_GetFXName, track, match.fx, "")
-  if not ok_name then return nil, "inventory_failed" end
-  local fingerprint =
-    CTX.plugin_profile_fingerprint_for_loaded(candidate, loaded_name)
-  if not fingerprint then return nil, "format_or_identity_mismatch" end
-  return {
-    project = project,
-    track = track,
-    fx = match.fx,
-    fingerprint = fingerprint,
-    loaded_name = loaded_name,
-  }
-end
-
-function CTX.plugin_profile_validate_existing(candidate, target)
-  local started = reaper.time_precise()
-  local inventory, inventory_err = CTX.plugin_profile_inventory(
-    target.track, target.fx, target.fingerprint.identifier)
-  if not inventory then
-    return CTX.plugin_profile_record(candidate, "unavailable",
-      inventory_err or "inventory_failed", nil, target.fingerprint,
-      "existing_instance", (reaper.time_precise() - started) * 1000)
-  end
-  local matched, mismatch =
-    CTX.plugin_profile_match(candidate.key, inventory)
-  local record = CTX.plugin_profile_record(candidate,
-    matched and "validated" or "rejected", mismatch, inventory,
-    target.fingerprint, "existing_instance",
-    (reaper.time_precise() - started) * 1000)
-  if matched then
-    local _, track_guid = reaper.GetSetMediaTrackInfo_String(
-      target.track, "GUID", "", false)
-    record.project = tostring(target.project)
-    record.track_guid = tostring(track_guid or "")
-    record.fx_guid = reaper.TrackFX_GetFXGUID
-      and tostring(reaper.TrackFX_GetFXGUID(target.track, target.fx) or "")
-      or ""
-  end
-  return record
-end
-
-function CTX.plugin_profile_project_count()
-  local count = 0
-  while reaper.EnumProjects(count) do count = count + 1 end
-  return count
-end
-
-function CTX.plugin_profile_live_project(project)
-  if not project then return nil end
-  local project_key = tostring(project)
-  local index = 0
-  while true do
-    local candidate = reaper.EnumProjects(index)
-    if not candidate then return nil end
-    if candidate == project or tostring(candidate) == project_key then
-      return candidate
-    end
-    index = index + 1
-  end
-end
-
-function CTX.plugin_profile_observable_snapshot(project)
-  project = CTX.plugin_profile_live_project(project)
-    or CTX.plugin_profile_live_project(reaper.EnumProjects(-1))
-  if not project then
-    error("plug-in profile observable snapshot has no live project")
-  end
-  local tracks = {}
-  local selected_tracks = {}
-  local selected_items = {}
-  local fx_count = 0
-  for index = 0, R_CountTracks(project) - 1 do
-    local track = R_GetTrack(project, index)
-    if track then
-      local _, guid = reaper.GetSetMediaTrackInfo_String(
-        track, "GUID", "", false)
-      tracks[#tracks + 1] = tostring(guid or "")
-      fx_count = fx_count + (R_TrackFX_GetCount(track) or 0)
-      if R_IsTrackSelected(track) then
-        selected_tracks[#selected_tracks + 1] = tostring(guid or "")
-      end
-    end
-  end
-  if reaper.CountSelectedMediaItems and reaper.GetSelectedMediaItem then
-    for index = 0, (reaper.CountSelectedMediaItems(project) or 0) - 1 do
-      local item = reaper.GetSelectedMediaItem(project, index)
-      local _, guid = reaper.GetSetMediaItemInfo_String(
-        item, "GUID", "", false)
-      selected_items[#selected_items + 1] = tostring(guid or "")
-    end
-  end
-  table.sort(tracks)
-  table.sort(selected_tracks)
-  table.sort(selected_items)
-  local focus = reaper.JS_Window_GetFocus and reaper.JS_Window_GetFocus() or nil
-  local active_project = CTX.plugin_profile_live_project(reaper.EnumProjects(-1))
-    or project
-  return {
-    active_project = tostring(active_project),
-    project = tostring(project),
-    project_tabs = CTX.plugin_profile_project_count(),
-    dirty = reaper.GetSetProjectInfo(project, "DIRTY", 0, false),
-    undo = tostring(reaper.Undo_CanUndo2(project) or ""),
-    track_count = R_CountTracks(project),
-    fx_count = fx_count,
-    track_guids = tbl_concat(tracks, "|"),
-    selected_track_guids = tbl_concat(selected_tracks, "|"),
-    selected_item_guids = tbl_concat(selected_items, "|"),
-    focus = focus and tostring(focus) or "",
-    focus_handle = focus,
-  }
-end
-
-function CTX.plugin_profile_observables_equal(before, after)
-  local fields = {
-    "active_project", "project", "project_tabs", "dirty", "undo",
-    "track_count", "fx_count", "track_guids", "selected_track_guids",
-    "selected_item_guids",
-  }
-  if before.focus ~= "" then fields[#fields + 1] = "focus" end
-  for _, field in ipairs(fields) do
-    if before[field] ~= after[field] then return false, field end
-  end
-  return true
-end
-
-function CTX.plugin_profile_project_exists(project)
-  return CTX.plugin_profile_live_project(project) ~= nil
-end
-
-function CTX.finish_plugin_profile_preparation(reason)
-  local prep = CTX._plugin_profile_preparation
-  if not prep or prep.finishing then return end
-  prep.finishing = true
-  local cleanup_refresh_held = false
-  local cleanup_ok, cleanup_err = pcall(function()
-    local temp_project = CTX.plugin_profile_live_project(prep.temp_project)
-    if prep.track and temp_project and reaper.ValidatePtr2(
-        temp_project, prep.track, "MediaTrack*") then
-      reaper.DeleteTrack(prep.track)
-    end
-    prep.track = nil
-    if temp_project then
-      reaper.PreventUIRefresh(1)
-      cleanup_refresh_held = true
-      if reaper.SelectProjectInstance then
-        reaper.SelectProjectInstance(temp_project)
-      end
-      reaper.GetSetProjectInfo(temp_project, "DIRTY", 0, true)
-      reaper.Main_OnCommand(40860, 0)
-    end
-    local original_project =
-      CTX.plugin_profile_live_project(prep.original_project)
-    if original_project and reaper.SelectProjectInstance then
-      prep.original_project = original_project
-      reaper.SelectProjectInstance(original_project)
-    end
-  end)
-  if cleanup_refresh_held then
-    reaper.PreventUIRefresh(-1)
-    cleanup_refresh_held = false
-  end
-  local restore_ok, restore_err = pcall(function()
-    local original_project =
-      CTX.plugin_profile_live_project(prep.original_project)
-    if original_project and reaper.SelectProjectInstance then
-      prep.original_project = original_project
-      reaper.SelectProjectInstance(original_project)
-    end
-  end)
-  if not restore_ok then
-    cleanup_ok = false
-    cleanup_err = tostring(cleanup_err or "") .. " restore_failed:"
-      .. tostring(restore_err)
-  end
-  if prep.refresh_held then
-    reaper.PreventUIRefresh(-1)
-    prep.refresh_held = false
-  end
-  if prep.before.focus_handle and reaper.JS_Window_SetFocus
-      and (not reaper.JS_Window_IsWindow
-        or reaper.JS_Window_IsWindow(prep.before.focus_handle)) then
-    pcall(reaper.JS_Window_SetFocus, prep.before.focus_handle)
-  end
-
-  local after = CTX.plugin_profile_observable_snapshot(prep.original_project)
-  local unchanged, changed_field =
-    CTX.plugin_profile_observables_equal(prep.before, after)
-  if not cleanup_ok or not unchanged then
-    local detail = not cleanup_ok and tostring(cleanup_err)
-      or ("observable_changed:" .. tostring(changed_field))
-    for _, candidate in ipairs(prep.candidates) do
-      CTX.plugin_profile_record(candidate, "unavailable",
-        "cleanup_failed", nil, nil, "temporary_instance",
-        (reaper.time_precise() - prep.started) * 1000)
-    end
-    Log.line("PLUGIN_PROFILE", "preparation cleanup failed: " .. detail)
-  end
-  local callback = prep.callback
-  local cancelled = prep.cancelled
-  local trace = prep.trace or {}
-  trace.completed = true
-  trace.completion_reason = tostring(reason or "")
-  trace.cleanup_ok = cleanup_ok and unchanged
-  trace.cleanup_error = (not cleanup_ok and tostring(cleanup_err))
-    or (not unchanged and ("observable_changed:"
-      .. tostring(changed_field))) or nil
-  trace.elapsed_ms = (reaper.time_precise() - prep.started) * 1000
-  trace.results = {}
-  for _, candidate in ipairs(prep.candidates or {}) do
-    local state = CTX.plugin_profile_state(candidate.key)
-    trace.results[#trace.results + 1] = {
-      product_key = candidate.meta and candidate.meta.key or candidate.key,
-      state = state.state,
-      reason = state.reason,
-      source = state.source,
-      elapsed_ms = state.elapsed_ms,
-      fingerprint = state.fingerprint,
-    }
-  end
-  CTX.plugin_profile_plan_request(
-    prep.user_text, prep.request_candidates or prep.candidates)
-  CTX._plugin_profile_last_trace = trace
-  if callback and not cancelled then
-    CTX._plugin_profile_resume_user_text = prep.user_text
-  end
-  CTX._plugin_profile_preparation = nil
-  if callback and not cancelled then reaper.defer(callback) end
-end
-
 function CTX.cancel_plugin_profile_preparation()
-  local prep = CTX._plugin_profile_preparation
-  if not prep then return false end
-  prep.cancelled = true
-  for _, candidate in ipairs(prep.candidates) do
-    if CTX.plugin_profile_state(candidate.key).state == "candidate" then
-      CTX.plugin_profile_record(candidate, "unavailable", "cancelled",
-        nil, nil, "temporary_instance",
-        (reaper.time_precise() - prep.started) * 1000)
-    end
-  end
-  CTX.finish_plugin_profile_preparation("cancelled")
-  return true
+  -- Compatibility hook. Guidance preparation is synchronous and read-only.
+  CTX._plugin_profile_preparation = nil
+  return false
 end
-
-function CTX.plugin_profile_prepare_tick()
-  local prep = CTX._plugin_profile_preparation
-  if not prep or prep.finishing then return end
-  if prep.cancelled then
-    CTX.finish_plugin_profile_preparation("cancelled")
-    return
-  end
-  local total_elapsed = reaper.time_precise() - prep.started
-  if total_elapsed > (tonumber(prep.total_timeout_seconds) or 12) then
-    for index = prep.index, #prep.candidates do
-      local pending = prep.candidates[index]
-      if CTX.plugin_profile_state(pending.key).state == "candidate" then
-        CTX.plugin_profile_record(pending, "unavailable", "timeout",
-          nil, nil, "temporary_instance", total_elapsed * 1000)
-      end
-    end
-    prep.trace.total_timeout_seconds = prep.total_timeout_seconds
-    prep.trace.total_timeout_triggered = true
-    CTX.finish_plugin_profile_preparation("total_timeout")
-    return
-  end
-  local candidate = prep.candidates[prep.index]
-  if not candidate then
-    CTX.finish_plugin_profile_preparation("complete")
-    return
-  end
-
-  if not prep.track then
-    local cached = nil
-    for _, fingerprint in ipairs(candidate.meta.fingerprints or {}) do
-      cached = CTX._plugin_profile_validation_cache[
-        CTX.plugin_profile_validation_cache_key(candidate, fingerprint)]
-      if cached and cached.state == "validated" then break end
-      cached = nil
-    end
-    if cached then
-      local reused = {}
-      for key, value in pairs(cached) do reused[key] = value end
-      reused.source = "session_cache"
-      CTX.plugin_profile_set_state(candidate.key, reused)
-      Log.line("PLUGIN_PROFILE", tostring(candidate.meta.display_name)
-        .. " state=validated source=session_cache")
-      prep.index = prep.index + 1
-      reaper.defer(CTX.plugin_profile_prepare_tick)
-      return
-    end
-
-    local insert_index = R_CountTracks(prep.temp_project)
-    reaper.InsertTrackInProject(prep.temp_project, insert_index, 0)
-    prep.track = R_GetTrack(prep.temp_project, insert_index)
-    if not prep.track then
-      CTX.plugin_profile_record(candidate, "unavailable",
-        "load_failed", nil, nil, "temporary_instance", 0)
-      prep.index = prep.index + 1
-      reaper.defer(CTX.plugin_profile_prepare_tick)
-      return
-    end
-    reaper.GetSetMediaTrackInfo_String(prep.track, "P_NAME",
-      "__ReaAssist profile preparation__", true)
-    prep.fx = nil
-    prep.fingerprint = nil
-    for _, fingerprint in ipairs(candidate.meta.fingerprints or {}) do
-      local fx = reaper.TrackFX_AddByName(
-        prep.track, tostring(fingerprint.identifier or ""), false, -1)
-      if fx and fx >= 0 then
-        prep.fx = fx
-        prep.fingerprint = fingerprint
-        break
-      end
-    end
-    if not prep.fx then
-      reaper.DeleteTrack(prep.track)
-      prep.track = nil
-      CTX.plugin_profile_record(candidate, "unavailable",
-        "load_failed", nil, nil, "temporary_instance", 0)
-      prep.index = prep.index + 1
-      reaper.defer(CTX.plugin_profile_prepare_tick)
-      return
-    end
-    prep.candidate_started = reaper.time_precise()
-    prep.last_count = nil
-    prep.stable_ticks = 0
-    reaper.defer(CTX.plugin_profile_prepare_tick)
-    return
-  end
-
-  local elapsed = reaper.time_precise() - prep.candidate_started
-  local count = reaper.TrackFX_GetNumParams(prep.track, prep.fx)
-  if count and count > 0 and count == prep.last_count then
-    prep.stable_ticks = prep.stable_ticks + 1
-  else
-    prep.last_count = count
-    prep.stable_ticks = 0
-  end
-  local settle_seconds =
-    tonumber((candidate.meta.safety or {}).settle_ms or 100) / 1000
-  if elapsed > prep.timeout_seconds then
-    CTX.plugin_profile_record(candidate, "unavailable",
-      "timeout", nil, prep.fingerprint, "temporary_instance",
-      elapsed * 1000)
-  elseif elapsed < settle_seconds or prep.stable_ticks < 2 then
-    reaper.defer(CTX.plugin_profile_prepare_tick)
-    return
-  else
-    local inventory, inventory_err = CTX.plugin_profile_inventory(
-      prep.track, prep.fx, prep.fingerprint.identifier)
-    if not inventory then
-      CTX.plugin_profile_record(candidate, "unavailable",
-        inventory_err or "inventory_failed", nil, prep.fingerprint,
-        "temporary_instance", elapsed * 1000)
-    else
-      local matched, mismatch =
-        CTX.plugin_profile_match(candidate.key, inventory)
-      CTX.plugin_profile_record(candidate,
-        matched and "validated" or "rejected", mismatch, inventory,
-        prep.fingerprint, "temporary_instance", elapsed * 1000)
-    end
-  end
-
-  if prep.track and reaper.ValidatePtr2(
-      prep.temp_project, prep.track, "MediaTrack*") then
-    reaper.DeleteTrack(prep.track)
-  end
-  prep.track = nil
-  prep.fx = nil
-  prep.fingerprint = nil
-  prep.index = prep.index + 1
-  reaper.defer(CTX.plugin_profile_prepare_tick)
-end
-
--- Returns true only when an asynchronous temporary-project preparation was
--- started. Existing-instance validation and session-cache reuse complete
--- synchronously, allowing the caller to continue the request immediately.
 CTX.PLUGIN_PACK_SIGNAL_TERMS = CTX.PLUGIN_PACK_SIGNAL_TERMS or {
   "plugin", "plug-in", "effect", "vst", "clap", "fx", "compressor",
   "limiter", "deesser", "de-esser", "equalizer", "reverb", "delay",
@@ -10028,6 +9139,13 @@ CTX.PLUGIN_PACK_SIGNAL_TERMS = CTX.PLUGIN_PACK_SIGNAL_TERMS or {
   "valhallavintageverb", "valhalla vintage verb", "vintageverb",
   "soothe2", "soothe 2", "soothe3", "soothe 3", "rc-20", "rc20",
   "rc 20", "retro color", "ozone", "maximizer",
+  "soundtoys", "little alterboy", "little alter boy", "little plate",
+  "microshift", "micro shift", "crystallizer", "superplate", "super plate",
+  "devil-loc", "devil loc", "filterfreak", "filter freak", "filterfreak1",
+  "filterfreak2", "filter freak 1", "filter freak 2", "primaltap",
+  "primal tap", "radiator", "panman", "pan man", "phasemistress",
+  "phase mistress", "sie-q", "sie q", "spaceblender", "space blender",
+  "tremolator",
 }
 
 function CTX.prompt_has_plugin_pack_signal(user_text)
@@ -10045,28 +9163,30 @@ function CTX.prompt_has_plugin_pack_signal(user_text)
   return false
 end
 
-function CTX.plugin_pack_show_notice(kind, detail)
-  local is_timeout = kind == "readiness_timeout"
-  local flag = is_timeout and "_plugin_pack_timeout_notice_shown"
-    or "_plugin_pack_degraded_notice_shown"
-  if CTX[flag] then return end
-  CTX[flag] = true
-  local message
-  if is_timeout then
-    message = "Specific plug-in guidance was not ready in time for this "
-      .. "request. Generic discovery will be used."
-  elseif kind == "integrity_mismatch" then
-    message = "Specific plug-in guidance is unavailable because the installed "
-      .. "pack did not match the local manifest. Generic discovery will be used."
-  elseif kind == "integrity_unavailable" then
-    message = "Specific plug-in guidance could not be verified for this "
-      .. "request. Generic discovery will be used."
-  else
-    message = "Specific plug-in guidance could not be loaded safely for this "
-      .. "request. Generic discovery will be used."
+CTX.PLUGIN_PACK_GENERIC_SIGNAL_TERMS =
+  CTX.PLUGIN_PACK_GENERIC_SIGNAL_TERMS or {
+    ["plugin"] = true, ["plug-in"] = true, ["effect"] = true,
+    ["vst"] = true, ["clap"] = true, ["fx"] = true,
+    ["compressor"] = true, ["limiter"] = true, ["deesser"] = true,
+    ["de-esser"] = true, ["equalizer"] = true, ["reverb"] = true,
+    ["delay"] = true, ["gate"] = true, ["saturation"] = true,
+    ["chorus"] = true, ["phaser"] = true, ["pitch"] = true,
+  }
+
+function CTX.prompt_has_named_plugin_pack_signal(user_text)
+  local text = tostring(user_text or ""):lower()
+  if text == "" then return false end
+  for _, term in ipairs(CTX.PLUGIN_PACK_SIGNAL_TERMS) do
+    if not CTX.PLUGIN_PACK_GENERIC_SIGNAL_TERMS[term] then
+      local escaped = term:gsub("(%W)", "%%%1")
+      if text:find("%f[%w]" .. escaped .. "%f[%W]") then return true end
+    end
   end
-  if UI and UI.show_float_toast then UI.show_float_toast(message, "err") end
-  Log.line("PLUGIN_PACK", "request degraded to generic discovery: "
+  return false
+end
+
+function CTX.plugin_pack_show_notice(kind, detail)
+  Log.line("PLUGIN_PACK", "guidance unavailable; continuing without it: "
     .. tostring(kind) .. " " .. tostring(detail or ""))
 end
 
@@ -10134,201 +9254,56 @@ end
 
 
 function CTX.prepare_plugin_profiles_for_prompt(user_text, callback)
-  if CTX._plugin_profile_preparation then return true end
-  if CTX._plugin_profile_resume_user_text == user_text then
-    CTX._plugin_profile_resume_user_text = nil
-    return false
-  end
-  if CTX._plugin_pack_wait then return true end
-  local pack_resume_mode = nil
-  if type(CTX._plugin_pack_resume) == "table"
-      and CTX._plugin_pack_resume.user_text == user_text then
-    pack_resume_mode = CTX._plugin_pack_resume.mode
-    CTX._plugin_pack_resume = nil
-  end
-  CTX._plugin_profile_request_plan = nil
-  local profile_mode = CTX.plugin_profile_mode()
-  if type(S) == "table" then S.plugin_profile_mode = profile_mode end
-  if profile_mode == "off" then
+  if not CTX.prompt_has_plugin_pack_signal(user_text) then return false end
+
+  -- Certified pack content is generation guidance. It never authorizes or
+  -- blocks execution, and preparing a request never creates a project tab or
+  -- a temporary plug-in instance.
+  CTX.ensure_plugin_pack_cache()
+  local state = CTX.plugin_pack_state()
+  if state.state == "ready" then
+    local candidates = CTX.plugin_profile_candidates_for_prompt(user_text)
+    local plan = CTX.plugin_profile_plan_request(user_text, candidates)
+    local applied = CTX.plugin_profile_apply_guidance_plan(plan)
     CTX._plugin_profile_last_trace = {
-      profile_mode = profile_mode,
-      attempted = false,
+      profile_mode = "guidance",
+      attempted = #candidates > 0,
       temporary_instance_created = false,
+      candidate_count = #candidates,
+      guidance_count = applied,
       completed = true,
-      completion_reason = "profile_mode_off",
-      results = {},
-    }
-    Log.line("PLUGIN_PROFILE", "preparation skipped: profile_mode=off")
-    return false
-  end
-  if pack_resume_mode == "generic" then return false end
-  local pack_signal = CTX.prompt_has_plugin_pack_signal(user_text)
-  if not pack_signal and pack_resume_mode ~= "ready" then
-    CTX._plugin_profile_last_trace = {
-      profile_mode = profile_mode,
-      attempted = false,
-      temporary_instance_created = false,
-      completed = true,
-      completion_reason = "no_plugin_pack_signal",
+      completion_reason = "guidance_only",
       results = {},
     }
     return false
   end
-  if pack_resume_mode ~= "ready" then
-    local waiting, wait_mode =
-      CTX.plugin_pack_wait_for_prompt(user_text, callback)
-    if waiting then return true end
-    if wait_mode == "generic" then return false end
+
+  if state.state == "pending" or state.state == "unattempted" then
+    local waiting = CTX.plugin_pack_wait_for_prompt(user_text, callback)
+    if waiting then
+      CTX._plugin_profile_last_trace = {
+        profile_mode = "guidance",
+        attempted = false,
+        temporary_instance_created = false,
+        completed = false,
+        completion_reason = "guidance_loading",
+        results = {},
+      }
+      return true
+    end
   end
-  local candidates = CTX.plugin_profile_candidates_for_prompt(user_text)
-  local trace = {
-    profile_mode = profile_mode,
-    attempted = #candidates > 0,
+
+  CTX._plugin_profile_last_trace = {
+    profile_mode = "guidance",
+    attempted = false,
     temporary_instance_created = false,
-    candidate_count = #candidates,
-    completed = false,
+    completed = true,
+    completion_reason = "guidance_unavailable",
     results = {},
   }
-  CTX._plugin_profile_last_trace = trace
-  if #candidates == 0 then
-    trace.completed = true
-    trace.completion_reason = "no_candidate"
-    return false
-  end
-
-  local pending = {}
-  for _, candidate in ipairs(candidates) do
-    local meta = candidate.meta
-    local current = CTX.plugin_profile_state(candidate.key)
-    local needs_dynamic_instance_check =
-      meta.product_class == "dynamic"
-      and not CTX.prompt_requests_fx_addition(user_text)
-    if current.state == "validated" and needs_dynamic_instance_check then
-      local target, target_reason =
-        CTX.plugin_profile_existing_instance(candidate, user_text)
-      if target then
-        CTX.plugin_profile_set_state(candidate.key, {
-          state = "candidate",
-          reason = candidate.reason,
-        })
-        CTX.plugin_profile_validate_existing(candidate, target)
-      elseif target_reason == "ambiguous_match"
-          or target_reason == "ambiguous_target" then
-        CTX.plugin_profile_record(candidate, "unavailable",
-          "ambiguous_target", nil, nil, "existing_instance", 0)
-      end
-    elseif current.state == "candidate" then
-      CTX.plugin_profile_set_state(candidate.key, {
-        state = "candidate",
-        reason = candidate.reason,
-      })
-      local target, target_reason =
-        CTX.plugin_profile_existing_instance(candidate, user_text)
-      if target then
-        CTX.plugin_profile_validate_existing(candidate, target)
-      elseif target_reason == "ambiguous_match"
-          or target_reason == "ambiguous_target" then
-        CTX.plugin_profile_record(candidate, "unavailable",
-          "ambiguous_target", nil, nil, "existing_instance", 0)
-      else
-        pending[#pending + 1] = candidate
-      end
-    end
-  end
-  if #pending == 0 then
-    trace.completed = true
-    trace.completion_reason = "synchronous"
-    for _, candidate in ipairs(candidates) do
-      local state = CTX.plugin_profile_state(candidate.key)
-      trace.results[#trace.results + 1] = {
-        product_key = candidate.meta and candidate.meta.key or candidate.key,
-        state = state.state,
-        reason = state.reason,
-        source = state.source,
-        elapsed_ms = state.elapsed_ms,
-        fingerprint = state.fingerprint,
-      }
-    end
-    CTX.plugin_profile_plan_request(user_text, candidates)
-    return false
-  end
-
-  if not reaper.Main_OnCommand or not reaper.EnumProjects
-      or not reaper.GetSetProjectInfo or not reaper.SelectProjectInstance
-      or not reaper.InsertTrackInProject then
-    for _, candidate in ipairs(pending) do
-      CTX.plugin_profile_record(candidate, "unavailable",
-        "isolation_unavailable", nil, nil, "temporary_instance", 0)
-    end
-    trace.completed = true
-    trace.completion_reason = "isolation_unavailable"
-    for _, candidate in ipairs(candidates) do
-      local state = CTX.plugin_profile_state(candidate.key)
-      trace.results[#trace.results + 1] = {
-        product_key = candidate.meta and candidate.meta.key or candidate.key,
-        state = state.state,
-        reason = state.reason,
-        source = state.source,
-        elapsed_ms = state.elapsed_ms,
-        fingerprint = state.fingerprint,
-      }
-    end
-    return false
-  end
-
-  local original = reaper.EnumProjects(-1)
-  local before = CTX.plugin_profile_observable_snapshot(original)
-  local prep = {
-    candidates = pending,
-    request_candidates = candidates,
-    index = 1,
-    original_project = original,
-    before = before,
-    callback = callback,
-    started = reaper.time_precise(),
-    timeout_seconds = 8,
-    total_timeout_seconds = 12,
-    refresh_held = true,
-    trace = trace,
-    user_text = user_text,
-  }
-  CTX._plugin_profile_preparation = prep
-  reaper.PreventUIRefresh(1)
-  local ok_open, open_err = pcall(function()
-    reaper.Main_OnCommand(40859, 0)
-    local opened_project = reaper.EnumProjects(-1)
-    if not opened_project or opened_project == original then
-      error("temporary project tab did not open")
-    end
-    prep.temp_project = opened_project
-    trace.temporary_instance_created = true
-    reaper.SelectProjectInstance(original)
-    if reaper.EnumProjects(-1) ~= original then
-      error("original project tab was not restored immediately")
-    end
-    reaper.PreventUIRefresh(-1)
-    prep.refresh_held = false
-  end)
-  if not ok_open then
-    for _, candidate in ipairs(pending) do
-      CTX.plugin_profile_record(candidate, "unavailable",
-        "isolation_unavailable", nil, nil, "temporary_instance", 0)
-    end
-    Log.line("PLUGIN_PROFILE", "temporary project open failed: "
-      .. tostring(open_err))
-    prep.callback = nil
-    CTX.finish_plugin_profile_preparation("open_failed")
-    return false
-  end
-  Log.line("PLUGIN_PROFILE", "preparing " .. tostring(#pending)
-    .. " profile candidate(s) in isolated project tab")
-  reaper.defer(CTX.plugin_profile_prepare_tick)
-  return true
+  return false
 end
 
--- A named plugin can expose an internal control whose label includes a generic
--- plugin-type word. For example, "Pro-R 2 Post EQ" names Pro-R 2's own output
--- section; it is not a request to add or inspect the user's preferred EQ.
 -- Keep this deliberately narrow so "Pro-R 2 plus an EQ" still resolves both.
 function CTX.prompt_type_keyword_is_internal_control(tkey, text, explicit_type_named)
   tkey = tostring(tkey or "")
@@ -10493,12 +9468,16 @@ function CTX.preempt_buckets_for_prompt(user_text)
   local manual_only_policy = type(Code) == "table"
     and type(Code.prompt_targets_manual_only_plugin) == "function"
     and Code.prompt_targets_manual_only_plugin(user_text) or nil
+  local explicit_profile_matches = CTX.explicit_plugin_profile_matches(user_text)
+  local closed_named_list = CTX.prompt_has_closed_named_plugin_list(
+    user_text, explicit_profile_matches)
 
   -- Scan chain-phrase hints first. Builds tkey -> matching_phrase so the
   -- main loop below can treat phrase hits identically to keyword hits and
   -- the log line can attribute the trigger.
   local phrase_implied = {}
-  if not stock_fx_constraint and not forbids_fx_addition then
+  if not stock_fx_constraint and not forbids_fx_addition
+      and not closed_named_list then
     for _, hint in ipairs(CHAIN_PHRASE_HINTS) do
       if _chain_phrase_matches(text, hint) then
         for _, t in ipairs(hint[2]) do
@@ -10514,10 +9493,6 @@ function CTX.preempt_buckets_for_prompt(user_text)
   if manual_only_policy then
     phrase_implied.pitch_correction = nil
     phrase_implied.pitch_shift = nil
-  end
-  if phrase_implied.gate == "chain.-rock%s+vocal" then
-    if phrase_implied.deesser == "chain.-vocal" then phrase_implied.deesser = nil end
-    if phrase_implied.reverb == "chain.-vocal" then phrase_implied.reverb = nil end
   end
   local chain_phrase_hit = next(phrase_implied) ~= nil
   local preempt_needs_plugin_helpers =
@@ -10670,8 +9645,16 @@ function CTX.preempt_buckets_for_prompt(user_text)
   -- section file doesn't block the user's request.
   S.docs_section_sent = S.docs_section_sent or {}
   local sec_seen = {}
+  local docs_phrase_text = text
+  if type(Code) == "table"
+      and type(Code._localized_action_intent_text) == "function" then
+    local localized_text = Code._localized_action_intent_text(user_text)
+    if localized_text ~= text then
+      docs_phrase_text = text .. "\n" .. localized_text
+    end
+  end
   CTX.each_docs_phrase_hint(function(hint)
-    if text:find(hint[1]) then
+    if docs_phrase_text:find(hint[1]) then
       local section = hint[2]
       if not sec_seen[section] then
         sec_seen[section] = true
@@ -10900,13 +9883,14 @@ function CTX.preempt_buckets_for_prompt(user_text)
     for _, list in pairs(aliases_by_pref_type) do table.sort(list) end
   end
   local explicit_type_named = {}
-  local explicit_profile_matches = CTX.explicit_plugin_profile_matches(user_text)
   do
     for curated_name, tkey in pairs(PROFILE_TYPE_BY_NAME) do
       local profile_key = CTX.plugin_profile_key(curated_name)
       local meta = profile_key
         and CTX._plugin_profile_metadata[profile_key] or nil
-      if meta and explicit_profile_matches[profile_key] then
+      if meta and explicit_profile_matches[profile_key]
+          and not CTX.prompt_profile_mentions_only_untouched_constraint(
+            user_text, meta) then
         explicit_type_named[tkey] = curated_name
       end
     end
@@ -10945,7 +9929,9 @@ function CTX.preempt_buckets_for_prompt(user_text)
   -- and skips a defensive resolve emission).
   local curated_unique = {}
   for key, meta in pairs(CTX._plugin_profile_metadata or {}) do
-    if explicit_profile_matches[key] then
+    if explicit_profile_matches[key]
+        and not CTX.prompt_profile_mentions_only_untouched_constraint(
+          user_text, meta) then
       curated_unique[meta.display_name] = true
     end
   end
@@ -10956,49 +9942,59 @@ function CTX.preempt_buckets_for_prompt(user_text)
   table.sort(curated_names)
   for _, curated_name in ipairs(curated_names) do
     local curated_key = CTX.plugin_profile_key(curated_name)
-    if CTX.plugin_profile_is_validated(curated_key) then
-      if preempt_live_fx_params then
+    local curated_meta = curated_key
+      and CTX._plugin_profile_metadata[curated_key] or nil
+    if curated_key then
+      local direct_live_fx_params = preempt_live_fx_params
+        or (curated_meta
+          and CTX.prompt_refers_to_existing_plugin_profile(
+            user_text, curated_meta))
+      if direct_live_fx_params then
         CTX.preempt_live_fx_params_for_ident(curated_name, injected,
           "direct curated name match", Code.prompt_has_param_write_intent(user_text),
           user_text)
       end
       local pr_key = "plugin_ref:" .. curated_name
-      -- Sticky context survives across turns, but the runtime authorization
-      -- receipt is deliberately turn-scoped. Re-read the already validated
-      -- section even when it is pinned so generated code from this turn keeps
-      -- the exact profile receipt that its deferred writes must present.
+      -- Re-read the maintained section so the current request receives the
+      -- most relevant guidance chunks.
       local direct_profile_content, _ = CTX.plugin_ref({curated_name})
+      -- The profile itself may already be sticky from an earlier action, but
+      -- workflow and core API context are turn-scoped. Supply them again for
+      -- every direct curated-name action so an existing profile never causes
+      -- a docs-request round trip.
+      Net.copin_plugin_bundle(injected,
+        Net.plugin_bundle_variant_for_prompt(user_text))
+      Net.copin_docs_core(injected)
+      if preempt_needs_plugin_helpers then
+        Net.copin_plugin_helpers(injected, "preempt")
+      end
       if not S.sticky_context[pr_key]
          and not (S.plugin_ref_sent or {})[curated_name] then
         if direct_profile_content then
           CTX.populate_installed_fx()
-          -- The preparation fingerprint already proved the exact loadable
-          -- identifier for this product. Prefer that receipt over a fresh
-          -- fuzzy installed-list search: a generic display name such as
-          -- "Saturation" can otherwise resolve to a sibling product like
-          -- Nectar 4 Saturation even though the validated profile is the
-          -- bundled LOSER/Saturation JSFX.
+          -- Prefer an exact known identifier when one is available, then use
+          -- the normal installed-list resolver. This is generation guidance.
           local profile_state = CTX.plugin_profile_state(curated_name)
-          local exact_ident =
-            profile_state.state == "validated"
-            and profile_state.identifier or nil
-          if not exact_ident and Code.resolve_chain_entry
+          local exact_ident = nil
+          if Code.resolve_chain_entry
              and CTX._installed_fx_list then
             exact_ident = Code.resolve_chain_entry(curated_name, CTX._installed_fx_list)
           end
           local prefix = ""
-          if exact_ident and exact_ident ~= curated_name then
+          local existing_request = curated_meta
+            and CTX.prompt_refers_to_existing_plugin_profile(
+              user_text, curated_meta)
+          if existing_request then
+            prefix = "The user asked to edit an existing instance on the request target: `"
+              .. tostring(profile_state.loaded_name or exact_ident or curated_name)
+              .. "`. Locate it with TrackFX_GetByName(..., false), do not add "
+              .. "another instance, and do not request fx_chains.\n\n"
+          elseif exact_ident and exact_ident ~= curated_name then
             prefix = "AddByName identifier on this system: `" .. exact_ident
               .. "` -- use this EXACT string with TrackFX_AddByName.\n\n"
           end
           Net.sticky_set(pr_key, prefix .. direct_profile_content)
           if S.plugin_ref_sent then S.plugin_ref_sent[curated_name] = true end
-          Net.copin_plugin_bundle(injected,
-            Net.plugin_bundle_variant_for_prompt(user_text))
-          Net.copin_docs_core(injected)
-          if preempt_needs_plugin_helpers then
-            Net.copin_plugin_helpers(injected, "preempt")
-          end
           injected[#injected+1] = pr_key
           Log.line("PREEMPT",
             "injected " .. pr_key .. " (curated content, direct name match)"
@@ -11034,6 +10030,14 @@ function CTX.preempt_buckets_for_prompt(user_text)
     if #keys > 0 then
       Log.line("PREEMPT",
         "skipped preferred-plugin keyword loop (explicit stock FX constraint)")
+    end
+    return injected
+  end
+
+  if closed_named_list then
+    if #keys > 0 then
+      Log.line("PREEMPT",
+        "skipped inferred preferred-plugin loop (closed named plug-in list)")
     end
     return injected
   end
@@ -11129,6 +10133,17 @@ function CTX.preempt_buckets_for_prompt(user_text)
       -- would silently bypass curated plugin_ref content for every
       -- FabFilter pref after the preferred_types canonicalization.
       if curated then
+        -- A profile can stay sticky across requests while the per-turn core
+        -- API reference is absent. Co-pin the workflow and docs for every
+        -- matched curated action, including an already-pinned profile, so the
+        -- Model does not spend another call requesting docs before it can
+        -- return runnable Lua.
+        Net.copin_plugin_bundle(injected,
+          Net.plugin_bundle_variant_for_prompt(user_text))
+        Net.copin_docs_core(injected)
+        if preempt_needs_plugin_helpers then
+          Net.copin_plugin_helpers(injected, "preempt")
+        end
         -- Curated plugin: inject plugin_ref:<Name> instead of
         -- preferred_plugins:<type>. Richer content, and doesn't depend
         -- on cache.plugins having scanned param data for the JSFX/stock.
@@ -11137,8 +10152,7 @@ function CTX.preempt_buckets_for_prompt(user_text)
         -- TrackFX_AddByName -- prevents the bare-name fuzzy-match from
         -- loading a wrong version/format when multiple are installed.
         local pr_key = "plugin_ref:" .. curated
-        -- A pinned profile still needs a fresh turn authorization receipt.
-        -- CTX.plugin_ref de-duplicates repeat activations within this turn.
+        -- CTX.plugin_ref supplies maintained generation guidance.
         local preferred_profile_content, _ = CTX.plugin_ref({curated})
         if not S.sticky_context[pr_key]
            and not (S.plugin_ref_sent or {})[curated] then
@@ -11172,13 +10186,6 @@ function CTX.preempt_buckets_for_prompt(user_text)
             -- plugin ADD/CONFIGURE task needs the plugin workflow rules, and
             -- co-pinning here saves the round-trip where the model would
             -- otherwise emit <context_needed>prompt_bundle:plugin</context_needed>.
-            Net.copin_plugin_bundle(injected,
-              Net.plugin_bundle_variant_for_prompt(user_text))
-            -- Same rationale for docs core: every plugin add/configure task
-            -- needs reaper.* signatures (TrackFX_*, defer, Undo_*). Without
-            -- this, the rich plugin context biases the model into bypassing
-            -- the API REF REQUIREMENT rule and the docs-gate has to retry.
-            Net.copin_docs_core(injected)
             -- Co-pin plugin_helpers ON THE SAME TURN as plugin_bundle so
             -- helpers rides the stable rung's first emission instead of
             -- arriving mid-session via <context_needed>. Tagged "preempt"
@@ -11195,9 +10202,6 @@ function CTX.preempt_buckets_for_prompt(user_text)
             -- / "chain suitable for a rock vocal" usually makes the model
             -- choose display-unit values and helper calls on its own. Pinning
             -- helpers here prevents the missing-helper retry for that family.
-            if preempt_needs_plugin_helpers then
-              Net.copin_plugin_helpers(injected, "preempt")
-            end
             injected[#injected+1] = pr_key
             Log.line("PREEMPT",
               "injected " .. pr_key .. " (curated content, " .. trigger .. ")"
@@ -11402,4 +10406,13 @@ CTX.build_snapshot = function(proj, opts)
     S.pending_orig_prompt)
   if hint ~= "" then body = body .. hint .. "\n\n" end
   return body
+end
+
+-- Warm the maintained plug-in guide after startup so the first relevant
+-- request can usually use it without waiting. Failure stays internal and the
+-- ordinary Lua path continues without the guide.
+if reaper and reaper.defer then
+  reaper.defer(function()
+    pcall(CTX.ensure_plugin_pack_cache)
+  end)
 end

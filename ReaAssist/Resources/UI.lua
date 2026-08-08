@@ -362,6 +362,246 @@ local PushStyleColor = reaper.ImGui_PushStyleColor
 local PopStyleColor  = reaper.ImGui_PopStyleColor
 local PushStyleVar   = reaper.ImGui_PushStyleVar
 local PushFont       = reaper.ImGui_PushFont
+
+-- Per-DPI UI scale memory. ReaImGui reports the active window DPI on every
+-- platform. ReaAssist stores only an explicit user choice for that rounded DPI
+-- class, never a guessed physical size or viewing-distance calculation.
+local function _display_dpi_class(dpi)
+  dpi = tonumber(dpi)
+  if not dpi or dpi <= 0 or dpi ~= dpi then return nil end
+  local percent = math_floor(dpi * 100 + 0.5)
+  if percent < 50 or percent > 800 then return nil end
+  return tostring(percent)
+end
+
+local function _valid_ui_scale_idx(value)
+  local idx = tonumber(value)
+  local count = CFG and CFG.UI_SCALE_OPTIONS and #CFG.UI_SCALE_OPTIONS or 0
+  if not idx or idx < 1 or idx > count then return nil end
+  return math_floor(idx)
+end
+
+function UI.remember_ui_scale_for_current_dpi(previous_idx)
+  local dpi_key = S and S._window_dpi_valid == true
+    and _display_dpi_class(S._window_dpi_scale) or nil
+  local current_idx = _valid_ui_scale_idx(prefs and prefs.ui_scale_idx)
+  if not dpi_key or not current_idx then return false end
+
+  if type(prefs.ui_scale_by_dpi) ~= "table" then
+    prefs.ui_scale_by_dpi = {}
+  end
+  local scale_map = prefs.ui_scale_by_dpi
+  if scale_map["100"] == nil then
+    scale_map["100"] = _valid_ui_scale_idx(previous_idx) or current_idx
+  end
+  scale_map[dpi_key] = current_idx
+  return true
+end
+
+function UI.apply_remembered_ui_scale()
+  local dpi_key = S and S._window_dpi_valid == true
+    and _display_dpi_class(S._window_dpi_scale) or nil
+  if not dpi_key then return false end
+  -- Do not alter a staged Settings session. The saved choice for the display
+  -- is applied after Save or after Settings closes.
+  if api_keys and api_keys.saved_ui_scale_idx ~= nil then return false end
+  if S._ui_scale_dpi_class == dpi_key then return false end
+  S._ui_scale_dpi_class = dpi_key
+
+  local scale_map = prefs and prefs.ui_scale_by_dpi
+  local remembered_idx = type(scale_map) == "table"
+    and _valid_ui_scale_idx(scale_map[dpi_key]) or nil
+  if not remembered_idx or remembered_idx == prefs.ui_scale_idx then
+    return false
+  end
+
+  prefs.ui_scale_idx = remembered_idx
+  S._scale_confirm_deadline = nil
+  S._scale_prev_idx = nil
+  S._open_scale_confirm = nil
+  return true
+end
+
+local function _display_dimension(value)
+  value = tonumber(value)
+  if not value or value ~= value or value < 1 or value > 100000 then return nil end
+  return math_floor(value + 0.5)
+end
+
+local function _display_rect_dimensions(left, top, right, bottom)
+  left, top, right, bottom =
+    tonumber(left), tonumber(top), tonumber(right), tonumber(bottom)
+  if not left or not top or not right or not bottom then return nil end
+  if left ~= left or top ~= top or right ~= right or bottom ~= bottom then return nil end
+  return _display_dimension(math.abs(right - left)),
+    _display_dimension(math.abs(bottom - top))
+end
+
+local function _display_converted_dimensions(first_x, first_y, last_x, last_y)
+  first_x, first_y, last_x, last_y =
+    tonumber(first_x), tonumber(first_y), tonumber(last_x), tonumber(last_y)
+  if not first_x or not first_y or not last_x or not last_y then return nil end
+  local logical_l = math.ceil(math.min(first_x, last_x))
+  local logical_t = math.ceil(math.min(first_y, last_y))
+  local logical_r = math.floor(math.max(first_x, last_x) + 1)
+  local logical_b = math.floor(math.max(first_y, last_y) + 1)
+  return _display_dimension(logical_r - logical_l),
+    _display_dimension(logical_b - logical_t)
+end
+
+local function _display_interface_context(out)
+  local idx = _valid_ui_scale_idx(prefs and prefs.ui_scale_idx)
+  local option = idx and CFG and CFG.UI_SCALE_OPTIONS
+    and tonumber(CFG.UI_SCALE_OPTIONS[idx]) or nil
+  if option and option >= 0.5 and option <= 4 then
+    out.interface_size_percent = math_floor(option * 100 + 0.5)
+    out.interface_size_mode = idx == 3 and "auto" or "manual"
+  end
+
+  local dpi_key = S and S._window_dpi_valid == true
+    and _display_dpi_class(S._window_dpi_scale) or nil
+  local remembered_idx = dpi_key and type(prefs and prefs.ui_scale_by_dpi) == "table"
+    and _valid_ui_scale_idx(prefs.ui_scale_by_dpi[dpi_key]) or nil
+  out.interface_size_remembered = idx ~= nil and remembered_idx == idx
+
+  local text_idx = tonumber(prefs and prefs.screen_reader_text_size_idx)
+  local factors = CFG and CFG.SCREEN_READER_TEXT_SIZE_FACTORS
+  local factor = text_idx and type(factors) == "table"
+    and tonumber(factors[text_idx]) or nil
+  if text_idx and factor and text_idx >= 1 and text_idx <= #factors
+      and factor >= 0.5 and factor <= 4 then
+    out.screen_reader_text_size_index = math_floor(text_idx)
+    out.screen_reader_text_size_percent = math_floor(factor * 100 + 0.5)
+  end
+end
+
+-- Cache a small, strict display snapshot for diagnostics. Native dimensions
+-- are labeled as platform-reported units because their meaning varies by OS.
+function UI.capture_display_context(wx, wy, window_w, window_h,
+    work_l, work_t, work_r, work_b)
+  local out = { status = "unavailable", source = "none" }
+  _display_interface_context(out)
+
+  out.window_logical_width = _display_dimension(window_w)
+  out.window_logical_height = _display_dimension(window_h)
+  out.work_area_logical_width, out.work_area_logical_height =
+    _display_rect_dimensions(work_l, work_t, work_r, work_b)
+
+  if S and S._window_dpi_valid == true then
+    local dpi_key = _display_dpi_class(S._window_dpi_scale)
+    out.dpi_scale_percent = dpi_key and tonumber(dpi_key) or nil
+  end
+
+  if reaper and type(reaper.ThemeLayout_GetLayout) == "function" then
+    local ok, _, raw = pcall(reaper.ThemeLayout_GetLayout, "tcp", -3)
+    raw = ok and tonumber(raw) or nil
+    local percent = raw and math_floor((raw / 256) * 100 + 0.5) or nil
+    if percent and percent >= 50 and percent <= 800 then
+      out.reaper_dpi_scale_percent = percent
+    end
+  end
+
+  local native_l, native_t, native_r, native_b
+  if RA and RA.ctx and ImGui
+      and type(ImGui.ImGui_PointConvertNative) == "function" then
+    local first_ok, first_x, first_y = pcall(
+      ImGui.ImGui_PointConvertNative, RA.ctx, wx, wy, true)
+    local last_ok, last_x, last_y = pcall(
+      ImGui.ImGui_PointConvertNative, RA.ctx,
+      (tonumber(wx) or 0) + (tonumber(window_w) or 1),
+      (tonumber(wy) or 0) + (tonumber(window_h) or 1), true)
+    if first_ok and last_ok then
+      native_l, native_t = tonumber(first_x), tonumber(first_y)
+      native_r, native_b = tonumber(last_x), tonumber(last_y)
+      if native_l and native_t and native_r and native_b then
+        native_l, native_r = math.min(native_l, native_r), math.max(native_l, native_r)
+        native_t, native_b = math.min(native_t, native_b), math.max(native_t, native_b)
+        out.window_platform_width, out.window_platform_height =
+          _display_rect_dimensions(native_l, native_t, native_r, native_b)
+      end
+    end
+  end
+
+  if native_l and reaper and type(reaper.my_getViewport) == "function" then
+    local full_ok, full_l, full_t, full_r, full_b = pcall(
+      reaper.my_getViewport, 0, 0, 0, 0,
+      native_l, native_t, native_r, native_b, false)
+    if full_ok then
+      out.display_platform_width, out.display_platform_height =
+        _display_rect_dimensions(full_l, full_t, full_r, full_b)
+      if out.display_platform_width and ImGui
+          and type(ImGui.ImGui_PointConvertNative) == "function" then
+        local first_ok, first_x, first_y = pcall(
+          ImGui.ImGui_PointConvertNative, RA.ctx, full_l, full_t, false)
+        local last_ok, last_x, last_y = pcall(
+          ImGui.ImGui_PointConvertNative, RA.ctx,
+          (tonumber(full_r) or 1) - 1, (tonumber(full_b) or 1) - 1, false)
+        if first_ok and last_ok then
+          out.display_logical_width, out.display_logical_height =
+            _display_converted_dimensions(first_x, first_y, last_x, last_y)
+        end
+      end
+    end
+
+    local work_ok, native_work_l, native_work_t, native_work_r, native_work_b = pcall(
+      reaper.my_getViewport, 0, 0, 0, 0,
+      native_l, native_t, native_r, native_b, true)
+    if work_ok then
+      out.work_area_platform_width, out.work_area_platform_height =
+        _display_rect_dimensions(native_work_l, native_work_t,
+          native_work_r, native_work_b)
+    end
+  end
+
+  local has_display = out.display_platform_width ~= nil
+    or out.display_logical_width ~= nil or out.dpi_scale_percent ~= nil
+  local complete = out.display_platform_width and out.display_platform_height
+    and out.display_logical_width and out.display_logical_height
+    and out.work_area_logical_width and out.work_area_logical_height
+    and out.work_area_platform_width and out.work_area_platform_height
+    and out.window_logical_width and out.window_logical_height
+    and out.window_platform_width and out.window_platform_height
+    and out.dpi_scale_percent and out.reaper_dpi_scale_percent
+  if complete then
+    out.status = "ok"
+  elseif has_display then
+    out.status = "partial"
+  end
+  if has_display then out.source = "reaper_viewport_imgui" end
+  S._display_context = out
+  return out
+end
+-- End per-DPI UI scale memory.
+
+-- Stable interface typography. Monitor DPI and the Auto/manual scale choice
+-- must not silently change font family or weight. Layout scaling already owns
+-- interface size, so each established text role stays consistent.
+function UI.uses_fractional_dpi_font()
+  return false
+end
+
+function UI.interface_text_font()
+  if UI.uses_fractional_dpi_font() then
+    return FONT.inter_semi or FONT.inter_reg
+  end
+  return FONT.inter_reg
+end
+
+function UI.interface_control_font()
+  if UI.uses_fractional_dpi_font() then
+    return FONT.inter_semi or FONT.inter_reg or FONT.mono_med
+  end
+  return FONT.mono_med
+end
+
+function UI.interface_regular_control_font()
+  if UI.uses_fractional_dpi_font() then
+    return FONT.inter_semi or FONT.inter_reg or FONT.mono_reg
+  end
+  return FONT.mono_reg
+end
+-- End stable interface typography.
+
 local PopFont        = reaper.ImGui_PopFont
 local Text           = reaper.ImGui_Text
 local SameLine       = reaper.ImGui_SameLine
@@ -509,10 +749,12 @@ local function settings_pref_select_min_w(label, value)
   local CHEV_SIZE  = RA.SC(10)
   local CHIP_PAD_X = RA.SC(9)
   local CHEV_GAP   = RA.SC(4)
-  PushFont(RA.ctx, FONT.inter_reg, LABEL_SZ)
+  local label_font = UI.interface_text_font()
+  local value_font = UI.interface_control_font()
+  PushFont(RA.ctx, label_font, LABEL_SZ)
   local label_w = CalcTextSize(RA.ctx, tostring(label or ""))
   PopFont(RA.ctx)
-  PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
+  PushFont(RA.ctx, value_font, MONO_SIZE)
   local value_w = CalcTextSize(RA.ctx, tostring(value or ""):upper())
   PopFont(RA.ctx)
   PushFont(RA.ctx, FONT.lucide, CHEV_SIZE)
@@ -1685,6 +1927,7 @@ function UI.chat_message_cull_key(msg, i, count, avail_w, chat_font_key,
     prefs.model_idx,
     prefs.thinking_idx,
     chat_font_key,
+    _display_dpi_class(S and S._window_dpi_scale) or "",
     Diag and Diag.uploader_enabled and "diag_on" or "diag_off",
     S.status,
     S.pending_display_idx == i,
@@ -2241,6 +2484,8 @@ function UI.hero_band_v5(phase)
   local WM_SIZE   = WM_SIZE_H + (WM_SIZE_C - WM_SIZE_H) * eased
   local TAG_SIZE  = RA.SC(20)
   local CHIP_SIZE = RA.SC(10)
+  local STATUS_FONT = UI.interface_regular_control_font()
+  local CHIP_FONT = UI.interface_control_font()
 
   local PAD_TOP_H, PAD_TOP_C = RA.SC(12), RA.SC(6)
   local PAD_BOT_H, PAD_BOT_C = RA.SC(18), RA.SC(12)
@@ -2351,9 +2596,9 @@ function UI.hero_band_v5(phase)
     end
   end
 
-  -- Clickable wordmark: acts like "return to home" -- clears the current
-  -- conversation (with no confirmation, since the user just clicked the
-  -- brand mark expecting a fresh start). Hover flips to hand cursor.
+  -- Clickable wordmark: acts like "return to home". A nonempty current chat
+  -- reaches the shared confirmation before any conversation state is cleared.
+  -- Hover flips to the hand cursor.
   -- Defer the actual conversation-clear to the main loop via
   -- S._logo_click_pending so the click site stays UI-only -- the
   -- consumer (Loop) handles cancel-curl + history wipe + status reset
@@ -2422,7 +2667,7 @@ function UI.hero_band_v5(phase)
 
   local DOT_R   = RA.SC(3)
   local DOT_GAP = RA.SC(8)
-  PushFont(RA.ctx, FONT.mono_reg, CHIP_SIZE)
+  PushFont(RA.ctx, STATUS_FONT, CHIP_SIZE)
   local st_tw = CalcTextSize(RA.ctx, st_label)
   PopFont(RA.ctx)
   local st_chip_w = DOT_R * 2 + DOT_GAP + st_tw
@@ -2442,7 +2687,7 @@ function UI.hero_band_v5(phase)
   PushFont(RA.ctx, FONT.lucide, NC_ICON_SIZE)
   local nc_icon_tw = CalcTextSize(RA.ctx, ICON.PLUS)
   PopFont(RA.ctx)
-  PushFont(RA.ctx, FONT.mono_med, CHIP_SIZE)
+  PushFont(RA.ctx, CHIP_FONT, CHIP_SIZE)
   local nc_text_tw = CalcTextSize(RA.ctx, NC_LABEL_TEXT)
   PopFont(RA.ctx)
   local nc_chip_w = NC_CHIP_PAD_X * 2 + nc_icon_tw + NC_ICON_GAP + nc_text_tw
@@ -2483,7 +2728,7 @@ function UI.hero_band_v5(phase)
 
   -- Status label.
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), st_color)
-  PushFont(RA.ctx, FONT.mono_reg, CHIP_SIZE)
+  PushFont(RA.ctx, STATUS_FONT, CHIP_SIZE)
   ImGui.ImGui_SetCursorPos(RA.ctx, group_x_local + DOT_R * 2 + DOT_GAP, chip_y_local)
   Text(RA.ctx, st_label)
   PopFont(RA.ctx)
@@ -2535,7 +2780,7 @@ function UI.hero_band_v5(phase)
         ImGui.ImGui_SetMouseCursor(RA.ctx, ImGui.ImGui_MouseCursor_Hand())
       end
       UI.tooltip_v5(UI.t("chat.hero.new_chat.tooltip", nil,
-        "Clear the current conversation and start fresh."))
+        "Start a new chat. ReaAssist confirms before clearing a nonempty current chat."))
     end
 
     -- Fill: dedicated per-theme tokens for rest + hover. Light-mode rest
@@ -2563,7 +2808,7 @@ function UI.hero_band_v5(phase)
     local nc_text_y = nc_cy - math_floor(CHIP_SIZE * 0.5) - RA.SC(2)
     ImGui.ImGui_DrawList_AddTextEx(dl, FONT.lucide, NC_ICON_SIZE,
       nc_icon_x, nc_icon_y, _fade(TK.accent), ICON.PLUS)
-    ImGui.ImGui_DrawList_AddTextEx(dl, FONT.mono_med, CHIP_SIZE,
+    ImGui.ImGui_DrawList_AddTextEx(dl, CHIP_FONT, CHIP_SIZE,
       nc_text_x, nc_text_y, _fade(TK.text_muted), NC_LABEL_TEXT)
 
     if nc_clicked then
@@ -2626,10 +2871,11 @@ function UI.hero_band_settings_v5(subtitle, right_text)
   local avail_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
   local win_x, win_y = ImGui.ImGui_GetWindowPos(RA.ctx)
   local win_w        = ImGui.ImGui_GetWindowSize(RA.ctx)
+  local compact_settings_hero = avail_w < RA.SC(520)
 
   local WM_SIZE   = RA.SC(22)    -- wordmark size (compact, per V5 spec)
-  local SUB_SIZE  = RA.SC(16)    -- subtitle size
-  local RIGHT_SZ  = RA.SC(12)    -- right-side breadcrumb mono size (+2 vs spec for weight)
+  local SUB_SIZE  = RA.SC(compact_settings_hero and 13 or 16)
+  local RIGHT_SZ  = RA.SC(compact_settings_hero and 10 or 12)
   local PAD_TOP   = RA.SC(16)
   local PAD_BOT   = RA.SC(22)    -- includes +10 breathing room above the divider
   local PAD_X     = RA.SC(22)
@@ -2769,8 +3015,14 @@ function UI.hero_band_settings_v5(subtitle, right_text)
     -- (sub_y uses the same formula below). Reads as complementary
     -- "meta" info at the same altitude as the page subtitle.
     local rt_x_screen = sx + (right_edge_local - start_x_local) - total_rt_w
-    local rt_y_screen = sy + PAD_TOP + WM_SIZE + WM_SUB_GAP
-                     + math_floor((SUB_SIZE - RIGHT_SZ) * 0.5)
+    local rt_y_screen
+    if compact_settings_hero then
+      rt_y_screen = sy + PAD_TOP
+        + math_floor((WM_SIZE - RIGHT_SZ) * 0.5)
+    else
+      rt_y_screen = sy + PAD_TOP + WM_SIZE + WM_SUB_GAP
+        + math_floor((SUB_SIZE - RIGHT_SZ) * 0.5)
+    end
     local cur_sx = rt_x_screen
     for _, ch in ipairs(chars) do
       ImGui.ImGui_DrawList_AddTextEx(dl, FONT.mono_reg, RIGHT_SZ,
@@ -2975,13 +3227,14 @@ function UI.session_strip_v5()
       ix, iy, TK.text_faint, ICON.FILE)
     x = x + iw + ITEM_GAP
   end
-  draw_seg(FONT.mono_reg, MONO_SIZE,  TK.text,       _session_cache.name)
+  local session_font = UI.interface_regular_control_font()
+  draw_seg(session_font, MONO_SIZE,  TK.text,       _session_cache.name)
   draw_dot()
-  draw_seg(FONT.mono_reg, MONO_SIZE,  TK.text_muted, _session_cache.tracks_label)
+  draw_seg(session_font, MONO_SIZE,  TK.text_muted, _session_cache.tracks_label)
   draw_dot()
-  draw_seg(FONT.mono_reg, MONO_SIZE,  TK.text_muted, _session_cache.items_label)
+  draw_seg(session_font, MONO_SIZE,  TK.text_muted, _session_cache.items_label)
   draw_dot()
-  draw_seg(FONT.mono_reg, MONO_SIZE,  TK.text_muted, _session_cache.fx_label)
+  draw_seg(session_font, MONO_SIZE,  TK.text_muted, _session_cache.fx_label)
 
   -- Transport state + play-cursor time (both mono, right-aligned). The time
   -- reads fresh each frame so it animates smoothly during playback; the state
@@ -3013,8 +3266,12 @@ function UI.session_strip_v5()
   -- playhead even when transport is stopped. Both calls are O(1) reads.
   local playhead = ((st & 1) ~= 0) and reaper.GetPlayPosition() or reaper.GetCursorPosition()
   local time_str = _format_time(playhead)
+  -- Keep the live transport readout tabular. The adaptive Inter face has
+  -- proportional digits, which would move the right-aligned state and time
+  -- labels sideways as the play position changes.
+  local transport_font = FONT.mono_reg
 
-  PushFont(RA.ctx, FONT.mono_reg, MONO_SIZE)
+  PushFont(RA.ctx, transport_font, MONO_SIZE)
   local t_tw  = CalcTextSize(RA.ctx, time_str)
   local st_tw = CalcTextSize(RA.ctx, st_label)
   PopFont(RA.ctx)
@@ -3024,7 +3281,7 @@ function UI.session_strip_v5()
   local st_x     = t_x - GAP_ST_T - st_tw
   local mono_y   = row_y + math_floor((ROW_FONT_SIZE - MONO_SIZE) * 0.5)
 
-  PushFont(RA.ctx, FONT.mono_reg, MONO_SIZE)
+  PushFont(RA.ctx, transport_font, MONO_SIZE)
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), st_col)
   ImGui.ImGui_SetCursorPos(RA.ctx, st_x, mono_y)
   Text(RA.ctx, st_label)
@@ -3050,15 +3307,21 @@ function UI.mode_model_row_v5()
   local sx, sy = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
   local start_pos_x = ImGui.ImGui_GetCursorPosX(RA.ctx)
   local start_pos_y = ImGui.ImGui_GetCursorPosY(RA.ctx)
+  local mode_row_avail_w = select(1, ImGui.ImGui_GetContentRegionAvail(RA.ctx))
+  local compact_mode_row = mode_row_avail_w < RA.SC(420)
 
-  local PAD_X      = RA.SC(14)
-  local ROW_GAP    = RA.SC(8)
+  -- High UI scales can leave less logical width even in a large window.
+  -- Tighten only the horizontal spacing there so every localized chip stays
+  -- reachable without changing the normal-scale layout or row height.
+  local PAD_X      = RA.SC(compact_mode_row and 8 or 14)
+  local ROW_GAP    = RA.SC(compact_mode_row and 4 or 8)
   local ROW_H      = RA.SC(22)
-  local SEG_PAD_X  = RA.SC(9)
+  local SEG_PAD_X  = RA.SC(compact_mode_row and 6 or 9)
   local INNER_PAD  = RA.SC(2)
-  local CHIP_PAD_X = RA.SC(9)
-  local CHEV_GAP   = RA.SC(4)
+  local CHIP_PAD_X = RA.SC(compact_mode_row and 5 or 9)
+  local CHEV_GAP   = RA.SC(compact_mode_row and 2 or 4)
   local MONO_SIZE  = RA.SC(10)
+  local CONTROL_FONT = UI.interface_control_font()
   local CHEV_SIZE  = RA.SC(10)
   local MENU_ICON_SIZE = RA.SC(11)
   local ROUND_PILL = RA.SC(5)
@@ -3095,7 +3358,7 @@ function UI.mode_model_row_v5()
   local CHIP_ROW_LIFT = RA.SC(5)
   local y1, y2 = sy - CHIP_ROW_LIFT, sy - CHIP_ROW_LIFT + ROW_H
 
-  local _, th = mode_text_metrics(FONT.mono_med, MONO_SIZE, "M")
+  local _, th = mode_text_metrics(CONTROL_FONT, MONO_SIZE, "M")
   local t_y = y1 + math_floor((ROW_H - th) * 0.5)
 
   -- Place an InvisibleButton at (x1, y1) with size (w, h). Returns true if the
@@ -3116,7 +3379,7 @@ function UI.mode_model_row_v5()
   -- chip's left edge (for popup anchoring) and whether it was clicked.
   local function draw_chip(label, btn_id, enabled, tooltip_text,
                            leading_icon, leading_icon_color)
-    local lw = mode_text_metrics(FONT.mono_med, MONO_SIZE, label)
+    local lw = mode_text_metrics(CONTROL_FONT, MONO_SIZE, label)
     local iw = 0
     local icon_gap = 0
     if leading_icon then
@@ -3146,7 +3409,7 @@ function UI.mode_model_row_v5()
       PopFont(RA.ctx)
       text_x = text_x + iw + icon_gap
     end
-    PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
+    PushFont(RA.ctx, CONTROL_FONT, MONO_SIZE)
     ImGui.ImGui_DrawList_AddText(dl, text_x, t_y,
       enabled and TK.text or TK.text_faint, label)
     PopFont(RA.ctx)
@@ -3166,7 +3429,8 @@ function UI.mode_model_row_v5()
   local MENU_COL_GAP   = RA.SC(10)
   local MENU_RIGHT_GAP = RA.SC(14)
   local MENU_CHECK_SLOT = RA.SC(18)
-  local menu_ascii_font = UI.brand_font("mono_med") or FONT.mono_med
+  local menu_ascii_font = UI.uses_fractional_dpi_font()
+    and CONTROL_FONT or (UI.brand_font("mono_med") or CONTROL_FONT)
 
   local function menu_text_w(text, font)
     if not text or text == "" then return 0 end
@@ -3629,8 +3893,8 @@ function UI.mode_model_row_v5()
   -- logical order: pick what AI to use first, then pick how it behaves.
   local ask_label = UI.t("mode.ask", nil, "ASK")
   local auto_run_label = UI.t("mode.auto_run", nil, "AUTO-RUN")
-  local ask_tw  = mode_text_metrics(FONT.mono_med, MONO_SIZE, ask_label)
-  local auto_tw = mode_text_metrics(FONT.mono_med, MONO_SIZE, auto_run_label)
+  local ask_tw  = mode_text_metrics(CONTROL_FONT, MONO_SIZE, ask_label)
+  local auto_tw = mode_text_metrics(CONTROL_FONT, MONO_SIZE, auto_run_label)
   local s1w = ask_tw  + SEG_PAD_X * 2
   local s2w = auto_tw + SEG_PAD_X * 2
   local pill_w = s1w + s2w + INNER_PAD * 2
@@ -3661,7 +3925,7 @@ function UI.mode_model_row_v5()
 
   -- Active-segment label color. Both ASK-on-accent and AUTO-RUN-on-pink
   -- use TK.accent_text (white) -- good contrast against both fills.
-  PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
+  PushFont(RA.ctx, CONTROL_FONT, MONO_SIZE)
   ImGui.ImGui_DrawList_AddText(dl, s1x1 + SEG_PAD_X, t_y,
     auto_on and TK.text_muted or TK.accent_text, ask_label)
   ImGui.ImGui_DrawList_AddText(dl, s2x1 + SEG_PAD_X, t_y,
@@ -3724,7 +3988,7 @@ function UI.mode_model_row_v5()
       return tonumber(w) or 0
     end
     local label_w = RA.SC(0)
-    PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
+    PushFont(RA.ctx, CONTROL_FONT, MONO_SIZE)
     label_w = math_max(mono_text_w(backup_label), mono_text_w(details_label),
       mono_text_w(custom_label))
     local off_w = mono_text_w(off_label)
@@ -3745,7 +4009,7 @@ function UI.mode_model_row_v5()
       local start_x, start_y = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
       local row_dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
       local label_y = start_y + math_floor((option_row_h - MONO_SIZE) * 0.5)
-      PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
+      PushFont(RA.ctx, CONTROL_FONT, MONO_SIZE)
       ImGui.ImGui_DrawList_AddText(row_dl, start_x + side_pad, label_y,
         TK.text, label)
       PopFont(RA.ctx)
@@ -3766,7 +4030,7 @@ function UI.mode_model_row_v5()
           ROUND_SEG)
         ImGui.ImGui_DrawList_AddRect(row_dl, x, seg_y,
           x + seg_w, seg_y + seg_h, TK.border, ROUND_SEG)
-        PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
+        PushFont(RA.ctx, CONTROL_FONT, MONO_SIZE)
         local tw = mono_text_w(seg_label)
         ImGui.ImGui_DrawList_AddText(row_dl,
           x + math_floor((seg_w - tw) * 0.5),
@@ -3793,7 +4057,7 @@ function UI.mode_model_row_v5()
           edit_hovered and TK.card_hover or TK.card, ROUND_SEG)
         ImGui.ImGui_DrawList_AddRect(row_dl, edit_x, seg_y,
           edit_x + edit_w, seg_y + seg_h, TK.border, ROUND_SEG)
-        PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
+        PushFont(RA.ctx, CONTROL_FONT, MONO_SIZE)
         local tw = mono_text_w(edit_label)
         ImGui.ImGui_DrawList_AddText(row_dl,
           edit_x + math_floor((edit_w - tw) * 0.5),
@@ -5268,18 +5532,20 @@ function UI.v5_select_row(id, label, items_str, cur_idx, tooltip, col_w, badge_t
   local BADGE_SZ   = RA.SC(9)
   local BADGE_H    = RA.SC(16)
   local BADGE_PAD_X = RA.SC(5)
+  local label_font = UI.interface_text_font()
+  local value_font = UI.interface_control_font()
 
   -- Card bg + border (the outer row).
   ImGui.ImGui_DrawList_AddRectFilled(dl, sx, sy, sx + col_w, sy + ROW_H, TK.card, ROUND)
   ImGui.ImGui_DrawList_AddRect(dl, sx, sy, sx + col_w, sy + ROW_H, TK.border, ROUND, 0, 1)
 
   -- Label on the left, vertically centered on its cap line.
-  PushFont(RA.ctx, FONT.inter_reg, LABEL_SZ)
+  PushFont(RA.ctx, label_font, LABEL_SZ)
   local label_w = CalcTextSize(RA.ctx, label)
   local _, lh = CalcTextSize(RA.ctx, "M")
   PopFont(RA.ctx)
   local label_y = sy + math_floor((ROW_H - lh) * 0.5)
-  ImGui.ImGui_DrawList_AddTextEx(dl, FONT.inter_reg, LABEL_SZ,
+  ImGui.ImGui_DrawList_AddTextEx(dl, label_font, LABEL_SZ,
     sx + PAD_X, label_y, TK.text, label)
   if badge_text and badge_text ~= "" then
     local badge_label = tostring(badge_text):upper()
@@ -5316,8 +5582,8 @@ function UI.v5_select_row(id, label, items_str, cur_idx, tooltip, col_w, badge_t
   local chip_label = preserve_value_case and cur_value or cur_value:upper()
   local chip_draw_label = chip_label
 
-  -- Measure the chip: mono_med label + Lucide chevron + inner padding.
-  PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
+  -- Measure the chip with the same adaptive font used for drawing.
+  PushFont(RA.ctx, value_font, MONO_SIZE)
   local lw = CalcTextSize(RA.ctx, chip_draw_label)
   PopFont(RA.ctx)
   PushFont(RA.ctx, FONT.lucide, CHEV_SIZE)
@@ -5331,7 +5597,7 @@ function UI.v5_select_row(id, label, items_str, cur_idx, tooltip, col_w, badge_t
     local max_text_w = max_chip_w - CHIP_PAD_X * 2 - CHEV_GAP - cw
     local ell = "..."
     chip_draw_label = chip_label
-    PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
+    PushFont(RA.ctx, value_font, MONO_SIZE)
     while #chip_draw_label > 0
         and CalcTextSize(RA.ctx, chip_draw_label .. ell) > max_text_w do
       chip_draw_label = UI._utf8_drop_last_char(chip_draw_label)
@@ -5377,14 +5643,14 @@ function UI.v5_select_row(id, label, items_str, cur_idx, tooltip, col_w, badge_t
     hovered and TK.card_hover or TK.card, ROUND_PILL)
   ImGui.ImGui_DrawList_AddRect(dl, chip_sx, chip_sy, chip_x2, chip_y2,
     TK.border, ROUND_PILL, 0, 1)
-  -- Mono-med label (uppercase). Use the actual measured text height
+  -- Compact label (uppercase). Use the actual measured text height
   -- (not MONO_SIZE) so the label sits on the chip's true optical
   -- center -- matches the home provider/model chip math.
-  PushFont(RA.ctx, FONT.mono_med, MONO_SIZE)
+  PushFont(RA.ctx, value_font, MONO_SIZE)
   local _, mono_th = CalcTextSize(RA.ctx, "M")
   PopFont(RA.ctx)
   local t_y = chip_sy + math_floor((CHIP_H - mono_th) * 0.5)
-  ImGui.ImGui_DrawList_AddTextEx(dl, FONT.mono_med, MONO_SIZE,
+  ImGui.ImGui_DrawList_AddTextEx(dl, value_font, MONO_SIZE,
     chip_sx + CHIP_PAD_X, t_y, TK.text, chip_draw_label)
   -- Lucide chevron, centered vertically in the chip.
   local ch_y = chip_sy + math_floor((CHIP_H - CHEV_SIZE) * 0.5)
@@ -5429,13 +5695,9 @@ function UI.v5_select_row(id, label, items_str, cur_idx, tooltip, col_w, badge_t
     do
       local margin = RA.SC(8)
       local scr_l, scr_t, scr_r, scr_b
-      if reaper and reaper.my_getViewport then
-        local src_l = math_floor(chip_sx)
-        local src_t = math_floor(chip_sy)
-        local src_r = math_floor(chip_x2)
-        local src_b = math_floor(chip_y2)
-        scr_l, scr_t, scr_r, scr_b = reaper.my_getViewport(
-          0, 0, 0, 0, src_l, src_t, src_r, src_b, true)
+      if RA and type(RA.monitor_work_rect) == "function" then
+        scr_l, scr_t, scr_r, scr_b = RA.monitor_work_rect(
+          chip_sx, chip_sy, chip_x2, chip_y2)
       end
       if type(scr_l) == "number" and type(scr_t) == "number"
           and type(scr_r) == "number" and type(scr_b) == "number" then
@@ -10307,6 +10569,7 @@ function Render._shared_key_screen_impl()
       -- are placed, so the console link can be right-aligned to the card's
       -- inner edge regardless of label length or UI scale.
       local row_start_x = GetCursorPosX(RA.ctx)
+      local row_start_sx = select(1, ImGui.ImGui_GetCursorScreenPos(RA.ctx))
       local row_avail_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
 
       -- Status dot: green when a key is stored, muted gray when empty.
@@ -10350,6 +10613,7 @@ function Render._shared_key_screen_impl()
       Text(RA.ctx, setup_label)
       PopStyleColor(RA.ctx)
       PopFont(RA.ctx)
+      local left_row_end_sx = select(1, ImGui.ImGui_GetItemRectMax(RA.ctx))
 
       -- Status pill: mono 9, inline right after the label. Shows
       -- CONNECTED (green) when a key is stored and idle, TESTING
@@ -10412,6 +10676,7 @@ function Render._shared_key_screen_impl()
         ImGui.ImGui_DrawList_AddTextEx(dl_pill, FONT.mono_reg, PILL_SZ,
           psx + PILL_PAD_X, pill_sy + PILL_PAD_Y - RA.SC(1),
           pill_fg, pill_label)
+        left_row_end_sx = select(1, ImGui.ImGui_GetItemRectMax(RA.ctx))
       end
 
       -- Console sign-up link (right side of the row). V5: mono SC(10) in
@@ -10434,11 +10699,14 @@ function Render._shared_key_screen_impl()
         PopFont(RA.ctx)
       end
       local link_w = prov._console_lw
+      local link_x = row_start_x + row_avail_w - link_w
+      local link_sx = row_start_sx + row_avail_w - link_w
+      local link_wraps = left_row_end_sx + RA.SC(8) > link_sx
       PushFont(RA.ctx, link_font, LINK_SZ)
       local _, link_h = CalcTextSize(RA.ctx, "M")
       PopFont(RA.ctx)
-      SameLine(RA.ctx)
-      SetCursorPosX(RA.ctx, row_start_x + row_avail_w - link_w)
+      if not link_wraps then SameLine(RA.ctx) end
+      SetCursorPosX(RA.ctx, link_x)
       if ImGui.ImGui_InvisibleButton(RA.ctx, "##frl" .. i,
           link_w, link_h) then
         UI.open_url(prov.console_url)
@@ -10980,11 +11248,23 @@ function Render._shared_key_screen_impl()
     local theme_value = theme_items[theme_idx + 1] or theme_items[1] or ""
 
     -- --- UI Scale ---
+    -- Keep Auto as the default index for existing configs while presenting it
+    -- first, followed by the exact manual scale choices in numeric order.
     local scale_label = UI.ui_scale_label()
-    UI._scale_combo_str = UI._scale_combo_str
-      or (tbl_concat(CFG.UI_SCALE_LABELS, "\0") .. "\0")
-    local scale_combo_str = UI._scale_combo_str
-    local scale_value = CFG.UI_SCALE_LABELS[prefs.ui_scale_idx] or ""
+    local scale_menu_to_pref = { 3, 1, 2, 7, 4, 5, 6 }
+    local scale_labels = {
+      UI.t("settings.pref.ui_scale.auto", nil, "AUTO (100%)"),
+      "75%", "85%", "100%", "125%", "150%", "200%",
+    }
+    local scale_combo_str = tbl_concat(scale_labels, "\0") .. "\0"
+    local scale_menu_idx = 0
+    for menu_idx, pref_idx in ipairs(scale_menu_to_pref) do
+      if pref_idx == prefs.ui_scale_idx then
+        scale_menu_idx = menu_idx - 1
+        break
+      end
+    end
+    local scale_value = scale_labels[scale_menu_idx + 1] or ""
 
     -- --- Chat Font ---
     local chat_font_label = UI.t("settings.pref.chat_font.label", nil,
@@ -11020,14 +11300,30 @@ function Render._shared_key_screen_impl()
       row_step)
     local sc_changed, sc_new = UI.v5_select_row("##pref_ui_scale",
       scale_label,
-      scale_combo_str, prefs.ui_scale_idx - 1,
+      scale_combo_str, scale_menu_idx,
       UI.t("settings.pref.ui_scale.tooltip", nil,
-        "Scale the entire interface (clamped to your monitor size)"), col_w)
-    if sc_changed and (sc_new + 1) ~= prefs.ui_scale_idx then
-      S._scale_prev_idx = prefs.ui_scale_idx  -- save for revert
-      S._scale_confirm_deadline = reaper.time_precise() + 10
-      prefs.ui_scale_idx = sc_new + 1  -- live preview
-      S._open_scale_confirm = true
+        "Auto keeps the original interface size. Manual percentages scale "
+          .. "the entire interface; ReaAssist "
+          .. "remembers the choice for the current monitor scale."), col_w)
+    if sc_changed then
+      local selected_idx = scale_menu_to_pref[sc_new + 1]
+      if selected_idx and selected_idx ~= prefs.ui_scale_idx then
+        local previous_idx = prefs.ui_scale_idx
+        local previous_scale = CFG.UI_SCALE_OPTIONS[previous_idx] or 1
+        local selected_scale = CFG.UI_SCALE_OPTIONS[selected_idx] or 1
+        prefs.ui_scale_idx = selected_idx  -- live preview
+        if selected_scale ~= previous_scale then
+          S._scale_prev_idx = previous_idx  -- save for revert
+          S._scale_confirm_deadline = reaper.time_precise() + 10
+          S._open_scale_confirm = true
+        else
+          -- Auto and manual 100% share the same layout scale, so changing
+          -- between them needs neither a resize nor a visibility confirmation.
+          S._scale_prev_idx = nil
+          S._scale_confirm_deadline = nil
+          S._open_scale_confirm = nil
+        end
+      end
     end
 
     settings_pref_select_pos(row_sx, row_sy, 3, grid_cols, col_w, GRID_GAP,
@@ -11118,12 +11414,13 @@ function Render._shared_key_screen_impl()
           UI.t("settings.adv.diagnostics.extended", nil, "Extended"),
         }, cur,
         UI.t("settings.adv.diagnostics.tooltip", nil,
-          "Basic anonymous diagnostics are enabled by default and can be "
-          .. "turned off. Basic includes fixed-category counts for errors, "
-          .. "outcomes, recovery, prompt mode, and cache use, without chat "
-          .. "text or names. Extended adds redacted chat, diagnostics, and "
-          .. "log/report detail. Sent on the next launch, never during an "
-          .. "active request."),
+          "Basic diagnostics are enabled by default and can be turned off. "
+          .. "Basic includes exact display, work-area and ReaAssist-window "
+          .. "sizes, display and REAPER DPI scaling, Interface Size settings, "
+          .. "Screen Reader visual text size, and fixed-category usage and "
+          .. "reliability counts. It does not include chat text or names. "
+          .. "Extended adds redacted chat, diagnostics, and log/report detail. "
+          .. "Sent on the next launch, never during an active request."),
         inner_w)
       if changed then
         local next_tier = (idx == 1) and "basic"
@@ -11535,8 +11832,10 @@ function Render._shared_key_screen_impl()
             "Extended includes Basic metrics plus redacted chat, diagnostics, "
             .. "recent errors, and redacted Advanced Log/report detail.")
           or UI.t("settings.diag.popup.basic_body", nil,
-            "Basic includes anonymous structured metrics only: counts, "
-            .. "providers, model tiers, tokens, cache, latency, and outcomes."))
+            "Basic includes text-free structured metrics: exact display, "
+            .. "work-area and ReaAssist-window sizes; display and REAPER DPI "
+            .. "scaling; Interface Size and Screen Reader visual text settings; "
+            .. "counts, providers, model tiers, tokens, cache, latency and outcomes."))
       ImGui.ImGui_Spacing(RA.ctx)
       local cancel_w, enable_w, gap = RA.SC(82), RA.SC(128), RA.SC(12)
       local row_w = cancel_w + gap + enable_w
@@ -12083,6 +12382,9 @@ function Render._shared_key_screen_impl()
       -- passes. If validation fails, the saved_* snapshots must stay intact so
       -- the dirty indicator, Cancel/Discard, and retry flow still reflect the
       -- real unsaved state.
+      if scale_changed and UI.remember_ui_scale_for_current_dpi then
+        UI.remember_ui_scale_for_current_dpi(api_keys.saved_ui_scale_idx)
+      end
       if api_keys.saved_ui_scale_idx then
         api_keys.saved_ui_scale_idx = nil
       end
@@ -16708,7 +17010,10 @@ function Render.main_window()
   -- When UI scale changes, re-apply the scaled default size immediately.
   -- Minimum width matches the default so the welcome text never needs to wrap.
   local scale_cond = ImGui.ImGui_Cond_Once()
-  if S._prev_ui_scale_idx and S._prev_ui_scale_idx ~= prefs.ui_scale_idx then
+  local scale_val = CFG.UI_SCALE_OPTIONS[prefs.ui_scale_idx] or 1.0
+  local previous_scale_val = S._prev_ui_scale_idx
+    and CFG.UI_SCALE_OPTIONS[S._prev_ui_scale_idx] or nil
+  if previous_scale_val and previous_scale_val ~= scale_val then
     scale_cond = ImGui.ImGui_Cond_Always()
   end
   if S._reset_window_size then
@@ -16717,7 +17022,6 @@ function Render.main_window()
   end
   S._prev_ui_scale_idx = prefs.ui_scale_idx
   -- At sub-100% scales the scaled window can be a bit too tight; nudge it up.
-  local scale_val = CFG.UI_SCALE_OPTIONS[prefs.ui_scale_idx] or 1.0
   local sw_extra = scale_val < 1.0 and 30 or 0
   local sh_extra = scale_val < 1.0 and 50 or 0
   local want_w = RA.SC(CFG.WIN_W) + sw_extra
@@ -16838,6 +17142,14 @@ function Render.main_window()
   -- knows whether to apply constraints or force-restore the
   -- pre-collapse size on the next Begin.
   S._main_was_visible = visible
+  local _frame_dpi = tonumber(ImGui.ImGui_GetWindowDpiScale(RA.ctx))
+  if _frame_dpi and _frame_dpi >= 0.5 and _frame_dpi <= 8
+      and _frame_dpi == _frame_dpi then
+    S._window_dpi_scale = _frame_dpi
+    S._window_dpi_valid = true
+  else
+    S._window_dpi_valid = false
+  end
 
   if visible then
     -- First-frame boot guard: skip content rendering until the window
@@ -16883,26 +17195,41 @@ function Render.main_window()
     -- V5 uses a flat window bg (TK.bg). The hero band paints its own gradient
     -- below the title bar, so the whole-window gradient is no longer needed.
 
-    -- Save the current monitor's work-area each frame for next-frame clamping.
+    -- Refresh the current monitor work area after geometry changes and once
+    -- per second so next-frame clamps track taskbar and display changes.
     do
       local wx, wy = ImGui.ImGui_GetWindowPos(RA.ctx)
       local cur_w, cur_h = ImGui.ImGui_GetWindowSize(RA.ctx)
-      local scr_l, scr_t, scr_r, scr_b
-      if reaper and reaper.my_getViewport then
-        local src_l = math_floor(wx)
-        local src_t = math_floor(wy)
-        local src_r = math_floor(wx + cur_w)
-        local src_b = math_floor(wy + cur_h)
-        scr_l, scr_t, scr_r, scr_b = reaper.my_getViewport(
-          0, 0, 0, 0,
-          src_l, src_t, src_r, src_b,
-          true)
-      end
-      if type(scr_l) == "number" and type(scr_t) == "number"
-          and type(scr_r) == "number" and type(scr_b) == "number"
-          and scr_r > scr_l and scr_b > scr_t then
-        S._monitor_w = scr_r - scr_l
-        S._monitor_h = scr_b - scr_t
+      local monitor_now = reaper.time_precise()
+      local geometry_attempted = S._monitor_attempt_x == wx
+        and S._monitor_attempt_y == wy
+        and S._monitor_attempt_w == cur_w
+        and S._monitor_attempt_h == cur_h
+      local recheck_due = not S._monitor_checked_at
+        or monitor_now - S._monitor_checked_at >= 1
+      if not geometry_attempted or recheck_due then
+        -- Record every attempt so a persistent failure retries at 1 Hz instead
+        -- of every frame. Commit the geometry cache only after a valid result.
+        S._monitor_attempt_x, S._monitor_attempt_y = wx, wy
+        S._monitor_attempt_w, S._monitor_attempt_h = cur_w, cur_h
+        S._monitor_checked_at = monitor_now
+        local scr_l, scr_t, scr_r, scr_b
+        if RA and type(RA.monitor_work_rect) == "function" then
+          scr_l, scr_t, scr_r, scr_b = RA.monitor_work_rect(
+            wx, wy, wx + cur_w, wy + cur_h)
+        end
+        if type(scr_l) == "number" and type(scr_t) == "number"
+            and type(scr_r) == "number" and type(scr_b) == "number"
+            and scr_r > scr_l and scr_b > scr_t then
+          S._monitor_x = scr_l
+          S._monitor_y = scr_t
+          S._monitor_r = scr_r
+          S._monitor_b = scr_b
+          S._monitor_w = scr_r - scr_l
+          S._monitor_h = scr_b - scr_t
+        end
+        UI.capture_display_context(wx, wy, cur_w, cur_h,
+          scr_l, scr_t, scr_r, scr_b)
       end
     end
 
@@ -16946,6 +17273,8 @@ function Render.main_window()
     --               Settings staged buffers, clear conversation.
     if S._logo_click_pending then
       S._logo_click_pending = false
+      local clear_confirmed = S._logo_click_confirmed == true
+      S._logo_click_confirmed = nil
       -- Guard: on the mandatory onboarding screens (TOS accept, first-
       -- run API key entry) the logo click is a no-op. Letting it drop
       -- to main chat would leak the user past onboarding with no keys
@@ -16969,6 +17298,19 @@ function Render.main_window()
           show_credits = false,
         }
         S._settings_request_cancel = true
+      elseif Net.conversation_has_content()
+          and not clear_confirmed then
+        S._chat_clear_return_state = {
+          screen = api_keys.screen,
+          show_help = S.show_help == true,
+          show_bug_report = S.show_bug_report == true,
+          show_credits = S.show_credits == true,
+        }
+        api_keys.screen = nil
+        S.show_help = false
+        S.show_bug_report = false
+        S.show_credits = false
+        S._open_chat_clear_confirm = true
       else
       -- Cancel any in-flight request so a late response doesn't write
       -- back into the now-cleared conversation.
@@ -17015,6 +17357,7 @@ function Render.main_window()
       S._footer_help_ret    = nil
       S._footer_credits_ret = nil
       -- Clear the conversation (brand-mark semantics: "return home").
+      S._chat_clear_return_state = nil
       Net.clear_conversation()
       S.refocus_prompt = true
       end  -- settings-vs-other branch
@@ -17212,6 +17555,8 @@ function Render.main_window()
       local TITLE_SIZE    = RA.SC(11)
       local BODY_SIZE     = RA.SC(10)
       local LABEL_SIZE    = RA.SC(10)
+      local INTERFACE_FONT = UI.interface_text_font()
+      local CONTROL_FONT   = UI.interface_regular_control_font()
       local HEAD_BODY_GAP = RA.SC(6)                  -- vertical gap title->body
       local BODY_LINE_H   = math_floor(BODY_SIZE * 1.35 + 0.5)
       local card_h        = CARD_PAD_Y + TITLE_SIZE + HEAD_BODY_GAP + BODY_LINE_H * 2 + CARD_PAD_BOT
@@ -17238,7 +17583,7 @@ function Render.main_window()
       local win_x0     = ImGui.ImGui_GetWindowPos(RA.ctx)
       local function draw_section_header(label)
         SetCursorPosX(RA.ctx, CONT_PAD_X)
-        PushFont(RA.ctx, FONT.mono_reg, LABEL_SIZE)
+        PushFont(RA.ctx, CONTROL_FONT, LABEL_SIZE)
         PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
         Text(RA.ctx, label)
         PopStyleColor(RA.ctx)
@@ -17335,7 +17680,7 @@ function Render.main_window()
                 _fade(dot_col))
 
               -- Title.
-              PushFont(RA.ctx, FONT.inter_reg, TITLE_SIZE)
+              PushFont(RA.ctx, INTERFACE_FONT, TITLE_SIZE)
               PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
               ImGui.ImGui_SetCursorPos(RA.ctx,
                 cx + CARD_PAD_X + DOT_SIZE + DOT_TEXT_GAP,
@@ -17345,7 +17690,7 @@ function Render.main_window()
               PopFont(RA.ctx)
 
               -- Body (2-line wrap).
-              PushFont(RA.ctx, FONT.inter_reg, BODY_SIZE)
+              PushFont(RA.ctx, INTERFACE_FONT, BODY_SIZE)
               PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
               ImGui.ImGui_SetCursorPos(RA.ctx,
                 cx + CARD_PAD_X,
@@ -17446,6 +17791,7 @@ function Render.main_window()
         local _w_key = tostring(prefs.chat_font_idx or 2)
           .. ":" .. tostring(prefs.ui_scale_idx or 3)
           .. ":" .. chat_font_key
+          .. ":" .. tostring(_display_dpi_class(S and S._window_dpi_scale))
         if msg._natural_content_w == nil
            or msg._natural_content_w_key ~= _w_key
            or msg._natural_content_w_src ~= stripped then
@@ -17517,6 +17863,7 @@ function Render.main_window()
           -- with many wrapped lines, where N visible bubbles * N lines *
           -- 60fps was the dominant cost.
           local _font_idx  = tostring(prefs.chat_font_idx or 2) .. ":" .. chat_font_key
+            .. ":" .. tostring(_display_dpi_class(S and S._window_dpi_scale))
           local _scale_idx = prefs.ui_scale_idx or 3
           if msg._bubble_w == nil
              or msg._bubble_w_guess ~= bubble_cpl_guess
@@ -18549,7 +18896,7 @@ function Render.main_window()
           UI.selectable_text(msg.storage_note, "##snote_" .. i, avail_w - 8, COL.DETAIL)
         end
 
-        if msg.typed_actions and msg.typed_actions.present == true then
+        if TypedActionController.message_has_typed_actions(msg) then
           local plan_text = msg.generated_code and msg.generated_code.content or nil
           local ta_lang = UI.active_language_code()
           local ta_catalog = I18N and I18N.load_catalog
@@ -18937,7 +19284,8 @@ function Render.main_window()
               if is_jsfx then
                 filename = Code.derive_filename_jsfx(msg.code_block) or "effect.jsfx"
               else
-                filename = Code.derive_filename(msg.code_block) or "snippet.lua"
+                filename = Code.derive_filename(
+                  msg.code_block, msg.source_request) or "snippet.lua"
               end
               local header_left  = lang .. "  \xc2\xb7  " .. filename
               local header_right = tostring(line_count) .. " lines"
@@ -19305,15 +19653,29 @@ function Render.main_window()
 
           if is_lua then
             -- Lua buttons: Copy and Save.
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        V5_SEC_BG)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), V5_SEC_HOV)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  V5_SEC_ACT)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          V5_SEC_TXT)
+            local code_row_gap = RA.SC(4)
+            local code_row_avail = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
             local copy_flash = S._btn_flash and S._btn_flash["copy_" .. i]
               and (reaper.time_precise() - S._btn_flash["copy_" .. i]) < 1.5
             local copy_label = copy_flash
               and UI.t("common.copied", nil, "Copied!")
               or UI.t("common.copy", nil, "Copy")
+            local save_flash = S._btn_flash and S._btn_flash["save_" .. i]
+              and (reaper.time_precise() - S._btn_flash["save_" .. i]) < 1.5
+            local save_lbl = save_flash
+              and UI.t("common.saved", nil, "Saved!")
+              or UI.t("common.save", nil, "Save")
+            local edit_label = not msg.edit_mode
+              and UI.t("common.edit", nil, "Edit") or nil
+            local copy_w = action_btn_w(copy_label, RA.SC(60), RA.SC(76))
+            local save_w = action_btn_w(save_lbl, RA.SC(60), RA.SC(82))
+            local edit_w = edit_label
+              and action_btn_w(edit_label, RA.SC(50), RA.SC(68)) or 0
+            local code_row_used = copy_w
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        V5_SEC_BG)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), V5_SEC_HOV)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  V5_SEC_ACT)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          V5_SEC_TXT)
             -- Nudge "Copied!" left by shrinking FramePadding.x. ButtonTextAlign
             -- can't help here because the label (at mono_med SC(11)) fills or
             -- overflows the button's content rect, so ImGui left-aligns to
@@ -19323,7 +19685,7 @@ function Render.main_window()
               PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(), RA.SC(6), RA.SC(5))
             end
             if ImGui.ImGui_Button(RA.ctx, copy_label .. "##copy_" .. i,
-                action_btn_w(copy_label, RA.SC(60), RA.SC(76)), 0) then
+                copy_w, 0) then
               ImGui.ImGui_SetClipboardText(RA.ctx, msg.code_block)
               S._btn_flash = S._btn_flash or {}
               S._btn_flash["copy_" .. i] = reaper.time_precise()
@@ -19334,14 +19696,14 @@ function Render.main_window()
                 "Copy code to clipboard"))
             end
 
-            SameLine(RA.ctx, 0, RA.SC(4))
-            local save_flash = S._btn_flash and S._btn_flash["save_" .. i]
-              and (reaper.time_precise() - S._btn_flash["save_" .. i]) < 1.5
-            local save_lbl = save_flash
-              and UI.t("common.saved", nil, "Saved!")
-              or UI.t("common.save", nil, "Save")
+            if code_row_used + code_row_gap + save_w <= code_row_avail then
+              SameLine(RA.ctx, 0, code_row_gap)
+              code_row_used = code_row_used + code_row_gap + save_w
+            else
+              code_row_used = save_w
+            end
             if ImGui.ImGui_Button(RA.ctx, save_lbl .. "##save_" .. i,
-                action_btn_w(save_lbl, RA.SC(60), RA.SC(82)), 0) then
+                save_w, 0) then
               if not reaper.JS_Dialog_BrowseForSaveFile and not S.js_hint_shown then
                 S.js_hint_shown = true
                 reaper.ShowMessageBox(
@@ -19352,7 +19714,8 @@ function Render.main_window()
                   UI.t("code.save_browser_tip.title", nil,
                     "ReaAssist - Tip"), 0)
               end
-              local saved = Code.save_file(msg.code_block, Code.derive_filename(msg.code_block))
+              local saved = Code.save_file(msg.code_block,
+                Code.derive_filename(msg.code_block, msg.source_request))
               if saved then
                 S.saved_script_path  = saved
                 S.open_actions_modal = true
@@ -19370,10 +19733,14 @@ function Render.main_window()
             -- block stays editable for the rest of the session, so the
             -- button hides itself after a click.
             if not msg.edit_mode then
-              SameLine(RA.ctx, 0, RA.SC(4))
-              local edit_label = UI.t("common.edit", nil, "Edit")
+              if code_row_used + code_row_gap + edit_w <= code_row_avail then
+                SameLine(RA.ctx, 0, code_row_gap)
+                code_row_used = code_row_used + code_row_gap + edit_w
+              else
+                code_row_used = edit_w
+              end
               if ImGui.ImGui_Button(RA.ctx, edit_label .. "##edit_" .. i,
-                  action_btn_w(edit_label, RA.SC(50), RA.SC(68)), 0) then
+                  edit_w, 0) then
                 msg.edit_mode = true
               end
               UI.tooltip(UI.t("code.edit.tooltip", nil,
@@ -19603,23 +19970,68 @@ function Render.main_window()
               ar_fg, ar_text)
             Dummy(RA.ctx, ar_w, ar_h)
           end
+          local fx_insert_evidence = msg.fx_insert_failure_evidence
+          local failed_fx_names = type(fx_insert_evidence) == "table"
+            and fx_insert_evidence.failed_names or nil
+          local has_fx_insert_failures = type(failed_fx_names) == "table"
+            and #failed_fx_names > 0
+          local interval_overlapped = type(msg.change_evidence) == "table"
+            and msg.change_evidence.attribution == "interval_overlapped"
+          local has_parameter_warning =
+            msg.parameter_change_status == "partially_changed"
+            or msg.parameter_change_status == "unchanged"
+            or msg.parameter_change_status == "returned_to_initial"
+          local has_generic_no_change = not has_fx_insert_failures
+            and not has_parameter_warning
+            and msg.parameter_change_status ~= "changed"
+            and msg.observable_change_status == "unchanged"
           if msg.run_status == "ran_ok"
-              and (msg.parameter_change_status == "partially_changed"
-                or msg.parameter_change_status == "unchanged"
-                or msg.parameter_change_status == "returned_to_initial"
-                or (msg.parameter_change_status ~= "changed"
-                  and msg.observable_change_status == "unchanged")) then
+              and (has_fx_insert_failures or has_parameter_warning
+                or has_generic_no_change) then
             ImGui.ImGui_Spacing(RA.ctx)
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
+            if has_fx_insert_failures then
+              local plugins = table.concat(failed_fx_names, ", ")
+              if interval_overlapped then
+                ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
+                  "code.run.fx_insert_failed_overlapped", {
+                    plugins = plugins,
+                  },
+                  "ReaAssist could not add: {plugins}. A newer action ran before this older action finished, so ReaAssist cannot tell which change REAPER's Undo would remove. Review the project and REAPER's Undo history before undoing anything. Confirm each named plug-in is installed and available in REAPER, then resend the request."))
+              elseif msg.observable_change_status == "changed" then
+                ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
+                  "code.run.fx_insert_failed_partial", {
+                    plugins = plugins,
+                  },
+                  "ReaAssist could not add: {plugins}. Other project changes were made, so the action may be partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request."))
+              else
+                ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
+                  "code.run.fx_insert_failed_unchanged", {
+                    plugins = plugins,
+                  },
+                  "ReaAssist could not add: {plugins}. No project changes were detected. Confirm each named plug-in is installed and available in REAPER, then resend the request."))
+              end
+            end
+            if has_fx_insert_failures and has_parameter_warning then
+              ImGui.ImGui_Spacing(RA.ctx)
+            end
             if msg.parameter_change_status == "partially_changed" then
-              ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
-                "code.run.partial_parameter_change", {
-                  changed = msg.parameter_change_evidence
-                    and msg.parameter_change_evidence.changed_target_count or 0,
-                  total = msg.parameter_change_evidence
-                    and msg.parameter_change_evidence.target_count or 0,
-                },
-                "Some parameter targets did not finish with a verified new value ({changed} of {total} changed). Confirm the unchanged or restored plugin values before continuing."))
+              local parameter_evidence = msg.parameter_change_evidence or {}
+              local changed_count = parameter_evidence.changed_target_count or 0
+              local target_count = parameter_evidence.target_count or 0
+              if (parameter_evidence.requested_value_confirmed_mismatch_count
+                    or 0) > 0 and changed_count == target_count then
+                ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
+                  "code.run.parameter_changed_missed_request", nil,
+                  "The parameter values changed, but at least one did not finish at the requested setting. Confirm the displayed plug-in values before continuing."))
+              else
+                ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
+                  "code.run.partial_parameter_change", {
+                    changed = changed_count,
+                    total = target_count,
+                  },
+                  "Some parameter targets could not be verified ({changed} of {total} changed). Confirm the unchanged, restored, or mismatched plug-in values before continuing."))
+              end
             elseif msg.parameter_change_status == "unchanged" then
               ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
                 "code.run.no_parameter_change", nil,
@@ -19628,10 +20040,16 @@ function Render.main_window()
               ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
                 "code.run.parameter_returned_to_initial", nil,
                 "Parameter probing finished at the original value. The requested state may already have been set, or a helper restored it after failing verification. Review any message shown by the script and confirm the displayed plugin value."))
-            else
-              ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
-                "code.run.no_project_change", nil,
-                "No project change was detected. The script may have exited early because a target was missing or the requested state was already set. Review any message shown by the script and confirm the project result."))
+            elseif has_generic_no_change then
+              if interval_overlapped then
+                ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
+                  "code.run.no_project_change_overlapped", nil,
+                  "This older action finished without changing the project, and a newer action has run since. It may have exited early because a target was missing or the requested state was already set. Review the project and REAPER's Undo history before undoing anything."))
+              else
+                ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
+                  "code.run.no_project_change", nil,
+                  "No project change was detected. The script may have exited early because a target was missing or the requested state was already set. Review any message shown by the script and confirm the project result."))
+              end
             end
             PopStyleColor(RA.ctx)
           end
@@ -20743,7 +21161,26 @@ function Render.main_window()
     -- ------ Clear confirmation popup -----------------------------------------
     -- Prevents accidental wipe of conversation history by requiring explicit
     -- confirmation. Escape or Cancel dismisses without clearing.
-    local clr_w, clr_h = RA.SC(320), RA.SC(150)
+    local clear_popup_title = UI.t("chat.clear.title", nil,
+      "Start a New Chat?") .. "##popup"
+    if S._open_chat_clear_confirm then
+      S._open_chat_clear_confirm = false
+      S._chat_clear_popup_active = true
+      ImGui.ImGui_OpenPopup(RA.ctx, clear_popup_title)
+    end
+    local function cancel_chat_clear()
+      local ret = S._chat_clear_return_state
+      if type(ret) == "table" then
+        api_keys.screen = ret.screen
+        S.show_help = ret.show_help == true
+        S.show_bug_report = ret.show_bug_report == true
+        S.show_credits = ret.show_credits == true
+      end
+      S._chat_clear_return_state = nil
+      S._chat_clear_popup_active = nil
+      S.refocus_prompt = true
+    end
+    local clr_w, clr_h = RA.SC(430), RA.SC(165)
     if update._main_w then
       ImGui.ImGui_SetNextWindowPos(RA.ctx,
         update._main_x + (update._main_w - clr_w) * 0.5,
@@ -20752,27 +21189,26 @@ function Render.main_window()
     end
     ImGui.ImGui_SetNextWindowSize(RA.ctx, clr_w, clr_h, ImGui.ImGui_Cond_Appearing())
     UI.push_modal_style()
-    if ImGui.ImGui_BeginPopupModal(RA.ctx,
-        UI.t("chat.clear.title", nil, "Confirm Clear") .. "##popup",
-        true, ImGui.ImGui_WindowFlags_NoResize()) then
+    local clear_visible, clear_open = ImGui.ImGui_BeginPopupModal(RA.ctx,
+        clear_popup_title,
+        true, ImGui.ImGui_WindowFlags_NoResize())
+    if clear_visible then
       local clr_cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
       ImGui.ImGui_Spacing(RA.ctx)
       local clr_txt = UI.t("chat.clear.prompt", nil,
-        "Clear the entire conversation?")
-      local clr_tw = CalcTextSize(RA.ctx, clr_txt)
-      SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx) + math_floor((clr_cw - clr_tw) * 0.5))
-      Text(RA.ctx, clr_txt)
+        "Clear the current chat and start a new one?\nThis only clears the current ReaAssist session.")
+      ImGui.ImGui_TextWrapped(RA.ctx, clr_txt)
       ImGui.ImGui_Spacing(RA.ctx)
       ImGui.ImGui_Spacing(RA.ctx)
 
       local confirm = false
-      local cfm_w, cnl_w, cfm_gap = RA.SC(88), RA.SC(72), RA.SC(16)
+      local cfm_w, cnl_w, cfm_gap = RA.SC(130), RA.SC(72), RA.SC(16)
       local cfm_row = cfm_w + cfm_gap + cnl_w
       SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx) + math_floor((clr_cw - cfm_row) * 0.5))
       -- Wipes the full conversation -- danger palette.
       UI.push_modal_danger_btn()
       if ImGui.ImGui_Button(RA.ctx,
-          UI.t("common.confirm", nil, "Confirm"), cfm_w, 0) then
+          UI.t("chat.clear.confirm", nil, "Start New Chat"), cfm_w, 0) then
         confirm = true
       end
       UI.pop_modal_danger_btn()
@@ -20780,6 +21216,7 @@ function Render.main_window()
       if ImGui.ImGui_Button(RA.ctx,
           UI.t("common.cancel", nil, "Cancel"), cnl_w, 0) then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+        cancel_chat_clear()
       end
       -- Enter confirms, Escape cancels.
       if ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Enter())
@@ -20788,14 +21225,22 @@ function Render.main_window()
       end
       if ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+        cancel_chat_clear()
       end
       if confirm then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
-        Net.clear_conversation()
-        S.refocus_prompt = true
+        S._chat_clear_popup_active = nil
+        S._chat_clear_return_state = nil
+        S._logo_click_confirmed = true
+        S._logo_click_pending = true
       end
 
       ImGui.ImGui_EndPopup(RA.ctx)
+      if clear_open == false and S._chat_clear_popup_active then
+        cancel_chat_clear()
+      end
+    elseif S._chat_clear_popup_active then
+      cancel_chat_clear()
     end
     UI.pop_modal_style()
 
@@ -22162,7 +22607,8 @@ function Render.main_window()
   -- differs ("ReaAssist vX is available" vs "N files need to be restored"),
   -- but the download progress, completion, and failure views are shared.
   if (update.state == "available" or update.state == "repair_available")
-      and not update.popup_opened then
+      and not update.popup_opened
+      and update.silent_manifest_repair ~= true then
     update.show_dialog = true
     update.popup_opened = true
   end
@@ -23113,7 +23559,8 @@ function UI.render_highlighted(src, lang, cache)
   -- tuned to match (see the SC(6) term when sizing the BeginChild height).
   PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ItemSpacing(), 0, RA.SC(6))
   local inline_font_size = ImGui.ImGui_GetFontSize(RA.ctx)
-  for _, segs in ipairs(lines) do
+  local function render_line(index)
+    local segs = lines[index]
     if #segs == 0 then
       -- Blank source line: emit an empty Text so cursor advances by one row.
       Text(RA.ctx, "")
@@ -23126,6 +23573,35 @@ function UI.render_highlighted(src, lang, cache)
         if inline_font then PopFont(RA.ctx) end
       end
     end
+  end
+  local clipped = false
+  if type(ImGui.ImGui_CreateListClipper) == "function"
+      and type(ImGui.ImGui_ListClipper_Begin) == "function"
+      and type(ImGui.ImGui_ListClipper_Step) == "function"
+      and type(ImGui.ImGui_ListClipper_GetDisplayRange) == "function"
+      and type(ImGui.ImGui_ListClipper_End) == "function" then
+    UI._highlight_line_clipper = UI._highlight_line_clipper
+      or ImGui.ImGui_CreateListClipper(RA.ctx)
+    if UI._highlight_line_clipper then
+      if not UI._highlight_line_clipper_attached
+          and type(ImGui.ImGui_Attach) == "function" then
+        ImGui.ImGui_Attach(RA.ctx, UI._highlight_line_clipper)
+        UI._highlight_line_clipper_attached = true
+      end
+      ImGui.ImGui_ListClipper_Begin(UI._highlight_line_clipper, #lines)
+      while ImGui.ImGui_ListClipper_Step(UI._highlight_line_clipper) do
+        local display_start, display_end =
+          ImGui.ImGui_ListClipper_GetDisplayRange(UI._highlight_line_clipper)
+        for index = display_start + 1, math_min(display_end, #lines) do
+          render_line(index)
+        end
+      end
+      ImGui.ImGui_ListClipper_End(UI._highlight_line_clipper)
+      clipped = true
+    end
+  end
+  if not clipped then
+    for index = 1, #lines do render_line(index) end
   end
   ImGui.ImGui_PopStyleVar(RA.ctx)
 end

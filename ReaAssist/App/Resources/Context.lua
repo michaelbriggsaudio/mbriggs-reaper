@@ -930,11 +930,20 @@ function CTX.local_master_output_presence_query(lt)
   return track_query
 end
 
--- Cap the per-snapshot FX listing so a 100+ track session doesn't dump
--- 30K+ bytes of FX names every turn. Selected tracks are reported first and
--- always survive the cap; remaining tracks fill up to the limit. The model
--- can request the full listing on demand via <context_needed>fx_chains</...>.
+-- Cap ordinary FX snapshots so a 100+ track session doesn't dump 30K+ bytes
+-- of FX names every turn. Selected tracks are reported first and always
+-- survive the cap. Explicit inventory reads and reactive fx_chains requests
+-- pass opts.full so the promised on-demand listing is complete.
+CTX.FX_OMISSION_MARKER = "more tracks with FX"
 CTX.MAX_FX_REPORT = 30
+-- Counts above this are rejected as invalid. Monitor FX inventory is never
+-- truncated because a partial chain could expose unsafe encoded indices.
+CTX.MONITOR_FX_COUNT_LIMIT = 256
+
+function CTX.fx_snapshot_is_capped(text)
+  return type(text) == "string"
+    and text:find(CTX.FX_OMISSION_MARKER, 1, true) ~= nil
+end
 
 -- FX chain listing by track. This reports plugin names and indices only; live
 -- parameter names/values are intentionally deferred to fx_params or fx_inspect.
@@ -943,9 +952,12 @@ CTX.MAX_FX_REPORT = 30
 function CTX.fx(proj, opts)
   local count = R_CountTracks(proj)
   local selected_only = opts and opts.selected_only == true
+  local full = opts and opts.full == true
   local source_track = opts and opts.source_track or nil
   local source_name = opts and opts.source_name or nil
-  local sel_with_fx, master_with_fx, other_with_fx = {}, {}, {}
+  local include_monitor = full and not selected_only and not source_track
+  local sel_with_fx, master_with_fx, monitor_with_fx, other_with_fx = {}, {}, {}, {}
+  local monitor_status = nil
   for i = 0, count - 1 do
     local tr = R_GetTrack(proj, i)
     if tr
@@ -985,19 +997,75 @@ function CTX.fx(proj, opts)
         master_with_fx[#master_with_fx+1] = str_format("%s|%s|%s",
           "M", _scrub_pipes(nm), tbl_concat(fx_names, ","))
       end
+      if include_monitor then
+        if type(reaper.TrackFX_GetRecCount) ~= "function" then
+          monitor_status = "Monitor FX inventory unavailable: count API unavailable"
+        else
+          local count_ok, monitor_count = pcall(reaper.TrackFX_GetRecCount, master)
+          local count_valid = count_ok and type(monitor_count) == "number"
+            and monitor_count == monitor_count
+            and monitor_count == math_floor(monitor_count)
+            and monitor_count >= 0
+            and monitor_count <= CTX.MONITOR_FX_COUNT_LIMIT
+          if not count_valid then
+            monitor_status = "Monitor FX inventory unavailable: invalid count"
+          elseif monitor_count > 0 then
+            local fx_names = {}
+            local names_valid = true
+            for f = 0, monitor_count - 1 do
+              local encoded_index = 0x1000000 + f
+              local name_ok, retval, fx_nm = pcall(
+                R_TrackFX_GetFXName, master, encoded_index, "")
+              if not name_ok or retval ~= true
+                  or type(fx_nm) ~= "string" or fx_nm == "" then
+                names_valid = false
+                break
+              end
+              fx_names[#fx_names + 1] = str_format(
+                "[%d]%s", encoded_index, _scrub_pipes(fx_nm))
+            end
+            if names_valid then
+              monitor_with_fx[#monitor_with_fx + 1] = str_format(
+                "%s|%s|%s", "MON", "Monitor FX", tbl_concat(fx_names, ","))
+            else
+              monitor_status = "Monitor FX inventory unavailable: name read failed"
+            end
+          end
+        end
+      end
+    elseif include_monitor then
+      monitor_status = "Monitor FX inventory unavailable: master track unavailable"
     end
   end
-  local total = #sel_with_fx + #master_with_fx + #other_with_fx
+  local total = #sel_with_fx + #master_with_fx + #monitor_with_fx + #other_with_fx
   if total == 0 then
+    if monitor_status then
+      return "FX chains: none (" .. monitor_status .. ")."
+    end
     if source_track then
       return "FX chains: none on " .. (source_name or "track")
     end
     return selected_only and "FX chains: none on selected tracks" or "FX chains: none"
   end
-  local lines = { "FX chains [track_idx|track_name|[fx_idx]fx_name,...]:" }
+  local lines
+  if include_monitor then
+    lines = {
+      "FX chains [track_ref|track_name|[fx_idx]fx_name,...]:",
+      "track_ref is a 1-based track number, M for Master FX, or MON for Monitor FX. "
+        .. "MON uses GetMasterTrack with the encoded FX index and is read-only "
+        .. "inventory, never an ordinary upsert target.",
+    }
+  else
+    lines = {
+      "FX chains [track_ref|track_name|[fx_idx]fx_name,...]:",
+      "This listing excludes Monitor FX.",
+    }
+  end
   for _, e in ipairs(sel_with_fx) do lines[#lines+1] = e end
   for _, e in ipairs(master_with_fx) do lines[#lines+1] = e end
-  local remaining = math_max(0,
+  for _, e in ipairs(monitor_with_fx) do lines[#lines+1] = e end
+  if monitor_status then lines[#lines + 1] = "(" .. monitor_status .. ")" end
+  local remaining = full and #other_with_fx or math_max(0,
     CTX.MAX_FX_REPORT - #sel_with_fx - #master_with_fx)
   local shown = 0
   for _, e in ipairs(other_with_fx) do
@@ -1008,8 +1076,8 @@ function CTX.fx(proj, opts)
   local omitted = #other_with_fx - shown
   if omitted > 0 then
     lines[#lines+1] = str_format(
-      "(+%d more tracks with FX -- request <context_needed>fx_chains</context_needed> for full)",
-      omitted)
+      "(+%d %s -- request <context_needed>fx_chains</context_needed> for full)",
+      omitted, CTX.FX_OMISSION_MARKER)
   end
   return tbl_concat(lines, "\n")
 end
@@ -1044,12 +1112,36 @@ function CTX.tracks_without_fx(proj, opts)
   return tbl_concat(lines, "\n")
 end
 
-function CTX.local_fx_search_key(s)
+function CTX.local_fx_name_key_and_bounds(s)
   s = tostring(s or ""):lower()
   s = s:gsub("^%w+:%s*", "")
   s = s:gsub("%s*%(.-%)%s*$", "")
-  s = s:gsub("[^%a%d]", "")
-  return s
+  local parts, starts, ends = {}, {}, {}
+  local key_length = 0
+  for token in s:gmatch("[%a%d]+") do
+    parts[#parts + 1] = token
+    starts[key_length + 1] = true
+    key_length = key_length + #token
+    ends[key_length] = true
+  end
+  return tbl_concat(parts, ""), starts, ends
+end
+
+function CTX.local_fx_search_key(s)
+  return (CTX.local_fx_name_key_and_bounds(s))
+end
+
+function CTX.local_fx_weak_key_matches(query, key, starts, ends)
+  local q = tostring(query or "")
+  if q == "" then return false end
+  local from = 1
+  while true do
+    local position = tostring(key or ""):find(q, from, true)
+    if not position then return false end
+    local last = position + #q - 1
+    if not (starts[position] and not ends[last]) then return true end
+    from = position + 1
+  end
 end
 
 function CTX.local_fx_search_query(lt)
@@ -1119,11 +1211,34 @@ function CTX.local_fx_search_query(lt)
   return q
 end
 
-function CTX.local_fx_search_keys_for_track(query)
+CTX.FX_CATEGORY_ALIASES = {
+  comp = { "reacomp", "comp" },
+  compression = { "reacomp", "comp" },
+  compressor = { "reacomp", "comp" },
+  delay = { "readelay", "delay" },
+  eq = { "reaeq", "eq" },
+  echo = { "readelay", "echo" },
+  gate = { "reagate", "gate" },
+  limiter = { "realimit", "limit" },
+  limit = { "realimit", "limit" },
+  reverb = { "reaverbate", "reverb", "verb" },
+  verb = { "reaverbate", "verb" },
+}
+
+function CTX.local_fx_category_key(query)
   local raw = tostring(query or ""):lower()
   raw = raw:gsub("[%.%?%!]+$", "")
   raw = raw:gsub("^%s+", ""):gsub("%s+$", "")
   raw = raw:gsub("^the%s+", ""):gsub("^a%s+", ""):gsub("^an%s+", "")
+  return raw
+end
+
+function CTX.local_fx_category_query(query)
+  return CTX.FX_CATEGORY_ALIASES[CTX.local_fx_category_key(query)] ~= nil
+end
+
+function CTX.local_fx_search_keys_for_track(query)
+  local raw = CTX.local_fx_category_key(query)
   local seen, keys = {}, {}
   local function add_key(value)
     local key = CTX.local_fx_search_key(value)
@@ -1133,20 +1248,7 @@ function CTX.local_fx_search_keys_for_track(query)
     end
   end
   add_key(query)
-  local aliases = {
-    comp = { "reacomp", "comp" },
-    compression = { "reacomp", "comp" },
-    compressor = { "reacomp", "comp" },
-    delay = { "readelay", "delay" },
-    eq = { "reaeq", "eq" },
-    echo = { "readelay", "echo" },
-    gate = { "reagate", "gate" },
-    limiter = { "realimit", "limit" },
-    limit = { "realimit", "limit" },
-    reverb = { "reaverbate", "reverb", "verb" },
-    verb = { "reaverbate", "verb" },
-  }
-  for _, value in ipairs(aliases[raw] or {}) do add_key(value) end
+  for _, value in ipairs(CTX.FX_CATEGORY_ALIASES[raw] or {}) do add_key(value) end
   return keys
 end
 
@@ -1210,17 +1312,25 @@ function CTX.fx_on_track_matching(proj, source_track, source_index, source_name,
   return tbl_concat(lines, "\n")
 end
 
-function CTX.fx_on_track_presence(proj, source_track, source_index, source_name, query)
+function CTX.fx_on_track_presence(
+    proj, source_track, source_index, source_name, query, weak)
   if not source_track then return nil end
   local keys = CTX.local_fx_search_keys_for_track(query)
+  local restrict_weak = weak and not CTX.local_fx_category_query(query)
   local total, rows = 0, {}
   local fx_count = R_TrackFX_GetCount(source_track) or 0
   for f = 0, fx_count - 1 do
     local _, fx_nm = R_TrackFX_GetFXName(source_track, f, "")
-    local fx_key = CTX.local_fx_search_key(fx_nm)
+    local fx_key, starts, ends = CTX.local_fx_name_key_and_bounds(fx_nm)
     local matched = false
     for _, q in ipairs(keys) do
-      if (#q >= 3 or q == "eq") and fx_key:find(q, 1, true) then
+      local key_matches
+      if restrict_weak then
+        key_matches = CTX.local_fx_weak_key_matches(q, fx_key, starts, ends)
+      else
+        key_matches = fx_key:find(q, 1, true)
+      end
+      if (#q >= 3 or q == "eq") and key_matches then
         matched = true
         break
       end
@@ -1239,9 +1349,9 @@ function CTX.fx_on_track_presence(proj, source_track, source_index, source_name,
     local q = tostring(query or ""):lower()
     if q == "" or q == "fx" or q == "plugin" or q == "plugins"
         or q == "effect" or q == "effects" or q == "there fx" then
-      return label .. " has no FX."
+      return label .. " has no FX.", 0
     end
-    return label .. " has no " .. tostring(query or "") .. " FX."
+    return label .. " has no " .. tostring(query or "") .. " FX.", 0
   end
   local lines = {
     str_format("FX presence: yes, %s has %s (N=%d) [track_idx|track_name|fx_idx|fx_name]:",
@@ -1251,7 +1361,7 @@ function CTX.fx_on_track_presence(proj, source_track, source_index, source_name,
   if total > CTX.MAX_FX_REPORT then
     lines[#lines + 1] = str_format("(+%d more)", total - CTX.MAX_FX_REPORT)
   end
-  return tbl_concat(lines, "\n")
+  return tbl_concat(lines, "\n"), total
 end
 
 function CTX.track_fx_presence_answer(proj, source_track, source_index, source_name)
@@ -1367,6 +1477,32 @@ function CTX.local_track_fx_query_from_parts(facts, track_query, fx_query, prefi
   return source_track, source_index, source_name, narrowed_fx_query, nil
 end
 
+function CTX.local_fx_presence_generic_head(query)
+  local head = tostring(query or ""):lower():match("^(%S+)")
+  return head == "fx" or head == "plugin" or head == "plugins"
+    or head == "effect" or head == "effects"
+end
+
+function CTX.local_fx_presence_function_word(word)
+  local value = tostring(word or ""):lower()
+  return value == "in" or value == "on" or value == "it" or value == "at"
+    or value == "all" or value == "there" or value == "here"
+    or value == "anywhere" or value == "them" or value == "these"
+    or value == "those"
+end
+
+function CTX.local_generic_fx_presence_query(query)
+  local words = {}
+  for word in tostring(query or ""):lower():gmatch("%S+") do
+    words[#words + 1] = word
+  end
+  if not CTX.local_fx_presence_generic_head(words[1]) then return false end
+  for i = 2, #words do
+    if not CTX.local_fx_presence_function_word(words[i]) then return false end
+  end
+  return true
+end
+
 function CTX.local_fx_presence_query(lt)
   local text = tostring(lt or ""):lower()
   text = text:gsub("[%.%?%!]+$", "")
@@ -1397,11 +1533,52 @@ function CTX.local_fx_presence_query(lt)
   fx_query = fx_query:gsub("^%s+", ""):gsub("%s+$", "")
   local fx_clean = CTX.local_fx_query_without_track_name(fx_query, "")
   if not fx_clean then return nil end
-  if fx_clean == "fx" or fx_clean == "plugin" or fx_clean == "plugins"
-      or fx_clean == "effect" or fx_clean == "effects" then
-    return nil
+  if CTX.local_generic_fx_presence_query(fx_clean) then return nil end
+  local generic_shape = CTX.local_fx_presence_generic_head(fx_clean)
+  local candidate = fx_clean
+  local fallback_query = nil
+  local generic_fallback = nil
+  local suffix_base = tostring(fx_query or ""):lower()
+    :gsub("^%s+", ""):gsub("%s+$", "")
+  local suffix_patterns = {
+    "^(.-)%s+on%s+it$", "^(.-)%s+on%s+them$",
+    "^(.-)%s+on%s+these$", "^(.-)%s+on%s+those$",
+    "^(.-)%s+on%s+there$", "^(.-)%s+on%s+here$",
+    "^(.-)%s+in%s+it$", "^(.-)%s+in%s+them$",
+    "^(.-)%s+in%s+these$", "^(.-)%s+in%s+those$",
+    "^(.-)%s+in%s+there$", "^(.-)%s+in%s+here$",
+    "^(.-)%s+at%s+all$", "^(.-)%s+anywhere$",
+    "^(.-)%s+there$", "^(.-)%s+here$",
+  }
+  local suffix_stripped = false
+  while true do
+    local stripped = nil
+    for _, pattern in ipairs(suffix_patterns) do
+      stripped = suffix_base:match(pattern)
+      if stripped then break end
+    end
+    if not stripped then break end
+    stripped = stripped:gsub("^%s+", ""):gsub("%s+$", "")
+    if stripped == "" or stripped == suffix_base then break end
+    suffix_base = stripped
+    suffix_stripped = true
   end
-  return track_query, fx_clean
+  if suffix_stripped then
+    candidate = CTX.local_fx_query_without_track_name(suffix_base, "")
+      or candidate
+  end
+  local without_tail, tail = candidate:match("^(.-)%s+(%S+)$")
+  if without_tail and CTX.local_fx_presence_generic_head(tail) then
+    if suffix_stripped and candidate ~= fx_clean then
+      fallback_query = candidate
+    end
+    generic_fallback = without_tail
+    generic_shape = true
+  elseif suffix_stripped and candidate ~= fx_clean then
+    fallback_query = candidate
+    generic_shape = true
+  end
+  return track_query, fx_clean, generic_shape, fallback_query, generic_fallback
 end
 
 -- Anchored read-only inventory phrasings. Keep compound/advice requests on the
@@ -1412,7 +1589,9 @@ function CTX.local_fx_inventory_target(lt)
   if text:find("%s+and%s+how%s+")
       or text:find("%s+and%s+can%s+")
       or text:find("%s+and%s+should%s+")
-      or text:find("%s+and%s+then%s+") then
+      or text:find("%s+and%s+then%s+")
+      or text:find("%s+and%s+what%s+")
+      or text:find("%s+and%s+where%s+") then
     return nil
   end
 
@@ -1421,6 +1600,10 @@ function CTX.local_fx_inventory_target(lt)
     or text:match("^%s*which%s+plugin%s+is%s+on%s+(.+)%s*$")
     or text:match("^%s*what%s+plugins%s+are%s+on%s+(.+)%s*$")
     or text:match("^%s*which%s+plugins%s+are%s+on%s+(.+)%s*$")
+    or text:match("^%s*what%s+plug%-in%s+is%s+on%s+(.+)%s*$")
+    or text:match("^%s*which%s+plug%-in%s+is%s+on%s+(.+)%s*$")
+    or text:match("^%s*what%s+plug%-ins%s+are%s+on%s+(.+)%s*$")
+    or text:match("^%s*which%s+plug%-ins%s+are%s+on%s+(.+)%s*$")
     or text:match("^%s*what%s+fx%s+is%s+on%s+(.+)%s*$")
     or text:match("^%s*which%s+fx%s+is%s+on%s+(.+)%s*$")
     or text:match("^%s*what%s+fx%s+are%s+on%s+(.+)%s*$")
@@ -1433,6 +1616,10 @@ function CTX.local_fx_inventory_target(lt)
     or text:match("^%s*which%s+plugin%s+does%s+(.+)%s+have%s*$")
     or text:match("^%s*what%s+plugins%s+does%s+(.+)%s+have%s*$")
     or text:match("^%s*which%s+plugins%s+does%s+(.+)%s+have%s*$")
+    or text:match("^%s*what%s+plug%-in%s+does%s+(.+)%s+have%s*$")
+    or text:match("^%s*which%s+plug%-in%s+does%s+(.+)%s+have%s*$")
+    or text:match("^%s*what%s+plug%-ins%s+does%s+(.+)%s+have%s*$")
+    or text:match("^%s*which%s+plug%-ins%s+does%s+(.+)%s+have%s*$")
     or text:match("^%s*what%s+fx%s+does%s+(.+)%s+have%s*$")
     or text:match("^%s*which%s+fx%s+does%s+(.+)%s+have%s*$")
     or text:match("^%s*what%s+effect%s+does%s+(.+)%s+have%s*$")
@@ -1443,12 +1630,86 @@ function CTX.local_fx_inventory_target(lt)
   return target:gsub("^%s+", ""):gsub("%s+$", "")
 end
 
-function CTX.fx_tracks_with(proj, query)
+function CTX.local_project_scope_phrase(scope)
+  local text = tostring(scope or ""):lower()
+  text = text:gsub("[%.%?%!]+$", "")
+  text = text:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  text = text:gsub("^the%s+", "")
+  return text == "project" or text == "this project"
+    or text == "current project" or text == "whole project"
+    or text == "entire project" or text == "session"
+    or text == "this session" or text == "current session"
+    or text == "whole session" or text == "entire session"
+end
+
+-- Complete, read-only project inventory requests. Require both an inventory
+-- form and an explicit project/session scope so advice or edit prompts stay on
+-- the model path.
+function CTX.local_project_fx_inventory_request(lt)
+  local text = tostring(lt or ""):lower()
+  text = text:gsub("[%.%?%!]+$", "")
+  text = text:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  if text:find("%s+and%s+") then return false end
+  text = text:gsub("^please%s+", "")
+  text = text:gsub("^can%s+you%s+", "")
+  text = text:gsub("^could%s+you%s+", "")
+  text = text:gsub("^would%s+you%s+", "")
+  text = text:gsub("^show%s+me%s+", "show ")
+  text = text:gsub("^tell%s+me%s+", "show ")
+  text = text:gsub("^give%s+me%s+", "show ")
+  text = text:gsub("plug%-ins", "plugins"):gsub("plug%-in", "plugin")
+  text = text:gsub("%s+are%s+currently%s+used%s+in%s+", " are in ")
+  text = text:gsub("%s+are%s+used%s+in%s+", " are in ")
+  text = text:gsub("%s+is%s+currently%s+used%s+in%s+", " is in ")
+  text = text:gsub("%s+is%s+used%s+in%s+", " is in ")
+  text = text:gsub("%s+currently%s+used%s+in%s+", " in ")
+  text = text:gsub("%s+used%s+in%s+", " in ")
+  text = text:gsub("%s+are%s+currently%s+loaded%s+in%s+", " are in ")
+  text = text:gsub("%s+are%s+loaded%s+in%s+", " are in ")
+  text = text:gsub("%s+currently%s+loaded%s+in%s+", " in ")
+  text = text:gsub("%s+loaded%s+in%s+", " in ")
+
+  local noun, scope
+  local patterns = {
+    "^what%s+(.+)%s+are%s+in%s+(.+)$",
+    "^which%s+(.+)%s+are%s+in%s+(.+)$",
+    "^what%s+(.+)%s+is%s+in%s+(.+)$",
+    "^which%s+(.+)%s+is%s+in%s+(.+)$",
+    "^what%s+(.+)%s+are%s+on%s+(.+)$",
+    "^which%s+(.+)%s+are%s+on%s+(.+)$",
+    "^what%s+(.+)%s+does%s+(.+)%s+have$",
+    "^which%s+(.+)%s+does%s+(.+)%s+have$",
+    "^show%s+(.+)%s+in%s+(.+)$",
+    "^list%s+(.+)%s+in%s+(.+)$",
+    "^show%s+(.+)%s+on%s+(.+)$",
+    "^list%s+(.+)%s+on%s+(.+)$",
+    "^show%s+(.+)%s+across%s+(.+)$",
+    "^list%s+(.+)%s+across%s+(.+)$",
+    "^show%s+(.+)%s+from%s+(.+)$",
+    "^list%s+(.+)%s+from%s+(.+)$",
+  }
+  for _, pattern in ipairs(patterns) do
+    noun, scope = text:match(pattern)
+    if noun then break end
+  end
+  if not noun or not scope then return false end
+  noun = noun:gsub("^all%s+the%s+", "")
+    :gsub("^all%s+", ""):gsub("^the%s+", "")
+  local noun_ok = {
+    fx = true, plugin = true, plugins = true,
+    effect = true, effects = true,
+    ["fx plugin"] = true, ["fx plugins"] = true,
+  }
+  return noun_ok[noun] == true and CTX.local_project_scope_phrase(scope)
+end
+
+function CTX.fx_tracks_with(proj, query, weak)
   local q = CTX.local_fx_search_key(query)
   if q == "" then return nil end
   if #q < 3 and q ~= "eq" then return nil end
   local rows = {}
   local total = 0
+  local restrict_weak = weak and not CTX.local_fx_category_query(query)
   local count = R_CountTracks(proj)
   for i = 0, count - 1 do
     local tr = R_GetTrack(proj, i)
@@ -1456,8 +1717,14 @@ function CTX.fx_tracks_with(proj, query)
       local fx_count = R_TrackFX_GetCount(tr)
       for f = 0, fx_count - 1 do
         local _, fx_nm = R_TrackFX_GetFXName(tr, f, "")
-        local fx_key = CTX.local_fx_search_key(fx_nm)
-        if fx_key:find(q, 1, true) then
+        local fx_key, starts, ends = CTX.local_fx_name_key_and_bounds(fx_nm)
+        local key_matches
+        if restrict_weak then
+          key_matches = CTX.local_fx_weak_key_matches(q, fx_key, starts, ends)
+        else
+          key_matches = fx_key:find(q, 1, true)
+        end
+        if key_matches then
           total = total + 1
           if #rows < CTX.MAX_FX_REPORT then
             local _, nm = R_GetTrackName(tr)
@@ -1473,8 +1740,14 @@ function CTX.fx_tracks_with(proj, query)
     local fx_count = R_TrackFX_GetCount(master) or 0
     for f = 0, fx_count - 1 do
       local _, fx_nm = R_TrackFX_GetFXName(master, f, "")
-      local fx_key = CTX.local_fx_search_key(fx_nm)
-      if fx_key:find(q, 1, true) then
+      local fx_key, starts, ends = CTX.local_fx_name_key_and_bounds(fx_nm)
+      local key_matches
+      if restrict_weak then
+        key_matches = CTX.local_fx_weak_key_matches(q, fx_key, starts, ends)
+      else
+        key_matches = fx_key:find(q, 1, true)
+      end
+      if key_matches then
         total = total + 1
         if #rows < CTX.MAX_FX_REPORT then
           local _, nm = R_GetTrackName(master)
@@ -1486,7 +1759,7 @@ function CTX.fx_tracks_with(proj, query)
     end
   end
   if total == 0 then
-    return "FX search: none matching " .. tostring(query or "")
+    return "FX search: none matching " .. tostring(query or ""), 0
   end
   local lines = {
     str_format("FX search: %s (N=%d) [track_idx|track_name|fx_idx|fx_name]:",
@@ -1496,7 +1769,7 @@ function CTX.fx_tracks_with(proj, query)
   if total > CTX.MAX_FX_REPORT then
     lines[#lines + 1] = str_format("(+%d more)", total - CTX.MAX_FX_REPORT)
   end
-  return tbl_concat(lines, "\n")
+  return tbl_concat(lines, "\n"), total
 end
 
 function CTX.master_fx(proj)
@@ -1919,7 +2192,7 @@ end
 -- CTX.markers(proj) -> string
 -- Reports all project markers and region start/end points (capped at
 -- CTX.MAX_MARKER_REPORT to keep snapshot size bounded on heavily-markered projects).
--- EnumProjectMarkers3 returns (retval, isrgn, pos, rgnend, name, idx).
+-- EnumProjectMarkers3 returns the displayed marker/region number last.
 -- Markers and region boundaries are both reported; regions include an end pos.
 CTX.MAX_MARKER_REPORT, CTX.MAX_ITEM_REPORT, CTX.MAX_SEND_REPORT = 20, 20, 40
 function CTX.markers(proj)
@@ -1927,18 +2200,18 @@ function CTX.markers(proj)
   if total == 0 then return "Markers/regions: none" end
 
   local lines = {
-    str_format("Markers/regions (N=%d) [type|idx|name|pos_s|end_s]:", total)
+    str_format("Markers/regions (N=%d) [type|disp_num|name|pos_s|end_s]:", total)
   }
   local report_n = math_min(total, CTX.MAX_MARKER_REPORT)
   for i = 0, report_n - 1 do
-    local _, isrgn, pos, rgnend, name, idx =
+    local _, isrgn, pos, rgnend, name, disp_num =
       R_EnumProjectMarkers3(proj, i)
     if isrgn then
       lines[#lines+1] = str_format(
-        "R|%d|%s|%.3f|%.3f", idx, _scrub_pipes(name), pos, rgnend)
+        "R|%d|%s|%.3f|%.3f", disp_num, _scrub_pipes(name), pos, rgnend)
     else
       lines[#lines+1] = str_format(
-        "M|%d|%s|%.3f|", idx, _scrub_pipes(name), pos)
+        "M|%d|%s|%.3f|", disp_num, _scrub_pipes(name), pos)
     end
   end
   if total > CTX.MAX_MARKER_REPORT then
@@ -2642,8 +2915,10 @@ function CTX.local_read_answer(user_text, proj)
   end
   local installed_plugin_answer = CTX.local_installed_plugin_answer(raw)
   if installed_plugin_answer then return installed_plugin_answer end
+  local project_fx_inventory = CTX.local_project_fx_inventory_request(lt)
   local read_start =
-       lt:find("^%s*what") ~= nil
+       project_fx_inventory
+    or lt:find("^%s*what") ~= nil
     or lt:find("^%s*what's") ~= nil
     or lt:find("^%s*whats") ~= nil
     or lt:find("^%s*which") ~= nil
@@ -3344,6 +3619,9 @@ function CTX.local_read_answer(user_text, proj)
       selected_only = selected_track_phrase,
     })
   end
+  if project_fx_inventory then
+    return CTX.fx(proj, { full = true })
+  end
   local fx_presence_text = lt:gsub("[%.%?%!]+$", "")
   local generic_fx_presence_target =
        fx_presence_text:match("^%s*are%s+there%s+any%s+fx%s+on%s+(.+)$")
@@ -3357,6 +3635,9 @@ function CTX.local_read_answer(user_text, proj)
     or fx_presence_text:match("^%s*does%s+(.+)%s+have%s+any%s+effects%s*$")
     or fx_presence_text:match("^%s*does%s+(.+)%s+have%s+effects%s*$")
   if generic_fx_presence_target then
+    if CTX.local_project_scope_phrase(generic_fx_presence_target) then
+      return CTX.fx(proj, { full = true })
+    end
     local source_track, source_index, source_name, target_error =
       CTX.local_any_track_target_in_text(
         facts, generic_fx_presence_target, "FX presence")
@@ -3385,15 +3666,45 @@ function CTX.local_read_answer(user_text, proj)
         source_track, source_index, source_name)
     end
   end
-  local fx_presence_track, fx_presence_query = CTX.local_fx_presence_query(lt)
+  local fx_presence_track, fx_presence_query, fx_presence_generic,
+    fx_presence_fallback, fx_presence_weak = CTX.local_fx_presence_query(lt)
   if fx_presence_track then
+    if CTX.local_project_scope_phrase(fx_presence_track) then
+      local answer, match_count = CTX.fx_tracks_with(proj, fx_presence_query)
+      if (match_count or 0) == 0 and fx_presence_fallback then
+        answer, match_count = CTX.fx_tracks_with(proj, fx_presence_fallback)
+      end
+      if (match_count or 0) == 0 and fx_presence_weak then
+        answer, match_count = CTX.fx_tracks_with(proj, fx_presence_weak, true)
+      end
+      if fx_presence_generic and (match_count or 0) == 0 then return nil end
+      return answer
+    end
     local source_track, source_index, source_name, narrowed_fx_query, fx_error =
       CTX.local_track_fx_query_from_parts(
         facts, fx_presence_track, fx_presence_query, "FX presence")
     if fx_error then return fx_error end
     if source_track and narrowed_fx_query then
-      return CTX.fx_on_track_presence(
+      local answer, match_count = CTX.fx_on_track_presence(
         proj, source_track, source_index, source_name, narrowed_fx_query)
+      if (match_count or 0) == 0 and fx_presence_fallback then
+        local narrowed_fallback = CTX.local_fx_query_without_track_name(
+          fx_presence_fallback, "")
+        if narrowed_fallback then
+          answer, match_count = CTX.fx_on_track_presence(
+            proj, source_track, source_index, source_name, narrowed_fallback)
+        end
+      end
+      if (match_count or 0) == 0 and fx_presence_weak then
+        local narrowed_weak = CTX.local_fx_query_without_track_name(
+          fx_presence_weak, "")
+        if narrowed_weak then
+          answer, match_count = CTX.fx_on_track_presence(
+            proj, source_track, source_index, source_name, narrowed_weak, true)
+        end
+      end
+      if fx_presence_generic and (match_count or 0) == 0 then return nil end
+      return answer
     end
   end
   if lt:find("fx chains", 1, true)
@@ -3448,6 +3759,9 @@ function CTX.local_read_answer(user_text, proj)
         fx_opts.source_name = source_name
       end
     end
+    if not fx_opts.selected_only and not fx_opts.source_track then
+      fx_opts.full = true
+    end
     return CTX.fx(proj, fx_opts)
   end
   local fx_query = CTX.local_fx_search_query(lt)
@@ -3461,7 +3775,8 @@ function CTX.local_read_answer(user_text, proj)
           proj, source_track, source_index, source_name, narrowed_fx_query)
       end
     end
-    return fx_query == "*" and CTX.fx(proj, {}) or CTX.fx_tracks_with(proj, fx_query)
+    return fx_query == "*" and CTX.fx(proj, { full = true })
+      or CTX.fx_tracks_with(proj, fx_query)
   end
   if lt:find("selected track", 1, true)
       or lt:find("selected tracks", 1, true)
@@ -9621,7 +9936,8 @@ function CTX.preempt_buckets_for_prompt(user_text)
         .. "    fx = reaper.TrackFX_AddByName(tr, \"<format-prefixed id>\", false, -1)\n"
         .. "  end\n"
         .. "  if fx < 0 then ShowMessageBox + return end\n"
-        .. "Apply to EVERY plugin in the chain. The static UPSERT-VALIDATOR "
+        .. "Apply only to numeric track rows and M|Master. Never use MON rows as ordinary upsert targets. "
+        .. "The static UPSERT-VALIDATOR "
         .. "rejects direct AddByName-only chains and forces a retry.\n"
         .. "HELPERS YOU CALL MUST BE PASTED: if your script calls "
         .. "set_param_display / set_param_enum / set_param_enum_paced / "

@@ -318,115 +318,113 @@ I18N.catalogs = {
         "Model - pick which model handles this provider's requests.",
       ["mode.model.descriptor.fast"] = "fast",
       ["mode.model.descriptor.balanced"] = "balanced",
-      ["mode.model.descriptor.smart"] = "smart",
+      ["mode.model.descriptor.smart"] = "premium",
       ["mode.model.paid_only"] = "paid only",
       ["mode.model.paid_only.tooltip"] =
         "Requires Google's paid API tier. Upgrade at aistudio.google.com/apikey.",
       ["mode.model_tip.claude-haiku-4-5"] =
-        "Cheapest Claude. Use High thinking. Sonnet None is faster for complex work.",
+        "Lowest-cost Claude. Use High thinking. Choose Sonnet None for complex work.",
       ["mode.model_tip.claude-sonnet-5"] =
-        "Recommended Claude default. Use None thinking. Raise effort only if a prompt struggles.",
+        "Default Claude for this app. Use None thinking. Raise the level only if a request struggles.",
       ["mode.model_tip.claude-opus-5"] =
-        "Premium Claude. Use None thinking. Best tested Opus 5 balance of quality, speed, and cost.",
-      ["mode.model_tip.gpt-5.4-mini"] =
-        "Lowest-priced GPT. Use Low thinking. Reliable budget option; GPT-5.6 Luna None is faster at a higher price.",
+        "Premium Claude. Use None thinking. Best tested Opus balance of quality, speed, and cost.",
       ["mode.model_tip.gpt-5.6-luna"] =
-        "Recommended OpenAI default. Use None thinking. Best tested balance of quality, speed, and cost.",
+        "Default GPT for this app. Use None thinking. Fastest and lowest-cost GPT-5.6 tested.",
       ["mode.model_tip.gpt-5.6-terra"] =
-        "Higher-cost GPT-5.6. Use None thinking. Choose Terra when Luna struggles or extra quality is worth the price.",
+        "Balanced GPT-5.6. Use None thinking. Choose it when Luna struggles.",
       ["mode.model_tip.gpt-5.6-sol"] =
-        "Premium GPT-5.6. Use None thinking. Flagship tier; higher effort added cost without a measured improvement.",
+        "Premium GPT-5.6. Use None thinking. Choose it for difficult work when capability matters more than cost.",
       ["mode.model_tip.gemini-3.5-flash-lite"] =
-        "Cheapest Gemini. Use Low thinking. Budget default based on ReaAssist testing; Flash 3.6 Minimal remains the stronger general recommendation.",
+        "Lowest-cost Gemini. Use Low thinking. Choose it for budget-sensitive work; Flash 3.6 Minimal is stronger overall.",
       ["mode.model_tip.gemini-3.6-flash"] =
-        "Recommended Gemini default. Use Minimal thinking. Best tested balance for scripts and edits; try Low only if Minimal struggles.",
+        "Default Gemini for this app. Use Minimal thinking. Best tested balance of quality, speed, and cost.",
+      ["mode.model_tip.gemini-3.7-flash"] =
+        "Optional Gemini model. Use Low thinking. It matched Flash 3.6 Minimal, but was slightly slower and cost more.",
       ["mode.model_tip.gemini-3.1-pro-preview"] =
-        "Premium Gemini preview. Use Medium thinking. Capacity has been unreliable; Flash 3.6 Minimal is safer for coding.",
+        "Premium Gemini preview. Use Medium thinking. Capacity can be unreliable; Flash 3.6 Minimal is safer for coding.",
       ["mode.model_tip.deepseek-v4-flash"] =
-        "Cheapest combo in the lineup. Use Non-Thinking. Strong cheap pick.",
+        "Budget model built into the app. Use Non-Thinking. Fast in testing; off-peak rates are half the peak rates.",
       ["mode.combo_hint.anthropic.claude-haiku-4-5.none"] =
-        "Simple tasks | Mid-cost | Very fast | Use Sonnet for complex",
+        "Simple requests | Lowest Claude cost | Very fast | Use Sonnet for complex work",
       ["mode.combo_hint.anthropic.claude-haiku-4-5.low"] =
-        "Simple tasks only | Mid-cost | Very fast | Use Sonnet for complex",
+        "Simple requests needing more reasoning | Lowest Claude cost | Very fast | Use Sonnet for complex work",
       ["mode.combo_hint.anthropic.claude-haiku-4-5.medium"] =
-        "Simple and complex | Mid-cost | Slow with retries | Use Sonnet for complex",
+        "General work with caveats | Lowest Claude cost | Slow with retries | Use Sonnet for complex work",
       ["mode.combo_hint.anthropic.claude-haiku-4-5.high"] =
-        "Recommended Level | Simple tasks; complex with caveats | Mid-cost | Moderate speed | Use Sonnet for complex",
+        "Recommended level | General work with caveats | Lowest Claude cost | Moderate speed | Sonnet None is stronger for complex work",
       ["mode.combo_hint.anthropic.claude-sonnet-5.none"] =
-        "Recommended Level | Simple and complex | Promo mid-cost | Fast",
+        "Recommended level | General and complex work | Balanced Claude cost | Fast",
       ["mode.combo_hint.anthropic.claude-sonnet-5.low"] =
-        "Simple and complex | Promo mid-cost | Slower | Use only if None struggles",
+        "General and complex work | Balanced Claude cost | Slower | Use only if None struggles",
       ["mode.combo_hint.anthropic.claude-sonnet-5.medium"] =
-        "Simple and complex | Promo mid-cost | Very slow | Use only if None struggles",
+        "General and complex work | Balanced Claude cost | Very slow | Use only if None struggles",
       ["mode.combo_hint.anthropic.claude-sonnet-5.high"] =
-        "Avoid long prompts | Promo mid-cost | Very slow (hits timeouts) | Use None or Opus None",
+        "Avoid long requests | Balanced Claude cost | Very slow; timeouts seen | Use None or Opus None",
       ["mode.combo_hint.anthropic.claude-opus-5.none"] =
-        "Recommended Level | Simple and complex (top quality) | Most expensive | Fastest tested",
+        "Recommended level | General and complex work | Highest Claude cost | Fastest tested Opus setting",
       ["mode.combo_hint.anthropic.claude-opus-5.low"] =
-        "Simple and complex | Most expensive | Slower | Runtime failure in testing -- use None",
+        "General and complex work | Highest Claude cost | Slower | One runtime failure in testing; use None",
       ["mode.combo_hint.anthropic.claude-opus-5.medium"] =
-        "Simple and complex | Most expensive | Slowest tested | No quality gain over None -- use None",
+        "General and complex work | Highest Claude cost | Slowest tested | No quality gain over None",
       ["mode.combo_hint.anthropic.claude-opus-5.high"] =
-        "Simple and complex | Most expensive | Untested | Use None; Medium added no measured quality gain",
-      ["mode.combo_hint.openai.gpt-5.4-mini.none"] =
-        "Lowest cost | Very fast | Less established than Low for complex edits",
-      ["mode.combo_hint.openai.gpt-5.4-mini.low"] =
-        "Recommended Level | Simple and complex | Lowest cost | Validated in ReaAssist testing",
-      ["mode.combo_hint.openai.gpt-5.4-mini.medium"] =
-        "Simple and complex | Higher output cost | Much slower | No measured gain over Low",
-      ["mode.combo_hint.openai.gpt-5.4-mini.high"] =
-        "Not recommended | Highest Mini latency and output cost | Use Low or Terra None",
+        "Bench data unavailable | Highest Claude cost | Speed unknown | Use None unless you measure a benefit",
       ["mode.combo_hint.openai.gpt-5.6-luna.none"] =
-        "Recommended Level | Simple and complex | Lowest GPT-5.6 cost | Fastest tested configuration",
+        "Recommended level | General and complex work | Lowest GPT-5.6 cost | Fastest tested",
       ["mode.combo_hint.openai.gpt-5.6-luna.low"] =
-        "Simple and complex | Low cost | Slower than None | No measured gain over None",
+        "General and complex work | Lowest GPT-5.6 cost | Slower than None | No measured gain",
       ["mode.combo_hint.openai.gpt-5.6-luna.medium"] =
-        "Avoid for routine work | Generated a runtime error in testing | Very slow on large code",
+        "Avoid routine use | Lowest GPT-5.6 base price | Very slow on large code | One runtime failure in testing",
       ["mode.combo_hint.openai.gpt-5.6-luna.high"] =
-        "Untested and expensive | Use None, or Terra None if a task struggles",
+        "Bench data unavailable | Higher reasoning cost | Speed unknown | Use None, or Terra None if Luna struggles",
       ["mode.combo_hint.openai.gpt-5.6-terra.none"] =
-        "Recommended Level | Simple and complex | Balanced cost | Fastest Terra configuration",
+        "Recommended level | General and complex work | Balanced GPT-5.6 cost | Fastest tested Terra setting",
       ["mode.combo_hint.openai.gpt-5.6-terra.low"] =
-        "Simple and complex | Balanced cost | Slower than None | No measured gain",
+        "General and complex work | Balanced GPT-5.6 cost | Slower than None | No measured gain",
       ["mode.combo_hint.openai.gpt-5.6-terra.medium"] =
-        "Simple and complex | Balanced cost | Slower | All tests passed, but no gain over None",
+        "General and complex work | Balanced GPT-5.6 cost | Slower | Passed testing, with no gain over None",
       ["mode.combo_hint.openai.gpt-5.6-terra.high"] =
-        "Untested and expensive | Reserve for a measured hard-task improvement",
+        "Bench data unavailable | Higher reasoning cost | Speed unknown | Use None unless testing shows a benefit",
       ["mode.combo_hint.openai.gpt-5.6-sol.none"] =
-        "Recommended Level | Simple and complex | Premium cost | Fastest Sol configuration",
+        "Recommended level | General and complex work | Highest GPT-5.6 cost | Fastest tested Sol setting",
       ["mode.combo_hint.openai.gpt-5.6-sol.low"] =
-        "Simple and complex | Premium cost | Slower than None | No measured gain",
+        "General and complex work | Highest GPT-5.6 cost | Slower than None | No measured gain",
       ["mode.combo_hint.openai.gpt-5.6-sol.medium"] =
-        "Avoid for routine work | Generated a runtime error in testing | Higher cost and latency",
+        "Avoid routine use | Highest GPT-5.6 cost | Higher latency | One runtime failure in testing",
       ["mode.combo_hint.openai.gpt-5.6-sol.high"] =
-        "Untested and most expensive | Reserve for a measured quality-first need",
+        "Bench data unavailable | Highest reasoning cost | Speed unknown | Use None unless quality justifies the cost",
       ["mode.combo_hint.google.gemini-3.5-flash-lite.MINIMAL"] =
-        "Simple and common scripts | Lowest Gemini cost | Fast | Low was faster in ReaAssist testing",
+        "Simple requests and scripts | Lowest Gemini cost | Fast | Low was faster in testing",
       ["mode.combo_hint.google.gemini-3.5-flash-lite.LOW"] =
-        "Recommended Level | Simple and complex | Lowest Gemini cost | Fastest tested Lite setting",
+        "Recommended level | General and complex work | Lowest Gemini cost | Fastest tested Lite setting",
       ["mode.combo_hint.google.gemini-3.5-flash-lite.MEDIUM"] =
-        "Simple and complex | Low cost | Slower | No measured gain over Low",
+        "General and complex work | Lowest Gemini cost | Slower than Low | No measured gain",
       ["mode.combo_hint.google.gemini-3.5-flash-lite.HIGH"] =
-        "Hard reasoning only | Low cost | Slowest | No measured gain over Low",
+        "Hard reasoning only | Lowest Gemini cost | Slowest tested | No measured gain over Low",
       ["mode.combo_hint.google.gemini-3.6-flash.MINIMAL"] =
-        "Recommended Level | Simple and complex | Best tested Flash balance | Fast",
+        "Recommended level | General and complex work | Best tested Gemini value | Fast",
       ["mode.combo_hint.google.gemini-3.6-flash.LOW"] =
-        "Use if Minimal struggles | More thinking tokens | Slower | Minimal is the tested default",
+        "General and complex work | Higher measured cost | Slower than Minimal | No quality gain",
       ["mode.combo_hint.google.gemini-3.6-flash.MEDIUM"] =
-        "Complex code/debugging only | Higher cost | Much slower | Try Minimal first, then Low",
+        "Complex code and debugging | Higher cost | Much slower | Try Minimal first",
       ["mode.combo_hint.google.gemini-3.6-flash.HIGH"] =
-        "Hard reasoning only | Highest Flash cost | Slowest | Avoid for routine ReaAssist work",
+        "Hard reasoning only | Highest Flash cost | Slowest | Avoid routine use",
+      ["mode.combo_hint.google.gemini-3.7-flash.LOW"] =
+        "Lowest supported level | Same tested quality as Flash 3.6 Minimal | Slightly slower | Higher measured cost",
+      ["mode.combo_hint.google.gemini-3.7-flash.MEDIUM"] =
+        "Bench data unavailable | More reasoning than Low | Higher expected cost and latency | Try Low first",
+      ["mode.combo_hint.google.gemini-3.7-flash.HIGH"] =
+        "Bench data unavailable | Maximum reasoning | Highest expected cost and latency | Avoid routine use",
       ["mode.combo_hint.google.gemini-3.1-pro-preview.LOW"] =
-        "Not recommended | Capacity-prone preview | Mid-cost | Underuses Pro -- use Flash 3.6 if 503s appear",
+        "Not recommended | Reduced reasoning | Highest Gemini cost | Use Flash 3.6 if capacity errors appear",
       ["mode.combo_hint.google.gemini-3.1-pro-preview.MEDIUM"] =
-        "Model default | Premium reasoning when available | Capacity-prone preview | Use Flash 3.6 for coding",
+        "Default Pro level in this app | Complex reasoning | Highest Gemini cost | Capacity can be unreliable",
       ["mode.combo_hint.google.gemini-3.1-pro-preview.HIGH"] =
-        "Not recommended | Capacity-prone preview | Mid-cost | Marginal lift over Medium",
+        "Not recommended | Marginal gain over Medium | Highest Gemini cost | Capacity can be unreliable",
       ["mode.combo_hint.deepseek.deepseek-v4-flash.disabled"] =
-        "Recommended Level | Simple and complex | Cheapest in lineup | Very fast | Strong cheap pick",
+        "Recommended level | General and complex work | Budget pricing | Fast | Off-peak rates are half price",
       ["mode.thinking.header"] = "Thinking:",
       ["mode.thinking.tooltip"] =
-        "Thinking depth: higher tiers think longer (smarter, slower, more expensive).",
+        "Thinking level: higher levels can help with difficult requests, but usually take longer and cost more.",
       ["mode.thinking.warning"] = "Warning: {hint}",
       ["mode.thinking.level.think"] = "THINK",
       ["mode.thinking.level.none"] = "None",
@@ -748,6 +746,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Could not request the Lua/ReaScript version.",
       ["typed_actions.status.undo_lua"] = "UNDO + LUA",
       ["typed_actions.status.lua_requested"] = "LUA REQUESTED",
+      ["typed_actions.status.lua_pending"] = "REQUESTING LUA",
       ["typed_actions.status.undo_sent"] = "UNDO SENT",
       ["typed_actions.status.failed"] = "FAILED",
       ["typed_actions.status.auto_ran"] = "AUTO-RAN",
@@ -769,6 +768,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["typed_actions.request_lua"] = "Request Lua",
       ["typed_actions.request_lua.tooltip"] =
         "Ask for a normal Lua/ReaScript version you can review, run, or save. The structured edit will not run.",
+      ["typed_actions.request_lua_after_apply.tooltip"] =
+        "Generate the Lua/ReaScript version while leaving the applied structured edit and its Undo item unchanged.",
       ["typed_actions.no_original_prompt"] =
         "Could not find the original prompt",
       ["code.run.tooltip"] = "Execute this code in REAPER",
@@ -776,7 +777,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Install/run this from its REAPER toolbar action context",
       ["code.run.fragment.tooltip"] =
         "This block is a fragment or patch, not a runnable script",
-      ["code.undo.tooltip"] = "Undo the last REAPER action (Ctrl+Z)",
+      ["code.undo.tooltip"] = "Undo the generated REAPER action (Ctrl+Z)",
       ["code.save_theme"] = "Save Theme",
       ["code.save_theme.tooltip"] =
         "Save the current theme color changes permanently to the theme file",
@@ -819,6 +820,14 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["jsfx.add_selected"] = "Add JSFX to Selected Track(s)",
       ["jsfx.add.tooltip"] = "Save JSFX and add it to all selected tracks",
       ["jsfx.undo.tooltip"] = "Undo adding the JSFX to tracks (Ctrl+Z)",
+      ["jsfx.project_safety_unavailable"] =
+        "ReaAssist could not verify the active project, so the JSFX was not added.",
+      ["jsfx.undo_unavailable_status"] =
+        "{status} Undo is unavailable because ReaAssist cannot verify that this add is still the current project action. Return to the original unchanged project tab to check again.",
+      ["jsfx.undo_failed_status"] =
+        "{status} REAPER could not undo this JSFX add. Review the project and Undo history before trying again.",
+      ["jsfx.add_already_applied_status"] =
+        "The JSFX was not added again. {status}",
       ["jsfx.copy.tooltip"] = "Copy JSFX code to clipboard",
       ["jsfx.save.tooltip"] = "Save JSFX to Effects/ReaAssist/ folder",
       ["jsfx.save_as.tooltip"] =
@@ -1099,9 +1108,9 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.response_state_ready_jsfx_added"] =
         "Response ready. JSFX has been added to the selected tracks. Use Undo Run if you need to revert it, or Read or Save JSFX to review it.",
       ["a11y.sr.response_state_ready_action_ran"] =
-        "Response ready. Auto-run has already run the structured edit successfully. Use Review Edit Details to review it, or Undo and Request Lua to ask for a reusable script.",
+        "Response ready. Auto-run has already run the structured edit successfully. Use Review Edit Details to review it, Undo Edit to revert it, or Request Lua to generate a reusable script without changing the applied edit.",
       ["a11y.sr.response_state_ready_action_ran_manual"] =
-        "Response ready. The structured edit ran successfully. Use Undo Edit if you need to revert it, or Undo and Request Lua to ask for a reusable script.",
+        "Response ready. The structured edit ran successfully. Use Undo Edit to revert it, or Request Lua to generate a reusable script without changing the applied edit.",
       ["a11y.sr.response_state.meaning"] =
         "Explains whether ReaAssist is waiting or a response is ready.",
       ["a11y.sr.request.meaning"] =
@@ -1122,7 +1131,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.undo_edit_unavailable"] =
         "There is no structured edit to undo.",
       ["a11y.sr.request_lua_sent"] =
-        "Requesting Lua/ReaScript version.",
+        "Generating and validating the Lua/ReaScript version. The structured edit remains unchanged.",
       ["a11y.sr.request_lua_unavailable"] =
         "Could not request the Lua/ReaScript version.",
       ["a11y.sr.undo_run.meaning"] =
@@ -2053,8 +2062,9 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.update_prompt.later_status"] =
         "Update reminder postponed.",
       ["a11y.sr.check_updates"] = "Check Updates",
-      ["a11y.sr.check_updates.meaning"] =
-        "Checks for ReaAssist updates and install repairs.",
+      ["a11y.sr.check_updates.meaning_v2"] =
+        "Checks for ReaAssist updates and install repairs. This works "
+        .. "whether or not automatic checks are on.",
       ["a11y.sr.apply_update"] = "Apply Update or Repair",
       ["a11y.sr.apply_update.meaning"] =
         "Applies the available ReaAssist update or file repair.",
@@ -2122,10 +2132,20 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Writes detailed request and diagnostic logs for troubleshooting.",
       ["a11y.sr.debug_logging_changed"] =
         "Advanced log is now {value}.",
-      ["a11y.sr.update_check.meaning"] =
-        "Automatically checks for ReaAssist updates when REAPER starts.",
-      ["a11y.sr.update_check_changed"] =
-        "Check for updates on startup is now {value}.",
+      ["a11y.sr.update_check.meaning_v2"] =
+        "On, after your first request in a session, ReaAssist tries one "
+        .. "automatic check for a newer version. Off, you update manually, "
+        .. "and Check Updates "
+        .. "still works every time you choose it. One exception: if "
+        .. "ReaAssist finds its own record of the files it installed missing "
+        .. "or damaged, it downloads a fresh copy of that record even with "
+        .. "this off, and brings the install to the current release through "
+        .. "the normal update path, which still asks before installing a new "
+        .. "version. An undamaged install with this off makes no automatic "
+        .. "update contact at all: ReaAssist reaches the update server only "
+        .. "when you ask it to.",
+      ["a11y.sr.update_check_changed_v2"] =
+        "Check for updates automatically is now {value}.",
       ["a11y.sr.concise_hints"] =
         "Concise focus hints",
       ["a11y.sr.concise_hints.meaning"] =
@@ -2685,6 +2705,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "after numeric target/name-guard mismatch",
       ["retry.reason.after_folder_boundary_mismatch"] =
         "after folder-boundary mismatch",
+      ["retry.reason.after_track_state_safety_guard"] =
+        "after unsafe track-state handling",
       ["retry.reason.after_track_selection_api_write"] =
         "after track-selection API write",
       ["retry.reason.after_missing_exclusive_track_selection"] =
@@ -2713,6 +2735,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "with API reference",
       ["retry.reason.for_mistyped_reaper_global"] =
         "for mistyped reaper global",
+      ["retry.reason.for_unqualified_reaper_api_calls"] =
+        "for unqualified REAPER API calls",
       ["retry.reason.for_invalid_reaper_calls"] =
         "for invalid reaper.* calls",
       ["retry.reason.after_fragile_toolbar_action_pattern"] =
@@ -2789,6 +2813,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "The script appears to open a folder but never closes it on the requested last child `{last_child}`. Auto-run is blocked; review I_FOLDERDEPTH before running manually.",
       ["validator.folder_closed_wrong_track_blocked"] =
         "The script appears to close a folder on `{track}` instead of the requested last child `{last_child}`. Auto-run is blocked; review I_FOLDERDEPTH before running manually.",
+      ["validator.track_state_safety_blocked"] =
+        "The script still relies on an unproven track selection or resets folder state across every existing track after a retry. Auto-run is blocked. Establish the complete intended selection before ReorderSelectedTracks and preserve unrelated I_FOLDERDEPTH values before running manually.",
       ["validator.bus_routing_blocked"] =
         "The user asked for tracks going into a bus or return, but the script still does not create sends with reaper.CreateTrackSend(...). Auto-run is blocked; review the routing before running manually.",
       ["validator.master_send_blocked"] =
@@ -2801,6 +2827,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "The model misspelled the REAPER API global, even after a retry: {lines}. Auto-run is blocked; review and edit the code before clicking Run manually.",
       ["validator.invalid_reaper_calls_blocked"] =
         "The model emitted Lua/ReaScript calls that will not run in ReaAssist, even after a retry: {calls}. Auto-run is blocked; review and edit the code before clicking Run manually, or retry with a stronger model.",
+      ["validator.unqualified_reaper_api_blocked"] =
+        "The model called REAPER APIs without the required `reaper.` prefix, even after a retry: {apis}. Auto-run and manual Run are blocked; regenerate the full script with `reaper.` before each named API.",
       ["validator.toolbar_action_blocked"] =
         "The model emitted a fragile toolbar/action script even after a retry: {codes}. Auto-run is blocked because this pattern can require repeated toolbar clicks or leave stale toolbar state. Review the script before saving/installing it as a REAPER action.",
       ["validator.midi_plain_item_blocked"] =
@@ -2971,6 +2999,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Auto-run was blocked because ReaAssist could not create a safety backup. Check the project folder, disk space, and permissions, then try again. To proceed without a backup, turn off Auto-backup in Settings and run the code manually.",
       ["auto_run.blocked.relevance"] =
         "Auto-run was blocked because the generated action did not clearly match the request and captured session. Review the target tracks, plugins, and REAPER actions before running it manually.",
+      ["auto_run.blocked.unrequested_record_input"] =
+        "Auto-run was blocked because the generated action changes a track record input that the request did not ask to change. Preserve the current record input or ask for the exact input channel. Do not run the blocked script manually.",
+      ["auto_run.blocked.unresolved_record_input_property"] =
+        "Auto-run was blocked because the generated action computes a track property at runtime and that property may resolve to the record input. Review the generated action and preserve the current record input. Do not run the blocked script manually.",
       ["code.run.no_parameter_change"] =
         "No parameter value change was detected. The requested value may already have been set or the write was a no-op. Confirm the displayed plugin value before continuing.",
       ["code.run.partial_parameter_change"] =
@@ -3008,11 +3040,21 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.response_state_ready_code_ran_manual_overlapped"] =
         "Response ready. Generated code ran successfully, but a newer action ran before this older action finished. Review the project and REAPER's Undo history before undoing anything, or Read or Save Code to review it.",
       ["code.compile_error"] =
-        "Lua compile error in generated code:\n\n{error}",
+        "Lua compile error in generated code:\n\n{error}\n\nThe script did not run, so no project change was made. Ask ReaAssist to fix and retry the last action.",
       ["code.runtime_error"] =
         "Runtime error in generated code:\n\n{error}",
       ["code.runtime_instruction_budget_error"] =
         "Generated Lua was stopped because it exceeded ReaAssist's instruction budget. It may contain an infinite loop or runaway iteration.\n\n{error}",
+      ["code.runtime_error_outcome.unknown"] =
+        "ReaAssist could not measure whether the generated action changed the project. The result is Unknown. Check the project and current REAPER Undo entry before undoing anything, then ask ReaAssist to fix and retry it.",
+      ["code.runtime_error_outcome.changed"] =
+        "The generated action changed the project before the error, so the result is partial. Review the project and current REAPER Undo entry before undoing anything, then ask ReaAssist to fix and retry the last action.",
+      ["code.runtime_error_outcome.unchanged"] =
+        "No generated-action project change was detected. Ask ReaAssist to fix and retry the last action.",
+      ["code.runtime_error_outcome.detached_changed"] =
+        "This older generated action changed the project before it failed, and a newer action has run since. Review the project and REAPER Undo history before undoing anything, then ask ReaAssist to fix and retry the older action.",
+      ["code.runtime_error_outcome.detached_unchanged"] =
+        "This older generated action failed without a detected project change, and a newer action has run since. Do not use Undo for the older action. Ask ReaAssist to fix and retry it.",
       ["attach.error.openai_pdf_unsupported"] =
         "ChatGPT does not support PDF attachments. The file name will be sent but its content cannot be read. Try Claude or Gemini for PDF support.",
       ["attach.error.max_count"] =
@@ -3102,14 +3144,28 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Close and reopen ReaAssist to start using the new version.",
       ["update.failed.noun.update"] = "Update",
       ["update.failed.noun.repair"] = "Repair",
-      ["update.failed.action.sync"] = "sync",
-      ["update.failed.action.reinstall"] = "reinstall",
       ["update.failed.sha"] =
         "{noun} files temporarily out of sync. GitHub's CDN may still be propagating a new release. Wait a minute or two, then click Retry.",
       ["update.failed.content"] =
         "{noun} aborted: a downloaded file did not look like ReaAssist content. This usually means a captive portal, proxy, or VPN is intercepting the download. Check your network, then Retry.",
-      ["update.failed.generic"] =
-        "{noun} failed. Click Retry, or {action} via ReaPack if the problem persists.",
+      ["update.failed.generic_v2"] =
+        "{noun} failed. Click Retry. If it keeps failing, reinstall ReaAssist from https://reaassist.app.",
+      ["update.failed.unresolved"] =
+        "{noun} did not start: ReaAssist has not finished recovering from an earlier update on this install, and nothing was changed. Close ReaAssist and open it again to let that recovery finish, then try again.",
+      ["update.failed.moved.gone"] =
+        "{noun} stopped: {file} is no longer where it was when the update started, so nothing further was changed and nothing was thrown away.",
+      ["update.failed.moved.appeared"] =
+        "{noun} stopped: a file has appeared at {file}, and it was not there when the update started, so nothing further was changed and nothing was thrown away.",
+      ["update.failed.moved.unknown"] =
+        "{noun} stopped: ReaAssist has no record of what was at {file} when the update started, so it did not change it and nothing was thrown away.",
+      ["update.failed.moved.put_back"] =
+        "If it was moved or deleted by mistake, put it back and click Retry. Otherwise close ReaAssist and open it again, which is what finishes an update that stopped part way.",
+      ["update.failed.moved.move_away"] =
+        "If you put that file there, move it somewhere else and click Retry. Closing ReaAssist and opening it again works too, but only once that file has been moved: the update cannot finish while it is there.",
+      ["update.failed.moved.move_away_reopen"] =
+        "Move that file somewhere else, then close ReaAssist and open it again: that is what finishes an update that stopped part way, and it cannot finish while that file is there.",
+      ["update.failed.moved.reopen"] =
+        "Close ReaAssist and open it again: an update that stopped part way is finished when ReaAssist starts, and from here that is the only thing that can take it further.",
       ["update.toast.url_missing"] = "Update URL not configured",
       ["update.toast.checking"] = "Checking for updates...",
       ["update.toast.start_failed"] = "Update check failed to start",
@@ -3695,9 +3751,19 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Rescanned {succeeded}/{total}. {count} failed (missing plugins).",
       ["settings.fx_cache.toast.rescan_cancelled"] =
         "Rescan cancelled at {done}/{total}.",
-      ["settings.pref.update_check.label"] = "Check for updates on startup",
-      ["settings.pref.update_check.tooltip"] =
-        "Automatically check for new ReaAssist versions when the script starts",
+      ["settings.pref.update_check.label_v2"] = "Check for updates automatically",
+      ["settings.pref.update_check.tooltip_v2"] =
+        "On: after your first request in a session, ReaAssist tries one "
+        .. "automatic check for a newer version. Off: you update manually, "
+        .. "and the Check for "
+        .. "Updates button below still works every time you click it. One "
+        .. "exception: if ReaAssist finds its own record of the files it "
+        .. "installed missing or damaged, it downloads a fresh copy of that "
+        .. "record even with this off, and brings the install to the current "
+        .. "release through the normal update path, which still asks before "
+        .. "installing a new version. An undamaged install with this off "
+        .. "makes no automatic update contact at all: ReaAssist reaches the "
+        .. "update server only when you ask it to.",
       ["settings.pref.auto_backup.label"] = "Auto-backup session",
       ["settings.pref.auto_backup.tooltip"] =
         "Save a timestamped .rpp-bak before Auto-Run executes returned code",
@@ -3736,8 +3802,9 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.custom_instructions.unsaved_enabled"] =
         "Unsaved text. Save to apply it.",
       ["settings.pref.check_updates.label"] = "Check for Updates",
-      ["settings.pref.check_updates.tooltip"] =
-        "Check now for a newer ReaAssist release or missing files",
+      ["settings.pref.check_updates.tooltip_v2"] =
+        "Check now for a newer ReaAssist release or missing files. This "
+        .. "works whether or not automatic checks are on.",
       ["settings.adv.snapshot.label"] =
         "Send session snapshot with each message",
       ["settings.adv.snapshot.tooltip"] =
@@ -3802,6 +3869,259 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.factory_reset.heading"] = "Delete all ReaAssist data?",
       ["settings.factory_reset.body"] =
         "This deletes settings, API keys, custom providers, feedback identity, logs, caches, and local Data files. ReaAssist will relaunch and start like a new install.",
+      -- Uninstaller. Every sentence the ownership-aware uninstaller says
+      -- reaches the user through these keys, and the body authors the same
+      -- English as its fallback, so a language pack that has never seen them
+      -- degrades to exactly this text (plan section 11, B2.4a).
+      ["settings.adv.uninstall.label"] = "Uninstall ReaAssist",
+      ["settings.adv.uninstall.tooltip"] =
+        "Remove ReaAssist from this REAPER install. Your data is a separate choice inside.",
+      ["settings.uninstall.heading"] = "Remove ReaAssist?",
+      ["settings.uninstall.blocked_heading"] =
+        "ReaAssist cannot uninstall right now",
+      ["settings.uninstall.remove_data"] =
+        "Also remove my ReaAssist data (settings, keys, chats, logs)",
+      ["settings.uninstall.result_title"] = "Uninstall",
+      ["settings.uninstall.close_app"] = "Close ReaAssist",
+      ["a11y.sr.uninstall.meaning"] =
+        "Removes ReaAssist from this REAPER install. Your data is a separate choice inside.",
+      ["a11y.sr.uninstall_unavailable"] =
+        "Uninstall is not available in this build.",
+      ["a11y.sr.uninstall_blocked_active"] =
+        "Cancel or finish the active request before uninstalling.",
+      ["a11y.sr.uninstall_title.meaning"] =
+        "Confirmation before removing ReaAssist from this REAPER install.",
+      ["a11y.sr.uninstall_body.meaning"] =
+        "What ReaAssist removes, what it leaves alone, and what happens to your data.",
+      ["a11y.sr.uninstall_remove_data.meaning"] =
+        "Removes settings, saved keys, custom providers, saved chats, logs and caches as well. This cannot be undone.",
+      ["a11y.sr.uninstall_confirm.meaning"] =
+        "Removes ReaAssist after confirmation, and reports what went and what stayed.",
+      ["a11y.sr.uninstall_confirm_opened"] =
+        "Uninstall confirmation opened. Read what will be removed, then choose Uninstall ReaAssist only if you want to remove it, or F9 to go back.",
+      ["a11y.sr.uninstall_blocked_opened"] =
+        "ReaAssist cannot uninstall right now. The reason is on this screen. Press F9 to go back.",
+      ["a11y.sr.uninstall_data_on"] =
+        "Your ReaAssist data will be removed too.",
+      ["a11y.sr.uninstall_data_off"] =
+        "Your ReaAssist data will be left where it is.",
+      ["a11y.sr.uninstall_finished"] =
+        "The uninstall has finished. Read the report, then close ReaAssist.",
+      ["a11y.sr.uninstall_cancelled"] =
+        "Uninstall cancelled. Nothing was removed.",
+      ["a11y.sr.uninstall_result_title.meaning"] =
+        "The report of what the uninstall removed and what it left.",
+      ["a11y.sr.uninstall_result_body.meaning"] =
+        "What was removed, what would not go, and how to finish by hand.",
+      ["a11y.sr.uninstall_result_opened"] =
+        "The uninstall report is open. Read it, copy it if you want a record, then close ReaAssist.",
+      ["a11y.sr.uninstall_copy.meaning"] =
+        "Copies the uninstall report to the clipboard.",
+      ["a11y.sr.uninstall_copied"] = "Uninstall report copied to clipboard.",
+      ["uninstall.marker.file_done"] =
+        "ReaAssist was uninstalled from this REAPER installation.\n\nThis file is what tells the ReaAssist actions not to start the program or install it again on their own. Running a ReaAssist action while this file is here asks you whether to install ReaAssist again, and installing again removes this file.\n\nDeleting this file by hand has the same effect.\n",
+      ["uninstall.marker.file_active"] =
+        "ReaAssist is being removed from this REAPER installation, or a removal was started and did not finish.\n\nWhile this file says that, the ReaAssist actions will not start the program and will not install it again, because the files they would start are the files being removed.\n\nIf no removal is running, the last one was interrupted. Delete this file by hand and run a ReaAssist action again.\n\nA removal moves each folder aside under a name of its own before it empties it, so an interrupted one can leave folders standing under those names. ReaAssist writes down every one of them here:\n{path}\n\nThe next time ReaAssist starts it puts back every folder on that list whose own name is free again, and names the ones it cannot. Leave that list where it is until then.\n",
+      ["uninstall.recovered.toast"] =
+        "ReaAssist put back what an interrupted removal had moved aside.",
+      ["uninstall.recovered.left"] =
+        "A ReaAssist removal was interrupted. ReaAssist moves each folder aside under a name of its own before it empties it, and it could not put these back, because something else is at the name each of them belongs at:\n{paths}\n\nWhat is in them is still there. Look in each one before you do anything with it, and move anything you want to keep somewhere else. ReaAssist keeps the list here and tries again every time it starts:\n  {journal}",
+      ["uninstall.recovered.foreign"] =
+        "ReaAssist keeps a list of the folders one of its own removals has moved aside, and that list now carries lines ReaAssist could not have written. Nothing on them was moved and nothing was deleted, and the lines were left exactly as they are.\n\nThe names on them are:\n{paths}\n\nThe list is here:\n  {journal}",
+      ["uninstall.recovered.lost"] =
+        "A ReaAssist removal was interrupted. ReaAssist moves each folder aside under a name of its own before it empties it, and it cannot find these where it put them:\n{paths}\n\nWhat became of them after that is not something ReaAssist can tell from here. Something else may have moved or replaced them, and one of ReaAssist's own acts may have taken the name: a removal that has emptied a folder finishes by taking the empty folder, and a link found standing at either of the two names ReaAssist knows for one of these folders is removed rather than followed. Neither of those can take anything that is inside a folder. What a removal had already taken out of one of these folders before it was interrupted is not on this list, which carries what ReaAssist moved and never what it removed, so what is inside one of them now is not something ReaAssist can tell you from here. ReaAssist keeps the list here and says this again every time it starts, until you take the list away:\n  {journal}",
+      ["uninstall.recovered.matched"] =
+        "A ReaAssist removal was interrupted. ReaAssist moves each folder aside under a name of its own before it empties it, and nothing is standing under the name it gave these:\n{paths}\n\nSomething is standing at each folder's own name and it holds a file carrying the value ReaAssist wrote down for the folder it moved aside, which is what a folder that had been put back would look like. ReaAssist will not take the line off its list for that: the value it checks that file against is written in the list itself, so anything that can read the list can put a file carrying it inside a folder of its own. That check renamed nothing and removed nothing: what it did was open the file it asks about inside the folder, add to that file and read it back, and ask the folder's own name questions that leave the name as they find it. It touched nothing else in the folder. Any name in brackets is the file ReaAssist asks about inside that folder. ReaAssist keeps the list here and says this again every time it starts, until you take the list away:\n  {journal}",
+      ["uninstall.recovered.superseded"] =
+        "A ReaAssist removal was interrupted. ReaAssist moves each folder aside under a name of its own before it empties it, and nothing is standing under the name it gave these. Another line on the same list describes each of them under a second name of ReaAssist's own, and a folder is standing there. Each folder's own name comes first below and the name a folder is standing under comes second:\n{paths}\n\nReaAssist keeps both lines rather than deciding which one is finished, because what it can check either of them against is written in the list itself. Neither check renamed anything or removed anything: each one looked inside for the file ReaAssist asks about there and, where what it found carried the value ReaAssist wrote down, added to that file and read it back, and each asked the name it was standing at questions that leave the name as they find it. They touched nothing else in either folder. ReaAssist keeps the list here and says this again every time it starts, until you take the list away:\n  {journal}",
+      ["uninstall.recovered.unproven"] =
+        "A ReaAssist removal was interrupted. ReaAssist moves each folder aside under a name of its own before it empties it, and when it went to put these back its own rename landed on something ReaAssist cannot prove is the folder:\n{paths}\n\nWhat is standing at each of those names arrived there through that rename, and ReaAssist can tell you neither that it is the folder it had moved aside nor where that folder is now. ReaAssist deleted nothing. Look at each one before you move or delete anything. ReaAssist keeps the list here and says this again every time it starts, until you take the list away:\n  {journal}",
+      ["uninstall.recovered.redirected"] =
+        "A ReaAssist removal was interrupted. ReaAssist moves each folder aside under a name of its own before it empties it, and its own rename did put each of these back:\n{paths}\n\nBy the time ReaAssist looked at those names again, each one was a link to somewhere else rather than the folder, so something other than ReaAssist moved the folder on in between. ReaAssist removed the link, left everything it pointed at alone, and deleted nothing else. Where each folder is now is not something ReaAssist can tell you, and one file of ReaAssist's own is inside it wherever it is. ReaAssist keeps the list here and says this again every time it starts, until you take the list away:\n  {journal}",
+      ["uninstall.recovered.unaccounted"] =
+        "A ReaAssist removal was interrupted. ReaAssist moves each folder aside under a name of its own before it empties it, and nothing is standing under the name it gave these:\n{paths}\n\nSomething is standing at each folder's own name, and ReaAssist cannot tell you whether it is the folder it had moved aside. The check renamed nothing and removed nothing: it looked inside for the file ReaAssist asks about there and, where what it found carried the value ReaAssist wrote down, added to that file and read it back, and it asked the folder's own name questions that leave the name as they find it. It touched nothing else in the folder. Look in each one before you do anything with it. ReaAssist keeps the list here and says this again every time it starts, until you take the list away:\n  {journal}",
+      ["uninstall.recovered.unbindable"] =
+        "A ReaAssist removal was interrupted. ReaAssist moves each folder aside under a name of its own before it empties it, and nothing is standing under the name it gave these:\n{paths}\n\nSomething is standing at each folder's own name and it refused ReaAssist's question for a reason of its own, which is usually a permission or another program holding it open, so ReaAssist cannot tell you whether it is the folder it had moved aside. The question renamed nothing and removed nothing: the most it can do at a name that refuses it is open the file ReaAssist asks about inside the folder and add to that file, and it touched nothing else. Look in each one before you do anything with it. ReaAssist keeps the list here and says this again every time it starts, until you take the list away:\n  {journal}",
+      ["uninstall.recovered.breach"] =
+        "A ReaAssist removal was interrupted, and when ReaAssist went to put a folder back, the name it had moved that folder to had been replaced with a link to somewhere else. Windows follows a link when it renames one, so ReaAssist's own rename moved what that link pointed at. A folder that is not ReaAssist's is standing at the first name below, and the link is still standing at the second, where ReaAssist has left it alone:\n{paths}\n\nReaAssist deleted nothing. The folder ReaAssist had moved aside is at neither name and ReaAssist cannot tell you where it is, and one file of ReaAssist's own went with it. Look at what is at each name before you move or delete anything: the folder that was carried in came from wherever that link points, which is where it was until the rename. ReaAssist keeps the list here and says this again every time it starts, until you take the list away:\n  {journal}",
+      ["uninstall.named_in_log"] = "(the ReaAssist log names it)",
+      ["uninstall.unnamed_owner"] =
+        "a copy of ReaAssist whose name could not be read",
+      ["uninstall.kind.folder"] = "folder",
+      ["uninstall.kind.file"] = "file",
+      ["uninstall.blocked.layout"] =
+        "ReaAssist cannot tell its application folder apart from the folder that holds it, so removing one could remove the other. Nothing was changed.\n\nClose REAPER and delete this folder by hand to remove ReaAssist:\n{path}",
+      ["uninstall.blocked.busy"] =
+        "ReaAssist is in the middle of an update. Let it finish or cancel it, then start the uninstall again.",
+      ["uninstall.blocked.instance"] =
+        "Another copy of ReaAssist is open on this install, or one was open and ReaAssist cannot prove it has closed. Removing the program while it is running there would break that session, so nothing was changed.\n\nClose ReaAssist in every other REAPER window, then start the uninstall again.\n\nReaAssist read this from:\n{names}",
+      ["uninstall.blocked.launcher_lock"] =
+        "A ReaAssist launcher is repairing or restoring this install, or one was and did not finish. That claim belongs to the launcher, not to this window, so ReaAssist will not remove it and nothing was changed.\n\nThe claim is here:\n{path}\n\nClose any other REAPER window that is starting ReaAssist and try again. If you are sure none is, delete the file named above and try again.",
+      ["uninstall.blocked.quarantine"] =
+        "ReaAssist is holding the record of an update it could not finish, and that record is the only description of which files were changed. Removing ReaAssist now would delete it unread, so nothing was changed.\n\nThe record is here:\n{path}\n\nRestart ReaAssist and take the repair it offers. Once the install has been verified the record is cleared and the uninstall can run.",
+      ["uninstall.blocked.journal"] =
+        "An update is part applied on this install and has not been resolved yet. Its record names the files that were replaced and the copies of the originals, and removing ReaAssist now would delete both, so nothing was changed.\n\nThe record is here:\n{path}\n\nRestart ReaAssist. It finishes or undoes that update at startup, and the uninstall can run afterwards.",
+      ["uninstall.blocked.journal_invalid"] =
+        "ReaAssist found the record of an interrupted update that it cannot read, so it cannot tell which files that update touched. Nothing was changed.\n\nThe record is here:\n{path}\n\nRestart ReaAssist. It sets that record aside as evidence and offers to verify and repair the install; the uninstall can run once that is done.",
+      ["uninstall.blocked.apply_lock"] =
+        "Another copy of ReaAssist is applying an update on this install. Let it finish, then start the uninstall again. Nothing was changed.",
+      ["uninstall.blocked.apply_lock_blocked"] =
+        "ReaAssist cannot look inside the folder where it keeps the claim that says an update is in progress, so it cannot tell whether another copy of ReaAssist is applying one on this install. Nothing was changed.\n\nThe folder is here:\n{path}\n\nGive your account permission to open it, then try again.",
+      ["uninstall.blocked.apply_lock_undecidable"] =
+        "ReaAssist cannot tell whether another copy of ReaAssist is still applying an update on this install, so it has not removed anything.\n\nThe claim is here:\n{path}\n\nIt was recorded by:\n{owner}\n\nClose any other REAPER window that is running ReaAssist and try again. If you are sure no other copy of ReaAssist is running on this computer, delete the {kind} named above and try again.",
+      ["uninstall.blocked.reentry"] =
+        "An uninstall has already run in this ReaAssist window. Close it and start REAPER again before doing anything else.",
+      ["uninstall.blocked.marker"] =
+        "ReaAssist could not write the note that stops its actions from starting the program again while it is being removed, so it removed nothing.\n\nThe note belongs here:\n{path}\n\nGive your account permission to write in that folder, then start the uninstall again.",
+      ["uninstall.blocked.custom_prompt_occupied"] =
+        "Something is already at the name ReaAssist wanted to move your custom system prompt to, and it will not write over it. Nothing was removed.\n\nThe file in the way is here:\n{path}\n\nMove or rename it, then start the uninstall again.",
+      ["uninstall.blocked.custom_prompt_move"] =
+        "ReaAssist could not move your custom system prompt out of the application folder, so it stopped and removed nothing.\n\nThe file is here:\n{path}\n\nCopy it somewhere safe yourself, then start the uninstall again.",
+      ["uninstall.stopped.quarantine"] =
+        "A record of an unfinished update appeared while the uninstall was starting, and it is the only description of which files that update changed. ReaAssist stopped rather than delete it.\n\nThe record is here:\n{path}\n\nRestart ReaAssist and take the repair it offers, then run the uninstall again.",
+      ["uninstall.stopped.launcher_lock"] =
+        "A ReaAssist launcher claimed this install while the uninstall was starting. That claim is the launcher's, so ReaAssist stopped rather than remove it.\n\nThe claim is here:\n{path}\n\nClose any other REAPER window that is starting ReaAssist and try again.",
+      ["uninstall.stopped.parked_copy"] =
+        "ReaAssist could not remove the repair copy it keeps of itself, and it will not remove the program while that copy is still there: the next time you started REAPER it would put ReaAssist back.\n\nThe copy is here:\n{path}\n\nThe actions you start ReaAssist from have not been touched. Delete that folder yourself, then run the uninstall again.",
+      ["uninstall.stopped.layout"] =
+        "ReaAssist stopped before removing its application files, because it can no longer tell that folder apart from the folder that holds it, and removing one could remove the other.\n\nThe folder is here:\n{path}\n\nClose REAPER and delete the ReaAssist folder by hand to finish.",
+      ["uninstall.stopped.breach"] =
+        "One of ReaAssist's own folders was replaced by a link to another folder while the uninstall was running, so ReaAssist stopped and removed nothing more.\n\nIt happened at this name:\n{path}\n\nThe folder that link pointed at was moved here, and nothing in it was touched:\n{moved}\n\nPut that folder back where it belongs before you do anything else, then start the uninstall again.",
+      ["uninstall.stopped.breach_seed"] =
+        "ReaAssist put one file of its own in that folder before it found out, and could not take it back out again. It is the only thing ReaAssist put there, and it is here:\n{path}",
+      ["uninstall.stopped.breach_claim"] =
+        "ReaAssist moves each folder aside under a name of its own before it empties it, and holds a file open inside it so that nothing can take its place. Something replaced the folder standing at one of those names anyway, so ReaAssist stopped and removed nothing more.\n\nThe folder ReaAssist was removing was here:\n{path}\n\nWhat ReaAssist could not prove is standing here now:\n{moved}\n\nLook at both of those names before you do anything else. ReaAssist stopped the moment it could not prove which folder was which, and it has removed nothing since.",
+      ["uninstall.copy.removes_heading"] = "What ReaAssist removes",
+      ["uninstall.copy.app_files"] = "  The application files in:",
+      ["uninstall.copy.app_files_detail"] =
+        "  Every file in the folders ReaAssist installed there goes, including any file you put among them yourself.",
+      ["uninstall.copy.recovery_folder"] =
+        "  The folder ReaAssist keeps its repair copy and recovery records in:",
+      ["uninstall.copy.recovery_folder_detail"] =
+        "  That folder goes completely, with everything in it. ReaAssist puts nothing there but its own repair copies and records.",
+      ["uninstall.copy.move_out_first"] =
+        "  Move anything you want to keep out of both folders first.",
+      ["uninstall.copy.actions"] = "  The ReaAssist actions you start it from:",
+      ["uninstall.copy.leaves_heading"] = "What ReaAssist leaves alone",
+      ["uninstall.copy.left_owned"] =
+        "    ReaPack installed this action and keeps it. ReaAssist will not delete it, because ReaPack would put it back the next time you synchronize. To remove it, open ReaPack, browse packages, find ReaAssist and choose Uninstall.",
+      ["uninstall.copy.left_foreign"] =
+        "    Another package owns this file, so it is not ReaAssist's to delete.",
+      ["uninstall.copy.left_unknown"] =
+        "    ReaAssist could not confirm who owns this file, and it only removes an action it knows nobody else installed.",
+      ["uninstall.copy.jsfx"] =
+        "    Effects ReaAssist installed into REAPER. Projects you still open may be using them, so they stay.",
+      ["uninstall.copy.saved_scripts"] =
+        "    Scripts ReaAssist saved for you. They are yours and they keep working without ReaAssist.",
+      ["uninstall.copy.reapack_rest"] =
+        "  Anything else ReaPack installed in the ReaAssist folder. It goes when you remove the package in ReaPack.",
+      ["uninstall.copy.foreign_folders"] =
+        "  Any folder inside the application folder that ReaAssist did not install, and everything in it. ReaAssist does not open a folder it cannot account for, and it names each one it left in the report.",
+      ["uninstall.copy.moved_aside"] =
+        "  ReaAssist moves each folder aside under a name of its own before it empties it, and holds a file open inside it so that nothing can take its place while it works. It puts each one back if anything inside has to stay.",
+      ["uninstall.copy.moved_aside_refused"] =
+        "  A folder it cannot move aside is left exactly as it is, with everything in it, and named in the report.",
+      ["uninstall.copy.moved_aside_stuck"] =
+        "  A folder it moved aside and then could not put back has already had everything ReaAssist was removing taken out of it. It stays beside where it was, under the name ReaAssist gave it, and the report names it there.",
+      ["uninstall.copy.claim_journal"] =
+        "  ReaAssist writes down every folder it moves aside, here:\n    {path}\n  If the removal is interrupted, the next time ReaAssist starts it puts back every folder on that list whose own name is free again, and names the ones it cannot.",
+      ["uninstall.copy.no_manifest"] =
+        "  ReaAssist could not read the list of files it installed, so it will leave more folders inside the application folder than usual and name every one of them in the report. Deleting the ReaAssist folder by hand afterwards finishes the job.",
+      ["uninstall.copy.folder_itself"] =
+        "  The ReaAssist folder itself, and any folder still holding something when this finishes.",
+      ["uninstall.copy.data_heading"] = "Your ReaAssist data",
+      ["uninstall.copy.data_removed_intro"] =
+        "  You asked ReaAssist to remove this too, so it also removes everything in:",
+      ["uninstall.copy.data_removed_detail"] =
+        "  That is your settings, your saved keys, custom providers, saved chats, logs, caches, downloaded language packs and your custom system prompt, and it clears the values ReaAssist saved in REAPER's own settings file. Anything else you put in that folder goes with it. It cannot be undone.",
+      ["uninstall.copy.data_kept_intro"] = "  Left exactly where it is:",
+      ["uninstall.copy.data_kept_detail"] =
+        "  Settings, saved keys, custom providers, saved chats, logs and caches all stay. If you install ReaAssist again it picks them up.",
+      ["uninstall.copy.custom_prompt_intro"] =
+        "  Your custom system prompt lives among the application files, so ReaAssist moves it first, to:",
+      ["uninstall.copy.custom_prompt_stop"] =
+        "  If that move does not succeed, ReaAssist stops and removes nothing.",
+      ["uninstall.copy.marker"] =
+        "Before it removes anything, ReaAssist writes a note at the path below. While the removal is running the ReaAssist actions will not start the program at all. When it finishes, the note stays and nothing puts ReaAssist back on its own: running an action then asks whether to install ReaAssist again, and saying yes removes the note. If the removal is interrupted the note stays as it was and the actions keep refusing until you delete it yourself:\n    {path}",
+      ["uninstall.copy.proof"] =
+        "ReaAssist checks every file after it deletes it and reports anything that would not go, with its full path. Nothing is called removed unless it is gone.",
+      ["uninstall.result.stopped_clean"] =
+        "ReaAssist stopped before removing anything.",
+      ["uninstall.result.stopped_partway"] =
+        "ReaAssist stopped partway through removing itself.",
+      ["uninstall.result.removed_before_stop"] =
+        "Removed {count} files and folders before stopping.",
+      ["uninstall.result.custom_prompt_moved"] =
+        "Your custom system prompt was moved to:",
+      ["uninstall.result.left_heading"] =
+        "These would not go, and are still on disk:",
+      ["uninstall.result.finish_by_hand"] =
+        "To finish by hand, close REAPER and delete this folder:",
+      ["uninstall.result.partly_removed"] = "ReaAssist was partly removed.",
+      ["uninstall.result.removed"] = "ReaAssist was removed.",
+      ["uninstall.result.removed_count"] = "Removed {count} files and folders.",
+      ["uninstall.result.data_kept"] =
+        "Your ReaAssist data was left where it is.",
+      ["uninstall.result.data_removed"] =
+        "Your ReaAssist data was removed, as you asked.",
+      ["uninstall.result.data_partial"] =
+        "Your ReaAssist data was removed except for what is listed below, which is still on disk.",
+      ["uninstall.result.in_use_heading"] =
+        "ReaAssist still has these open while this window is running, so it could not remove them. They go with the folder named at the end:",
+      ["uninstall.result.actions_left_heading"] =
+        "ReaAssist deleted these action files, but REAPER did not remove their rows from the action list. Open Actions, Show action list, find each one and remove it there:",
+      ["uninstall.result.reapack_left"] =
+        "ReaPack installed the ReaAssist actions and keeps them, so ReaAssist did not delete them. Open ReaPack, browse packages, find ReaAssist and choose Uninstall to take them away.",
+      ["uninstall.result.foreign_left"] =
+        "Another package owns one of the ReaAssist actions listed above, so ReaAssist left it alone. Remove it through whatever installed it.",
+      ["uninstall.result.unknown_left"] =
+        "ReaAssist could not confirm who owns one of the actions listed above, and it only deletes an action it knows nobody else installed. Delete it yourself if you are sure it is ReaAssist's.",
+      ["uninstall.result.marker"] =
+        "The ReaAssist actions will not start ReaAssist again while this note is on disk, so nothing reinstalls it on its own. Running an action asks whether to install ReaAssist again, and saying yes removes the note:\n  {path}",
+      ["uninstall.result.marker_active"] =
+        "ReaAssist could not finish the note it wrote when it started, so that note still says a removal is in progress. While it does, the ReaAssist actions will not start ReaAssist and will not offer to install it again.\n\nThe note is here:\n  {path}\n\nDelete that file yourself when you want the actions to work again.",
+      ["uninstall.result.marker_stuck"] =
+        "ReaAssist could not take back the note it wrote when it started, and while that note is on disk the ReaAssist actions will not start ReaAssist at all.\n\nThe note is here:\n  {path}\n\nDelete that file yourself to use ReaAssist again.",
+      ["uninstall.result.moved_aside"] =
+        "ReaAssist moves a folder aside under a name of its own before it empties it, and one or more of those could not be put back. Everything ReaAssist was removing is already out of them, and anything that had to stay is listed above under the name it has now. ReaAssist wrote each one down and puts it back the next time it starts, if its own name is free again.",
+      ["uninstall.result.claims_left"] =
+        "An earlier ReaAssist removal on this install was interrupted. These folders it had moved aside could not be put back, because something else is at the name each of them belongs at, and what is in them is still there:\n{paths}",
+      ["uninstall.result.claims_foreign"] =
+        "The list ReaAssist keeps of folders it has moved aside carries lines ReaAssist could not have written. Nothing was moved and nothing was deleted for those lines, and they were left exactly as they are:\n{paths}\n\nThe list is here:\n  {journal}",
+      ["uninstall.result.link_seeds"] =
+        "ReaAssist puts one file of its own inside a folder before it can tell whether the name is a folder or a link to somewhere else. These names turned out to be links, so ReaAssist removed the link and left everything it pointed at alone, and its own file is inside the folder each link pointed at. It is the only thing ReaAssist put there, and it cannot reach it to take it back. The name, and the file:\n{paths}",
+      ["uninstall.result.claims_lost"] =
+        "An earlier ReaAssist removal on this install was interrupted, and ReaAssist cannot find these folders where it had moved them aside:\n{paths}\n\nWhat became of them after that is not something ReaAssist can tell from here. Something else may have moved or replaced them, and one of ReaAssist's own acts may have taken the name: a removal that has emptied a folder finishes by taking the empty folder, and a link found standing at either of the two names ReaAssist knows for one of these folders is removed rather than followed. Neither of those can take anything that is inside a folder. What a removal had already taken out of one of these folders before it was interrupted is not on this list, which carries what ReaAssist moved and never what it removed, so what is inside one of them now is not something ReaAssist can tell you from here. ReaAssist keeps the list here:\n  {journal}",
+      ["uninstall.result.claims_matched"] =
+        "An earlier ReaAssist removal on this install was interrupted, and nothing is standing under the names it had moved these folders aside to:\n{paths}\n\nSomething is standing at each folder's own name and it holds a file carrying the value ReaAssist wrote down for the folder it moved aside, which is what a folder that had been put back would look like. ReaAssist will not take the line off its list for that: the value it checks that file against is written in the list itself, so anything that can read the list can put a file carrying it inside a folder of its own. That check renamed nothing and removed nothing: what it did was open the file it asks about inside the folder, add to that file and read it back, and ask the folder's own name questions that leave the name as they find it. It touched nothing else in the folder. Any name in brackets is the file ReaAssist asks about inside that folder. It keeps the list here:\n  {journal}",
+      ["uninstall.result.claims_superseded"] =
+        "An earlier ReaAssist removal on this install was interrupted, and nothing is standing under the names it had moved these folders aside to. Another line on the same list describes each of them under a second name of ReaAssist's own, and a folder is standing there. Each folder's own name comes first below and the name a folder is standing under comes second:\n{paths}\n\nReaAssist keeps both lines rather than deciding which one is finished, because what it can check either of them against is written in the list itself. Neither check renamed anything or removed anything: each one looked inside for the file ReaAssist asks about there and, where what it found carried the value ReaAssist wrote down, added to that file and read it back, and each asked the name it was standing at questions that leave the name as they find it. They touched nothing else in either folder. It keeps the list here:\n  {journal}",
+      ["uninstall.result.claims_unaccounted"] =
+        "An earlier ReaAssist removal on this install was interrupted, and nothing is standing under the names it had moved these folders aside to:\n{paths}\n\nSomething is standing at each folder's own name, and ReaAssist cannot tell you whether it is the folder it had moved aside. The check renamed nothing and removed nothing: it looked inside for the file ReaAssist asks about there and, where what it found carried the value ReaAssist wrote down, added to that file and read it back, and it asked the folder's own name questions that leave the name as they find it. It touched nothing else in the folder. It keeps the list here:\n  {journal}",
+      ["uninstall.result.claims_unbindable"] =
+        "An earlier ReaAssist removal on this install was interrupted, and nothing is standing under the names it had moved these folders aside to:\n{paths}\n\nSomething is standing at each folder's own name and it refused ReaAssist's question for a reason of its own, which is usually a permission or another program holding it open, so ReaAssist cannot tell you whether it is the folder it had moved aside. The question renamed nothing and removed nothing: the most it can do at a name that refuses it is open the file ReaAssist asks about inside the folder and add to that file, and it touched nothing else. It keeps the list here:\n  {journal}",
+      ["uninstall.result.claims_breach"] =
+        "An earlier ReaAssist removal on this install was interrupted, and when ReaAssist went to put a folder back, the name it had moved that folder to had been replaced with a link to somewhere else. Windows follows a link when it renames one, so ReaAssist's own rename moved what that link pointed at. A folder that is not ReaAssist's is standing at the first name below, and the link is still standing at the second, where ReaAssist left it alone:\n{paths}\n\nReaAssist deleted nothing. The folder ReaAssist had moved aside is at neither name and ReaAssist cannot tell you where it is. The folder that was carried in came from wherever that link points, which is where it was until the rename. ReaAssist keeps the list here:\n  {journal}",
+      ["uninstall.result.claim_lost"] =
+        "ReaAssist moves a folder aside under a name of its own before it empties it, and when it went to put these back the name it had moved them to was a link to somewhere else rather than the folder. ReaAssist removed the link, left everything it pointed at alone, and moved nothing. Where these folders are now is not something ReaAssist can tell you. Any name in brackets is a file of ReaAssist's own that went through the link before it could be asked about, and ReaAssist cannot reach it to take it back:\n{paths}",
+      ["uninstall.result.claim_breach"] =
+        "ReaAssist moves a folder aside under a name of its own before it empties it, and when it went to put these back the name it had moved them to had been replaced with a link to somewhere else. Windows follows a link when it renames one, so ReaAssist's own rename moved what that link pointed at: a folder that is not ReaAssist's is standing at the first name below, and the link is still standing at the second, where ReaAssist left it alone. ReaAssist deleted nothing. The folder ReaAssist had moved aside is at neither name and ReaAssist cannot tell you where it is, and any name in brackets is a file of ReaAssist's own that went with it. The folder that was carried in came from wherever that link points, which is where it was until the rename:\n{paths}",
+      ["uninstall.result.claims_unproven"] =
+        "An earlier ReaAssist removal on this install was interrupted, and when ReaAssist went to put a folder back its own rename landed on something ReaAssist cannot prove is the folder. What is standing at each name below arrived there through that rename, and ReaAssist can tell you neither that it is the folder it had moved aside nor where that folder is now. ReaAssist deleted nothing:\n{paths}\n\nReaAssist keeps the list here:\n  {journal}",
+      ["uninstall.result.claim_unproven"] =
+        "ReaAssist moves a folder aside under a name of its own before it empties it, and when it went to put these back its own rename landed on something ReaAssist cannot prove is the folder. What is standing at each name below arrived there through that rename, and ReaAssist can tell you neither that it is the folder it had moved aside nor where that folder is now. ReaAssist deleted nothing. Look at each one before you move or delete anything:\n{paths}",
+      ["uninstall.result.claims_redirected"] =
+        "An earlier ReaAssist removal on this install was interrupted, and ReaAssist's own rename did put these folders back. By the time it looked at each folder's own name again, that name was a link to somewhere else rather than the folder, so something other than ReaAssist moved the folder on in between. ReaAssist removed the link, left everything it pointed at alone, and deleted nothing else:\n{paths}\n\nWhere each folder is now is not something ReaAssist can tell you. ReaAssist keeps the list here:\n  {journal}",
+      ["uninstall.result.claim_redirected"] =
+        "ReaAssist moves a folder aside under a name of its own before it empties it, and its own rename did put each of these back. By the time ReaAssist looked at the folder's own name again, that name was a link to somewhere else rather than the folder. Something other than ReaAssist moved the folder on in between. ReaAssist removed the link, left everything it pointed at alone, and deleted nothing else, and where each folder is now is not something ReaAssist can tell you. Any name in brackets is a file of ReaAssist's own that is inside the folder wherever it is:\n{paths}",
+      ["uninstall.result.claim_vanished"] =
+        "ReaAssist moves a folder aside under a name of its own before it empties it, and the name it had moved these to was gone before ReaAssist had finished with them. Something other than ReaAssist took it away. The put-back that failed moved nothing and removed nothing: its rename did not happen, and nothing standing at that name was taken. Where these folders are now is not something ReaAssist can tell you. Whatever is standing at each name below, this run did not put it there:\n{paths}",
+      ["uninstall.result.claims_kept"] =
+        "ReaAssist keeps a list of the folders one of its own removals moved aside, and it could not account for every line on that list, so the list is still on disk:\n  {path}\n\nEach line names a folder and the name ReaAssist moved it to. Leaving that file where it is changes nothing and deletes nothing: it is the only record ReaAssist has of where those folders went. Delete it yourself once you have finished with it.",
+      ["uninstall.result.records_stuck"] =
+        "ReaAssist could not write to the list it keeps of the folders it has moved aside, so it left one or more of them under the name it gave them rather than renaming folders it would then have no record of. The list is here:\n  {path}",
+      ["uninstall.result.close_and_finish"] =
+        "Close ReaAssist now. To finish by hand, close REAPER and delete this folder:",
       ["settings.diag.popup.title"] = "Enable Diagnostics",
       ["settings.diag.popup.next_launch"] =
         "{tier} diagnostics are sent on the next launch, when ReaAssist is idle.",
@@ -4245,6 +4565,7 @@ I18N.local_overrides.ja = {
     ["typed_actions.status.auto_ran"] = "自動実行済み",
     ["typed_actions.status.failed"] = "失敗",
     ["typed_actions.status.lua_requested"] = "Lua依頼済み",
+    ["typed_actions.status.lua_pending"] = "Lua依頼中",
     ["typed_actions.status.undo_lua"] = "元に戻す + Lua",
     ["typed_actions.status.undo_sent"] = "元に戻しました",
     ["typed_actions.status.validated"] = "検証済み",
@@ -4256,6 +4577,8 @@ I18N.local_overrides.ja = {
     ["typed_actions.request_lua"] = "Luaを依頼",
     ["typed_actions.request_lua.tooltip"] =
       "確認、実行、保存できる通常のLua/ReaScript版を依頼します。構造化編集は実行されません。",
+    ["typed_actions.request_lua_after_apply.tooltip"] =
+      "適用済みの構造化編集とその元に戻す項目を変更せずに、Lua/ReaScript版を生成します。",
 }
 I18N.local_overrides.ko = {
     ["footer.credits.label"] = "크레딧",
@@ -4268,6 +4591,7 @@ I18N.local_overrides.ko = {
     ["typed_actions.status.auto_ran"] = "자동 실행됨",
     ["typed_actions.status.failed"] = "실패",
     ["typed_actions.status.lua_requested"] = "Lua 요청됨",
+    ["typed_actions.status.lua_pending"] = "Lua 요청 중",
     ["typed_actions.status.undo_lua"] = "실행 취소 + Lua",
     ["typed_actions.status.undo_sent"] = "실행 취소됨",
     ["typed_actions.status.validated"] = "검증됨",
@@ -4279,6 +4603,8 @@ I18N.local_overrides.ko = {
     ["typed_actions.request_lua"] = "Lua 요청",
     ["typed_actions.request_lua.tooltip"] =
       "검토, 실행, 저장할 수 있는 일반 Lua/ReaScript 버전을 요청합니다. 구조화 편집은 실행되지 않습니다.",
+    ["typed_actions.request_lua_after_apply.tooltip"] =
+      "적용된 구조화 편집과 해당 실행 취소 항목을 변경하지 않고 Lua/ReaScript 버전을 생성합니다.",
 }
 I18N.local_overrides.id = {
     ["common.run"] = "Jalankan",
@@ -4321,8 +4647,6 @@ I18N.local_overrides.id = {
     ["settings.pref.chat_font.tooltip"] =
       "Ukuran fonta untuk pesan obrolan saja (tidak memengaruhi bagian antarmuka lainnya)",
     ["settings.pref.check_updates.label"] = "Periksa pembaruan",
-    ["settings.pref.check_updates.tooltip"] =
-      "Periksa sekarang apakah ada rilis ReaAssist baru atau berkas yang hilang",
     ["settings.pref.preferred_plugins.label"] = "Pengaya pilihan",
     ["settings.pref.preferred_plugins.tooltip"] =
       "Tetapkan pengaya bawaan untuk setiap jenis (EQ, kompresor, reverb, dan lainnya)",
@@ -4333,10 +4657,6 @@ I18N.local_overrides.id = {
     ["settings.pref.ui_scale.label"] = "Skala antarmuka",
     ["settings.pref.ui_scale.tooltip"] =
       "Otomatis mempertahankan ukuran antarmuka asli. Persentase manual menskalakan seluruh antarmuka; ReaAssist mengingat pilihan tersebut untuk skala monitor Anda saat ini.",
-    ["settings.pref.update_check.label"] =
-      "Periksa pembaruan saat mulai",
-    ["settings.pref.update_check.tooltip"] =
-      "Periksa versi ReaAssist baru secara otomatis saat skrip dimulai",
 }
 
 do

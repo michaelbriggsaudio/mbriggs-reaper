@@ -25,8 +25,8 @@
 -- friendly message instead.
 if type(RA) ~= "table" then
   local msg = "Resources/UI.lua is part of ReaAssist and cannot be run "
-           .. "directly.\n\nPlease run ReaAssist.lua in the parent folder "
-           .. "instead."
+           .. "directly.\n\nPlease run the ReaAssist action from REAPER's "
+           .. "Action List instead."
   if type(reaper) == "table" and reaper.MB then
     reaper.MB(msg, "ReaAssist", 0)
   else
@@ -187,9 +187,20 @@ end
 
 local function jsfx_manual_perform_action(msg, idx, action, allow_invalid)
   if not msg then return false end
-  if action == "add" and reaper.CountSelectedTracks(0) == 0 then
-    S.open_no_tracks_warn = true
-    return false
+  local action_project = nil
+  if action == "add" then
+    if Code.jsfx_add_is_applied(msg) then return false end
+    action_project = Code.active_project()
+    if not Code.jsfx_add_project_is_supported(action_project) then
+      msg.jsfx_status = UI.t("jsfx.project_safety_unavailable", nil,
+        "ReaAssist could not verify the active project, so the JSFX was not added.")
+      msg._jsfx_status_final = true
+      return false
+    end
+    if reaper.CountSelectedTracks(action_project) == 0 then
+      S.open_no_tracks_warn = true
+      return false
+    end
   end
 
   local prepared, inject_info, warning = jsfx_manual_prepare(msg, allow_invalid)
@@ -264,24 +275,24 @@ local function jsfx_manual_perform_action(msg, idx, action, allow_invalid)
       end
     end
     if msg.jsfx_saved_path and fx_name then
-      local sel_count = reaper.CountSelectedTracks(0)
+      local sel_count = reaper.CountSelectedTracks(action_project)
       local trs = {}
       for t = 0, sel_count - 1 do
-        trs[#trs + 1] = reaper.GetSelectedTrack(0, t)
+        trs[#trs + 1] = reaper.GetSelectedTrack(action_project, t)
       end
-      reaper.Undo_BeginBlock()
-      local added_n = 0
-      for _, tr in ipairs(trs) do
-        if tr and reaper.ValidatePtr2(0, tr, "MediaTrack*") then
-          reaper.TrackFX_AddByName(tr, fx_name, false, -1)
-          added_n = added_n + 1
-        end
+      local added_n, add_reason = Code.add_jsfx_to_tracks(
+        action_project, trs, fx_name)
+      if added_n <= 0 then
+        msg.jsfx_status = UI.t("a11y.sr.add_jsfx_failed", nil,
+          "JSFX was saved, but REAPER did not add it to the selected tracks.")
+        return false
       end
-      reaper.Undo_EndBlock("ReaAssist: Add JSFX to selected tracks", -1)
       msg.jsfx_status = UI.t("jsfx.added_to", {
         count = added_n,
       }, "Added to " .. added_n .. " track(s).")
-      msg.jsfx_added_to_tracks = true
+      msg._jsfx_status_final = nil
+      Code.record_jsfx_add_undo_state(msg, action_project, added_n,
+        add_reason == nil)
       return true
     end
     msg.jsfx_status = UI.t("jsfx.save_failed", nil, "Failed to save JSFX.")
@@ -1961,11 +1972,13 @@ function UI.chat_message_cull_key(msg, i, count, avail_w, chat_font_key,
     msg.local_answer,
     msg.local_retry_available,
     msg.local_llm_requested,
+    msg.local_escalation_state,
     msg.llm_retry_prompt,
     active_provider_label,
     msg.link_label,
     msg.link_url,
     msg.typed_action_token_cap,
+    msg.typed_action_lua_generation_pending,
     msg.typed_action_lua_requested,
     msg.typed_action_undo_clicked,
     msg.screen_reader_undo_clicked,
@@ -2396,6 +2409,9 @@ function UI.logo(inner_w, title_size)
 end
 
 function UI.open_settings(return_to)
+  if api_keys.cancel_visual_key_test_navigation then
+    api_keys.cancel_visual_key_test_navigation()
+  end
   if return_to == nil then
     return_to = {
       screen       = api_keys.screen,
@@ -3569,7 +3585,7 @@ function UI.mode_model_row_v5()
         local nm = MODELS[prefs.model_idx]
         if nm then
           for _, att in ipairs(S.attachments) do
-            att.cost = att.tokens * nm.price_in / 1000000
+            att.cost = MODELS.calc_cost(nm, att.tokens, 0, 0, 0)
           end
         end
         if Store and Store.save_config then Store.save_config() end
@@ -3635,7 +3651,7 @@ function UI.mode_model_row_v5()
         or UI.t("mode.model.descriptor.balanced", nil, "balanced")
     end
     if i == 1 then return UI.t("mode.model.descriptor.fast", nil, "fast") end
-    if i == total then return UI.t("mode.model.descriptor.smart", nil, "smart") end
+    if i == total then return UI.t("mode.model.descriptor.smart", nil, "premium") end
     return UI.t("mode.model.descriptor.balanced", nil, "balanced")
   end
   if ImGui.ImGui_BeginPopup(RA.ctx, "##mm_mdl_popup") then
@@ -3796,7 +3812,7 @@ function UI.mode_model_row_v5()
         if prov_id == "google" then Net.gemini_cache_invalidate() end
         S.api_ref_message = nil
         for _, att in ipairs(S.attachments) do
-          att.cost = att.tokens * raw_m.price_in / 1000000
+          att.cost = MODELS.calc_cost(raw_m, att.tokens, 0, 0, 0)
         end
         if Store and Store.save_config then Store.save_config() end
       end
@@ -3810,7 +3826,7 @@ function UI.mode_model_row_v5()
     local active_model = MODELS[prefs.model_idx] or MODELS[1]
     local vis = {}
     for i, tl in ipairs(p_active.thinking_levels) do
-      if not tl.flash_only or (active_model and active_model.is_flash) then
+      if PROVIDERS.thinking_idx_allowed(p_active, active_model, i) then
         vis[#vis+1] = { idx = i, label = UI.thinking_level_label(tl) }
       end
     end
@@ -3820,7 +3836,7 @@ function UI.mode_model_row_v5()
       local cur_tone = UI.combo_tone(p_active, active_model, cur)
       local tl_icon = (cur_tone == "warn") and ICON.TRIANGLE_ALERT or nil
       local tl_tip = UI.t("mode.thinking.tooltip", nil,
-        "Thinking depth: higher tiers think longer (smarter, slower, more expensive).")
+        "Thinking level: higher levels can help with difficult requests, but usually take longer and cost more.")
       if cur_tone == "warn" then
         local hint = UI.combo_hint(p_active, active_model, cur)
         if hint then
@@ -4126,10 +4142,9 @@ function UI.mode_model_row_v5()
 
   -- Combo hint below the chip row: a single muted line describing the
   -- current (provider, model, thinking) pick in the format
-  -- "Best for | Cost | Speed | Note" -- e.g.
-  -- "Simple and complex | Mid-cost | Very fast | Recommended OpenAI default"
-  -- or "Avoid long prompts | Higher cost | Very slow (hits timeouts) |
-  -- Use None or Opus None". Lookup table lives in UI.COMBO_HINTS (source
+  -- "Best for | Cost | Speed | Note", for example:
+  -- "Recommended level | General and complex work | Balanced cost | Fast".
+  -- Lookup table lives in UI.COMBO_HINTS (source
   -- of truth: Dev/Model_Info.md). Custom providers and uncovered combos
   -- return nil and the line just doesn't render. Rendered in the
   -- whitespace between the chip row and the footer rail, left-aligned
@@ -4182,7 +4197,19 @@ function UI.mode_model_row_v5()
         PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), fade_c)
         local _, cy = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
         ImGui.ImGui_SetCursorScreenPos(RA.ctx, sx + PAD_X + RA.SC(2), cy - RA.SC(3))
-        Text(RA.ctx, hint)
+        local hint_draw = hint
+        local hint_max_w = math_max(1, mode_row_avail_w - PAD_X * 2 - RA.SC(4))
+        local hint_ell = "..."
+        while #hint_draw > 0
+            and CalcTextSize(RA.ctx, hint_draw .. hint_ell) > hint_max_w do
+          hint_draw = UI._utf8_drop_last_char(hint_draw)
+        end
+        local hint_truncated = hint_draw ~= hint
+        if hint_truncated then
+          hint_draw = (#hint_draw > 0) and (hint_draw .. hint_ell) or hint_ell
+        end
+        Text(RA.ctx, hint_draw)
+        if hint_truncated then UI.tooltip_v5(hint) end
         PopStyleColor(RA.ctx)
         PopFont(RA.ctx)
       end
@@ -4622,6 +4649,9 @@ function UI.footer_rail_v5()
           show_bug     = S.show_bug_report,
           show_credits = S.show_credits,
         }
+        if api_keys.cancel_visual_key_test_navigation then
+          api_keys.cancel_visual_key_test_navigation()
+        end
         api_keys.screen    = nil
         S.show_help        = true
         S.show_bug_report  = false
@@ -4643,6 +4673,9 @@ function UI.footer_rail_v5()
           show_help = S.show_help,
           show_bug  = S.show_bug_report,
         }
+        if api_keys.cancel_visual_key_test_navigation then
+          api_keys.cancel_visual_key_test_navigation()
+        end
         api_keys.screen    = nil
         S.show_help        = false
         S.show_bug_report  = false
@@ -8169,6 +8202,194 @@ function Render._factory_reset_popup(ctx)
   UI.pop_modal_style()
 end
 
+-- -----------------------------------------------------------------------------
+-- Uninstall (plan section 5, work package B2.4)
+-- -----------------------------------------------------------------------------
+-- Two modals. The first states what will be removed and what will not, carries
+-- the user-data offer as its own opt-in, and refuses outright when the body
+-- reports something standing in the way. The second reports what actually
+-- happened, path by path.
+--
+-- Every word of both comes from Updater.uninstall_copy and
+-- Updater.uninstall_result_copy in ReaAssist.lua, so the Screen Reader
+-- entrypoint can reach the same sentences without this visual sidecar, and so
+-- the copy can be asserted against the plan that produced it.
+--
+-- The plan is built ONCE, when the button is clicked, and held. Rebuilding it
+-- per frame would ask ReaPack who owns the launchers on every frame the modal
+-- is open. The one thing not frozen with it is ownership at the destructive
+-- moment, which the body re-asks for itself.
+function Render._uninstall_open()
+  Render._uninstall_remove_data = false
+  Render._uninstall_result = nil
+  Render._uninstall_plan = Updater.uninstall_plan({ remove_user_data = false })
+end
+
+function Render._uninstall_popup(ctx)
+  local plan = Render._uninstall_plan
+  if not plan then return end
+  local popup_id = UI.t("settings.adv.uninstall.label", nil,
+    "Uninstall ReaAssist") .. "##uninstall_confirm"
+  local uw = RA.SC(560)
+  local uh = RA.SC(470)
+  if update._main_w then
+    ImGui.ImGui_SetNextWindowPos(ctx,
+      update._main_x + (update._main_w - uw) * 0.5,
+      update._main_y + (update._main_h - uh) * 0.5,
+      ImGui.ImGui_Cond_Appearing())
+  end
+  ImGui.ImGui_SetNextWindowSize(ctx, uw, uh, ImGui.ImGui_Cond_Appearing())
+  UI.push_modal_style()
+  if ImGui.ImGui_BeginPopupModal(ctx, popup_id, true, 0) then
+    local cw = ImGui.ImGui_GetContentRegionAvail(ctx)
+    local blockers = plan.blockers or {}
+    ImGui.ImGui_Spacing(ctx)
+    local head = (#blockers > 0)
+      and UI.t("settings.uninstall.blocked_heading", nil,
+        "ReaAssist cannot uninstall right now")
+      or UI.t("settings.uninstall.heading", nil, "Remove ReaAssist?")
+    local hw = CalcTextSize(ctx, head)
+    SetCursorPosX(ctx, GetCursorPosX(ctx) + math_floor((cw - hw) * 0.5))
+    Text(ctx, head)
+    ImGui.ImGui_Spacing(ctx)
+
+    -- The body scrolls: the copy names full paths and there can be several.
+    PushStyleVar(ctx, ImGui.ImGui_StyleVar_ChildRounding(), RA.SC(5))
+    PushStyleVar(ctx, ImGui.ImGui_StyleVar_WindowPadding(), RA.SC(10), RA.SC(8))
+    local body
+    if #blockers > 0 then
+      local parts = {}
+      for _, blocker in ipairs(blockers) do
+        parts[#parts + 1] = tostring(blocker.message)
+      end
+      body = table.concat(parts, "\n\n")
+    else
+      plan.remove_user_data = Render._uninstall_remove_data and true or false
+      body = Updater.uninstall_copy(plan)
+    end
+    if ImGui.ImGui_BeginChild(ctx, "##uninstall_body", cw, RA.SC(268),
+        ImGui.ImGui_ChildFlags_Borders()) then
+      if ImGui.ImGui_BeginPopupContextWindow(ctx, "##uninstall_body_ctx") then
+        if ImGui.ImGui_MenuItem(ctx, UI.t("common.copy", nil, "Copy")) then
+          ImGui.ImGui_SetClipboardText(ctx, body)
+        end
+        ImGui.ImGui_EndPopup(ctx)
+      end
+      PushStyleColor(ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+      UI.text_multiline(body)
+      PopStyleColor(ctx)
+      ImGui.ImGui_EndChild(ctx)
+    end
+    ImGui.ImGui_PopStyleVar(ctx, 2)
+    ImGui.ImGui_Spacing(ctx)
+
+    local do_uninstall = false
+    if #blockers == 0 then
+      -- The user-data offer, and it is an offer: it starts clear, it is never
+      -- ticked by anything else, and the copy above changes to match it the
+      -- moment it moves.
+      local changed, val = ImGui.ImGui_Checkbox(ctx,
+        UI.t("settings.uninstall.remove_data", nil,
+          "Also remove my ReaAssist data (settings, keys, chats, logs)"),
+        Render._uninstall_remove_data and true or false)
+      if changed then Render._uninstall_remove_data = val and true or false end
+      ImGui.ImGui_Spacing(ctx)
+    end
+
+    local yes_label = UI.t("settings.adv.uninstall.label", nil,
+      "Uninstall ReaAssist")
+    local no_label = (#blockers > 0)
+      and UI.t("common.close", nil, "Close")
+      or UI.t("common.cancel", nil, "Cancel")
+    local no_w = math_max(RA.SC(72), CalcTextSize(ctx, no_label) + RA.SC(28))
+    local gap = RA.SC(16)
+    local row = no_w
+    local yes_w = 0
+    if #blockers == 0 then
+      yes_w = math_max(RA.SC(150), CalcTextSize(ctx, yes_label) + RA.SC(28))
+      row = yes_w + gap + no_w
+    end
+    SetCursorPosX(ctx, GetCursorPosX(ctx) + math_floor((cw - row) * 0.5))
+    if #blockers == 0 then
+      UI.push_modal_danger_btn()
+      if ImGui.ImGui_Button(ctx, yes_label, yes_w, 0) then
+        do_uninstall = true
+      end
+      UI.pop_modal_danger_btn()
+      SameLine(ctx, 0, gap)
+    end
+    if ImGui.ImGui_Button(ctx, no_label, no_w, 0) then
+      ImGui.ImGui_CloseCurrentPopup(ctx)
+    end
+    if ImGui.ImGui_IsKeyPressed(ctx, ImGui.ImGui_Key_Escape()) then
+      ImGui.ImGui_CloseCurrentPopup(ctx)
+    end
+    if do_uninstall then
+      Render._uninstall_pending = true
+      ImGui.ImGui_CloseCurrentPopup(ctx)
+    end
+    ImGui.ImGui_EndPopup(ctx)
+  end
+  UI.pop_modal_style()
+end
+
+function Render._uninstall_result_popup(ctx)
+  local result = Render._uninstall_result
+  if not result then return end
+  local popup_id = UI.t("settings.uninstall.result_title", nil,
+    "Uninstall") .. "##uninstall_result"
+  local uw = RA.SC(560)
+  local uh = RA.SC(430)
+  if update._main_w then
+    ImGui.ImGui_SetNextWindowPos(ctx,
+      update._main_x + (update._main_w - uw) * 0.5,
+      update._main_y + (update._main_h - uh) * 0.5,
+      ImGui.ImGui_Cond_Appearing())
+  end
+  ImGui.ImGui_SetNextWindowSize(ctx, uw, uh, ImGui.ImGui_Cond_Appearing())
+  UI.push_modal_style()
+  if ImGui.ImGui_BeginPopupModal(ctx, popup_id, true, 0) then
+    local cw = ImGui.ImGui_GetContentRegionAvail(ctx)
+    local body = Updater.uninstall_result_copy(result)
+    ImGui.ImGui_Spacing(ctx)
+    PushStyleVar(ctx, ImGui.ImGui_StyleVar_ChildRounding(), RA.SC(5))
+    PushStyleVar(ctx, ImGui.ImGui_StyleVar_WindowPadding(), RA.SC(10), RA.SC(8))
+    if ImGui.ImGui_BeginChild(ctx, "##uninstall_result_body", cw, RA.SC(300),
+        ImGui.ImGui_ChildFlags_Borders()) then
+      PushStyleColor(ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+      UI.text_multiline(body)
+      PopStyleColor(ctx)
+      ImGui.ImGui_EndChild(ctx)
+    end
+    ImGui.ImGui_PopStyleVar(ctx, 2)
+    ImGui.ImGui_Spacing(ctx)
+    local copy_label = UI.t("common.copy", nil, "Copy")
+    -- A finished uninstall has taken the code this window would need to keep
+    -- running, so the only honest next step is closing it. A stop leaves
+    -- everything in place, so that one just closes the report.
+    local close_label = result.ok
+      and UI.t("settings.uninstall.close_app", nil, "Close ReaAssist")
+      or UI.t("common.close", nil, "Close")
+    local copy_w = math_max(RA.SC(84), CalcTextSize(ctx, copy_label) + RA.SC(28))
+    local close_w = math_max(RA.SC(140),
+      CalcTextSize(ctx, close_label) + RA.SC(28))
+    local gap = RA.SC(16)
+    SetCursorPosX(ctx, GetCursorPosX(ctx)
+      + math_floor((cw - (copy_w + gap + close_w)) * 0.5))
+    if ImGui.ImGui_Button(ctx, copy_label, copy_w, 0) then
+      ImGui.ImGui_SetClipboardText(ctx, body)
+    end
+    SameLine(ctx, 0, gap)
+    if ImGui.ImGui_Button(ctx, close_label, close_w, 0) then
+      Render._uninstall_result = nil
+      ImGui.ImGui_CloseCurrentPopup(ctx)
+      if result.ok then S.script_open = false end
+    end
+    ImGui.ImGui_EndPopup(ctx)
+  end
+  UI.pop_modal_style()
+end
+
 function Render._reaper_version_notice_popup()
   if S.reaper_version_notice_session_dismissed then return end
   if Store and Store.reaper_version_notice_dismissed
@@ -10276,6 +10497,9 @@ end
 -- this 14-line block, with predictable drift risk -- the synthesis
 -- review caught two minor inconsistencies between them.
 local function _exit_settings_screen()
+  if api_keys.cancel_visual_key_test_navigation then
+    api_keys.cancel_visual_key_test_navigation()
+  end
   -- Clear staged Preference snapshots so a re-entry into Settings starts
   -- fresh.
   api_keys.saved_ui_scale_idx          = nil
@@ -10994,12 +11218,10 @@ function Render._shared_key_screen_impl()
     end
     ImGui.ImGui_BeginDisabled(RA.ctx, not has_keys or api_keys.key_validating)
     if ImGui.ImGui_Button(RA.ctx, test_label .. "##key_recheck") then
-      -- Promote any buffered (freshly-pasted) keys into S.api_key_map so the
-      -- test queue below picks them up. Mirrors what Save does -- the key
-      -- is only moved in-memory here; persistence happens in the
-      -- test-success callback, same as for a Save-then-test flow. Any
-      -- buffered key that fails format validation records an inline error
-      -- and is NOT promoted.
+      api_keys.start_key_test("visual_manual")
+      -- Stage buffered keys outside the stored-key map. A candidate is sent
+      -- only through the exact key-test override and reaches the map after a
+      -- provider-specific success envelope proves it.
       api_keys.key_warnings = api_keys.key_warnings or {}
       for i, prov in ipairs(PROVIDERS) do
         if not prov.is_custom then
@@ -11007,7 +11229,7 @@ function Render._shared_key_screen_impl()
           if buf ~= "" then
             local valid, reason = Key.validate_format(buf, prov)
             if valid then
-              S.api_key_map[prov.id] = buf
+              api_keys.stage_key_candidate(prov, i, buf)
               api_keys.key_errors[i] = nil
               api_keys.key_warnings[i] = reason
             else
@@ -11018,7 +11240,7 @@ function Render._shared_key_screen_impl()
         end
       end
 
-      -- Build a queue of all providers that have a stored key.
+      -- Build a queue of every stored key and every staged candidate.
       api_keys.test_queue   = {}
       api_keys.test_results = {}
       -- Two passes (hardcoded providers first, custom providers last)
@@ -11028,12 +11250,12 @@ function Render._shared_key_screen_impl()
       -- matters more than queue brevity. The order also matches what
       -- the user usually configures first (cloud keys -> custom).
       for i, pk in ipairs(PROVIDERS) do
-        if not pk.is_custom and S.api_key_map[pk.id] then
+        if not pk.is_custom and api_keys.key_for_test(pk) then
           api_keys.test_queue[#api_keys.test_queue + 1] = { idx = i, prov = pk }
         end
       end
       for i, pk in ipairs(PROVIDERS) do
-        if pk.is_custom and S.api_key_map[pk.id] then
+        if pk.is_custom and api_keys.key_for_test(pk) then
           api_keys.test_queue[#api_keys.test_queue + 1] = { idx = i, prov = pk }
         end
       end
@@ -11049,10 +11271,12 @@ function Render._shared_key_screen_impl()
         -- snapshot. Without it, "Test API Keys" silently switches the
         -- active provider to whichever was last in the queue.
         api_keys._test_orig_provider_idx = prefs.provider_idx
-        S.api_key = S.api_key_map[first.prov.id]
+        S.api_key = api_keys.key_for_test(first.prov)
         prefs.provider_idx = first.idx
         MODELS.refresh()
         Net.fire_key_test(first.prov)
+      else
+        api_keys.finish_key_test_session()
       end
     end
     UI.pressable()
@@ -11435,15 +11659,48 @@ function Render._shared_key_screen_impl()
     end
     Dummy(RA.ctx, 1, RA.SC(6))
 
-    -- Toggle: Check for updates on startup. Stages the change on `prefs`
+    -- Toggle: Check for updates automatically. Stages the change on `prefs`
     -- only -- Save persists, Cancel reverts from api_keys.saved_update_check.
+    --
+    -- The copy is the plan's section 7 reframe (work package B2.5): OFF means
+    -- "I update manually", never "I update through ReaPack", and the Check for
+    -- Updates action below stays a one-shot the preference does not gate. The
+    -- second half is the disclosure the B2.2a ruling owes this screen: the
+    -- manifest repair lane in Updater.try_manifest_restore is deliberately
+    -- ungated, so a DAMAGED install fetches repair data and converges on the
+    -- current release with this off. It is damage-gated, so an intact install
+    -- with this off makes no contact from that lane at all, and the tooltip
+    -- says both halves rather than only the reassuring one.
+    --
+    -- Two claims here are narrower than they first read, and rounds 64 and
+    -- 65 made both of them say so (B2.5a, B2.5b). The automatic check arms
+    -- on the first idle-to-waiting edge, so a session with no request never
+    -- checks; and the trigger marks the session fired before calling
+    -- check_start, which declines on its busy guards with no retry, so even
+    -- an armed session may get no check. The tooltip therefore says
+    -- ReaAssist TRIES one automatic check after your first request, which
+    -- is the attempt the code actually bounds. And the contact the
+    -- preference silences is the AUTOMATIC
+    -- kind: Updater.manual_check reaches the server whenever the user asks,
+    -- which the same tooltip promises two sentences earlier, so an
+    -- unqualified "no contact" would have contradicted its own paragraph.
     do
       local changed, new_on = UI.v5_toggle("##adv_update_check",
-        UI.t("settings.pref.update_check.label", nil,
-          "Check for updates on startup"),
+        UI.t("settings.pref.update_check.label_v2", nil,
+          "Check for updates automatically"),
         prefs.update_check,
-        UI.t("settings.pref.update_check.tooltip", nil,
-          "Automatically check for new ReaAssist versions when the script starts"),
+        UI.t("settings.pref.update_check.tooltip_v2", nil,
+          "On: after your first request in a session, ReaAssist tries one "
+          .. "automatic check for a newer version. Off: you update manually, "
+          .. "and the Check "
+          .. "for Updates button below still works every time you click it. "
+          .. "One exception: if ReaAssist finds its own record of the files "
+          .. "it installed missing or damaged, it downloads a fresh copy of "
+          .. "that record even with this off, and brings the install to the "
+          .. "current release through the normal update path, which still "
+          .. "asks before installing a new version. An undamaged install "
+          .. "with this off makes no automatic update contact at all: "
+          .. "ReaAssist reaches the update server only when you ask it to."),
         inner_w)
       if changed then prefs.update_check = new_on end
     end
@@ -11616,12 +11873,15 @@ function Render._shared_key_screen_impl()
 
     -- Check for Updates action: manual update/repair check, grouped with
     -- Advanced maintenance rather than everyday preferences.
+    -- Updater.manual_check reads no preference, so this is a one-shot the
+    -- toggle above cannot switch off; the tooltip says so (section 7, B2.5).
     Dummy(RA.ctx, 1, RA.SC(6))
     do
       local cu_label = UI.t("settings.pref.check_updates.label", nil,
         "Check for Updates")
-      local cu_tip   = UI.t("settings.pref.check_updates.tooltip", nil,
-        "Check now for a newer ReaAssist release or missing files")
+      local cu_tip   = UI.t("settings.pref.check_updates.tooltip_v2", nil,
+        "Check now for a newer ReaAssist release or missing files. This "
+        .. "works whether or not automatic checks are on.")
       local busy = Updater.is_busy()
       if busy or CFG.UPDATE_BASE_URL == "" then
         ImGui.ImGui_BeginDisabled(RA.ctx, true)
@@ -11750,6 +12010,32 @@ function Render._shared_key_screen_impl()
       "Clear all keys, preferences, and settings to start fresh"))
     PopStyleColor(RA.ctx, 5)
 
+    -- Uninstall gets a row of its own rather than a fifth seat on the row
+    -- above. It is the only control here that removes the program itself, and
+    -- crowding it in beside Factory Reset would invite the misclick the
+    -- confirmation modal exists to catch.
+    Dummy(RA.ctx, 1, adv_gap)
+    local uninstall_label = UI.t("settings.adv.uninstall.label", nil,
+      "Uninstall ReaAssist")
+    local b_un_w = math_max(RA.SC(180),
+      CalcTextSize(RA.ctx, uninstall_label) + RA.SC(24))
+    SetCursorPosX(RA.ctx,
+      row_start_x + math_max(math_floor((inner_w - b_un_w) * 0.5), 0))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          FR_RED)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),        FR_RED)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        TK.card)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), TK.card_hover)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  TK.card_hover)
+    if ImGui.ImGui_Button(RA.ctx,
+        uninstall_label .. "##adv_uninstall", b_un_w, 0) then
+      Render._uninstall_open()
+      ImGui.ImGui_OpenPopup(RA.ctx, uninstall_label .. "##uninstall_confirm")
+    end
+    UI.tooltip(UI.t("settings.adv.uninstall.tooltip", nil,
+      "Remove ReaAssist from this REAPER install. Your data is a separate "
+      .. "choice inside."))
+    PopStyleColor(RA.ctx, 5)
+
     ImGui.ImGui_PopStyleVar(RA.ctx, 3)  -- FrameBorderSize, FrameRounding, FramePadding
     PopFont(RA.ctx)
   end -- ADVANCED collapsible section
@@ -11765,6 +12051,25 @@ function Render._shared_key_screen_impl()
       Render._factory_reset_execute()
     end
   end
+
+  -- Uninstall, rendered on the same terms as Factory Reset: the confirmation
+  -- modal stays called whether the ADVANCED section is open or not, because
+  -- the button above is the only thing that opens it.
+  Render._uninstall_popup(RA.ctx)
+  do
+    local do_uninstall = Render._uninstall_pending
+    Render._uninstall_pending = false
+    if do_uninstall and Render._uninstall_plan then
+      local plan = Render._uninstall_plan
+      plan.remove_user_data = Render._uninstall_remove_data and true or false
+      Render._uninstall_result = Updater.uninstall_execute(plan)
+      Render._uninstall_plan = nil
+      ImGui.ImGui_OpenPopup(RA.ctx,
+        UI.t("settings.uninstall.result_title", nil, "Uninstall")
+          .. "##uninstall_result")
+    end
+  end
+  Render._uninstall_result_popup(RA.ctx)
 
   end -- is_reentry: options section
 
@@ -12272,6 +12577,9 @@ function Render._shared_key_screen_impl()
       if ImGui.ImGui_Button(RA.ctx,
           UI.t("common.help", nil, "Help") .. "##fr_help_pinned",
           HELP_W, BTN_H) then
+        if api_keys.cancel_visual_key_test_navigation then
+          api_keys.cancel_visual_key_test_navigation()
+        end
         S.help_return_to = "first_run"
         api_keys.screen  = nil
         S.show_help      = true
@@ -12366,8 +12674,6 @@ function Render._shared_key_screen_impl()
             api_keys.key_errors[i] = reason
             has_format_error = true
           else
-            -- Key format is valid: store in memory (persisted after test succeeds).
-            S.api_key_map[prov.id] = trimmed
             api_keys.key_warnings[i] = reason
             if not first_valid_idx then first_valid_idx = i end
           end
@@ -12423,19 +12729,33 @@ function Render._shared_key_screen_impl()
       end
       if Store and Store.save_config then Store.save_config() end
       if first_valid_idx then
-        -- Fire a test call for the first newly entered valid CLOUD key.
-        -- Snapshot the active provider before flipping so the post-test
-        -- restore in handle_key_test's success path can put the user
-        -- back where they were. Without the snapshot, pasting a NEW
-        -- key for a non-active provider would silently switch the
-        -- active provider as a side effect of testing.
+        -- Keep every candidate outside the stored-key map and test all of
+        -- them in provider order. A partial failure stays on this screen with
+        -- the failed buffer intact. Successful candidates commit individually.
+        api_keys.start_key_test("visual_save")
+        api_keys.test_queue = {}
+        api_keys.test_results = {}
+        for i, prov in ipairs(PROVIDERS) do
+          if not prov.is_custom then
+            local trimmed = (api_keys.key_bufs[i] or "")
+              :match("^%s*(.-)%s*$") or ""
+            if trimmed ~= "" then
+              api_keys.stage_key_candidate(prov, i, trimmed)
+              api_keys.test_queue[#api_keys.test_queue + 1] = {
+                idx = i,
+                prov = prov,
+              }
+            end
+          end
+        end
         api_keys._test_orig_provider_idx = prefs.provider_idx
-        local test_prov = PROVIDERS[first_valid_idx]
-        S.api_key = S.api_key_map[test_prov.id]
-        prefs.provider_idx = first_valid_idx
+        local first = api_keys.test_queue[1]
+        local test_prov = first.prov
+        S.api_key = api_keys.key_for_test(test_prov)
+        prefs.provider_idx = first.idx
         MODELS.refresh()
         api_keys.key_validating = true
-        api_keys.key_validating_idx = first_valid_idx
+        api_keys.key_validating_idx = first.idx
         Net.fire_key_test(test_prov)
       elseif has_any_key then
         -- No new cloud keys to test, but at least one provider is usable:
@@ -17306,6 +17626,9 @@ function Render.main_window()
           show_bug_report = S.show_bug_report == true,
           show_credits = S.show_credits == true,
         }
+        if api_keys.cancel_visual_key_test_navigation then
+          api_keys.cancel_visual_key_test_navigation()
+        end
         api_keys.screen = nil
         S.show_help = false
         S.show_bug_report = false
@@ -17316,6 +17639,9 @@ function Render.main_window()
       -- back into the now-cleared conversation.
       if S.status == "waiting" then
         Net.cancel_active_request("cancelled")
+      end
+      if api_keys.cancel_visual_key_test_navigation then
+        api_keys.cancel_visual_key_test_navigation()
       end
       -- Drop any screen / modal navigation state so the dispatcher
       -- falls through to the main chat branch on the same frame.
@@ -18606,7 +18932,8 @@ function Render.main_window()
           Text(RA.ctx, (I18N and I18N.t and I18N.t("local.footer.free_reply"))
             or "ReaAssist local free reply.")
           PopStyleColor(RA.ctx)
-          local can_ask_provider = (S.status == "idle" or S.status == "error")
+          local can_ask_provider = Net and Net.local_escalation_available
+            and Net.local_escalation_available(msg) or false
           local active_provider = PROVIDERS and PROVIDERS.active
             and PROVIDERS.active() or nil
           local ask_provider = active_provider
@@ -18635,20 +18962,17 @@ function Render.main_window()
           if ImGui.ImGui_BeginDisabled then ImGui.ImGui_BeginDisabled(RA.ctx, not can_ask_provider) end
           if ImGui.ImGui_Button(RA.ctx, ask_label .. "##local_llm_" .. i, link_w, 0)
              and can_ask_provider then
-            msg.local_llm_requested = true
-            msg.local_retry_available = false
             if Net and Net.ask_model_instead then
               local call_ok, sent, _, send_handling =
-                pcall(Net.ask_model_instead, msg.llm_retry_prompt)
+                pcall(Net.ask_model_instead, msg.llm_retry_prompt, msg)
               if not call_ok then
                 Log.add_error(UI.t("message.send_failed", nil,
                   "Could not send request. Please try again."), nil, nil, nil,
                   Net._send_exception_extra("visual_ask_model", sent))
                 send_handling = "surfaced"
               end
-              if not call_ok or sent ~= true then
-                msg.local_llm_requested = false
-                msg.local_retry_available = true
+              if not call_ok
+                  or (sent ~= true and S.pending_local_escalation == nil) then
                 if send_handling ~= "surfaced" then
                   UI.show_float_toast(UI.t("message.send_failed", nil,
                     "Could not send request. Please try again."), "err")
@@ -18714,7 +19038,17 @@ function Render.main_window()
           if rec_prov and rec_prov.thinking_levels then
             cur_idx = PROVIDERS.load_thinking_idx(rec_prov, rec_model)
           end
-          local can_lower = cur_idx and cur_idx > 1
+          local lower_idx
+          if cur_idx then
+            for candidate_idx = cur_idx - 1, 1, -1 do
+              if PROVIDERS.thinking_idx_allowed(
+                  rec_prov, rec_model, candidate_idx) then
+                lower_idx = candidate_idx
+                break
+              end
+            end
+          end
+          local can_lower = lower_idx ~= nil
           -- Retry hides until the user has applied a fix (msg.recovery_used is
           -- stamped below by Lower). Also gated on idle/error status so the
           -- button can't fire mid-request.
@@ -18774,14 +19108,14 @@ function Render.main_window()
               PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          V5_ACC_TXT)
             end
             if can_lower then
-              local lower = rec_prov.thinking_levels[cur_idx - 1]
+              local lower = rec_prov.thinking_levels[lower_idx]
               local lower_label = UI.t("message.lower_thinking_to", {
                 level = UI.thinking_level_label(lower, lower.label or "?"),
               }, "Lower Thinking to " .. (lower.label or "?"))
               _push_sec()
               if ImGui.ImGui_Button(RA.ctx,
                   lower_label .. "##rec_think_" .. i, 0, 0) then
-                local new_idx = cur_idx - 1
+                local new_idx = lower_idx
                 -- Save under the (provider, model) that produced the
                 -- failed response so the lowered level applies to that
                 -- model on its next turn, not to whichever model the
@@ -18915,6 +19249,8 @@ function Render.main_window()
               or msg._typed_receipt_pending ~= msg.typed_actions.deferred_pending
               or msg._typed_receipt_kind ~= msg.typed_actions.kind
               or msg._typed_receipt_error ~= msg.typed_actions.error
+              or msg._typed_receipt_lua_pending
+                ~= msg.typed_action_lua_generation_pending
               or msg._typed_receipt_lua_requested ~= msg.typed_action_lua_requested
               or msg._typed_receipt_undo_clicked ~= msg.typed_action_undo_clicked
               or msg._typed_receipt_sr_undo_clicked ~= msg.screen_reader_undo_clicked
@@ -18938,7 +19274,10 @@ function Render.main_window()
               { count = action_count },
               tostring(action_count) .. " action"
                 .. (action_count == 1 and "" or "s"))
-            local status_label = msg.typed_action_lua_requested
+            local status_label = msg.typed_action_lua_generation_pending
+              and UI.t("typed_actions.status.lua_pending", nil,
+                "REQUESTING LUA")
+              or msg.typed_action_lua_requested
               and ((msg.typed_action_undo_clicked
                 or msg.screen_reader_undo_clicked)
                 and UI.t("typed_actions.status.undo_lua", nil,
@@ -18965,6 +19304,8 @@ function Render.main_window()
             msg._typed_receipt_pending = msg.typed_actions.deferred_pending
             msg._typed_receipt_kind = msg.typed_actions.kind
             msg._typed_receipt_error = msg.typed_actions.error
+            msg._typed_receipt_lua_pending =
+              msg.typed_action_lua_generation_pending
             msg._typed_receipt_lua_requested = msg.typed_action_lua_requested
             msg._typed_receipt_undo_clicked = msg.typed_action_undo_clicked
             msg._typed_receipt_sr_undo_clicked = msg.screen_reader_undo_clicked
@@ -19064,15 +19405,16 @@ function Render.main_window()
             PopFont(RA.ctx)
             ImGui.ImGui_SetCursorScreenPos(RA.ctx, ta_sx, ta_y2)
 
-            local ar = msg.typed_actions.action_results
-            local can_undo = (msg.auto_ran
-              or msg.run_status == "ran_ok"
-              or (msg.run_status == "errored" and type(ar) == "table" and #ar > 0))
-              and not TypedActionController.message_undo_sent(msg)
+            local has_applied_edit = TypedActionController
+              and TypedActionController.message_has_applied_typed_action
+              and TypedActionController.message_has_applied_typed_action(msg)
+            local can_undo = TypedActionController
+              and TypedActionController.message_can_undo_generated_action
+              and TypedActionController.message_can_undo_generated_action(msg)
             local can_apply = type(plan_text) == "string"
               and plan_text ~= ""
               and msg.typed_actions.valid == true
-              and not can_undo
+              and not has_applied_edit
               and not msg.typed_action_lua_requested
               and msg.run_status ~= "pending"
               and not (msg.typed_actions.deferred_pending == true)
@@ -19141,7 +19483,7 @@ function Render.main_window()
                 local ok_req, req_msg, req_handling = TypedActionController
                   and TypedActionController.request_lua_for_typed_action_message
                   and TypedActionController.request_lua_for_typed_action_message(
-                    msg, i, { skip_undo = true })
+                    msg, i)
                 if not ok_req and req_handling ~= "surfaced"
                     and UI.show_float_toast then
                   UI.show_float_toast(req_msg or UI.t(
@@ -19173,29 +19515,36 @@ function Render.main_window()
               PushFont(RA.ctx, FONT.mono_med, RA.SC(11))
               if ImGui.ImGui_Button(RA.ctx,
                   UI.t("common.undo", nil, "Undo") .. "##ta_undo_" .. i,
-                  RA.SC(78), 0) then
+                  RA.SC(78), 0)
+                  and TypedActionController
+                    .message_can_undo_generated_action(msg) then
                 reaper.Main_OnCommand(40029, 0)
                 msg.typed_action_undo_clicked = true
                 S.refocus_prompt = true
               end
               UI.tooltip(UI.t("typed_actions.undo.tooltip", nil,
                 "Undo the last REAPER action (Ctrl+Z)"))
-              ImGui.ImGui_SameLine(RA.ctx, 0, RA.SC(6))
-              if ImGui.ImGui_Button(RA.ctx,
-                  UI.t("typed_actions.undo_lua", nil,
-                    "Undo and Request Lua") .. "##ta_undo_lua_" .. i,
-                  0, 0) then
-                local ok_req, req_msg, req_handling = TypedActionController
-                  and TypedActionController.request_lua_for_typed_action_message
-                  and TypedActionController.request_lua_for_typed_action_message(msg, i)
-                if not ok_req and req_handling ~= "surfaced" then
-                  UI.show_float_toast(req_msg or UI.t(
-                    "typed_actions.no_original_prompt", nil,
-                    "Could not find the original prompt"), "err")
+              if msg.typed_action_lua_generation_pending ~= true
+                  and msg.typed_action_lua_requested ~= true then
+                ImGui.ImGui_SameLine(RA.ctx, 0, RA.SC(6))
+                if ImGui.ImGui_Button(RA.ctx,
+                    UI.t("typed_actions.request_lua", nil,
+                      "Request Lua") .. "##ta_request_lua_applied_" .. i,
+                    0, 0) then
+                  local ok_req, req_msg, req_handling = TypedActionController
+                    and TypedActionController.request_lua_for_typed_action_message
+                    and TypedActionController.request_lua_for_typed_action_message(
+                      msg, i)
+                  if not ok_req and req_handling ~= "surfaced" then
+                    UI.show_float_toast(req_msg or UI.t(
+                      "typed_actions.no_original_prompt", nil,
+                      "Could not find the original prompt"), "err")
+                  end
                 end
+                UI.tooltip(UI.t(
+                  "typed_actions.request_lua_after_apply.tooltip", nil,
+                  "Generate the Lua/ReaScript version while leaving the applied structured edit and its Undo item unchanged."))
               end
-              UI.tooltip(UI.t("typed_actions.undo_lua.tooltip", nil,
-                "Undo this structured edit, then ask for the Lua/ReaScript version. Auto-run still follows your current setting."))
               PopFont(RA.ctx)
               PopStyleColor(RA.ctx, 5)
               ImGui.ImGui_PopStyleVar(RA.ctx, 3)
@@ -19457,8 +19806,13 @@ function Render.main_window()
               auto_run_block_warning = msg.manual_review_reason or UI.t(
                 "validator.midi_record_mode_review", nil,
                 "The script still assigns an output-recording I_RECMODE value to a MIDI recording workflow after an automatic correction attempt. Automatic execution is paused because that mode can record track output instead of the requested MIDI behavior. Review the code before using Run. MIDI overdub is 7 and MIDI replace is 8.")
+            elseif reason == "project_changed" then
+              auto_run_block_warning = UI.t(
+                "auto_run.blocked.project_changed", nil,
+                "Auto-run was paused because the active project changed while ReaAssist prepared the response. Return to the intended project tab, or review the code and use Run to apply it deliberately to the current project.")
             elseif reason == "plugin_profile_guard_validator"
-                or reason == "fx_param_provenance_validator" then
+                or reason == "fx_param_provenance_validator"
+                or reason == "typed_action_lua_generation_only" then
               auto_run_block_warning = nil
             else
               auto_run_block_warning = UI.t(
@@ -19580,21 +19934,29 @@ function Render.main_window()
                 "Execute this code in REAPER"))
             PopStyleColor(RA.ctx, 4)  -- Run: Button/Hovered/Active/Text
 
-            SameLine(RA.ctx, 0, RA.SC(4))
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        V5_SEC_BG)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), V5_SEC_HOV)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  V5_SEC_ACT)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          V5_SEC_TXT)
-            local undo_label = UI.t("common.undo", nil, "Undo")
-            if ImGui.ImGui_Button(RA.ctx, undo_label .. "##undo_" .. i,
-                action_btn_w(undo_label, RA.SC(55), RA.SC(84)), 0) then
-              Theme.restore_backups()
-              reaper.Main_OnCommand(40029, 0)
-              S.refocus_prompt = true
+            if TypedActionController
+                and TypedActionController.message_can_undo_generated_action
+                and TypedActionController
+                  .message_can_undo_generated_action(msg) then
+              SameLine(RA.ctx, 0, RA.SC(4))
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        V5_SEC_BG)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), V5_SEC_HOV)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  V5_SEC_ACT)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          V5_SEC_TXT)
+              local undo_label = UI.t("common.undo", nil, "Undo")
+              if ImGui.ImGui_Button(RA.ctx, undo_label .. "##undo_" .. i,
+                  action_btn_w(undo_label, RA.SC(55), RA.SC(84)), 0)
+                  and TypedActionController
+                    .message_can_undo_generated_action(msg) then
+                Theme.restore_backups()
+                reaper.Main_OnCommand(40029, 0)
+                msg.lua_undo_clicked = true
+                S.refocus_prompt = true
+              end
+              UI.tooltip(UI.t("code.undo.tooltip", nil,
+                "Undo the generated REAPER action (Ctrl+Z)"))
+              PopStyleColor(RA.ctx, 4)
             end
-            UI.tooltip(UI.t("code.undo.tooltip", nil,
-              "Undo the last REAPER action (Ctrl+Z)"))
-            PopStyleColor(RA.ctx, 4)
 
             -- Save Theme button: only on theme-related code blocks with unsaved backups.
             if msg.code_block and msg.code_block:find("SetThemeColor")
@@ -19792,25 +20154,30 @@ function Render.main_window()
               end
             end
 
-            -- Add To Selected Track(s) button (primary accent, first in row).
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        V5_RUN_BG)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), V5_RUN_HOV)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  V5_RUN_ACT)
-            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          V5_RUN_TXT)
-            local jsfx_add_label = UI.t("jsfx.add_selected", nil,
-              "Add To Selected Track(s)")
-            if ImGui.ImGui_Button(RA.ctx,
-                jsfx_add_label .. "##jsfx_add_" .. i,
-                action_btn_w(jsfx_add_label, RA.SC(130), RA.SC(190)), 0) then
-              jsfx_manual_perform_action(msg, i, "add", false)
+            local jsfx_added = Code.jsfx_add_is_applied(msg)
+            local jsfx_can_undo = Code.jsfx_add_can_undo(msg)
+            local jsfx_has_leading_action = false
+            if not jsfx_added then
+              -- Add To Selected Track(s) button (primary accent, first in row).
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        V5_RUN_BG)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), V5_RUN_HOV)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  V5_RUN_ACT)
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          V5_RUN_TXT)
+              local jsfx_add_label = UI.t("jsfx.add_selected", nil,
+                "Add To Selected Track(s)")
+              if ImGui.ImGui_Button(RA.ctx,
+                  jsfx_add_label .. "##jsfx_add_" .. i,
+                  action_btn_w(jsfx_add_label, RA.SC(130), RA.SC(190)), 0) then
+                jsfx_manual_perform_action(msg, i, "add", false)
+              end
+              UI.tooltip(UI.t("jsfx.add.tooltip", nil,
+                "Save JSFX and add it to all selected tracks"))
+              PopStyleColor(RA.ctx, 4)
+              jsfx_has_leading_action = true
             end
-            UI.tooltip(UI.t("jsfx.add.tooltip", nil,
-              "Save JSFX and add it to all selected tracks"))
-            PopStyleColor(RA.ctx, 4)
 
-            -- Undo button: only shown after "Add To Selected Track(s)" was used.
-            if msg.jsfx_added_to_tracks then
-              SameLine(RA.ctx, 0, RA.SC(4))
+            -- Undo remains available only while the bound project still owns it.
+            if jsfx_can_undo then
               PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        V5_SEC_BG)
               PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), V5_SEC_HOV)
               PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  V5_SEC_ACT)
@@ -19819,17 +20186,31 @@ function Render.main_window()
               if ImGui.ImGui_Button(RA.ctx,
                   jsfx_undo_label .. "##jsfx_undo_" .. i,
                   action_btn_w(jsfx_undo_label, RA.SC(55), RA.SC(84)), 0) then
-                reaper.Main_OnCommand(40029, 0)
-                msg.jsfx_added_to_tracks = false
-                msg.jsfx_status = nil
+                local undone, undo_reason = Code.undo_jsfx_add(msg)
+                if undone then
+                  msg.jsfx_status = nil
+                  msg._jsfx_status_final = nil
+                else
+                  local prior_status = tostring(msg.jsfx_status or "")
+                  local failed = undo_reason == "failed"
+                  msg.jsfx_status = UI.t(failed
+                    and "jsfx.undo_failed_status"
+                    or "jsfx.undo_unavailable_status", {
+                      status = prior_status,
+                    }, prior_status .. (failed
+                      and " REAPER could not undo this JSFX add. Review the project and Undo history before trying again."
+                      or " Undo is unavailable because ReaAssist cannot verify that this add is still the current project action. Return to the original unchanged project tab to check again."))
+                  msg._jsfx_status_final = true
+                end
                 S.refocus_prompt = true
               end
               UI.tooltip(UI.t("jsfx.undo.tooltip", nil,
                 "Undo adding the JSFX to tracks (Ctrl+Z)"))
               PopStyleColor(RA.ctx, 4)
+              jsfx_has_leading_action = true
             end
 
-            SameLine(RA.ctx, 0, RA.SC(4))
+            if jsfx_has_leading_action then SameLine(RA.ctx, 0, RA.SC(4)) end
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        V5_SEC_BG)
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(), V5_SEC_HOV)
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),  V5_SEC_ACT)
@@ -19894,9 +20275,17 @@ function Render.main_window()
             PopStyleColor(RA.ctx, 4)
 
             -- JSFX status text on its own line (button row is already wide).
-            if msg.jsfx_status then
+            local jsfx_display_status = tostring(msg.jsfx_status or "")
+            if jsfx_added and not jsfx_can_undo
+                and msg._jsfx_status_final ~= true then
+              jsfx_display_status = UI.t("jsfx.undo_unavailable_status", {
+                status = jsfx_display_status,
+              }, jsfx_display_status
+                .. " Undo is unavailable because ReaAssist cannot verify that this add is still the current project action. Return to the original unchanged project tab to check again.")
+            end
+            if jsfx_display_status ~= "" then
               PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), COL.CHAT_TEXT)
-              Text(RA.ctx, msg.jsfx_status)
+              ImGui.ImGui_TextWrapped(RA.ctx, jsfx_display_status)
               PopStyleColor(RA.ctx)
             end
           end
@@ -22757,6 +23146,18 @@ function Render.main_window()
         UI.update_dialog_text_center(done_text, dlg_cw, TK.text,
                                      nil, RA.SC(14))
         ImGui.ImGui_Spacing(RA.ctx)
+        -- A launcher this transaction went ahead without (B2.3b). An ordinary
+        -- update reaches this view rather than the bootstrap one, and a swap
+        -- the ownership fence declined happens on an ordinary update, so the
+        -- one thing the user has to act on is said here too. Ahead of the
+        -- close-and-reopen line, because reopening is what it is about.
+        if S.launcher_notice then
+          for line in (tostring(S.launcher_notice) .. "\n"):gmatch("([^\n]*)\n") do
+            UI.update_dialog_text_center_wrapped(line, dlg_cw,
+                                                 TK.text_muted, nil, RA.SC(12))
+          end
+          ImGui.ImGui_Spacing(RA.ctx)
+        end
         local inst_w = math_min(CalcTextSize(RA.ctx, inst_text), dlg_cw)
         UI.update_dialog_center_cursor(dlg_cw, inst_w)
         ImGui.ImGui_PushTextWrapPos(RA.ctx, GetCursorPosX(RA.ctx) + inst_w)
@@ -22778,7 +23179,31 @@ function Render.main_window()
         --   content_verify -> downloaded file is not ReaAssist content
         --                     (proxy interception or wrong server),
         --                     no point hammering Retry without diagnosis
-        --   anything else  -> generic copy with ReaPack fallback hint
+        --   apply_unresolved -> an update record nobody has finished is on
+        --                     disk and apply_start refused to start over it,
+        --                     so nothing was changed and only a restart can
+        --                     move this on (Codex round 28, B2.3e)
+        --   apply_moved      -> a destination stopped matching what apply_start
+        --                     found there, so the swap stopped before it
+        --                     touched anything and the record, the backups and
+        --                     the staging were all kept (Codex round 30,
+        --                     B2.3g). The generic copy is wrong for this one in
+        --                     both halves: nothing here is fixed by hammering
+        --                     Retry, and nothing here is fixed by reinstalling
+        --                     ReaAssist either. It is TWO paragraphs,
+        --                     each chosen from what the stop recorded (Codex
+        --                     round 31, B2.3h): what happened, which differs
+        --                     by direction because a file that went and a file
+        --                     that arrived need opposite corrections, and what
+        --                     to do about it, which is an instruction plus
+        --                     Retry only where a Retry can still get past
+        --                     apply_start's fence.
+        --   anything else  -> generic copy, Retry plus a reinstall from the
+        --                     ReaAssist site. It used to send the user to
+        --                     ReaPack to sync or reinstall; plan section 7
+        --                     (B2.5) took ReaPack out of every update path in
+        --                     the copy, and the site is where a reinstall
+        --                     comes from now.
         --
         -- The sha_verify branch is the common case immediately after a
         -- new release: GitHub's raw CDN serves stale bytes from edge
@@ -22804,14 +23229,73 @@ function Render.main_window()
               .. "look like ReaAssist content. This usually means "
               .. "a captive portal, proxy, or VPN is intercepting "
               .. "the download. Check your network, then Retry.")
+        elseif update.last_step == "apply_unresolved" then
+          fail_text = UI.t("update.failed.unresolved", { noun = noun },
+            noun .. " did not start: ReaAssist has not finished "
+              .. "recovering from an earlier update on this install, "
+              .. "and nothing was changed. Close ReaAssist and open it "
+              .. "again to let that recovery finish, then try again.")
+        elseif update.last_step == "apply_moved" then
+          -- The stop stamped all three of these together, so they are only
+          -- ever read alongside the step they belong to.
+          local moved_file = tostring(update.moved_file or "")
+          local happened
+          if update.moved_direction == "appeared" then
+            happened = UI.t("update.failed.moved.appeared",
+              { noun = noun, file = moved_file },
+              noun .. " stopped: a file has appeared at " .. moved_file
+                .. ", and it was not there when the update started, so "
+                .. "nothing further was changed and nothing was thrown away.")
+          elseif update.moved_direction == "unknown" then
+            happened = UI.t("update.failed.moved.unknown",
+              { noun = noun, file = moved_file },
+              noun .. " stopped: ReaAssist has no record of what was at "
+                .. moved_file .. " when the update started, so it did not "
+                .. "change it and nothing was thrown away.")
+          else
+            happened = UI.t("update.failed.moved.gone",
+              { noun = noun, file = moved_file },
+              noun .. " stopped: " .. moved_file .. " is no longer where it "
+                .. "was when the update started, so nothing further was "
+                .. "changed and nothing was thrown away.")
+          end
+          -- MOVING IT COMES FIRST, WHICHEVER WAY OUT IS TAKEN (Codex round 33,
+          -- B2.3j blocker). A file that arrived has to be moved before EITHER
+          -- way out works: the click is refused by apply_start's fence, and the
+          -- launch the other half names stops on the same disagreement in
+          -- startup recovery. So the appeared direction says move it first in
+          -- both, and the withheld-button case gets a way out of its own rather
+          -- than the reason-free line, which speaks for cases no move clears.
+          local way_out
+          if update.moved_retry ~= true
+              and update.moved_direction == "appeared" then
+            way_out = UI.t("update.failed.moved.move_away_reopen", nil,
+              "Move that file somewhere else, then close ReaAssist and open "
+                .. "it again: that is what finishes an update that stopped "
+                .. "part way, and it cannot finish while that file is there.")
+          elseif update.moved_retry ~= true then
+            way_out = UI.t("update.failed.moved.reopen", nil,
+              "Close ReaAssist and open it again: an update that stopped part "
+                .. "way is finished when ReaAssist starts, and from here that "
+                .. "is the only thing that can take it further.")
+          elseif update.moved_direction == "appeared" then
+            way_out = UI.t("update.failed.moved.move_away", nil,
+              "If you put that file there, move it somewhere else and click "
+                .. "Retry. Closing ReaAssist and opening it again works too, "
+                .. "but only once that file has been moved: the update cannot "
+                .. "finish while it is there.")
+          else
+            way_out = UI.t("update.failed.moved.put_back", nil,
+              "If it was moved or deleted by mistake, put it back and click "
+                .. "Retry. Otherwise close ReaAssist and open it again, "
+                .. "which is what finishes an update that stopped part way.")
+          end
+          fail_text = happened .. " " .. way_out
         else
-          local action = update.action_was_repair
-            and UI.t("update.failed.action.reinstall", nil, "reinstall")
-            or UI.t("update.failed.action.sync", nil, "sync")
-          fail_text = UI.t("update.failed.generic",
-            { noun = noun, action = action },
-            noun .. " failed. Click Retry, or " .. action
-              .. " via ReaPack if the problem persists.")
+          fail_text = UI.t("update.failed.generic_v2",
+            { noun = noun },
+            noun .. " failed. Click Retry. If it keeps failing, reinstall "
+              .. "ReaAssist from https://reaassist.app.")
         end
         -- Wrapped paragraphs must start inside the content region. Centering
         -- by the unwrapped text width can push long failures negative, which
@@ -22833,6 +23317,29 @@ function Render.main_window()
         -- the initial failure. OK just dismisses; next manual Check
         -- for Updates (or next-session piggyback) re-surfaces from
         -- the standard path.
+        --
+        -- ONE FAILURE IS NOT OFFERED IT (Codex round 28, B2.3e). When an
+        -- update record nobody has finished is sitting on disk, apply_start
+        -- refuses every attempt in this session, so the click cannot do
+        -- anything except re-download a payload it will refuse again. It is
+        -- safe -- that fence is what makes it safe -- and offering it anyway
+        -- would be an invitation to hammer a button while the copy beside it
+        -- says the only thing that works is a restart.
+        --
+        -- The round-30 stop keeps it SOMETIMES, and the round-31 should-fix is
+        -- that "sometimes" (Codex round 31, B2.3h). Putting a moved file back
+        -- is a thing the user can actually do, and a click after that starts
+        -- the transaction over for real, because the fence at apply_start then
+        -- reads a record that changed nothing. But that is only true while the
+        -- record HAS changed nothing. Let entry two move after entry one has
+        -- landed and no restoration reaches the fence: the same click downloads
+        -- the release again and dead-ends on the surface above, which is the
+        -- one that does not offer a button. So the stop works out at the moment
+        -- it happens whether a click can still get through, and the button
+        -- follows that answer rather than the step.
+        local retry_offered = update.last_step ~= "apply_unresolved"
+          and (update.last_step ~= "apply_moved"
+            or update.moved_retry == true)
         local retry_label = UI.t("common.retry", nil, "Retry")
         local ok_label = UI.t("common.ok", nil, "OK")
         local btn1_w = math_max(RA.SC(80),
@@ -22840,18 +23347,20 @@ function Render.main_window()
         local btn2_w = math_max(RA.SC(72),
           CalcTextSize(RA.ctx, ok_label) + RA.SC(24))
         local gap = RA.SC(16)
-        local row_w = btn1_w + gap + btn2_w
+        local row_w = retry_offered and (btn1_w + gap + btn2_w) or btn2_w
         UI.update_dialog_center_cursor(dlg_cw, row_w)
-        UI.push_modal_primary_btn()
-        if ImGui.ImGui_Button(RA.ctx, retry_label, btn1_w, 0) then
-          -- Close dialog so the auto-show guard re-fires when
-          -- check_poll transitions state back to "available" /
-          -- "repair_available" after the fresh manifest fetch lands.
-          update.show_dialog = false
-          Updater.force_reinstall()
+        if retry_offered then
+          UI.push_modal_primary_btn()
+          if ImGui.ImGui_Button(RA.ctx, retry_label, btn1_w, 0) then
+            -- Close dialog so the auto-show guard re-fires when
+            -- check_poll transitions state back to "available" /
+            -- "repair_available" after the fresh manifest fetch lands.
+            update.show_dialog = false
+            Updater.force_reinstall()
+          end
+          UI.pop_modal_primary_btn()
+          SameLine(RA.ctx, 0, gap)
         end
-        UI.pop_modal_primary_btn()
-        SameLine(RA.ctx, 0, gap)
         if ImGui.ImGui_Button(RA.ctx, ok_label, btn2_w, 0) then
           update.show_dialog = false
         end

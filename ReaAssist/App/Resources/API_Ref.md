@@ -6,8 +6,8 @@
 <!-- SECTION:core -->
 # REAPER ReaScript Lua API Reference
 
-Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.78),
-plus official Cockos changelog notes through REAPER v7.78.
+Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.79),
+plus official Cockos changelog notes through REAPER v7.79.
 Lua-only. All functions called as reaper.FunctionName().
 Use proj=0 for active project. Track/item indices in the API are 0-based.
 
@@ -144,7 +144,7 @@ VOLUME (D_VOL is LINEAR AMPLITUDE, not dB and not slider position):
   direction: 25% left = -0.25, 50% right = 0.50.
 
 COLORS:
-- I_CUSTOMCOLOR and track/item colors require ColorToNative(r,g,b)|0x1000000.
+- I_CUSTOMCOLOR and track/item colors require reaper.ColorToNative(r,g,b)|0x1000000.
   Without the |0x1000000 high bit, REAPER reads the value as "no custom
   color" and shows the default.
 
@@ -300,7 +300,7 @@ local ts, te = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
   I_NCHAN (2-128 even), I_SELECTED, I_FOLDERDEPTH, I_FOLDERCOMPACT,
   I_FREEMODE (1=free item positioning,2=fixed lanes), I_NUMFIXEDLANES,
   D_VOL (1=+0dB), D_PAN (-1..1), D_WIDTH (-1..1),
-  I_CUSTOMCOLOR (ColorToNative(r,g,b)|0x1000000),
+  I_CUSTOMCOLOR (reaper.ColorToNative(r,g,b)|0x1000000),
   I_HEIGHTOVERRIDE, B_SHOWINMIXER, B_SHOWINTCP, B_MAINSEND,
   IP_TRACKNUMBER (read-only: 1-based, -1=master), P_PARTRACK (read-only).
 
@@ -318,6 +318,12 @@ channels begin at `512`. Exact stereo examples: hardware inputs 1+2 use `1024`,
 and hardware inputs 3+4 use `1026` (`1024 + 2`). Do not store a one-based input
 number directly in `I_RECINPUT`.
 
+For an exact named audio input, enumerate indices from `0` through
+`reaper.GetNumAudioInputs() - 1` and read each name with
+`reaper.GetInputChannelName(index)`. Match the requested channel name
+case-insensitively. If the user names only an interface or microphone without
+an exact input channel, do not infer a channel; ask one concise question.
+
 I_RECINPUT for MIDI record input is bit-packed:
 `4096 + (physical_input_index * 32) + channel`, where channel `0` means all
 MIDI channels and `1..16` mean only that channel. The physical input index is
@@ -333,14 +339,18 @@ record-input filtering. For an all-except-device workflow, create helper input
 tracks for the allowed devices and route their MIDI to the target track, or ask
 the user to set the exclusion manually in REAPER.
 Arm a track with `reaper.SetMediaTrackInfo_Value(track, "I_RECARM", 1)`.
-`B_RECARM` is not a valid track property. For a newly created record-ready MIDI
-track, set only the recording properties the request requires. When the request
-includes a record mode, set `I_RECINPUT`, `I_RECMODE`, and `I_RECMON` first,
-then set `I_RECARM` last. Otherwise set `I_RECINPUT` and `I_RECMON` before
-`I_RECARM`. `I_RECMODE` uses the following exact values: `0` input, `1` stereo
-output, `2` none, `3` stereo output with latency compensation, `4` MIDI
-output, `5` mono output, `6` mono output with latency compensation, `7` MIDI
-overdub, and `8` MIDI replace.
+`B_RECARM` is not a valid track property. On new or existing tracks, change
+`I_RECINPUT`, `I_RECMODE`, `I_RECMON`, or `I_RECARM` only when the request
+explicitly asks for that property. Input monitoring is input monitoring, not
+signal isolation. Monitoring or arming does not authorize a record-input
+change. Preserve an existing track's record input unless the user explicitly
+asks to change it. When several requested recording properties are written,
+set `I_RECINPUT`, `I_RECMODE`, and `I_RECMON` before setting `I_RECARM` last.
+This is ordering guidance, not permission to add unrequested writes.
+`I_RECMODE` uses the following exact values: `0` input, `1` stereo output,
+`2` none, `3` stereo output with latency compensation, `4` MIDI output,
+`5` mono output, `6` mono output with latency compensation, `7` MIDI overdub,
+and `8` MIDI replace.
 
 I_FOLDERDEPTH is a folder-depth delta: 1 starts a folder, 0 keeps the current
 depth, -1 closes one folder after this track, and lower negative values close
@@ -425,7 +435,7 @@ specific tracks/items/takes.
   Get track custom color (0=none).
 
 `reaper.SetTrackColor(MediaTrack track, integer color)`
-  Set track custom color. Use ColorToNative(r,g,b)|0x1000000.
+  Set track custom color. Use reaper.ColorToNative(r,g,b)|0x1000000.
 
 `boolean reaper.MuteAllTracks(boolean mute)`
   Mute or unmute all tracks.
@@ -692,7 +702,7 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
 
 `integer reaper.AddProjectMarker2(ReaProject proj, boolean isrgn, number pos, number rgnend, string name, integer wantidx, integer color)`
   Legacy/discouraged in REAPER 7.72+. Add marker/region with color
-  (ColorToNative(r,g,b)|0x1000000, or 0 for default). The 2nd argument is the
+  (reaper.ColorToNative(r,g,b)|0x1000000, or 0 for default). The 2nd argument is the
   region flag: use `false` for a point marker and `true` for a region. Do NOT
   pass a marker index as the 2nd argument.
 
@@ -756,6 +766,27 @@ end
 `reaper.Undo_DoUndo2(ReaProject proj)`
 `reaper.Undo_DoRedo2(ReaProject proj)`
 
+REAPER 7.79+ undo history inspection and navigation:
+
+`integer reaper.Undo_GetNumEntries(ReaProject proj)`
+  Return the number of undo entries.
+
+`integer reaper.Undo_GetCurEntry(ReaProject proj)`
+  Return the current undo entry index.
+
+`string reaper.Undo_GetEntryDesc(ReaProject proj, integer index)`
+  Return an undo entry's description.
+
+`number reaper.Undo_GetEntryTime(ReaProject proj, integer index)`
+  Return an undo entry's Unix timestamp.
+
+`integer reaper.Undo_IsEntryAltTree(ReaProject proj, integer index)`
+  Return the number of alternate redo paths available for the entry.
+
+`reaper.Undo_SetCurPos(ReaProject proj, integer index, integer loadAltTree)`
+  Load an undo entry. The v7.79 official HTML describes alternate branch
+  direction inconsistently, so do not guess nonzero `loadAltTree` semantics.
+
 ## PERFORMANCE TIPS
 
 ```lua
@@ -769,7 +800,8 @@ reaper.UpdateArrange()
 -- UpdateArrange: call after moving/resizing items or changing track properties.
 -- Both are cheap; when in doubt call both at the end of your script.
 
--- Envelope bulk inserts: pass noSortIn=true, then call Envelope_SortPoints once:
+-- Envelope bulk inserts: pass noSortIn=true, then call Envelope_SortPoints once.
+-- These example values are already in the envelope point storage domain:
 reaper.InsertEnvelopePoint(env, 0.0, 1.0, 0, 0, false, true)
 reaper.InsertEnvelopePoint(env, 1.0, 0.5, 0, 0, false, true)
 reaper.Envelope_SortPoints(env)
@@ -929,6 +961,9 @@ inserted/skipped counts.
   unmodified. It can also report/set 256 for the temporary-save state used when
   REAPER's relevant preferences are enabled. Do not clear this unless the user
   explicitly asked to manage save/dirty state.
+- `VKB_NOTECENTER` (REAPER 7.79+): virtual MIDI keyboard center note.
+- `VKB_LASTVEL` (REAPER 7.79+): virtual MIDI keyboard last velocity.
+- `VKB_CHANNEL` (REAPER 7.79+): virtual MIDI keyboard channel.
 
 RULER LANE KEYS (REAPER 7.62+ / 7.65+ / 7.71+):
 - `RULER_HEIGHT`: ruler height in pixels.
@@ -937,7 +972,7 @@ RULER LANE KEYS (REAPER 7.62+ / 7.65+ / 7.71+):
   `RULER_LANE_COUNT - 1` when inspecting existing lanes.
 - `RULER_LANE_ORDER:X`: move lane at position X to a new position; -1 inserts
   a new lane.
-- `RULER_LANE_COLOR:X`: default lane color; use ColorToNative(r,g,b)|0x1000000.
+- `RULER_LANE_COLOR:X`: default lane color; use reaper.ColorToNative(r,g,b)|0x1000000.
 - `RULER_LANE_HIDDEN:X`: 1 if hidden, 0 otherwise.
 - `RULER_LANE_LOCKED:X`: 1 if locked, 0 otherwise.
 - `RULER_LANE_VISIBLE:X`: 1 if visible, 0 otherwise (read-only).
@@ -1058,7 +1093,7 @@ Useful string keys:
 
 `reaper.SetThemeColor(string ini_key, integer color, integer flags)`
   Set a theme color at runtime. ini_key = color key (e.g. "col_arrangebg").
-  color = ColorToNative(r,g,b)|0x1000000. flags = 0. Changes are temporary
+  color = reaper.ColorToNative(r,g,b)|0x1000000. flags = 0. Changes are temporary
   (reset on theme reload). Call ThemeLayout_RefreshAll() + UpdateArrange() after.
   Request the "theme" context bucket for the full list of valid ini_key names.
 
@@ -1484,7 +1519,7 @@ item.
   D_FADEINLEN, D_FADEOUTLEN, D_FADEINDIR, D_FADEOUTDIR,
   C_FADEINSHAPE, C_FADEOUTSHAPE (integer 0..6; 0=linear),
   I_GROUPID (0=no group), I_CURTAKE,
-  I_CUSTOMCOLOR (ColorToNative(r,g,b)|0x1000000),
+  I_CUSTOMCOLOR (reaper.ColorToNative(r,g,b)|0x1000000),
   I_LASTY, I_LASTH (read-only px), P_TRACK (read-only).
 
 `boolean reaper.SetMediaItemInfo_Value(MediaItem item, string parmname, number newvalue)`
@@ -1760,6 +1795,7 @@ TARGET RESOLUTION RULE (existing named track/envelope):
 `integer reaper.CountEnvelopePointsEx(TrackEnvelope envelope, integer autoitem_idx)`
 `boolean retval, number time, number value, integer shape, number tension, boolean selected reaper.GetEnvelopePointEx(TrackEnvelope envelope, integer autoitem_idx, integer ptidx)`
 `boolean reaper.SetEnvelopePointEx(TrackEnvelope envelope, integer autoitem_idx, integer ptidx, optional number timeIn, optional number valueIn, optional integer shapeIn, optional number tensionIn, optional boolean selectedIn, optional boolean noSortIn)`
+`boolean reaper.DeleteEnvelopePointEx(TrackEnvelope envelope, integer autoitem_idx, integer ptidx)`
   Use the `*Ex` envelope-point functions for points inside automation items.
   `autoitem_idx=-1` targets the underlying envelope; `0` targets the first
   automation item, `1` the second, etc.
@@ -1768,8 +1804,14 @@ TARGET RESOLUTION RULE (existing named track/envelope):
   Insert envelope point. shape: 0=linear,1=square,2=slow start/end,3=fast start,4=fast end,5=bezier.
   Call Envelope_SortPoints after bulk inserts.
 
+`integer reaper.GetEnvelopePointByTime(TrackEnvelope envelope, number time)`
+  Return the index of the point at or immediately before `time`, or a negative
+  value when no earlier point exists. This is not an exact-time lookup. Read
+  the returned point and confirm its time before writing through that index.
+
 `boolean retval, number time, number value, integer shape, number tension, boolean selected reaper.GetEnvelopePoint(TrackEnvelope envelope, integer ptidx)`
-  Get envelope point attributes.
+  Get envelope point attributes. `value` is in the envelope point storage
+  domain accepted by InsertEnvelopePoint.
 
 `boolean reaper.SetEnvelopePoint(TrackEnvelope envelope, integer ptidx, optional number timeIn, optional number valueIn, optional integer shapeIn, optional number tensionIn, optional boolean selectedIn, optional boolean noSortIn)`
   Set envelope point attributes.
@@ -1780,13 +1822,22 @@ TARGET RESOLUTION RULE (existing named track/envelope):
   force envelope visibility without selection-changing action macros.
 
 `boolean reaper.DeleteEnvelopePointRange(TrackEnvelope envelope, number time_start, number time_end)`
-  Delete points in a time range.
+  Delete points in the start-inclusive, end-exclusive range
+  `[time_start, time_end)`. A point exactly at `time_end` survives. A successful
+  deletion can renumber every later point. Any point index captured before this
+  call is stale. Delete first, then re-enumerate or re-find a surviving point
+  by stable criteria such as time. Confirm the returned point's actual time
+  before calling SetEnvelopePoint or SetEnvelopePointEx.
 
 `boolean reaper.Envelope_SortPoints(TrackEnvelope envelope)`
   Sort points by time. Call after bulk insert/modify.
 
-`integer retval, number value reaper.Envelope_Evaluate(TrackEnvelope envelope, number time, number samplerate, integer samplesRequested)`
-  Get effective envelope value at a time position.
+`integer retval, number value, number dVdS, number ddVdS, number dddVdS reaper.Envelope_Evaluate(TrackEnvelope envelope, number time, number samplerate, integer samplesRequested)`
+  Get the effective envelope value and its first three per-sample derivatives
+  at a time position. `samplesRequested` is the expected interval before the
+  next evaluation. `retval` is the number of following samples for which the
+  returned values remain valid; it is not a success flag. The returned `value`
+  is in the envelope point storage domain accepted by InsertEnvelopePoint.
 
 `TrackEnvelope reaper.GetSelectedEnvelope(ReaProject proj)`
   Get currently selected envelope (nil if none).
@@ -1803,14 +1854,18 @@ TARGET RESOLUTION RULE (existing named track/envelope):
 
 `number reaper.ScaleFromEnvelopeMode(integer scaling_mode, number val)`
   Convert an envelope's internal scaled value back to the real-world value.
-  Use this when reading points via GetEnvelopePoint.
+  Use this only when the script needs to interpret or display a value read from
+  GetEnvelopePoint or Envelope_Evaluate in real-world units.
 
 ```
-CRITICAL: Volume envelope values are NOT the same as track D_VOL.
-The "Volume (Pre-FX)" / "Volume" envelopes use a scaling that depends on
-the envelope's scaling_mode. You MUST round-trip values through
-ScaleToEnvelopeMode / ScaleFromEnvelopeMode or your points will land at the
-wrong dB. Pan envelopes have a similar issue when "fader scaling" is on.
+CRITICAL: Volume envelope values are NOT always the same as track D_VOL.
+The "Volume (Pre-FX)" / "Volume" envelopes use a storage domain that depends
+on the envelope's scaling_mode. Values read from GetEnvelopePoint or
+Envelope_Evaluate are already in the storage domain accepted by
+InsertEnvelopePoint. Insert those values directly. Do not pass them through
+ScaleToEnvelopeMode. Values chosen by the script in real-world units must pass
+through ScaleToEnvelopeMode exactly once. Pan envelopes have the same concern
+when "fader scaling" is on.
 
 Always read the scaling mode with the native GetEnvelopeScalingMode(env)
 before writing a point. NEVER assume mode 0 -- the cost is one function
@@ -1831,6 +1886,104 @@ local val    = 10 ^ (-6 / 20)                    -- -6 dB -> linear amplitude
 local scaled = reaper.ScaleToEnvelopeMode(mode, val)
 reaper.InsertEnvelopePoint(env, 4.0, scaled, 0, 0, false, false)
 reaper.Envelope_SortPoints(env)
+```
+
+```lua
+-- Pattern: replace a ramp while preserving the effective value at its start.
+-- ENVELOPE_REWRITE_SAFE_PATTERN_BEGIN
+local function replace_envelope_ramp(
+    env, ramp_start, ramp_end, chosen_end_value)
+  if not env then return false, "The target envelope is unavailable." end
+  if ramp_end <= ramp_start then
+    return false, "The ramp end must be later than the ramp start."
+  end
+  -- The caller must wrap this mutation in Undo_BeginBlock/Undo_EndBlock and
+  -- surface a returned error. A partial insertion must remain undoable.
+  -- For a single-position lookup, request one sample at a positive sample rate.
+  -- The returned value is already in the point storage domain.
+  local _, start_value = reaper.Envelope_Evaluate(
+    env, ramp_start, 44100, 1)
+
+  -- chosen_end_value is a real-world value selected by this script, so scale
+  -- it exactly once. Never scale start_value because it came from the envelope.
+  local mode = reaper.GetEnvelopeScalingMode(env)
+  local end_value = reaper.ScaleToEnvelopeMode(mode, chosen_end_value)
+  if not reaper.DeleteEnvelopePointRange(env, ramp_start, ramp_end) then
+    return false, "Could not remove the old envelope points."
+  end
+  -- DeleteEnvelopePointRange excludes ramp_end. Remove every exact endpoint
+  -- after the range deletion, re-finding after each delete because indices move.
+  local time_epsilon = 0.000000001 -- One nanosecond for double roundoff only.
+  local endpoint_cleanup_done = false
+  for _ = 1, 64 do
+    local endpoint_idx = reaper.GetEnvelopePointByTime(env, ramp_end)
+    if endpoint_idx < 0 then
+      endpoint_cleanup_done = true
+      break
+    end
+    local found, endpoint_time = reaper.GetEnvelopePointEx(
+      env, -1, endpoint_idx)
+    if not found then
+      return false, "The old range was cleared, but its endpoint could not " ..
+        "be read. Undo this action."
+    end
+    if math.abs(endpoint_time - ramp_end) > time_epsilon then
+      endpoint_cleanup_done = true
+      break
+    end
+    if not reaper.DeleteEnvelopePointEx(env, -1, endpoint_idx) then
+      return false, "The old range was cleared, but its endpoint could not " ..
+        "be removed. Undo this action."
+    end
+  end
+  if not endpoint_cleanup_done then
+    return false, "Endpoint cleanup reached its safety limit. Undo this action."
+  end
+  local start_ok = reaper.InsertEnvelopePoint(
+    env, ramp_start, start_value, 0, 0, false, true)
+  local end_ok = reaper.InsertEnvelopePoint(
+    env, ramp_end, end_value, 0, 0, false, true)
+  local sorted = reaper.Envelope_SortPoints(env)
+  if not start_ok or not end_ok then
+    return false, "The old range was cleared, but the replacement points " ..
+      "were incomplete. Undo this action."
+  end
+  if not sorted then
+    return false, "The replacement points could not be sorted. Undo this action."
+  end
+  return true
+end
+-- ENVELOPE_REWRITE_SAFE_PATTERN_END
+```
+
+After DeleteEnvelopePointRange or any other point deletion, do not reuse a
+previously captured point index. Re-enumerate or re-find the target, confirm the
+returned point's actual time, then check the setter return value before
+reporting success:
+
+```lua
+-- ENVELOPE_REFIND_SAFE_PATTERN_BEGIN
+local function set_refound_envelope_point(env, point_time, point_value)
+  local point_idx = reaper.GetEnvelopePointByTime(env, point_time)
+  if point_idx < 0 then
+    return false, "Could not re-find the envelope point after deletion."
+  end
+  local found, found_time = reaper.GetEnvelopePointEx(env, -1, point_idx)
+  -- One nanosecond absorbs ordinary double roundoff without treating a
+  -- distinct nearby point as the requested point.
+  local time_epsilon = 0.000000001
+  if not found or math.abs(found_time - point_time) > time_epsilon then
+    return false, "No envelope point exists at the requested time."
+  end
+  -- point_value is already in the envelope point storage domain.
+  local set_ok = reaper.SetEnvelopePointEx(
+    env, -1, point_idx, point_time, point_value, nil, nil, nil, false)
+  if not set_ok then
+    return false, "Could not update the re-found envelope point."
+  end
+  return true
+end
+-- ENVELOPE_REFIND_SAFE_PATTERN_END
 ```
 
 ```lua
@@ -2132,6 +2285,11 @@ reaper.SetMediaTrackInfo_Value(src, "B_MAINSEND", 0)           -- no master/main
   Set a tempo marker. ptidx=-1 to add new.
   Use either `timepos` with `measurepos=-1, beatpos=-1`, or use
   `measurepos/beatpos` with `timepos=-1`; do not mix both forms.
+
+`number reaper.GetSetTempoTimeSigMarkerBasis(ReaProject project, integer point_index, number beatbase, boolean is_set)`
+  REAPER 7.79+. Get or set a tempo/time-signature marker's beat basis.
+  Supported values are 0.5=eighth, 0.75=dotted eighth, 1=quarter,
+  1.5=dotted quarter, 2=half, and 3=dotted half.
 
 `integer reaper.FindTempoTimeSigMarker(ReaProject proj, number time)`
   Find tempo marker at or before a time position.
@@ -3060,7 +3218,7 @@ local r, g, b = reaper.ColorFromNative(native)
 ## API FUNCTIONS
 
 `reaper.SetThemeColor(string ini_key, integer color, integer flags)`
-  Set a theme color. ini_key = color key from list below. color = ColorToNative(r,g,b)|0x1000000. flags = 0.
+  Set a theme color. ini_key = color key from list below. color = reaper.ColorToNative(r,g,b)|0x1000000. flags = 0.
 
 `integer reaper.GetThemeColor(string ini_key, integer flags)`
   Get current theme color value. Returns OS-native color. Use ColorFromNative() to extract RGB. flags = 0.

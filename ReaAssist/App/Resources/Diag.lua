@@ -125,7 +125,8 @@ Diag.FAILURE_STAGE_VOCABULARY = {
 Diag.TERMINAL_OUTCOME_VOCABULARY = {
   "answer_complete", "answer_truncated", "answer_empty",
   "run_succeeded_changed", "run_succeeded_unchanged",
-  "run_succeeded_unverified", "run_failed", "run_blocked",
+  "run_succeeded_unverified", "run_failed", "run_failed_fx_insert",
+  "run_blocked",
   "manual_run_required", "pending", "unknown",
 }
 Diag.RECOVERY_ACTION_VOCABULARY = {
@@ -1114,6 +1115,9 @@ local function _turn_to_table(msg, redact_content)
     if msg.local_llm_requested ~= nil then
       t.local_llm_requested = msg.local_llm_requested
     end
+    if msg.local_escalation_state ~= nil then
+      t.local_escalation_state = msg.local_escalation_state
+    end
     if msg.local_retry_escalation ~= nil then
       t.local_retry_escalation = msg.local_retry_escalation
     end
@@ -1992,6 +1996,18 @@ local function _metrics_summary()
     return tostring(m.observable_change_status
       or (rr and rr.observable_change_status) or "")
   end
+  local function message_has_fx_insert_failure(m)
+    local rr = type(m.run_result) == "table" and m.run_result or nil
+    local evidence = rr
+      and (type(rr.fx_insert_failure_evidence) == "table"
+        and rr.fx_insert_failure_evidence or nil)
+      or (not rr and type(m.fx_insert_failure_evidence) == "table"
+        and m.fx_insert_failure_evidence or nil)
+    if not evidence then return false end
+    return (tonumber(evidence.failed_target_count) or 0) > 0
+      or (tonumber(evidence.failure_count) or 0) > 0
+      or (tonumber(evidence.failed_name_count) or 0) > 0
+  end
   local function failure_stage(m, err_kind)
     if network_error_kinds[err_kind] then return "provider" end
     if err_kind == "plugin_pack_integrity_mismatch"
@@ -2024,7 +2040,12 @@ local function _metrics_summary()
          and m.typed_actions.executed == true) then
       local change_status = message_change_status(m)
       if change_status == "changed" then return "run_succeeded_changed" end
-      if change_status == "unchanged" then return "run_succeeded_unchanged" end
+      if change_status == "unchanged" then
+        if message_has_fx_insert_failure(m) then
+          return "run_failed_fx_insert"
+        end
+        return "run_succeeded_unchanged"
+      end
       return "run_succeeded_unverified"
     end
     if run_status == "errored" or run_status == "provider_failed" then
@@ -2091,11 +2112,13 @@ local function _metrics_summary()
   local msgs = (type(S) == "table" and type(S.display_messages) == "table")
                and S.display_messages or {}
   local pending_request
+  local context_buckets_seen
   for _, m in ipairs(msgs) do
     if type(m) == "table" then
       local paired_request
       if m.role == "user" then
         pending_request = m
+        context_buckets_seen = {}
       elseif m.role == "assistant" then
         paired_request = pending_request
         pending_request = nil
@@ -2176,12 +2199,17 @@ local function _metrics_summary()
         end
       end
       if type(m.ctx_label) == "string" and m.ctx_label ~= "" then
+        context_buckets_seen = context_buckets_seen or {}
         for _, key in ipairs(Diag.context_bucket_types(m.ctx_label)) do
-          _inc(context_features, key, 1)
-          _inc(bucket_counts, key, 1)
-          _inc(bucket_states, "included", 1)
+          if not context_buckets_seen[key] then
+            context_buckets_seen[key] = true
+            _inc(context_features, key, 1)
+            _inc(bucket_counts, key, 1)
+            _inc(bucket_states, "included", 1)
+          end
         end
       end
+      if m.role == "assistant" then context_buckets_seen = nil end
       if type(m.request_status) == "table"
          and (m.role == "user" or paired_request == nil) then
         transport_retry_count = transport_retry_count
@@ -3435,13 +3463,53 @@ local function _ensure_dir(dir)
   return dir
 end
 
+-- Whether `dir` holds one of the two permanent launchers, which is what
+-- makes a directory a package root rather than just a directory called App.
+-- A launcher is decided by a marker in its header rather than by its name,
+-- because a name is not evidence and a stranger's ReaAssist.lua in the folder
+-- above a flat install would otherwise move this fallback's Data/ into it.
+-- Local copy of the rule; the master copy is RA.holds_launcher /
+-- RA.package_dir_for in ReaAssist.lua. `dir` carries its trailing separator.
+local function _holds_launcher(dir)
+  if type(dir) ~= "string" or dir == "" then return false end
+  -- Two halves on purpose. This file is not one a probe opens, but the rule is
+  -- copied verbatim between all five call sites and one of them is. Do not
+  -- join them.
+  local marker = "The shipped path is an action identity"
+    .. " and can never move"
+  for _, name in ipairs({ "ReaAssist.lua",
+                          "ReaAssist_Screen_Reader_Mode.lua" }) do
+    local f = io.open(dir .. name, "rb")
+    if f then
+      local head = f:read(4096)
+      f:close()
+      if head and head:find(marker, 1, true) then return true end
+    end
+  end
+  return false
+end
+
 local function _fallback_data_dir()
   local sep = _sep()
   local base = nil
-  if type(RA) == "table" and type(RA.RESOURCES_DIR) == "string"
+  -- Data/ hangs off the package root, so ask for that root by name first.
+  -- Deriving it from RA.RESOURCES_DIR still works, but only after the App/
+  -- segment decision 10a.1 introduced is trimmed as well as the Resources
+  -- one; without that this lands in App/Data, which nothing else writes to.
+  if type(RA) == "table" and type(RA.PACKAGE_DIR) == "string"
+     and RA.PACKAGE_DIR ~= "" then
+    base = RA.PACKAGE_DIR:gsub("[/\\]+$", "")
+  elseif type(RA) == "table" and type(RA.RESOURCES_DIR) == "string"
      and RA.RESOURCES_DIR ~= "" then
     base = RA.RESOURCES_DIR:gsub("[/\\]+$", "")
     base = base:gsub("[/\\]Resources$", "")
+    -- The App hop is conditional: a flat install whose own directory is
+    -- named App has the same spelling and stripping it would write Data/
+    -- into a directory ReaAssist does not own.
+    local app_parent = base:match("^(.*[/\\])App$")
+    if app_parent and _holds_launcher(app_parent) then
+      base = app_parent:gsub("[/\\]+$", "")
+    end
   elseif type(reaper) == "table" and type(reaper.GetResourcePath) == "function" then
     local rp = reaper.GetResourcePath()
     if type(rp) == "string" and rp ~= "" then

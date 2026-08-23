@@ -3,12 +3,12 @@
 <!-- metadata_layout:split-route-validate -->
 <!-- profile_schema:2 -->
 <!-- builder_version:2 -->
-<!-- builder_script_sha256:826244e628ed2129115bb5c6b7320cbe77c63f17a50ffb87b50f1c2292608818 -->
+<!-- builder_script_sha256:8a7e968f1323dc59feceb215c460d67ccf103ae06c815d13d50c3785d2387166 -->
 <!-- section_count:66 -->
-<!-- source_set_sha256:b09e29742a799f06433c45275ff1d2bc9e393ec13edf369b40fbe90b2824de63 -->
+<!-- source_set_sha256:f518d38f49635d4c374bf7bbc890d4f875d413bed1a87be6fdb030e4ccc83439 -->
 <!-- stoplist_version:1 -->
 <!-- aggregate_injected_limit_bytes:98304 -->
-<!-- pack_revision:fd5bedc2e019034f8a7e974fe6d7a445dde031d9d41faba72141e4bf0ccc655d -->
+<!-- pack_revision:0b8e3b9e082a4c36efbae4ef851e644e902e1f3a120c8293f9b219293d8b7a9a -->
 <!-- Plugin_Pack.md - markers are PLUGIN:Name (NOT SECTION:) because each block -->
 <!-- is a typed, addressable plugin entry served as plugin_ref:Name. SECTION: -->
 <!-- is reserved for generic on-demand buckets in API_Ref.md / Prompts.md.    -->
@@ -2018,11 +2018,11 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 32, 0.10)    -- Release: 10%
 <!-- /PLUGIN:Pro-MB -->
 
 <!-- PLUGIN:Pro-Q 4 -->
-<!-- SECTION-REVISION:131f5cf894fc99e4f24771b435b1ffa89aa66fe5663e57740727632683553a67 -->
+<!-- SECTION-REVISION:870bef40b8ae218c3c37d76cc1ecafb1bffc87a5dddd7c2476de31d12bf5d5bf -->
 ## Pro-Q 4
 
 ```json plugin-route
-{"pack_format":2,"profile_schema":2,"key":"fabfilter-pro-q-4","display_name":"Pro-Q 4","vendor":"FabFilter","product_class":"dynamic","preference_type":"eq","identifiers":{"add_by_name":["VST3: Pro-Q 4","VST3: Pro-Q 4 (FabFilter)"],"aliases":["pro-q 4","pro-q","fabfilter pro-q 4","VST3: Pro-Q 4","VST3: Pro-Q 4 (FabFilter)"],"curated":["Pro-Q 4"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":["pro q"]},"chunks":["control","musical"]}
+{"pack_format":2,"profile_schema":2,"key":"fabfilter-pro-q-4","display_name":"Pro-Q 4","vendor":"FabFilter","product_class":"dynamic","preference_type":"eq","identifiers":{"add_by_name":["VST3: Pro-Q 4","VST3: Pro-Q 4 (FabFilter)"],"aliases":["pro-q 4","pro-q4","pro q 4","proq4","pro-q","fabfilter pro-q 4","fabfilter pro-q4","fabfilter pro q 4","fabfilter proq4","VST3: Pro-Q 4","VST3: Pro-Q 4 (FabFilter)"],"curated":["Pro-Q 4"]},"routing":{"context_any_of":["vendor","format","current_track_fx","separate_unique_alias","plugin_action"],"context_exempt":[],"context_required":["pro q","proq4"]},"chunks":["control","musical"]}
 ```
 
 ```json plugin-validate

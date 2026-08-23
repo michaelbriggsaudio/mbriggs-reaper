@@ -1,5 +1,21 @@
 # ReaAssist - Changelog
 
+## v1.5.0 - 2026-08-23
+
+- **ReaPack and website installs now share one protected update system.** Existing ReaPack installations migrate automatically, keep the same standard and Screen Reader Action List entries, and receive future ReaAssist updates inside ReaAssist. Website installations use those same stable launchers. A verified recovery copy can restore missing or damaged application files.
+
+- **Installation, repair, and removal are safer.** ReaAssist coordinates update activity between open instances, verifies files before using them, preserves custom prompts and other user-owned files, and respects ReaPack ownership during repair and uninstall operations.
+
+- **Plug-in inventories and actions are more accurate.** Complete project inventory now includes Monitor FX, exact and hyphenated plug-in names are handled correctly, weak generic matches no longer select unrelated products, requested parameter requirements survive the full request, and failed insertions are no longer reported as successful.
+
+- **Generated project changes have stricter intent and state checks.** ReaAssist will not change a track's recording input unless the request clearly asks for it. Envelope rewrites preserve existing values and verify the intended automation points. Immediate track moves and folder resets require a complete target selection, and current FX-chain and track-state details survive hidden retries.
+
+- **Provider failures now lead to clearer recovery.** ReaAssist distinguishes exhausted credit, invalid credentials, oversized requests, HTTP errors, and rate limits more accurately. Saved keys remain intact when an account needs funding, unnecessary retries are avoided, and Ask Provider Instead prevents duplicate requests while restoring the correct recovery control after a failure.
+
+- **More requests are understood correctly across supported languages.** Brazilian Portuguese analysis and inventory requests remain read-only, Portuguese and Spanish track-creation requests route correctly, and Russian action offers, confirmations, cancellations, and Pro-Q 4 requests are handled more reliably. All nineteen maintained language packs include the current v1.5.0 interface text.
+
+- **Provider, model, and REAPER guidance is current.** Gemini Flash 3.6 is the recommended Gemini model, DeepSeek time-based pricing is represented more accurately, Sonnet and Gemini pricing guidance has been refreshed, and the bundled REAPER references now cover version 7.79.
+
 ## v1.4.9 - 2026-08-07
 
 - **Gemini Flash Lite has been upgraded to 3.5.** Saved Flash Lite 3.1 selections move automatically to 3.5 with Low thinking, the fastest tested Lite setting. Both versions passed the same 10 ReaAssist tasks, with 3.5 responding faster in every comparison.

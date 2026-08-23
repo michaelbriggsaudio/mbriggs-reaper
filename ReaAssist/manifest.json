@@ -1,127 +1,130 @@
 {
-  "version": "1.4.9",
-  "removed_files": [
-    "ReaAssist - Screen Reader Mode.lua",
-    "ReaAssist_ScreenReaderMode.lua",
-    "Resources/Help.md",
-    "Resources/MIDI_Ref.md",
-    "Resources/Plugin_Ref.md",
-    "Resources/ScreenReaderMode.lua",
-    "Resources/Theme_Ref.md",
-    "Resources/fonts/JetBrainsMono-SemiBold.ttf"
-  ],
+  "version": "1.5.0",
+  "removed_files": [],
   "files": [
     {
-      "name": "CHANGELOG.md",
-      "sha256": "57dde627eed99804eabbf5c9818b014fd8d2442cf1242a1363cc2a88b238be35"
+      "name": "App/CHANGELOG.md",
+      "sha256": "ffdd64887cca90d26c8f0ff99abcf9e0a1d77602b5df5ba50f8ada5a7f69d1d0"
     },
     {
-      "name": "LICENSE.txt",
+      "name": "App/LICENSE.txt",
       "sha256": "ee866e370188e92b5ac35bf47e286b071b8a14fd1ef7a0ded18f61a0564cad25"
     },
     {
-      "name": "README.md",
+      "name": "App/README.md",
       "sha256": "e4f9a9b58efee7278efabb313354c6362c20d6197251405cae32a7730eb87f11"
     },
     {
-      "name": "ReaAssist.lua",
-      "sha256": "ca42f15a631203e833378cd14f77a687f9c2ecc6d051f66886f32f01e9a4fa80"
+      "name": "App/ReaAssist.lua",
+      "sha256": "c51523a26c3f13aa6807204646e4d591562af6a3ed0529887ec9ffd99530e863"
     },
     {
-      "name": "ReaAssist_Screen_Reader_Mode.lua",
-      "sha256": "54c2df855b88a0a25996fbdf26d3d564ba57e2fd2c07d2f7a4d43e1a0dd865bd"
+      "name": "App/ReaAssist_Screen_Reader_Mode.lua",
+      "sha256": "d914ef19f94f8b2a61e9957a7b1e6b1fcd7e1808adc86296e5184f487aa779d5"
     },
     {
-      "name": "Resources/API_Ref.md",
-      "sha256": "5085e23221c5f7d9634871117f85ed1c0ecde837cc7440eccfce4bd3a987a862"
+      "name": "App/Resources/API_Ref.md",
+      "sha256": "0f5526dc27c4fb735f0ec4e8bcf2462b8aa2932722cf778804714a73cdde60fd"
     },
     {
-      "name": "Resources/CodeRuntime.lua",
-      "sha256": "c0a73686d50e6c2af08092dc434841998e086f3fd8a8359d2c25e8118b0c96b9"
+      "name": "App/Resources/CodeRuntime.lua",
+      "sha256": "e8e1de91e7149f8e26802f179796e4e1ac83b8fd0960ace133ab7106fd9ef51f"
     },
     {
-      "name": "Resources/Context.lua",
-      "sha256": "7f1ac3938f742b0387d2722304bdc30588269f77722164479aef802893a654cf"
+      "name": "App/Resources/Context.lua",
+      "sha256": "01b333447037325c1996c1e8fc135cb1ddacfb613343af5f3fcf6c8345222cef"
     },
     {
-      "name": "Resources/Diag.lua",
-      "sha256": "06b8c6d6745b35885a409e3b680ebea4aaeb4b15fe04a2464f2267f0c91e7ca9"
+      "name": "App/Resources/Diag.lua",
+      "sha256": "511c9fcd7987973f5df3677d947c80ae93fcf0e8ab1e687037c49fa8046a9827"
     },
     {
-      "name": "Resources/I18N.lua",
-      "sha256": "a318248c173ccea2328ff00c5e2d062bc43942390d633383d663009fc2be6b20"
+      "name": "App/Resources/I18N.lua",
+      "sha256": "a1c2072b7c8941b3e1f18971b36afd040b21e07375cbe7179e7f6a76c8e67847"
     },
     {
-      "name": "Resources/Plugin_Pack.md",
-      "sha256": "b812be71b634e5a7bb8f6618f1183573e431e970e6a66ee81fbcea5a4e5c7e9e"
+      "name": "App/Resources/Plugin_Pack.md",
+      "sha256": "06ef8d86ad295938e6bee3f157e749c98c5ab479a612891d2f5b6fb4addfe01c"
     },
     {
-      "name": "Resources/Prompts.md",
+      "name": "App/Resources/Prompts.md",
       "sha256": "130dcf2fac43aa06406097edfec72bc438cc594572c581c0d7a0bce047201e78"
     },
     {
-      "name": "Resources/ReEQ/Dependencies/firhalfband.jsfx-inc",
+      "name": "App/Resources/ReEQ/Dependencies/firhalfband.jsfx-inc",
       "sha256": "803138717878e9fe1bc546ccbc033614c0637b6c0d66018486d498f43b0d2ec0"
     },
     {
-      "name": "Resources/ReEQ/Dependencies/spectrum.jsfx-inc",
+      "name": "App/Resources/ReEQ/Dependencies/spectrum.jsfx-inc",
       "sha256": "caa388dd5df5c8c85120f8a16e78016e2628bea7106bfe4fd1573fc6c2c43b9e"
     },
     {
-      "name": "Resources/ReEQ/Dependencies/svf_filter.jsfx-inc",
+      "name": "App/Resources/ReEQ/Dependencies/svf_filter.jsfx-inc",
       "sha256": "e1162241f9097a3a866b9db692733fd2aa059b1c793ee4190c581670880e81bd"
     },
     {
-      "name": "Resources/ReEQ/LICENSE.txt",
+      "name": "App/Resources/ReEQ/LICENSE.txt",
       "sha256": "9e0332342bcaa078724b5daa6a711e037378daa230a8a766b10694bcfd185cd0"
     },
     {
-      "name": "Resources/ReEQ/ReEQ.jsfx",
+      "name": "App/Resources/ReEQ/ReEQ.jsfx",
       "sha256": "f32d3fa5c30b934cd0f1707d61d795f3d0a8f8eba505d0d52782a67e76bb4a9e"
     },
     {
-      "name": "Resources/Reaper_Recent_Changes.md",
-      "sha256": "1beb91e3e6a0ac8db8ae591bedeb5fa076210b0f28b6a552fe4c67e1988b8093"
+      "name": "App/Resources/Reaper_Recent_Changes.md",
+      "sha256": "180ae4668240a8bbbe214342176e6d87bf70aec07f2300d30740194a3ef5b3b4"
     },
     {
-      "name": "Resources/Relaunch.lua",
-      "sha256": "8f0ad3f918328ca1c4772f63b60bbaf14cf9a916f5d877cc5228fbdfa1cd998a"
+      "name": "App/Resources/Relaunch.lua",
+      "sha256": "4957542c8dca3c0f5db472abd5c52eb4350b40d3a62b8ab3eaab7fd819c04a1f"
     },
     {
-      "name": "Resources/System_Prompt.md",
-      "sha256": "0a079148cb8c4c61f978b4151876e4a26aa6498bd11d8175b0ce6ea50c7829f5"
+      "name": "App/Resources/System_Prompt.md",
+      "sha256": "378524a927976246b11cf05996a990c3c28a5b74ac1b6c3588a5394c903362b1"
     },
     {
-      "name": "Resources/UI.lua",
-      "sha256": "afed240b59e48e478c270487ce3a10d1224bf659bee9d4dc9492fe351865c153"
+      "name": "App/Resources/UI.lua",
+      "sha256": "f45510ef8c3b49070cb1c59d4d0fce42a8da9aa2794a26f52917a91ed797d12d"
     },
     {
-      "name": "Resources/fonts/Inter_18pt-Bold.ttf",
+      "name": "App/Resources/fonts/Inter_18pt-Bold.ttf",
       "sha256": "30a5c45ec23a594af2effe8d3b589ad22c2dede27441050a1604d00ff82fd0dc"
     },
     {
-      "name": "Resources/fonts/Inter_18pt-Light.ttf",
+      "name": "App/Resources/fonts/Inter_18pt-Light.ttf",
       "sha256": "f0e82b52327efcb68e1b181019ad81d6773bc5ee2addb0b3588d5712740054cd"
     },
     {
-      "name": "Resources/fonts/Inter_18pt-Regular.ttf",
+      "name": "App/Resources/fonts/Inter_18pt-Regular.ttf",
       "sha256": "3e5f90a0138b38de4cf4d779ad78391974ea1df776b9164842bdcbb60ce383c5"
     },
     {
-      "name": "Resources/fonts/Inter_18pt-SemiBold.ttf",
+      "name": "App/Resources/fonts/Inter_18pt-SemiBold.ttf",
       "sha256": "a8b276e25bb13dfa39cface35cc92aff9a7d5f1b96143f0df8c66351ccfed2a4"
     },
     {
-      "name": "Resources/fonts/JetBrainsMono-Medium.ttf",
+      "name": "App/Resources/fonts/JetBrainsMono-Medium.ttf",
       "sha256": "23d57b8a635d023c3717a9c7ac1721199d0f8c6fe4b06d4d5ba3af2170fcbaa2"
     },
     {
-      "name": "Resources/fonts/JetBrainsMono-Regular.ttf",
+      "name": "App/Resources/fonts/JetBrainsMono-Regular.ttf",
       "sha256": "b6b1ff4ddefe36d7f2a6174e1d001cab374e594519ee9049af028d577b64c5f5"
     },
     {
-      "name": "Resources/fonts/lucide.ttf",
+      "name": "App/Resources/fonts/lucide.ttf",
       "sha256": "008e877bcb61dcefec75161793df2e1a872f9ec1bd23d97824a1a274c583e294"
+    },
+    {
+      "name": "App/manifest.json",
+      "sha256": "e2f3088aeed8beebf8aaa586aa500ef7103ca7ec842aa5f9ce46a5383b3720ed"
+    },
+    {
+      "name": "ReaAssist.lua",
+      "sha256": "fc257ecd07fde7c68fe3a6cc1d0a661c95ae6a88ae189f0fa7c4dda95b06c233"
+    },
+    {
+      "name": "ReaAssist_Screen_Reader_Mode.lua",
+      "sha256": "0d884697c2be0f63db4582686574e7e747db662e9e915eab6d65072e39456074"
     }
   ]
 }

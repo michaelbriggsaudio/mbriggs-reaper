@@ -7,6 +7,21 @@ model training cutoffs. This is not the full changelog.
 If a user asks outside this slice, do not invent details. Say the installed
 REAPER changelog is authoritative, or ask for the relevant changelog lines.
 
+## REAPER 7.79 - August 2026
+
+- ReaScript: new undo history APIs can inspect entry counts, the current entry,
+  descriptions, timestamps, and alternate redo paths, then load an entry.
+  `GetSetTempoTimeSigMarkerBasis()` can get or set a tempo marker's beat basis.
+  `GetSetProjectInfo()` also supports virtual MIDI keyboard center note, last
+  velocity, and channel values.
+- ReaScript, JSFX, and Video IDEs support high Unicode code points. On Windows,
+  ReaScript gfx windows can receive high Unicode input through the IME.
+- Media import: tempo-matched Media Explorer imports now reconcile preview and
+  project import settings more explicitly, with updated stretch prompts and
+  automatic stretching when the source contains tempo information.
+- Extensions: Preferences has a Plug-ins/Extensions page for viewing, enabling,
+  and disabling installed extensions.
+
 ## REAPER 7.78 - July 2026
 
 - Sends: a new pre-receive send mode can send media and monitoring to a

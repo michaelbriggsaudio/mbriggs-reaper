@@ -1,5 +1,25 @@
 # ReaAssist - Changelog
 
+## v1.6.0 - 2026-09-17
+
+- Added a helper extension for more stable and secure network activity in the standard interface. It installs automatically for your system.
+
+- Added streaming responses so you can read replies as they arrive in the standard interface.
+
+- Added OpenAI Responses and Google Interactions support, plus updated Anthropic Messages and DeepSeek Responses integrations. These improve handling of images, model reasoning and caching where supported.
+
+- Expanded compatibility with custom and local providers that use the Responses API.
+
+- Gemini Flash 3.8 matched Flash 3.7’s success rate in our tests while using fewer tokens and costing less, with similar response times.
+
+- DeepSeek Flash 4.1 adds image support and lower pricing, with another 50% discount during off-peak hours.
+
+- Improved cost reporting, including cached usage and corrected Sonnet 5 estimates.
+
+- Reduced download size and improved updates from v1.4.x and v1.5 while preserving settings and API keys.
+
+- Updated all 19 language packs and REAPER guidance through v7.80.
+
 ## v1.5.0 - 2026-08-23
 
 - **ReaPack and website installs now share one protected update system.** Existing ReaPack installations migrate automatically, keep the same standard and Screen Reader Action List entries, and receive future ReaAssist updates inside ReaAssist. Website installations use those same stable launchers. A verified recovery copy can restore missing or damaged application files.

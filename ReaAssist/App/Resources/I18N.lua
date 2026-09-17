@@ -170,8 +170,7 @@ I18N.catalogs = {
       ["attach.menu.screenshot"] = "Screenshot",
       ["attach.menu.paste_image"] = "Paste Image",
       ["attach.dialog.title"] = "Attach files",
-      ["attach.error.file_picker"] =
-        "File picker requires js_ReaScriptAPI.\nInstall via ReaPack (Extensions > ReaPack > Browse Packages).",
+      ["attach.error.file_picker"] = "The file picker is unavailable. Finish installing ReaAssist or install js_ReaScriptAPI, then restart REAPER.",
       ["attach.error.screenshot_failed_popup"] =
         "Screenshot capture failed (see popup for details).",
       ["attach.error.screenshot_linux_unsupported"] =
@@ -338,12 +337,12 @@ I18N.catalogs = {
         "Lowest-cost Gemini. Use Low thinking. Choose it for budget-sensitive work; Flash 3.6 Minimal is stronger overall.",
       ["mode.model_tip.gemini-3.6-flash"] =
         "Default Gemini for this app. Use Minimal thinking. Best tested balance of quality, speed, and cost.",
-      ["mode.model_tip.gemini-3.7-flash"] =
-        "Optional Gemini model. Use Low thinking. It matched Flash 3.6 Minimal, but was slightly slower and cost more.",
+      ["mode.model_tip.gemini-3.8-flash"] =
+        "Optional Gemini model. Use Low thinking. It matched Flash 3.7 while using fewer tokens and costing less in testing.",
       ["mode.model_tip.gemini-3.1-pro-preview"] =
         "Premium Gemini preview. Use Medium thinking. Capacity can be unreliable; Flash 3.6 Minimal is safer for coding.",
-      ["mode.model_tip.deepseek-v4-flash"] =
-        "Budget model built into the app. Use Non-Thinking. Fast in testing; off-peak rates are half the peak rates.",
+      ["mode.model_tip.deepseek-flash"] =
+        "DeepSeek's latest Flash model. Use Non-Thinking. Supports images; off-peak rates are half the peak rates.",
       ["mode.combo_hint.anthropic.claude-haiku-4-5.none"] =
         "Simple requests | Lowest Claude cost | Very fast | Use Sonnet for complex work",
       ["mode.combo_hint.anthropic.claude-haiku-4-5.low"] =
@@ -408,11 +407,11 @@ I18N.catalogs = {
         "Complex code and debugging | Higher cost | Much slower | Try Minimal first",
       ["mode.combo_hint.google.gemini-3.6-flash.HIGH"] =
         "Hard reasoning only | Highest Flash cost | Slowest | Avoid routine use",
-      ["mode.combo_hint.google.gemini-3.7-flash.LOW"] =
-        "Lowest supported level | Same tested quality as Flash 3.6 Minimal | Slightly slower | Higher measured cost",
-      ["mode.combo_hint.google.gemini-3.7-flash.MEDIUM"] =
+      ["mode.combo_hint.google.gemini-3.8-flash.LOW"] =
+        "Lowest supported level | Same tested pass rate as Flash 3.7 | Fewer tokens and lower cost | Similar speed",
+      ["mode.combo_hint.google.gemini-3.8-flash.MEDIUM"] =
         "Bench data unavailable | More reasoning than Low | Higher expected cost and latency | Try Low first",
-      ["mode.combo_hint.google.gemini-3.7-flash.HIGH"] =
+      ["mode.combo_hint.google.gemini-3.8-flash.HIGH"] =
         "Bench data unavailable | Maximum reasoning | Highest expected cost and latency | Avoid routine use",
       ["mode.combo_hint.google.gemini-3.1-pro-preview.LOW"] =
         "Not recommended | Reduced reasoning | Highest Gemini cost | Use Flash 3.6 if capacity errors appear",
@@ -574,6 +573,12 @@ I18N.catalogs = {
         "Diagnostic report (app/REAPER/OS, recent errors, metrics)",
       ["bug_report.item.log"] =
         "Advanced Log enabled - your complete log ({size}) will be attached",
+      ["bug_report.item.chat_log_empty.one"] =
+        "Advanced Log is on but has not captured any activity yet. Reproduce the issue, then submit. ReaAssist will attach the current chat instead ({count} message).",
+      ["bug_report.item.chat_log_empty.many"] =
+        "Advanced Log is on but has not captured any activity yet. Reproduce the issue, then submit. ReaAssist will attach the current chat instead ({count} messages).",
+      ["bug_report.item.none_log_empty"] =
+        "Advanced Log is on but has not captured any activity yet. Reproduce the issue, then submit. No chat is available, so only the diagnostic report will be sent.",
       ["bug_report.item.chat.one"] =
         "Advanced Log not enabled - the current chat ({count} message) will be attached instead",
       ["bug_report.item.chat.many"] =
@@ -622,8 +627,14 @@ I18N.catalogs = {
       ["bug_report.panel.not_redacted.contact"] =
         "Your contact name and email (so a reply works)",
       ["bug_report.debug.section"] = "DEBUG LOG",
+      -- Superseded by bug_report.debug.capture_order. Keep this key while
+      -- maintained language packs still carry the legacy entry.
       ["bug_report.debug.body"] =
         "Captures full API traffic and FX scan events. When enabled, the complete log is attached to your bug report automatically. Reproduce the issue first, then send the form above.",
+      ["bug_report.debug.capture_order"] =
+        "Enable Advanced Log before reproducing the issue. It records new API traffic and FX scan events. Reproduce the issue, then submit the report above. If the log has no captured activity, ReaAssist attaches the current chat instead.",
+      ["bug_report.debug.enabled_reproduce"] =
+        "Advanced Log is on. Reproduce the issue, then submit.",
       ["bug_report.debug.enable"] = "Enable Advanced Log",
       ["bug_report.debug.enable_tooltip"] =
         "Log all API requests/responses (including hidden auto-follow-ups) and FX scan events to a file you can attach to a bug report.\nFile: {path}",
@@ -667,9 +678,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["chat.status.elapsed"] = "Elapsed",
       ["chat.status.timeout"] = "Timeout",
       ["chat.status.thinking"] = "Thinking...",
+      ["chat.status.responding"] = "Responding...",
+      ["chat.status.revising_answer"] = "Revising answer...",
       ["chat.status.deep_scanning"] = "Deep-scanning {label}...",
-      ["chat.status.deep_scan.detail"] =
-        "This plugin reports parameter values with a one-frame delay (common on some VST3 plugins), so a slower defer-paced scan is needed to read accurate data. This only runs once per plugin. Future requests for this plugin will use the cached data and respond instantly.\n\nIf the plugin has heavy selector params (Style, Preset, Algorithm, Engine), the scan waits for each value to fully load before moving on, so it can take noticeably longer than a typical scan.",
+      ["chat.status.deep_scan.detail"] = "This plugin reports parameter values with a one-frame delay (common on some VST3 plugins), so a slower defer-paced scan is needed to read accurate data. This only runs once per plugin. Future requests for this plugin will use the cached data and respond instantly.\n\nIf the plugin has heavy selector params (Style, Preset, Algorithm), the scan waits for each value to fully load before moving on, so it can take noticeably longer than a typical scan.",
       ["chat.status.probing"] = "Probing",
       ["chat.status.running_code"] = "Running code...",
       ["chat.status.extend_by"] = "Extend by {seconds}s",
@@ -681,6 +693,12 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["details.field.fx_cache"] = "FX Cache",
       ["details.field.tokens"] = "Tokens",
       ["details.field.cache"] = "Cache",
+      ["details.field.cache_hit_miss"] = "Cache Hit/Miss",
+      ["details.field.response_cache"] = "Response Cache",
+      ["details.field.request_path"] = "Request Path",
+      ["details.field.api_protocol"] = "API Protocol",
+      ["details.field.provider_route"] = "Provider Route",
+      ["details.field.actual_cost"] = "Actual Cost",
       ["details.field.api_calls"] = "API Calls",
       ["details.field.model_calls"] = "Model Calls",
       ["details.field.transport_retries"] = "Transport Retries",
@@ -691,6 +709,39 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["details.value.session"] = "Session",
       ["details.value.tokens_io"] = "{input} in / {output} out",
       ["details.value.cache_io"] = "{read} read, {created} created",
+      ["details.value.cache_hit_miss"] = "{hit} hit / {miss} miss",
+      ["details.value.cache_hit_miss_percent"] = "{hit} hit / {miss} miss ({percent} hit)",
+      ["details.tip.cache_hit_miss"] = "Input tokens recorded as cache hits / remaining input tokens across this message's model calls. The percentage is cache hits divided by total input tokens. Misses include newly created cache tokens. This is prompt-token usage, not response-cache hits. Unavailable or inconsistent usage is Unknown; failed calls without usage reports are not included.",
+      ["details.value.response_cache.conflicting"] = "Conflicting evidence",
+      ["details.value.response_cache.hit"] = "Hit (free)",
+      ["details.value.response_cache.miss"] = "Miss",
+      ["details.value.response_cache.unknown"] = "Unknown",
+      ["details.value.response_cache.hit_count"] = "{count} hit",
+      ["details.value.response_cache.miss_count"] = "{count} miss",
+      ["details.value.response_cache.unknown_count"] = "{count} unknown",
+      ["details.value.response_cache.conflicting_count"] =
+        "{count} conflicting",
+      ["details.value.request_path.engine"] = "Standard",
+      ["details.value.request_path.lua"] = "Compatibility",
+      ["details.value.request_path.fallback"] = "Compatibility fallback",
+      ["details.value.api_protocol.openai_responses"] = "OpenAI Responses",
+      ["details.value.api_protocol.openai_chat_completions"] =
+        "OpenAI Chat Completions",
+      ["details.value.api_protocol.anthropic_messages"] = "Anthropic Messages",
+      ["details.value.api_protocol.google_generate_content"] =
+        "Google GenerateContent",
+      ["details.value.api_protocol.google_interactions"] = "Google Interactions",
+      ["details.value.api_protocol.deepseek_responses"] = "DeepSeek Responses",
+      ["details.value.api_protocol.deepseek_chat_completions"] =
+        "DeepSeek Chat Completions",
+      ["details.value.api_protocol.openrouter_responses"] =
+        "OpenRouter Responses",
+      ["details.value.api_protocol.openrouter_chat_completions"] =
+        "OpenRouter Chat Completions",
+      ["details.value.provider_route"] =
+        "{provider}{endpoint} / attempt {attempt} / fallback {fallback}",
+      ["details.value.yes"] = "yes",
+      ["details.value.no"] = "no",
       ["details.value.free_tier_cost"] =
         "Free Tier (would have been ~{cost})",
       ["details.suffix.this_chat"] = "(this chat)",
@@ -707,6 +758,13 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["details.tip.time"] = "How long the model took to return its response.",
       ["details.tip.cache"] =
         "Tokens read from the prompt cache / tokens newly written to the cache this turn. Cache reads are billed at a fraction of the normal input-token rate.",
+      ["details.tip.response_cache"] =
+        "OpenRouter response-cache results reported by response headers. A confirmed hit returns the stored completed response at zero cost. Missing or conflicting evidence is never inferred as a free hit.",
+      ["details.tip.request_path"] = "The connection used for this exchange. Standard uses the current connection method. Compatibility uses the older method. Compatibility fallback means this exchange used both methods.",
+      ["details.tip.provider_route"] =
+        "OpenRouter's provider-reported selected provider for the latest model call, plus the configured endpoint tag when available, upstream attempt, and fallback status.",
+      ["details.tip.actual_cost"] =
+        "Exact provider-reported cost for this exchange. Multi-call exchanges preserve each call's exact decimal because ReaAssist does not add authoritative decimal costs through floating-point arithmetic.",
       ["details.tip.api_calls"] =
         "How many round-trips to the model this turn took. 1 means a single clean request. >1 means a silent retry fired (docs auto-fetch, beta-header fallback, cache-expiration refresh, intra-turn context fetch); the Tokens / Cache / Time / Cost values reflect only the LAST request, so when this is >1 the visible numbers undercount the true work for the turn.",
       ["details.tip.complexity"] =
@@ -719,6 +777,18 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["chat.clear.prompt"] =
         "Clear the current chat and start a new one?\nThis only clears the current ReaAssist session.",
       ["chat.clear.confirm"] = "Start New Chat",
+      ["message.answer_retried.label"] =
+        "Answer retried automatically ({count} discarded).",
+      ["message.answer_retried.edit_format_tooltip"] =
+        "An earlier response did not match the required edit format.",
+      ["message.answer_retried.validation_tooltip"] =
+        "Earlier responses did not pass ReaAssist's validation checks.",
+      ["message.reasoning_summary.label"] = "Reasoning summary",
+      ["message.reasoning_summary.truncated"] =
+        "Summary shortened for display.",
+      ["message.provider_reasoning.label"] = "Provider reasoning",
+      ["message.provider_reasoning.truncated"] =
+        "Provider reasoning shortened for display.",
       ["message.truncated.structured_cap"] =
         "Structured edit cut off at its compact action-token cap.",
       ["message.truncated.output_cap"] =
@@ -806,8 +876,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["code.save_lua.fallback_label"] =
         "Filename (saved to REAPER Scripts folder):,extrawidth=260",
       ["code.save_lua.tooltip"] = "Save code as a .lua script file",
-      ["code.save_browser_tip"] =
-        "For a full file browser when saving scripts, install\njs_ReaScriptAPI via ReaPack (Extensions menu).\n\nThe basic filename prompt will open now.",
+      ["code.save_browser_tip"] = "The full file browser is unavailable. You can enter a filename now. To enable the browser, finish installing ReaAssist or install js_ReaScriptAPI through ReaPack, then restart REAPER.",
       ["code.save_browser_tip.title"] = "ReaAssist - Tip",
       ["code.edit.tooltip"] =
         "Make this code block editable (removes syntax highlighting)",
@@ -1056,6 +1125,24 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.title.meaning"] =
         "Title for the ReaAssist screen reader mode window.",
       ["a11y.sr.page_status_ready"] = "Ready.",
+      ["a11y.sr.legacy_substitution_status"] =
+        "Screen Reader compatibility selection is active for this session. Using {provider}, {model}. Shared provider settings were not changed.",
+      ["a11y.sr.legacy_substitution_status.meaning"] =
+        "Reports the session-only provider and model used for Screen Reader compatibility.",
+      ["a11y.sr.legacy_substitution_announcement"] =
+        "The saved provider selection uses a newer or unsupported provider format. For this Screen Reader session only, ReaAssist is using its legacy compatibility selection. Shared provider settings were not changed.",
+      ["a11y.sr.legacy_auth_missing"] =
+        "Sending is unavailable in Screen Reader Mode. Add an API key for {provider} in Provider API Keys.",
+      ["a11y.sr.legacy_endpoint_missing"] =
+        "Sending is unavailable in Screen Reader Mode. Open Advanced Providers and add a valid Chat Completions endpoint for {provider}.",
+      ["a11y.sr.legacy_model_pending"] =
+        "Sending is unavailable while ReaAssist checks whether this Google account can use {model}.",
+      ["a11y.sr.legacy_model_unavailable"] =
+        "{model} is unavailable for this Google account. Choose another Screen Reader-compatible Gemini model.",
+      ["a11y.sr.legacy_tuple_unavailable"] =
+        "The selected provider or model is not available in Screen Reader Mode. Choose a Screen Reader-compatible provider and model.",
+      ["a11y.sr.legacy_runtime_mismatch_status"] =
+        "Sending is blocked because the active Screen Reader provider or model does not match the saved compatibility selection. Expected {provider}, {model}. Choose an available Screen Reader model to replace the saved selection.",
       ["a11y.sr.status.meaning"] =
         "Current page status or last action result.",
       ["a11y.sr.provider"] = "Provider",
@@ -1522,6 +1609,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Could not open the link.",
       ["a11y.sr.link_opened"] =
         "Opening link.",
+      ["a11y.sr.response_link.meaning_v1"] =
+        "Opens {label} in your browser.",
       ["a11y.sr.email_opened"] =
         "Opening email link.",
       ["a11y.sr.donate_opened"] =
@@ -2130,8 +2219,12 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Enable advanced log",
       ["a11y.sr.debug_logging.meaning"] =
         "Writes detailed request and diagnostic logs for troubleshooting.",
+      ["a11y.sr.debug_logging.meaning_v2"] =
+        "Records new API traffic and FX scan events after you turn it on. Reproduce the issue, then submit the report.",
       ["a11y.sr.debug_logging_changed"] =
         "Advanced log is now {value}.",
+      ["a11y.sr.debug_logging_enabled_reproduce"] =
+        "Advanced log is on. Reproduce the issue, then submit the report.",
       ["a11y.sr.update_check.meaning_v2"] =
         "On, after your first request in a session, ReaAssist tries one "
         .. "automatic check for a newer version. Off, you update manually, "
@@ -2399,6 +2492,16 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Advanced Log will be attached.",
       ["a11y.sr.report_attachment_chat"] =
         "Current chat will be attached.",
+      ["a11y.sr.report_attachment_chat.one"] =
+        "Current chat ({count} message) will be attached.",
+      ["a11y.sr.report_attachment_chat.many"] =
+        "Current chat ({count} messages) will be attached.",
+      ["a11y.sr.report_attachment_chat_log_empty.one"] =
+        "Advanced Log is on but has not captured activity yet. Reproduce the issue, then submit. Current chat ({count} message) will be attached instead.",
+      ["a11y.sr.report_attachment_chat_log_empty.many"] =
+        "Advanced Log is on but has not captured activity yet. Reproduce the issue, then submit. Current chat ({count} messages) will be attached instead.",
+      ["a11y.sr.report_attachment_none_log_empty"] =
+        "Advanced Log is on but has not captured activity yet. Reproduce the issue, then submit. Diagnostic report only.",
       ["a11y.sr.report_comment_preview"] =
         "Description: {text}",
       ["a11y.sr.report_comment_preview.meaning"] =
@@ -2633,6 +2736,11 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "The HTTP/2 connection failed while talking to the server. Try again; if it repeats, switch networks or disable VPN/proxy.",
       ["network.curl.generic"] =
         "A network error occurred. Please check your internet connection and try again.",
+      ["network.engine.stream_incomplete"] = "ReaAssist could not verify that the response finished. The incomplete answer was discarded. Try sending your message again.",
+      ["network.engine.provider_http_error"] =
+        "{provider} (HTTP {status}): {message}",
+      ["network.engine.provider_error"] =
+        "{provider}: {message}",
       ["network.curl.back_online_settings"] =
         "Once you're back online, click the Settings button to try again.",
       ["response.context_followup_failed"] =
@@ -2785,6 +2893,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "for exact FX identifier repair",
       ["retry.reason.for_unchecked_addbyname_result"] =
         "for unchecked AddByName result",
+      ["retry.reason.for_plugin_identifier"] =
+        "for plug-in identity and preference",
       ["retry.reason.for_dependent_getbyname_result"] =
         "for dependent GetByName result",
       ["retry.reason.for_chain_upsert_violation"] =
@@ -2891,6 +3001,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "The model used plugin identifier(s) that do not match the exact installed identifiers, even after a retry: {plugins}. Auto-run is blocked; review and edit the code before clicking Run manually.",
       ["validator.item_duplication_blocked"] =
         "The script does not safely duplicate the complete media item state with fresh item/take identities. Auto-run is blocked; regenerate it before running.",
+      ["validator.fx_identifier_unmatched_warning"] =
+        "The same script names plug-in(s) no installed plug-in carries exactly, which may also fail to load: {plugins}. Install them, or ask for the chain again with plug-ins you have.",
+      ["validator.fx_identifier_missing_blocked"] =
+        "The generated script uses plug-ins that are not installed on this system, even after a retry: {plugins}. Auto-run is blocked because those plug-ins cannot load. Install them, or ask for the chain again with plug-ins you have.",
       ["validator.fx_addbyname_unchecked_blocked"] =
         "The model wrote TrackFX_AddByName / TakeFX_AddByName without checking the result, even after a retry: {vars}. If the plugin fails to load the script will silently report success. Auto-run is blocked; review and edit the code before clicking Run manually.",
       ["validator.fx_getbyname_silent_skip_blocked"] =
@@ -2957,6 +3071,15 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "- Selected: {tracks}\n",
       ["response.local_loudness_bundle_clarification"] =
         "I can set an explicit track-fader dB target and a dBFS peak ceiling once each has its own value. Integrated LUFS requires a loudness measurement or render result; it cannot be inferred from a fader setting. Which tracks and fader dB changes should I use, what dBFS ceiling should I set, and should I measure the rendered result for the LUFS target?",
+      ["response.local_peak_level_clarification"] =
+        "Do you want to reduce those peaks by that many dB, or reach an absolute peak level in dBFS? Should I use take gain, a volume envelope or a compressor?",
+      ["response.local_compound_audio_sync_clarification"] =
+        "I haven't changed the tempo or aligned the audio. To continue with both parts of your request, which matching lyric, transient or timecode should I use as the alignment anchor?",
+      ["network.curl.dns_retry"] =
+        "Could not resolve the server address. Check your connection, then use Retry Same Model to resend this request.",
+      ["validator.audio_sync_missing_edit_blocked"] =
+        "The script still contains no requested audio-alignment edit after a retry. Auto-run is blocked. Provide a matching lyric, transient or timecode anchor to continue.",
+      ["retry.reason.for_audio_sync_missing_edit"] = "for missing audio-alignment edits",
       ["response.local_vocal_edit_clarification"] =
         "Which vocal tracks should I edit, should timing be aligned with stretch markers or item edits, which pitch-correction method should I use, and what measurable level target do you want, such as peak dBFS, RMS, or LUFS?",
       ["response.api_key_storage_note"] =
@@ -2965,6 +3088,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Your key was stored locally with reversible obfuscation, not OS-vault encryption. The install-path binding is why it cannot be decoded after being copied or moved.",
       ["response.credits_exhausted"] =
         "Your {provider} account has run out of credits.\n\nTo continue using ReaAssist, add funds to your account:",
+      ["response.credits_exhausted_openai_v2"] =
+        "Your OpenAI API account has run out of credits. API billing is separate from a ChatGPT subscription, and OpenAI API credits are billed in USD. To continue using ReaAssist, add funds to your API account:",
       ["response.credits_exhausted_no_link"] =
         "Your {provider} account has run out of credits.\n\nCheck that provider's billing and usage limits to continue.",
       ["response.provider_overloaded"] =
@@ -2977,6 +3102,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "That model doesn't seem to exist anymore. It may have been renamed or retired.\n\nTry picking a different one from the dropdown below.",
       ["response.permission_denied"] =
         "Your API key doesn't have access to this model. This usually means it requires a higher account tier.\n\nTry a different model, or check your plan here:",
+      ["response.permission_denied_v2"] =
+        "The provider denied this request. Check that the API or project is enabled, the key restrictions allow this model or endpoint, and the account has access. Review the provider response or console before retrying.",
       ["response.openai_rate_limit"] =
         "OpenAI is throttling this request because the account/model token-per-minute limit is temporarily saturated. This is a provider-side throughput limit, not a Lua or prompt failure.\n\nWait a minute and try again, or switch to a smaller model for this request.",
       ["response.provider_server_error"] =
@@ -2991,6 +3118,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "That model doesn't seem to exist anymore. Try picking a different one.",
       ["response.google_permission_denied"] =
         "Your API key doesn't have access to this model.",
+      ["response.google_permission_denied_v2"] =
+        "Google denied access to this project or API request. Check that the Gemini API is enabled for the project and that the API key restrictions allow it. If access is still denied, contact Google support with the provider error details.",
       ["code.backup_failed_after_save"] =
         "Project saved, but the safety backup failed ({error}). The generated code was NOT run. Resolve the disk/permission issue and try again, or click Run manually if you want to proceed without a backup.",
       ["code.backup_failed_run"] =
@@ -3007,12 +3136,41 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "No parameter value change was detected. The requested value may already have been set or the write was a no-op. Confirm the displayed plugin value before continuing.",
       ["code.run.partial_parameter_change"] =
         "Some parameter targets did not finish with a verified new value ({changed} of {total} changed). Confirm the unchanged or restored plugin values before continuing.",
+      ["code.run.midi_partial"] = "Some MIDI note changes were confirmed, but other writes were rejected or could not be verified. Review the MIDI item before continuing.",
+      ["code.run.midi_returned"] = "MIDI note writes occurred, but the tracked notes returned to their original values.",
+      ["code.run.midi_unchanged"] = "No MIDI note value change was confirmed. The values may already have been set, or a write may have been rejected. Review the MIDI item before continuing.",
+      ["code.run.midi_unknown"] = "ReaAssist could not verify the MIDI note changes. Review the MIDI item before continuing.",
+      ["code.run.no_guess_mapping_validator"] = "The exact plug-in parameter mapping could not be verified. This code was not run. Adjust the value manually or resend the request.",
+      ["code.run.no_guess_execution_contract_invalid"] = "This response no longer has a verified request and code binding. This code was not run. Resend the request.",
+      ["code.run.no_guess_multiple_scripts"] = "This response contains multiple Lua scripts, so there is no single verified script to run. No script was run. Resend the request.",
+      ["code.run.midi_limited"] = "MIDI writes exceeded the verification limit. Note-change totals are unavailable. Review the MIDI item before continuing.",
+      ["code.run.validation_blocked"] = "Validation blocked this code. Resend the request before running it.",
       ["code.run.parameter_returned_to_initial"] =
         "Parameter probing finished at the original value. The requested state may already have been set, or a helper restored it after failing verification. Review any message shown by the script and confirm the displayed plugin value.",
       ["code.run.fx_insert_failed_unchanged"] =
         "ReaAssist could not add: {plugins}. No project changes were detected. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
       ["code.run.fx_insert_failed_partial"] =
         "ReaAssist could not add: {plugins}. Other project changes were made, so the action may be partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
+      ["code.run.fx_insert_failed_partial_v3"] =
+        "ReaAssist could not add: {plugins}. {completed} plug-in add call(s) were accepted; these calls may reuse existing FX. The action is partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
+      ["code.run.fx_insert_failed_partial_v2"] =
+        "ReaAssist could not add: {plugins}. {completed} other plug-in insertion(s) completed, so the action is partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
+      ["code.run.fx_preference_substituted_item"] =
+        "Used {used}; your saved {role} preference is {preference}.",
+      ["code.run.fx_preference_substituted"] =
+        "{items} Ask again naming the plug-in you want, or change the saved preference on the Preferred Plugins page.",
+      ["a11y.sr.response_ready_fx_preference_substituted"] =
+        "Generated code finished. {items} Ask again naming the plug-in you want, or change the saved preference on the Preferred Plugins page.",
+      ["code.run.fx_requested_unserved"] =
+        "The plug-in you asked for, {plugins}, was not inserted: this answer used track actions, which cannot add plug-ins. Ask again for a script if you want it added.",
+      ["code.run.fx_requested_unserved_script"] =
+        "The plug-in you asked for, {plugins}, is not in the script this answer ran. Ask again if you want it added.",
+      ["code.run.fx_requested_unserved_guessed"] =
+        "This answer used track actions, which cannot add plug-ins. If you asked for one, ask again for a script.",
+      ["code.run.fx_requested_unserved_script_guessed"] =
+        "This answer ran a script that added no plug-in. If you asked for one, ask again.",
+      ["code.run.fx_insert_reused_index_v2"] =
+        "A repeated plug-in request returned the same FX index for: {plugins}. Later settings may have overwritten the earlier instance. Review the chain, or use Undo and regenerate it.",
       ["code.run.fx_insert_failed_overlapped"] =
         "ReaAssist could not add: {plugins}. A newer action ran before this older action finished, so ReaAssist cannot tell which change REAPER's Undo would remove. Review the project and REAPER's Undo history before undoing anything. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
       ["a11y.sr.response_ready_no_parameter_change"] =
@@ -3025,6 +3183,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Generated code finished, but ReaAssist could not add: {plugins}. No project changes were detected. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
       ["a11y.sr.response_ready_fx_insert_failed_partial"] =
         "Generated code finished, but ReaAssist could not add: {plugins}. Other project changes were made, so the action may be partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
+      ["a11y.sr.response_ready_fx_insert_failed_partial_v3"] =
+        "Generated code finished, but ReaAssist could not add: {plugins}. {completed} plug-in add call(s) were accepted; these calls may reuse existing FX. The action is partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
+      ["a11y.sr.response_ready_fx_insert_failed_partial_v2"] =
+        "Generated code finished, but ReaAssist could not add: {plugins}. {completed} other plug-in insertion(s) completed, so the action is partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
       ["a11y.sr.response_ready_fx_insert_failed_overlapped"] =
         "Generated code finished, but ReaAssist could not add: {plugins}. A newer action ran before this older action finished, so ReaAssist cannot tell which change REAPER's Undo would remove. Review the project and REAPER's Undo history before undoing anything. Confirm each named plug-in is installed and available in REAPER, then resend the request.",
       ["code.run.no_project_change"] =
@@ -3316,6 +3478,12 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.api_key.error.custom_model_test_failed"] =
         "The endpoint responded but the model test failed.",
       ["settings.api_key.error.server_said"] = "Server said: {message}",
+      ["settings.api_key.error.anthropic_workspace_short"] =
+        "Anthropic needs a key scoped to one workspace.",
+      ["settings.api_key.error.anthropic_workspace_detail"] =
+        "Anthropic rejected this key because it is not scoped to one workspace. ReaAssist does not currently send a workspace ID with its requests.",
+      ["settings.api_key.error.anthropic_workspace_hint"] =
+        "Create a key scoped to one workspace in the Anthropic Console, paste it into ReaAssist, and test it again.",
       ["settings.api_key.error.auth_failed_short"] =
         "Authentication failed. The key may have expired or been revoked.",
       ["settings.api_key.error.didnt_work_short"] =
@@ -3396,6 +3564,25 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "For usable results, use a code-specialized model with at least ~14B parameters (e.g. Qwen 2.5 Coder 14B at ~12 GB VRAM); 32B coders on 24 GB VRAM work substantially better. Below 14B, treat the connection as \"wired up correctly\" rather than \"ready to use.\"",
       ["settings.custom.status.new"] = "New Provider",
       ["settings.custom.status.editing"] = "Editing Provider",
+      ["settings.custom.native.section"] = "CONNECTION",
+      ["settings.custom.native.local_label"] =
+        "Local server (otherwise custom online endpoint)",
+      ["settings.custom.native.responses_label"] =
+        "Use Responses API (off uses Chat Completions)",
+      ["settings.custom.native.auth_label"] =
+        "Require an API key (Bearer authentication)",
+      ["settings.custom.native.description"] = "Each model accepts text only unless you enable image input in Model Details. This connection keeps the selected API format and will not retry an image request after removing its images. It does not support custom headers, insecure TLS, model prefixes, extra request fields or returned images.",
+      ["settings.custom.native.tls_policy"] =
+        "On Windows, configurable Custom and Local HTTPS profiles use best-effort certificate revocation compatibility. Certificate and hostname verification stay enabled. Built-in hosted providers keep strict revocation checks.",
+      ["settings.custom.legacy.tls_policy"] =
+        "Legacy Custom HTTPS tries strict certificate revocation first on Windows. Its existing bounded compatibility retry may relax only the revocation check after a classified revocation failure. Certificate and hostname verification stay enabled.",
+      ["settings.custom.native.legacy_description"] = "This provider keeps its existing Chat Completions connection. Create a new provider to choose Chat Completions or Responses.",
+      ["settings.custom.route.engine_local_responses"] = "LOCAL / RESPONSES",
+      ["settings.custom.route.engine_local_chat"] = "LOCAL / CHAT COMPLETIONS",
+      ["settings.custom.route.engine_custom_responses"] = "CUSTOM / RESPONSES",
+      ["settings.custom.route.engine_custom_chat"] = "CUSTOM / CHAT COMPLETIONS",
+      ["settings.custom.route.legacy_chat"] =
+        "COMPATIBILITY / CHAT COMPLETIONS",
       ["settings.custom.section.endpoint"] = "ENDPOINT",
       ["settings.custom.section.models"] = "MODELS",
       ["settings.custom.section.advanced"] = "ADVANCED",
@@ -3409,6 +3596,19 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "http://localhost:11434/v1/chat/completions",
       ["settings.custom.tip.endpoint"] =
         "The full URL of the chat completions endpoint, including http:// or https:// and the port.\n\nExpected shape for OpenAI-compatible servers:\n  http://localhost:11434/v1/chat/completions   (Ollama)\n  http://localhost:1234/v1/chat/completions    (LM Studio)\n  http://localhost:8080/v1/chat/completions    (llama.cpp)\n  https://openrouter.ai/api/v1/chat/completions (OpenRouter)\n\nUse the preset pills below to fill in the common defaults.",
+      ["settings.custom.tip.native_endpoint"] =
+        "Enter the exact endpoint for the selected API format. Loopback names are saved as 127.0.0.1. Public endpoints require HTTPS. Private IP addresses require the Local server option and approval for the exact scheme, address, and port.",
+      ["settings.custom.notice.localhost_normalized"] =
+        "localhost will be saved as the IP literal 127.0.0.1.",
+      ["settings.custom.warning.private_network"] =
+        "Private network endpoint: {origin}. Requests and any API key go directly to this address without a proxy. Only continue if you control or trust that server.",
+      ["settings.custom.warning.remote_price_unknown"] =
+        "Input and output prices are blank for a remote endpoint. ReaAssist will ask you to approve every request because it cannot estimate the cost. Enter both published prices to get cost estimates and avoid repeated approval prompts.",
+      ["settings.custom.warning.legacy_remote_price_unknown"] = "One or both prices are zero for this older remote connection. ReaAssist cannot tell whether zero was entered or saved from a blank field, so the estimate is Unknown and each request needs approval. Enter positive published input and output prices, or create a new provider to record an explicit zero price.",
+      ["settings.custom.private_network.confirm"] =
+        "I trust this exact private network address",
+      ["settings.custom.private_network.confirm_tip"] =
+        "Approval is bound to the exact scheme, IP address, and port. Changing that origin requires approval again.",
       ["settings.custom.field.api_key"] = "API Key",
       ["settings.custom.field.api_key_suffix"] =
         "(optional, required for hosted gateways)",
@@ -3433,6 +3633,9 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Fill in the Groq endpoint URL (API key required)",
       ["settings.custom.tip.preset.kimi"] =
         "Fill in Kimi (Moonshot) defaults:\n  - Endpoint: https://api.moonshot.ai/v1/chat/completions\n  - Provider name: Kimi (if blank)\n  - Model row: kimi-k2.6, 262k context, $0.95/$0.16/$4.00 per 1M\n  - Extra Body: {\"thinking\":{\"type\":\"disabled\"}}\n\nThinking is disabled by default because k2.6's reasoning pass adds tens of seconds of latency and thousands of hidden output tokens on simple tasks. Open the model row's Details popup to re-enable it (set the Extra Body to {\"thinking\":{\"type\":\"enabled\"}} or blank) when you need deeper reasoning.\n\nAPI key required. If you've already customized the default model row, only the URL and provider name are filled.",
+      ["settings.custom.tip.preset.kimi_native"] = "Fill in Kimi (Moonshot) defaults:\n  - Endpoint: {endpoint}\n  - Provider name: Kimi (if blank)\n  - Model row: kimi-k2.6, 262k context, $0.95/$0.16/$4.00 per 1M\n\nThis connection uses a fixed request format. Extra Body remains unavailable.\n\nAPI key required. If you have already customized the default model row, that row stays unchanged. The preset still updates the endpoint, provider type, and authentication mode, and fills the provider name when blank.",
+      ["settings.custom.tip.preset.unsupported_format"] =
+        "This preset has no maintained endpoint for the selected API format. Enter the exact endpoint manually or select Chat Completions.",
       ["settings.custom.section.models_hint"] =
         "One row per model. Open Details to set prices, context, notes, and extra body JSON.",
       ["settings.custom.header.model_id"] = "MODEL IDENTIFIER",
@@ -3456,7 +3659,13 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Input Price per 1M (Cache Miss)",
       ["settings.custom.details.price_cache"] =
         "Input Price per 1M (Cache Hit)",
+      ["settings.custom.details.price_cache_write"] =
+        "Input Price per 1M (Cache Write)",
       ["settings.custom.details.price_out"] = "Output Price per 1M",
+      ["settings.custom.details.supports_image_input"] =
+        "Supports image input",
+      ["settings.custom.details.modern_token_limit"] =
+        "Use max_completion_tokens",
       ["settings.custom.details.context_window"] =
         "Context Window (tokens)",
       ["settings.custom.details.extra_body"] = "Extra Body JSON",
@@ -3467,6 +3676,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Details - prices, context, notes, extra body JSON",
       ["settings.custom.details.price_summary"] =
         "${input} in / ${cache} cached / ${output} out per 1M tokens",
+      ["settings.custom.details.native_price_summary_v2"] =
+        "{input} in / {cache} cache read / {cache_write} cache write / {output} out per 1M tokens",
       ["settings.custom.details.context_summary"] =
         "Context: {tokens} tokens",
       ["settings.custom.details.dropdown_notes_summary"] =
@@ -3483,8 +3694,16 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Cost per million input tokens for fresh (non-cached) prompt content. Used for cost estimates only; the script does not bill you.",
       ["settings.custom.tip.details.price_cache"] =
         "Cost per million input tokens that the provider served from its automatic prompt cache (reported as usage.prompt_tokens_details.cached_tokens). Common providers and their published cache-hit rates: OpenAI ~10% of input, Kimi ~17% ($0.16 vs $0.95). Leave at 0 for endpoints without caching or unknown rates; cached tokens will then be billed at $0 in the cost estimate.",
+      ["settings.custom.tip.details.native_price_cache"] =
+        "Cost per million cached input tokens. Leave this blank when the rate is Unknown. Enter 0 only when the provider's documented cache-hit rate is free.",
+      ["settings.custom.tip.details.price_cache_write"] =
+        "Cost per million input tokens reported as cache writes. Leave this blank when the rate is Unknown. Enter 0 only when the provider documents cache writes as free.",
       ["settings.custom.tip.details.price_out"] =
         "Cost per million output tokens. For reasoning models this usually includes hidden thinking tokens as part of the completion, so a long thinking pass charges at the output rate even when the visible reply is short.",
+      ["settings.custom.tip.details.supports_image_input"] =
+        "Enable this only when this exact model accepts images through the selected API format. ReaAssist will otherwise keep the model text-only. A rejected image request is surfaced without retrying after removing the image.",
+      ["settings.custom.tip.details.modern_token_limit"] =
+        "Enable this for newer OpenAI-compatible models that reject max_tokens and require max_completion_tokens. Leave it off for the broadest compatibility with older or local servers.",
       ["settings.custom.tip.details.context_window"] =
         "Maximum combined input + output token capacity for this model. The preflight check warns if a pending send would overflow this window. Kimi k2.6 = 262144, Claude Opus 5 = 1000000, most local 8B models = 8192.",
       ["settings.custom.tip.details.extra_body"] =
@@ -3532,6 +3751,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Test with a real chat/completions request",
       ["settings.custom.tip.test_inference"] =
         "Off (default): GET /v1/models -- safe, free, instant. Verifies server reachable and auth header works.\n\nOn: POST /v1/chat/completions with max_tokens=1 and 'hi' against your first model. Exercises the same path real chat uses, but reasoning models (o1, Qwen reasoning variants, etc.) still run the full thinking phase -- you'll pay for one short inference call.",
+      ["settings.custom.tip.native_test_inference"] = "This test sends a real model request and may be billed.",
       ["settings.custom.tip.cancel_test"] =
         "Cancel the in-flight connection test",
       ["settings.custom.tip.test_connection"] =
@@ -3544,6 +3764,317 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Endpoint must start with http:// or https://.",
       ["settings.custom.error.endpoint_chars"] =
         "Endpoint may not contain quotes, backticks, or control characters.",
+      ["settings.custom.error.endpoint_format_changed"] =
+        "API format changed. Verify or replace the endpoint path before saving.",
+      ["settings.custom.error.private_requires_local"] =
+        "Private network endpoints require the Local server option.",
+      ["settings.custom.error.private_ack_required"] =
+        "Confirm that you trust this exact private network address.",
+      ["settings.custom.error.private_ack_stale"] =
+        "The saved private network approval no longer matches this endpoint.",
+      ["settings.custom.error.native_https_required"] =
+        "Public endpoints must use HTTPS.",
+      ["settings.custom.error.native_forbidden_destination"] = "This IP address range is not allowed for this provider.",
+      ["settings.custom.error.native_endpoint"] =
+        "Use a valid HTTPS endpoint, an IP-literal loopback endpoint, or an approved private network IP ending in the selected API path.",
+      ["settings.custom.error.native_model_id"] = "Model IDs must use 1 to 256 printable ASCII characters without spaces.",
+      ["settings.custom.error.chat_token_limit_field"] =
+        "Choose a supported Chat Completions token-limit field.",
+      ["settings.custom.error.native_price_pair"] =
+        "Enter both input and output prices, or leave both blank.",
+      ["settings.custom.error.native_timeouts"] = "Timeouts must be whole seconds. The request timeout must be at least the connect timeout.",
+      ["settings.custom.error.native_key_required"] = "This provider requires an API key.",
+      ["settings.custom.error.native_invalid_settings"] =
+        "Invalid Custom or Local provider settings.",
+      ["settings.custom.error.native_id_conflict"] =
+        "A built-in or legacy provider already uses this ID.",
+      ["settings.custom.error.native_future_schema"] =
+        "These Custom and Local settings were saved by a newer ReaAssist version.",
+      ["settings.custom.error.native_preserved_id_conflict"] =
+        "A preserved native provider already uses this ID.",
+      ["settings.custom.error.native_limit"] =
+        "Too many native Custom and Local providers.",
+      ["settings.custom.error.native_not_found"] =
+        "Native provider not found.",
+      ["settings.custom.error.native_test_incomplete"] =
+        "The native provider test configuration is incomplete.",
+      ["settings.custom.value.unknown"] = "Unknown",
+      ["settings.custom.native.test_inference"] =
+        "Test with one real inference request",
+      ["settings.custom.native.advanced_description"] = "You can adjust timeouts for this connection. Other advanced fields are unavailable because the request format is fixed.",
+      ["settings.custom.native.provider_fallback"] = "Custom provider",
+      ["settings.custom.native.start_sr_title"] = "This connection is unavailable in Screen Reader Mode.",
+      ["settings.custom.native.start_sr_body"] = "{provider} uses a connection type that Screen Reader Mode cannot test.",
+      ["settings.custom.native.start_sr_help"] = "Use the visual interface for this provider, or select a compatible Custom provider in Screen Reader Mode.",
+      ["a11y.sr.native_profile_unavailable"] = "{provider} uses a connection type that is unavailable in Screen Reader Mode. Use the visual interface for this provider, or select a compatible Custom provider in Screen Reader Mode.",
+      ["settings.custom.native.start_refused_title"] = "Couldn't start the {provider} request.",
+      ["settings.custom.native.start_refused_body"] = "The selected connection is unavailable. Check its settings and try again.",
+      ["settings.custom.native.start_refused_help"] = "Check the endpoint, API format, authentication and model ID. If installation is incomplete, finish it and restart REAPER.",
+      ["settings.openrouter.configure"] = "Configure OpenRouter",
+      ["settings.openrouter.configure.tip"] =
+        "Choose the model, exact provider endpoint, routing policy, preset, and API format used for OpenRouter requests.",
+      ["settings.openrouter.subtitle"] =
+        "Try any OpenRouter model and choose how it is routed.",
+      ["settings.openrouter.breadcrumb"] =
+        "OPENROUTER (EXPERIMENTAL) / ADVANCED USERS",
+      ["settings.openrouter.warning"] =
+        "Experimental: OpenRouter models and providers are unverified. Compatibility, output quality, pricing estimates, and capabilities are not tested or guaranteed by ReaAssist.",
+      ["settings.openrouter.capability_note"] =
+        "Image input and returned-image support start as Unknown and fail closed. Readable provider reasoning can use the existing Show provider reasoning setting when the selected route returns it.",
+      ["settings.openrouter.model_id"] = "Model ID",
+      ["settings.openrouter.provider_id"] = "Provider ID",
+      ["settings.openrouter.optional"] = "(optional)",
+      ["settings.openrouter.provider_id_tip"] =
+        "Paste the exact OpenRouter endpoint tag, such as deepinfra/fp8 or deepseek. This is not a URL or provider display name.",
+      ["settings.openrouter.routing.label"] = "Provider Routing",
+      ["settings.openrouter.routing.auto"] =
+        "Automatic (OpenRouter default)",
+      ["settings.openrouter.routing.price"] = "Lowest price",
+      ["settings.openrouter.routing.throughput"] = "Highest throughput",
+      ["settings.openrouter.routing.latency"] = "Lowest latency",
+      ["settings.openrouter.routing.specific"] = "Specific provider",
+      ["settings.openrouter.routing.tip"] =
+        "Choose OpenRouter default routing, an exact sort, or a specific endpoint. OpenRouter applies Auto Exacto automatically only to requests that contain tools. ReaAssist does not offer it as a separate route.",
+      ["settings.openrouter.format.label"] = "API Format",
+      ["settings.openrouter.format.chat"] =
+        "Chat Completions (default)",
+      ["settings.openrouter.format.responses"] =
+        "Responses API (Experimental)",
+      ["settings.openrouter.format.tip"] =
+        "The two formats are separate configurations. ReaAssist never probes one by billing the other.",
+      ["settings.openrouter.fallback.label"] =
+        "If the selected provider fails",
+      ["settings.openrouter.fallback.use_another"] =
+        "Use another provider if needed",
+      ["settings.openrouter.fallback.fail"] = "Fail the request",
+      ["settings.openrouter.fallback.tip"] =
+        "Fallback can use a different provider. Fail the request pins the exact Provider ID.",
+      ["settings.openrouter.confirm_direct"] =
+        "Use this unverified Provider ID",
+      ["settings.openrouter.confirm_direct.tip"] =
+        "The current exact-model catalog does not verify this tag. OpenRouter will decide whether it exists.",
+      ["settings.openrouter.preset.mode.label"] = "Preset Mode",
+      ["settings.openrouter.preset.mode.off"] =
+        "Off (use Model ID and Provider Routing)",
+      ["settings.openrouter.preset.mode.preset_only"] =
+        "Preset owns model and provider routing",
+      ["settings.openrouter.preset.mode.request_override"] =
+        "Preset with ReaAssist request overrides",
+      ["settings.openrouter.preset.mode.tip"] =
+        "Preset-only lets the preset own its model list and provider routing. Request overrides keep the Model ID and Provider Routing below. OpenRouter request fields override matching preset fields.",
+      ["settings.openrouter.preset.slug"] = "Preset Slug",
+      ["settings.openrouter.preset.choose_or_paste"] = "(choose or paste)",
+      ["settings.openrouter.preset.choose"] = "Choose a fetched preset...",
+      ["settings.openrouter.preset.fetched_label"] = "Fetched Presets",
+      ["settings.openrouter.preset.fetched_tip"] =
+        "The chooser contains up to the first 100 account presets. You can paste another exact slug above.",
+      ["settings.openrouter.preset.more"] =
+        "OpenRouter returned the first {shown} of {total} presets. Paste another exact slug above.",
+      ["settings.openrouter.preset.refresh"] = "Refresh preset list",
+      ["settings.openrouter.preset.refreshing"] =
+        "Refreshing OpenRouter presets...",
+      ["settings.openrouter.preset.refresh_failed"] =
+        "Preset refresh could not start.",
+      ["settings.openrouter.preset.unavailable"] = "Preset lookup is unavailable until the connection is ready.",
+      ["settings.openrouter.preset.confirm_direct"] =
+        "Use this unverified preset slug",
+      ["settings.openrouter.preset.confirm_direct.tip"] =
+        "This slug is not in the current fetched account list. OpenRouter will decide whether it exists when the request is sent.",
+      ["settings.openrouter.catalog.label"] =
+        "MODEL AND PROVIDER CATALOG",
+      ["settings.openrouter.catalog.copy"] =
+        "Refresh performs a non-billable OpenRouter catalog lookup. Pricing is a dated estimate until final usage reports the actual cost. There is no manual pricing entry.",
+      ["settings.openrouter.catalog.refresh"] =
+        "Refresh model and provider list",
+      ["settings.openrouter.catalog.refreshing"] =
+        "Refreshing OpenRouter catalog...",
+      ["settings.openrouter.catalog.start_failed"] =
+        "Catalog lookup could not start.",
+      ["settings.openrouter.catalog.unavailable"] = "Catalog lookup is unavailable until the OpenRouter connection is ready.",
+      ["settings.openrouter.catalog.provenance"] =
+        "OpenRouter catalog snapshot / fetched UTC {timestamp}",
+      ["settings.openrouter.catalog.search_hint"] =
+        "Search provider name or ID",
+      ["settings.openrouter.catalog.detail.input_output"] =
+        "${input} input / ${output} output per 1M tokens",
+      ["settings.openrouter.catalog.detail.cache_read"] =
+        "${price} cache read per 1M tokens",
+      ["settings.openrouter.catalog.detail.context"] = "{value} context",
+      ["settings.openrouter.catalog.detail.uptime"] = "{value}% uptime",
+      ["settings.openrouter.catalog.detail.latency"] = "{value}s latency",
+      ["settings.openrouter.catalog.detail.throughput"] = "{value} tps",
+      ["settings.openrouter.catalog.tip.supported_parameters"] =
+        "Supported parameters: {values}",
+      ["settings.openrouter.catalog.tip.cache_supported"] =
+        "Implicit prompt caching: supported",
+      ["settings.openrouter.catalog.tip.cache_not_advertised"] =
+        "Implicit prompt caching: not advertised",
+      ["settings.openrouter.catalog.tip.max_output"] =
+        "Max output: {value}",
+      ["settings.openrouter.catalog.tip.region"] = "Region: {value}",
+      ["settings.openrouter.catalog.tip.prompt_training"] =
+        "Prompt training",
+      ["settings.openrouter.catalog.tip.retention"] = "Retention",
+      ["settings.openrouter.catalog.tip.moderation"] = "Moderation",
+      ["settings.openrouter.catalog.no_matches"] =
+        "No providers match this search.",
+      ["settings.openrouter.catalog.more_matches"] =
+        "{count} more matches. Narrow the search.",
+      ["settings.openrouter.catalog.unknown"] =
+        "No current exact-model catalog snapshot. Capability and preflight cost estimates are Unknown.",
+      ["settings.openrouter.test"] = "Deliberate billed test",
+      ["settings.openrouter.test.tip"] =
+        "Sends one real request using the selected model and API format. OpenRouter may bill it.",
+      ["settings.openrouter.test.confirm_title"] =
+        "Run billed OpenRouter test?",
+      ["settings.openrouter.test.confirm_body"] =
+        "This sends a real request to {model} using {format}. The selected OpenRouter settings are saved before the request is sent. OpenRouter may bill the request. One success does not certify the model.",
+      ["settings.openrouter.test.confirm"] = "Run billed test",
+      ["settings.openrouter.test.running"] =
+        "OpenRouter billed test started...",
+      ["settings.openrouter.test.start_failed"] =
+        "OpenRouter test could not start.",
+      ["settings.openrouter.test.unavailable"] = "The billed test is unavailable until the OpenRouter connection is ready.",
+      ["settings.openrouter.saved"] = "OpenRouter settings saved",
+      ["settings.openrouter.error.model_id"] =
+        "Enter a valid OpenRouter model ID such as z-ai/glm-5.3-flash.",
+      ["settings.openrouter.error.provider_id"] =
+        "Enter an exact provider ID such as deepinfra/fp8 or deepseek, or leave it blank.",
+      ["settings.openrouter.error.provider_required"] =
+        "Specific provider routing requires a Provider ID.",
+      ["settings.openrouter.error.provider_requires_specific"] =
+        "A Provider ID requires Specific provider routing.",
+      ["settings.openrouter.error.confirm_unverified_provider"] =
+        "Confirm that this directly entered Provider ID is unverified.",
+      ["settings.openrouter.error.preset_mode"] = "Invalid preset mode.",
+      ["settings.openrouter.error.preset_slug"] =
+        "Enter a valid OpenRouter preset slug.",
+      ["settings.openrouter.error.preset_disabled_slug"] =
+        "Turn on Presets before entering a slug.",
+      ["settings.openrouter.error.preset_slug_required"] =
+        "Enter an OpenRouter preset slug.",
+      ["settings.openrouter.error.routing"] =
+        "Invalid provider routing selection.",
+      ["settings.openrouter.error.preset_owns_routing"] =
+        "Preset-only mode owns provider routing.",
+      ["settings.openrouter.error.api_format"] =
+        "Invalid API format selection.",
+      ["settings.openrouter.error.preset_inactive"] =
+        "The selected preset is not active.",
+      ["settings.openrouter.error.confirm_unverified_preset"] =
+        "Confirm that this directly entered preset slug is unverified.",
+      ["settings.openrouter.provider_label"] =
+        "OpenRouter (Experimental)",
+      ["settings.openrouter.model.set_in_settings"] =
+        "Set a model ID in Settings",
+      ["settings.openrouter.model.preset_unverified"] =
+        "Preset: {preset} (Unverified)",
+      ["settings.openrouter.model.unverified"] =
+        "{model} (Unverified)",
+      ["settings.openrouter.model.chip"] = "UNVERIFIED",
+      ["settings.openrouter.error.invalid_document"] =
+        "Invalid OpenRouter settings.",
+      ["settings.openrouter.error.future_schema"] =
+        "OpenRouter settings were saved by a newer ReaAssist version.",
+      ["settings.openrouter.error.invalid_preset_mode"] =
+        "Invalid OpenRouter preset mode.",
+      ["settings.openrouter.error.invalid_preset_slug_detail"] =
+        "Invalid OpenRouter preset slug: {reason}",
+      ["settings.openrouter.error.invalid_model_id_detail"] =
+        "Invalid OpenRouter model ID: {reason}",
+      ["settings.openrouter.error.invalid_provider_id_detail"] =
+        "Invalid OpenRouter provider ID: {reason}",
+      ["settings.openrouter.error.preset_only_routing_save"] =
+        "Preset-only mode must leave request routing on Automatic with no Provider ID.",
+      ["settings.openrouter.error.confirm_provider_before_save"] =
+        "Confirm the unverified OpenRouter Provider ID before saving.",
+      ["settings.openrouter.error.preset_inactive_save"] =
+        "The selected OpenRouter preset is not active.",
+      ["settings.openrouter.error.confirm_preset_before_save"] =
+        "Confirm the unverified OpenRouter preset slug before saving.",
+      ["settings.openrouter.error.invalid_api_format"] =
+        "Invalid OpenRouter API format.",
+      ["settings.openrouter.operation.failed"] =
+        "OpenRouter operation failed",
+      ["settings.openrouter.operation.reason.start_failed"] = "start failed",
+      ["settings.openrouter.operation.reason.status_failed"] =
+        "status failed",
+      ["settings.openrouter.operation.reason.read_failed"] = "read failed",
+      ["settings.openrouter.operation.reason.snapshot_rejected"] =
+        "snapshot rejected",
+      ["settings.openrouter.operation.reason.final_status_failed"] =
+        "final status failed",
+      ["settings.openrouter.operation.reason.unknown"] = "unknown",
+      ["settings.openrouter.catalog.cancelled"] =
+        "OpenRouter catalog refresh cancelled.",
+      ["settings.openrouter.catalog.already_running"] =
+        "An OpenRouter catalog refresh is already running.",
+      ["settings.openrouter.catalog.invalid_model"] =
+        "Invalid OpenRouter model ID: {reason}",
+      ["settings.openrouter.catalog.key_required"] =
+        "Enter an OpenRouter API key before refreshing the catalog.",
+      ["settings.openrouter.catalog.engine_unavailable"] = "The OpenRouter catalog is unavailable.",
+      ["settings.openrouter.catalog.credential_failed"] =
+        "Could not prepare the OpenRouter catalog credential.",
+      ["settings.openrouter.catalog.provider_start_failed"] =
+        "OpenRouter provider lookup could not start: {reason}",
+      ["settings.openrouter.catalog.provider_running"] =
+        "Refreshing OpenRouter provider catalog...",
+      ["settings.openrouter.preset.key_required"] =
+        "Enter an OpenRouter API key before refreshing presets.",
+      ["settings.openrouter.preset.start_failed_reason"] =
+        "OpenRouter preset lookup could not start: {reason}",
+      ["settings.openrouter.preset.catalog_mismatch"] =
+        "OpenRouter preset catalog did not match the request.",
+      ["settings.openrouter.catalog.snapshot_mismatch"] =
+        "OpenRouter catalog snapshots did not match the requested model.",
+      ["settings.openrouter.catalog.refresh_failed_reason"] =
+        "OpenRouter catalog refresh failed: {reason}",
+      ["settings.openrouter.catalog.ended_state"] =
+        "OpenRouter catalog refresh ended in state {state}.",
+      ["settings.openrouter.catalog.save_failed"] =
+        "OpenRouter catalog could not be saved: {reason}",
+      ["settings.openrouter.preset.completed"] =
+        "OpenRouter preset catalog refreshed.",
+      ["settings.openrouter.catalog.completed"] =
+        "OpenRouter provider catalog refreshed.",
+      ["settings.openrouter.test.cancelled"] =
+        "OpenRouter billed test cancelled. A request already sent may still be billed.",
+      ["settings.openrouter.test.already_running"] =
+        "An OpenRouter billed test is already running.",
+      ["settings.openrouter.test.key_required"] =
+        "Enter an OpenRouter API key before running the billed test.",
+      ["settings.openrouter.test.engine_unavailable"] = "The OpenRouter connection is unavailable.",
+      ["settings.openrouter.test.api_format_unavailable"] =
+        "The OpenRouter billed test API format is unavailable.",
+      ["settings.openrouter.test.input_failed"] =
+        "Could not prepare the OpenRouter billed test input.",
+      ["settings.openrouter.test.start_failed_reason"] =
+        "OpenRouter billed test could not start: {reason}",
+      ["settings.openrouter.test.accumulator_failed"] =
+        "OpenRouter billed test accumulator could not start.",
+      ["settings.openrouter.test.status_failed"] =
+        "OpenRouter billed test status failed: {reason}",
+      ["settings.openrouter.test.read_failed"] =
+        "OpenRouter billed test read failed: {reason}",
+      ["settings.openrouter.test.event_rejected"] =
+        "OpenRouter billed test event was rejected: {reason}",
+      ["settings.openrouter.test.failed_reason"] =
+        "OpenRouter billed test failed: {reason}",
+      ["settings.openrouter.test.completed"] =
+        "OpenRouter billed test completed.",
+      ["settings.openrouter.test.completed_cost"] =
+        "OpenRouter billed test completed. Actual cost: ${cost}.",
+      ["settings.openrouter.test.completed_provider"] =
+        "OpenRouter billed test completed. Provider: {provider}.",
+      ["settings.openrouter.test.completed_cost_provider"] =
+        "OpenRouter billed test completed. Actual cost: ${cost}. Provider: {provider}.",
+      ["settings.openrouter.test.actual_cost"] = "Actual cost: ${cost}.",
+      ["settings.openrouter.test.provider"] = "Provider: {provider}.",
+      ["settings.openrouter.catalog.poll_failed"] =
+        "OpenRouter catalog polling failed: {reason}",
+      ["settings.openrouter.test.poll_failed"] =
+        "OpenRouter billed test polling failed: {reason}",
       ["settings.custom.error.endpoint_chat_completions"] =
         "Use the full chat-completions URL, for example http://localhost:1234/v1/chat/completions.",
       ["settings.custom.error.model_required"] =
@@ -3554,6 +4085,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Input price (cache miss) must be a number >= 0.",
       ["settings.custom.error.price_cache"] =
         "Cache-hit price must be a number >= 0.",
+      ["settings.custom.error.price_cache_write"] =
+        "Cache-write price must be a number >= 0.",
       ["settings.custom.error.price_out"] =
         "Output price must be a number >= 0.",
       ["settings.custom.error.context_window_min"] =
@@ -3767,6 +4300,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.pref.auto_backup.label"] = "Auto-backup session",
       ["settings.pref.auto_backup.tooltip"] =
         "Save a timestamped .rpp-bak before Auto-Run executes returned code",
+      ["settings.pref.stream_responses.label"] = "Stream responses",
+      ["settings.pref.stream_responses.tooltip"] =
+        "Show each answer as it arrives. Turn this off to wait for the "
+        .. "complete, validated answer.",
       ["settings.pref.theme.label"] = "Theme",
       ["settings.pref.theme.auto"] = "Auto",
       ["settings.pref.theme.dark"] = "Dark",
@@ -3805,6 +4342,57 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.pref.check_updates.tooltip_v2"] =
         "Check now for a newer ReaAssist release or missing files. This "
         .. "works whether or not automatic checks are on.",
+      -- The deploy lock contract's two lines. The held one is the sentence
+      -- Engine/engine/tools/MAIN_INSTALL_CANDIDATE_SAFETY.md requires: nothing
+      -- is queued and nothing is retried, so it asks the user to try again.
+      ["deploy_lock.held"] =
+        "An update is being installed. Try again in a moment.",
+      ["deploy_lock.stale"] =
+        "A deploy lock file was left behind at {path}. Nothing is being installed. Delete that file to clear this notice.",
+      ["engine.heading"] = "Installation",
+      ["engine.action.install"] = "Finish Installation",
+      ["engine.action.update"] = "Install Update",
+      ["engine.action.tooltip"] = "Installs required ReaAssist files. Restart REAPER afterward to finish installation.",
+      ["engine.install.available"] = "Required files are ready to install.",
+      ["engine.update.available"] = "An update to support files is ready to install.",
+      ["engine.install.current"] = "No installation needed.",
+      ["engine.install.newer"] = "A newer support file is already installed. No change will be made.",
+      ["engine.install.conflict"] = "An installed support file does not match this release. Open Settings > Advanced and choose Reinstall This Version to replace it, or report the mismatch. No file is replaced without your confirmation.",
+      ["engine.install.preparing"] = "Preparing the installation. Keep REAPER open until this step finishes.",
+      ["engine.action.close_reaper"] = "Close REAPER",
+      ["engine.install.restart"] = "Restart REAPER to finish the install.",
+      ["engine.install.recovery_blocked"] = "The previous support file cannot be restored. Open Settings > Advanced and choose Stop Waiting for Recovery to end this recovery and allow a new installation attempt.",
+      ["engine.install.no_action"] = "This package will not replace the installed support file. No change was made.",
+      ["engine.install.not_active"] = "Restart REAPER to finish the install. If you have already restarted and still see this, open Settings > Advanced and choose Repair Installation.",
+      ["engine.install.quarantined"] = "This version was rejected after an earlier installation. Open Settings > Advanced and choose Allow This Version to permit another installation attempt.",
+      ["engine.install.repair_needed"] = "Installation stopped. Open Settings > Advanced and choose Repair Installation to check and recover the saved installation state.",
+      ["engine.install.active"] = "Installation complete.",
+      ["engine.install.rolled_back"] = "The installation was rolled back. ReaAssist will keep using its previous connection method.",
+      ["engine.install.refused"] = "Installation stopped. Restart REAPER and open ReaAssist to try recovery again.",
+      ["engine.install.unavailable"] = "Installation is unavailable in this build.",
+      ["engine.install.unexpected_error"] = "The installation action failed. Check the installation status before trying again.",
+      ["engine.install.action_expired"] = "That action is no longer available. The installation state changed while this dialog was open.",
+      ["attach.error.import_failed"] = "ReaAssist could not import this image. Remove it and attach it again.",
+      ["attach.error.aggregate_limit"] = "Attachments are too large for one request. Remove an attachment or use smaller files.",
+      ["network.response_unreadable"] = "The provider finished the request, but ReaAssist could not read the saved response. The request will not be sent again automatically. Please send your message again.",
+      ["engine.install.busy"] = "Finish the current request or update before starting installation.",
+      ["engine.dialog.title"] = "ReaAssist",
+      ["engine.install.recovery_required"] = "An interrupted installation left a required support file missing. Open Settings > Advanced and choose Repair Installation. If Finish Installation is available, you can use it to install the required files again.",
+      ["engine.action.repair"] = "Repair Installation",
+      ["engine.action.repair.tooltip"] = "May restore the previous support file, remove a file that never activated or set aside an unreadable installation record and rebuild it from the installed file. Restart REAPER afterward.",
+      ["engine.confirm.repair"] = "Repair the installation? Depending on the saved state, ReaAssist may restore the previous support file, remove a file that never activated or set aside an unreadable installation record and rebuild it from the installed file. Restart REAPER afterward to finish the repair.",
+      ["engine.action.confirm_repair"] = "Replace Installed File",
+      ["engine.action.confirm_repair.tooltip"] = "ReaAssist cannot identify the file in REAPER's UserPlugins folder. Replaces it with the file included in this release, then verifies it after a REAPER restart.",
+      ["engine.confirm.confirm_repair"] = "ReaAssist cannot identify the file in REAPER's UserPlugins folder. Replace it with the file included in this release? Restart REAPER afterward to finish verification.",
+      ["engine.install.confirm_repair"] = "ReaAssist cannot identify an installed support file. Open Settings > Advanced to review and replace it.",
+      ["engine.action.clear_quarantine"] = "Allow This Version",
+      ["engine.action.clear_quarantine.tooltip"] = "Allows a previously rejected support-file version to be installed again. It changes no installed file.",
+      ["engine.action.replace"] = "Reinstall This Version",
+      ["engine.action.replace.tooltip"] = "Replaces the installed support file with the same version from this release. Restart REAPER afterward to finish installation.",
+      ["engine.confirm.replace"] = "Reinstall the required support file? ReaAssist will replace it with the file in this release and verify it after you restart REAPER.",
+      ["engine.action.discharge_recovery"] = "Stop Waiting for Recovery",
+      ["engine.action.discharge_recovery.tooltip"] = "Ends a blocked recovery when the previous support file is missing, damaged or withdrawn. It changes no installed file and allows a new installation attempt.",
+      ["engine.confirm.discharge_recovery"] = "Stop waiting for recovery? The previous support file is missing, damaged or withdrawn, so it cannot be restored. Continuing ends this recovery and allows a new installation attempt. No installed file is changed, and the recovery record is kept.",
       ["settings.adv.snapshot.label"] =
         "Send session snapshot with each message",
       ["settings.adv.snapshot.tooltip"] =
@@ -3813,6 +4401,21 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Always include REAPER API reference",
       ["settings.adv.api_ref.tooltip"] =
         "Pin the REAPER Lua API reference to every request instead of letting the model fetch it on-demand. On = zero round-trips but ~10K extra tokens every turn. Off = saves tokens on non-code turns; the model fetches docs when it needs them.",
+      ["settings.adv.reasoning_summaries.label"] =
+        "Show reasoning summaries",
+      ["settings.adv.reasoning_summaries.tooltip"] =
+        "Show a provider-written summary after the final answer when the selected provider supports it.",
+      ["settings.adv.reasoning_summaries.availability"] =
+        "Available for Claude and Gemini when Thinking is on. A supported provider may return no summary for a simple request. ChatGPT, DeepSeek, and custom providers do not supply supported summaries in this version.",
+      ["settings.adv.reasoning_display.label"] = "Show provider reasoning",
+      ["settings.adv.reasoning_display.off"] = "Off",
+      ["settings.adv.reasoning_display.summaries"] = "Summaries",
+      ["settings.adv.reasoning_display.provider_visible"] =
+        "Provider reasoning",
+      ["settings.adv.reasoning_display.tooltip"] =
+        "Choose whether final answers show provider-written summaries, or both summaries and readable reasoning returned by the provider. Encrypted or hidden reasoning is never shown.",
+      ["settings.adv.reasoning_display.availability"] =
+        "Availability depends on the selected provider, model, and API format. A supported provider may return no readable reasoning or summary for a simple request.",
       ["settings.adv.diagnostics.label"] = "Automatic diagnostics",
       ["settings.adv.diagnostics.off"] = "Off",
       ["settings.adv.diagnostics.basic"] = "Basic",
@@ -3839,6 +4442,12 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Projected token use for this request: {projected} (your limit: {limit}). This next model call could use up to {next} tokens.",
       ["dialog.turn_budget.cost_body"] =
         "Projected cost for this request: {projected} (your limit: {limit}). This next model call could cost up to {next}.",
+      ["dialog.turn_budget.unknown_cache_price_body"] =
+        "The previous model call used a cache category whose price is blank. The exact turn cost is Unknown, so ReaAssist cannot safely estimate this additional billable request.",
+      ["dialog.turn_budget.unknown_provider_price_body"] =
+        "This billable Custom provider has no trusted input and output price estimate. ReaAssist cannot prove that this request stays within your per-turn dollar limit.",
+      ["dialog.turn_budget.actual_cost_body"] =
+        "Provider-reported actual cost already used: {actual} (your limit: {limit}). A trusted estimate is unavailable for the next model call.",
       ["dialog.turn_budget.not_sent"] =
         "No additional model request has been sent.",
       ["dialog.turn_budget.one_call"] =
@@ -3853,6 +4462,12 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Stopped before another model request. Its worst-case token allowance would put this turn at about {projected} tokens, above your {limit}-token limit.\n\nRaise the per-turn token limit in Settings > Advanced, shorten the request, or start a new chat.",
       ["net.turn_budget.cost_stop"] =
         "Stopped before another billable model request. Its estimated worst case would put this turn at about {projected}, above your {limit} per-turn limit.\n\nRaise the dollar limit in Settings > Advanced, choose a less expensive model, or start a new chat.",
+      ["net.turn_budget.unknown_cache_price_stop"] =
+        "Stopped before another billable model request. The previous call used a cache category whose price is blank, so this turn's exact cost is Unknown. Set the missing cache price in Settings, approve the additional request explicitly, or start a new chat.",
+      ["net.turn_budget.unknown_provider_price_stop"] =
+        "Stopped before a billable Custom provider request whose price is blank. ReaAssist cannot prove that this request stays within your per-turn dollar limit. Enter the provider's input and output prices, approve this one request explicitly, or start a new chat.",
+      ["net.turn_budget.actual_cost_stop"] =
+        "Stopped before another billable model request. This turn has already used {actual} in provider-reported actual cost, reaching your {limit} per-turn limit. A trusted estimate is unavailable for the next call.\n\nRaise the dollar limit in Settings > Advanced, choose a less expensive model, or start a new chat.",
       ["net.turn_budget.continue_failed"] =
         "The approved model request could not be started. Please try again.",
       ["settings.adv.fx_cache.label"] = "FX Param Cache",
@@ -4155,10 +4770,406 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
   },
 }
 
+I18N.SOURCE_REVISION = 1
+-- Keys added or changed since public v1.5 require current translations.
+I18N.KEY_MIN_REVISION = {
+  ["response.local_peak_level_clarification"] = 1,
+  ["response.local_compound_audio_sync_clarification"] = 1,
+  ["network.curl.dns_retry"] = 1,
+  ["validator.audio_sync_missing_edit_blocked"] = 1,
+  ["retry.reason.for_audio_sync_missing_edit"] = 1,
+  ["a11y.sr.debug_logging.meaning_v2"] = 1,
+  ["a11y.sr.debug_logging_enabled_reproduce"] = 1,
+  ["a11y.sr.legacy_auth_missing"] = 1,
+  ["a11y.sr.legacy_endpoint_missing"] = 1,
+  ["a11y.sr.legacy_model_pending"] = 1,
+  ["a11y.sr.legacy_model_unavailable"] = 1,
+  ["a11y.sr.legacy_runtime_mismatch_status"] = 1,
+  ["a11y.sr.legacy_substitution_announcement"] = 1,
+  ["a11y.sr.legacy_substitution_status"] = 1,
+  ["a11y.sr.legacy_substitution_status.meaning"] = 1,
+  ["a11y.sr.legacy_tuple_unavailable"] = 1,
+  ["a11y.sr.native_profile_unavailable"] = 1,
+  ["a11y.sr.report_attachment_chat.many"] = 1,
+  ["a11y.sr.report_attachment_chat.one"] = 1,
+  ["a11y.sr.report_attachment_chat_log_empty.many"] = 1,
+  ["a11y.sr.report_attachment_chat_log_empty.one"] = 1,
+  ["a11y.sr.report_attachment_none_log_empty"] = 1,
+  ["a11y.sr.response_link.meaning_v1"] = 1,
+  ["a11y.sr.response_ready_fx_insert_failed_partial_v2"] = 1,
+  ["a11y.sr.response_ready_fx_insert_failed_partial_v3"] = 1,
+  ["a11y.sr.response_ready_fx_preference_substituted"] = 1,
+  ["attach.error.aggregate_limit"] = 1,
+  ["attach.error.file_picker"] = 1,
+  ["attach.error.import_failed"] = 1,
+  ["bug_report.debug.capture_order"] = 1,
+  ["bug_report.debug.enabled_reproduce"] = 1,
+  ["bug_report.item.chat_log_empty.many"] = 1,
+  ["bug_report.item.chat_log_empty.one"] = 1,
+  ["bug_report.item.none_log_empty"] = 1,
+  ["chat.status.deep_scan.detail"] = 1,
+  ["chat.status.responding"] = 1,
+  ["chat.status.revising_answer"] = 1,
+  ["code.run.fx_insert_failed_partial_v2"] = 1,
+  ["code.run.fx_insert_failed_partial_v3"] = 1,
+  ["code.run.fx_insert_reused_index_v2"] = 1,
+  ["code.run.fx_preference_substituted"] = 1,
+  ["code.run.fx_preference_substituted_item"] = 1,
+  ["code.run.fx_requested_unserved"] = 1,
+  ["code.run.fx_requested_unserved_guessed"] = 1,
+  ["code.run.fx_requested_unserved_script"] = 1,
+  ["code.run.fx_requested_unserved_script_guessed"] = 1,
+  ["code.run.midi_limited"] = 1,
+  ["code.run.midi_partial"] = 1,
+  ["code.run.midi_returned"] = 1,
+  ["code.run.midi_unchanged"] = 1,
+  ["code.run.midi_unknown"] = 1,
+  ["code.run.no_guess_execution_contract_invalid"] = 1,
+  ["code.run.no_guess_mapping_validator"] = 1,
+  ["code.run.no_guess_multiple_scripts"] = 1,
+  ["code.run.validation_blocked"] = 1,
+  ["code.save_browser_tip"] = 1,
+  ["deploy_lock.held"] = 1,
+  ["deploy_lock.stale"] = 1,
+  ["details.field.actual_cost"] = 1,
+  ["details.field.api_protocol"] = 1,
+  ["details.field.cache_hit_miss"] = 1,
+  ["details.field.provider_route"] = 1,
+  ["details.field.request_path"] = 1,
+  ["details.field.response_cache"] = 1,
+  ["details.tip.actual_cost"] = 1,
+  ["details.tip.cache_hit_miss"] = 1,
+  ["details.tip.provider_route"] = 1,
+  ["details.tip.request_path"] = 1,
+  ["details.tip.response_cache"] = 1,
+  ["details.value.api_protocol.anthropic_messages"] = 1,
+  ["details.value.api_protocol.deepseek_chat_completions"] = 1,
+  ["details.value.api_protocol.deepseek_responses"] = 1,
+  ["details.value.api_protocol.google_generate_content"] = 1,
+  ["details.value.api_protocol.google_interactions"] = 1,
+  ["details.value.api_protocol.openai_chat_completions"] = 1,
+  ["details.value.api_protocol.openai_responses"] = 1,
+  ["details.value.api_protocol.openrouter_chat_completions"] = 1,
+  ["details.value.api_protocol.openrouter_responses"] = 1,
+  ["details.value.cache_hit_miss"] = 1,
+  ["details.value.cache_hit_miss_percent"] = 1,
+  ["details.value.no"] = 1,
+  ["details.value.provider_route"] = 1,
+  ["details.value.request_path.engine"] = 1,
+  ["details.value.request_path.fallback"] = 1,
+  ["details.value.request_path.lua"] = 1,
+  ["details.value.response_cache.conflicting"] = 1,
+  ["details.value.response_cache.conflicting_count"] = 1,
+  ["details.value.response_cache.hit"] = 1,
+  ["details.value.response_cache.hit_count"] = 1,
+  ["details.value.response_cache.miss"] = 1,
+  ["details.value.response_cache.miss_count"] = 1,
+  ["details.value.response_cache.unknown"] = 1,
+  ["details.value.response_cache.unknown_count"] = 1,
+  ["details.value.yes"] = 1,
+  ["dialog.turn_budget.actual_cost_body"] = 1,
+  ["dialog.turn_budget.unknown_cache_price_body"] = 1,
+  ["dialog.turn_budget.unknown_provider_price_body"] = 1,
+  ["engine.action.clear_quarantine"] = 1,
+  ["engine.action.clear_quarantine.tooltip"] = 1,
+  ["engine.action.confirm_repair"] = 1,
+  ["engine.action.confirm_repair.tooltip"] = 1,
+  ["engine.action.discharge_recovery"] = 1,
+  ["engine.action.discharge_recovery.tooltip"] = 1,
+  ["engine.action.install"] = 1,
+  ["engine.action.repair"] = 1,
+  ["engine.action.repair.tooltip"] = 1,
+  ["engine.action.replace"] = 1,
+  ["engine.action.replace.tooltip"] = 1,
+  ["engine.action.tooltip"] = 1,
+  ["engine.action.update"] = 1,
+  ["engine.confirm.confirm_repair"] = 1,
+  ["engine.confirm.discharge_recovery"] = 1,
+  ["engine.confirm.repair"] = 1,
+  ["engine.confirm.replace"] = 1,
+  ["engine.dialog.title"] = 1,
+  ["engine.heading"] = 1,
+  ["engine.install.action_expired"] = 1,
+  ["engine.install.active"] = 1,
+  ["engine.install.available"] = 1,
+  ["engine.install.busy"] = 1,
+  ["engine.install.confirm_repair"] = 1,
+  ["engine.install.conflict"] = 1,
+  ["engine.install.current"] = 1,
+  ["engine.install.newer"] = 1,
+  ["engine.install.no_action"] = 1,
+  ["engine.install.not_active"] = 1,
+  ["engine.install.preparing"] = 1,
+  ["engine.action.close_reaper"] = 1,
+  ["engine.install.quarantined"] = 1,
+  ["engine.install.recovery_blocked"] = 1,
+  ["engine.install.recovery_required"] = 1,
+  ["engine.install.refused"] = 1,
+  ["engine.install.repair_needed"] = 1,
+  ["engine.install.restart"] = 1,
+  ["engine.install.rolled_back"] = 1,
+  ["engine.install.unavailable"] = 1,
+  ["engine.install.unexpected_error"] = 1,
+  ["engine.update.available"] = 1,
+  ["message.answer_retried.edit_format_tooltip"] = 1,
+  ["message.answer_retried.label"] = 1,
+  ["message.answer_retried.validation_tooltip"] = 1,
+  ["message.provider_reasoning.label"] = 1,
+  ["message.provider_reasoning.truncated"] = 1,
+  ["message.reasoning_summary.label"] = 1,
+  ["message.reasoning_summary.truncated"] = 1,
+  ["mode.combo_hint.google.gemini-3.8-flash.HIGH"] = 1,
+  ["mode.combo_hint.google.gemini-3.8-flash.LOW"] = 1,
+  ["mode.combo_hint.google.gemini-3.8-flash.MEDIUM"] = 1,
+  ["mode.model_tip.deepseek-flash"] = 1,
+  ["mode.model_tip.gemini-3.8-flash"] = 1,
+  ["net.turn_budget.actual_cost_stop"] = 1,
+  ["net.turn_budget.unknown_cache_price_stop"] = 1,
+  ["net.turn_budget.unknown_provider_price_stop"] = 1,
+  ["network.engine.provider_error"] = 1,
+  ["network.engine.provider_http_error"] = 1,
+  ["network.engine.stream_incomplete"] = 1,
+  ["network.response_unreadable"] = 1,
+  ["response.credits_exhausted_openai_v2"] = 1,
+  ["response.google_permission_denied_v2"] = 1,
+  ["response.permission_denied_v2"] = 1,
+  ["retry.reason.for_plugin_identifier"] = 1,
+  ["settings.adv.reasoning_display.availability"] = 1,
+  ["settings.adv.reasoning_display.label"] = 1,
+  ["settings.adv.reasoning_display.off"] = 1,
+  ["settings.adv.reasoning_display.provider_visible"] = 1,
+  ["settings.adv.reasoning_display.summaries"] = 1,
+  ["settings.adv.reasoning_display.tooltip"] = 1,
+  ["settings.adv.reasoning_summaries.availability"] = 1,
+  ["settings.adv.reasoning_summaries.label"] = 1,
+  ["settings.adv.reasoning_summaries.tooltip"] = 1,
+  ["settings.api_key.error.anthropic_workspace_detail"] = 1,
+  ["settings.api_key.error.anthropic_workspace_hint"] = 1,
+  ["settings.api_key.error.anthropic_workspace_short"] = 1,
+  ["settings.custom.details.modern_token_limit"] = 1,
+  ["settings.custom.details.native_price_summary_v2"] = 1,
+  ["settings.custom.details.price_cache_write"] = 1,
+  ["settings.custom.details.supports_image_input"] = 1,
+  ["settings.custom.error.chat_token_limit_field"] = 1,
+  ["settings.custom.error.endpoint_format_changed"] = 1,
+  ["settings.custom.error.native_endpoint"] = 1,
+  ["settings.custom.error.native_forbidden_destination"] = 1,
+  ["settings.custom.error.native_future_schema"] = 1,
+  ["settings.custom.error.native_https_required"] = 1,
+  ["settings.custom.error.native_id_conflict"] = 1,
+  ["settings.custom.error.native_invalid_settings"] = 1,
+  ["settings.custom.error.native_key_required"] = 1,
+  ["settings.custom.error.native_limit"] = 1,
+  ["settings.custom.error.native_model_id"] = 1,
+  ["settings.custom.error.native_not_found"] = 1,
+  ["settings.custom.error.native_preserved_id_conflict"] = 1,
+  ["settings.custom.error.native_price_pair"] = 1,
+  ["settings.custom.error.native_test_incomplete"] = 1,
+  ["settings.custom.error.native_timeouts"] = 1,
+  ["settings.custom.error.price_cache_write"] = 1,
+  ["settings.custom.error.private_ack_required"] = 1,
+  ["settings.custom.error.private_ack_stale"] = 1,
+  ["settings.custom.error.private_requires_local"] = 1,
+  ["settings.custom.legacy.tls_policy"] = 1,
+  ["settings.custom.native.advanced_description"] = 1,
+  ["settings.custom.native.auth_label"] = 1,
+  ["settings.custom.native.description"] = 1,
+  ["settings.custom.native.legacy_description"] = 1,
+  ["settings.custom.native.local_label"] = 1,
+  ["settings.custom.native.provider_fallback"] = 1,
+  ["settings.custom.native.responses_label"] = 1,
+  ["settings.custom.native.section"] = 1,
+  ["settings.custom.native.start_refused_body"] = 1,
+  ["settings.custom.native.start_refused_help"] = 1,
+  ["settings.custom.native.start_refused_title"] = 1,
+  ["settings.custom.native.start_sr_body"] = 1,
+  ["settings.custom.native.start_sr_help"] = 1,
+  ["settings.custom.native.start_sr_title"] = 1,
+  ["settings.custom.native.test_inference"] = 1,
+  ["settings.custom.native.tls_policy"] = 1,
+  ["settings.custom.notice.localhost_normalized"] = 1,
+  ["settings.custom.private_network.confirm"] = 1,
+  ["settings.custom.private_network.confirm_tip"] = 1,
+  ["settings.custom.route.engine_custom_chat"] = 1,
+  ["settings.custom.route.engine_custom_responses"] = 1,
+  ["settings.custom.route.engine_local_chat"] = 1,
+  ["settings.custom.route.engine_local_responses"] = 1,
+  ["settings.custom.route.legacy_chat"] = 1,
+  ["settings.custom.tip.details.modern_token_limit"] = 1,
+  ["settings.custom.tip.details.native_price_cache"] = 1,
+  ["settings.custom.tip.details.price_cache_write"] = 1,
+  ["settings.custom.tip.details.supports_image_input"] = 1,
+  ["settings.custom.tip.native_endpoint"] = 1,
+  ["settings.custom.tip.native_test_inference"] = 1,
+  ["settings.custom.tip.preset.kimi_native"] = 1,
+  ["settings.custom.tip.preset.unsupported_format"] = 1,
+  ["settings.custom.value.unknown"] = 1,
+  ["settings.custom.warning.legacy_remote_price_unknown"] = 1,
+  ["settings.custom.warning.private_network"] = 1,
+  ["settings.custom.warning.remote_price_unknown"] = 1,
+  ["settings.openrouter.breadcrumb"] = 1,
+  ["settings.openrouter.capability_note"] = 1,
+  ["settings.openrouter.catalog.already_running"] = 1,
+  ["settings.openrouter.catalog.cancelled"] = 1,
+  ["settings.openrouter.catalog.completed"] = 1,
+  ["settings.openrouter.catalog.copy"] = 1,
+  ["settings.openrouter.catalog.credential_failed"] = 1,
+  ["settings.openrouter.catalog.detail.cache_read"] = 1,
+  ["settings.openrouter.catalog.detail.context"] = 1,
+  ["settings.openrouter.catalog.detail.input_output"] = 1,
+  ["settings.openrouter.catalog.detail.latency"] = 1,
+  ["settings.openrouter.catalog.detail.throughput"] = 1,
+  ["settings.openrouter.catalog.detail.uptime"] = 1,
+  ["settings.openrouter.catalog.ended_state"] = 1,
+  ["settings.openrouter.catalog.engine_unavailable"] = 1,
+  ["settings.openrouter.catalog.invalid_model"] = 1,
+  ["settings.openrouter.catalog.key_required"] = 1,
+  ["settings.openrouter.catalog.label"] = 1,
+  ["settings.openrouter.catalog.more_matches"] = 1,
+  ["settings.openrouter.catalog.no_matches"] = 1,
+  ["settings.openrouter.catalog.poll_failed"] = 1,
+  ["settings.openrouter.catalog.provenance"] = 1,
+  ["settings.openrouter.catalog.provider_running"] = 1,
+  ["settings.openrouter.catalog.provider_start_failed"] = 1,
+  ["settings.openrouter.catalog.refresh"] = 1,
+  ["settings.openrouter.catalog.refresh_failed_reason"] = 1,
+  ["settings.openrouter.catalog.refreshing"] = 1,
+  ["settings.openrouter.catalog.save_failed"] = 1,
+  ["settings.openrouter.catalog.search_hint"] = 1,
+  ["settings.openrouter.catalog.snapshot_mismatch"] = 1,
+  ["settings.openrouter.catalog.start_failed"] = 1,
+  ["settings.openrouter.catalog.tip.cache_not_advertised"] = 1,
+  ["settings.openrouter.catalog.tip.cache_supported"] = 1,
+  ["settings.openrouter.catalog.tip.max_output"] = 1,
+  ["settings.openrouter.catalog.tip.moderation"] = 1,
+  ["settings.openrouter.catalog.tip.prompt_training"] = 1,
+  ["settings.openrouter.catalog.tip.region"] = 1,
+  ["settings.openrouter.catalog.tip.retention"] = 1,
+  ["settings.openrouter.catalog.tip.supported_parameters"] = 1,
+  ["settings.openrouter.catalog.unavailable"] = 1,
+  ["settings.openrouter.catalog.unknown"] = 1,
+  ["settings.openrouter.configure"] = 1,
+  ["settings.openrouter.configure.tip"] = 1,
+  ["settings.openrouter.confirm_direct"] = 1,
+  ["settings.openrouter.confirm_direct.tip"] = 1,
+  ["settings.openrouter.error.api_format"] = 1,
+  ["settings.openrouter.error.confirm_preset_before_save"] = 1,
+  ["settings.openrouter.error.confirm_provider_before_save"] = 1,
+  ["settings.openrouter.error.confirm_unverified_preset"] = 1,
+  ["settings.openrouter.error.confirm_unverified_provider"] = 1,
+  ["settings.openrouter.error.future_schema"] = 1,
+  ["settings.openrouter.error.invalid_api_format"] = 1,
+  ["settings.openrouter.error.invalid_document"] = 1,
+  ["settings.openrouter.error.invalid_model_id_detail"] = 1,
+  ["settings.openrouter.error.invalid_preset_mode"] = 1,
+  ["settings.openrouter.error.invalid_preset_slug_detail"] = 1,
+  ["settings.openrouter.error.invalid_provider_id_detail"] = 1,
+  ["settings.openrouter.error.model_id"] = 1,
+  ["settings.openrouter.error.preset_disabled_slug"] = 1,
+  ["settings.openrouter.error.preset_inactive"] = 1,
+  ["settings.openrouter.error.preset_inactive_save"] = 1,
+  ["settings.openrouter.error.preset_mode"] = 1,
+  ["settings.openrouter.error.preset_only_routing_save"] = 1,
+  ["settings.openrouter.error.preset_owns_routing"] = 1,
+  ["settings.openrouter.error.preset_slug"] = 1,
+  ["settings.openrouter.error.preset_slug_required"] = 1,
+  ["settings.openrouter.error.provider_id"] = 1,
+  ["settings.openrouter.error.provider_required"] = 1,
+  ["settings.openrouter.error.provider_requires_specific"] = 1,
+  ["settings.openrouter.error.routing"] = 1,
+  ["settings.openrouter.fallback.fail"] = 1,
+  ["settings.openrouter.fallback.label"] = 1,
+  ["settings.openrouter.fallback.tip"] = 1,
+  ["settings.openrouter.fallback.use_another"] = 1,
+  ["settings.openrouter.format.chat"] = 1,
+  ["settings.openrouter.format.label"] = 1,
+  ["settings.openrouter.format.responses"] = 1,
+  ["settings.openrouter.format.tip"] = 1,
+  ["settings.openrouter.model.chip"] = 1,
+  ["settings.openrouter.model.preset_unverified"] = 1,
+  ["settings.openrouter.model.set_in_settings"] = 1,
+  ["settings.openrouter.model.unverified"] = 1,
+  ["settings.openrouter.model_id"] = 1,
+  ["settings.openrouter.operation.failed"] = 1,
+  ["settings.openrouter.operation.reason.final_status_failed"] = 1,
+  ["settings.openrouter.operation.reason.read_failed"] = 1,
+  ["settings.openrouter.operation.reason.snapshot_rejected"] = 1,
+  ["settings.openrouter.operation.reason.start_failed"] = 1,
+  ["settings.openrouter.operation.reason.status_failed"] = 1,
+  ["settings.openrouter.operation.reason.unknown"] = 1,
+  ["settings.openrouter.optional"] = 1,
+  ["settings.openrouter.preset.catalog_mismatch"] = 1,
+  ["settings.openrouter.preset.choose"] = 1,
+  ["settings.openrouter.preset.choose_or_paste"] = 1,
+  ["settings.openrouter.preset.completed"] = 1,
+  ["settings.openrouter.preset.confirm_direct"] = 1,
+  ["settings.openrouter.preset.confirm_direct.tip"] = 1,
+  ["settings.openrouter.preset.fetched_label"] = 1,
+  ["settings.openrouter.preset.fetched_tip"] = 1,
+  ["settings.openrouter.preset.key_required"] = 1,
+  ["settings.openrouter.preset.mode.label"] = 1,
+  ["settings.openrouter.preset.mode.off"] = 1,
+  ["settings.openrouter.preset.mode.preset_only"] = 1,
+  ["settings.openrouter.preset.mode.request_override"] = 1,
+  ["settings.openrouter.preset.mode.tip"] = 1,
+  ["settings.openrouter.preset.more"] = 1,
+  ["settings.openrouter.preset.refresh"] = 1,
+  ["settings.openrouter.preset.refresh_failed"] = 1,
+  ["settings.openrouter.preset.refreshing"] = 1,
+  ["settings.openrouter.preset.slug"] = 1,
+  ["settings.openrouter.preset.start_failed_reason"] = 1,
+  ["settings.openrouter.preset.unavailable"] = 1,
+  ["settings.openrouter.provider_id"] = 1,
+  ["settings.openrouter.provider_id_tip"] = 1,
+  ["settings.openrouter.provider_label"] = 1,
+  ["settings.openrouter.routing.auto"] = 1,
+  ["settings.openrouter.routing.label"] = 1,
+  ["settings.openrouter.routing.latency"] = 1,
+  ["settings.openrouter.routing.price"] = 1,
+  ["settings.openrouter.routing.specific"] = 1,
+  ["settings.openrouter.routing.throughput"] = 1,
+  ["settings.openrouter.routing.tip"] = 1,
+  ["settings.openrouter.saved"] = 1,
+  ["settings.openrouter.subtitle"] = 1,
+  ["settings.openrouter.test"] = 1,
+  ["settings.openrouter.test.accumulator_failed"] = 1,
+  ["settings.openrouter.test.actual_cost"] = 1,
+  ["settings.openrouter.test.already_running"] = 1,
+  ["settings.openrouter.test.api_format_unavailable"] = 1,
+  ["settings.openrouter.test.cancelled"] = 1,
+  ["settings.openrouter.test.completed"] = 1,
+  ["settings.openrouter.test.completed_cost"] = 1,
+  ["settings.openrouter.test.completed_cost_provider"] = 1,
+  ["settings.openrouter.test.completed_provider"] = 1,
+  ["settings.openrouter.test.confirm"] = 1,
+  ["settings.openrouter.test.confirm_body"] = 1,
+  ["settings.openrouter.test.confirm_title"] = 1,
+  ["settings.openrouter.test.engine_unavailable"] = 1,
+  ["settings.openrouter.test.event_rejected"] = 1,
+  ["settings.openrouter.test.failed_reason"] = 1,
+  ["settings.openrouter.test.input_failed"] = 1,
+  ["settings.openrouter.test.key_required"] = 1,
+  ["settings.openrouter.test.poll_failed"] = 1,
+  ["settings.openrouter.test.provider"] = 1,
+  ["settings.openrouter.test.read_failed"] = 1,
+  ["settings.openrouter.test.running"] = 1,
+  ["settings.openrouter.test.start_failed"] = 1,
+  ["settings.openrouter.test.start_failed_reason"] = 1,
+  ["settings.openrouter.test.status_failed"] = 1,
+  ["settings.openrouter.test.tip"] = 1,
+  ["settings.openrouter.test.unavailable"] = 1,
+  ["settings.openrouter.warning"] = 1,
+  ["settings.pref.stream_responses.label"] = 1,
+  ["settings.pref.stream_responses.tooltip"] = 1,
+  ["validator.fx_identifier_missing_blocked"] = 1,
+  ["validator.fx_identifier_unmatched_warning"] = 1,
+}
+
 I18N.PACK_SCHEMA = 1
 I18N.MAX_INDEX_BYTES = 128 * 1024
-I18N.MAX_UI_PACK_BYTES = 512 * 1024
-I18N.INDEX_URL = "https://reaassist.app/lang/v1/index.json"
+I18N.MAX_UI_PACK_BYTES = 1024 * 1024
+I18N.CHANNEL = "v1.6"
+I18N.INDEX_URL = "https://reaassist.app/lang/v1.6/index.json"
 I18N._cached_pack_miss = I18N._cached_pack_miss or {}
 
 function I18N._sep()
@@ -4192,7 +5203,7 @@ end
 
 function I18N.index_path()
   local root = I18N.lang_root_dir()
-  return root and (root .. "index.json") or nil
+  return root and (root .. "index." .. I18N.CHANNEL .. ".json") or nil
 end
 
 function I18N._safe_code(code)
@@ -4244,14 +5255,10 @@ function I18N._read_file_limited(path, max_bytes)
   if not (path and path ~= "") then return nil, "missing_path" end
   local f, err = io.open(path, "rb")
   if not f then return nil, err or "open_failed" end
-  local size = f:seek("end") or 0
-  if size > max_bytes then
-    f:close()
-    return nil, "oversize"
-  end
-  f:seek("set", 0)
-  local raw = f:read("*a") or ""
-  f:close()
+  local raw, read_err = f:read(max_bytes + 1)
+  local closed, close_err = f:close()
+  if read_err or not closed then return nil, read_err or close_err or "read_failed" end
+  raw = raw or ""
   if #raw > max_bytes then return nil, "oversize" end
   return raw
 end
@@ -4337,10 +5344,15 @@ function I18N.validate_ui_pack(doc, requested_code)
   if type(english_strings) ~= "table" then return nil, "english_missing" end
   local strings = {}
   local skipped = 0
+  local revision = doc.source_revision
+  if type(revision) ~= "number" or revision < 0 or revision % 1 ~= 0
+      or revision > I18N.SOURCE_REVISION then revision = 0 end
   for key, value in pairs(doc.strings) do
     if type(key) ~= "string" or key == "" or key:sub(1, 1) == "_" then
       skipped = skipped + 1
     elseif type(value) ~= "string" then
+      skipped = skipped + 1
+    elseif (I18N.KEY_MIN_REVISION[key] or 0) > revision then
       skipped = skipped + 1
     else
       local source = english_strings[key]
@@ -4359,6 +5371,7 @@ function I18N.validate_ui_pack(doc, requested_code)
       status = "complete",
       schema = I18N.PACK_SCHEMA,
       source_version = tostring(doc.source_version or ""),
+      source_revision = revision,
       remote = true,
       skipped_string_count = skipped,
     },
@@ -4374,6 +5387,34 @@ function I18N.parse_ui_pack_json(raw, requested_code)
   return I18N.validate_ui_pack(doc, requested_code)
 end
 
+function I18N._read_cached_document(path, limit, parse)
+  local function read(candidate)
+    local raw, err = I18N._read_file_limited(candidate, limit)
+    if not raw then return nil, err end
+    return parse(raw)
+  end
+  local doc, primary_err = read(path)
+  if doc then return doc end
+  local dir, name = tostring(path or ""):match("^(.*[/\\])([^/\\]+)$")
+  if not (dir and reaper and reaper.EnumerateFiles) then return nil, primary_err end
+  local prefix, backups = name .. ".bak.", {}
+  reaper.EnumerateFiles(dir, -1)
+  for index = 0, 4095 do
+    local candidate = reaper.EnumerateFiles(dir, index)
+    if not candidate then break end
+    if candidate:sub(1, #prefix) == prefix
+        and candidate:sub(#prefix + 1):match("^[%w_.%-]+$") then
+      backups[#backups + 1] = candidate
+    end
+  end
+  table.sort(backups, function(a, b) return a > b end)
+  for index = 1, math.min(#backups, 32) do
+    doc = read(dir .. backups[index])
+    if doc then return doc end
+  end
+  return nil, primary_err
+end
+
 function I18N.load_cached_ui_pack(code, opts)
   code = I18N._safe_code(code)
   if not code or code == I18N.fallback_code or code == "qps-ploc" then
@@ -4387,12 +5428,8 @@ function I18N.load_cached_ui_pack(code, opts)
     return false, "cached_miss"
   end
   local path = I18N.cached_ui_pack_path(code)
-  local raw, read_err = I18N._read_file_limited(path, I18N.MAX_UI_PACK_BYTES)
-  if not raw then
-    I18N._cached_pack_miss[code] = true
-    return false, read_err or "read_failed"
-  end
-  local catalog, parse_err = I18N.parse_ui_pack_json(raw, code)
+  local catalog, parse_err = I18N._read_cached_document(path,
+    I18N.MAX_UI_PACK_BYTES, function(raw) return I18N.parse_ui_pack_json(raw, code) end)
   if not catalog then
     I18N._cached_pack_miss[code] = true
     if Log and Log.line then
@@ -4411,14 +5448,14 @@ function I18N.load_cached_index(opts)
   opts = type(opts) == "table" and opts or {}
   if I18N.remote_index and not opts.force then return I18N.remote_index end
   local path = I18N.index_path()
-  local raw, read_err = I18N._read_file_limited(path, I18N.MAX_INDEX_BYTES)
-  if not raw then return nil, read_err or "read_failed" end
-  local doc, err = I18N._json_decode(raw)
-  if not doc then return nil, err or "json_decode_failed" end
-  if type(doc) ~= "table" or doc.schema ~= I18N.PACK_SCHEMA
-      or type(doc.languages) ~= "table" then
-    return nil, "invalid_index"
-  end
+  local doc, err = I18N._read_cached_document(path, I18N.MAX_INDEX_BYTES, function(raw)
+    local parsed, parse_err = I18N._json_decode(raw)
+    if not parsed then return nil, parse_err or "json_decode_failed" end
+    if type(parsed) ~= "table" or parsed.schema ~= I18N.PACK_SCHEMA
+        or type(parsed.languages) ~= "table" then return nil, "invalid_index" end
+    return parsed
+  end)
+  if not doc then return nil, err end
   I18N.remote_index = doc
   return doc
 end
@@ -4543,12 +5580,20 @@ end
 
 I18N.local_overrides = I18N.local_overrides or {}
 I18N.local_overrides.es = {
+    ["response.local_peak_level_clarification"] =
+      "¿Quiere reducir esos picos en esa cantidad de dB o alcanzar un nivel de pico absoluto en dBFS? ¿Debo usar la ganancia de toma, una envolvente de volumen o un compresor?",
+    ["response.local_compound_audio_sync_clarification"] =
+      "No he cambiado el tempo ni alineado el audio. Para continuar con ambas partes de su solicitud, ¿qué letra, transitorio o código de tiempo coincidente debo usar como referencia de alineación?",
     ["response.local_loudness_bundle_clarification"] =
       "Puedo establecer un valor explícito en dB para los faders de pista y un techo de pico en dBFS cuando cada uno tenga su propio valor. El LUFS integrado requiere una medición de sonoridad o el resultado de una renderización; no se puede deducir de un ajuste de fader. ¿Qué pistas y ajustes de fader en dB debo usar, qué techo en dBFS debo establecer y debo medir el resultado renderizado para el objetivo de LUFS?",
     ["response.local_vocal_edit_clarification"] =
       "¿Qué pistas vocales debo editar, debe alinearse el tiempo con marcadores de estiramiento o con ediciones de ítems, qué método de corrección de afinación debo usar y qué objetivo de nivel medible quiere, como pico en dBFS, RMS o LUFS?",
 }
 I18N.local_overrides.pt = {
+    ["response.local_peak_level_clarification"] =
+      "Você quer reduzir esses picos nessa quantidade de dB ou atingir um nível de pico absoluto em dBFS? Devo usar o ganho do take, um envelope de volume ou um compressor?",
+    ["response.local_compound_audio_sync_clarification"] =
+      "Não alterei o andamento nem alinhei o áudio. Para continuar com as duas partes do seu pedido, qual letra, transiente ou timecode correspondente devo usar como referência de alinhamento?",
     ["response.local_loudness_bundle_clarification"] =
       "Posso definir um valor explícito em dB para os faders das faixas e um teto de pico em dBFS quando cada um tiver seu próprio valor. O LUFS integrado exige uma medição de loudness ou o resultado de uma renderização; ele não pode ser deduzido de um ajuste de fader. Quais faixas e ajustes de fader em dB devo usar, qual teto em dBFS devo definir e devo medir o resultado renderizado para a meta de LUFS?",
     ["response.local_vocal_edit_clarification"] =

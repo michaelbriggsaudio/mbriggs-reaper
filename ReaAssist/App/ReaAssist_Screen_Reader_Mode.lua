@@ -247,9 +247,51 @@ local function osara_note_path()
   return temp_dir .. sep .. "ScreenReader_OSARA_Required.txt", temp_dir
 end
 
+-- The deploy lock contract, for the one write this launcher performs before
+-- `ReaAssist.lua` is loaded. Once the body loads, `DeployLock` installs the
+-- exclusion on `io.open` and `reaper.RecursiveCreateDirectory` for this same
+-- Lua state and every later write is covered by it. This path runs earlier,
+-- when OSARA is missing, so it asks the same two questions the body asks:
+-- does the lock file exist, and does a process still hold it. The rename is to
+-- the same name, so a success moves nothing.
+-- `Engine/engine/tools/MAIN_INSTALL_CANDIDATE_SAFETY.md` under "Deploy lock
+-- contract" is the authority.
+local function deploy_lock_held()
+  if not (reaper and type(reaper.GetResourcePath) == "function") then
+    return false
+  end
+  local ok, root = pcall(reaper.GetResourcePath)
+  if not ok or type(root) ~= "string" then return false end
+  root = root:gsub("[/\\]+$", "")
+  if root == "" then return false end
+  local path = root .. sep .. "Data" .. sep .. "mbriggs_helper" .. sep
+    .. "deploy.lock"
+  local f, open_err, open_code = io.open(path, "rb")
+  if not f then
+    local msg = tostring(open_err or ""):lower()
+    if open_code == 2 or msg:find("no such file", 1, true)
+        or msg:find("cannot find", 1, true)
+        or msg:find("not found", 1, true) then
+      return false
+    end
+    -- Present and unreadable is held: the safe reading of an unreadable lock
+    -- is that a deploy owns it.
+    return true
+  end
+  pcall(f.close, f)
+  local os_name = reaper.GetOS and tostring(reaper.GetOS() or "") or ""
+  if not os_name:match("^Win") then return true end
+  if os.rename(path, path) then return false end
+  return true
+end
+
 local function write_osara_note(message)
   local path, temp_dir = osara_note_path()
   if not path then return nil end
+  -- No folder is created and no file is opened under the package's own `Data`
+  -- while a deploy holds the lock. The message box beside this call still
+  -- carries the instructions; only the saved copy is skipped.
+  if deploy_lock_held() then return nil end
   if reaper and reaper.RecursiveCreateDirectory then
     pcall(reaper.RecursiveCreateDirectory, temp_dir, 0)
   end
@@ -733,8 +775,24 @@ end
 
 function ScreenReader.announce(text)
   if reaper.osara_outputMessage and text and text ~= "" then
-    pcall(reaper.osara_outputMessage, tostring(text))
+    return pcall(reaper.osara_outputMessage, tostring(text))
   end
+  return false
+end
+
+function ScreenReader.announce_legacy_startup(base_text)
+  local notice = ScreenReaderLegacy and ScreenReaderLegacy.pending_announcement
+    and ScreenReaderLegacy.pending_announcement(
+      Store, PROVIDERS, S, RA and RA.sha256_hex) or nil
+  local text = tostring(base_text or "")
+  if notice and notice ~= "" then
+    text = notice .. (text ~= "" and (" " .. text) or "")
+  end
+  local delivered = ScreenReader.announce(text)
+  if delivered and notice and ScreenReaderLegacy.mark_announcement_delivered then
+    ScreenReaderLegacy.mark_announcement_delivered(Store)
+  end
+  return delivered
 end
 
 function ScreenReader.finish()
@@ -1476,9 +1534,16 @@ end
 
 function ScreenReader.response_ready_ran_text(payload, long_form)
   local notices = {}
+  if payload and type(Code) == "table" and Code.midi_note_result_notice then
+    local notice = Code.midi_note_result_notice(payload.midi_note_change_evidence, ScreenReader.t)
+    if notice then notices[#notices + 1] = notice end
+  end
   local fx_insert_evidence = payload and payload.fx_insert_failure_evidence
   local failed_fx_names = type(fx_insert_evidence) == "table"
     and fx_insert_evidence.failed_names or nil
+  local fx_reuse_evidence = payload and payload.fx_insert_reuse_evidence
+  local reused_fx_names = type(fx_reuse_evidence) == "table"
+    and fx_reuse_evidence.names or nil
   local interval_overlapped = payload
     and type(payload.change_evidence) == "table"
     and payload.change_evidence.attribution == "interval_overlapped"
@@ -1492,11 +1557,20 @@ function ScreenReader.response_ready_ran_text(payload, long_form)
         },
         "Generated code finished, but ReaAssist could not add: {plugins}. A newer action ran before this older action finished, so ReaAssist cannot tell which change REAPER's Undo would remove. Review the project and REAPER's Undo history before undoing anything. Confirm each named plug-in is installed and available in REAPER, then resend the request.")
     elseif payload.observable_change_status == "changed" then
+      local completed = math.max(0, math.floor(tonumber(
+        fx_insert_evidence.successful_insert_count) or 0))
+      local partial_key = completed > 0
+        and "a11y.sr.response_ready_fx_insert_failed_partial_v3"
+        or "a11y.sr.response_ready_fx_insert_failed_partial"
+      local partial_fallback = completed > 0
+        and "Generated code finished, but ReaAssist could not add: {plugins}. {completed} plug-in add call(s) were accepted; these calls may reuse existing FX. The action is partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request."
+        or "Generated code finished, but ReaAssist could not add: {plugins}. Other project changes were made, so the action may be partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request."
       notices[#notices + 1] = ScreenReader.t(
-        "a11y.sr.response_ready_fx_insert_failed_partial", {
+        partial_key, {
           plugins = plugins,
+          completed = completed,
         },
-        "Generated code finished, but ReaAssist could not add: {plugins}. Other project changes were made, so the action may be partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request.")
+        partial_fallback)
     else
       notices[#notices + 1] = ScreenReader.t(
         "a11y.sr.response_ready_fx_insert_failed_unchanged", {
@@ -1504,6 +1578,31 @@ function ScreenReader.response_ready_ran_text(payload, long_form)
         },
         "Generated code finished, but ReaAssist could not add: {plugins}. No project changes were detected. Confirm each named plug-in is installed and available in REAPER, then resend the request.")
     end
+  end
+  if payload and payload.run_status == "ran_ok"
+      and type(reused_fx_names) == "table" and #reused_fx_names > 0 then
+    notices[#notices + 1] = ScreenReader.t(
+      "code.run.fx_insert_reused_index_v2", {
+        plugins = table.concat(reused_fx_names, ", "),
+      },
+      "A repeated plug-in request returned the same FX index for: {plugins}. Later settings may have overwritten the earlier instance. Review the chain, or use Undo and regenerate it.")
+  end
+  -- The substitution notice, from the same record the visual interface reads.
+  if payload and payload.run_status == "ran_ok"
+      and type(Code) == "table"
+      and type(Code.fx_preference_substitution_notice) == "function" then
+    local notice = Code.fx_preference_substitution_notice(
+      payload.fx_preference_substitutions, ScreenReader.t, true)
+    if notice then notices[#notices + 1] = notice end
+  end
+  -- Round thirty, Z-01: the plug-in a typed-action plan could not insert,
+  -- from the same record the visual transcript reads.
+  if payload and type(Code) == "table"
+      and type(Code.fx_requested_unserved_notice) == "function" then
+    local notice = Code.fx_requested_unserved_notice(
+      payload.fx_requested_unserved, ScreenReader.t,
+      payload.fx_requested_unserved_kind)
+    if notice then notices[#notices + 1] = notice end
   end
   if payload and payload.parameter_change_status == "partially_changed" then
     local parameter_evidence = payload.parameter_change_evidence or {}
@@ -1533,6 +1632,8 @@ function ScreenReader.response_ready_ran_text(payload, long_form)
   end
   if #notices > 0 then return table.concat(notices, "\n\n") end
   if payload and payload.parameter_change_status ~= "changed"
+      and payload.midi_note_change_evidence == nil
+      and payload.host_value_change_status ~= "changed"
       and payload.observable_change_status == "unchanged" then
     if interval_overlapped then
       return ScreenReader.t(
@@ -1655,6 +1756,20 @@ function ScreenReader.response_ready_parts(payload)
   elseif typed_action then
     body_text = ScreenReader.t("a11y.sr.response_ready_body_action", nil,
       "Review the edit details before running it, or request Lua if you want a script to save.")
+    -- ROUND THIRTY-TWO, Codex: THE UNRUN BRANCH NAMES IT TOO. The round
+    -- thirty notice went into ScreenReader.response_ready_ran_text only, and
+    -- with Auto-run off a typed-action plan stops here instead. The visual
+    -- transcript renders the notice in both states, so a screen-reader user
+    -- was the only one told to review an edit without being told which
+    -- plug-in it cannot insert. Same record, same renderer, and it comes
+    -- first because it is the part that changes what the user does next.
+    local unserved_notice = payload and type(Code) == "table"
+      and type(Code.fx_requested_unserved_notice) == "function"
+      and Code.fx_requested_unserved_notice(payload.fx_requested_unserved,
+        ScreenReader.t, payload.fx_requested_unserved_kind) or nil
+    if unserved_notice then
+      body_text = unserved_notice .. " " .. body_text
+    end
   elseif ScreenReader.payload_is_jsfx(payload) then
     local jsfx_status = ScreenReader.payload_jsfx_status(payload)
     body_text = jsfx_status ~= "" and jsfx_status
@@ -1698,13 +1813,6 @@ function ScreenReader.response_ready_announcement_text(payload, fallback)
     local summary = parts.action_summary ~= "" and parts.action_summary
       or parts.sr_summary
     local status_text = parts.body_text
-    if parts.code_ran then
-      status_text = parts.typed_action
-        and ScreenReader.t("a11y.sr.response_ready_body_action_ran_manual",
-          nil, "The structured edit ran successfully.")
-        or ScreenReader.t("a11y.sr.response_ready_body_code_ran_manual",
-          nil, "Generated code ran successfully.")
-    end
     if summary ~= "" then messages[#messages + 1] = summary end
     if status_text ~= "" then messages[#messages + 1] = status_text end
     if parts.auto_run_blocked ~= "" then
@@ -1717,9 +1825,12 @@ function ScreenReader.response_ready_announcement_text(payload, fallback)
       messages[#messages + 1] = parts.prose
     end
   else
+    if parts.manual_run_blocked ~= "" then
+      messages[#messages + 1] = parts.manual_run_blocked
+    end
     if parts.prose ~= "" then
       messages[#messages + 1] = parts.prose
-    elseif parts.body_text ~= "" then
+    elseif parts.body_text ~= "" and parts.body_text ~= parts.manual_run_blocked then
       messages[#messages + 1] = parts.body_text
     end
   end
@@ -1763,6 +1874,10 @@ end
 function ScreenReader.manual_lua_run_block_text(payload)
   local blocked, reason = ScreenReader.payload_blocks_manual_lua_run(payload)
   if not blocked then return "" end
+  if reason == "no_guess_mapping_validator" or reason == "no_guess_execution_contract_invalid"
+      or reason == "no_guess_multiple_scripts" then
+    return Code.no_guess_block_message(reason)
+  end
   if reason == "sandbox_forbidden_global" then
     return ScreenReader.t("a11y.sr.run_code_sandbox_blocked", nil,
       "ReaAssist blocked this code from running because it uses a restricted Lua API. Ask ReaAssist to regenerate it instead.")
@@ -1773,7 +1888,20 @@ end
 
 function ScreenReader.auto_run_block_text(payload)
   local reason = payload and tostring(payload.auto_run_block_reason or "") or ""
+  if reason == "no_guess_mapping_validator" or reason == "no_guess_execution_contract_invalid"
+      or reason == "no_guess_multiple_scripts" then
+    return Code.no_guess_block_message(reason)
+  end
   if reason == "" or reason == "auto_run_disabled" then return "" end
+  if reason == "fx_ident_validator" then
+    -- The latest response carries the fault detail, so the spoken answer
+    -- names the plug-ins the same way the visual transcript does.
+    local message = type(Code) == "table"
+      and type(Code.fx_identifier_block_message) == "function"
+      and Code.fx_identifier_block_message(
+        payload and payload.fx_ident_block or nil, ScreenReader.t) or nil
+    if message and message ~= "" then return message end
+  end
   if reason == "fx_param_scope_validator" then
     return ScreenReader.t("auto_run.blocked.fx_param_scope", nil,
       "Auto-run blocked: the model added plugin parameter changes even though the request only asked to add/load FX. Review the TrackFX_SetParam*/TakeFX_SetParam* lines before running manually.")
@@ -1966,16 +2094,28 @@ end
 function ScreenReader.status_text(prefix)
   local status = AppController.provider_model_status_text()
   if prefix and prefix ~= "" then status = tostring(prefix) .. " " .. status end
+  local legacy = ScreenReaderLegacy
+    and ScreenReaderLegacy.compatibility_status_text
+    and ScreenReaderLegacy.compatibility_status_text() or ""
+  if legacy ~= "" then status = status .. " " .. legacy end
   if not AppController.active_provider_is_usable() then
-    status = status .. " " .. ScreenReader.t(
-      "a11y.sr.provider_not_configured_short",
-      nil,
-      "The selected provider needs setup before sending.")
+    local reason = ScreenReaderLegacy and ScreenReaderLegacy.runtime
+      and ScreenReaderLegacy.runtime.readiness
+      and ScreenReaderLegacy.runtime.readiness.reason or nil
+    local guidance = ScreenReaderLegacy and ScreenReaderLegacy.guidance_for_reason
+      and ScreenReaderLegacy.guidance_for_reason(reason) or ""
+    status = status .. " " .. (guidance ~= "" and guidance or ScreenReader.t(
+      "a11y.sr.provider_not_configured_short", nil,
+      "The selected provider needs setup before sending."))
   end
   return status
 end
 
 function ScreenReader.page_status_text()
+  local legacy = ScreenReaderLegacy
+    and ScreenReaderLegacy.compatibility_status_text
+    and ScreenReaderLegacy.compatibility_status_text() or ""
+  if legacy ~= "" then return legacy end
   return ScreenReader.t("a11y.sr.page_status_ready", nil, "Ready.")
 end
 
@@ -2528,6 +2668,8 @@ end
 function ScreenReader.report_summary_text()
   local comment = AppController.trim_text(ScreenReader.report_comment())
   local contact = ScreenReader.report_email()
+  local chat_count = S and S.display_messages and #S.display_messages or 0
+  local logging_enabled = prefs and prefs.debug_logging == true
   local contact_text = contact ~= ""
     and ScreenReader.t("a11y.sr.report_contact_saved", nil,
       "Contact email saved.")
@@ -2535,21 +2677,36 @@ function ScreenReader.report_summary_text()
       "No contact email saved.")
   local attachment = ScreenReader.t("a11y.sr.report_attachment_none", nil,
     "Diagnostic report only.")
-  local log_has_content = false
-  if prefs and prefs.debug_logging and Log and Log.path and Log.path ~= "" then
-    local f = io.open(Log.path, "rb")
-    if f then
-      log_has_content = (f:seek("end") or 0) > 0
-      f:close()
+  local log_has_evidence = false
+  if logging_enabled and Log and Log.path and Log.path ~= "" then
+    if Diag and type(Diag.advanced_log_file_probe) == "function" then
+      local _, has_evidence = Diag.advanced_log_file_probe(Log.path)
+      log_has_evidence = has_evidence == true
     end
   end
-  if log_has_content then
+  if log_has_evidence then
     attachment = ScreenReader.t("a11y.sr.report_attachment_log", nil,
       "Advanced Log will be attached.")
-  elseif S and S.display_messages and #S.display_messages > 0 then
-    attachment = ScreenReader.t("a11y.sr.report_attachment_chat", {
-      count = tostring(#S.display_messages),
-    }, "Current chat will be attached.")
+  elseif logging_enabled and chat_count > 0 then
+    attachment = ScreenReader.t(chat_count == 1
+        and "a11y.sr.report_attachment_chat_log_empty.one"
+        or "a11y.sr.report_attachment_chat_log_empty.many", {
+      count = tostring(chat_count),
+    }, "Advanced Log is on but has not captured activity yet. Reproduce the "
+      .. "issue, then submit. Current chat (" .. tostring(chat_count)
+      .. " message" .. (chat_count == 1 and "" or "s")
+      .. ") will be attached instead.")
+  elseif logging_enabled then
+    attachment = ScreenReader.t("a11y.sr.report_attachment_none_log_empty", nil,
+      "Advanced Log is on but has not captured activity yet. Reproduce the "
+        .. "issue, then submit. Diagnostic report only.")
+  elseif chat_count > 0 then
+    attachment = ScreenReader.t(chat_count == 1
+        and "a11y.sr.report_attachment_chat.one"
+        or "a11y.sr.report_attachment_chat.many", {
+      count = tostring(chat_count),
+    }, "Current chat (" .. tostring(chat_count) .. " message"
+      .. (chat_count == 1 and "" or "s") .. ") will be attached.")
   end
   if comment == "" then
     return ScreenReader.t("a11y.sr.report_summary_empty", {
@@ -3050,6 +3207,11 @@ function ScreenReader.refresh_menus()
   labels, map, selected = ScreenReader.menu_from_thinking_items()
   ui.thinking_map = map
   ScreenReader.set_dropdown_items(ui.ids.thinking, labels, selected)
+  if ui.ids.legacy_compat_status then
+    ScreenReader.set_label(ui.ids.legacy_compat_status,
+      ScreenReaderLegacy and ScreenReaderLegacy.compatibility_status_text
+        and ScreenReaderLegacy.compatibility_status_text() or "")
+  end
 end
 
 function ScreenReader.refresh_mode_summary()
@@ -3088,7 +3250,8 @@ function ScreenReader.default_focus_for_view(view)
     main = "prompt_input",
     prompt_edit = "prompt_input",
     response_ready = {
-      "undo_edit", "run_code", "read_code", "read_response",
+      "undo_edit", "run_code", "read_code", "open_response_link",
+      "read_response",
       "copy_response", "new_prompt", "main",
     },
     reader = {
@@ -3209,6 +3372,8 @@ function ScreenReader.refresh_actions(opts)
   ScreenReader.set_button_disabled(ui.ids.read_response, not has_text)
   ScreenReader.set_button_disabled(ui.ids.copy_response, not has_text)
   ScreenReader.set_button_disabled(ui.ids.read_code, not has_code)
+  ScreenReader.set_button_disabled(ui.ids.open_response_link,
+    not payload or tostring(payload.link_url or "") == "")
   ScreenReader.set_button_disabled(ui.ids.undo_edit,
     request_active or not ScreenReader.payload_can_undo(payload))
   ScreenReader.set_button_disabled(ui.ids.request_lua,
@@ -3241,8 +3406,9 @@ function ScreenReader.refresh_actions(opts)
   ScreenReader.set_button_disabled(ui.ids.clear_chat, request_active or not has_chat)
   ScreenReader.set_button_disabled(ui.ids.remove_last, not has_attachments)
   ScreenReader.set_button_disabled(ui.ids.clear_attachments, not has_attachments)
+  local update_busy = false
   if AppController.update_is_busy then
-    local update_busy = AppController.update_is_busy()
+    update_busy = AppController.update_is_busy()
     ScreenReader.set_button_disabled(ui.ids.check_updates, update_busy)
     ScreenReader.set_button_disabled(ui.ids.update_later, update_busy)
   end
@@ -3381,6 +3547,9 @@ function ScreenReader.send_current_prompt()
     elseif err == "attachments_not_ready" then
       msg = ScreenReader.t("a11y.sr.send_state_attachments", nil,
         "Send unavailable: attachments are still encoding.")
+    elseif ScreenReaderLegacy and ScreenReaderLegacy.guidance_for_reason
+        and tostring(err or ""):match("^screen_reader_legacy_") then
+      msg = ScreenReaderLegacy.guidance_for_reason(err)
     else
       msg = ScreenReader.t("a11y.sr.send_failed_generic", nil,
         "Could not send request. Please try again.")
@@ -4696,6 +4865,9 @@ function ScreenReader.terms_text()
 end
 
 function ScreenReader.has_usable_provider()
+  if ScreenReaderLegacy and ScreenReaderLegacy.send_admission then
+    return ScreenReaderLegacy.send_admission(PROVIDERS, MODELS, prefs, S)
+  end
   if Store and Store.has_usable_provider then
     return Store.has_usable_provider()
   end
@@ -5669,12 +5841,19 @@ function ScreenReader.api_key_message_box(message)
   end
 end
 
-function ScreenReader.api_key_test_result_text(passed, after_save)
-  local test_text = passed
-    and ScreenReader.t("a11y.sr.api_key_test_passed", nil,
-      "API key test passed.")
-    or ScreenReader.t("a11y.sr.api_key_test_failed", nil,
-      "API key test failed. Check the key and try again.")
+function ScreenReader.api_key_test_result_text(passed, after_save, recovery)
+  local test_text
+  if not passed and type(recovery) == "table"
+      and type(recovery.announcement) == "string"
+      and recovery.announcement ~= "" then
+    test_text = recovery.announcement
+  else
+    test_text = passed
+      and ScreenReader.t("a11y.sr.api_key_test_passed", nil,
+        "API key test passed.")
+      or ScreenReader.t("a11y.sr.api_key_test_failed", nil,
+        "API key test failed. Check the key and try again.")
+  end
   if after_save then
     return ScreenReader.t("a11y.sr.api_key_saved", nil,
       "API key saved.") .. " " .. test_text
@@ -5743,7 +5922,9 @@ function ScreenReader.handle_key_test_ready()
   local after_save = S._screen_reader_key_test_after_save == true
   S._screen_reader_key_test_after_save = nil
   local passed = AppController.active_provider_is_usable() and S.status ~= "error"
-  local msg = ScreenReader.api_key_test_result_text(passed, after_save)
+  local recovery = api_keys and api_keys.key_test_recovery or nil
+  local msg = ScreenReader.api_key_test_result_text(passed, after_save, recovery)
+  if api_keys then api_keys.key_test_recovery = nil end
   ScreenReader.set_status(msg, false)
   ScreenReader.api_key_message_box(msg)
   ScreenReader.refresh_menus()
@@ -7664,13 +7845,20 @@ function ScreenReader.build_settings_ui()
   ScreenReader.next_line_for_large_text()
   ui.ids.debug_logging = reagirl.Checkbox_Add(nil, nil,
     ScreenReader.t("a11y.sr.debug_logging", nil, "Enable advanced log"),
-    ScreenReader.t("a11y.sr.debug_logging.meaning", nil,
-      "Writes detailed request and diagnostic logs for troubleshooting."),
+    ScreenReader.t("a11y.sr.debug_logging.meaning_v2", nil,
+      "Records new API traffic and FX scan events after you turn it on. "
+        .. "Reproduce the issue, then submit the report."),
     prefs and prefs.debug_logging == true,
     function(_, checked)
-      ScreenReader.set_pref_bool("debug_logging", checked,
-        "a11y.sr.debug_logging_changed",
-        "Advanced log is now {value}.")
+      if checked then
+        ScreenReader.set_pref_bool("debug_logging", checked,
+          "a11y.sr.debug_logging_enabled_reproduce",
+          "Advanced log is on. Reproduce the issue, then submit the report.")
+      else
+        ScreenReader.set_pref_bool("debug_logging", checked,
+          "a11y.sr.debug_logging_changed",
+          "Advanced log is now {value}.")
+      end
     end,
     "debug_logging")
   ScreenReader.next_line_for_large_text()
@@ -8926,6 +9114,21 @@ function ScreenReader.build_response_ready_ui()
       function() ScreenReader.ask_provider_for_local_answer(payload) end,
       "ask_provider")
   end
+  local response_link_url = tostring(payload.link_url or "")
+  if response_link_url ~= "" then
+    local response_link_label = tostring(payload.link_label or "")
+    if response_link_label == "" then response_link_label = response_link_url end
+    ui.ids.open_response_link = reagirl.Button_Add(nil, nil, 32, 5,
+      response_link_label,
+      ScreenReader.t("a11y.sr.response_link.meaning_v1", {
+        label = response_link_label,
+      }, "Opens {label} in your browser."),
+      function()
+        ScreenReader.open_external_url(response_link_url,
+          "a11y.sr.link_opened", "Opening link.")
+      end,
+      "open_response_link")
+  end
   if has_code then
     if ScreenReader.payload_can_undo(payload) then
       ui.ids.undo_edit = reagirl.Button_Add(nil, nil, 14, 5,
@@ -9926,13 +10129,15 @@ function ScreenReader.build_reader_ui()
         false, nil, "reader_preview_note")
     end
   end
-  local shortened = is_code and not preview_notice
-    and ScreenReader.t("a11y.sr.reader_preview_shortened_code", nil,
+  local shortened
+  if preview_notice then
+    shortened = false
+  elseif is_code then
+    shortened = ScreenReader.t("a11y.sr.reader_preview_shortened_code", nil,
       "Preview shortened. Use Copy or Save for the full text.")
-    or not is_code and false
-    or nil
+  end
   for i, line in ipairs(ScreenReader.preview_lines(data.text, is_code,
-      preview_width, preview_limit, preview_notice and false or shortened)) do
+      preview_width, preview_limit, shortened)) do
     reagirl.NextLine()
     ui.ids["body_line_" .. tostring(i)] = reagirl.Label_Add(nil, nil,
       line,
@@ -9970,30 +10175,55 @@ function ScreenReader.build_turn_budget_confirm_ui()
   local pending = S.turn_budget_confirmation or {}
   local budget = pending.budget or {}
   local matched = pending.matched_condition or "projected_token_limit"
-  local body
-  if matched == "projected_cost_limit" then
-    local projected = MODELS.format_cost(budget.projected_cost or 0)
-    local limit = MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
-      or CFG.TURN_COST_LIMIT_DEFAULT)
-    local next_cost = MODELS.format_cost(budget.next_cost or 0)
-    body = ScreenReader.t("dialog.turn_budget.cost_body", {
-      projected = projected,
-      limit = limit,
-      next = next_cost,
-    }, "Projected cost for this request: " .. projected .. " (your limit: " .. limit
-      .. "). This next model call could cost up to " .. next_cost .. ".")
-  else
-    local projected = ScreenReader.format_count(budget.projected_tokens or 0)
-    local limit = ScreenReader.format_count(tonumber(prefs.turn_token_limit)
-      or CFG.TURN_TOKEN_LIMIT_DEFAULT)
-    local next_tokens = ScreenReader.format_count(budget.next_tokens or 0)
-    body = ScreenReader.t("dialog.turn_budget.token_body", {
-      projected = projected,
-      limit = limit,
-      next = next_tokens,
-    }, "Projected token use for this request: " .. projected .. " (your limit: " .. limit
-      .. "). This next model call could use up to " .. next_tokens .. " tokens.")
+  local conditions = type(budget.matched_conditions) == "table"
+    and budget.matched_conditions or { matched }
+  if #conditions == 0 then conditions = { matched } end
+  local body_parts = {}
+  for _, condition in ipairs(conditions) do
+    local part
+    if condition == "unknown_provider_price" then
+      part = ScreenReader.t(
+        "dialog.turn_budget.unknown_provider_price_body", nil,
+        "This billable Custom provider has no trusted input and output price estimate. ReaAssist cannot prove that this request stays within your per-turn dollar limit.")
+    elseif condition == "unknown_cache_price" then
+      part = ScreenReader.t("dialog.turn_budget.unknown_cache_price_body", nil,
+        "The previous model call used a cache category whose price is blank. The exact turn cost is Unknown, so ReaAssist cannot safely estimate this additional billable request.")
+    elseif condition == "actual_cost_limit" then
+      local actual = MODELS.format_cost(budget.actual_cost or 0)
+      local limit = MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
+        or CFG.TURN_COST_LIMIT_DEFAULT)
+      part = ScreenReader.t("dialog.turn_budget.actual_cost_body", {
+        actual = actual,
+        limit = limit,
+      }, "Provider-reported actual cost already used: " .. actual
+        .. " (your limit: " .. limit
+        .. "). A trusted estimate is unavailable for the next model call.")
+    elseif condition == "projected_cost_limit" then
+      local projected = MODELS.format_cost(budget.projected_cost or 0)
+      local limit = MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
+        or CFG.TURN_COST_LIMIT_DEFAULT)
+      local next_cost = MODELS.format_cost(budget.next_cost or 0)
+      part = ScreenReader.t("dialog.turn_budget.cost_body", {
+        projected = projected,
+        limit = limit,
+        next = next_cost,
+      }, "Projected cost for this request: " .. projected .. " (your limit: " .. limit
+        .. "). This next model call could cost up to " .. next_cost .. ".")
+    elseif condition == "projected_token_limit" then
+      local projected = ScreenReader.format_count(budget.projected_tokens or 0)
+      local limit = ScreenReader.format_count(tonumber(prefs.turn_token_limit)
+        or CFG.TURN_TOKEN_LIMIT_DEFAULT)
+      local next_tokens = ScreenReader.format_count(budget.next_tokens or 0)
+      part = ScreenReader.t("dialog.turn_budget.token_body", {
+        projected = projected,
+        limit = limit,
+        next = next_tokens,
+      }, "Projected token use for this request: " .. projected .. " (your limit: " .. limit
+        .. "). This next model call could use up to " .. next_tokens .. " tokens.")
+    end
+    if part then body_parts[#body_parts + 1] = part end
   end
+  local body = table.concat(body_parts, "\n\n")
   ScreenReader.begin_reagirl_ui()
 
   ui.ids.title = reagirl.Label_Add(18, 18, ScreenReader.view_title(),
@@ -10937,6 +11167,18 @@ function ScreenReader.build_ui()
     function(_, menu_idx) ScreenReader.select_model(menu_idx) end,
     "model")
 
+  local legacy_status = ScreenReaderLegacy
+    and ScreenReaderLegacy.compatibility_status_text
+    and ScreenReaderLegacy.compatibility_status_text() or ""
+  if legacy_status ~= "" then
+    reagirl.NextLine()
+    ui.ids.legacy_compat_status = reagirl.Label_Add(nil, nil,
+      legacy_status,
+      ScreenReader.t("a11y.sr.legacy_substitution_status.meaning", nil,
+        "Reports the session-only provider and model used for Screen Reader compatibility."),
+      false, nil, "legacy_compat_status")
+  end
+
   labels, map, selected = ScreenReader.menu_from_thinking_items()
   ui.thinking_map = map
   ScreenReader.next_line_for_large_text()
@@ -11216,7 +11458,8 @@ function ScreenReader.start()
       ScreenReader.report_startup_failure(msg, msg)
       return ScreenReader.finish()
     end
-    ScreenReader.set_status(setup_status, true)
+    ScreenReader.set_status(ScreenReader.status_text(setup_status), false)
+    ScreenReader.announce_legacy_startup(ScreenReader.status_text(setup_status))
     reaper.defer(ScreenReader.loop)
     return
   end
@@ -11227,7 +11470,7 @@ function ScreenReader.start()
     ScreenReader.report_startup_failure(msg, msg)
     return ScreenReader.finish()
   end
-  ScreenReader.announce(ScreenReader.t("a11y.sr.opened", nil,
+  ScreenReader.announce_legacy_startup(ScreenReader.t("a11y.sr.opened", nil,
     "ReaAssist Screen Reader Mode opened. Press F2 for a new prompt, F1 for shortcuts, or Tab to move through controls."))
   reaper.defer(ScreenReader.loop)
 end
@@ -11339,6 +11582,9 @@ function AppController.active_thinking_level()
 end
 
 function AppController.active_provider_is_usable()
+  if ScreenReaderLegacy and ScreenReaderLegacy.send_admission then
+    return ScreenReaderLegacy.send_admission(PROVIDERS, MODELS, prefs, S)
+  end
   local p = AppController.active_provider()
   if not p then return false end
   if p.is_custom then return true end
@@ -11459,6 +11705,9 @@ function AppController.provider_items(opts)
   local out = {}
   if not PROVIDERS then return out end
   for i, p in ipairs(PROVIDERS) do
+    local legacy_allowed = not ScreenReaderLegacy
+      or not ScreenReaderLegacy.provider_allowed
+      or ScreenReaderLegacy.provider_allowed(p)
     local configured = Store and Store.provider_has_usable_credentials
       and Store.provider_has_usable_credentials(p)
     if not configured then
@@ -11466,7 +11715,7 @@ function AppController.provider_items(opts)
         or (S.api_key_map and S.api_key_map[p.id]
           and tostring(S.api_key_map[p.id]) ~= "")
     end
-    if configured or opts.include_unconfigured then
+    if legacy_allowed and (configured or opts.include_unconfigured) then
       local label = (opts.setup_labels and p.setup_label)
         or p.label or p.id or ("Provider " .. tostring(i))
       if p.id == "google" and S.gemini_paid_tier == false then
@@ -11491,6 +11740,9 @@ function AppController.model_items(opts)
   local p = AppController.active_provider()
   if not (p and p.models) then return out end
   for raw_idx, m in ipairs(p.models) do
+    local legacy_allowed = not ScreenReaderLegacy
+      or not ScreenReaderLegacy.model_allowed
+      or ScreenReaderLegacy.model_allowed(p, m)
     local model_idx = nil
     if p.is_custom then
       model_idx = raw_idx
@@ -11501,7 +11753,7 @@ function AppController.model_items(opts)
     end
     local paid_locked = (m.paid_only and p.id == "google"
       and S.gemini_paid_tier ~= true) or false
-    if model_idx or opts.include_unavailable then
+    if legacy_allowed and (model_idx or opts.include_unavailable) then
       out[#out + 1] = {
         idx = model_idx,
         raw_idx = raw_idx,
@@ -11568,16 +11820,27 @@ function AppController.select_provider_idx(idx)
   if not (idx and PROVIDERS and PROVIDERS[idx]) then
     return false, "invalid_provider"
   end
-  if prefs.provider_idx == idx then return true end
+  if ScreenReaderLegacy and ScreenReaderLegacy.provider_allowed
+      and not ScreenReaderLegacy.provider_allowed(PROVIDERS[idx]) then
+    return false, "invalid_provider"
+  end
+  local substituting = ScreenReaderLegacy
+    and ScreenReaderLegacy.runtime_selection_is_temporary
+    and ScreenReaderLegacy.runtime_selection_is_temporary() or false
+  if prefs.provider_idx == idx and not substituting then return true end
   local old_p = AppController.active_provider()
-  if old_p and Store and Store.remember_model_idx then
+  if not substituting and old_p and Store and Store.remember_model_idx then
     Store.remember_model_idx(old_p, MODELS, prefs.model_idx)
   end
-  if old_p and old_p.thinking_levels and prefs.thinking_idx > 0 then
+  if not substituting and old_p and old_p.thinking_levels
+      and prefs.thinking_idx > 0 then
     PROVIDERS.save_thinking_idx(old_p, MODELS[prefs.model_idx] or MODELS[1],
       prefs.thinking_idx)
   end
   if old_p and old_p.id == "google" and Net then Net.gemini_cache_invalidate() end
+  if ScreenReaderLegacy and ScreenReaderLegacy.begin_explicit_selection then
+    ScreenReaderLegacy.begin_explicit_selection()
+  end
   prefs.provider_idx = idx
   MODELS.refresh()
   local active = AppController.active_provider()
@@ -11586,17 +11849,31 @@ function AppController.select_provider_idx(idx)
   if active and active.id == "google" and Net then Net.gemini_cache_invalidate() end
   AppController._refresh_attachment_costs(AppController.active_model())
   if Store and Store.save_config then Store.save_config() end
+  if ScreenReaderLegacy and ScreenReaderLegacy.initialize then
+    ScreenReaderLegacy.initialize(Store, PROVIDERS, prefs, S, reaper, CFG)
+    ScreenReaderLegacy.finalize_startup(PROVIDERS, MODELS, prefs, S)
+  end
   return true
 end
 
 function AppController.select_model_idx(idx)
   idx = tonumber(idx)
   if not (idx and MODELS and MODELS[idx]) then return false, "invalid_model" end
-  if prefs.model_idx == idx then return true end
   local p = AppController.active_provider()
-  if p and p.thinking_levels and prefs.thinking_idx > 0 then
+  if ScreenReaderLegacy and ScreenReaderLegacy.model_allowed
+      and not ScreenReaderLegacy.model_allowed(p, MODELS[idx]) then
+    return false, "invalid_model"
+  end
+  local substituting = ScreenReaderLegacy
+    and ScreenReaderLegacy.runtime_selection_is_temporary
+    and ScreenReaderLegacy.runtime_selection_is_temporary() or false
+  if prefs.model_idx == idx and not substituting then return true end
+  if not substituting and p and p.thinking_levels and prefs.thinking_idx > 0 then
     PROVIDERS.save_thinking_idx(p, MODELS[prefs.model_idx] or MODELS[1],
       prefs.thinking_idx)
+  end
+  if ScreenReaderLegacy and ScreenReaderLegacy.begin_explicit_selection then
+    ScreenReaderLegacy.begin_explicit_selection()
   end
   prefs.model_idx = idx
   if p and p.thinking_levels then
@@ -11606,6 +11883,10 @@ function AppController.select_model_idx(idx)
   S.api_ref_message = nil
   AppController._refresh_attachment_costs(AppController.active_model())
   if Store and Store.save_config then Store.save_config() end
+  if ScreenReaderLegacy and ScreenReaderLegacy.initialize then
+    ScreenReaderLegacy.initialize(Store, PROVIDERS, prefs, S, reaper, CFG)
+    ScreenReaderLegacy.finalize_startup(PROVIDERS, MODELS, prefs, S)
+  end
   return true
 end
 
@@ -11694,21 +11975,24 @@ function AppController.add_attachment_path(path)
   path = path:gsub("^%s*file:///", ""):gsub("^%s*file://", "")
   path = path:gsub('^"(.*)"$', "%1")
   local ok = Attach and Attach.file and Attach.file(path)
-  return ok == true, ok and nil or (S.attach_error
+  if ok == true then return true, nil end
+  return false, (S.attach_error
     or AppController.t("a11y.sr.attachment_add_failed", nil,
       "Could not add attachment."))
 end
 
 function AppController.add_clipboard_image_attachment()
   local ok = Attach and Attach.clipboard and Attach.clipboard()
-  return ok == true, ok and nil or (S.attach_error
+  if ok == true then return true, nil end
+  return false, (S.attach_error
     or AppController.t("a11y.sr.attachment_clipboard_failed", nil,
       "Could not add a clipboard image."))
 end
 
 function AppController.add_screenshot_attachment()
   local ok = Attach and Attach.screenshot and Attach.screenshot()
-  return ok == true, ok and nil or (S.attach_error
+  if ok == true then return true, nil end
+  return false, (S.attach_error
     or AppController.t("a11y.sr.attachment_screenshot_failed", nil,
       "Could not take a screenshot."))
 end
@@ -11734,6 +12018,11 @@ function AppController.send_prompt(prompt)
   if prompt == "" then return false, "empty_prompt" end
   if not AppController.attachments_ready() then
     return false, "attachments_not_ready"
+  end
+  if ScreenReaderLegacy and ScreenReaderLegacy.send_admission then
+    local admitted, refusal = ScreenReaderLegacy.send_admission(
+      PROVIDERS, MODELS, prefs, S)
+    if not admitted then return false, refusal end
   end
   if not AppController.active_provider_is_usable() then
     return false, "provider_not_configured"
@@ -12138,6 +12427,7 @@ function AppController.latest_response_payload()
       undo_sent = false,
       can_undo = false,
       auto_run_block_reason = nil,
+      fx_ident_block = nil,
       validation_status = nil,
       validation_block_kind = nil,
       local_answer = false,
@@ -12151,6 +12441,8 @@ function AppController.latest_response_payload()
       local_retry_available = false,
       local_llm_requested = false,
       llm_retry_prompt = nil,
+      link_url = nil,
+      link_label = nil,
     }
   end
   local code = AppController.generated_code_text(msg)
@@ -12159,6 +12451,14 @@ function AppController.latest_response_payload()
   return {
     message = msg,
     message_idx = idx,
+    source_request = msg.source_request,
+    parameter_targets = msg.parameter_targets,
+    parameter_context = msg.parameter_context,
+    no_guess_activation_request = msg.no_guess_activation_request,
+    no_guess_current_reply = msg.no_guess_current_reply,
+    no_guess_policy_state = msg.no_guess_policy_state,
+    no_guess_inherited_constraints = msg.no_guess_inherited_constraints,
+    no_guess_execution_contract = msg.no_guess_execution_contract,
     request_message = request_msg,
     request_message_idx = request_idx,
     text = AppController.response_text(msg),
@@ -12171,8 +12471,20 @@ function AppController.latest_response_payload()
     change_evidence = msg and msg.change_evidence or nil,
     parameter_change_status = msg and msg.parameter_change_status or nil,
     parameter_change_evidence = msg and msg.parameter_change_evidence or nil,
+    host_value_change_status = msg and msg.host_value_change_status or nil,
+    host_value_change_evidence = msg and msg.host_value_change_evidence or nil,
+    midi_note_change_evidence = msg and msg.midi_note_change_evidence or nil,
+    midi_note_change_status = msg and msg.midi_note_change_status or nil,
     fx_insert_failure_evidence = msg
       and msg.fx_insert_failure_evidence or nil,
+    fx_insert_reuse_evidence = msg
+      and msg.fx_insert_reuse_evidence or nil,
+    fx_preference_substitutions = msg
+      and msg.fx_preference_substitutions or nil,
+    fx_requested_unserved = msg and msg.fx_requested_unserved or nil,
+    fx_requested_unserved_kind = msg and msg.fx_requested_unserved_kind or nil,
+    link_url = msg and msg.link_url or nil,
+    link_label = msg and msg.link_label or nil,
     auto_ran = msg and msg.auto_ran == true,
     typed_action = typed_action,
     typed_action_has_results = typed_action
@@ -12189,6 +12501,7 @@ function AppController.latest_response_payload()
     typed_action_lua_requested = msg
       and msg.typed_action_lua_requested == true or false,
     auto_run_block_reason = msg and msg.auto_run_block_reason or nil,
+    fx_ident_block = msg and msg.fx_ident_block or nil,
     manual_review_reason = msg and msg.manual_review_reason or nil,
     validation_status = msg and msg.validation_status or nil,
     validation_block_kind = msg and msg.validation_block_kind or nil,
@@ -12254,6 +12567,12 @@ function AppController.latest_code_run_info()
       message = ScreenReader.manual_lua_run_block_text(payload),
     }
   end
+  local context = Code.generated_lua_run_context(msg, payload.message_idx, code)
+  local allowed, reason, message = Code.preflight_generated_lua_execution(code, context)
+  if not allowed then
+    msg.auto_run_block_reason, msg.validation_status, msg.run_blocked = reason, "blocked", message
+    return {can_run=false, reason=reason, message=message}
+  end
   local artifact = Code and Code.classify_lua_artifact
     and Code.classify_lua_artifact(code, { context_text = msg.content }) or nil
   if artifact and (not artifact.runnable or artifact.manual_run_only) then
@@ -12281,6 +12600,9 @@ function AppController.run_latest_code(opts)
   opts = opts or {}
   local info = AppController.latest_code_run_info()
   if not info.can_run then return false, info.reason, info.message end
+  local context = Code.generated_lua_run_context(info.message_obj, info.message_idx, info.code)
+  local allowed, reason, message = Code.preflight_generated_lua_execution(info.code, context)
+  if not allowed then return false, reason, message end
   if Code and Code.scan_risky and not opts.confirm_risky then
     local risk = Code.scan_risky(info.code)
     if risk then
@@ -12304,7 +12626,7 @@ function AppController.run_latest_code(opts)
     end
   end
   S.status = "running"
-  local ok = Code and Code.run and Code.run(info.code)
+  local ok = Code and Code.run and Code.run(info.code, nil, nil, context)
   if Code and Code.bind_pending_deferred_run then
     Code.bind_pending_deferred_run(info.message_idx, nil, false, nil)
   end
@@ -12806,6 +13128,624 @@ function AppController.close_instance()
     reaper.DeleteExtState(CFG.EXT_NS, "running", false)
   end
   reaper.DeleteExtState(CFG.EXT_NS, "request_close", false)
+end
+
+-- ---------------------------------------------------------------------------
+-- Frozen Screen Reader provider compatibility policy
+-- ---------------------------------------------------------------------------
+-- This table belongs to the legacy Screen Reader entry point. The shared app
+-- asks it for a runtime provider tuple, but visual and future web interfaces
+-- never inherit these defaults. Bump TABLE_REVISION whenever an allowed tuple
+-- or frozen default changes.
+ScreenReaderLegacy = ScreenReaderLegacy or {}
+ScreenReaderLegacy.TABLE_REVISION = 1
+ScreenReaderLegacy.DEFAULT = {
+  provider_id = "anthropic",
+  model_id = "claude-sonnet-5",
+  protocol_id = "anthropic_messages",
+}
+ScreenReaderLegacy.PROVIDERS = {
+  anthropic = {
+    protocol_id = "anthropic_messages",
+    default_model_id = "claude-sonnet-5",
+    models = {
+      ["claude-haiku-4-5"] = true,
+      ["claude-sonnet-5"] = true,
+      ["claude-opus-5"] = true,
+    },
+  },
+  openai = {
+    protocol_id = "openai_chat_completions",
+    default_model_id = "gpt-5.6-luna",
+    models = {
+      ["gpt-5.6-luna"] = true,
+      ["gpt-5.6-terra"] = true,
+      ["gpt-5.6-sol"] = true,
+    },
+  },
+  google = {
+    protocol_id = "google_generate_content",
+    default_model_id = "gemini-3.6-flash",
+    models = {
+      ["gemini-3.5-flash-lite"] = true,
+      ["gemini-3.6-flash"] = true,
+      ["gemini-3.8-flash"] = true,
+      ["gemini-3.1-pro-preview"] = true,
+    },
+  },
+  deepseek = {
+    protocol_id = "deepseek_chat_completions",
+    default_model_id = "deepseek-flash",
+    models = {
+      ["deepseek-flash"] = true,
+    },
+  },
+}
+ScreenReaderLegacy.CUSTOM_PROTOCOL_ID = "openai_chat_completions"
+
+function ScreenReaderLegacy._copy(value, seen)
+  if type(value) ~= "table" then return value end
+  seen = seen or {}
+  if seen[value] then return seen[value] end
+  local out = {}
+  seen[value] = out
+  for key, child in pairs(value) do
+    out[ScreenReaderLegacy._copy(key, seen)] =
+      ScreenReaderLegacy._copy(child, seen)
+  end
+  return out
+end
+
+function ScreenReaderLegacy._trim(value)
+  return tostring(value or ""):match("^%s*(.-)%s*$") or ""
+end
+
+function ScreenReaderLegacy._provider_by_id(providers, provider_id)
+  if not providers then return nil, nil end
+  local idx = providers._by_id and providers._by_id[provider_id] or nil
+  if idx and providers[idx] then return providers[idx], idx end
+  for i, provider in ipairs(providers) do
+    if provider.id == provider_id then return provider, i end
+  end
+  return nil, nil
+end
+
+function ScreenReaderLegacy._model_by_id(provider, model_id)
+  if not (provider and provider.models) then return nil, nil end
+  for i, model in ipairs(provider.models) do
+    if model.id == model_id then return model, i end
+  end
+  for i, model in ipairs(provider.models) do
+    if type(model.legacy_ids) == "table" and model.legacy_ids[model_id] == true then
+      return model, i
+    end
+  end
+  return nil, nil
+end
+
+function ScreenReaderLegacy._is_native_profile(provider)
+  return type(provider) == "table" and provider.is_native_custom == true
+end
+
+function ScreenReaderLegacy._legacy_protocol(provider)
+  if not provider then return nil end
+  if ScreenReaderLegacy._is_native_profile(provider) then return nil end
+  local entry = ScreenReaderLegacy.PROVIDERS[provider.id]
+  if entry then return entry.protocol_id end
+  if provider.is_custom == true then
+    return ScreenReaderLegacy.CUSTOM_PROTOCOL_ID
+  end
+  return nil
+end
+
+function ScreenReaderLegacy._saved_protocol(selection, provider_id, model_id,
+    provider)
+  selection = type(selection) == "table" and selection or {}
+  local key = tostring(provider_id or "") .. "/" .. tostring(model_id or "")
+  for _, field in ipairs({
+    "protocol_id_by_provider_model",
+    "protocol_by_provider_model",
+  }) do
+    local map = type(selection[field]) == "table" and selection[field] or nil
+    local value = map and ScreenReaderLegacy._trim(map[key]) or ""
+    if value ~= "" then return value, false end
+  end
+  for _, field in ipairs({
+    "protocol_id_by_provider",
+    "protocol_by_provider",
+  }) do
+    local map = type(selection[field]) == "table" and selection[field] or nil
+    local value = map and ScreenReaderLegacy._trim(map[provider_id]) or ""
+    if value ~= "" then return value, false end
+  end
+  local direct = ScreenReaderLegacy._trim(
+    selection.protocol_id or selection.protocol)
+  if direct ~= "" then return direct, false end
+  -- Configurations written before protocol persistence are explicitly legacy.
+  -- Never derive their meaning from a newer provider.protocol default.
+  return ScreenReaderLegacy._legacy_protocol(provider), true
+end
+
+function ScreenReaderLegacy._endpoint_is_chat_completions(endpoint)
+  endpoint = ScreenReaderLegacy._trim(endpoint)
+  if endpoint == "" or endpoint:match("^https?://") == nil then return false end
+  if endpoint:find("[%z\r\n]") then return false end
+  local without_suffix = endpoint:match("^([^?#]+)") or endpoint
+  without_suffix = without_suffix:gsub("/+$", "")
+  return without_suffix:match("/chat/completions$") ~= nil
+end
+
+function ScreenReaderLegacy._tuple_allowed(provider, model_id, protocol_id)
+  if not provider then return false, "unsupported_provider" end
+  if ScreenReaderLegacy._is_native_profile(provider) then
+    return false, "unsupported_native_profile"
+  end
+  local model = ScreenReaderLegacy._model_by_id(provider, model_id)
+  if not model then return false, "unsupported_model" end
+  local entry = ScreenReaderLegacy.PROVIDERS[provider.id]
+  if entry then
+    if protocol_id ~= entry.protocol_id then
+      return false, "unsupported_protocol"
+    end
+    if entry.models[model.id] ~= true then
+      return false, "unsupported_model"
+    end
+    return true
+  end
+  if provider.is_custom == true then
+    if protocol_id ~= ScreenReaderLegacy.CUSTOM_PROTOCOL_ID then
+      return false, "unsupported_protocol"
+    end
+    if not ScreenReaderLegacy._endpoint_is_chat_completions(provider.endpoint) then
+      return false, "invalid_endpoint"
+    end
+    return true
+  end
+  return false, "unsupported_provider"
+end
+
+function ScreenReaderLegacy.provider_allowed(provider)
+  if not provider then return false end
+  if ScreenReaderLegacy._is_native_profile(provider) then return false end
+  if ScreenReaderLegacy.PROVIDERS[provider.id] then return true end
+  return provider.is_custom == true
+    and ScreenReaderLegacy._endpoint_is_chat_completions(provider.endpoint)
+end
+
+function ScreenReaderLegacy.model_allowed(provider, model)
+  if not (provider and model and model.id) then return false end
+  local protocol = ScreenReaderLegacy._legacy_protocol(provider)
+  return ScreenReaderLegacy._tuple_allowed(provider, model.id, protocol) == true
+end
+
+function ScreenReaderLegacy._saved_tuple(store, providers, reaper_api, cfg)
+  local doc = store and store.config_doc and store.config_doc() or {}
+  local original = type(doc.selection) == "table"
+    and ScreenReaderLegacy._copy(doc.selection) or {}
+  local selection = ScreenReaderLegacy._copy(original)
+  selection.model_id_by_provider =
+    type(selection.model_id_by_provider) == "table"
+    and selection.model_id_by_provider or {}
+  local provider_id = ScreenReaderLegacy._trim(selection.provider_id)
+  local had_saved_choice = provider_id ~= ""
+  if provider_id == "" and reaper_api and cfg then
+    local raw_idx = ScreenReaderLegacy._trim(
+      reaper_api.GetExtState(cfg.EXT_NS, "provider_idx"))
+    if raw_idx ~= "" then
+      local provider = providers and providers[tonumber(raw_idx)] or nil
+      if provider and provider.id then
+        provider_id = provider.id
+        selection.provider_id = provider_id
+        had_saved_choice = true
+      end
+    end
+  end
+  local provider = ScreenReaderLegacy._provider_by_id(providers, provider_id)
+  local model_id = provider_id ~= ""
+    and ScreenReaderLegacy._trim(selection.model_id_by_provider[provider_id])
+    or ""
+  if model_id == "" and provider and reaper_api and cfg then
+    local raw_idx = ScreenReaderLegacy._trim(reaper_api.GetExtState(
+      cfg.EXT_NS, "model_idx_" .. provider_id))
+    if raw_idx ~= "" then
+      local model = provider.models and provider.models[tonumber(raw_idx)] or nil
+      if model and model.id then model_id = model.id end
+    end
+  end
+  if model_id == "" and provider then
+    local entry = ScreenReaderLegacy.PROVIDERS[provider_id]
+    model_id = entry and entry.default_model_id
+      or (provider.models and provider.models[1] and provider.models[1].id) or ""
+  end
+  if had_saved_choice and provider_id ~= "" and model_id ~= "" then
+    selection.provider_id = provider_id
+    selection.model_id_by_provider[provider_id] = model_id
+  end
+  local protocol_id, inferred = ScreenReaderLegacy._saved_protocol(
+    selection, provider_id, model_id, provider)
+  return {
+    had_saved_choice = had_saved_choice,
+    -- Preserve the Config.json selection exactly while this entry point uses
+    -- a runtime-only compatibility tuple. The working copy above may fill
+    -- missing legacy fields for interpretation, but must never become a write.
+    selection = original,
+    provider_id = provider_id,
+    model_id = model_id,
+    protocol_id = protocol_id,
+    protocol_inferred = inferred == true,
+    provider = provider,
+  }
+end
+
+function ScreenReaderLegacy.initialize(store, providers, prefs_ref, state,
+    reaper_api, cfg)
+  local saved = ScreenReaderLegacy._saved_tuple(
+    store, providers, reaper_api, cfg)
+  local allowed, reason = false, "fresh_default"
+  if saved.had_saved_choice then
+    allowed, reason = ScreenReaderLegacy._tuple_allowed(
+      saved.provider, saved.model_id, saved.protocol_id)
+  end
+  local effective = saved.had_saved_choice and allowed and {
+    provider_id = saved.provider_id,
+    model_id = ScreenReaderLegacy._model_by_id(saved.provider, saved.model_id).id,
+    protocol_id = saved.protocol_id,
+  } or ScreenReaderLegacy._copy(ScreenReaderLegacy.DEFAULT)
+  ScreenReaderLegacy.runtime = {
+    saved = saved,
+    effective = effective,
+    substitution_active = saved.had_saved_choice and not allowed,
+    substitution_reason = saved.had_saved_choice and reason or nil,
+    startup_finalized = false,
+    readiness = { ok = false, reason = "provider_not_configured" },
+  }
+  if state then state._screen_reader_legacy = ScreenReaderLegacy.runtime end
+  local _, idx = ScreenReaderLegacy._provider_by_id(
+    providers, effective.provider_id)
+  if idx and prefs_ref then prefs_ref.provider_idx = idx end
+  return ScreenReaderLegacy.runtime
+end
+
+function ScreenReaderLegacy.provider_idx(providers)
+  local runtime = ScreenReaderLegacy.runtime
+  local effective = runtime and runtime.effective or ScreenReaderLegacy.DEFAULT
+  local _, idx = ScreenReaderLegacy._provider_by_id(
+    providers, effective.provider_id)
+  return idx
+end
+
+function ScreenReaderLegacy.model_idx(provider, models)
+  local runtime = ScreenReaderLegacy.runtime
+  local effective = runtime and runtime.effective or ScreenReaderLegacy.DEFAULT
+  if not (provider and provider.id == effective.provider_id) then return nil end
+  for i, model in ipairs(models or {}) do
+    if model.id == effective.model_id then return i end
+  end
+  return nil
+end
+
+function ScreenReaderLegacy.selection_for_save()
+  local runtime = ScreenReaderLegacy.runtime
+  if not (runtime and (runtime.startup_finalized ~= true
+        or ScreenReaderLegacy.runtime_selection_is_temporary())
+      and runtime.saved and runtime.saved.selection) then return nil end
+  return ScreenReaderLegacy._copy(runtime.saved.selection)
+end
+
+function ScreenReaderLegacy.decorate_selection(selection, provider, model)
+  if type(selection) ~= "table" or not (provider and model and model.id) then
+    return selection
+  end
+  selection.protocol_id_by_provider_model =
+    type(selection.protocol_id_by_provider_model) == "table"
+    and selection.protocol_id_by_provider_model or {}
+  local protocol = ScreenReaderLegacy._legacy_protocol(provider)
+  if protocol then
+    selection.protocol_id_by_provider_model[
+      provider.id .. "/" .. model.id] = protocol
+  end
+  return selection
+end
+
+function ScreenReaderLegacy.begin_explicit_selection()
+  local runtime = ScreenReaderLegacy.runtime
+  if runtime then
+    runtime.substitution_active = false
+    runtime.substitution_reason = nil
+    runtime.readiness = { ok = false, reason = nil }
+  end
+end
+
+function ScreenReaderLegacy.runtime_selection_is_temporary()
+  local runtime = ScreenReaderLegacy.runtime
+  return runtime ~= nil and (runtime.substitution_active == true
+    or (runtime.readiness
+      and runtime.readiness.reason == "screen_reader_legacy_runtime_mismatch"))
+end
+
+function ScreenReaderLegacy._active_tuple(providers, models, prefs_ref)
+  local provider = providers and providers[prefs_ref and prefs_ref.provider_idx or 0]
+  local model = models and models[prefs_ref and prefs_ref.model_idx or 0]
+    or (models and models[1])
+  return provider, model, ScreenReaderLegacy._legacy_protocol(provider)
+end
+
+function ScreenReaderLegacy.refresh_readiness(providers, models, prefs_ref, state)
+  local runtime = ScreenReaderLegacy.runtime
+  if not runtime then return false, "screen_reader_legacy_unavailable" end
+  local provider, model, protocol = ScreenReaderLegacy._active_tuple(
+    providers, models, prefs_ref)
+  local effective = runtime.effective or {}
+  if not (provider and model
+      and provider.id == effective.provider_id
+      and model.id == effective.model_id
+      and protocol == effective.protocol_id) then
+    runtime.readiness = {
+      ok = false,
+      reason = "screen_reader_legacy_runtime_mismatch",
+    }
+    return false, runtime.readiness.reason
+  end
+  local allowed, reason = ScreenReaderLegacy._tuple_allowed(
+    provider, model and model.id or nil, protocol)
+  if not allowed then
+    runtime.readiness = { ok = false,
+      reason = "screen_reader_legacy_" .. tostring(reason) }
+    return false, runtime.readiness.reason
+  end
+  if provider.id == "google" and model and model.paid_only
+      and state and state.gemini_paid_tier ~= true then
+    runtime.readiness = { ok = false,
+      reason = state.gemini_paid_tier == false
+        and "screen_reader_legacy_model_unavailable"
+        or "screen_reader_legacy_model_pending" }
+    return false, runtime.readiness.reason
+  end
+  if provider.is_custom == true then
+    local endpoint = ScreenReaderLegacy._trim(provider.endpoint)
+    if endpoint == "" then
+      runtime.readiness = { ok = false,
+        reason = "screen_reader_legacy_endpoint_missing" }
+      return false, runtime.readiness.reason
+    end
+    if not ScreenReaderLegacy._endpoint_is_chat_completions(endpoint) then
+      runtime.readiness = { ok = false,
+        reason = "screen_reader_legacy_endpoint_invalid" }
+      return false, runtime.readiness.reason
+    end
+  else
+    local endpoint = provider.endpoint or provider.endpoint_tpl
+    if ScreenReaderLegacy._trim(endpoint) == "" then
+      runtime.readiness = { ok = false,
+        reason = "screen_reader_legacy_endpoint_missing" }
+      return false, runtime.readiness.reason
+    end
+    local key = state and state.api_key_map and state.api_key_map[provider.id]
+    if ScreenReaderLegacy._trim(key) == "" then
+      runtime.readiness = { ok = false,
+        reason = "screen_reader_legacy_auth_missing" }
+      return false, runtime.readiness.reason
+    end
+  end
+  runtime.readiness = { ok = true, reason = nil }
+  return true
+end
+
+function ScreenReaderLegacy.finalize_startup(providers, models, prefs_ref, state)
+  local runtime = ScreenReaderLegacy.runtime
+  if not runtime then return false, "screen_reader_legacy_unavailable" end
+  runtime.startup_finalized = true
+  local provider = providers and providers[prefs_ref.provider_idx] or nil
+  if state then
+    state.api_key = provider and state.api_key_map
+      and state.api_key_map[provider.id] or nil
+  end
+  return ScreenReaderLegacy.refresh_readiness(
+    providers, models, prefs_ref, state)
+end
+
+function ScreenReaderLegacy.send_admission(providers, models, prefs_ref, state)
+  return ScreenReaderLegacy.refresh_readiness(
+    providers, models, prefs_ref, state)
+end
+
+function ScreenReaderLegacy.factory_reset(store, providers, prefs_ref, state,
+    reaper_api, cfg)
+  ScreenReaderLegacy.runtime = nil
+  ScreenReaderLegacy._pending_fingerprint = nil
+  ScreenReaderLegacy._pending_announcement = nil
+  return ScreenReaderLegacy.initialize(
+    store, providers, prefs_ref, state, reaper_api, cfg)
+end
+
+function ScreenReaderLegacy._endpoint_identity(endpoint)
+  endpoint = ScreenReaderLegacy._trim(endpoint)
+  local scheme, authority = endpoint:match("^([Hh][Tt][Tt][Pp][Ss]?)://([^/?#]+)")
+  if not scheme or not authority then return "invalid" end
+  scheme = scheme:lower()
+  authority = authority:match(".*@(.*)$") or authority
+  local host, port
+  if authority:sub(1, 1) == "[" then
+    host, port = authority:match("^%[([^%]]+)%]:?(%d*)$")
+    if host then host = "[" .. host:lower() .. "]" end
+  else
+    host, port = authority:match("^([^:]+):?(%d*)$")
+    if host then host = host:lower():gsub("%.$", "") end
+  end
+  if not host or host == "" or #host > 255 then return "invalid" end
+  if port == "" or port == nil then port = scheme == "https" and "443" or "80" end
+  local port_number = tonumber(port)
+  if not port_number or port_number < 1 or port_number > 65535 then
+    return "invalid"
+  end
+  return scheme .. "|" .. host .. "|" .. tostring(port_number)
+end
+
+function ScreenReaderLegacy._fingerprint_fields(providers, state)
+  local runtime = ScreenReaderLegacy.runtime
+  if not (runtime and runtime.substitution_active and runtime.saved) then
+    return nil
+  end
+  local saved = runtime.saved
+  local provider = saved.provider
+  local endpoint = provider and (provider.endpoint or provider.endpoint_tpl) or ""
+  local auth_state
+  if provider and provider.is_custom == true then
+    local key = state and state.api_key_map and state.api_key_map[provider.id]
+    auth_state = ScreenReaderLegacy._trim(key) ~= ""
+      and "optional_configured" or "optional_missing"
+  elseif provider then
+    local key = state and state.api_key_map and state.api_key_map[provider.id]
+    auth_state = ScreenReaderLegacy._trim(key) ~= ""
+      and "required_configured" or "required_missing"
+  else
+    auth_state = "required_missing"
+  end
+  return {
+    "reaassist-screen-reader-legacy-notice-v1",
+    tostring(ScreenReaderLegacy.TABLE_REVISION),
+    tostring(saved.provider_id or ""),
+    tostring(saved.model_id or ""),
+    tostring(saved.protocol_id or ""),
+    ScreenReaderLegacy._endpoint_identity(endpoint),
+    auth_state,
+  }
+end
+
+function ScreenReaderLegacy.notice_fingerprint(providers, state, sha256)
+  local fields = ScreenReaderLegacy._fingerprint_fields(providers, state)
+  if not fields or type(sha256) ~= "function" then return nil end
+  local encoded = {}
+  for _, field in ipairs(fields) do
+    field = tostring(field or "")
+    encoded[#encoded + 1] = tostring(#field) .. ":" .. field
+  end
+  local ok, digest = pcall(sha256, table.concat(encoded, "|"))
+  digest = ok and tostring(digest or ""):lower() or ""
+  if not digest:match("^[0-9a-f]+$") or #digest ~= 64 then return nil end
+  return digest
+end
+
+function ScreenReaderLegacy._notice_state(store)
+  local doc = store and store.state_doc and store.state_doc() or nil
+  if type(doc) ~= "table" then return nil, nil end
+  doc.screen_reader_legacy = type(doc.screen_reader_legacy) == "table"
+    and doc.screen_reader_legacy or {}
+  return doc.screen_reader_legacy, doc
+end
+
+function ScreenReaderLegacy.compatibility_status_text()
+  local runtime = ScreenReaderLegacy.runtime
+  if not runtime then return "" end
+  local provider, model = ScreenReaderLegacy._active_tuple(
+    PROVIDERS, MODELS, prefs)
+  if runtime.readiness
+      and runtime.readiness.reason == "screen_reader_legacy_runtime_mismatch" then
+    local effective = runtime.effective or {}
+    local expected_provider = ScreenReaderLegacy._provider_by_id(
+      PROVIDERS, effective.provider_id)
+    local expected_model = ScreenReaderLegacy._model_by_id(
+      expected_provider, effective.model_id)
+    return RA.t("a11y.sr.legacy_runtime_mismatch_status", {
+      provider = expected_provider
+        and (expected_provider.label or expected_provider.id)
+        or tostring(effective.provider_id or "unknown provider"),
+      model = expected_model and (expected_model.label or expected_model.id)
+        or tostring(effective.model_id or "unknown model"),
+    }, "Sending is blocked because the active Screen Reader provider or model "
+      .. "does not match the saved compatibility selection. Expected "
+      .. tostring(expected_provider
+        and (expected_provider.label or expected_provider.id)
+        or effective.provider_id or "unknown provider")
+      .. ", " .. tostring(expected_model
+        and (expected_model.label or expected_model.id)
+        or effective.model_id or "unknown model")
+      .. ". Choose an available Screen Reader model to replace the saved selection.")
+  end
+  if not runtime.substitution_active then return "" end
+  return RA.t("a11y.sr.legacy_substitution_status", {
+    provider = provider and (provider.label or provider.id) or "unknown provider",
+    model = model and (model.label or model.id) or "unknown model",
+  }, "Screen Reader compatibility selection is active for this session. Using "
+    .. tostring(provider and (provider.label or provider.id) or "unknown provider")
+    .. ", " .. tostring(model and (model.label or model.id) or "unknown model")
+    .. ". Shared provider settings were not changed.")
+end
+
+function ScreenReaderLegacy.guidance_for_reason(reason)
+  local provider, model = ScreenReaderLegacy._active_tuple(
+    PROVIDERS, MODELS, prefs)
+  local provider_label = provider and (provider.setup_label or provider.label
+    or provider.id) or "the selected provider"
+  local model_label = model and (model.label or model.id) or "the selected model"
+  if reason == "screen_reader_legacy_unsupported_native_profile" then
+    return RA.t("a11y.sr.native_profile_unavailable",
+      { provider = provider_label },
+      tostring(provider_label) .. " uses a connection type that is unavailable in Screen Reader Mode. Use the visual interface for this provider, or select a compatible Custom provider in Screen Reader Mode.")
+  end
+  if reason == "screen_reader_legacy_auth_missing" then
+    return RA.t("a11y.sr.legacy_auth_missing", { provider = provider_label },
+      "Sending is unavailable in Screen Reader Mode. Add an API key for "
+        .. provider_label .. " in Provider API Keys.")
+  end
+  if reason == "screen_reader_legacy_endpoint_missing"
+      or reason == "screen_reader_legacy_endpoint_invalid" then
+    return RA.t("a11y.sr.legacy_endpoint_missing", { provider = provider_label },
+      "Sending is unavailable in Screen Reader Mode. Open Advanced Providers "
+        .. "and add a valid Chat Completions endpoint for " .. provider_label .. ".")
+  end
+  if reason == "screen_reader_legacy_model_pending" then
+    return RA.t("a11y.sr.legacy_model_pending", { model = model_label },
+      "Sending is unavailable while ReaAssist checks whether this Google account "
+        .. "can use " .. model_label .. ".")
+  end
+  if reason == "screen_reader_legacy_model_unavailable" then
+    return RA.t("a11y.sr.legacy_model_unavailable", { model = model_label },
+      model_label .. " is unavailable for this Google account. Choose another "
+        .. "Screen Reader-compatible Gemini model.")
+  end
+  if reason == "screen_reader_legacy_runtime_mismatch" then
+    return ScreenReaderLegacy.compatibility_status_text()
+  end
+  if reason and reason:match("^screen_reader_legacy_") then
+    return RA.t("a11y.sr.legacy_tuple_unavailable", nil,
+      "The selected provider or model is not available in Screen Reader Mode. "
+        .. "Choose a Screen Reader-compatible provider and model.")
+  end
+  return nil
+end
+
+function ScreenReaderLegacy.pending_announcement(store, providers, state, sha256)
+  local runtime = ScreenReaderLegacy.runtime
+  if not (runtime and runtime.substitution_active) then return nil end
+  local fingerprint = ScreenReaderLegacy.notice_fingerprint(
+    providers, state, sha256)
+  if not fingerprint then
+    return RA.t("a11y.sr.legacy_substitution_announcement", nil,
+      "The saved provider selection uses a newer or unsupported provider format. "
+        .. "For this Screen Reader session only, ReaAssist is using its legacy "
+        .. "compatibility selection. Shared provider settings were not changed.")
+  end
+  local marker = ScreenReaderLegacy._notice_state(store)
+  if marker and marker.last_announced_fingerprint == fingerprint then return nil end
+  ScreenReaderLegacy._pending_fingerprint = fingerprint
+  ScreenReaderLegacy._pending_announcement = true
+  return RA.t("a11y.sr.legacy_substitution_announcement", nil,
+    "The saved provider selection uses a newer or unsupported provider format. "
+      .. "For this Screen Reader session only, ReaAssist is using its legacy "
+      .. "compatibility selection. Shared provider settings were not changed.")
+end
+
+function ScreenReaderLegacy.mark_announcement_delivered(store)
+  local fingerprint = ScreenReaderLegacy._pending_fingerprint
+  ScreenReaderLegacy._pending_fingerprint = nil
+  ScreenReaderLegacy._pending_announcement = nil
+  if not fingerprint then return false end
+  local marker = ScreenReaderLegacy._notice_state(store)
+  if not marker then return false end
+  marker.last_announced_fingerprint = fingerprint
+  if not (store and store.save_state) then return false end
+  return store.save_state() == nil
 end
 
 REAASSIST_SCREEN_READER_MODE = true

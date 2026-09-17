@@ -5,10 +5,10 @@
 <!-- builder_version:2 -->
 <!-- builder_script_sha256:8a7e968f1323dc59feceb215c460d67ccf103ae06c815d13d50c3785d2387166 -->
 <!-- section_count:66 -->
-<!-- source_set_sha256:f518d38f49635d4c374bf7bbc890d4f875d413bed1a87be6fdb030e4ccc83439 -->
+<!-- source_set_sha256:073d8a648599a9f748cc3d2784233fe10e359e1c497985299eb0d176c647e706 -->
 <!-- stoplist_version:1 -->
 <!-- aggregate_injected_limit_bytes:98304 -->
-<!-- pack_revision:0b8e3b9e082a4c36efbae4ef851e644e902e1f3a120c8293f9b219293d8b7a9a -->
+<!-- pack_revision:eb545bbf72007f19a0f0b5c354c4245a6118f382a948120552409a6f5f97ab7b -->
 <!-- Plugin_Pack.md - markers are PLUGIN:Name (NOT SECTION:) because each block -->
 <!-- is a typed, addressable plugin entry served as plugin_ref:Name. SECTION: -->
 <!-- is reserved for generic on-demand buckets in API_Ref.md / Prompts.md.    -->
@@ -781,7 +781,7 @@ instance. State final settings without claiming a heard amount of reduction.
 <!-- /PLUGIN:Pro-C 2 -->
 
 <!-- PLUGIN:Pro-C 3 -->
-<!-- SECTION-REVISION:e31d84650614670382cb57a0e660df438fb72809b6c6aaf42039abdd8bf6090d -->
+<!-- SECTION-REVISION:5c033d97d65cf1e242ca958b8891ae767b61fc155cfe25aceb1487262abc14c1 -->
 ## Pro-C 3
 
 ```json plugin-route
@@ -789,7 +789,7 @@ instance. State final settings without claiming a heard amount of reduction.
 ```
 
 ```json plugin-validate
-{"key":"fabfilter-pro-c-3","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Pro-C 3","loaded_name":"VST3: Pro-C 3 (FabFilter)","parameter_count":{"mode":"exact","value":240},"required_parameters":[{"index":0,"name":"Style","section":"","section_required":false},{"index":24,"name":"Host Trigger Offset","section":"","section_required":false},{"index":49,"name":"Side Chain EQ Band 2 Speakers","section":"Side Chain EQ Band 2","section_required":true},{"index":73,"name":"Side Chain EQ Band 5 Shape","section":"Side Chain EQ Band 5","section_required":true},{"index":99,"name":"Show Input Level Meter","section":"","section_required":false}],"observed_fingerprint_sha256":"e22bc8283626bbae7a3e5748e68200d6ca8c5d8b95dbb6aa2f88fd6214d1c34c"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"1ac6c01ae2651cef4c19c5a9f2cd2806a73da68560a4384321b24298385051f0","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
+{"key":"fabfilter-pro-c-3","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Pro-C 3","loaded_name":"VST3: Pro-C 3 (FabFilter)","parameter_count":{"mode":"exact","value":240},"required_parameters":[{"index":0,"name":"Style","section":"","section_required":false},{"index":24,"name":"Host Trigger Offset","section":"","section_required":false},{"index":49,"name":"Side Chain EQ Band 2 Speakers","section":"Side Chain EQ Band 2","section_required":true},{"index":73,"name":"Side Chain EQ Band 5 Shape","section":"Side Chain EQ Band 5","section_required":true},{"index":99,"name":"Show Input Level Meter","section":"","section_required":false}],"observed_fingerprint_sha256":"e22bc8283626bbae7a3e5748e68200d6ca8c5d8b95dbb6aa2f88fd6214d1c34c"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"817133b90ed1bc23b2f945ed57c05a3523246e5795ca2652bb7e4dcb87d1bc45","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
 ```
 
 <!-- CHUNK:control -->
@@ -807,6 +807,7 @@ Use these facts before any longer reference below. Indices are zero-based.
 8 Release: 100ms=0.2779541015625, 120ms=0.30712890625,
            150ms=0.345947265625, 250ms=0.45001220703125
 19 Auto Gain: Off=0, On=1
+21 Side Chain Input: Internal=0, External=1/3, Host Sync=2/3, MIDI=1
 88 Mix: 100 percent=0.5
 ```
 
@@ -850,6 +851,9 @@ idx  Name                  Default val   Type        Notes
 15   Wet Gain              0.5           continuous  dB (0.5=0dB)
 17   Dry Gain              0             continuous  dB (-INF..0; 0=silence, parallel)
 19   Auto Gain             0             toggle      0=Off, 1=On (auto make-up)
+20   Show Side Chain       0             toggle      UI panel only; no routing
+21   Side Chain Input      0             enum        Internal/External/Host Sync/MIDI
+22   Side Chain Level      0.5           continuous  dB (0.5=0dB), detector trim
 26   Stereo Link           0.402         continuous  % 0..200 (default 80%)
 27   Stereo Link Mode      0             enum        0=Mid, 1=Side, 2=L/R
 88   Mix                   0.5           continuous  % dry/wet, 0.5=100% wet (see below)
@@ -861,6 +865,34 @@ idx  Name                  Default val   Type        Notes
 
 Side Chain EQ params (idx 32-49, two bands) are for internal SC filtering;
 leave at defaults unless explicitly tuning sidechain response.
+
+### SIDE CHAIN INPUT (idx 21, ducking)
+
+Verified on VST3: Pro-C 3 (FabFilter), 240 parameters, REAPER 7.79. The
+parameter is named exactly `Side Chain Input` and is a four-value enum:
+
+```
+Displayed     Normalized
+------------  ----------
+Internal      0.0 (default -- the external input is IGNORED)
+External      1/3  (0.3333333333333333)
+Host Sync     2/3
+MIDI          1.0
+```
+
+A ducking request ("the bass ducks under the kick") is not finished until this
+parameter reads `External`. The send into channels 3+4 and `I_NCHAN = 4` only
+deliver the trigger audio; Pro-C 3 keeps listening to its own input until the
+selector moves. Write it by name, never by a remembered index: `50` is
+`Side Chain EQ Band 3 Used` on this build, not the side-chain input.
+
+```lua
+local sc = find_param(tr, fx, "Side Chain Input")
+if sc then reaper.TrackFX_SetParamNormalized(tr, fx, sc, 1/3) end  -- External
+```
+
+Do not raise `Show Side Chain` (idx 20) instead; it only opens the side-chain
+panel in the plug-in UI and changes no routing.
 
 ### STYLE ENUM (idx 0, 14 values)
 
@@ -904,7 +936,10 @@ Formula: dB = -60 + slider * 60. Slider = (dB + 60) / 60.
 
 ### RATIO SCALE (1:1..100:1)
 
-Non-uniform taper -- more resolution at low/medium ratios.
+Non-uniform taper with more resolution at low/medium ratios. The overview
+below is approximate. For an exact target, use the maintained anchors below
+or verified live formatted values. Never copy a rounded overview value when
+an exact anchor is available.
 
 ```
 slider   ratio       slider   ratio
@@ -937,17 +972,18 @@ Formula: dB = slider * 72. Default 7.35 dB = slider 0.102. Most use 0..18 dB.
 ### ATTACK SCALE (0..250 ms, cubic -- ms = 250 * slider^3)
 
 ```
-Formula: ms = 250 * slider^3. Slider = (ms / 250)^(1/3).
-
-0.005 ms = 0.000   5 ms   = 0.271    50 ms  = 0.585
-0.1 ms   = 0.074   10 ms  = 0.342   100 ms  = 0.737
-0.5 ms   = 0.126   20 ms  = 0.431   150 ms  = 0.843
-1 ms     = 0.159   30 ms  = 0.493   250 ms  = 1.000
+Formula: ms = 250 * slider^3. Slider = (requested_ms / 250)^(1/3).
+10 ms = (10 / 250)^(1/3)
+15 ms = (15 / 250)^(1/3)
+50 ms = (50 / 250)^(1/3)
 ```
 
-Default 0.725 ms = slider 0.142 (≈ 0.725^(1/3) / 250^(1/3)).
+Calculate the requested value directly instead of rounding the slider.
+The host display may quantize it; compare the settled displayed value too.
 
 ### RELEASE ANCHORS (10 ms..several sec, non-linear)
+
+The overview is approximate. Exact anchors below take precedence.
 
 ```
 10 ms   = 0.000    100 ms = 0.278 *    1 sec  = ~0.55
@@ -1043,15 +1079,18 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 19, 0.0)  -- Auto Gain OFF
 reaper.TrackFX_SetParamNormalized(tr, fx, 91, 0.5)  -- Output Level: 0 dB
 ```
 
-**"Gentle vocal compression, ready-to-hear (Vocal style, ~3 dB GR):"**
+**"Gentle vocal compression starting point (Vocal style):"**
+
+Actual gain reduction depends on the recording and input level. These
+settings do not establish a measured gain-reduction target.
 
 ```lua
 reaper.TrackFX_SetParamNormalized(tr, fx, 0, 10/13)   -- Style: "Vocal" (idx 10/14)
-reaper.TrackFX_SetParamNormalized(tr, fx, 1, 0.75)    -- Threshold: -15 dB
-reaper.TrackFX_SetParamNormalized(tr, fx, 4, 0.40)    -- Ratio: 2:1
+reaper.TrackFX_SetParamNormalized(tr, fx, 1, (-15 + 60)/60) -- Threshold: -15 dB
+reaper.TrackFX_SetParamNormalized(tr, fx, 4, 0.400390625) -- Ratio: 2:1
 reaper.TrackFX_SetParamNormalized(tr, fx, 5, 10/72)   -- Knee: 10 dB (soft)
-reaper.TrackFX_SetParamNormalized(tr, fx, 7, 0.342)   -- Attack: 10 ms
-reaper.TrackFX_SetParamNormalized(tr, fx, 8, 0.278)   -- Release: 100 ms
+reaper.TrackFX_SetParamNormalized(tr, fx, 7, (10/250)^(1/3)) -- Attack: 10 ms
+reaper.TrackFX_SetParamNormalized(tr, fx, 8, 0.2779541015625) -- Release: 100 ms
 reaper.TrackFX_SetParamNormalized(tr, fx, 19, 1.0)    -- Auto Gain ON
 ```
 
@@ -1062,9 +1101,9 @@ ready-to-hear starting point. For an honest comparison, set idx 19 to `0.0`.
 
 ```lua
 reaper.TrackFX_SetParamNormalized(tr, fx, 0, 12/13)   -- Style: "Bus" (idx 12/14)
-reaper.TrackFX_SetParamNormalized(tr, fx, 1, 0.667)   -- Threshold: -20 dB
-reaper.TrackFX_SetParamNormalized(tr, fx, 4, 0.30)    -- Ratio: 1.5:1
-reaper.TrackFX_SetParamNormalized(tr, fx, 7, 0.585)   -- Attack: 50 ms
+reaper.TrackFX_SetParamNormalized(tr, fx, 1, (-20 + 60)/60) -- Threshold: -20 dB
+reaper.TrackFX_SetParamNormalized(tr, fx, 4, 0.30078125) -- Ratio: 1.5:1
+reaper.TrackFX_SetParamNormalized(tr, fx, 7, (50/250)^(1/3)) -- Attack: 50 ms
 reaper.TrackFX_SetParamNormalized(tr, fx, 9, 1.0)     -- Auto Release ON
 reaper.TrackFX_SetParamNormalized(tr, fx, 19, 1.0)    -- Auto Gain ON
 ```
@@ -2474,7 +2513,7 @@ the user's words and available trustworthy context.
 <!-- /PLUGIN:Pro-Q 4 -->
 
 <!-- PLUGIN:Pro-R 2 -->
-<!-- SECTION-REVISION:3845ba52e20d608a00a3a5cfe12c17e04334e05a170481f11d165bbd302e2a2a -->
+<!-- SECTION-REVISION:9df673a6cfbc310b388a483207f001666083757c41a6319d71dc21ece2f3f0c1 -->
 ## Pro-R 2
 
 ```json plugin-route
@@ -2482,7 +2521,7 @@ the user's words and available trustworthy context.
 ```
 
 ```json plugin-validate
-{"key":"fabfilter-pro-r-2","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Pro-R 2","loaded_name":"VST3: Pro-R 2 (FabFilter)","parameter_count":{"mode":"exact","value":276},"required_parameters":[{"index":0,"name":"Space","section":"","section_required":false},{"index":33,"name":"Decay EQ Band 3 Used","section":"Decay EQ Band 3","section_required":true},{"index":67,"name":"Post EQ Band 1 Slope","section":"Post EQ Band 1","section_required":true},{"index":100,"name":"Post EQ Band 5 Gain","section":"Post EQ Band 5","section_required":true},{"index":135,"name":"Midi State","section":"","section_required":false}],"observed_fingerprint_sha256":"144a87c5108b77e92fa48febcf4d34cdf101768c02c07bc3a7bd36f292e5322f"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"1cf564a63d2b77f8ad5f44fd53d8fa54f8443f8a1afd20c60559ca0d1d7af3d3","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
+{"key":"fabfilter-pro-r-2","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Pro-R 2","loaded_name":"VST3: Pro-R 2 (FabFilter)","parameter_count":{"mode":"exact","value":276},"required_parameters":[{"index":0,"name":"Space","section":"","section_required":false},{"index":33,"name":"Decay EQ Band 3 Used","section":"Decay EQ Band 3","section_required":true},{"index":67,"name":"Post EQ Band 1 Slope","section":"Post EQ Band 1","section_required":true},{"index":100,"name":"Post EQ Band 5 Gain","section":"Post EQ Band 5","section_required":true},{"index":135,"name":"Midi State","section":"","section_required":false}],"observed_fingerprint_sha256":"144a87c5108b77e92fa48febcf4d34cdf101768c02c07bc3a7bd36f292e5322f"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"2036d3d7f709c324385b80801370c71ca43fdbbdc6492b6fe0596ff108b25a43","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
 ```
 
 <!-- CHUNK:control -->
@@ -2614,8 +2653,12 @@ Slider    Display      Feel
 -------   -----------  ----------------------------
 0.00      Modern       Clean, neutral (default)
 0.25      Vintage      Warm, analog-flavored
-0.75      Plate        Metallic, bright, dense
+0.85      Plate        Metallic, bright, dense
 ```
+
+Use the same Plate target `0.85` as the maintained vocal-plate recipe.
+The settled normalized value may differ while the displayed Style remains
+Plate. Verify the displayed value instead of requiring numerical identity.
 
 ### PREDELAY SYNC ENUM (idx 18)
 
@@ -10114,7 +10157,7 @@ those hidden editors.
 <!-- /PLUGIN:Tremolator -->
 
 <!-- PLUGIN:ValhallaDelay -->
-<!-- SECTION-REVISION:ce74f0b5c7e0ec04e685933007fcb0d867047b319c04b029fece2cd0a6d3ae25 -->
+<!-- SECTION-REVISION:da31d80b8a38a37fc1cf2b334cdfae56cfc2b1d3db177eba1debb7412b4760a2 -->
 ## ValhallaDelay
 
 ```json plugin-route
@@ -10122,7 +10165,7 @@ those hidden editors.
 ```
 
 ```json plugin-validate
-{"key":"valhalla-delay","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[16],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: ValhallaDelay","loaded_name":"VST3: ValhallaDelay (Valhalla DSP, LLC)","parameter_count":{"mode":"exact","value":42},"required_parameters":[{"index":0,"name":"Mix","section":"","section_required":false},{"index":16,"name":"Feedback","section":"","section_required":false},{"index":32,"name":"Mode","section":"","section_required":false},{"index":33,"name":"Era","section":"","section_required":false}],"observed_fingerprint_sha256":"6145bd74ff72af1caab3f56f27a8e7c516f1df722865798177d74822bebce12f"}],"status":"pilot","provenance":{"source":"https://valhalladsp.com/2019/04/16/valhalladelay-the-controls/","migrated_at":"2026-07-30","body_sha256":"9b76f797c1c25b943643284c78a4af0801d9f7e9542a3c68ce0422f06f9ae09f","verified_at":"2026-07-30","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"6145bd74ff72af1caab3f56f27a8e7c516f1df722865798177d74822bebce12f"}}
+{"key":"valhalla-delay","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[16],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: ValhallaDelay","loaded_name":"VST3: ValhallaDelay (Valhalla DSP, LLC)","parameter_count":{"mode":"exact","value":42},"required_parameters":[{"index":0,"name":"Mix","section":"","section_required":false},{"index":16,"name":"Feedback","section":"","section_required":false},{"index":32,"name":"Mode","section":"","section_required":false},{"index":33,"name":"Era","section":"","section_required":false}],"observed_fingerprint_sha256":"6145bd74ff72af1caab3f56f27a8e7c516f1df722865798177d74822bebce12f"}],"status":"pilot","provenance":{"source":"https://valhalladsp.com/2019/04/16/valhalladelay-the-controls/","migrated_at":"2026-07-30","body_sha256":"14e2cb7361fe69d90ca308be8c810afb4c0da233df7ae4f54858f7e33bd4e838","verified_at":"2026-07-30","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"6145bd74ff72af1caab3f56f27a8e7c516f1df722865798177d74822bebce12f"}}
 ```
 
 <!-- CHUNK:control -->
@@ -10145,10 +10188,17 @@ preserve Note. For tempo-note timing, set the matching Note control and
 preserve `_Ms`. If the user requests one centered delay time, keep both sides
 matched. Preserve separate left and right timing when refining an existing
 stereo setup.
+For tempo-note timing, `DelayLSync` and `DelayRSync` use normalized `0.5` for
+the displayed label `Note`. `DelayLNote` and `DelayRNote` use normalized
+`0.41666665673256` for the displayed label `1/4`. Set and verify both sides
+independently.
 
 Feedback is unsafe to sweep. Use reviewed normalized anchors and keep unheard
 starting points at or below 40.0 %. Mix should normally stay at or below
 30.0 % on an insert. Use 100.0 % only on an explicitly identified return.
+For Feedback, 20.0 % is normalized `0.10009765625` and 30.0 % is normalized
+`0.15`. Do not substitute the requested display percentage as the normalized
+value.
 
 Resolve every requested name and index before the first write. For the
 certified starting recipe, use the reviewed normalized anchors below. The

@@ -1,0 +1,66 @@
+{
+  "schema": 3,
+  "version": "1.0.2",
+  "core_abi": 2,
+  "build_channel": "production",
+  "subsystems": {
+    "core": 1,
+    "client": 1,
+    "inference": 2,
+    "input_media": 1,
+    "openrouter_catalog": 1,
+    "stateless_helpers": 1
+  },
+  "protocols": [
+    "openai_responses",
+    "openrouter_responses",
+    "deepseek_responses",
+    "openai_chat_completions",
+    "openrouter_chat_completions",
+    "deepseek_chat_completions",
+    "anthropic_messages",
+    "google_generate_content",
+    "google_interactions"
+  ],
+  "inference_profiles": [
+    "custom_openai_chat_v1",
+    "custom_openai_responses_v1",
+    "local_openai_chat_v1",
+    "local_openai_responses_v1",
+    "local_openai_chat_private_v1",
+    "local_openai_responses_private_v1"
+  ],
+  "artifacts": {
+    "win-x64": {
+      "filename": "reaper_mbriggs_helper-x64.dll",
+      "sha256": "c8e01db52c6268217d3f44a25c2426ecdef203ad7637daa17774754ec581254d",
+      "signature": "signed-timestamped"
+    },
+    "win-arm64": {
+      "filename": "reaper_mbriggs_helper-arm64.dll",
+      "sha256": "daac326816c45d7d1166ed36a93879ff91bf10d39154e7d76bae2df964abff78",
+      "signature": "signed-timestamped"
+    },
+    "mac-arm64": {
+      "filename": "reaper_mbriggs_helper-arm64.dylib",
+      "sha256": "e19c41dd6ff03f7d995fc893a4790778e3904cf678524fa4b3ee65e57fd32a35",
+      "signature": "developer-id-notarized"
+    },
+    "mac-x64": {
+      "filename": "reaper_mbriggs_helper-x86_64.dylib",
+      "sha256": "9ab847dabfdb181c26e028bec9c206ce239a45519d77341c25e8c6d566529cd9",
+      "signature": "developer-id-notarized"
+    },
+    "linux-x64": {
+      "filename": "reaper_mbriggs_helper-x86_64.so",
+      "sha256": "94a3fadddd02efcb29221fb56ca79cfec327fcc6ccc760a60a17952d106cd007",
+      "signature": "sha256"
+    },
+    "linux-arm64": {
+      "filename": "reaper_mbriggs_helper-aarch64.so",
+      "sha256": "f8599a7260cfc250599c198a336b1337b8d07c323cd9421399cbd706476ea16a",
+      "signature": "sha256"
+    }
+  },
+  "payload_layout": "native-bytes-txt-v1"
+}

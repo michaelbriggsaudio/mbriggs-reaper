@@ -6,8 +6,8 @@
 <!-- SECTION:core -->
 # REAPER ReaScript Lua API Reference
 
-Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.79),
-plus official Cockos changelog notes through REAPER v7.79.
+Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.80),
+plus official Cockos changelog notes through REAPER v7.80.
 Lua-only. All functions called as reaper.FunctionName().
 Use proj=0 for active project. Track/item indices in the API are 0-based.
 
@@ -45,6 +45,11 @@ REAPER installs: `if reaper.FunctionName then ... else ... end`.
   Both matching persistence modes are written to `reaper.ini`; return type 2
   describes a project-default setting, not a write to the current `.RPP` file.
   Do not invent a concrete config-variable key for an explanatory example.
+  REAPER 7.80 adds a separate generic-INI mode, `persist=3`, for keys that
+  cannot use the ordinary modes. It writes the INI file and may require a
+  restart or other reload to take effect. In that mode only, `=delete=` deletes
+  the key; an empty string is not the deletion token. The helper below remains
+  restricted to ordinary global-preference and project-default writes.
   Use a neutral guarded helper and let the caller supply a documented key:
   ```lua
   local function set_config_checked(name, value, persist)
@@ -142,6 +147,10 @@ VOLUME (D_VOL is LINEAR AMPLITUDE, not dB and not slider position):
 - D_PAN is direct position, not percent: -1.0 = full left, 0.0 = center,
   1.0 = full right. Convert percent requests by dividing by 100 and applying
   direction: 25% left = -0.25, 50% right = 0.50.
+- THIS SIGN IS THE TRACK'S D_PAN ONLY. A PAN ENVELOPE POINT RUNS THE OTHER
+  WAY: +1.0 is hard LEFT and -1.0 is hard RIGHT. Do not carry the D_PAN sign
+  into `InsertEnvelopePoint` / `InsertEnvelopePointEx`. See PAN ENVELOPE SIGN
+  in the envelopes bucket (`<context_needed>docs:envelopes</context_needed>`).
 
 COLORS:
 - I_CUSTOMCOLOR and track/item colors require reaper.ColorToNative(r,g,b)|0x1000000.
@@ -214,7 +223,7 @@ end
 local tr = reaper.GetSelectedTrack(0, 0)
 if tr then reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "New Name", true) end
 
--- Add FX to a track (use -1 to find existing OR add):
+-- Add a new FX instance to a track (negative instantiate always creates new):
 local tr = reaper.GetSelectedTrack(0, 0)
 if tr then reaper.TrackFX_AddByName(tr, "ReaEQ", false, -1) end
 
@@ -497,10 +506,15 @@ scripts the plain P_RAZOREDITS field is what you want.
 ## TRACK FX
 
 ADDBYNAME vs GETBYNAME (read first -- the most common FX-script bug):
-- `TrackFX_AddByName(tr, name, false, -1)` finds OR adds. Use this when your
-  script needs the FX to exist on the track.
-- `TrackFX_GetByName(tr, name, false)` NEVER adds, only searches. Returns -1
-  if not found. Reserve for read-only existence checks.
+- A negative instantiate value always creates a new instance. Use `-1` for an
+  add/new/insert request, including each requested repeated instance.
+- `TrackFX_AddByName(tr, name, false, 0)` searches only and returns -1 when no
+  matching instance exists. Use this to modify an existing FX.
+- A positive instantiate value adds the FX only when no matching instance
+  exists. It can return an existing instance, so do not use it when the user
+  requested a new or repeated instance.
+- `TrackFX_GetByName(tr, name, false)` also searches without adding. Returns
+  -1 if not found.
 - After AddByName, defer param access to the next cycle -- the FX may not be
   fully initialized in the same execution frame, and GetNumParams returns nil.
 - Function name is `GetNumParams`, NOT `GetParamCount` (common hallucination).
@@ -544,9 +558,9 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
 `integer reaper.TrackFX_AddByName(MediaTrack track, string fxname, boolean recFX, integer instantiate)`
   Add or find FX by name. Returns zero-based FX index, or -1 on failure.
   instantiate values:
-    -1 = find existing instance OR add if not present (PREFERRED -- use this in almost all scripts)
+    negative instantiate value = always create a new instance
      0 = find existing only, never add
-     1 = always add a new instance even if one exists (causes duplicates -- avoid)
+    positive instantiate value = add only if no matching instance exists
 
 `boolean reaper.TrackFX_Delete(MediaTrack track, integer fx)`
   Remove FX from chain.
@@ -595,6 +609,10 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
   `parent_container`, and `container_item.X`. REAPER 7.75+ also supports
   `chain_index_to_slot` and `chain_slot_to_index` for mapping between dense FX
   chain indices and displayed sparse TCP/MCP FX slots. Returns false if unsupported.
+  REAPER 7.80+: `param.X.default_value` returns the normalized default value
+  for parameter X when available. `param_hovered` returns the hovered parameter
+  index, or -1 when no parameter is hovered, in supporting CLAP plug-ins.
+  Check the boolean result before using either value; unsupported queries fail.
   For dry/wet preview scripts, skip virtual instruments by checking whether
   `fx_type` ends in `i` (or the displayed name begins with VSTi/AUi/etc.), then
   use `TrackFX_GetParamFromIdent(track, fx, ":wet")` for the remaining FX.
@@ -614,6 +632,10 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
   `local ok, formatted = reaper.TrackFX_FormatParamValueNormalized(track, 0, 0, 0.5)`.
   The first FX is index 0; do not use `TrackFX_GetByName(track, "", false)`.
   Works only for FX that support Cockos VST extensions.
+  Some plug-ins return true but format their current value for every candidate.
+  Validate distinct endpoint displays before using this for conversion. A
+  successful call alone is insufficient. Use GetFormattedParamValue for actual
+  post-write readback; stop or restore the original value if the target misses.
 
 `boolean reaper.TrackFX_GetOpen(MediaTrack track, integer fx)`
   Returns true if FX UI is open.
@@ -1082,6 +1104,15 @@ Useful string keys:
   `reaper.ini`. Type 2 does not mean the value is written to the current `.RPP`.
   Prefer safer project/extstate APIs unless the user explicitly asks to change
   a REAPER preference/config variable.
+  REAPER 7.80+: some generic INI keys require `persist=3`; these writes may not
+  take effect immediately. With that mode, the special value `=delete=` deletes
+  the key. Do not use this mode for ordinary preference writes or infer an INI
+  key name. Preserve the user's prior value before an explicitly requested edit.
+
+`boolean retval, string value reaper.get_config_var_string(string name)`
+  Read a configuration value as text. Most keys return the in-memory value;
+  some generic INI keys are read directly from the INI file in REAPER 7.80+.
+  Check retval before using the returned string.
 
 ## COLORS
 
@@ -1355,6 +1386,12 @@ TRACKS
   40297   Track: Unselect (clear selection of) all tracks
   40296   Track: Select all tracks
   40769   Unselect (clear selection of) all tracks/items/envelope points
+  40406   Track: Toggle track volume envelope visible
+  40407   Track: Toggle track pan envelope visible
+    These two create the lane when the track has none. They are a TOGGLE:
+    running one on a track that already has the lane hides it. Use them only
+    through the write route in TARGET RESOLUTION RULE, and write the id as a
+    literal at the Main_OnCommand call.
 
 PROJECT
   40860   Close current project tab
@@ -1524,6 +1561,25 @@ item.
 
 `boolean reaper.SetMediaItemInfo_Value(MediaItem item, string parmname, number newvalue)`
   Set item numerical attribute.
+
+RULE: CROSSFADING OVERLAPPING ITEMS MEANS FADING ACROSS THE OVERLAP THEY
+ALREADY HAVE. Use this recipe only for a staggered overlap: the later item
+starts inside the earlier item and ends after it. NEVER change `D_POSITION` or
+`D_LENGTH` to butt the items together: trimming the overlap away deletes audio
+and leaves no crossfade at all. The overlap is
+`(pos_earlier + len_earlier) - pos_later`. Write it to the `_AUTO` pair, the
+automatic crossfade REAPER writes itself: an `_AUTO` length greater than zero
+is the fade that edge plays, so it wins over `D_FADEOUTLEN`/`D_FADEINLEN`.
+
+```lua
+local overlap = (pos_earlier + len_earlier) - pos_later
+reaper.SetMediaItemInfo_Value(earlier, "D_FADEOUTLEN_AUTO", overlap)
+reaper.SetMediaItemInfo_Value(later,   "D_FADEINLEN_AUTO",  overlap)
+```
+
+If the later item ends before the earlier item ends, one item is contained
+inside the other. That is a different case and this formula does not apply:
+ask the user what they want.
 
 `boolean retval, string str reaper.GetSetMediaItemInfo_String(MediaItem item, string parmname, string str, boolean setNewValue)`
   Get/set item string: P_NOTES, P_EXT:xyz, GUID.
@@ -1724,6 +1780,56 @@ NOTE: action 40032 ("Item grouping: Group items") does the same thing as the
 grouping pattern above and is shorter. Prefer the action when you just need to
 group the current selection; use the manual I_GROUPID approach when you need to
 inspect, filter, or programmatically pick which items go in which group.
+
+### CLEARING AUDIO INSIDE A RAZOR EDIT AREA
+
+The razor area string format is in the always-pinned core reference
+(P_RAZOREDITS). This is the destructive item edit it implies.
+
+`MediaItem reaper.SplitMediaItem(MediaItem item, number position)`
+  Split an item at `position`. Returns the NEW right-hand item, or nil when
+  `position` is outside the item. The original handle keeps the left part.
+
+RULE: clearing a razor area means removing the audio INSIDE the area and
+nothing else. An item that starts before the area, or ends after it, still has
+audio the user asked to keep.
+
+1. Split every item that crosses the area start, then split every item that
+   crosses the area end. After both passes, no item straddles a boundary.
+2. Delete only items that now lie entirely inside the area
+   (`pos >= area_start` and `pos + len <= area_end`), with a small epsilon for
+   floating-point ends.
+3. Never delete an item merely because it overlaps the area. An overlap test
+   such as `item_end > area_start and pos < area_end` destroys audio outside
+   the area and is wrong here.
+4. Touch only the tracks the request names. Leave other tracks, the item
+   selection and the time selection as they were.
+
+```lua
+-- Pattern: clear the audio inside [area_start, area_end) on one track.
+local EPS = 1e-9
+for _, edge in ipairs({ area_start, area_end }) do
+  local i = 0
+  while i < reaper.CountTrackMediaItems(track) do
+    local item = reaper.GetTrackMediaItem(track, i)
+    local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+    local fin = pos + reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+    if pos < edge - EPS and fin > edge + EPS then
+      reaper.SplitMediaItem(item, edge)   -- adds one item; rescan this index
+    else
+      i = i + 1
+    end
+  end
+end
+for i = reaper.CountTrackMediaItems(track) - 1, 0, -1 do
+  local item = reaper.GetTrackMediaItem(track, i)
+  local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  local fin = pos + reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+  if pos >= area_start - EPS and fin <= area_end + EPS then
+    reaper.DeleteTrackMediaItem(track, item)
+  end
+end
+```
 <!-- /SECTION:items -->
 
 <!-- SECTION:envelopes -->
@@ -1742,14 +1848,162 @@ TARGET RESOLUTION RULE (existing named track/envelope):
 - When the request or live session names an existing track, resolve only that
   track. If the named track is missing, show a clear message and return; do not
   create a replacement track unless the user explicitly asked for one.
-- If `GetTrackEnvelopeByName` returns nil, show a clear message and return. Do
+- For a request that WRITES track volume or pan automation (the user asks for
+  an automation envelope, a fade ride, a pan move), a missing lane is created
+  through the visibility action and only then written. Verified in REAPER 7.79:
+  `40406` = "Track: Toggle track volume envelope visible", `40407` = "Track:
+  Toggle track pan envelope visible". Both create the lane when the track has
+  none. Sequence:
+  1. RESOLVE THE TARGET LANES FIRST, before deciding that anything has to be
+     created. Volume is `GetTrackEnvelopeByName(track, "Volume")`. Pan is
+     `GetTrackEnvelopeByName(track, "Pan")`, and when that returns nil, ask
+     for the two dual-pan lanes by name: "Pan (Left)" and "Pan (Right)".
+     Ask for that pair EVERY time "Pan" is nil. Do not gate it on `I_PANMODE`
+     being 6: a track that inherits a project-wide dual-pan default still
+     reports `I_PANMODE` -1 while its lanes carry the dual-pan names, and a
+     pair that is never resolved is a pair the toggle would hide.
+  2. If step 1 found a lane, write the points into it and stop. A lane that
+     already exists is used as it is, visible or hidden.
+     NEVER run the toggle when a handle was returned: the action toggles
+     visibility, so a second call hides a visible lane.
+  3. Only when step 1 found NO lane: save the current track selection with the
+     pattern below, select only the target track with `SetOnlyTrackSelected`,
+     run the action, then resolve again by the same rule in step 1. Write the
+     action id as a LITERAL at the `Main_OnCommand` call:
+     `reaper.Main_OnCommand(40406, 0)` for volume and
+     `reaper.Main_OnCommand(40407, 0)` for pan. Do not pass the id into a
+     helper and call `Main_OnCommand(command, 0)`; an id that is not readable
+     at the call site blocks auto-run and the turn ends without running.
+  4. Restore the saved selection on every exit path, including the failure and
+     early-return paths.
+  5. If the second resolve still finds no lane, show a clear message and
+     return.
+- For a request that READS an envelope or MODIFIES an existing one, and ONLY
+  when the user did not ask to write or create automation: if
+  `GetTrackEnvelopeByName` returns nil, show a clear message and return. Do
   not use `Main_OnCommand`, `NamedCommandLookup`, SWS toggle actions, or
   unrelated track-property writes to synthesize the envelope. The state-chunk
   visibility pattern below applies only after you already have a valid envelope
-  handle.
+  handle. A missing lane on a WRITE request is the bullet above, not this one:
+  a nil handle there is what the creation route exists for.
+
+```lua
+-- Pattern: resolve a track volume or pan lane, create it only when the track
+-- has none, then write points. Selection is saved and restored, master track
+-- included.
+local function reaassist_save_track_selection()
+  local saved = {}
+  for i = 0, reaper.CountSelectedTracks2(0, true) - 1 do
+    saved[#saved+1] = reaper.GetSelectedTrack2(0, i, true)
+  end
+  return saved
+end
+
+local function reaassist_restore_track_selection(saved)
+  for i = 0, reaper.CountTracks(0) - 1 do
+    reaper.SetTrackSelected(reaper.GetTrack(0, i), false)
+  end
+  reaper.SetTrackSelected(reaper.GetMasterTrack(0), false)
+  for _, tr in ipairs(saved) do
+    if reaper.ValidatePtr2(0, tr, "MediaTrack*") then
+      reaper.SetTrackSelected(tr, true)
+    end
+  end
+end
+
+-- The lanes a volume or pan write targets, read from what the track actually
+-- has. An empty list means the track has no such lane at all.
+local function reaassist_resolve_lanes(track, what)
+  if what == "volume" then
+    local env = reaper.GetTrackEnvelopeByName(track, "Volume")
+    return env and { env } or {}
+  end
+  local pan = reaper.GetTrackEnvelopeByName(track, "Pan")
+  if pan then return { pan } end
+  -- Dual pan names its lanes differently. Always ask for the pair when "Pan"
+  -- is nil: I_PANMODE is -1 on a track that inherits the project default, so
+  -- a test for 6 would miss an existing pair and the toggle would hide it.
+  -- A lane found here is an existing lane: write into it, hidden or visible.
+  local lanes = {}
+  for _, name in ipairs({ "Pan (Left)", "Pan (Right)" }) do
+    local env = reaper.GetTrackEnvelopeByName(track, name)
+    if env then lanes[#lanes + 1] = env end
+  end
+  return lanes
+end
+
+local function reaassist_lanes_for_write(track, what)
+  local lanes = reaassist_resolve_lanes(track, what)
+  if #lanes > 0 then return lanes end   -- never toggle a lane that exists
+  local saved = reaassist_save_track_selection()
+  reaper.SetOnlyTrackSelected(track)
+  -- WRITE THE ACTION ID AT THE CALL SITE, as a literal. Passing the id in
+  -- through a parameter and calling `Main_OnCommand(command, 0)` hides which
+  -- action runs, and ReaAssist blocks auto-run for a script whose action id is
+  -- not readable at the call. One branch per lane, one literal each.
+  if what == "volume" then
+    reaper.Main_OnCommand(40406, 0)  -- Track: Toggle track volume envelope visible
+  else
+    reaper.Main_OnCommand(40407, 0)  -- Track: Toggle track pan envelope visible
+  end
+  lanes = reaassist_resolve_lanes(track, what)
+  reaassist_restore_track_selection(saved)
+  return lanes
+end
+
+local vol = reaassist_lanes_for_write(track, "volume")
+if #vol == 0 then
+  reaper.ShowMessageBox("Could not create the volume envelope on that track.",
+    "ReaAssist", 0)
+  return
+end
+```
+
+- ENVELOPE NAMES (verified REAPER 7.79). Volume is always "Volume". Pan is
+  "Pan" under `I_PANMODE` 0 (classic balance), 3 (new balance) and 5 (stereo
+  pan), and under a project default that is one of those. Under dual pan
+  the lanes are named "Pan (Left)" and "Pan (Right)" and
+  `GetTrackEnvelopeByName(track, "Pan")` returns nil, whether those lanes were
+  already there or the action just made them.
+  `I_PANMODE` DOES NOT TELL YOU WHICH NAMES TO ASK FOR. A track that takes the
+  project-wide pan mode reports `I_PANMODE` -1, and when that project default
+  is dual pan the track's lanes are still "Pan (Left)" and "Pan (Right)" while
+  the reading stays -1, before and after the action. So resolve the pair by
+  name every time "Pan" is nil, whatever `I_PANMODE` says. A dual-pan track
+  that already has its two lanes must NOT be sent down the creation route,
+  which would only hide them.
+- MASTER TRACK: `40406` and `40407` reach the master exactly the same way.
+  `SetOnlyTrackSelected(reaper.GetMasterTrack(0))` selects it. `CountSelectedTracks(0)`
+  does NOT count the master, so save and restore selection with
+  `CountSelectedTracks2(proj, true)` / `GetSelectedTrack2(proj, idx, true)` and
+  clear the master explicitly, as the pattern above does.
+- PAN ENVELOPE SIGN (verified REAPER 7.79 through `Envelope_FormatValue` on a
+  "Pan" lane at envelope scaling mode 0): A PAN ENVELOPE POINT IS +1.0 FOR
+  HARD LEFT AND -1.0 FOR HARD RIGHT. That is the OPPOSITE of the track's
+  `D_PAN`, where -1.0 is full left. The readings: `Envelope_FormatValue(pan,
+  1.0)` returns "100%L", `Envelope_FormatValue(pan, -1.0)` returns "100%R",
+  and `Envelope_FormatValue(pan, 0.0)` returns "center". So a sweep that
+  starts hard left and ends hard right writes value +1.0 at the first point
+  and -1.0 at the last, and "50% right" is -0.5. Reuse of the `D_PAN`
+  convention here writes the sweep backwards.
+  UNDER DUAL PAN, what "Pan (Left)" and "Pan (Right)" each take is Unknown:
+  the reading above was taken on a single "Pan" lane, and the two dual-pan
+  lanes are not covered by it. Do not assume the pair shares this sign. VERIFY
+  EACH LANE BEFORE WRITING IT: call `Envelope_FormatValue(lane, 1.0)` and
+  `Envelope_FormatValue(lane, -1.0)` on the "Pan (Left)" envelope and again on
+  the "Pan (Right)" envelope, then write into each lane the value whose reading
+  matches what the user asked for. The same value in both lanes can be the
+  correct answer once both readings say so. If the readings do not settle it,
+  ask the user which lane should go where.
+- A HIDDEN lane is still a real lane: `GetTrackEnvelopeByName` returns it and
+  its points are intact while `VIS` is `0`. Write the points without any
+  visibility toggle.
 
 `TrackEnvelope reaper.GetTrackEnvelopeByChunkName(MediaTrack track, string chunkname)`
   Get envelope by chunk name (e.g. "<VOLENV", "<PANENV").
+  PITFALL: this is NOT an existence test. On REAPER 7.79 it returns a handle
+  for "<VOLENV" on a track that has no volume lane at all. Use
+  `GetTrackEnvelopeByName` to decide whether a lane exists.
 
 `integer reaper.CountTakeEnvelopes(MediaItem_Take take)`
   Count take envelopes. Use this for item/take volume, pan, mute, or pitch
@@ -2065,7 +2319,9 @@ Choosing track FX vs take FX:
   Count FX on a take.
 
 `integer reaper.TakeFX_AddByName(MediaItem_Take take, string fxname, integer instantiate)`
-  Add or find FX on a take. instantiate: -1 = find or add (PREFERRED), 0 = find only, 1 = always new.
+  Add or find FX on a take. A negative instantiate value always creates a new
+  instance, 0 finds an existing instance without adding, and a positive value
+  adds only when no matching instance exists.
   NOTE: TakeFX_AddByName has NO recFX argument (unlike TrackFX_AddByName, which has 4 args).
   Same MANDATORY DEFER RULE applies: do not query or set params in the same execution frame.
 
@@ -2179,6 +2435,12 @@ end)
 
 `boolean reaper.SetTrackSendInfo_Value(MediaTrack tr, integer category, integer sendidx, string parmname, number newvalue)`
   Set send/receive attribute.
+  `tr` IS THE SOURCE TRACK for a send, and `sendidx` is that send's index in
+  the SOURCE track's send list, which is what `CreateTrackSend(src, dest)`
+  returned. Passing the destination track addresses a different track's send
+  list: the call returns without an error and the send you created keeps its
+  default values. Category `-1` is the only form that reads from the
+  destination, and it addresses the destination's receive list.
   REAPER 7.75+: `I_SLOT_HINT` can hint the UI slot index for sends/hardware
   outputs. Prefer normal dense send indices for ordinary routing scripts.
   In REAPER 7.77+, editing an existing UI-ordered slot uses category
@@ -2256,6 +2518,89 @@ reaper.SetTrackSendInfo_Value(src, 1, hwidx, "I_SRCCHAN", 0)   -- stereo from ch
 reaper.SetTrackSendInfo_Value(src, 1, hwidx, "I_DSTCHAN", 2)   -- hardware outs 3+4
 reaper.SetMediaTrackInfo_Value(src, "B_MAINSEND", 0)           -- no master/main
 ```
+
+### SIDE-CHAIN COMPRESSION (DUCKING)
+
+A side-chain send is not a side chain on its own. Three things are required,
+and a script that stops after the first two produces a session where nothing
+ducks:
+
+1. The destination track carries at least four channels. RAISE the count, do
+   not set it: `I_NCHAN = 4` on a track that already has eight channels takes
+   four away and breaks whatever was using them. Read the current value and
+   write `math.max(4, current)` (do this BEFORE the send).
+2. A send from the trigger track into channels 3+4 of the destination:
+   `SetTrackSendInfo_Value(src, 0, sidx, "I_DSTCHAN", 2)`. THE SEND LIVES ON
+   THE SOURCE TRACK. Pass the trigger track here, not the compressor's track,
+   and pass the index `CreateTrackSend(src, dest)` returned, which is an index
+   into the SOURCE track's send list. Written against the destination the call
+   changes nothing, the send stays on channels 1+2, and the compressor's
+   external input listens to a pair with nothing on it.
+3. The compressor's EXTERNAL side-chain input is switched on. Almost every
+   compressor defaults to its internal detector, so without this step the
+   audio arrives on channels 3+4 and is ignored.
+
+```lua
+-- Pattern: widen the destination without taking away channels it already has.
+local current_nchan = reaper.GetMediaTrackInfo_Value(dest, "I_NCHAN") or 2
+reaper.SetMediaTrackInfo_Value(dest, "I_NCHAN", math.max(4, current_nchan))
+```
+
+Enable that input BY PARAMETER NAME, never by a guessed index. Parameter
+numbering differs between products and between versions of the same product, so
+a literal index silently writes some unrelated control.
+
+FIRST CHOICE: a curated plug-in profile in PINNED REFERENCES that names the
+control and its value. For FabFilter Pro-C 3 the profile gives the parameter
+`Side Chain Input` and the displayed value `External`, so set that control by
+name, read the display back, and confirm it reads "External". No search runs.
+
+FALLBACK, only when no profile covers the plug-in: resolve the parameter with
+`find_param` (or `TrackFX_GetParamName` in a loop) and step the control until
+its FORMATTED text names the external input. The search writes to a live
+control, so it has to check the setter's return and the readback, and it has to
+put the control back where it found it when no step produces "External":
+
+```lua
+-- Pattern: turn on a compressor's external side-chain detector by name.
+-- Leaves the control untouched when it cannot confirm the external setting.
+local function reaassist_enable_external_sidechain(track, fx)
+  for p = 0, reaper.TrackFX_GetNumParams(track, fx) - 1 do
+    local _, name = reaper.TrackFX_GetParamName(track, fx, p, "")
+    local lower = tostring(name or ""):lower()
+    if lower:find("side chain input", 1, true)
+        or lower:find("sidechain input", 1, true)
+        or lower == "external sidechain" then
+      local original = reaper.TrackFX_GetParamNormalized(track, fx, p)
+      for step = 0, 32 do
+        local value = step / 32
+        if reaper.TrackFX_SetParamNormalized(track, fx, p, value) then
+          local readback = reaper.TrackFX_GetParamNormalized(track, fx, p)
+          local _, shown =
+            reaper.TrackFX_GetFormattedParamValue(track, fx, p, "")
+          -- The setter returned true and the control reads back, so the
+          -- displayed text is the authority on which entry landed. Do not
+          -- compare the readback with `value`: an enum snaps to its own
+          -- entry value and a numeric equality test would reject a control
+          -- that is now correctly on External.
+          if tonumber(readback)
+              and tostring(shown or ""):lower():find("external", 1, true) then
+            return true
+          end
+        end
+      end
+      if original then
+        reaper.TrackFX_SetParamNormalized(track, fx, p, original)
+      end
+    end
+  end
+  return false
+end
+```
+
+If no such parameter exists, say so in the reply instead of writing a guessed
+index: some compressors expose the external detector only through REAPER's pin
+connector or their own UI.
 <!-- /SECTION:routing -->
 
 <!-- SECTION:tempo -->
@@ -2998,6 +3343,13 @@ MIDI items across tracks.
 `MediaItem_Take reaper.MIDIEditor_GetTake(HWND midieditor)`
 
   Get the take currently being edited.
+
+`integer reaper.MIDIEditor_GetSetting_int(HWND midieditor, string setting_desc)`
+
+  REAPER 7.80+: `timebase_unit` returns 0 for seconds or 1 for quarter notes.
+  `pixels_per_timebase_unit` returns 1024 times the pixels per timebase unit;
+  divide by 1024 to obtain pixels per second or quarter note. Requires an open
+  MIDI editor. On older REAPER versions, do not assume these keys are supported.
 
 `boolean reaper.TakeIsMIDI(MediaItem_Take take)`
 

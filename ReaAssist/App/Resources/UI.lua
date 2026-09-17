@@ -319,11 +319,17 @@ local _DETAILS_GROUP_OF = {
   ["FX Cache"]   = "context",
   ["Tokens"]     = "usage",
   ["Cache"]      = "usage",
+  ["Cache Hit/Miss"] = "usage",
+  ["Response Cache"] = "usage",
   ["API Calls"]  = "usage",
   ["Model Calls"] = "usage",
   ["Transport Retries"] = "usage",
+  ["Request Path"] = "usage",
+  ["API Protocol"] = "usage",
   ["Time"]       = "cost",   -- grouped with Est. Cost so the "bill" sits together
   ["Thinking"]   = "reasoning",
+  ["Provider Route"] = "usage",
+  ["Actual Cost"] = "cost",
   ["Est. Cost"]  = "cost",
   ["Est. Total"] = "cost",
 }
@@ -334,20 +340,29 @@ local _DETAILS_FIELD_KEYS = {
   ["FX Cache"]   = "fx_cache",
   ["Tokens"]     = "tokens",
   ["Cache"]      = "cache",
+  ["Cache Hit/Miss"] = "cache_hit_miss",
+  ["Response Cache"] = "response_cache",
   ["API Calls"]  = "api_calls",
   ["Model Calls"] = "model_calls",
   ["Transport Retries"] = "transport_retries",
+  ["Request Path"] = "request_path",
+  ["API Protocol"] = "api_protocol",
   ["Time"]       = "time",
   ["Thinking"]   = "thinking",
+  ["Provider Route"] = "provider_route",
+  ["Actual Cost"] = "actual_cost",
   ["Est. Cost"]  = "est_cost",
   ["Est. Total"] = "est_total",
 }
 local _DETAILS_ROW_ORDER = {
   "Model", "Complexity",
   "Context", "FX Cache",
-  "Tokens", "Cache", "Model Calls", "Transport Retries", "API Calls", "Time",
+  "Tokens", "Cache Hit/Miss", "Cache", "Response Cache", "Model Calls", "Transport Retries",
+  "API Calls", "Time",
+  "Request Path", "API Protocol",
+  "Provider Route",
   "Thinking",
-  "Est. Cost", "Est. Total",
+  "Actual Cost", "Est. Cost", "Est. Total",
 }
 local _DETAILS_FIELD_TOOLTIPS = {
   ["Context"]    = "Which source material was bundled with your prompt. 'Session' = live state of your REAPER session (tracks, items, FX, markers, etc.). 'API' = the REAPER/ReaScript API reference. 'fx:<plugin>' = per-plugin parameter reference. 'plugin_ref:<plugin>' = general plugin documentation.",
@@ -357,13 +372,170 @@ local _DETAILS_FIELD_TOOLTIPS = {
   ["Tokens"]     = "Total input tokens / output tokens reported across this exchange. Input covers your prompt plus bundled context; output includes intermediate context requests and the final reply.",
   ["Time"]       = "Wall-clock time from send until the exchange settled, including automatic context fetches or repair follow-ups.",
   ["Cache"]      = "Total tokens read from the prompt cache / newly written to the cache across this exchange. Cache reads are billed at a fraction of the normal input-token rate.",
+  ["Cache Hit/Miss"] = "Input tokens recorded as cache hits / remaining input tokens across this message's model calls. The percentage is cache hits divided by total input tokens. Misses include newly created cache tokens. This is prompt-token usage, not response-cache hits. Unavailable or inconsistent usage is Unknown; failed calls without usage reports are not included.",
+  ["Response Cache"] = "OpenRouter response-cache results reported by response headers. A confirmed hit returns the stored completed response at zero cost. Missing or conflicting evidence is never inferred as a free hit.",
   ["API Calls"]  = "How many model round-trips this exchange took. 1 means a single clean request. A higher number can include automatic context fetches, repair follow-ups, or provider transport retries. Tokens, Cache, and Est. Cost accumulate every successful response that reports usage; failed attempts without provider usage data cannot be included. Time spans the full exchange.",
   ["Model Calls"] = "Initial model requests plus context fetches and model/validator repair calls. Provider transport retries are counted separately.",
   ["Transport Retries"] = "Automatic re-sends after a transient provider overload or transport failure. These are counted separately from billable model calls.",
+  ["Request Path"] = "The connection used for this exchange. Standard uses the current connection method. Compatibility uses the older method. Compatibility fallback means this exchange used both methods.",
+  ["API Protocol"] = "The provider API protocol actually used for this exchange. If automatic recovery used more than one protocol, each one is listed in request order.",
   ["Complexity"] = "Auto-computed complexity score of your prompt (0-10). Higher = a more involved request. The parenthesised label shows which tier Auto mode picked for this turn: Fast (simple prompts), Balanced (mid-range), or Smart (complex work).",
   ["Thinking"]   = "Reasoning effort level used for this response (only relevant for models that support extended thinking).",
+  ["Provider Route"] = "OpenRouter's provider-reported selected provider for the latest model call, plus the configured endpoint tag when available, upstream attempt, and fallback status.",
+  ["Actual Cost"] = "Exact provider-reported cost for this exchange. Multi-call exchanges preserve each call's exact decimal because ReaAssist does not add authoritative decimal costs through floating-point arithmetic.",
   ["FX Cache"]   = "Filter applied to the FX cache this turn (limits which plugins contribute to the Context bundle).",
 }
+
+function UI.cache_hit_miss_summary(msg)
+  local unknown = UI.t("details.value.cost_unknown", nil, "Unknown")
+  if type(msg) ~= "table" then return unknown end
+  local quality = msg.usage_accounting_quality
+  if quality ~= nil and quality ~= "complete_normalized_usage" then
+    return unknown
+  end
+  local function valid_count(value)
+    return type(value) == "number" and value == value and value >= 0
+      and value <= 9007199254740991 and value % 1 == 0
+  end
+  local input, hit = msg.tok_in, msg.tok_cache_read
+  if not valid_count(input) or not valid_count(hit) or hit > input then
+    return unknown
+  end
+  -- tok_in already includes cache creation for every provider. Subtract
+  -- only reads; subtracting writes too would undercount cache misses.
+  local miss = input - hit
+  local hit_text, miss_text = fmt_num(hit), fmt_num(miss)
+  if input > 0 then
+    local percent = str_format("%.1f%%", 100 * hit / input)
+    return UI.t("details.value.cache_hit_miss_percent", {
+      hit = hit_text, miss = miss_text, percent = percent,
+    }, str_format("%s hit / %s miss (%s hit)", hit_text, miss_text, percent))
+  end
+  return UI.t("details.value.cache_hit_miss", {
+    hit = hit_text, miss = miss_text,
+  }, str_format("%s hit / %s miss", hit_text, miss_text))
+end
+
+local function response_cache_summary(calls)
+  if type(calls) ~= "table" or #calls == 0 then return nil end
+  local hit, miss, uncertain, contradictory = 0, 0, 0, 0
+  for _, call in ipairs(calls) do
+    if type(call) == "table" then
+      if call.consistency == "contradictory" then
+        contradictory = contradictory + 1
+      elseif call.status == "hit" and call.consistency == "confirmed" then
+        hit = hit + 1
+      elseif call.status == "miss" then
+        miss = miss + 1
+      else
+        uncertain = uncertain + 1
+      end
+    end
+  end
+  if #calls == 1 then
+    if contradictory == 1 then
+      return UI.t("details.value.response_cache.conflicting", nil,
+        "Conflicting evidence")
+    end
+    if hit == 1 then
+      return UI.t("details.value.response_cache.hit", nil, "Hit (free)")
+    end
+    if miss == 1 then
+      return UI.t("details.value.response_cache.miss", nil, "Miss")
+    end
+    return UI.t("details.value.response_cache.unknown", nil, "Unknown")
+  end
+  local parts = {}
+  if hit > 0 then
+    parts[#parts + 1] = UI.t(
+      "details.value.response_cache.hit_count", { count = tostring(hit) },
+      tostring(hit) .. " hit")
+  end
+  if miss > 0 then
+    parts[#parts + 1] = UI.t(
+      "details.value.response_cache.miss_count", { count = tostring(miss) },
+      tostring(miss) .. " miss")
+  end
+  if uncertain > 0 then
+    parts[#parts + 1] = UI.t(
+      "details.value.response_cache.unknown_count", {
+        count = tostring(uncertain),
+      }, tostring(uncertain) .. " unknown")
+  end
+  if contradictory > 0 then
+    parts[#parts + 1] = UI.t(
+      "details.value.response_cache.conflicting_count", {
+        count = tostring(contradictory),
+      }, tostring(contradictory) .. " conflicting")
+  end
+  return table.concat(parts, " / ")
+end
+
+local function request_path_summary(events)
+  if type(events) ~= "table" or #events == 0 then return nil end
+  local used_engine, used_lua = false, false
+  for _, event in ipairs(events) do
+    if type(event) == "table" then
+      if event.lane == "engine" then
+        used_engine = true
+      elseif event.lane == "curl" then
+        used_lua = true
+      end
+    end
+  end
+  if used_engine and used_lua then
+    return UI.t("details.value.request_path.fallback", nil,
+      "Compatibility fallback")
+  end
+  if used_engine then
+    return UI.t("details.value.request_path.engine", nil, "Standard")
+  end
+  if used_lua then
+    return UI.t("details.value.request_path.lua", nil, "Compatibility")
+  end
+  return nil
+end
+
+local function api_protocol_summary(events)
+  if type(events) ~= "table" or #events == 0 then return nil end
+  local labels = {
+    openai_responses = { "openai_responses", "OpenAI Responses" },
+    openai_chat_completions = {
+      "openai_chat_completions", "OpenAI Chat Completions",
+    },
+    anthropic_messages = { "anthropic_messages", "Anthropic Messages" },
+    google_generate_content = {
+      "google_generate_content", "Google GenerateContent",
+    },
+    google_interactions = { "google_interactions", "Google Interactions" },
+    deepseek_responses = { "deepseek_responses", "DeepSeek Responses" },
+    deepseek_chat_completions = {
+      "deepseek_chat_completions", "DeepSeek Chat Completions",
+    },
+    openrouter_responses = {
+      "openrouter_responses", "OpenRouter Responses",
+    },
+    openrouter_chat_completions = {
+      "openrouter_chat_completions", "OpenRouter Chat Completions",
+    },
+  }
+  local seen, parts = {}, {}
+  for _, event in ipairs(events) do
+    local protocol = type(event) == "table"
+      and type(event.protocol) == "string" and event.protocol or nil
+    if protocol and protocol:match("^[a-z0-9_]+$") and not seen[protocol] then
+      seen[protocol] = true
+      local label = labels[protocol]
+      if label then
+        parts[#parts + 1] = UI.t("details.value.api_protocol." .. label[1],
+          nil, label[2])
+      else
+        parts[#parts + 1] = protocol
+      end
+    end
+  end
+  return #parts > 0 and table.concat(parts, " + ") or nil
+end
 
 -- ImGui hot-path aliases -- shorter names for the calls used hundreds of
 -- times across draw code. Saves file size and avoids repeated table lookups
@@ -949,7 +1121,8 @@ function UI.render_float_toast(anchor_x, anchor_y, anchor_w, anchor_h)
   PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowRounding(), RA.SC(10))
   PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowBorderSize(), 1)
   if ImGui.ImGui_Begin(RA.ctx, "##reaassist_float_toast", nil, flags) then
-    local accent_col = (tip.kind == "err") and TK.red or TK.green
+    local accent_col = (tip.kind == "err") and TK.red
+      or (tip.kind == "warn") and TK.amber or TK.green
     PushFont(RA.ctx, FONT.inter_semi, RA.SC(12))
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), _scale_alpha(accent_col, alpha))
     Text(RA.ctx, tip.text)
@@ -964,6 +1137,21 @@ end
 -- Keep every visual run surface consistent when a requested safety backup
 -- fails. Execution has already been stopped by the caller; this helper makes
 -- that stop visible and gives the user a deliberate recovery path.
+function UI.preflight_staged_lua(kind)
+  local prefix = kind .. "_warn_"
+  local idx, code = S[prefix .. "idx"], S[prefix .. "code"]
+  local msg = S.display_messages and S.display_messages[idx] or nil
+  local context = Code.generated_lua_run_context(msg, idx, code)
+  if not msg or S[prefix .. "message"] ~= msg then context.invalid = true end
+  local ok, reason, message = Code.preflight_generated_lua_execution(code, context)
+  if not ok then
+    if msg then msg.auto_run_block_reason, msg.run_blocked = reason, message end
+    S[prefix .. "code"], S[prefix .. "idx"], S[prefix .. "message"] = nil, nil, nil
+    S[prefix .. "jsfx"], S[prefix .. "detail"] = nil, nil
+  end
+  return ok, context
+end
+
 function UI.report_backup_run_blocked(err)
   local message = UI.t("code.backup_failed_run", {
     error = tostring(err or "unknown_error"),
@@ -1641,6 +1829,58 @@ function UI.expire_missing_scroll_to_msg()
   return false
 end
 
+UI.CHAT_SCROLL_BOTTOM_EPSILON = 1
+
+function UI.resume_chat_auto_follow(force_scroll)
+  S.chat_auto_follow = true
+  S._chat_scroll_prev_y = nil
+  if force_scroll ~= false then S.scroll_to_bottom = true end
+end
+
+function UI.update_chat_auto_follow(scroll_y, scroll_max_y, chat_hovered,
+    wheel_y)
+  scroll_y = math_max(0, tonumber(scroll_y) or 0)
+  scroll_max_y = math_max(scroll_y, tonumber(scroll_max_y) or 0)
+  local at_bottom = (scroll_max_y - scroll_y)
+    <= UI.CHAT_SCROLL_BOTTOM_EPSILON
+  local prev_y = tonumber(S._chat_scroll_prev_y)
+  local user_scrolled_up = chat_hovered == true
+    and ((tonumber(wheel_y) or 0) > 0
+      or (prev_y ~= nil
+        and scroll_y < prev_y - UI.CHAT_SCROLL_BOTTOM_EPSILON))
+    and not at_bottom
+
+  if user_scrolled_up then
+    S.chat_auto_follow = false
+  elseif S.chat_auto_follow == false and at_bottom then
+    S.chat_auto_follow = true
+  elseif S.chat_auto_follow == nil then
+    S.chat_auto_follow = true
+  end
+
+  if S.chat_auto_follow == false then
+    -- Streaming may request another bottom scroll every time a chunk arrives.
+    -- Clear those requests while the user is reading earlier content.
+    S.scroll_to_bottom = false
+  end
+  return S.chat_auto_follow ~= false
+end
+
+function UI.capture_chat_scroll_extent(scroll_y, scroll_max_y)
+  scroll_y = math_max(0, tonumber(scroll_y) or 0)
+  scroll_max_y = math_max(scroll_y, tonumber(scroll_max_y) or 0)
+  S._chat_scroll_prev_y = S.chat_auto_follow ~= false
+    and scroll_max_y or scroll_y
+end
+
+function UI.should_dock_request_status(status, retry_scheduled,
+    deep_scan_active, resolve_popup)
+  return status == "waiting"
+    and retry_scheduled ~= true
+    and deep_scan_active ~= true
+    and not resolve_popup
+end
+
 function UI._utf8_safe_prefix_bytes(text, max_bytes)
   text = tostring(text or "")
   max_bytes = math_floor(tonumber(max_bytes) or 0)
@@ -1916,6 +2156,27 @@ function UI.chat_message_static_cull_sig(msg)
   return msg._chat_cull_static_sig or ""
 end
 
+function UI.validation_retry_disclosure(msg)
+  local trace = type(msg) == "table" and msg.validation_trace or nil
+  local count = type(trace) == "table"
+    and math_floor(tonumber(trace.retry_count) or 0) or 0
+  if count <= 0 then return nil end
+
+  local first_event = type(trace.events) == "table" and trace.events[1] or nil
+  local kind = type(first_event) == "table"
+    and tostring(first_event.kind or "") or ""
+  local tooltip
+  if kind:find("typed_action", 1, true) then
+    tooltip = UI.t("message.answer_retried.edit_format_tooltip", nil,
+      "An earlier response did not match the required edit format.")
+  else
+    tooltip = UI.t("message.answer_retried.validation_tooltip", nil,
+      "Earlier responses did not pass ReaAssist's validation checks.")
+  end
+  return UI.t("message.answer_retried.label", { count = count },
+    "Answer retried automatically (" .. count .. " discarded)."), tooltip
+end
+
 function UI.chat_message_cull_key(msg, i, count, avail_w, chat_font_key,
                                   running_cost, running_cost_count, prev_msg)
   msg = msg or {}
@@ -1951,18 +2212,34 @@ function UI.chat_message_cull_key(msg, i, count, avail_w, chat_font_key,
     msg.model_label,
     msg.provider_id,
     msg.model_id,
+    msg.engine_provisional == true,
     msg.tok_in,
     msg.tok_out,
     msg.cost,
+    msg.cost_unknown == true,
     msg.free_tier,
     msg.response_time,
     msg.tok_cache_read,
     msg.tok_cache_create,
     msg.thinking_label,
+    type(msg.provider_reasoning) == "string",
+    type(msg.provider_reasoning) == "string"
+      and #msg.provider_reasoning or 0,
+    msg.provider_reasoning_open == true,
+    msg.provider_reasoning_truncated == true,
+    type(msg.provider_reasoning_summary) == "string",
+    type(msg.provider_reasoning_summary) == "string"
+      and #msg.provider_reasoning_summary or 0,
+    msg.provider_reasoning_summary_open == true,
+    msg.provider_reasoning_summary_truncated == true,
     msg.fx_cache_label,
     msg.api_calls,
     msg.model_calls,
     msg.transport_retries,
+    msg.validation_trace and msg.validation_trace.retry_count,
+    msg.validation_trace and msg.validation_trace.events
+      and msg.validation_trace.events[1]
+      and msg.validation_trace.events[1].kind,
     msg.auto_ran,
     msg.auto_run_block_reason,
     msg.run_status,
@@ -2440,6 +2717,8 @@ function UI.open_settings(return_to)
   api_keys.saved_theme                 = prefs.theme
   api_keys.saved_update_check          = prefs.update_check
   api_keys.saved_auto_backup           = prefs.auto_backup
+  api_keys.saved_stream_responses      = prefs.stream_responses
+  api_keys.saved_reasoning_display_mode = Net.reasoning_display_mode()
   api_keys.saved_chat_font_idx         = prefs.chat_font_idx
   api_keys.saved_reply_language_idx    = prefs.reply_language_idx
   api_keys.saved_include_snapshot      = prefs.include_snapshot
@@ -2879,6 +3158,100 @@ end
 -- semibold subtitle below. Bleed the gradient to the window edges like
 -- the main hero. Clickable wordmark behaves as "return home".
 -- Returns the total pixel height consumed.
+-- BEGIN PURE SETTINGS HERO GEOMETRY
+function UI.settings_hero_rects_overlap(a, b, gap)
+  if type(a) ~= "table" or type(b) ~= "table" then return false end
+  gap = tonumber(gap) or 0
+  return a.x1 < b.x2 + gap and b.x1 < a.x2 + gap
+    and a.y1 < b.y2 and b.y1 < a.y2
+end
+
+function UI.settings_hero_geometry(input)
+  input = input or {}
+  local gap = tonumber(input.min_gap) or 0
+  local epsilon = tonumber(input.epsilon) or 0.01
+
+  local has_breadcrumb = type(input.breadcrumb_subtitle_rect) == "table"
+    and type(input.breadcrumb_wordmark_rect) == "table"
+  local subtitle_candidate_collision = has_breadcrumb
+    and UI.settings_hero_rects_overlap(
+      input.subtitle_rect, input.breadcrumb_subtitle_rect, gap)
+    or false
+  local breadcrumb_row = "none"
+  local candidate_rect = nil
+  if has_breadcrumb then
+    breadcrumb_row = (input.compact or subtitle_candidate_collision)
+      and "wordmark" or "subtitle"
+    candidate_rect = breadcrumb_row == "wordmark"
+      and input.breadcrumb_wordmark_rect or input.breadcrumb_subtitle_rect
+  end
+  local wordmark_candidate_collision = breadcrumb_row == "wordmark"
+    and UI.settings_hero_rects_overlap(input.wordmark_rect, candidate_rect, gap)
+    or false
+  local wordmark_row_collision = wordmark_candidate_collision
+  if wordmark_row_collision
+      and type(input.breadcrumb_standalone_rect) == "table" then
+    breadcrumb_row = "standalone"
+    candidate_rect = input.breadcrumb_standalone_rect
+    wordmark_candidate_collision = false
+  end
+  local breadcrumb_hidden_for_collision = wordmark_row_collision
+    and breadcrumb_row ~= "standalone"
+  local breadcrumb_visible = has_breadcrumb
+    and not breadcrumb_hidden_for_collision
+  local drawn_breadcrumb_rect = breadcrumb_visible and candidate_rect or nil
+  local post_layout_overlap = breadcrumb_visible and (
+    UI.settings_hero_rects_overlap(input.subtitle_rect, drawn_breadcrumb_rect, gap)
+      or UI.settings_hero_rects_overlap(
+        input.wordmark_rect, drawn_breadcrumb_rect, gap)
+  ) or false
+
+  local subtitle_horizontal_clip = false
+  local subtitle_vertical_clip = false
+  if type(input.subtitle_rect) == "table" then
+    local content = input.subtitle_content_rect
+    local vertical = input.subtitle_vertical_rect
+    subtitle_horizontal_clip = type(content) ~= "table"
+      or input.subtitle_rect.x1 < content.x1 - epsilon
+      or input.subtitle_rect.x2 > content.x2 + epsilon
+    subtitle_vertical_clip = type(vertical) ~= "table"
+      or input.subtitle_rect.y1 < vertical.y1 - epsilon
+      or input.subtitle_rect.y2 > vertical.y2 + epsilon
+  end
+  local wrap_expected = (tonumber(input.subtitle_natural_width) or 0)
+    > (tonumber(input.subtitle_wrap_width) or 0) + epsilon
+  local wrap_failed = wrap_expected
+    and (tonumber(input.subtitle_height) or 0)
+      <= (tonumber(input.subtitle_single_line_height) or 0) + epsilon
+  local subtitle_clipped = subtitle_horizontal_clip
+    or subtitle_vertical_clip or wrap_failed
+
+  return {
+    breadcrumb_row = breadcrumb_row,
+    breadcrumb_visible = breadcrumb_visible,
+    breadcrumb_hidden_for_collision = breadcrumb_hidden_for_collision,
+    subtitle_candidate_collision = subtitle_candidate_collision,
+    wordmark_candidate_collision = wordmark_candidate_collision,
+    wordmark_row_collision = wordmark_row_collision,
+    post_layout_overlap = post_layout_overlap,
+    overlap = post_layout_overlap,
+    subtitle_horizontal_clip = subtitle_horizontal_clip,
+    subtitle_vertical_clip = subtitle_vertical_clip,
+    subtitle_wrap_expected = wrap_expected,
+    subtitle_wrap_failed = wrap_failed,
+    subtitle_clipped = subtitle_clipped,
+    subtitle_rect = input.subtitle_rect,
+    subtitle_content_rect = input.subtitle_content_rect,
+    subtitle_vertical_rect = input.subtitle_vertical_rect,
+    wordmark_rect = input.wordmark_rect,
+    breadcrumb_rect = drawn_breadcrumb_rect,
+    breadcrumb_subtitle_rect = input.breadcrumb_subtitle_rect,
+    breadcrumb_wordmark_rect = input.breadcrumb_wordmark_rect,
+    breadcrumb_standalone_rect = input.breadcrumb_standalone_rect,
+  }
+end
+-- END PURE SETTINGS HERO GEOMETRY
+
 function UI.hero_band_settings_v5(subtitle, right_text)
   local dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
   local start_x_local = GetCursorPosX(RA.ctx)
@@ -2897,9 +3270,27 @@ function UI.hero_band_settings_v5(subtitle, right_text)
   local PAD_X     = RA.SC(22)
   local WM_SUB_GAP = RA.SC(6)    -- gap between wordmark and subtitle
 
+  -- Measure the localized subtitle against its actual row width before the
+  -- hero height is fixed. Long translations wrap inside the hero instead of
+  -- being clipped at the right edge, and the background grows by the exact
+  -- wrapped text height.
+  local subtitle_wrap_w = math_max(avail_w - PAD_X * 2, RA.SC(1))
+  local subtitle_natural_w = 0
+  local subtitle_h = SUB_SIZE
+  local subtitle_wrapped = false
+  if subtitle and subtitle ~= "" then
+    PushFont(RA.ctx, FONT.inter_semi, SUB_SIZE)
+    subtitle_natural_w = CalcTextSize(RA.ctx, subtitle)
+    local _, measured_h = CalcTextSize(
+      RA.ctx, subtitle, nil, nil, false, subtitle_wrap_w)
+    subtitle_h = math_max(SUB_SIZE, measured_h)
+    subtitle_wrapped = subtitle_natural_w > subtitle_wrap_w
+    PopFont(RA.ctx)
+  end
+
   local hero_h
   if subtitle and subtitle ~= "" then
-    hero_h = PAD_TOP + WM_SIZE + WM_SUB_GAP + SUB_SIZE + PAD_BOT
+    hero_h = PAD_TOP + WM_SIZE + WM_SUB_GAP + subtitle_h + PAD_BOT
   else
     hero_h = PAD_TOP + WM_SIZE + PAD_BOT
   end
@@ -3011,12 +3402,13 @@ function UI.hero_band_settings_v5(subtitle, right_text)
     -- spacing style var; CalcTextSize per char gives us advance widths.
     local TIGHT_KERN = -math_max(1, math_floor(RIGHT_SZ * 0.08))
     PushFont(RA.ctx, FONT.mono_reg, RIGHT_SZ)
-    local chars, total_rt_w = {}, 0
+    local chars, total_rt_w, max_rt_h = {}, 0, 0
     for _, cp in utf8.codes(right_text) do
       local ch = utf8.char(cp)
-      local cw = CalcTextSize(RA.ctx, ch)
+      local cw, ch_h = CalcTextSize(RA.ctx, ch)
       chars[#chars+1] = { c = ch, w = cw }
       total_rt_w = total_rt_w + cw
+      max_rt_h = math_max(max_rt_h, ch_h)
     end
     PopFont(RA.ctx)
     if #chars > 1 then
@@ -3031,20 +3423,141 @@ function UI.hero_band_settings_v5(subtitle, right_text)
     -- (sub_y uses the same formula below). Reads as complementary
     -- "meta" info at the same altitude as the page subtitle.
     local rt_x_screen = sx + (right_edge_local - start_x_local) - total_rt_w
-    local rt_y_screen
-    if compact_settings_hero then
-      rt_y_screen = sy + PAD_TOP
-        + math_floor((WM_SIZE - RIGHT_SZ) * 0.5)
-    else
-      rt_y_screen = sy + PAD_TOP + WM_SIZE + WM_SUB_GAP
-        + math_floor((SUB_SIZE - RIGHT_SZ) * 0.5)
+    local subtitle_y_screen = sy + PAD_TOP + WM_SIZE + WM_SUB_GAP
+    local subtitle_rect = nil
+    if subtitle and subtitle ~= "" then
+      subtitle_rect = {
+        x1 = sx + PAD_X,
+        y1 = subtitle_y_screen,
+        x2 = sx + PAD_X + math_min(subtitle_natural_w, subtitle_wrap_w),
+        y2 = subtitle_y_screen + subtitle_h,
+      }
     end
-    local cur_sx = rt_x_screen
-    for _, ch in ipairs(chars) do
-      ImGui.ImGui_DrawList_AddTextEx(dl, FONT.mono_reg, RIGHT_SZ,
-        cur_sx, rt_y_screen, TK.text_faint, ch.c)
-      cur_sx = cur_sx + ch.w + TIGHT_KERN
+    local wordmark_rect = {
+      x1 = sx + PAD_X,
+      y1 = sy + PAD_TOP,
+      x2 = sx + PAD_X + total_w,
+      y2 = sy + PAD_TOP + WM_SIZE,
+    }
+    local breadcrumb_subtitle_y = subtitle_y_screen
+      + math_floor((SUB_SIZE - RIGHT_SZ) * 0.5)
+    local breadcrumb_wordmark_y = sy + PAD_TOP
+      + math_floor((WM_SIZE - RIGHT_SZ) * 0.5)
+    local breadcrumb_subtitle_rect = {
+      x1 = rt_x_screen,
+      y1 = breadcrumb_subtitle_y,
+      x2 = rt_x_screen + total_rt_w,
+      y2 = breadcrumb_subtitle_y + max_rt_h,
+    }
+    local breadcrumb_wordmark_rect = {
+      x1 = rt_x_screen,
+      y1 = breadcrumb_wordmark_y,
+      x2 = rt_x_screen + total_rt_w,
+      y2 = breadcrumb_wordmark_y + max_rt_h,
+    }
+    local BREADCRUMB_ROW_GAP = RA.SC(6)
+    local breadcrumb_standalone_y = sy + hero_h + BREADCRUMB_ROW_GAP
+    local breadcrumb_standalone_rect = {
+      x1 = rt_x_screen,
+      y1 = breadcrumb_standalone_y,
+      x2 = rt_x_screen + total_rt_w,
+      y2 = breadcrumb_standalone_y + max_rt_h,
+    }
+    local geometry = UI.settings_hero_geometry({
+      compact = compact_settings_hero,
+      min_gap = RA.SC(14),
+      epsilon = RA.SC(0.5),
+      subtitle_rect = subtitle_rect,
+      subtitle_content_rect = subtitle_rect and {
+        x1 = sx + PAD_X,
+        y1 = subtitle_y_screen,
+        x2 = sx + PAD_X + subtitle_wrap_w,
+        y2 = subtitle_y_screen + subtitle_h,
+      } or nil,
+      subtitle_vertical_rect = subtitle_rect and {
+        x1 = sx + PAD_X,
+        y1 = subtitle_y_screen,
+        x2 = sx + PAD_X + subtitle_wrap_w,
+        y2 = sy + hero_h - PAD_BOT,
+      } or nil,
+      subtitle_natural_width = subtitle_natural_w,
+      subtitle_wrap_width = subtitle_wrap_w,
+      subtitle_height = subtitle_h,
+      subtitle_single_line_height = SUB_SIZE,
+      wordmark_rect = wordmark_rect,
+      breadcrumb_subtitle_rect = breadcrumb_subtitle_rect,
+      breadcrumb_wordmark_rect = breadcrumb_wordmark_rect,
+      breadcrumb_standalone_rect = breadcrumb_standalone_rect,
+    })
+    local rt_y_screen = geometry.breadcrumb_row == "wordmark"
+      and breadcrumb_wordmark_y
+      or (geometry.breadcrumb_row == "standalone"
+        and breadcrumb_standalone_y or breadcrumb_subtitle_y)
+    if geometry.breadcrumb_row == "standalone" then
+      local old_bottom = sy + hero_h
+      hero_h = hero_h + BREADCRUMB_ROW_GAP + max_rt_h
+      ImGui.ImGui_DrawList_AddRectFilled(dl,
+        win_x, old_bottom - RA.SC(2), win_x + win_w, sy + hero_h,
+        TK.bg)
+      ImGui.ImGui_DrawList_AddLine(dl,
+        win_x, sy + hero_h - 1, win_x + win_w, sy + hero_h - 1,
+        TK.border, 1)
     end
+    if geometry.breadcrumb_visible then
+      local cur_sx = rt_x_screen
+      for _, ch in ipairs(chars) do
+        ImGui.ImGui_DrawList_AddTextEx(dl, FONT.mono_reg, RIGHT_SZ,
+          cur_sx, rt_y_screen, TK.text_faint, ch.c)
+        cur_sx = cur_sx + ch.w + TIGHT_KERN
+      end
+    end
+    geometry.subtitle_width = subtitle_natural_w
+    geometry.subtitle_height = subtitle_h
+    geometry.subtitle_wrap_width = subtitle_wrap_w
+    geometry.subtitle_wrapped = subtitle_wrapped
+    geometry.breadcrumb_width = total_rt_w
+    geometry.breadcrumb_standalone_used =
+      geometry.breadcrumb_row == "standalone"
+    geometry.moved_for_subtitle_fit = geometry.subtitle_candidate_collision
+    S._settings_hero_layout = geometry
+  else
+    local subtitle_y_screen = sy + PAD_TOP + WM_SIZE + WM_SUB_GAP
+    local subtitle_rect = nil
+    if subtitle and subtitle ~= "" then
+      subtitle_rect = {
+        x1 = sx + PAD_X,
+        y1 = subtitle_y_screen,
+        x2 = sx + PAD_X + math_min(subtitle_natural_w, subtitle_wrap_w),
+        y2 = subtitle_y_screen + subtitle_h,
+      }
+    end
+    local geometry = UI.settings_hero_geometry({
+      epsilon = RA.SC(0.5),
+      subtitle_rect = subtitle_rect,
+      subtitle_content_rect = subtitle_rect and {
+        x1 = sx + PAD_X,
+        y1 = subtitle_y_screen,
+        x2 = sx + PAD_X + subtitle_wrap_w,
+        y2 = subtitle_y_screen + subtitle_h,
+      } or nil,
+      subtitle_vertical_rect = subtitle_rect and {
+        x1 = sx + PAD_X,
+        y1 = subtitle_y_screen,
+        x2 = sx + PAD_X + subtitle_wrap_w,
+        y2 = sy + hero_h - PAD_BOT,
+      } or nil,
+      subtitle_natural_width = subtitle_natural_w,
+      subtitle_wrap_width = subtitle_wrap_w,
+      subtitle_height = subtitle_h,
+      subtitle_single_line_height = SUB_SIZE,
+    })
+    geometry.subtitle_width = subtitle_natural_w
+    geometry.subtitle_height = subtitle_h
+    geometry.subtitle_wrap_width = subtitle_wrap_w
+    geometry.subtitle_wrapped = subtitle_wrapped
+    geometry.breadcrumb_width = 0
+    geometry.moved_for_subtitle_fit = false
+    S._settings_hero_layout = geometry
   end
 
   -- Subtitle below wordmark (Inter SemiBold at SUB_SIZE, TK.text).
@@ -3053,7 +3566,10 @@ function UI.hero_band_settings_v5(subtitle, right_text)
     PushFont(RA.ctx, FONT.inter_semi, SUB_SIZE)
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
     ImGui.ImGui_SetCursorPos(RA.ctx, start_x_local + PAD_X, sub_y)
-    Text(RA.ctx, subtitle)
+    ImGui.ImGui_PushTextWrapPos(
+      RA.ctx, start_x_local + PAD_X + subtitle_wrap_w)
+    ImGui.ImGui_TextWrapped(RA.ctx, subtitle)
+    ImGui.ImGui_PopTextWrapPos(RA.ctx)
     PopStyleColor(RA.ctx)
     PopFont(RA.ctx)
   end
@@ -3568,18 +4084,26 @@ function UI.mode_model_row_v5()
       if ImGui.ImGui_MenuItem(RA.ctx, fp.label, nil, fp.idx == prefs.provider_idx)
          and fp.idx ~= prefs.provider_idx then
         local old_p = PROVIDERS.active()
-        if Store and Store.remember_model_idx then
+        local released_temporary = Store
+          and Store.release_temporary_provider_selection
+          and Store.release_temporary_provider_selection(
+            "the user selected a provider")
+        if not released_temporary and Store and Store.remember_model_idx then
           Store.remember_model_idx(old_p, MODELS, prefs.model_idx)
         end
         -- Save thinking_idx under the OLD (provider, model) pair so the
         -- per-model state survives the switch.
-        if old_p.thinking_levels and prefs.thinking_idx > 0 then
+        if not released_temporary
+            and old_p.thinking_levels and prefs.thinking_idx > 0 then
           local old_m = MODELS[prefs.model_idx] or MODELS[1]
           PROVIDERS.save_thinking_idx(old_p, old_m, prefs.thinking_idx)
         end
         if old_p.id == "google" then Net.gemini_cache_invalidate() end
         prefs.provider_idx = fp.idx
         MODELS.refresh()
+        if Store and Store.remember_provider_id then
+          Store.remember_provider_id(PROVIDERS.active())
+        end
         S.api_key = S.api_key_map[PROVIDERS.active().id]
         S.api_ref_message = nil
         local nm = MODELS[prefs.model_idx]
@@ -3796,7 +4320,12 @@ function UI.mode_model_row_v5()
         -- mutating prefs.model_idx; otherwise we'd save under the new
         -- model's id and lose the old model's setting.
         local old_m = MODELS[prefs.model_idx] or MODELS[1]
-        if p_active.thinking_levels and prefs.thinking_idx > 0 then
+        local released_temporary = Store
+          and Store.release_temporary_provider_selection
+          and Store.release_temporary_provider_selection(
+            "the user selected a model")
+        if not released_temporary
+            and p_active.thinking_levels and prefs.thinking_idx > 0 then
           PROVIDERS.save_thinking_idx(p_active, old_m, prefs.thinking_idx)
         end
         prefs.model_idx = usable_idx
@@ -3879,10 +4408,14 @@ function UI.mode_model_row_v5()
           if draw_menu_choice("##mm_tl_" .. tostring(v.idx), v.label,
               v.idx == prefs.thinking_idx, row_icon, row_col, false,
               nil, thinking_row_w) then
+            local active_m = MODELS[prefs.model_idx] or MODELS[1]
+            if Store and Store.remember_temporary_thinking_selection then
+              Store.remember_temporary_thinking_selection(
+                p_active, active_m, v.idx)
+            end
             prefs.thinking_idx = v.idx
             -- Save under the per-model slot via the helper. Falls back to
             -- the legacy per-provider key only when no model id is available.
-            local active_m = MODELS[prefs.model_idx] or MODELS[1]
             PROVIDERS.save_thinking_idx(p_active, active_m, prefs.thinking_idx)
           end
           -- Hover tooltip: show the (provider, model, this-thinking) explainer
@@ -4715,7 +5248,9 @@ function UI.footer_rail_v5()
               if cr > 0 or cc > 0 then
                 parts[#parts+1] = str_format("  Cache: %d read, %d created", cr, cc)
               end
-              if msg.cost then
+              if msg.cost_unknown then
+                parts[#parts+1] = "  Estimated cost: Unknown"
+              elseif msg.cost then
                 if msg.free_tier then
                   parts[#parts+1] = "  Estimated cost: Free Tier (would have been ~"
                     .. MODELS.format_cost(msg.cost) .. ")"
@@ -4731,6 +5266,8 @@ function UI.footer_rail_v5()
               parts[#parts+1] = "  FX Cache: " .. msg.fx_cache_label
             end
           else
+            -- Reasoning summaries are display-only and intentionally excluded
+            -- from clipboard chat exports, saved chats, and request history.
             parts[#parts+1] = "[ASSISTANT]"
             parts[#parts+1] = msg.content or ""
             if msg.code_block then
@@ -4743,8 +5280,10 @@ function UI.footer_rail_v5()
         end
         if S.session_tok_in > 0 then
           parts[#parts+1] = string.rep("-", 50)
+          local session_cost = S.session_cost_unknown
+            and "Unknown" or MODELS.format_cost(S.session_cost)
           parts[#parts+1] = str_format("Session: %d in / %d out  |  Est. cost: %s",
-            S.session_tok_in, S.session_tok_out, MODELS.format_cost(S.session_cost))
+            S.session_tok_in, S.session_tok_out, session_cost)
         end
         ImGui.ImGui_SetClipboardText(RA.ctx, tbl_concat(parts, "\n"))
         UI.show_float_toast(UI.t("footer.copy.toast", nil,
@@ -5042,6 +5581,7 @@ function UI.submit_prompt(input_source)
   if Net.log_plugin_test_gui_send then
     Net.log_plugin_test_gui_send(trimmed, input_source or "prompt")
   end
+  UI.resume_chat_auto_follow(true)
   Net.send_to_api(trimmed)
   S.refocus_prompt = true
   return true, ""
@@ -7087,11 +7627,8 @@ function Render.bug_report_screen()
         or (now - (probe.checked_at or 0)) > 1.0 then
       local sz, present = nil, false
       if prefs.debug_logging and log_path ~= "" then
-        local f = io.open(log_path, "rb")
-        if f then
-          sz = f:seek("end") or 0
-          f:close()
-          present = sz > 0
+        if Diag and type(Diag.advanced_log_file_probe) == "function" then
+          sz, present = Diag.advanced_log_file_probe(log_path)
         end
       end
       probe = { key = log_key, checked_at = now, size = sz, present = present }
@@ -7257,6 +7794,20 @@ function Render.bug_report_screen()
       _bullet(UI.t("bug_report.item.log", { size = size_str },
         "Advanced Log enabled - your complete log (" .. size_str
           .. ") will be attached"))
+    elseif prefs.debug_logging and _attachment_kind == "chat" then
+      _bullet(UI.t(_chat_count == 1
+          and "bug_report.item.chat_log_empty.one"
+          or "bug_report.item.chat_log_empty.many",
+        { count = _chat_count },
+        "Advanced Log is on but has not captured any activity yet. "
+          .. "Reproduce the issue, then submit. ReaAssist will attach the "
+          .. "current chat instead (" .. _chat_count .. " message"
+          .. (_chat_count == 1 and "" or "s") .. ")."))
+    elseif prefs.debug_logging then
+      _bullet(UI.t("bug_report.item.none_log_empty", nil,
+        "Advanced Log is on but has not captured any activity yet. "
+          .. "Reproduce the issue, then submit. No chat is available, so "
+          .. "only the diagnostic report will be sent."), TK.text_faint)
     elseif _attachment_kind == "chat" then
       _bullet(UI.t(_chat_count == 1 and "bug_report.item.chat.one"
           or "bug_report.item.chat.many",
@@ -7609,10 +8160,11 @@ function Render.bug_report_screen()
   UI.v5_section_label(UI.t("bug_report.debug.section", nil, "DEBUG LOG"),
     nil, nil, SEC_LBL_SCALE, SEC_LBL_COL)
 
-  _para(UI.t("bug_report.debug.body", nil,
-    "Captures full API traffic and FX scan events. When enabled, the "
-      .. "complete log is attached to your bug report automatically. "
-      .. "Reproduce the issue first, then send the form above."))
+  _para(UI.t("bug_report.debug.capture_order", nil,
+    "Enable Advanced Log before reproducing the issue. It records new API "
+      .. "traffic and FX scan events. Reproduce the issue, then submit the "
+      .. "report above. If the log has no captured activity, ReaAssist "
+      .. "attaches the current chat instead."))
 
   Dummy(RA.ctx, 1, RA.SC(10))
 
@@ -7629,7 +8181,17 @@ function Render.bug_report_screen()
     if changed_dl then
       prefs.debug_logging = new_dl
       if Store and Store.save_config then Store.save_config() end
-      if prefs.debug_logging then Log.session_header() end
+      if prefs.debug_logging then
+        Log.session_header()
+        S.bug_report_log_msg = UI.t("bug_report.debug.enabled_reproduce", nil,
+          "Advanced Log is on. Reproduce the issue, then submit.")
+        S.bug_report_log_msg_err = false
+        S.bug_report_log_msg_time = reaper.time_precise()
+      else
+        S.bug_report_log_msg = nil
+        S.bug_report_log_msg_err = nil
+        S.bug_report_log_msg_time = nil
+      end
     end
   end
 
@@ -7686,8 +8248,10 @@ function Render.bug_report_screen()
           os.date("%Y-%m-%d_%H%M%S"))
         local default_dir = reaper.GetResourcePath() or ""
         local saved_path
-        if reaper.JS_Dialog_BrowseForSaveFile then
-          local ret, path = reaper.JS_Dialog_BrowseForSaveFile(
+        local save_dialog = RA.preferred_platform_api(
+          "MBH_Dialog_BrowseForSaveFile", "JS_Dialog_BrowseForSaveFile")
+        if save_dialog then
+          local ret, path = save_dialog(
             UI.t("bug_report.debug.save_dialog_title", nil,
               "Save ReaAssist Debug Log"),
             default_dir, default_name,
@@ -8505,22 +9069,33 @@ function Render._key_test_results_popup()
       "API Key Test Results") .. "###key_test_results")
   end
   local all_ok = true
-  local failed_count = 0
-  local failed_with_links = 0
+  local res_w = RA.SC(420)
+  local result_wrap_w = res_w - RA.SC(48)
+  local result_content_h = 0
   for _, r in pairs(api_keys.test_results) do
+    result_content_h = result_content_h + RA.SC(21)
     if not r.ok then
       all_ok = false
-      failed_count = failed_count + 1
-      if r.url then failed_with_links = failed_with_links + 1 end
+      result_content_h = result_content_h + RA.SC(7)
+      if r.error then
+        result_content_h = result_content_h
+          + UI.measure_multiline_height("    " .. r.error, result_wrap_w)
+          + RA.SC(4)
+      end
+      if r.url then
+        local fix_text = r.hint
+          and UI.t("dialog.key_validation.how_to_fix", { hint = r.hint },
+            "How to fix: " .. r.hint)
+          or UI.t("dialog.key_test.fix_hint", nil,
+            "How to fix: double-check this key, or generate a new one:")
+        result_content_h = result_content_h
+          + UI.measure_multiline_height("    " .. fix_text, result_wrap_w)
+          + RA.SC(26)
+      end
     end
   end
-  local res_w = RA.SC(420)
   local res_h = all_ok and RA.SC(150)
-    or (RA.SC(220) + failed_count * RA.SC(42)
-      + failed_with_links * RA.SC(22))
-  local result_count = 0
-  for _ in pairs(api_keys.test_results) do result_count = result_count + 1 end
-  if result_count > 3 then res_h = res_h + (result_count - 3) * RA.SC(22) end
+    or math_max(RA.SC(220), RA.SC(170) + result_content_h)
   local win_x, win_y = ImGui.ImGui_GetWindowPos(RA.ctx)
   local win_w, win_h = ImGui.ImGui_GetWindowSize(RA.ctx)
   local max_w = math_max(res_w, win_w - RA.SC(80))
@@ -8572,8 +9147,12 @@ function Render._key_test_results_popup()
             end
             if r.url then
               PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-              Text(RA.ctx, "    " .. UI.t("dialog.key_test.fix_hint", nil,
-                "How to fix: double-check this key, or generate a new one:"))
+              local fix_text = r.hint
+                and UI.t("dialog.key_validation.how_to_fix", { hint = r.hint },
+                  "How to fix: " .. r.hint)
+                or UI.t("dialog.key_test.fix_hint", nil,
+                  "How to fix: double-check this key, or generate a new one:")
+              UI.text_multiline("    " .. fix_text)
               PopStyleColor(RA.ctx)
               ImGui.ImGui_Indent(RA.ctx, RA.SC(18))
               UI.inline_link_sentence("{link}", r.url_label or r.url,
@@ -9793,6 +10372,490 @@ function Render.settings_screen()
   Render._shared_key_screen_impl()
 end
 
+function UI.engine_installer_presentation()
+  if RA and RA.UPDATE_CHECKS_DISABLED then return nil end
+  if type(EngineInstallerHost) ~= "table"
+      or type(EngineInstallerHost.presentation) ~= "function" then
+    return nil
+  end
+  local ok, value = pcall(
+    EngineInstallerHost.presentation, EngineInstallerHost)
+  if not ok or type(value) ~= "table" then return nil end
+  if RA.support_download and RA.support_download:busy() then
+    value.action = "installing"
+    for key in pairs(value) do
+      if type(key) == "string" and key:sub(1, 4) == "can_" then value[key] = false end
+    end
+  end
+  -- The deploy lock contract, applied to the view rather than inside the
+  -- vendored host. While the lock is held every control is withdrawn here, so
+  -- no row is drawn that could start an action.
+  if RA and type(RA.deploy_lock_installer_view) == "function" then
+    local guarded = RA.deploy_lock_installer_view(value)
+    if type(guarded) == "table" then return guarded end
+  end
+  return value
+end
+
+function UI.engine_installer_status_text(value)
+  value = type(value) == "table" and value or {}
+  local action = tostring(value.action or "unavailable")
+  -- The deploy lock contract's own sentence. Nothing was queued and nothing
+  -- will be retried, so the line says what to do rather than what is pending.
+  if action == "deploy-locked" then
+    return UI.t("deploy_lock.held", nil,
+      "An update is being installed. Try again in a moment.")
+  end
+  -- A stale lock pauses nothing, so it is appended to whatever the installer
+  -- otherwise reports rather than replacing it.
+  if value.deploy_lock == "stale" then
+    local path = tostring(value.deploy_lock_path or "")
+    local unlocked = {}
+    for key, item in pairs(value) do unlocked[key] = item end
+    unlocked.deploy_lock = nil
+    return UI.engine_installer_status_text(unlocked)
+      .. "\n\n" .. UI.t("deploy_lock.stale", { path = path },
+      "A deploy lock file was left behind at " .. path
+        .. ". Nothing is being installed. Delete that file to clear this "
+        .. "notice.")
+  end
+  if action == "install" then
+    return UI.t("engine.install.available", nil,
+      "Required files are ready to install.")
+  end
+  if action == "update" then
+    return UI.t("engine.update.available", nil, "An update to support files is ready to install.")
+  end
+  if action == "current" or action == "already-current" then
+    return UI.t("engine.install.current", nil,
+      "No installation needed.")
+  end
+  if action == "newer" then
+    return UI.t("engine.install.newer", nil, "A newer support file is already installed. No change will be made.")
+  end
+  if action == "conflict" then
+    return UI.t("engine.install.conflict", nil,
+      "An installed support file does not match this release. Open Settings > Advanced and choose Reinstall This Version to replace it, or report the mismatch. No file is replaced without your confirmation.")
+  end
+  if action == "installing" then
+    return UI.t("engine.install.preparing", nil,
+      "Preparing the installation. Keep REAPER open until this step finishes.")
+  end
+  if action == "restart-required" then
+    return UI.t("engine.install.restart", nil,
+      "Restart REAPER to finish the install.")
+  end
+  if action == "not-active" then
+    return UI.t("engine.install.not_active", nil,
+      "Restart REAPER to finish the install. If you have already restarted and still see this, open Settings > Advanced and choose Repair Installation.")
+  end
+  if action == "active" then
+    return UI.t("engine.install.active", nil, "Installation complete.")
+  end
+  if action == "rolled-back" then
+    return UI.t("engine.install.rolled_back", nil, "The installation was rolled back. ReaAssist will keep using its previous connection method.")
+  end
+  if action == "refuse" then
+    if value.can_clear_quarantine == true then
+      return UI.t("engine.install.quarantined", nil,
+        "This version was rejected after an earlier installation. Open Settings > Advanced and choose Allow This Version to permit another installation attempt.")
+    end
+    if value.can_repair == true then
+      return UI.t("engine.install.repair_needed", nil,
+        "Installation stopped. Open Settings > Advanced and choose Repair Installation to check and recover the saved installation state.")
+    end
+    return UI.t("engine.install.refused", nil, "Installation stopped. Restart REAPER and open ReaAssist to try recovery again.")
+  end
+  if action == "recovery-required" then
+    if value.can_discharge_recovery == true then
+      return UI.t("engine.install.recovery_blocked", nil,
+        "The previous support file cannot be restored. Open Settings > Advanced and choose Stop Waiting for Recovery to end this recovery and allow a new installation attempt.")
+    end
+    return UI.t("engine.install.recovery_required", nil, "An interrupted installation left a required support file missing. Open Settings > Advanced and choose Repair Installation. If Finish Installation is available, you can use it to install the required files again.")
+  end
+  -- The installer found an Engine it cannot name and will not replace it
+  -- without being asked to. Without this case the user read "Engine
+  -- installation is unavailable in this build", which is both wrong and a
+  -- dead end: the installer is waiting on them.
+  if action == "confirm-repair" then
+    return UI.t("engine.install.confirm_repair", nil,
+      "ReaAssist cannot identify an installed support file. Open Settings > Advanced to review and replace it.")
+  end
+  if action == "no-action" then
+    return UI.t("engine.install.no_action", nil,
+      "This package will not replace the installed support file. No change was made.")
+  end
+  return UI.t("engine.install.unavailable", nil,
+    "Installation is unavailable in this build.")
+end
+
+function UI.engine_installer_action_label(value)
+  if value and value.action == "update" then
+    return UI.t("engine.action.update", nil, "Install Update")
+  end
+  return UI.t("engine.action.install", nil, "Finish Installation")
+end
+
+-- The four durable actions the installer host offers beside staging, in the
+-- order they are shown. Repair, confirmed repair and replace all move the
+-- Engine this REAPER process has loaded, so all three ask first. Clearing
+-- quarantine removes a refusal record and changes no file, so it does not.
+--
+-- EVERY GATE THE HOST CAN OPEN HAS A CONTROL HERE. `can_confirm_repair` had
+-- none until 2026-09-09, which left the user with nothing to press in every
+-- state the host answers `repair-required`, including the `unresolved` marker
+-- the status-record repair writes on purpose. `Dev\Tests` walks the gates the
+-- host's `presentation()` can set and fails by name if one is unreachable.
+UI.ENGINE_INSTALLER_ACTIONS = {
+  {
+    name = "repair",
+    method = "repair",
+    gate = "can_repair",
+    id = "##adv_engine_repair",
+    label = function()
+      return UI.t("engine.action.repair", nil, "Repair Installation")
+    end,
+    tooltip = function()
+      return UI.t("engine.action.repair.tooltip", nil,
+        "May restore the previous support file, remove a file that never activated or set aside an unreadable installation record and rebuild it from the installed file. Restart REAPER afterward.")
+    end,
+    confirm = function()
+      return UI.t("engine.confirm.repair", nil,
+        "Repair the installation? Depending on the saved state, ReaAssist may restore the previous support file, remove a file that never activated or set aside an unreadable installation record and rebuild it from the installed file. Restart REAPER afterward to finish the repair.")
+    end,
+  },
+  -- The user's answer to the question the installer cannot answer itself.
+  -- Offered beside the record repair, which rebuilds the record without
+  -- touching a binary; this one replaces the binary, so it says exactly which
+  -- file goes and what takes its place.
+  {
+    name = "confirm_repair",
+    method = "confirm_repair",
+    gate = "can_confirm_repair",
+    id = "##adv_engine_confirm_repair",
+    label = function()
+      return UI.t("engine.action.confirm_repair", nil,
+        "Replace Installed File")
+    end,
+    tooltip = function()
+      return UI.t("engine.action.confirm_repair.tooltip", nil,
+        "ReaAssist cannot identify the file in REAPER's UserPlugins folder. Replaces it with the file included in this release, then verifies it after a REAPER restart.")
+    end,
+    confirm = function()
+      return UI.t("engine.confirm.confirm_repair", nil,
+        "ReaAssist cannot identify the file in REAPER's UserPlugins folder. Replace it with the file included in this release? Restart REAPER afterward to finish verification.")
+    end,
+  },
+  {
+    name = "clear_quarantine",
+    method = "clear_quarantine",
+    gate = "can_clear_quarantine",
+    id = "##adv_engine_clear_quarantine",
+    label = function()
+      return UI.t("engine.action.clear_quarantine", nil, "Allow This Version")
+    end,
+    tooltip = function()
+      return UI.t("engine.action.clear_quarantine.tooltip", nil,
+        "Allows a previously rejected support-file version to be installed again. It changes no installed file.")
+    end,
+  },
+  {
+    name = "replace",
+    method = "replace_package",
+    gate = "can_replace",
+    id = "##adv_engine_replace",
+    label = function()
+      return UI.t("engine.action.replace", nil, "Reinstall This Version")
+    end,
+    tooltip = function()
+      return UI.t("engine.action.replace.tooltip", nil,
+        "Replaces the installed support file with the same version from this release. Restart REAPER afterward to finish installation.")
+    end,
+    confirm = function()
+      return UI.t("engine.confirm.replace", nil,
+        "Reinstall the required support file? ReaAssist will replace it with the file in this release and verify it after you restart REAPER.")
+    end,
+  },
+  -- The escape from an obligation nothing can meet. It is offered only for a
+  -- recovery whose previous Engine is absent, holds other bytes, or has been
+  -- withdrawn, which the decision core decides rather than this table. While
+  -- it stands, no transaction may be abandoned and no bundle installed, so
+  -- repair and install both keep failing until this ends it.
+  {
+    name = "discharge_recovery",
+    method = "discharge_recovery",
+    gate = "can_discharge_recovery",
+    id = "##adv_engine_discharge_recovery",
+    label = function()
+      return UI.t("engine.action.discharge_recovery", nil,
+        "Stop Waiting for Recovery")
+    end,
+    tooltip = function()
+      return UI.t("engine.action.discharge_recovery.tooltip", nil,
+        "Ends a blocked recovery when the previous support file is missing, damaged or withdrawn. It changes no installed file and allows a new installation attempt.")
+    end,
+    confirm = function()
+      return UI.t("engine.confirm.discharge_recovery", nil,
+        "Stop waiting for recovery? The previous support file is missing, damaged or withdrawn, so it cannot be restored. Continuing ends this recovery and allows a new installation attempt. No installed file is changed, and the recovery record is kept.")
+    end,
+  },
+}
+
+-- One call site for every host action, so a raised error or a result that is
+-- not a state reaches the user the same way whichever button produced it.
+function UI.engine_installer_download_error(state, reason)
+  if state == "blocked" then
+    return UI.t("engine.install.busy", nil,
+      "Finish the current request or update before starting installation.")
+  end
+  if reason == "download-start" or reason == "download-http" or reason == "download-timeout" then
+    return UI.t("network.curl.generic", nil,
+      "A network error occurred. Please check your internet connection and try again.")
+  end
+  return UI.t("engine.install.unexpected_error", nil,
+    "The installation action failed. Check the installation status before trying again.")
+end
+
+function UI.engine_installer_run(name)
+  S._engine_installer_ui_error = nil
+  if RA and RA.UPDATE_CHECKS_DISABLED then return nil end
+  -- No action starts while a deploy holds the lock. The host is not called at
+  -- all, so nothing is written and nothing is left half started; the user is
+  -- told one sentence and retries when the transfer is over.
+  if RA and type(RA.deploy_lock_installer_held) == "function"
+      and RA.deploy_lock_installer_held() then
+    S._engine_installer_ui_error = UI.t("deploy_lock.held", nil,
+      "An update is being installed. Try again in a moment.")
+    return nil
+  end
+  if name == "stage_package" or name == "replace_package" or name == "confirm_repair" then
+    if not RA.support_download then
+      S._engine_installer_ui_error = UI.t("engine.install.unexpected_error", nil,
+        "The installation action failed. Check the installation status before trying again.")
+      return nil
+    end
+    local prepared, state, reason = pcall(RA.support_download.ensure, RA.support_download, name, true)
+    if prepared and state == "pending" then
+      S._support_install_preparing = true
+      return {kind="preparing"}
+    end
+    if not prepared or state ~= "ready" then
+      S._engine_installer_ui_error = UI.engine_installer_download_error(prepared and state or "failed", reason)
+      return nil
+    end
+  end
+  local method = EngineInstallerHost and EngineInstallerHost[name]
+  local ok, result = false, nil
+  if type(method) == "function" then
+    ok, result = pcall(method, EngineInstallerHost)
+  end
+  if not ok or type(result) ~= "table" then
+    S._engine_installer_ui_error = UI.t(
+      "engine.install.unexpected_error", nil,
+      "The installation action failed. Check the installation status before trying again.")
+    if Log and Log.line then
+      Log.line("ENGINE-INSTALL", "UI " .. tostring(name) .. " failed: "
+        .. tostring(ok and "invalid result" or result))
+    end
+  end
+  return result
+end
+
+function UI.engine_installer_action(name)
+  for _, action in ipairs(UI.ENGINE_INSTALLER_ACTIONS) do
+    if action.name == name then return action end
+  end
+  return nil
+end
+
+-- Eligibility is read again at the moment of dispatch, not only when the row
+-- was drawn. A confirmation dialog stays open across frames, and the installer
+-- can finish a transaction or start one behind it, so the gate that offered the
+-- action has to still be open when the action runs.
+function UI.engine_installer_action_ready(name)
+  local action = UI.engine_installer_action(name)
+  if not action or S.status == "waiting" then return false end
+  local view = UI.engine_installer_presentation()
+  return type(view) == "table" and view[action.gate] == true
+end
+
+-- The armed action is held by name, never as the table itself, so nothing that
+-- reads or writes session state ever has to carry a function.
+function UI.engine_installer_confirm_popup(ctx)
+  local pending = UI.engine_installer_action(S._engine_installer_confirm)
+  if not pending then
+    S._engine_installer_confirm = nil
+    S._engine_installer_confirm_open = nil
+    return
+  end
+  local popup = UI.t("engine.dialog.title", nil, "ReaAssist")
+    .. "###engine_installer_confirm"
+  if not S._engine_installer_confirm_open then
+    S._engine_installer_confirm_open = true
+    ImGui.ImGui_OpenPopup(ctx, popup)
+  end
+  local width = RA.SC(440)
+  if update._main_w then
+    ImGui.ImGui_SetNextWindowPos(ctx,
+      update._main_x + (update._main_w - width) * 0.5,
+      update._main_y + math_max(RA.SC(70), update._main_h * 0.22),
+      ImGui.ImGui_Cond_Appearing())
+  end
+  ImGui.ImGui_SetNextWindowSize(ctx, width, 0, ImGui.ImGui_Cond_Appearing())
+  UI.push_modal_style()
+  if ImGui.ImGui_BeginPopupModal(ctx, popup, true,
+      ImGui.ImGui_WindowFlags_AlwaysAutoResize()
+        | ImGui.ImGui_WindowFlags_NoResize()) then
+    ImGui.ImGui_PushTextWrapPos(ctx, GetCursorPosX(ctx) + width - RA.SC(40))
+    ImGui.ImGui_TextWrapped(ctx, pending.confirm())
+    ImGui.ImGui_PopTextWrapPos(ctx)
+    ImGui.ImGui_Spacing(ctx)
+    local confirm_label = pending.label()
+    local cancel_label = UI.t("common.cancel", nil, "Cancel")
+    local confirm_w = math_max(RA.SC(118),
+      CalcTextSize(ctx, confirm_label) + RA.SC(28))
+    local cancel_w = math_max(RA.SC(72),
+      CalcTextSize(ctx, cancel_label) + RA.SC(28))
+    local gap = RA.SC(16)
+    SetCursorPosX(ctx, GetCursorPosX(ctx)
+      + math_floor((ImGui.ImGui_GetContentRegionAvail(ctx)
+        - confirm_w - gap - cancel_w) * 0.5))
+    local run = false
+    if ImGui.ImGui_Button(ctx, confirm_label, confirm_w, 0) then run = true end
+    SameLine(ctx, 0, gap)
+    local close = ImGui.ImGui_Button(ctx, cancel_label, cancel_w, 0)
+      or ImGui.ImGui_IsKeyPressed(ctx, ImGui.ImGui_Key_Escape())
+    if run or close then
+      S._engine_installer_confirm = nil
+      S._engine_installer_confirm_open = nil
+      ImGui.ImGui_CloseCurrentPopup(ctx)
+    end
+    ImGui.ImGui_EndPopup(ctx)
+    if run then
+      if UI.engine_installer_action_ready(pending.name) then
+        UI.engine_installer_run(pending.method)
+      else
+        S._engine_installer_ui_error = UI.t(
+          "engine.install.action_expired", nil,
+          "That action is no longer available. The installation state "
+            .. "changed while this dialog was open.")
+      end
+    end
+  elseif S._engine_installer_confirm_open then
+    -- The user dismissed the modal with the title-bar close.
+    S._engine_installer_confirm = nil
+    S._engine_installer_confirm_open = nil
+  end
+  UI.pop_modal_style()
+end
+
+function UI.engine_installer_request_close()
+  if S._engine_quit_requested or S._support_install_preparing then return false end
+  local view = UI.engine_installer_presentation()
+  if not view or (view.action ~= "restart-required" and view.action ~= "not-active") then return false end
+  S._engine_quit_requested = true
+  -- Finish the ImGui frame before requesting normal REAPER shutdown. Never
+  -- force termination: REAPER owns unsaved-project prompts and cancellation.
+  reaper.defer(function()
+    S._engine_quit_requested = nil
+    local current = UI.engine_installer_presentation()
+    if S._support_install_preparing or not current
+        or (current.action ~= "restart-required" and current.action ~= "not-active") then return end
+    reaper.Main_OnCommand(40004, 0)
+  end)
+  return true
+end
+
+function Render._engine_installer_notice_popup()
+  local value = UI.engine_installer_presentation()
+  local action = value and tostring(value.action or "") or ""
+  local preparing = S._support_install_preparing == true
+  if preparing then action = "preparing" end
+  local terminal = action == "restart-required" or action == "not-active"
+    or action == "refuse" or action == "confirm-repair" or action == "conflict"
+    or action == "rolled-back" or action == "recovery-required"
+  local should_show = terminal or preparing or S._engine_installer_ui_error ~= nil
+  if not should_show and not S._engine_installer_notice_open then return end
+
+  local signature = action .. ":" .. tostring(value and value.detail or "")
+    .. ":" .. tostring(not terminal and S._engine_installer_ui_error or "")
+  local popup = UI.t("engine.dialog.title", nil, "ReaAssist")
+    .. "###engine_installer_notice"
+  if should_show and S._engine_installer_notice_signature ~= signature then
+    S._engine_installer_notice_signature = signature
+    ImGui.ImGui_OpenPopup(RA.ctx, popup)
+  end
+
+  local popup_w = RA.SC(440)
+  if update._main_w then
+    ImGui.ImGui_SetNextWindowPos(RA.ctx,
+      update._main_x + (update._main_w - popup_w) * 0.5,
+      update._main_y + math_max(RA.SC(70), update._main_h * 0.22),
+      ImGui.ImGui_Cond_Appearing())
+  end
+  ImGui.ImGui_SetNextWindowSize(RA.ctx, popup_w, 0,
+    ImGui.ImGui_Cond_Appearing())
+  UI.push_modal_style()
+  local visible, remains_open = ImGui.ImGui_BeginPopupModal(RA.ctx, popup, true,
+      ImGui.ImGui_WindowFlags_AlwaysAutoResize()
+        | ImGui.ImGui_WindowFlags_NoResize())
+  S._engine_installer_notice_open = visible
+  if visible and not should_show then
+    ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+    ImGui.ImGui_EndPopup(RA.ctx)
+    S._engine_installer_notice_open = nil
+    S._engine_installer_notice_signature = nil
+  elseif visible then
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),
+      (action == "refuse" or action == "conflict") and TK.red or TK.text)
+    ImGui.ImGui_PushTextWrapPos(RA.ctx,
+      GetCursorPosX(RA.ctx) + ImGui.ImGui_GetContentRegionAvail(RA.ctx))
+    ImGui.ImGui_TextWrapped(RA.ctx, preparing
+      and UI.t("engine.install.preparing", nil,
+        "Preparing the installation. Keep REAPER open until this step finishes.")
+      or terminal and UI.engine_installer_status_text(value) or S._engine_installer_ui_error)
+    if preparing then S._support_install_preparing_painted = true end
+    ImGui.ImGui_PopTextWrapPos(RA.ctx)
+    PopStyleColor(RA.ctx)
+    ImGui.ImGui_Spacing(RA.ctx)
+    do
+      local ok_label = UI.t("common.ok", nil, "OK")
+      local button_w = math_max(RA.SC(76),
+        CalcTextSize(RA.ctx, ok_label) + RA.SC(24))
+      local close_label = UI.t("engine.action.close_reaper", nil, "Close REAPER")
+      local can_close = not preparing and (action == "restart-required" or action == "not-active")
+      local close_w = math_max(RA.SC(118), CalcTextSize(RA.ctx, close_label) + RA.SC(24))
+      local row_w = button_w + (can_close and (close_w + RA.SC(8)) or 0)
+      SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx)
+        + math_max((ImGui.ImGui_GetContentRegionAvail(RA.ctx) - row_w) * 0.5, 0))
+      if can_close then
+        if ImGui.ImGui_Button(RA.ctx, close_label .. "##engine_quit", close_w, 0) then
+          UI.engine_installer_request_close()
+        end
+        ImGui.ImGui_SameLine(RA.ctx, 0, RA.SC(8))
+      end
+      UI.push_modal_primary_btn()
+      if ImGui.ImGui_Button(RA.ctx, ok_label .. "##engine_notice", button_w, 0)
+          or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Enter())
+          or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_KeypadEnter())
+          or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
+        S._engine_installer_ui_error = nil
+        S._engine_installer_notice_signature = action .. ":"
+          .. tostring(value and value.detail or "") .. ":"
+        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+      end
+      UI.pop_modal_primary_btn()
+    end
+    ImGui.ImGui_EndPopup(RA.ctx)
+  end
+  if remains_open == false then
+    S._engine_installer_ui_error = nil
+    S._engine_installer_notice_signature = action .. ":"
+      .. tostring(value and value.detail or "") .. ":"
+  end
+  UI.pop_modal_style()
+end
+
 function Render._custom_instructions_leave()
   local ret = api_keys.custom_instr_return_screen
   api_keys.custom_instr_loaded = nil
@@ -10506,6 +11569,8 @@ local function _exit_settings_screen()
   api_keys.saved_theme                 = nil
   api_keys.saved_update_check          = nil
   api_keys.saved_auto_backup           = nil
+  api_keys.saved_stream_responses      = nil
+  api_keys.saved_reasoning_display_mode = nil
   api_keys.saved_chat_font_idx         = nil
   api_keys.saved_reply_language_idx    = nil
   api_keys.saved_include_snapshot      = nil
@@ -10761,7 +11826,7 @@ function Render._shared_key_screen_impl()
     -- Providers" page (entered via the nav row further down). Skip them
     -- here to avoid rendering the cloud-provider single-input layout
     -- against a row that has its own multi-row schema.
-    if not prov.is_custom then
+    if not prov.is_custom and PROVIDERS.user_visible(prov) then
       if any_card_drawn then
         Dummy(RA.ctx, 1, RA.SC(5))
       end
@@ -10908,47 +11973,51 @@ function Render._shared_key_screen_impl()
       -- inner right edge so long labels can't crowd it. Draw text/underline
       -- manually so localized UI fonts cannot recenter the URL inside a
       -- wider button frame.
-      local LINK_SZ = RA.SC(10)
-      -- Cache the console-label width on prov itself, keyed on font size.
-      -- prov.console_label is invariant per provider; PROVIDERS rebuilds
-      -- via Custom.register_all naturally invalidate by replacing the
-      -- table reference.
-      local link_font = UI.brand_font("mono_reg") or FONT.mono_reg
-      local link_key = tostring(LINK_SZ) .. ":" .. tostring(link_font)
-        .. ":" .. tostring(prov.console_label or "")
-      if prov._console_lw_key ~= link_key then
+      local console_url = tostring(prov.console_url or "")
+      local console_label = tostring(prov.console_label or "")
+      if console_url ~= "" and console_label ~= "" then
+        local LINK_SZ = RA.SC(10)
+        -- Cache the console-label width on prov itself, keyed on font size.
+        -- Built-in provider labels are invariant; PROVIDERS rebuilds via
+        -- Custom.register_all naturally invalidate by replacing the table.
+        local link_font = UI.brand_font("mono_reg") or FONT.mono_reg
+        local link_key = tostring(LINK_SZ) .. ":" .. tostring(link_font)
+          .. ":" .. console_label
+        if prov._console_lw_key ~= link_key then
+          PushFont(RA.ctx, link_font, LINK_SZ)
+          prov._console_lw     = CalcTextSize(RA.ctx, console_label)
+          prov._console_lw_key = link_key
+          PopFont(RA.ctx)
+        end
+        local link_w = prov._console_lw
+        local link_x = row_start_x + row_avail_w - link_w
+        local link_sx = row_start_sx + row_avail_w - link_w
+        local link_wraps = left_row_end_sx + RA.SC(8) > link_sx
         PushFont(RA.ctx, link_font, LINK_SZ)
-        prov._console_lw     = CalcTextSize(RA.ctx, prov.console_label)
-        prov._console_lw_key = link_key
+        local _, link_h = CalcTextSize(RA.ctx, "M")
         PopFont(RA.ctx)
-      end
-      local link_w = prov._console_lw
-      local link_x = row_start_x + row_avail_w - link_w
-      local link_sx = row_start_sx + row_avail_w - link_w
-      local link_wraps = left_row_end_sx + RA.SC(8) > link_sx
-      PushFont(RA.ctx, link_font, LINK_SZ)
-      local _, link_h = CalcTextSize(RA.ctx, "M")
-      PopFont(RA.ctx)
-      if not link_wraps then SameLine(RA.ctx) end
-      SetCursorPosX(RA.ctx, link_x)
-      if ImGui.ImGui_InvisibleButton(RA.ctx, "##frl" .. i,
-          link_w, link_h) then
-        UI.open_url(prov.console_url)
-      end
-      if ImGui.ImGui_IsItemHovered(RA.ctx) then
-        ImGui.ImGui_SetMouseCursor(RA.ctx, ImGui.ImGui_MouseCursor_Hand())
-      end
-      UI.tooltip(UI.t("settings.api_key.console_tooltip",
-        { provider = setup_label },
-        "Sign up for or manage " .. setup_label
-          .. " keys on the provider's console"))
-      do
-        local bx1, by1 = ImGui.ImGui_GetItemRectMin(RA.ctx)
-        local bx2, by2 = ImGui.ImGui_GetItemRectMax(RA.ctx)
-        local dl       = ImGui.ImGui_GetWindowDrawList(RA.ctx)
-        ImGui.ImGui_DrawList_AddTextEx(dl, link_font, LINK_SZ,
-          bx1, by1, TK.accent, prov.console_label)
-        ImGui.ImGui_DrawList_AddLine(dl, bx1, by2 - 1, bx2, by2 - 1, TK.accent, 1.0)
+        if not link_wraps then SameLine(RA.ctx) end
+        SetCursorPosX(RA.ctx, link_x)
+        if ImGui.ImGui_InvisibleButton(RA.ctx, "##frl" .. i,
+            link_w, link_h) then
+          UI.open_url(console_url)
+        end
+        if ImGui.ImGui_IsItemHovered(RA.ctx) then
+          ImGui.ImGui_SetMouseCursor(RA.ctx, ImGui.ImGui_MouseCursor_Hand())
+        end
+        UI.tooltip(UI.t("settings.api_key.console_tooltip",
+          { provider = setup_label },
+          "Sign up for or manage " .. setup_label
+            .. " keys on the provider's console"))
+        do
+          local bx1, by1 = ImGui.ImGui_GetItemRectMin(RA.ctx)
+          local bx2, by2 = ImGui.ImGui_GetItemRectMax(RA.ctx)
+          local dl       = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+          ImGui.ImGui_DrawList_AddTextEx(dl, link_font, LINK_SZ,
+            bx1, by1, TK.accent, console_label)
+          ImGui.ImGui_DrawList_AddLine(dl, bx1, by2 - 1, bx2, by2 - 1,
+            TK.accent, 1.0)
+        end
       end
 
       -- Current key status + Remove button. V5: "Current: sk-..." in mono
@@ -11141,6 +12210,31 @@ function Render._shared_key_screen_impl()
         PopFont(RA.ctx)
       end
 
+      if prov.id == "openrouter" then
+        Dummy(RA.ctx, 1, RA.SC(7))
+        PushFont(RA.ctx, FONT.inter_reg, RA.SC(10))
+        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 1)
+        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(), RA.SC(4))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(), TK.border)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(), TK.card_hover)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(),
+          UI.lerp_u32(TK.card_hover, TK.accent_ui, 0.35))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(),
+          UI.lerp_u32(TK.card_hover, TK.accent_ui, 0.55))
+        if ImGui.ImGui_Button(RA.ctx,
+            UI.t("settings.openrouter.configure", nil,
+              "Configure model, provider, routing, and API format")
+              .. "##openrouter_config") then
+          api_keys.openrouter_begin_edit(api_keys.screen or "settings")
+        end
+        UI.tooltip(UI.t("settings.openrouter.configure.tip", nil,
+          "Advanced experimental OpenRouter setup. Arbitrary models and routes are unverified."))
+        PopStyleColor(RA.ctx, 5)
+        ImGui.ImGui_PopStyleVar(RA.ctx, 2)
+        PopFont(RA.ctx)
+      end
+
         ImGui.ImGui_EndChild(RA.ctx)
       end
       ImGui.ImGui_PopStyleVar(RA.ctx, 3)   -- ChildBorderSize, ChildRounding, WindowPadding
@@ -11212,8 +12306,11 @@ function Render._shared_key_screen_impl()
     -- while a test is already running.
     local has_keys = false
     for i, pk in ipairs(PROVIDERS) do
-      if S.api_key_map[pk.id] then has_keys = true; break end
-      local buf = not pk.is_custom and api_keys.key_bufs[i]
+      if PROVIDERS.user_visible(pk) and S.api_key_map[pk.id] then
+        has_keys = true; break
+      end
+      local buf = PROVIDERS.user_visible(pk) and not pk.is_custom
+        and api_keys.key_bufs[i]
       if buf and buf:match("%S") then has_keys = true; break end
     end
     ImGui.ImGui_BeginDisabled(RA.ctx, not has_keys or api_keys.key_validating)
@@ -11250,7 +12347,8 @@ function Render._shared_key_screen_impl()
       -- matters more than queue brevity. The order also matches what
       -- the user usually configures first (cloud keys -> custom).
       for i, pk in ipairs(PROVIDERS) do
-        if not pk.is_custom and api_keys.key_for_test(pk) then
+        if PROVIDERS.user_visible(pk) and not pk.is_custom
+            and api_keys.key_for_test(pk) then
           api_keys.test_queue[#api_keys.test_queue + 1] = { idx = i, prov = pk }
         end
       end
@@ -11452,6 +12550,21 @@ function Render._shared_key_screen_impl()
   end
   Dummy(RA.ctx, 1, RA.SC(6))
 
+  -- Streaming changes presentation timing only. The request remains on the
+  -- Engine and still passes through the same final response validation.
+  if not S.screen_reader_mode then
+    local changed, new_on = UI.v5_toggle("##pref_stream_responses",
+      UI.t("settings.pref.stream_responses.label", nil,
+        "Stream responses"),
+      prefs.stream_responses ~= false,
+      UI.t("settings.pref.stream_responses.tooltip", nil,
+        "Show each answer as it arrives. Turn this off to wait for the "
+          .. "complete, validated answer."),
+      inner_w)
+    if changed then prefs.stream_responses = new_on end
+    Dummy(RA.ctx, 1, RA.SC(6))
+  end
+
   -- Responsive select grid: Theme / UI Scale / Chat Font. English and other
   -- compact locales stay three-up; longer translated labels drop to two
   -- columns so labels never collide with the value chip.
@@ -11623,6 +12736,45 @@ function Render._shared_key_screen_impl()
       end
     end
     Dummy(RA.ctx, 1, RA.SC(6))
+
+    -- Provider-written reasoning is optional display metadata. It remains
+    -- outside chat history, request context, saved chats, and diagnostics.
+    if not S.screen_reader_mode then
+      local mode = Net.reasoning_display_mode()
+      local current = mode == "summaries" and 1
+        or mode == "provider_visible" and 2 or 0
+      local changed, selected = UI.v5_segmented_row(
+        "##adv_reasoning_display_mode",
+        UI.t("settings.adv.reasoning_display.label", nil,
+          "Show provider reasoning"),
+        {
+          UI.t("settings.adv.reasoning_display.off", nil, "Off"),
+          UI.t("settings.adv.reasoning_display.summaries", nil, "Summaries"),
+          UI.t("settings.adv.reasoning_display.provider_visible", nil,
+            "Provider reasoning"),
+        }, current,
+        UI.t("settings.adv.reasoning_display.tooltip", nil,
+          "Choose whether final answers show provider-written summaries, or "
+            .. "both summaries and readable reasoning returned by the provider. "
+            .. "Encrypted or hidden reasoning is never shown."),
+        inner_w)
+      if changed then
+        Net.set_reasoning_display_mode(selected == 1 and "summaries"
+          or selected == 2 and "provider_visible" or "off")
+      end
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(10))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
+      ImGui.ImGui_PushTextWrapPos(RA.ctx, GetCursorPosX(RA.ctx) + inner_w)
+      ImGui.ImGui_TextWrapped(RA.ctx,
+        UI.t("settings.adv.reasoning_display.availability", nil,
+          "Availability depends on the selected provider, model, and API format. "
+            .. "A supported provider may return no readable reasoning or summary "
+            .. "for a simple request."))
+      ImGui.ImGui_PopTextWrapPos(RA.ctx)
+      PopStyleColor(RA.ctx)
+      PopFont(RA.ctx)
+      Dummy(RA.ctx, 1, RA.SC(6))
+    end
 
     -- Automatic diagnostics. Basic is default-on anonymous metrics; Extended
     -- also includes redacted chat/diagnostic detail and remains opt-in.
@@ -11896,6 +13048,76 @@ function Render._shared_key_screen_impl()
       end
     end
 
+    -- Engine installation is visible only when this release carries a package
+    -- that passed the fixed descriptor and platform admission gate, or when a
+    -- durable transaction needs the user's attention. The runtime performs the
+    -- final live-file, hash, quarantine, journal, and lock checks after a click.
+    do
+      local engine_view = UI.engine_installer_presentation()
+      if engine_view and engine_view.visible then
+        Dummy(RA.ctx, 1, RA.SC(10))
+        PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
+        Text(RA.ctx, UI.t("engine.heading", nil, "Installation"))
+        PopStyleColor(RA.ctx)
+        PopFont(RA.ctx)
+
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),
+          (engine_view.action == "refuse" or engine_view.action == "conflict")
+            and TK.red or TK.text_muted)
+        ImGui.ImGui_PushTextWrapPos(RA.ctx,
+          GetCursorPosX(RA.ctx) + inner_w)
+        ImGui.ImGui_TextWrapped(RA.ctx,
+          S._engine_installer_ui_error
+            or UI.engine_installer_status_text(engine_view))
+        ImGui.ImGui_PopTextWrapPos(RA.ctx)
+        PopStyleColor(RA.ctx)
+
+        local engine_busy = S.status == "waiting"
+          or S.status == "awaiting_confirmation"
+          or S.curl_pid ~= nil
+          or S.retry_scheduled == true
+          or S.turn_budget_confirmation ~= nil
+          or Updater.is_busy()
+        if engine_view.can_stage then
+          Dummy(RA.ctx, 1, RA.SC(4))
+          local engine_label = UI.engine_installer_action_label(engine_view)
+          local engine_tip = UI.t("engine.action.tooltip", nil,
+            "Installs required ReaAssist files. Restart REAPER afterward to finish installation.")
+          if engine_busy then
+            ImGui.ImGui_BeginDisabled(RA.ctx, true)
+          end
+          if UI.v5_action_row("##adv_engine_install", ICON.REDO_2,
+              engine_label, engine_tip, inner_w) and not engine_busy then
+            UI.engine_installer_run("stage_package")
+          end
+          if engine_busy then ImGui.ImGui_EndDisabled(RA.ctx) end
+        end
+        -- The durable recovery actions, on the same busy gate as staging. Each
+        -- appears only while the host says the installer can take it, and the
+        -- two that move the loaded Engine open a confirmation first.
+        for _, engine_action in ipairs(UI.ENGINE_INSTALLER_ACTIONS) do
+          if engine_view[engine_action.gate] == true then
+            Dummy(RA.ctx, 1, RA.SC(4))
+            if engine_busy then
+              ImGui.ImGui_BeginDisabled(RA.ctx, true)
+            end
+            if UI.v5_action_row(engine_action.id, ICON.REDO_2,
+                engine_action.label(), engine_action.tooltip(), inner_w)
+                and not engine_busy then
+              if engine_action.confirm then
+                S._engine_installer_ui_error = nil
+                S._engine_installer_confirm = engine_action.name
+              else
+                UI.engine_installer_run(engine_action.method)
+              end
+            end
+            if engine_busy then ImGui.ImGui_EndDisabled(RA.ctx) end
+          end
+        end
+      end
+    end
+
     -- Maintenance actions stay on one centered row when labels fit, then
     -- wrap to a 2x2 grid for longer localized strings.
     Dummy(RA.ctx, 1, RA.SC(10))
@@ -12039,6 +13261,11 @@ function Render._shared_key_screen_impl()
     ImGui.ImGui_PopStyleVar(RA.ctx, 3)  -- FrameBorderSize, FrameRounding, FramePadding
     PopFont(RA.ctx)
   end -- ADVANCED collapsible section
+
+  -- The Engine repair and reinstall confirmation, on the same terms: the rows
+  -- above are the only thing that arms it, and it renders whether or not the
+  -- ADVANCED section is still open.
+  UI.engine_installer_confirm_popup(RA.ctx)
 
   -- Factory Reset confirmation popup (stays rendered whether the
   -- ADVANCED section is open or not -- the OpenPopup call above is the
@@ -12251,6 +13478,13 @@ function Render._shared_key_screen_impl()
         if api_keys.saved_auto_backup ~= nil then
           prefs.auto_backup = api_keys.saved_auto_backup
         end
+        if api_keys.saved_stream_responses ~= nil then
+          prefs.stream_responses = api_keys.saved_stream_responses
+        end
+        if api_keys.saved_reasoning_display_mode ~= nil then
+          Net.set_reasoning_display_mode(
+            api_keys.saved_reasoning_display_mode)
+        end
         if api_keys.saved_chat_font_idx then
           prefs.chat_font_idx = api_keys.saved_chat_font_idx
         end
@@ -12306,7 +13540,7 @@ function Render._shared_key_screen_impl()
   -- is managed on its own page, so it does not participate here.
   local any_new_input = false
   for i, prov in ipairs(PROVIDERS) do
-    if not prov.is_custom
+      if PROVIDERS.user_visible(prov) and not prov.is_custom
        and api_keys.key_bufs[i] and api_keys.key_bufs[i]:match("%S") then
       any_new_input = true; break
     end
@@ -12328,6 +13562,11 @@ function Render._shared_key_screen_impl()
     and prefs.update_check ~= api_keys.saved_update_check
   local bak_changed     = api_keys.saved_auto_backup ~= nil
     and prefs.auto_backup ~= api_keys.saved_auto_backup
+  local stream_changed  = api_keys.saved_stream_responses ~= nil
+    and prefs.stream_responses ~= api_keys.saved_stream_responses
+  local reasoning_display_changed = api_keys.saved_reasoning_display_mode ~= nil
+    and Net.reasoning_display_mode()
+      ~= api_keys.saved_reasoning_display_mode
   local font_changed    = api_keys.saved_chat_font_idx
     and prefs.chat_font_idx ~= api_keys.saved_chat_font_idx
   local lang_changed    = api_keys.saved_reply_language_idx
@@ -12348,7 +13587,8 @@ function Render._shared_key_screen_impl()
     and prefs.turn_token_limit ~= api_keys.saved_turn_token_limit
 
   local any_pref_changed = scale_changed or theme_changed
-    or upd_changed or bak_changed or font_changed or lang_changed
+    or upd_changed or bak_changed or stream_changed
+    or reasoning_display_changed or font_changed or lang_changed
     or snap_changed or ref_changed
     or diag_changed or to_changed or cost_limit_changed or token_limit_changed
 
@@ -12666,7 +13906,7 @@ function Render._shared_key_screen_impl()
     for i, prov in ipairs(PROVIDERS) do
       api_keys.key_errors[i] = nil
       api_keys.key_warnings[i] = nil
-      if not prov.is_custom then
+      if PROVIDERS.user_visible(prov) and not prov.is_custom then
         local trimmed = (api_keys.key_bufs[i] or ""):match("^%s*(.-)%s*$") or ""
         if trimmed ~= "" then
           local valid, reason = Key.validate_format(trimmed, prov)
@@ -12703,6 +13943,12 @@ function Render._shared_key_screen_impl()
       if api_keys.saved_auto_backup ~= nil then
         api_keys.saved_auto_backup = nil
       end
+      if api_keys.saved_stream_responses ~= nil then
+        api_keys.saved_stream_responses = nil
+      end
+      if api_keys.saved_reasoning_display_mode ~= nil then
+        api_keys.saved_reasoning_display_mode = nil
+      end
       if api_keys.saved_chat_font_idx then
         api_keys.saved_chat_font_idx = nil
       end
@@ -12736,7 +13982,7 @@ function Render._shared_key_screen_impl()
         api_keys.test_queue = {}
         api_keys.test_results = {}
         for i, prov in ipairs(PROVIDERS) do
-          if not prov.is_custom then
+          if PROVIDERS.user_visible(prov) and not prov.is_custom then
             local trimmed = (api_keys.key_bufs[i] or "")
               :match("^%s*(.-)%s*$") or ""
             if trimmed ~= "" then
@@ -12836,10 +14082,15 @@ end
 
 function api_keys.enter_custom_new()
   api_keys.custom_edit = {
-    id              = Custom.gen_id(),
+    id              = CustomNative.gen_id(),
     is_new          = true,
+    storage_kind    = "native_engine",
+    profile_kind    = "local_server",
+    record_format   = "chat_completions",
+    auth_mode       = "none",
     saved_label     = nil,
     endpoint        = "",
+    private_network_origin = nil,
     timeout         = tostring(CUSTOM_DEFAULT_TIMEOUT),
     connect_timeout = tostring(Custom.DEFAULT_CONNECT),
     allow_insecure  = false,
@@ -12850,9 +14101,10 @@ function api_keys.enter_custom_new()
     key             = "",
     errors          = {},
     models          = { {
-      id = "", price_in = "0", price_cache_r = "0", price_out = "0",
+      id = "", price_in = "", price_cache_r = "", price_cache_w = "",
+      price_out = "",
       context_window = tostring(CUSTOM_DEFAULT_CTX),
-      notes = "", extra_body = "",
+      notes = "", extra_body = "", supports_image_input = false,
     } },
   }
   if api_keys.custom_conn_test then
@@ -12865,24 +14117,34 @@ end
 -- screen expects. Accepts both raw records (Custom.load_record shape, with
 -- timeout_secs) and registered providers (PROVIDERS entries, with
 -- request_timeout) so callers can hand over whichever they have at reach.
-local function _build_edit_models_buf(src)
+local function _build_edit_models_buf(src, preserve_source_indices)
   local buf = {}
   for _, m in ipairs(src.models or {}) do
     buf[#buf+1] = {
       id             = m.id or "",
-      price_in       = tostring(m.price_in       or 0),
-      price_cache_r  = tostring(m.price_cache_r  or 0),
-      price_out      = tostring(m.price_out      or 0),
+      price_in       = m.price_in ~= nil and tostring(m.price_in) or "",
+      price_cache_r  = m.price_cache_r ~= nil
+        and tostring(m.price_cache_r) or "",
+      price_cache_w  = m.price_cache_w ~= nil
+        and tostring(m.price_cache_w) or "",
+      price_out      = m.price_out ~= nil and tostring(m.price_out) or "",
       context_window = tostring(m.context_window or CUSTOM_DEFAULT_CTX),
       notes          = m.notes      or "",
       extra_body     = m.extra_body or "",
+      supports_image_input = m.supports_image_input == true,
+      chat_token_limit_field = m.chat_token_limit_field,
+      _provider_source_index = preserve_source_indices
+        and m._provider_source_index or nil,
+      _native_source = preserve_source_indices and m._native_source
+        and Store._copy_json_value(m._native_source) or nil,
     }
   end
   if #buf == 0 then
     buf[1] = {
-      id = "", price_in = "0", price_cache_r = "0", price_out = "0",
+      id = "", price_in = "", price_cache_r = "", price_cache_w = "",
+      price_out = "",
       context_window = tostring(CUSTOM_DEFAULT_CTX),
-      notes = "", extra_body = "",
+      notes = "", extra_body = "", supports_image_input = false,
     }
   end
   return buf
@@ -12917,8 +14179,15 @@ function api_keys.enter_custom_edit(record)
   api_keys.custom_edit = {
     id              = record.id,
     is_new          = false,
+    storage_kind    = record.is_native_custom == true
+      and "native_engine" or "legacy_curl",
+    profile_kind    = record.is_native_custom == true
+      and record.native_provider_id or nil,
+    record_format   = record.record_format,
+    auth_mode       = record.auth_mode,
     saved_label     = record.label,
     endpoint        = record.endpoint or "",
+    private_network_origin = record.private_network_origin,
     timeout         = adv.timeout,
     connect_timeout = adv.connect_timeout,
     allow_insecure  = adv.allow_insecure,
@@ -12928,8 +14197,10 @@ function api_keys.enter_custom_edit(record)
     label           = record.label or "",
     key             = saved_key,
     orig_key        = saved_key,  -- detect "user blanked the key" on Save
+    _native_source  = record.is_native_custom == true and record._native_source
+      and Store._copy_json_value(record._native_source) or nil,
     errors          = {},
-    models          = _build_edit_models_buf(record),
+    models          = _build_edit_models_buf(record, true),
   }
   if api_keys.custom_conn_test then
     api_keys.custom_conn_test.result = nil
@@ -12943,10 +14214,18 @@ end
 function api_keys.enter_custom_duplicate(source)
   local adv = _build_adv_fields(source)
   api_keys.custom_edit = {
-    id              = Custom.gen_id(),
+    id              = source.is_native_custom == true
+      and CustomNative.gen_id() or Custom.gen_id(),
     is_new          = true,
+    storage_kind    = source.is_native_custom == true
+      and "native_engine" or "legacy_curl",
+    profile_kind    = source.is_native_custom == true
+      and source.native_provider_id or nil,
+    record_format   = source.record_format,
+    auth_mode       = source.auth_mode,
     saved_label     = nil,
     endpoint        = source.endpoint or "",
+    private_network_origin = nil,
     timeout         = adv.timeout,
     connect_timeout = adv.connect_timeout,
     allow_insecure  = adv.allow_insecure,
@@ -12962,6 +14241,990 @@ function api_keys.enter_custom_duplicate(source)
     api_keys.custom_conn_test.result = nil
   end
   api_keys.screen = "custom_llm"
+end
+
+function api_keys.persist_custom_provider_record(record, edit)
+  local save_err
+  if edit and edit.storage_kind == "native_engine" then
+    save_err = CustomNative.save_record(record)
+  else
+    save_err = Custom.upsert_record(record)
+  end
+  if not save_err then return true, nil end
+  local message = tostring(save_err)
+  edit.errors = type(edit.errors) == "table" and edit.errors or {}
+  edit.errors.save = message
+  if UI and UI.show_float_toast then
+    UI.show_float_toast(message, "err", true)
+  end
+  return false, message
+end
+
+api_keys.CUSTOM_PROVIDER_PRESETS = {
+  ollama = {
+    endpoints = {
+      chat_completions = "http://127.0.0.1:11434/v1/chat/completions",
+    },
+    profile_kind = "local_server", auth_mode = "none",
+  },
+  lmstudio = {
+    endpoints = {
+      chat_completions = "http://127.0.0.1:1234/v1/chat/completions",
+    },
+    profile_kind = "local_server", auth_mode = "none",
+  },
+  llamacpp = {
+    endpoints = {
+      chat_completions = "http://127.0.0.1:8080/v1/chat/completions",
+    },
+    profile_kind = "local_server", auth_mode = "none",
+  },
+  openrouter = {
+    endpoints = {
+      chat_completions = "https://openrouter.ai/api/v1/chat/completions",
+    },
+    profile_kind = "custom", auth_mode = "bearer",
+  },
+  groq = {
+    endpoints = {
+      chat_completions = "https://api.groq.com/openai/v1/chat/completions",
+    },
+    profile_kind = "custom", auth_mode = "bearer",
+  },
+  kimi = {
+    endpoints = {
+      chat_completions = "https://api.moonshot.ai/v1/chat/completions",
+    },
+    profile_kind = "custom", auth_mode = "bearer",
+  },
+}
+
+function api_keys.apply_custom_provider_preset(edit, preset)
+  if type(edit) ~= "table" or type(preset) ~= "table"
+      or type(preset.endpoints) ~= "table" then
+    return false
+  end
+  local endpoint
+  if edit.storage_kind == "native_engine" then
+    endpoint = preset.endpoints[edit.record_format]
+  else
+    endpoint = preset.endpoints.chat_completions
+  end
+  if type(endpoint) ~= "string" then return false, "unsupported_format" end
+  if edit.storage_kind == "native_engine" then
+    if (preset.profile_kind ~= "custom"
+        and preset.profile_kind ~= "local_server")
+        or (preset.auth_mode ~= "bearer" and preset.auth_mode ~= "none") then
+      return false
+    end
+    edit.endpoint = endpoint
+    edit.profile_kind = preset.profile_kind
+    edit.auth_mode = preset.auth_mode
+    if preset.auth_mode == "none" then edit.key = "" end
+  else
+    edit.endpoint = endpoint
+  end
+  edit.private_network_origin = nil
+  edit.errors = type(edit.errors) == "table" and edit.errors or {}
+  edit.errors.endpoint = nil
+  return true
+end
+
+function api_keys.custom_price_display(value, native_mode)
+  local text = type(value) == "string" and value
+    or value ~= nil and tostring(value) or ""
+  text = text:match("^%s*(.-)%s*$") or ""
+  if text == "" then
+    return native_mode
+      and UI.t("settings.custom.value.unknown", nil, "Unknown") or "$0"
+  end
+  return "$" .. text
+end
+
+function api_keys.custom_remote_price_notice(edit, endpoint_info)
+  if type(edit) ~= "table" or type(endpoint_info) ~= "table"
+      or endpoint_info.destination_class ~= "public_https" then
+    return nil
+  end
+  local native_mode = edit.storage_kind == "native_engine"
+  for _, row in ipairs(edit.models or {}) do
+    local model_id = tostring(row.id or ""):match("^%s*(.-)%s*$") or ""
+    if model_id ~= "" then
+      local input = tostring(row.price_in or ""):match("^%s*(.-)%s*$") or ""
+      local output = tostring(row.price_out or ""):match("^%s*(.-)%s*$") or ""
+      if native_mode and input == "" and output == "" then
+        return "native_blank"
+      end
+      if not native_mode and ((tonumber(input) or 0) <= 0
+          or (tonumber(output) or 0) <= 0) then
+        return "legacy_ambiguous"
+      end
+    end
+  end
+  return nil
+end
+
+function api_keys.build_native_provider_record(edit, label, endpoint,
+                                                timeout_secs,
+                                                connect_timeout_secs,
+                                                models)
+  if type(edit) ~= "table" or type(models) ~= "table" then return nil end
+  local endpoint_info = Custom.admit_native_endpoint(endpoint,
+    edit.record_format, edit.profile_kind, edit.private_network_origin)
+  local private_network = endpoint_info
+    and endpoint_info.destination_class == "private_network" or false
+  return {
+    id = edit.id,
+    label = label,
+    profile_kind = edit.profile_kind,
+    record_format = edit.record_format,
+    profile_id = Custom.native_profile_id(edit.profile_kind,
+      edit.record_format, private_network),
+    endpoint = endpoint_info and endpoint_info.endpoint or endpoint,
+    endpoint_class = endpoint_info and endpoint_info.destination_class or nil,
+    private_network_origin = private_network and endpoint_info.origin or nil,
+    auth_mode = edit.auth_mode,
+    timeout_secs = timeout_secs,
+    connect_timeout_secs = connect_timeout_secs,
+    models = models,
+    _native_source = edit._native_source
+      and Store._copy_json_value(edit._native_source) or nil,
+  }
+end
+
+function api_keys.openrouter_begin_edit(return_screen)
+  local profile = OpenRouter and OpenRouter.profile
+    and OpenRouter.profile() or nil
+  if not profile then return false end
+  api_keys.openrouter_edit = {
+    model_id = tostring(profile.model_id or ""),
+    provider_tag = tostring(profile.provider_tag or ""),
+    routing = tostring(profile.routing or "automatic"),
+    allow_fallbacks = profile.allow_fallbacks ~= false,
+    api_format = tostring(profile.api_format or "chat_completions"),
+    direct_tag_confirmed = profile.direct_tag_confirmed == true,
+    preset_mode = tostring(profile.preset_mode or "none"),
+    preset_slug = tostring(profile.preset_slug or ""),
+    direct_preset_confirmed = profile.direct_preset_confirmed == true,
+    preset_search = "",
+    catalog_search = "",
+    errors = {},
+    status = nil,
+    return_screen = return_screen or "settings",
+  }
+  api_keys.screen = "openrouter"
+  return true
+end
+
+function api_keys.openrouter_return()
+  local edit = api_keys.openrouter_edit
+  if Net and type(Net.cancel_openrouter_settings_operations) == "function" then
+    Net.cancel_openrouter_settings_operations()
+  end
+  if OpenRouter and type(OpenRouter.clear_catalog_preview) == "function" then
+    OpenRouter.clear_catalog_preview()
+  end
+  api_keys.screen = edit and edit.return_screen or "settings"
+  api_keys.openrouter_edit = nil
+end
+
+function api_keys.openrouter_validate_edit(edit)
+  edit.errors = {}
+  local preset_mode = OpenRouter.PRESET_MODE_VALUES[edit.preset_mode]
+    and edit.preset_mode or nil
+  if not preset_mode then
+    edit.errors.preset_mode = UI.t(
+      "settings.openrouter.error.preset_mode", nil, "Invalid preset mode.")
+  end
+  local preset_slug, preset_err = OpenRouter.validate_preset_slug(
+    edit.preset_slug, true)
+  if not preset_slug then
+    edit.errors.preset_slug = UI.t(
+      "settings.openrouter.error.preset_slug", nil,
+      "Enter a valid OpenRouter preset slug.")
+  elseif preset_mode == "none" and preset_slug ~= "" then
+    edit.errors.preset_slug = UI.t(
+      "settings.openrouter.error.preset_disabled_slug", nil,
+      "Turn on Presets before entering a slug.")
+  elseif preset_mode ~= "none" and preset_slug == "" then
+    edit.errors.preset_slug = UI.t(
+      "settings.openrouter.error.preset_slug_required", nil,
+      "Enter an OpenRouter preset slug.")
+  end
+  local model_id, model_err = OpenRouter.validate_model_id(edit.model_id)
+  if preset_mode == "preset_only" and OpenRouter._trim(edit.model_id) == "" then
+    model_id = ""
+  elseif not model_id then
+    edit.errors.model_id = UI.t("settings.openrouter.error.model_id", nil,
+      "Enter a valid OpenRouter model ID such as z-ai/glm-5.3-flash.")
+  end
+  local provider_tag, tag_err = OpenRouter.validate_provider_tag(
+    edit.provider_tag, true)
+  if provider_tag == nil then
+    edit.errors.provider_tag = UI.t(
+      "settings.openrouter.error.provider_id", nil,
+      "Enter an exact provider ID such as deepinfra/fp8 or deepseek, or leave it blank.")
+  end
+  if not OpenRouter.ROUTING_VALUES[edit.routing] then
+    edit.errors.routing = UI.t(
+      "settings.openrouter.error.routing", nil,
+      "Invalid provider routing selection.")
+  elseif preset_mode == "preset_only" and (edit.routing ~= "automatic"
+      or provider_tag ~= "" or edit.allow_fallbacks == false) then
+    edit.errors.routing = UI.t(
+      "settings.openrouter.error.preset_owns_routing", nil,
+      "Preset-only mode owns provider routing.")
+  elseif edit.routing == "specific" and provider_tag == "" then
+    edit.errors.provider_tag = UI.t(
+      "settings.openrouter.error.provider_required", nil,
+      "Specific provider routing requires a Provider ID.")
+  elseif edit.routing ~= "specific" and provider_tag ~= "" then
+    edit.errors.provider_tag = UI.t(
+      "settings.openrouter.error.provider_requires_specific", nil,
+      "A Provider ID requires Specific provider routing.")
+  end
+  if not OpenRouter.API_FORMAT_VALUES[edit.api_format] then
+    edit.errors.api_format = UI.t(
+      "settings.openrouter.error.api_format", nil,
+      "Invalid API format selection.")
+  end
+  local profile = OpenRouter.catalog_profile_for_model(model_id)
+  local matched = provider_tag and provider_tag ~= ""
+    and OpenRouter.catalog_endpoint(profile, provider_tag) or nil
+  if provider_tag and provider_tag ~= "" and not matched
+      and edit.direct_tag_confirmed ~= true then
+    edit.errors.direct_tag_confirmed = UI.t(
+      "settings.openrouter.error.confirm_unverified_provider", nil,
+      "Confirm that this directly entered Provider ID is unverified.")
+  end
+  local preset_entry = preset_slug and preset_slug ~= ""
+    and OpenRouter.preset_catalog_entry(OpenRouter.profile(), preset_slug)
+    or nil
+  if preset_entry and preset_entry.status ~= "active" then
+    edit.errors.preset_slug = UI.t(
+      "settings.openrouter.error.preset_inactive", nil,
+      "The selected preset is not active.")
+  elseif preset_mode ~= "none" and preset_slug ~= "" and not preset_entry
+      and edit.direct_preset_confirmed ~= true then
+    edit.errors.direct_preset_confirmed = UI.t(
+      "settings.openrouter.error.confirm_unverified_preset", nil,
+      "Confirm that this directly entered preset slug is unverified.")
+  end
+  return next(edit.errors) == nil, {
+    model_id = model_id,
+    provider_tag = provider_tag,
+    routing = edit.routing,
+    allow_fallbacks = edit.allow_fallbacks ~= false,
+    api_format = edit.api_format,
+    direct_tag_confirmed = edit.direct_tag_confirmed == true,
+    preset_mode = preset_mode,
+    preset_slug = preset_slug,
+    direct_preset_confirmed = edit.direct_preset_confirmed == true,
+  }
+end
+
+-- =============================================================================
+-- Render.openrouter_screen
+-- =============================================================================
+function Render.openrouter_screen()
+  local edit = api_keys.openrouter_edit
+  if not edit then
+    api_keys.openrouter_begin_edit("settings")
+    edit = api_keys.openrouter_edit
+  end
+  if not edit then
+    api_keys.screen = "settings"
+    return
+  end
+  if Net and type(Net.openrouter_settings_status) == "function" then
+    local operation_status = Net.openrouter_settings_status()
+    if type(operation_status) == "table"
+        and operation_status.sequence ~= edit._operation_status_sequence then
+      edit._operation_status_sequence = operation_status.sequence
+      edit.status = operation_status.message
+    end
+  end
+
+  UI.push_settings_styles()
+  UI.hero_band_settings_v5(
+    UI.t("settings.openrouter.subtitle", nil,
+      "Try any OpenRouter model and choose how it is routed."),
+    UI.t("settings.openrouter.breadcrumb", nil,
+      "OPENROUTER (EXPERIMENTAL) / ADVANCED USERS")
+      .. " \xc2\xb7 v" .. CFG.VERSION)
+
+  local FOOTER_RAIL_H = RA.SC(32)
+  local body_w, body_avail_h = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+  local body_h = math_max(body_avail_h - FOOTER_RAIL_H, RA.SC(1))
+
+  PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildBorderSize(), 0)
+  PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(), 0, 0)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarBg(), 0x00000000)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrab(), TK.border_str)
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabHovered(),
+    UI.lerp_u32(TK.border_str, TK.text, 0.30))
+  PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
+    UI.lerp_u32(TK.border_str, TK.text, 0.55))
+
+  local save_clicked = false
+  local cancel_clicked = false
+  local test_clicked = false
+  if ImGui.ImGui_BeginChild(RA.ctx, "##openrouter_body",
+      body_w, body_h, 0) then
+    local available_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+    local inner_w = math_min(RA.SC(620), available_w)
+    local indent_w = math_max(math_floor((available_w - inner_w) * 0.5), 0)
+    if indent_w > 0 then ImGui.ImGui_Indent(RA.ctx, indent_w) end
+    Dummy(RA.ctx, 1, RA.SC(14))
+
+    ImGui.ImGui_PushTextWrapPos(RA.ctx,
+      GetCursorPosX(RA.ctx) + inner_w - RA.SC(12))
+    PushFont(RA.ctx, FONT.inter_semi, RA.SC(12))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
+    UI.text_multiline(UI.t("settings.openrouter.warning", nil,
+      "Experimental: OpenRouter models and providers are unverified. "
+      .. "Compatibility, output quality, pricing estimates, and capabilities "
+      .. "are not tested or guaranteed by ReaAssist."))
+    PopStyleColor(RA.ctx)
+    PopFont(RA.ctx)
+    Dummy(RA.ctx, 1, RA.SC(5))
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+    UI.text_multiline(UI.t("settings.openrouter.capability_note", nil,
+      "Image input and returned-image support start as Unknown and fail closed. "
+      .. "Readable provider reasoning can use the existing Show provider "
+      .. "reasoning setting when the selected route returns it."))
+    PopStyleColor(RA.ctx)
+    PopFont(RA.ctx)
+    ImGui.ImGui_PopTextWrapPos(RA.ctx)
+    Dummy(RA.ctx, 1, RA.SC(12))
+
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), TK.card)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(), TK.border)
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildBorderSize(), 1)
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildRounding(), RA.SC(6))
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(),
+      RA.SC(12), RA.SC(10))
+    if ImGui.ImGui_BeginChild(RA.ctx, "##openrouter_profile_card", inner_w, 0,
+        ImGui.ImGui_ChildFlags_AutoResizeY()
+          | ImGui.ImGui_ChildFlags_Borders()) then
+      local card_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+      local gap = RA.SC(10)
+      local field_w = math_max((card_w - gap) * 0.5, RA.SC(160))
+
+      local preset_labels = table.concat({
+        UI.t("settings.openrouter.preset.mode.off", nil,
+          "Off (use Model ID and Provider Routing)"),
+        UI.t("settings.openrouter.preset.mode.preset_only", nil,
+          "Preset owns model and provider routing"),
+        UI.t("settings.openrouter.preset.mode.request_override", nil,
+          "Preset with ReaAssist request overrides"),
+      }, "\0") .. "\0"
+      local preset_values = {"none", "preset_only", "request_override"}
+      local preset_idx = edit.preset_mode == "preset_only" and 2
+        or edit.preset_mode == "request_override" and 3 or 1
+      local preset_changed, next_preset = UI.v5_select_row(
+        "##openrouter_preset_mode",
+        UI.t("settings.openrouter.preset.mode.label", nil, "Preset Mode"),
+        preset_labels, preset_idx,
+        UI.t("settings.openrouter.preset.mode.tip", nil,
+          "Preset-only lets the preset own its model list and provider routing. "
+            .. "Request overrides keep the Model ID and Provider Routing below. "
+            .. "OpenRouter request fields override matching preset fields."),
+        card_w)
+      if preset_changed then
+        edit.preset_mode = preset_values[next_preset]
+        if edit.preset_mode == "preset_only" then
+          edit.provider_tag = ""
+          edit.routing = "automatic"
+          edit.allow_fallbacks = true
+          edit.direct_tag_confirmed = false
+        elseif edit.preset_mode == "none" then
+          edit.preset_slug = ""
+          edit.direct_preset_confirmed = false
+        end
+      end
+      if edit.preset_mode ~= "none" then
+        custom_provider_field_label(
+          UI.t("settings.openrouter.preset.slug", nil, "Preset Slug"),
+          UI.t("settings.openrouter.preset.choose_or_paste", nil,
+            "(choose or paste)"))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBg(), TK.input_bg)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgHovered(), TK.input_bg)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgActive(), TK.input_bg)
+        PushFont(RA.ctx, FONT.mono_reg, RA.SC(10))
+        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),
+          RA.SC(8), RA.SC(5))
+        ImGui.ImGui_SetNextItemWidth(RA.ctx, card_w)
+        local slug_changed, preset_slug = ImGui.ImGui_InputTextWithHint(
+          RA.ctx, "##openrouter_preset_slug", "my-preset", edit.preset_slug)
+        _, preset_slug = UI.input_with_menu(RA.ctx, false, preset_slug,
+          "##openrouter_preset_ctx")
+        if slug_changed or preset_slug ~= edit.preset_slug then
+          edit.preset_slug = preset_slug
+          edit.direct_preset_confirmed = false
+          edit.errors.preset_slug = nil
+        end
+        ImGui.ImGui_PopStyleVar(RA.ctx)
+        PopFont(RA.ctx)
+        PopStyleColor(RA.ctx, 3)
+
+        local preset_profile = OpenRouter.profile()
+        local preset_snapshot = preset_profile.preset_catalog_state == "current"
+          and preset_profile.preset_catalog_snapshot or nil
+        if preset_snapshot and #(preset_snapshot.presets or {}) > 0 then
+          local labels, values = {
+            UI.t("settings.openrouter.preset.choose", nil,
+              "Choose a fetched preset..."),
+          }, {""}
+          local selected_idx = 1
+          for _, preset in ipairs(preset_snapshot.presets) do
+            labels[#labels + 1] = preset.name .. " (" .. preset.slug .. ")"
+              .. (preset.status ~= "active" and " [" .. preset.status .. "]"
+                or "")
+            values[#values + 1] = preset.slug
+            if preset.slug == OpenRouter._trim(edit.preset_slug) then
+              selected_idx = #values
+            end
+          end
+          local choice_changed, next_choice = UI.v5_select_row(
+            "##openrouter_preset_choice",
+            UI.t("settings.openrouter.preset.fetched_label", nil,
+              "Fetched Presets"),
+            table.concat(labels, "\0") .. "\0", selected_idx,
+            UI.t("settings.openrouter.preset.fetched_tip", nil,
+              "The chooser contains up to the first 100 account presets. "
+                .. "You can paste another exact slug above."), card_w)
+          if choice_changed and values[next_choice] ~= "" then
+            edit.preset_slug = values[next_choice]
+            edit.direct_preset_confirmed = false
+            edit.errors.preset_slug = nil
+          end
+          if preset_snapshot.total_count > #preset_snapshot.presets then
+            custom_provider_inline_msg(UI.t(
+              "settings.openrouter.preset.more", {
+                shown = tostring(#preset_snapshot.presets),
+                total = tostring(preset_snapshot.total_count),
+              }, "OpenRouter returned the first "
+                .. tostring(#preset_snapshot.presets) .. " of "
+                .. tostring(preset_snapshot.total_count)
+                .. " presets. Paste another exact slug above."), TK.text_muted)
+          end
+        end
+        if ImGui.ImGui_Button(RA.ctx,
+            UI.t("settings.openrouter.preset.refresh", nil,
+              "Refresh preset list") .. "##openrouter_preset_refresh") then
+          if Net and type(Net.openrouter_preset_catalog_start) == "function" then
+            local started, start_err = Net.openrouter_preset_catalog_start()
+            edit.status = started and UI.t(
+              "settings.openrouter.preset.refreshing", nil,
+              "Refreshing OpenRouter presets...")
+              or tostring(start_err or UI.t(
+                "settings.openrouter.preset.refresh_failed", nil,
+                "Preset refresh could not start."))
+          else
+            edit.status = UI.t(
+              "settings.openrouter.preset.unavailable", nil,
+              "Preset lookup is unavailable until the connection is ready.")
+          end
+        end
+        local matched_preset = OpenRouter.preset_catalog_entry(
+          preset_profile, OpenRouter._trim(edit.preset_slug))
+        if edit.preset_slug:match("%S") and not matched_preset then
+          local _, confirmed = UI.v5_toggle(
+            "##openrouter_direct_preset_confirm",
+            UI.t("settings.openrouter.preset.confirm_direct", nil,
+              "Use this unverified preset slug"),
+            edit.direct_preset_confirmed == true,
+            UI.t("settings.openrouter.preset.confirm_direct.tip", nil,
+              "This slug is not in the current fetched account list. OpenRouter "
+                .. "will decide whether it exists when the request is sent."),
+            card_w)
+          edit.direct_preset_confirmed = confirmed
+          custom_provider_inline_msg(edit.errors.direct_preset_confirmed, TK.red)
+        end
+        custom_provider_inline_msg(edit.errors.preset_slug, TK.red)
+        Dummy(RA.ctx, 1, RA.SC(10))
+      end
+
+      ImGui.ImGui_BeginDisabled(RA.ctx, edit.preset_mode == "preset_only")
+
+      custom_provider_field_label(UI.t("settings.openrouter.model_id", nil,
+        "Model ID"))
+      SameLine(RA.ctx, field_w + gap + GetCursorPosX(RA.ctx))
+      custom_provider_field_label(UI.t("settings.openrouter.provider_id", nil,
+        "Provider ID"), UI.t("settings.openrouter.optional", nil,
+        "(optional)"))
+
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBg(), TK.input_bg)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgHovered(), TK.input_bg)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBgActive(), TK.input_bg)
+      PushFont(RA.ctx, FONT.mono_reg, RA.SC(10))
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),
+        RA.SC(8), RA.SC(5))
+      ImGui.ImGui_SetNextItemWidth(RA.ctx, field_w)
+      local model_changed, model_id = ImGui.ImGui_InputTextWithHint(
+        RA.ctx, "##openrouter_model_id", "z-ai/glm-5.3-flash", edit.model_id)
+      _, model_id = UI.input_with_menu(RA.ctx, false, model_id,
+        "##openrouter_model_ctx")
+      if model_changed or model_id ~= edit.model_id then
+        edit.model_id = model_id
+        edit.provider_tag = ""
+        edit.direct_tag_confirmed = false
+        OpenRouter.clear_catalog_preview()
+        edit.errors.model_id = nil
+      end
+      SameLine(RA.ctx, 0, gap)
+      ImGui.ImGui_SetNextItemWidth(RA.ctx, field_w)
+      local tag_changed, provider_tag = ImGui.ImGui_InputTextWithHint(
+        RA.ctx, "##openrouter_provider_id", "deepinfra/fp8",
+        edit.provider_tag)
+      _, provider_tag = UI.input_with_menu(RA.ctx, false, provider_tag,
+        "##openrouter_provider_ctx")
+      if tag_changed or provider_tag ~= edit.provider_tag then
+        edit.provider_tag = provider_tag
+        edit.direct_tag_confirmed = false
+        edit.errors.provider_tag = nil
+        if provider_tag:match("%S") then edit.routing = "specific" end
+      end
+      ImGui.ImGui_PopStyleVar(RA.ctx)
+      PopFont(RA.ctx)
+      PopStyleColor(RA.ctx, 3)
+      UI.tooltip(UI.t("settings.openrouter.provider_id_tip", nil,
+        "Paste the exact OpenRouter endpoint tag, such as deepinfra/fp8 or deepseek. "
+        .. "This is not a URL or provider display name."))
+      if edit.errors.model_id then
+        custom_provider_inline_msg(edit.errors.model_id, TK.red)
+      end
+      if edit.errors.provider_tag then
+        custom_provider_inline_msg(edit.errors.provider_tag, TK.red)
+      end
+
+      Dummy(RA.ctx, 1, RA.SC(10))
+      local routing_labels = table.concat({
+        UI.t("settings.openrouter.routing.auto", nil,
+          "Automatic (OpenRouter default)"),
+        UI.t("settings.openrouter.routing.price", nil, "Lowest price"),
+        UI.t("settings.openrouter.routing.throughput", nil,
+          "Highest throughput"),
+        UI.t("settings.openrouter.routing.latency", nil, "Lowest latency"),
+        UI.t("settings.openrouter.routing.specific", nil, "Specific provider"),
+      }, "\0") .. "\0"
+      local routing_values = {
+        "automatic", "price", "throughput", "latency", "specific",
+      }
+      local routing_idx = 1
+      for index, value in ipairs(routing_values) do
+        if value == edit.routing then routing_idx = index; break end
+      end
+      local routing_changed, next_routing = UI.v5_select_row(
+        "##openrouter_routing",
+        UI.t("settings.openrouter.routing.label", nil, "Provider Routing"),
+        routing_labels, routing_idx,
+        UI.t("settings.openrouter.routing.tip", nil,
+          "Choose OpenRouter default routing, an exact sort, or a specific endpoint. "
+            .. "OpenRouter applies Auto Exacto automatically only to requests "
+            .. "that contain tools. ReaAssist does not offer it as a separate route."),
+        card_w)
+      if routing_changed then
+        edit.routing = routing_values[next_routing]
+        if edit.routing ~= "specific" then
+          edit.provider_tag = ""
+          edit.direct_tag_confirmed = false
+        end
+      end
+      custom_provider_inline_msg(edit.errors.routing, TK.red)
+      ImGui.ImGui_EndDisabled(RA.ctx)
+
+      local format_labels = table.concat({
+        UI.t("settings.openrouter.format.chat", nil,
+          "Chat Completions (default)"),
+        UI.t("settings.openrouter.format.responses", nil,
+          "Responses API (Experimental)"),
+      }, "\0") .. "\0"
+      local format_idx = edit.api_format == "responses" and 2 or 1
+      local format_changed, next_format = UI.v5_select_row(
+        "##openrouter_format",
+        UI.t("settings.openrouter.format.label", nil, "API Format"),
+        format_labels, format_idx,
+        UI.t("settings.openrouter.format.tip", nil,
+          "The two formats are separate configurations. ReaAssist never probes one by billing the other."),
+        card_w)
+      if format_changed then
+        edit.api_format = next_format == 2 and "responses"
+          or "chat_completions"
+      end
+      custom_provider_inline_msg(edit.errors.api_format, TK.red)
+
+      if edit.routing == "specific" then
+        local fallback_labels = table.concat({
+          UI.t("settings.openrouter.fallback.use_another", nil,
+            "Use another provider if needed"),
+          UI.t("settings.openrouter.fallback.fail", nil,
+            "Fail the request"),
+        }, "\0") .. "\0"
+        local fallback_idx = edit.allow_fallbacks ~= false and 1 or 2
+        local fallback_changed, next_fallback = UI.v5_select_row(
+          "##openrouter_fallback",
+          UI.t("settings.openrouter.fallback.label", nil,
+            "If the selected provider fails"),
+          fallback_labels, fallback_idx,
+          UI.t("settings.openrouter.fallback.tip", nil,
+            "Fallback can use a different provider. Fail the request pins the exact Provider ID."),
+          card_w)
+        if fallback_changed then edit.allow_fallbacks = next_fallback == 1 end
+      end
+
+      local profile = OpenRouter.catalog_profile_for_model(edit.model_id)
+      local normalized_tag = OpenRouter.validate_provider_tag(
+        edit.provider_tag, true)
+      local matched = normalized_tag and normalized_tag ~= ""
+        and OpenRouter.catalog_endpoint(profile, normalized_tag) or nil
+      if normalized_tag and normalized_tag ~= "" and not matched then
+        local _, confirmed = UI.v5_toggle(
+          "##openrouter_direct_confirm",
+          UI.t("settings.openrouter.confirm_direct", nil,
+            "Use this unverified Provider ID"),
+          edit.direct_tag_confirmed == true,
+          UI.t("settings.openrouter.confirm_direct.tip", nil,
+            "The current exact-model catalog does not verify this tag. OpenRouter will decide whether it exists."),
+          card_w)
+        edit.direct_tag_confirmed = confirmed
+        custom_provider_inline_msg(edit.errors.direct_tag_confirmed, TK.red)
+      end
+      ImGui.ImGui_EndChild(RA.ctx)
+    end
+    ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+    PopStyleColor(RA.ctx, 2)
+
+    Dummy(RA.ctx, 1, RA.SC(10))
+    UI.v5_section_label(UI.t("settings.openrouter.catalog.label", nil,
+      "MODEL AND PROVIDER CATALOG"))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), TK.card)
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(), TK.border)
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildBorderSize(), 1)
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildRounding(), RA.SC(6))
+    PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(),
+      RA.SC(12), RA.SC(10))
+    if ImGui.ImGui_BeginChild(RA.ctx, "##openrouter_catalog_card", inner_w, 0,
+        ImGui.ImGui_ChildFlags_AutoResizeY()
+          | ImGui.ImGui_ChildFlags_Borders()) then
+      local card_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+      UI.text_multiline(UI.t("settings.openrouter.catalog.copy", nil,
+        "Refresh performs a non-billable OpenRouter catalog lookup. Pricing is "
+        .. "a dated estimate until final usage reports the actual cost. There "
+        .. "is no manual pricing entry."))
+      PopStyleColor(RA.ctx)
+      PopFont(RA.ctx)
+      Dummy(RA.ctx, 1, RA.SC(7))
+
+      if ImGui.ImGui_Button(RA.ctx,
+          UI.t("settings.openrouter.catalog.refresh", nil,
+            "Refresh model and provider list") .. "##openrouter_refresh") then
+        local model_id = OpenRouter.validate_model_id(edit.model_id)
+        if not model_id then
+          edit.errors.model_id = UI.t("settings.openrouter.error.model_id", nil,
+            "Enter a valid OpenRouter model ID before refreshing.")
+        elseif Net and type(Net.openrouter_catalog_start) == "function" then
+          local started, start_err = Net.openrouter_catalog_start(model_id)
+          edit.status = started == false
+            and tostring(start_err or UI.t(
+              "settings.openrouter.catalog.start_failed", nil,
+              "Catalog lookup could not start."))
+            or UI.t("settings.openrouter.catalog.refreshing", nil,
+              "Refreshing OpenRouter catalog...")
+        else
+          edit.status = UI.t("settings.openrouter.catalog.unavailable", nil,
+            "Catalog lookup is unavailable until the OpenRouter connection is ready.")
+        end
+      end
+
+      local snapshot = OpenRouter.catalog_snapshot_for_model(edit.model_id)
+      if snapshot then
+        SameLine(RA.ctx, 0, RA.SC(8))
+        PushFont(RA.ctx, FONT.mono_reg, RA.SC(9))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
+        Text(RA.ctx, UI.t("settings.openrouter.catalog.provenance", {
+          timestamp = tostring(snapshot.fetched_at_utc),
+        }, "OpenRouter catalog snapshot / fetched UTC "
+          .. tostring(snapshot.fetched_at_utc)))
+        PopStyleColor(RA.ctx)
+        PopFont(RA.ctx)
+        Dummy(RA.ctx, 1, RA.SC(8))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_FrameBg(), TK.input_bg)
+        ImGui.ImGui_SetNextItemWidth(RA.ctx, card_w)
+        local _, search = ImGui.ImGui_InputTextWithHint(RA.ctx,
+          "##openrouter_catalog_search",
+          UI.t("settings.openrouter.catalog.search_hint", nil,
+            "Search provider name or ID"),
+          edit.catalog_search or "")
+        PopStyleColor(RA.ctx)
+        edit.catalog_search = search
+        local needle = OpenRouter._trim(search):lower()
+        local shown = 0
+        for _, endpoint in ipairs(snapshot.endpoints or {}) do
+          local haystack = (tostring(endpoint.provider_name) .. " "
+            .. tostring(endpoint.tag)):lower()
+          if needle == "" or haystack:find(needle, 1, true) then
+            shown = shown + 1
+            if shown <= 50 then
+              local pricing_per_million = endpoint.pricing_per_million or {}
+              local detail = endpoint.provider_name .. " / " .. endpoint.tag
+              if pricing_per_million.input ~= nil
+                  and pricing_per_million.output ~= nil then
+                detail = detail .. " / " .. UI.t(
+                  "settings.openrouter.catalog.detail.input_output", {
+                    input = tostring(pricing_per_million.input),
+                    output = tostring(pricing_per_million.output),
+                  }, "$" .. tostring(pricing_per_million.input)
+                    .. " input / $" .. tostring(pricing_per_million.output)
+                    .. " output per 1M tokens")
+              end
+              if pricing_per_million.cache_read ~= nil then
+                detail = detail .. " / " .. UI.t(
+                  "settings.openrouter.catalog.detail.cache_read", {
+                    price = tostring(pricing_per_million.cache_read),
+                  }, "$" .. tostring(pricing_per_million.cache_read)
+                    .. " cache read per 1M tokens")
+              end
+              if endpoint.quantization ~= nil then
+                detail = detail .. " / " .. tostring(endpoint.quantization)
+              elseif endpoint.precision ~= nil then
+                detail = detail .. " / " .. tostring(endpoint.precision)
+              end
+              if endpoint.context_length ~= nil then
+                detail = detail .. " / " .. UI.t(
+                  "settings.openrouter.catalog.detail.context", {
+                    value = tostring(endpoint.context_length),
+                  }, tostring(endpoint.context_length) .. " context")
+              end
+              if endpoint.status ~= nil then
+                detail = detail .. " / " .. tostring(endpoint.status)
+              end
+              if endpoint.uptime ~= nil then
+                detail = detail .. " / " .. UI.t(
+                  "settings.openrouter.catalog.detail.uptime", {
+                    value = tostring(endpoint.uptime),
+                  }, tostring(endpoint.uptime) .. "% uptime")
+              end
+              if endpoint.latency ~= nil then
+                local value = str_format("%.3g", endpoint.latency)
+                detail = detail .. " / " .. UI.t(
+                  "settings.openrouter.catalog.detail.latency", {
+                    value = value,
+                  }, value .. "s latency")
+              end
+              if endpoint.throughput ~= nil then
+                local value = str_format("%.3g", endpoint.throughput)
+                detail = detail .. " / " .. UI.t(
+                  "settings.openrouter.catalog.detail.throughput", {
+                    value = value,
+                  }, value .. " tps")
+              end
+              if ImGui.ImGui_Button(RA.ctx,
+                  detail .. "##openrouter_ep_" .. endpoint.tag,
+                  card_w, 0) then
+                edit.provider_tag = endpoint.tag
+                edit.routing = "specific"
+                edit.direct_tag_confirmed = false
+                edit.errors.provider_tag = nil
+                edit.errors.direct_tag_confirmed = nil
+              end
+              local endpoint_tip = {}
+              if type(endpoint.supported_parameters) == "table"
+                  and #endpoint.supported_parameters > 0 then
+                local values = table.concat(endpoint.supported_parameters, ", ")
+                endpoint_tip[#endpoint_tip + 1] = UI.t(
+                  "settings.openrouter.catalog.tip.supported_parameters", {
+                    values = values,
+                  }, "Supported parameters: " .. values)
+              end
+              if endpoint.supports_implicit_caching == true then
+                endpoint_tip[#endpoint_tip + 1] = UI.t(
+                  "settings.openrouter.catalog.tip.cache_supported", nil,
+                  "Implicit prompt caching: supported")
+              elseif endpoint.supports_implicit_caching == false then
+                endpoint_tip[#endpoint_tip + 1] = UI.t(
+                  "settings.openrouter.catalog.tip.cache_not_advertised", nil,
+                  "Implicit prompt caching: not advertised")
+              end
+              if endpoint.max_output ~= nil then
+                endpoint_tip[#endpoint_tip + 1] = UI.t(
+                  "settings.openrouter.catalog.tip.max_output", {
+                    value = tostring(endpoint.max_output),
+                  }, "Max output: " .. tostring(endpoint.max_output))
+              end
+              if endpoint.region ~= nil then
+                endpoint_tip[#endpoint_tip + 1] = UI.t(
+                  "settings.openrouter.catalog.tip.region", {
+                    value = tostring(endpoint.region),
+                  }, "Region: " .. tostring(endpoint.region))
+              end
+              if type(endpoint.data_policy) == "table" then
+                local policy = endpoint.data_policy
+                for _, field in ipairs({
+                    {"prompt_training", UI.t(
+                      "settings.openrouter.catalog.tip.prompt_training", nil,
+                      "Prompt training")},
+                    {"retention", UI.t(
+                      "settings.openrouter.catalog.tip.retention", nil,
+                      "Retention")},
+                    {"moderation", UI.t(
+                      "settings.openrouter.catalog.tip.moderation", nil,
+                      "Moderation")},
+                  }) do
+                  if policy[field[1]] ~= nil then
+                    endpoint_tip[#endpoint_tip + 1] = field[2] .. ": "
+                      .. tostring(policy[field[1]])
+                  end
+                end
+              end
+              if #endpoint_tip > 0 then
+                UI.tooltip(table.concat(endpoint_tip, "\n"))
+              end
+            end
+          end
+        end
+        if shown == 0 then
+          custom_provider_inline_msg(UI.t(
+            "settings.openrouter.catalog.no_matches", nil,
+            "No providers match this search."), TK.text_muted)
+        elseif shown > 50 then
+          custom_provider_inline_msg(UI.t(
+            "settings.openrouter.catalog.more_matches", {
+              count = tostring(shown - 50),
+            }, tostring(shown - 50) .. " more matches. Narrow the search."),
+            TK.text_muted)
+        end
+      else
+        Dummy(RA.ctx, 1, RA.SC(6))
+        custom_provider_inline_msg(UI.t(
+          "settings.openrouter.catalog.unknown", nil,
+          "No current exact-model catalog snapshot. Capability and preflight cost estimates are Unknown."),
+          TK.amber)
+      end
+      if edit.status then
+        Dummy(RA.ctx, 1, RA.SC(4))
+        custom_provider_inline_msg(edit.status, TK.text_muted)
+      end
+      ImGui.ImGui_EndChild(RA.ctx)
+    end
+    ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+    PopStyleColor(RA.ctx, 2)
+
+    Dummy(RA.ctx, 1, RA.SC(12))
+    local cancel_label = UI.t("common.cancel", nil, "Cancel")
+    local test_label = UI.t("settings.openrouter.test", nil,
+      "Deliberate billed test")
+    local save_label = UI.t("common.save", nil, "Save")
+    if ImGui.ImGui_Button(RA.ctx,
+        cancel_label .. "##openrouter_cancel") then cancel_clicked = true end
+    SameLine(RA.ctx, 0, RA.SC(8))
+    ImGui.ImGui_BeginDisabled(RA.ctx,
+      not (S.api_key_map and S.api_key_map.openrouter))
+    if ImGui.ImGui_Button(RA.ctx,
+        test_label .. "##openrouter_test") then test_clicked = true end
+    ImGui.ImGui_EndDisabled(RA.ctx)
+    UI.tooltip(UI.t("settings.openrouter.test.tip", nil,
+      "Sends one real request using the selected model and API format. OpenRouter may bill it."))
+    SameLine(RA.ctx, 0, RA.SC(8))
+    if ImGui.ImGui_Button(RA.ctx,
+        save_label .. "##openrouter_save") then save_clicked = true end
+    Dummy(RA.ctx, 1, RA.SC(10))
+    if indent_w > 0 then ImGui.ImGui_Unindent(RA.ctx, indent_w) end
+    ImGui.ImGui_EndChild(RA.ctx)
+  end
+  PopStyleColor(RA.ctx, 4)
+  ImGui.ImGui_PopStyleVar(RA.ctx, 2)
+  UI.pop_settings_styles()
+  UI.footer_rail_v5()
+
+  if cancel_clicked or UI.back_pressed() then
+    api_keys.openrouter_return()
+    return
+  end
+
+  if save_clicked then
+    local valid, candidate = api_keys.openrouter_validate_edit(edit)
+    if valid then
+      local err = Store.save_openrouter_profile(candidate)
+      if err then
+        edit.status = tostring(err)
+      else
+        if PROVIDERS.active() and PROVIDERS.active().id == "openrouter" then
+          MODELS.refresh()
+          prefs.model_idx = 1
+          if Store and Store.remember_model_idx then
+            Store.remember_model_idx(PROVIDERS.active(), MODELS, 1)
+          end
+          Store.save_config()
+        end
+        UI.show_float_toast(UI.t("settings.openrouter.saved", nil,
+          "OpenRouter settings saved"), "ok")
+        api_keys.openrouter_return()
+        return
+      end
+    end
+  end
+
+  if test_clicked then
+    local valid, candidate = api_keys.openrouter_validate_edit(edit)
+    if valid then
+      edit._pending_test_candidate = candidate
+      ImGui.ImGui_OpenPopup(RA.ctx,
+        UI.t("settings.openrouter.test.confirm_title", nil,
+          "Run billed OpenRouter test?") .. "##openrouter_test_confirm")
+    end
+  end
+
+  UI.push_modal_style()
+  if ImGui.ImGui_BeginPopupModal(RA.ctx,
+      UI.t("settings.openrouter.test.confirm_title", nil,
+        "Run billed OpenRouter test?") .. "##openrouter_test_confirm",
+      true, ImGui.ImGui_WindowFlags_AlwaysAutoResize()) then
+    local pending = edit._pending_test_candidate
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+    UI.text_multiline(UI.t("settings.openrouter.test.confirm_body", {
+      model = tostring(pending and pending.model_id or ""),
+      format = tostring(pending and pending.api_format or ""),
+    }, "This sends a real request to "
+      .. tostring(pending and pending.model_id or "") .. " using "
+      .. tostring(pending and pending.api_format or "")
+      .. ". The selected OpenRouter settings are saved before the request is sent. "
+      .. "OpenRouter may bill the request. One success does not certify the model."))
+    PopFont(RA.ctx)
+    if ImGui.ImGui_Button(RA.ctx,
+        UI.t("settings.openrouter.test.confirm", nil, "Run billed test")) then
+      local save_err, saved_profile = Store.save_openrouter_profile(pending)
+      if save_err then
+        edit.status = tostring(save_err)
+      elseif Net and type(Net.openrouter_deliberate_test_start) == "function" then
+        local started, start_err = Net.openrouter_deliberate_test_start(
+          saved_profile)
+        edit.status = started == false
+          and tostring(start_err or UI.t(
+            "settings.openrouter.test.start_failed", nil,
+            "OpenRouter test could not start."))
+          or UI.t("settings.openrouter.test.running", nil,
+            "OpenRouter billed test started...")
+      else
+        edit.status = UI.t("settings.openrouter.test.unavailable", nil,
+          "The billed test is unavailable until the OpenRouter connection is ready.")
+      end
+      edit._pending_test_candidate = nil
+      ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+    end
+    SameLine(RA.ctx, 0, RA.SC(8))
+    if ImGui.ImGui_Button(RA.ctx,
+        UI.t("common.cancel", nil, "Cancel") .. "##openrouter_test_no") then
+      edit._pending_test_candidate = nil
+      ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+    end
+    ImGui.ImGui_EndPopup(RA.ctx)
+  end
+  UI.pop_modal_style()
 end
 
 -- =============================================================================
@@ -13165,6 +15428,37 @@ function Render.custom_providers_screen()
         PopStyleColor(RA.ctx)
         PopFont(RA.ctx)
 
+        if rec.is_native_custom == true then
+          PushFont(RA.ctx, FONT.mono_reg, RA.SC(9))
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.accent_ui)
+          local is_local = rec.native_provider_id == "local_server"
+          local is_responses = rec.record_format == "responses"
+          local route_key = is_local
+            and (is_responses
+              and "settings.custom.route.engine_local_responses"
+              or "settings.custom.route.engine_local_chat")
+            or (is_responses
+              and "settings.custom.route.engine_custom_responses"
+              or "settings.custom.route.engine_custom_chat")
+          local route_fallback = is_local
+            and (is_responses
+              and "LOCAL / RESPONSES"
+              or "LOCAL / CHAT COMPLETIONS")
+            or (is_responses
+              and "CUSTOM / RESPONSES"
+              or "CUSTOM / CHAT COMPLETIONS")
+          Text(RA.ctx, UI.t(route_key, nil, route_fallback))
+          PopStyleColor(RA.ctx)
+          PopFont(RA.ctx)
+        else
+          PushFont(RA.ctx, FONT.mono_reg, RA.SC(9))
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
+          Text(RA.ctx, UI.t("settings.custom.route.legacy_chat", nil,
+            "COMPATIBILITY / CHAT COMPLETIONS"))
+          PopStyleColor(RA.ctx)
+          PopFont(RA.ctx)
+        end
+
         -- Action row: Edit (primary-muted) / Duplicate / Delete.
         Dummy(RA.ctx, 1, RA.SC(8))
         PushFont(RA.ctx, FONT.inter_reg, RA.SC(10))
@@ -13292,20 +15586,36 @@ function Render.custom_providers_screen()
         if target_id then
           local was_active_id = PROVIDERS.active() and PROVIDERS.active().id
           local active_removed = (was_active_id == target_id)
-          Custom.unregister_id(target_id)
-          Custom.remove_record(target_id)
-          Custom.register_all()
-          if active_removed then
-            prefs.provider_idx = 1
-            MODELS.refresh()
-            S.api_key = S.api_key_map[PROVIDERS.active().id]
-          elseif was_active_id and PROVIDERS._by_id[was_active_id] then
-            prefs.provider_idx = PROVIDERS._by_id[was_active_id]
+          local remove_err
+          if target and target.is_native_custom == true then
+            remove_err = CustomNative.remove_record(target_id)
+          else
+            remove_err = Custom.remove_record(target_id)
           end
-          if Store and Store.save_config then Store.save_config() end
+          if remove_err then
+            UI.show_float_toast(tostring(remove_err), "err", true)
+          else
+            if target and target.is_native_custom == true then
+              Key.clear("api_key_" .. target_id)
+              S.api_key_map[target_id] = nil
+            end
+            Custom.unregister_id(target_id)
+            Custom.register_all()
+            if active_removed then
+              prefs.provider_idx = 1
+              MODELS.refresh()
+              S.api_key = S.api_key_map[PROVIDERS.active().id]
+            elseif was_active_id and PROVIDERS._by_id[was_active_id] then
+              prefs.provider_idx = PROVIDERS._by_id[was_active_id]
+            end
+            if Store and Store.save_config then Store.save_config() end
+            api_keys.custom_providers_confirm = nil
+            ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+          end
+        else
+          api_keys.custom_providers_confirm = nil
+          ImGui.ImGui_CloseCurrentPopup(RA.ctx)
         end
-        api_keys.custom_providers_confirm = nil
-        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
       end
       UI.pop_modal_danger_btn()
       SameLine(RA.ctx, 0, del_gap)
@@ -13398,6 +15708,10 @@ function Render.custom_llm_screen()
     return
   end
   local edit = api_keys.custom_edit
+  local native_mode = edit.storage_kind == "native_engine"
+  local endpoint_format = native_mode and edit.record_format or "chat_completions"
+  local native_endpoint_info = Custom.classify_native_endpoint(edit.endpoint,
+    endpoint_format)
 
   -- Centered column. Narrower inner_w (SC(540)) matches the Settings page
   -- for consistent left/right padding across the settings-family screens.
@@ -13589,6 +15903,85 @@ function Render.custom_llm_screen()
     Dummy(RA.ctx, 1, RA.SC(12))
   end
 
+  if native_mode then
+    UI.v5_section_label(UI.t("settings.custom.native.section", nil,
+      "CONNECTION"))
+    _push_cllm_card()
+    if ImGui.ImGui_BeginChild(RA.ctx, "##cllm_engine_card", inner_w, 0,
+        ImGui.ImGui_ChildFlags_AutoResizeY()
+          | ImGui.ImGui_ChildFlags_Borders()) then
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
+      local changed_local, selected_local = ImGui.ImGui_Checkbox(RA.ctx,
+        UI.t("settings.custom.native.local_label", nil,
+          "Local server (otherwise custom online endpoint)")
+          .. "##cus_native_local",
+        edit.profile_kind == "local_server")
+      if changed_local then
+        edit.profile_kind = selected_local and "local_server" or "custom"
+        edit.auth_mode = selected_local and "none" or "bearer"
+        if not selected_local then edit.private_network_origin = nil end
+      end
+      local changed_format, selected_responses = ImGui.ImGui_Checkbox(RA.ctx,
+        UI.t("settings.custom.native.responses_label", nil,
+          "Use Responses API (off uses Chat Completions)")
+          .. "##cus_native_responses",
+        edit.record_format == "responses")
+      if changed_format then
+        local next_format = selected_responses
+          and "responses" or "chat_completions"
+        edit.record_format = next_format
+        edit.errors = type(edit.errors) == "table" and edit.errors or {}
+        edit.errors.endpoint = UI.t(
+          "settings.custom.error.endpoint_format_changed", nil,
+          "API format changed. Verify or replace the endpoint path before saving.")
+      end
+      local changed_auth, selected_auth = ImGui.ImGui_Checkbox(RA.ctx,
+        UI.t("settings.custom.native.auth_label", nil,
+          "Require an API key (Bearer authentication)")
+          .. "##cus_native_auth",
+        edit.auth_mode == "bearer")
+      if changed_auth then
+        edit.auth_mode = selected_auth and "bearer" or "none"
+        if not selected_auth then edit.key = "" end
+      end
+      PopStyleColor(RA.ctx)
+      PopFont(RA.ctx)
+      Dummy(RA.ctx, 1, RA.SC(6))
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(10))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+      UI.text_multiline(
+        UI.t("settings.custom.native.description", nil,
+          "Each model accepts text only unless you enable image input in Model Details. This connection keeps the selected API format and will not retry an image request after removing its images. It does not support custom headers, insecure TLS, model prefixes, extra request fields or returned images."))
+      Dummy(RA.ctx, 1, RA.SC(4))
+      UI.text_multiline(UI.t("settings.custom.native.tls_policy", nil,
+        "On Windows, configurable Custom and Local HTTPS profiles use "
+          .. "best-effort certificate revocation compatibility. Certificate "
+          .. "and hostname verification stay enabled. Built-in hosted "
+          .. "providers keep strict revocation checks."))
+      PopStyleColor(RA.ctx)
+      PopFont(RA.ctx)
+      ImGui.ImGui_EndChild(RA.ctx)
+    end
+    _pop_cllm_card()
+    Dummy(RA.ctx, 1, RA.SC(12))
+  else
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(10))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+    UI.text_multiline(
+      UI.t("settings.custom.native.legacy_description", nil,
+        "This provider keeps its existing Chat Completions connection. Create a new provider to choose Chat Completions or Responses."))
+    Dummy(RA.ctx, 1, RA.SC(4))
+    UI.text_multiline(UI.t("settings.custom.legacy.tls_policy", nil,
+      "Legacy Custom HTTPS tries strict certificate revocation first on "
+        .. "Windows. Its existing bounded compatibility retry may relax only "
+        .. "the revocation check after a classified revocation failure. "
+        .. "Certificate and hostname verification stay enabled."))
+    PopStyleColor(RA.ctx)
+    PopFont(RA.ctx)
+    Dummy(RA.ctx, 1, RA.SC(12))
+  end
+
   -- ============================================================
   -- ENDPOINT section: URL + presets + API key.
   -- ============================================================
@@ -13633,15 +16026,19 @@ function Render.custom_llm_screen()
       "Endpoint URL"))
     _push_input_style()
     ImGui.ImGui_SetNextItemWidth(RA.ctx, card_w)
+    local endpoint_hint = native_mode and edit.record_format == "responses"
+      and "http://127.0.0.1:11434/v1/responses"
+      or "http://127.0.0.1:11434/v1/chat/completions"
     local _, new_endpoint = ImGui.ImGui_InputTextWithHint(RA.ctx, "##cus_endpoint",
-      "http://localhost:11434/v1/chat/completions",
+      endpoint_hint,
       edit.endpoint)
     UI.focus_ring()
     _, new_endpoint = UI.input_with_menu(RA.ctx, false, new_endpoint,
       "##cus_endpoint_ctx")
     _pop_input_style()
     edit.endpoint = new_endpoint
-    UI.tooltip(UI.t("settings.custom.tip.endpoint", nil,
+    UI.tooltip(UI.t(native_mode and "settings.custom.tip.native_endpoint"
+        or "settings.custom.tip.endpoint", nil,
       "The full URL of the chat completions endpoint, including http:// or "
       .. "https:// and the port.\n\n"
       .. "Expected shape for OpenAI-compatible servers:\n"
@@ -13651,6 +16048,35 @@ function Render.custom_llm_screen()
       .. "  https://openrouter.ai/api/v1/chat/completions (OpenRouter)\n\n"
       .. "Use the preset pills below to fill in the common defaults."))
     custom_provider_inline_msg(edit.errors.endpoint, TK.red)
+    if native_mode and native_endpoint_info
+        and native_endpoint_info.normalized_localhost then
+      custom_provider_inline_msg(UI.t(
+        "settings.custom.notice.localhost_normalized", nil,
+        "localhost will be saved as the IP literal 127.0.0.1."), TK.text_muted)
+    end
+    if native_mode and native_endpoint_info
+        and native_endpoint_info.destination_class == "private_network" then
+      custom_provider_inline_msg(UI.t("settings.custom.warning.private_network",
+        { origin = native_endpoint_info.origin },
+        "Private network endpoint: {origin}. Requests and any API key go "
+          .. "directly to this address without a proxy. Only continue if "
+          .. "you control or trust that server."), TK.amber)
+      if edit.profile_kind == "local_server" then
+        local approved = edit.private_network_origin
+          == native_endpoint_info.origin
+        local changed_approval, next_approval = ImGui.ImGui_Checkbox(RA.ctx,
+          UI.t("settings.custom.private_network.confirm", nil,
+            "I trust this exact private network address")
+            .. "##cus_private_network", approved)
+        if changed_approval then
+          edit.private_network_origin = next_approval
+            and native_endpoint_info.origin or nil
+        end
+        UI.tooltip(UI.t("settings.custom.private_network.confirm_tip", nil,
+          "Approval is bound to the exact scheme, IP address, and port. "
+            .. "Changing that origin requires approval again."))
+      end
+    end
     if edit.endpoint
        and edit.endpoint:match("^http://")
        and not edit.endpoint:match("^http://localhost[:/]")
@@ -13688,12 +16114,19 @@ function Render.custom_llm_screen()
       PopStyleColor(RA.ctx)
       PopFont(RA.ctx)
     end
-    local function _preset_btn(label, id, url, tip)
+    local function _preset_btn(label, id, tip)
+      local preset = api_keys.CUSTOM_PROVIDER_PRESETS[id]
+      local supported = not native_mode
+        or type(preset.endpoints[edit.record_format]) == "string"
+      ImGui.ImGui_BeginDisabled(RA.ctx, not supported)
       if ImGui.ImGui_Button(RA.ctx, label .. "##cus_ep_" .. id) then
-        edit.endpoint        = url
-        edit.errors.endpoint = nil
+        api_keys.apply_custom_provider_preset(edit,
+          preset)
       end
-      UI.tooltip(tip)
+      ImGui.ImGui_EndDisabled(RA.ctx)
+      UI.tooltip(supported and tip or UI.t(
+        "settings.custom.tip.preset.unsupported_format", nil,
+        "This preset has no maintained endpoint for the selected API format. Enter the exact endpoint manually or select Chat Completions."))
     end
 
     -- LOCAL row: three most common self-hosted servers.
@@ -13701,17 +16134,14 @@ function Render.custom_llm_screen()
     _preset_label(UI.t("settings.custom.preset.local", nil, "LOCAL"))
     SameLine(RA.ctx, row_start_x + PRESET_LBL_W)
     _preset_btn("Ollama", "ollama",
-      "http://localhost:11434/v1/chat/completions",
       UI.t("settings.custom.tip.preset.ollama", nil,
         "Fill in the default Ollama endpoint URL"))
     SameLine(RA.ctx, 0, RA.SC(6))
     _preset_btn("LM Studio", "lmstudio",
-      "http://localhost:1234/v1/chat/completions",
       UI.t("settings.custom.tip.preset.lmstudio", nil,
         "Fill in the default LM Studio endpoint URL"))
     SameLine(RA.ctx, 0, RA.SC(6))
     _preset_btn("llama.cpp", "llamacpp",
-      "http://localhost:8080/v1/chat/completions",
       UI.t("settings.custom.tip.preset.llamacpp", nil,
         "Fill in the default llama.cpp server endpoint URL"))
 
@@ -13719,19 +16149,17 @@ function Render.custom_llm_screen()
 
     -- HOSTED row: OpenAI-compatible cloud gateways. The first two pills
     -- only fill the URL (matching the LOCAL-row convention). The Kimi pill
-    -- is opinionated: it also fills the provider label, seeds a kimi-k2.6
-    -- model row (prices, context, thinking-disabled extra body) if the
-    -- models list is still empty / default, and never overwrites values the
-    -- user has already typed.
+    -- is opinionated: it also fills the provider label and seeds a kimi-k2.6
+    -- model row if the models list is still empty / default. Native profiles
+    -- seed prices and context while leaving Extra Body blank. Presets never
+    -- overwrite values the user has already typed.
     _preset_label(UI.t("settings.custom.preset.hosted", nil, "HOSTED"))
     SameLine(RA.ctx, row_start_x + PRESET_LBL_W)
     _preset_btn("OpenRouter", "openrouter",
-      "https://openrouter.ai/api/v1/chat/completions",
       UI.t("settings.custom.tip.preset.openrouter", nil,
         "Fill in the OpenRouter endpoint URL (API key required)"))
     SameLine(RA.ctx, 0, RA.SC(6))
     _preset_btn("Groq", "groq",
-      "https://api.groq.com/openai/v1/chat/completions",
       UI.t("settings.custom.tip.preset.groq", nil,
         "Fill in the Groq endpoint URL (API key required)"))
     SameLine(RA.ctx, 0, RA.SC(6))
@@ -13744,18 +16172,24 @@ function Render.custom_llm_screen()
     -- body), we fill URL + label and leave the row alone. Without the
     -- broader check, a user who typed prices or a context window but
     -- not the id yet would lose those values just by clicking Kimi.
-    if ImGui.ImGui_Button(RA.ctx, "Kimi##cus_ep_kimi") then
-      edit.endpoint        = "https://api.moonshot.ai/v1/chat/completions"
-      edit.errors.endpoint = nil
+    local kimi_preset = api_keys.CUSTOM_PROVIDER_PRESETS.kimi
+    local kimi_supported = not native_mode
+      or type(kimi_preset.endpoints[edit.record_format]) == "string"
+    ImGui.ImGui_BeginDisabled(RA.ctx, not kimi_supported)
+    if ImGui.ImGui_Button(RA.ctx, "Kimi##cus_ep_kimi")
+        and api_keys.apply_custom_provider_preset(edit, kimi_preset) then
       if (edit.label or ""):match("^%s*$") then
         edit.label = "Kimi"
       end
       local m0 = edit.models[1]
       local models_are_default = #edit.models == 1
         and (m0.id or "")             == ""
-        and (m0.price_in or "")       == "0"
-        and (m0.price_cache_r or "")  == "0"
-        and (m0.price_out or "")      == "0"
+        and ((m0.price_in or "") == "" or (m0.price_in or "") == "0")
+        and ((m0.price_cache_r or "") == ""
+          or (m0.price_cache_r or "") == "0")
+        and ((m0.price_cache_w or "") == ""
+          or (m0.price_cache_w or "") == "0")
+        and ((m0.price_out or "") == "" or (m0.price_out or "") == "0")
         and (m0.context_window or "") == tostring(CUSTOM_DEFAULT_CTX)
         and (m0.notes or "")          == ""
         and (m0.extra_body or "")     == ""
@@ -13764,32 +16198,45 @@ function Render.custom_llm_screen()
           id             = "kimi-k2.6",
           price_in       = "0.95",    -- cache-miss input
           price_cache_r  = "0.16",    -- cache-hit input
+          price_cache_w  = "",        -- provider does not publish this rate
           price_out      = "4",
           context_window = "262144",
           notes          = "",
-          -- Disable server-side reasoning by default. Kimi k2.6 runs a
-          -- reasoning pass otherwise, which can add tens of seconds of
-          -- latency and thousands of hidden output tokens on simple
-          -- scripting tasks. Flip the body to {"thinking":{"type":"enabled"}}
-          -- (or blank it out) for research-style work.
-          extra_body     = '{"thinking":{"type":"disabled"}}',
+          -- Legacy curl requests disable server-side reasoning by default.
+          -- Native Engine profiles use a fixed request shape and keep this
+          -- unsupported field blank.
+          extra_body     = native_mode and ""
+            or '{"thinking":{"type":"disabled"}}',
         }
       end
     end
-    UI.tooltip(UI.t("settings.custom.tip.preset.kimi", nil,
-      "Fill in Kimi (Moonshot) defaults:\n"
-      .. "  - Endpoint: https://api.moonshot.ai/v1/chat/completions\n"
-      .. "  - Provider name: Kimi (if blank)\n"
-      .. "  - Model row: kimi-k2.6, 262k context, $0.95/$0.16/$4.00 per 1M\n"
-      .. "  - Extra Body: {\"thinking\":{\"type\":\"disabled\"}}\n\n"
-      .. "Thinking is disabled by default because k2.6's reasoning pass "
-      .. "adds tens of seconds of latency and thousands of hidden output "
-      .. "tokens on simple tasks. Open the model row's Details popup to "
-      .. "re-enable it (set the Extra Body to "
-      .. "{\"thinking\":{\"type\":\"enabled\"}} or blank) when you need "
-      .. "deeper reasoning.\n\n"
-      .. "API key required. If you've already customized the default model "
-      .. "row, only the URL and provider name are filled."))
+    ImGui.ImGui_EndDisabled(RA.ctx)
+    local kimi_tip
+    if native_mode then
+      local kimi_endpoint = "https://api.moonshot.ai/v1/chat/completions"
+      kimi_tip = UI.t("settings.custom.tip.preset.kimi_native",
+        { endpoint = kimi_endpoint },
+        "Fill in Kimi (Moonshot) defaults:\n  - Endpoint: " .. tostring(kimi_endpoint) .. "\n  - Provider name: Kimi (if blank)\n  - Model row: kimi-k2.6, 262k context, $0.95/$0.16/$4.00 per 1M\n\nThis connection uses a fixed request format. Extra Body remains unavailable.\n\nAPI key required. If you have already customized the default model row, that row stays unchanged. The preset still updates the endpoint, provider type, and authentication mode, and fills the provider name when blank.")
+    else
+      kimi_tip = UI.t("settings.custom.tip.preset.kimi", nil,
+        "Fill in Kimi (Moonshot) defaults:\n"
+          .. "  - Endpoint: https://api.moonshot.ai/v1/chat/completions\n"
+          .. "  - Provider name: Kimi (if blank)\n"
+          .. "  - Model row: kimi-k2.6, 262k context, "
+          .. "$0.95/$0.16/$4.00 per 1M\n"
+          .. "  - Extra Body: {\"thinking\":{\"type\":\"disabled\"}}\n\n"
+          .. "Thinking is disabled by default because k2.6's reasoning pass "
+          .. "adds tens of seconds of latency and thousands of hidden output "
+          .. "tokens on simple tasks. Open the model row's Details popup to "
+          .. "re-enable it (set the Extra Body to "
+          .. "{\"thinking\":{\"type\":\"enabled\"}} or blank) when you need "
+          .. "deeper reasoning.\n\n"
+          .. "API key required. If you've already customized the default "
+          .. "model row, only the URL and provider name are filled.")
+    end
+    UI.tooltip(kimi_supported and kimi_tip or UI.t(
+      "settings.custom.tip.preset.unsupported_format", nil,
+      "This preset has no maintained endpoint for the selected API format. Enter the exact endpoint manually or select Chat Completions."))
 
     PopStyleColor(RA.ctx, 5)
     ImGui.ImGui_PopStyleVar(RA.ctx, 3)
@@ -13830,6 +16277,21 @@ function Render.custom_llm_screen()
     ImGui.ImGui_EndChild(RA.ctx)
   end
   _pop_cllm_card()
+
+  local price_notice = api_keys.custom_remote_price_notice(edit,
+    native_endpoint_info)
+  if price_notice == "native_blank" then
+    custom_provider_inline_msg(UI.t(
+      "settings.custom.warning.remote_price_unknown", nil,
+      "Input and output prices are blank for a remote endpoint. ReaAssist "
+        .. "will ask you to approve every request because it cannot estimate "
+        .. "the cost. Enter both published prices to get cost estimates and "
+        .. "avoid repeated approval prompts."), TK.amber)
+  elseif price_notice == "legacy_ambiguous" then
+    custom_provider_inline_msg(UI.t(
+      "settings.custom.warning.legacy_remote_price_unknown", nil,
+      "One or both prices are zero for this older remote connection. ReaAssist cannot tell whether zero was entered or saved from a blank field, so the estimate is Unknown and each request needs approval. Enter positive published input and output prices, or create a new provider to record an explicit zero price."), TK.amber)
+  end
 
   Dummy(RA.ctx, 1, RA.SC(12))
 
@@ -14002,6 +16464,30 @@ function Render.custom_llm_screen()
       -- pushed only around each button so the surrounding input-style font
       -- stays in scope for the inputs.
       local cache_n = tonumber(row.price_cache_r or "0") or 0
+      local display_price_in = api_keys.custom_price_display(
+        row.price_in, native_mode)
+      local display_price_cache = api_keys.custom_price_display(
+        row.price_cache_r, native_mode)
+      local display_price_cache_write = api_keys.custom_price_display(
+        row.price_cache_w, native_mode)
+      local display_price_out = api_keys.custom_price_display(
+        row.price_out, native_mode)
+      local price_summary = native_mode
+        and UI.t("settings.custom.details.native_price_summary_v2", {
+          input = display_price_in,
+          cache = display_price_cache,
+          cache_write = display_price_cache_write,
+          output = display_price_out,
+        }, str_format("%s in / %s cache read / %s cache write / %s out per 1M tokens",
+          display_price_in, display_price_cache,
+          display_price_cache_write, display_price_out))
+        or UI.t("settings.custom.details.price_summary", {
+          input = row.price_in or "0",
+          cache = row.price_cache_r or "0",
+          output = row.price_out or "0",
+        }, str_format("$%s in / $%s cached / $%s out per 1M tokens",
+          row.price_in or "0", row.price_cache_r or "0",
+          row.price_out or "0"))
 
       if _icon_btn(ICON.SETTINGS .. "##cus_det_" .. ri, DET_W) then
         open_details_ri = ri
@@ -14011,12 +16497,7 @@ function Render.custom_llm_screen()
       local tip_lines = {
         UI.t("settings.custom.details.summary", nil,
           "Details - prices, context, notes, extra body JSON"),
-        UI.t("settings.custom.details.price_summary", {
-          input = row.price_in or "0",
-          cache = row.price_cache_r or "0",
-          output = row.price_out or "0",
-        }, str_format("$%s in / $%s cached / $%s out per 1M tokens",
-          row.price_in or "0", row.price_cache_r or "0", row.price_out or "0")),
+        price_summary,
         UI.t("settings.custom.details.context_summary",
           { tokens = row.context_window or "?" },
           str_format("Context: %s tokens", row.context_window or "?")),
@@ -14103,10 +16584,13 @@ function Render.custom_llm_screen()
         id             = src.id,
         price_in       = src.price_in,
         price_cache_r  = src.price_cache_r,
+        price_cache_w  = src.price_cache_w,
         price_out      = src.price_out,
         context_window = src.context_window,
         notes          = src.notes,
         extra_body     = src.extra_body,
+        supports_image_input = src.supports_image_input == true,
+        chat_token_limit_field = src.chat_token_limit_field,
       })
     end
 
@@ -14132,7 +16616,7 @@ function Render.custom_llm_screen()
     local row = ri and edit.models[ri] or nil
     if row then
       local popup_id = details_title .. "##cus_details_popup_" .. ri
-      local pw, ph = RA.SC(460), RA.SC(600)
+      local pw, ph = RA.SC(460), RA.SC(650)
       if update._main_w then
         ImGui.ImGui_SetNextWindowPos(RA.ctx,
           update._main_x + (update._main_w - pw) * 0.5,
@@ -14221,7 +16705,8 @@ function Render.custom_llm_screen()
         _price_field("price_in",
           UI.t("settings.custom.details.price_in", nil,
             "Input Price per 1M (Cache Miss)"),
-          "0",
+          native_mode and UI.t("settings.custom.value.unknown", nil,
+            "Unknown") or "0",
           UI.t("settings.custom.tip.details.price_in", nil,
             "Cost per million input tokens for fresh (non-cached) prompt "
             .. "content. Used for cost estimates only; the script does not "
@@ -14230,27 +16715,83 @@ function Render.custom_llm_screen()
         _price_field("price_cache_r",
           UI.t("settings.custom.details.price_cache", nil,
             "Input Price per 1M (Cache Hit)"),
-          "0",
-          UI.t("settings.custom.tip.details.price_cache", nil,
-            "Cost per million input tokens that the provider served from its "
-            .. "automatic prompt cache (reported as "
-            .. "usage.prompt_tokens_details.cached_tokens). Common providers "
-            .. "and their published cache-hit rates: OpenAI ~10% of input, "
-            .. "Kimi ~17% ($0.16 vs $0.95). Leave at 0 for endpoints without "
-            .. "caching or unknown rates; cached tokens will then be billed "
-            .. "at $0 in the cost estimate."))
+          native_mode and UI.t("settings.custom.value.unknown", nil,
+            "Unknown") or "0",
+          native_mode
+            and UI.t("settings.custom.tip.details.native_price_cache", nil,
+              "Cost per million cached input tokens. Leave this blank when "
+                .. "the rate is Unknown. Enter 0 only when the provider's "
+                .. "documented cache-hit rate is free.")
+            or UI.t("settings.custom.tip.details.price_cache", nil,
+              "Cost per million input tokens that the provider served from its "
+              .. "automatic prompt cache (reported as "
+              .. "usage.prompt_tokens_details.cached_tokens). Common providers "
+              .. "and their published cache-hit rates: OpenAI ~10% of input, "
+              .. "Kimi ~17% ($0.16 vs $0.95). Leave at 0 for endpoints without "
+              .. "caching or unknown rates; cached tokens will then be billed "
+              .. "at $0 in the cost estimate."))
         custom_provider_inline_msg(edit.errors["model_cache_" .. ri], TK.red)
         Dummy(RA.ctx, 1, RA.SC(6))
+        if native_mode then
+          _price_field("price_cache_w",
+            UI.t("settings.custom.details.price_cache_write", nil,
+              "Input Price per 1M (Cache Write)"),
+            UI.t("settings.custom.value.unknown", nil, "Unknown"),
+            UI.t("settings.custom.tip.details.price_cache_write", nil,
+              "Cost per million input tokens reported as cache writes. Leave "
+                .. "this blank when the rate is Unknown. Enter 0 only when "
+                .. "the provider documents cache writes as free."))
+          custom_provider_inline_msg(
+            edit.errors["model_cache_write_" .. ri], TK.red)
+          Dummy(RA.ctx, 1, RA.SC(6))
+        end
         _price_field("price_out",
           UI.t("settings.custom.details.price_out", nil,
             "Output Price per 1M"),
-          "0",
+          native_mode and UI.t("settings.custom.value.unknown", nil,
+            "Unknown") or "0",
           UI.t("settings.custom.tip.details.price_out", nil,
             "Cost per million output tokens. For reasoning models this "
             .. "usually includes hidden thinking tokens as part of the "
             .. "completion, so a long thinking pass charges at the output "
             .. "rate even when the visible reply is short."))
         Dummy(RA.ctx, 1, RA.SC(10))
+
+        if native_mode and edit.record_format == "chat_completions" then
+          local modern_limit_field = row.chat_token_limit_field
+            == "max_completion_tokens"
+          local changed_limit_field, next_modern_limit_field =
+            ImGui.ImGui_Checkbox(RA.ctx,
+              UI.t("settings.custom.details.modern_token_limit", nil,
+                "Use max_completion_tokens")
+                .. "##cus_dtoken_limit_" .. ri,
+              modern_limit_field)
+          if changed_limit_field then
+            row.chat_token_limit_field = next_modern_limit_field
+              and "max_completion_tokens" or nil
+          end
+          UI.tooltip(UI.t(
+            "settings.custom.tip.details.modern_token_limit", nil,
+            "Enable this for newer OpenAI-compatible models that reject "
+              .. "max_tokens and require max_completion_tokens. Leave it "
+              .. "off for the broadest compatibility with older or local "
+              .. "servers."))
+          Dummy(RA.ctx, 1, RA.SC(10))
+        end
+
+        if native_mode then
+          local changed_image, next_image = ImGui.ImGui_Checkbox(RA.ctx,
+            UI.t("settings.custom.details.supports_image_input", nil,
+              "Supports image input") .. "##cus_dimage_" .. ri,
+            row.supports_image_input == true)
+          if changed_image then row.supports_image_input = next_image end
+          UI.tooltip(UI.t("settings.custom.tip.details.supports_image_input", nil,
+            "Enable this only when this exact model accepts images through "
+              .. "the selected API format. ReaAssist will otherwise keep "
+              .. "the model text-only. A rejected image request is surfaced "
+              .. "without retrying after removing the image."))
+          Dummy(RA.ctx, 1, RA.SC(10))
+        end
 
         -- Context window
         PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
@@ -14286,6 +16827,7 @@ function Render.custom_llm_screen()
           "(optional, merged into the chat-completions request body)"))
         PopStyleColor(RA.ctx)
         PopFont(RA.ctx)
+        ImGui.ImGui_BeginDisabled(RA.ctx, native_mode)
         _push_input_style()
         local eb_h = RA.SC(96)
         local _, new_eb = ImGui.ImGui_InputTextMultiline(RA.ctx,
@@ -14294,6 +16836,7 @@ function Render.custom_llm_screen()
         _, new_eb = UI.input_with_menu(RA.ctx, false, new_eb,
           "##cus_deb_ctx_" .. ri)
         _pop_input_style()
+        ImGui.ImGui_EndDisabled(RA.ctx)
         row.extra_body = new_eb
         UI.tooltip(UI.t("settings.custom.tip.details.extra_body", nil,
           "A JSON object merged into the outgoing chat-completions body. "
@@ -14356,9 +16899,12 @@ function Render.custom_llm_screen()
     if ImGui.ImGui_Button(RA.ctx,
         UI.t("settings.custom.add_model", nil, "+  Add Model") .. "##cus_madd") then
       edit.models[#edit.models+1] = {
-        id = "", price_in = "0", price_cache_r = "0", price_out = "0",
+        id = "", price_in = native_mode and "" or "0",
+        price_cache_r = native_mode and "" or "0",
+        price_cache_w = native_mode and "" or "0",
+        price_out = native_mode and "" or "0",
         context_window = tostring(CUSTOM_DEFAULT_CTX),
-        notes = "", extra_body = "",
+        notes = "", extra_body = "", supports_image_input = false,
       }
     end
     UI.tooltip(UI.t("settings.custom.add_model.tooltip", nil,
@@ -14387,6 +16933,16 @@ function Render.custom_llm_screen()
   if ImGui.ImGui_BeginChild(RA.ctx, "##cllm_adv_card", inner_w, 0,
       ImGui.ImGui_ChildFlags_AutoResizeY() | ImGui.ImGui_ChildFlags_Borders()) then
     local adv_card_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+    if native_mode then
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(10))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+      UI.text_multiline(
+        UI.t("settings.custom.native.advanced_description", nil,
+          "You can adjust timeouts for this connection. Other advanced fields are unavailable because the request format is fixed."))
+      PopStyleColor(RA.ctx)
+      PopFont(RA.ctx)
+      Dummy(RA.ctx, 1, RA.SC(8))
+    end
 
     -- Request timeout (narrow numeric field).
     custom_provider_field_label(UI.t("settings.custom.field.request_timeout", nil,
@@ -14428,6 +16984,8 @@ function Render.custom_llm_screen()
     custom_provider_inline_msg(edit.errors.connect_timeout, TK.red)
 
     Dummy(RA.ctx, 1, RA.SC(10))
+
+    ImGui.ImGui_BeginDisabled(RA.ctx, native_mode)
 
     -- Model ID prefix (full-width text). Most users never need this; the
     -- muted hint text explains when they would. Prepended to every model
@@ -14519,6 +17077,7 @@ function Render.custom_llm_screen()
           TK.amber)
       end
     end
+    ImGui.ImGui_EndDisabled(RA.ctx)
     -- For http:// or blank URLs, the toggle row is hidden above. The
     -- saved 'allow_insecure' value is preserved in edit state so that
     -- flipping the URL back to https:// (e.g. during a typo fix) doesn't
@@ -14590,8 +17149,11 @@ function Render.custom_llm_screen()
   do
     local edit = api_keys.custom_edit
     if edit then
-      local cb_label = UI.t("settings.custom.test_inference", nil,
-        "Test with a real chat/completions request")
+      local cb_label = native_mode
+        and UI.t("settings.custom.native.test_inference", nil,
+          "Test with one real inference request")
+        or UI.t("settings.custom.test_inference", nil,
+          "Test with a real chat/completions request")
       PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
       local cb_w = CalcTextSize(RA.ctx, cb_label) + RA.SC(28)  -- text + checkbox + gap
       PopFont(RA.ctx)
@@ -14607,12 +17169,15 @@ function Render.custom_llm_screen()
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_CheckMark(),     TK.accent)
       local _changed, _new = ImGui.ImGui_Checkbox(RA.ctx,
         cb_label .. "##cllm_test_inference",
-        edit.test_with_inference and true or false)
-      if _changed then edit.test_with_inference = _new end
+        native_mode or edit.test_with_inference and true or false)
+      if _changed and not native_mode then edit.test_with_inference = _new end
       PopStyleColor(RA.ctx, 5)
       PopFont(RA.ctx)
-      UI.tooltip(UI.t("settings.custom.tip.test_inference", nil,
-        "Off: safe GET /v1/models check. On: real chat/completions POST."))
+      UI.tooltip(native_mode
+        and UI.t("settings.custom.tip.native_test_inference", nil,
+          "This test sends a real model request and may be billed.")
+        or UI.t("settings.custom.tip.test_inference", nil,
+          "Off: safe GET /v1/models check. On: real chat/completions POST."))
       Dummy(RA.ctx, 1, RA.SC(8))
     end
   end
@@ -14623,6 +17188,10 @@ function Render.custom_llm_screen()
   -- V5 secondary (card fill, border, muted text). Centered under the
   -- cards to keep eye flow down the page.
   -- ============================================================
+  if edit.errors.save then
+    custom_provider_inline_msg(edit.errors.save, TK.red)
+    Dummy(RA.ctx, 1, RA.SC(6))
+  end
   local test_active = api_keys.custom_conn_test and api_keys.custom_conn_test.active
   local test_btn_lbl = test_active
     and UI.t("settings.custom.action.cancel_test", nil, "Cancel Test")
@@ -14741,7 +17310,9 @@ function Render.custom_llm_screen()
     local has_format_error = false
 
     local endpoint_t = (edit.endpoint        or ""):match("^%s*(.-)%s*$") or ""
-    endpoint_t = Custom.normalize_chat_endpoint(endpoint_t)
+    endpoint_t = native_mode
+      and Custom.normalize_native_endpoint(endpoint_t, edit.record_format)
+      or Custom.normalize_chat_endpoint(endpoint_t)
     if edit.endpoint ~= endpoint_t then edit.endpoint = endpoint_t end
     local timeout_t  = (edit.timeout         or ""):match("^%s*(.-)%s*$") or ""
     local ctimeout_t = (edit.connect_timeout or ""):match("^%s*(.-)%s*$") or ""
@@ -14755,10 +17326,14 @@ function Render.custom_llm_screen()
       local id_t     = (row.id             or ""):match("^%s*(.-)%s*$") or ""
       local pin_t    = (row.price_in       or ""):match("^%s*(.-)%s*$") or ""
       local pcache_t = (row.price_cache_r  or ""):match("^%s*(.-)%s*$") or ""
+      local pcache_w_t = (row.price_cache_w or ""):match("^%s*(.-)%s*$") or ""
       local pout_t   = (row.price_out      or ""):match("^%s*(.-)%s*$") or ""
       local ctx_t2   = (row.context_window or ""):match("^%s*(.-)%s*$") or ""
       local notes_raw = row.notes or ""
       local body_raw  = row.extra_body or ""
+      local chat_token_limit_field = native_mode
+        and edit.record_format == "chat_completions"
+        and row.chat_token_limit_field or nil
       -- Has the user typed anything meaningful on this row besides the id?
       -- Used for two things: feeding any_row_input (form-is-being-filled-out
       -- gate), and surfacing an explicit "Model Identifier required" error
@@ -14769,25 +17344,57 @@ function Render.custom_llm_screen()
       local row_typed = (pin_t    ~= "" and pin_t    ~= "0")
                         or (pout_t   ~= "" and pout_t   ~= "0")
                         or (pcache_t ~= "" and pcache_t ~= "0")
+                        or (pcache_w_t ~= "" and pcache_w_t ~= "0")
                         or (ctx_t2   ~= "" and ctx_t2   ~= tostring(CUSTOM_DEFAULT_CTX))
                         or (notes_raw ~= "")
                         or (body_raw  ~= "")
+                        or (native_mode and row.supports_image_input == true)
+                        or (native_mode
+                          and edit.record_format == "chat_completions"
+                          and row.chat_token_limit_field
+                            == "max_completion_tokens")
       if id_t ~= "" or row_typed then
         any_row_input = true
       end
       if id_t ~= "" then
-        local pin_n    = tonumber(pin_t    == "" and "0" or pin_t)
-        local pcache_n = tonumber(pcache_t == "" and "0" or pcache_t)
-        local pout_n   = tonumber(pout_t   == "" and "0" or pout_t)
+        local pin_n, pcache_n, pcache_w_n, pout_n
+        if native_mode then
+          pin_n = pin_t ~= "" and tonumber(pin_t) or nil
+          pcache_n = pcache_t ~= "" and tonumber(pcache_t) or nil
+          pcache_w_n = pcache_w_t ~= "" and tonumber(pcache_w_t) or nil
+          pout_n = pout_t ~= "" and tonumber(pout_t) or nil
+        else
+          pin_n = tonumber(pin_t == "" and "0" or pin_t)
+          pcache_n = tonumber(pcache_t == "" and "0" or pcache_t)
+          pcache_w_n = tonumber(pcache_w_t == "" and "0" or pcache_w_t)
+          pout_n = tonumber(pout_t == "" and "0" or pout_t)
+        end
         local ctx_n    = tonumber(ctx_t2   == "" and tostring(CUSTOM_DEFAULT_CTX) or ctx_t2)
         local notes_clean, notes_err = Custom.validate_notes(notes_raw)
         local body_clean,  body_err  = Custom.validate_extra_body(body_raw)
-        if not pin_n or pin_n < 0 then
+        if native_mode and not CustomNative.model_id_is_valid(id_t) then
+          edit.errors["model_" .. ri] = UI.t(
+            "settings.custom.error.native_model_id", nil,
+            "Model IDs must use 1 to 256 printable ASCII characters without spaces.")
+          has_format_error = true
+        elseif native_mode and ((pin_t == "") ~= (pout_t == "")) then
+          edit.errors["model_" .. ri] = UI.t(
+            "settings.custom.error.native_price_pair", nil,
+            "Enter both input and output prices, or leave both blank.")
+          has_format_error = true
+        elseif native_mode
+            and not CustomNative.chat_token_limit_field_is_valid(
+              chat_token_limit_field, edit.record_format) then
+          edit.errors["model_" .. ri] = UI.t(
+            "settings.custom.error.chat_token_limit_field", nil,
+            "Choose a supported Chat Completions token-limit field.")
+          has_format_error = true
+        elseif pin_t ~= "" and (not pin_n or pin_n < 0) then
           edit.errors["model_" .. ri] =
             UI.t("settings.custom.error.price_in", nil,
               "Input price (cache miss) must be a number >= 0.")
           has_format_error = true
-        elseif not pcache_n or pcache_n < 0 then
+        elseif pcache_t ~= "" and (not pcache_n or pcache_n < 0) then
           edit.errors["model_cache_" .. ri] =
             UI.t("settings.custom.error.price_cache", nil,
               "Cache-hit price must be a number >= 0.")
@@ -14795,7 +17402,16 @@ function Render.custom_llm_screen()
             UI.t("settings.custom.error.details_reopen", nil,
               "Details has errors - reopen to fix.")
           has_format_error = true
-        elseif not pout_n or pout_n < 0 then
+        elseif pcache_w_t ~= ""
+            and (not pcache_w_n or pcache_w_n < 0) then
+          edit.errors["model_cache_write_" .. ri] =
+            UI.t("settings.custom.error.price_cache_write", nil,
+              "Cache-write price must be a number >= 0.")
+          edit.errors["model_" .. ri] =
+            UI.t("settings.custom.error.details_reopen", nil,
+              "Details has errors - reopen to fix.")
+          has_format_error = true
+        elseif pout_t ~= "" and (not pout_n or pout_n < 0) then
           edit.errors["model_" .. ri] =
             UI.t("settings.custom.error.price_out", nil,
               "Output price must be a number >= 0.")
@@ -14812,7 +17428,7 @@ function Render.custom_llm_screen()
           -- "reopen Details" hint required.
           edit.errors["model_notes_" .. ri] = notes_err
           has_format_error = true
-        elseif body_err then
+        elseif not native_mode and body_err then
           edit.errors["model_body_" .. ri] = body_err
           edit.errors["model_" .. ri] =
             UI.t("settings.custom.error.details_reopen", nil,
@@ -14823,10 +17439,17 @@ function Render.custom_llm_screen()
             id             = id_t,
             price_in       = pin_n,
             price_cache_r  = pcache_n,
+            price_cache_w  = pcache_w_n,
             price_out      = pout_n,
             context_window = ctx_n,
             notes          = notes_clean or "",
-            extra_body     = body_clean  or "",
+            extra_body     = native_mode and "" or (body_clean or ""),
+            supports_image_input = native_mode
+              and row.supports_image_input == true or false,
+            chat_token_limit_field = chat_token_limit_field,
+            _provider_source_index = row._provider_source_index,
+            _native_source = native_mode and row._native_source
+              and Store._copy_json_value(row._native_source) or nil,
           }
         end
       elseif row_typed then
@@ -14844,9 +17467,17 @@ function Render.custom_llm_screen()
     end
 
     local any_field = label_t ~= "" or endpoint_t ~= "" or any_row_input or key_t ~= ""
-    local headers_arr, headers_err = Custom.parse_headers_text(edit.headers_text or "")
+    local headers_arr, headers_err = {}, nil
+    if not native_mode then
+      headers_arr, headers_err = Custom.parse_headers_text(
+        edit.headers_text or "")
+    end
     if headers_err then any_field = true end
-    local prov_body_clean, prov_body_err = Custom.validate_extra_body(edit.extra_body or "")
+    local prov_body_clean, prov_body_err = "", nil
+    if not native_mode then
+      prov_body_clean, prov_body_err = Custom.validate_extra_body(
+        edit.extra_body or "")
+    end
     if prov_body_err or (prov_body_clean and prov_body_clean ~= "") then
       any_field = true
     end
@@ -14866,7 +17497,16 @@ function Render.custom_llm_screen()
         edit.errors.endpoint = UI.t("settings.custom.error.endpoint_chars", nil,
           "Endpoint may not contain quotes, backticks, or control characters.")
         has_format_error = true
-      elseif not Custom.endpoint_is_chat_completions(endpoint_t) then
+      elseif native_mode then
+        local endpoint_info, endpoint_reason = Custom.admit_native_endpoint(
+          endpoint_t, edit.record_format, edit.profile_kind,
+          edit.private_network_origin)
+        if not endpoint_info then
+          edit.errors.endpoint = Custom.native_endpoint_error(endpoint_reason)
+          has_format_error = true
+        end
+      elseif not native_mode
+          and not Custom.endpoint_is_chat_completions(endpoint_t) then
         edit.errors.endpoint = UI.t(
           "settings.custom.error.endpoint_chat_completions", nil,
           "Use the full chat-completions URL, for example http://localhost:1234/v1/chat/completions.")
@@ -14901,6 +17541,14 @@ function Render.custom_llm_screen()
               Custom.MIN_CONNECT, Custom.MAX_CONNECT))
         has_format_error = true
       end
+      if native_mode and timeout_n and ctimeout_n
+          and (timeout_n ~= math_floor(timeout_n)
+            or ctimeout_n ~= math_floor(ctimeout_n)
+            or timeout_n < ctimeout_n) then
+        edit.errors.timeout = UI.t("settings.custom.error.native_timeouts", nil,
+          "Timeouts must be whole seconds. The request timeout must be at least the connect timeout.")
+        has_format_error = true
+      end
       if headers_err then
         edit.errors.headers = headers_err
         has_format_error = true
@@ -14917,6 +17565,11 @@ function Render.custom_llm_screen()
           has_format_error = true
         end
       end
+      if native_mode and edit.auth_mode == "bearer" and key_t == "" then
+        edit.errors.key = UI.t("settings.custom.error.native_key_required", nil,
+          "This provider requires an API key.")
+        has_format_error = true
+      end
 
       if not has_format_error then
         -- Remember which provider was active before saving so we can
@@ -14925,19 +17578,27 @@ function Render.custom_llm_screen()
         -- id lookup on the re-registered PROVIDERS table snaps
         -- prefs.provider_idx back onto the right entry.
         local was_active_id = PROVIDERS.active() and PROVIDERS.active().id
-        local record = {
-          id                   = edit.id,
-          endpoint             = endpoint_t,
-          models               = parsed_models,
-          timeout_secs         = timeout_n or CUSTOM_DEFAULT_TIMEOUT,
-          connect_timeout_secs = ctimeout_n or Custom.DEFAULT_CONNECT,
-          allow_insecure       = edit.allow_insecure and true or false,
-          model_prefix         = prefix_t,
-          extra_headers        = headers_arr or {},
-          extra_body           = prov_body_clean or "",
-          label                = label_t,  -- validated non-empty above
-        }
-        Custom.upsert_record(record)
+        local record
+        if native_mode then
+          record = api_keys.build_native_provider_record(edit, label_t,
+            endpoint_t, timeout_n or CUSTOM_DEFAULT_TIMEOUT,
+            ctimeout_n or Custom.DEFAULT_CONNECT, parsed_models)
+        else
+          record = {
+            id = edit.id,
+            endpoint = endpoint_t,
+            models = parsed_models,
+            timeout_secs = timeout_n or CUSTOM_DEFAULT_TIMEOUT,
+            connect_timeout_secs = ctimeout_n or Custom.DEFAULT_CONNECT,
+            allow_insecure = edit.allow_insecure and true or false,
+            model_prefix = prefix_t,
+            extra_headers = headers_arr or {},
+            extra_body = prov_body_clean or "",
+            label = label_t,
+          }
+        end
+        local record_saved = api_keys.persist_custom_provider_record(record, edit)
+        if record_saved then
         -- Clamp the persisted model_idx for this provider so it can never
         -- point past the (possibly-shrunk) models list. The runtime loader
         -- already clamps at read time; this just keeps the staged selection
@@ -14959,7 +17620,10 @@ function Render.custom_llm_screen()
             Store.remember_model_idx({ id = edit.id }, parsed_models, cur)
           end
         end
-        if key_t ~= "" then
+        if native_mode and edit.auth_mode == "none" then
+          Key.clear("api_key_" .. edit.id)
+          S.api_key_map[edit.id] = nil
+        elseif key_t ~= "" then
           Key.save(key_t, "api_key_" .. edit.id)
           S.api_key_map[edit.id] = key_t
         elseif edit.orig_key and edit.orig_key ~= "" then
@@ -15004,6 +17668,7 @@ function Render.custom_llm_screen()
         api_keys.screen      = "custom_providers"
         UI.show_float_toast(UI.t("settings.custom.toast.saved", nil,
           "Provider saved"), "ok")
+        end
       end
     else
       -- Nothing to save -- just go back to the list.
@@ -17147,14 +19812,16 @@ Attach.render_ui = function(fhs, avail_w)
   if ImGui.ImGui_BeginPopup(RA.ctx, "##attach_menu") then
     if ImGui.ImGui_MenuItem(RA.ctx,
         UI.t("attach.menu.attach_file", nil, "Attach File")) then
-      if reaper.JS_Dialog_BrowseForOpenFiles then
-        local ret, paths = reaper.JS_Dialog_BrowseForOpenFiles(
+      local open_dialog = RA.preferred_platform_api(
+        "MBH_Dialog_BrowseForOpenFiles", "JS_Dialog_BrowseForOpenFiles")
+      if open_dialog then
+        local ret, paths = open_dialog(
           UI.t("attach.dialog.title", nil, "Attach files"), "", "",
           "All files\0*.*\0",
           true)
         if ret == 1 and paths and paths ~= "" then
           local lines = {}
-          for line in paths:gmatch("[^\n]+") do lines[#lines+1] = line end
+          for line in paths:gmatch("[^\n%z]+") do lines[#lines+1] = line end
           if #lines == 1 then
             Attach.file(lines[1])
           else
@@ -17169,8 +19836,7 @@ Attach.render_ui = function(fhs, avail_w)
         end
       else
         S.attach_error = UI.t("attach.error.file_picker", nil,
-          "File picker requires js_ReaScriptAPI.\n"
-          .. "Install via ReaPack (Extensions > ReaPack > Browse Packages).")
+          "The file picker is unavailable. Finish installing ReaAssist or install js_ReaScriptAPI, then restart REAPER.")
         S.attach_error_time = time_precise()
       end
     end
@@ -17656,6 +20322,8 @@ function Render.main_window()
       api_keys.saved_theme                = nil
       api_keys.saved_update_check         = nil
       api_keys.saved_auto_backup          = nil
+      api_keys.saved_stream_responses     = nil
+      api_keys.saved_reasoning_display_mode = nil
       api_keys.saved_chat_font_idx        = nil
       api_keys.saved_reply_language_idx   = nil
       api_keys.saved_include_snapshot     = nil
@@ -17712,6 +20380,8 @@ function Render.main_window()
       Render.custom_llm_screen()
     elseif api_keys.screen == "custom_providers" then
       Render.custom_providers_screen()
+    elseif api_keys.screen == "openrouter" then
+      Render.openrouter_screen()
     elseif S.show_help then
       Render.help_screen()
     elseif S.show_bug_report then
@@ -17805,6 +20475,8 @@ function Render.main_window()
     local MODE_ROW_H     = RA.SC(22)
     local MODE_ROW_GAP   = RA.SC(10)                         -- gap above AND below the mode row
     local FOOTER_H       = RA.SC(32)
+    local status_docked = UI.should_dock_request_status(
+      S.status, S.retry_scheduled, deep_scan.active, S.resolve_popup)
     local bottom_reserve = PROMPT_TOP_PAD + V5_PROMPT_H
                          + MODE_ROW_GAP + MODE_ROW_H + MODE_ROW_GAP
                          + FOOTER_H
@@ -17814,6 +20486,7 @@ function Render.main_window()
                          -- (the bg still extends to win_bottom, so this reads
                          -- as breathing room under the credits row).
                          + RA.SC(31)
+                         + (status_docked and RA.SC(70) or 0)
     if #S.attachments > 0 then
       bottom_reserve = bottom_reserve + math_floor(fhs * 1.5)
     end
@@ -17835,6 +20508,14 @@ function Render.main_window()
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), 0x00000000)
     local chat_visible = ImGui.ImGui_BeginChild(RA.ctx, "chat", avail_w, chat_h)
     if chat_visible then
+    local chat_hovered = ImGui.ImGui_IsWindowHovered(RA.ctx,
+      ImGui.ImGui_HoveredFlags_ChildWindows())
+    local chat_wheel_y = ImGui.ImGui_GetMouseWheel(RA.ctx)
+    UI.update_chat_auto_follow(
+      ImGui.ImGui_GetScrollY(RA.ctx),
+      ImGui.ImGui_GetScrollMaxY(RA.ctx),
+      chat_hovered,
+      chat_wheel_y)
     -- Shadow avail_w with the INNER content region so layout accounts for the
     -- vertical scrollbar when it's present (otherwise the right cards get
     -- clipped by the scrollbar when messages are scrolled back to the top).
@@ -17979,6 +20660,7 @@ function Render.main_window()
                 if ImGui.ImGui_IsItemClicked(RA.ctx) then
                   S.from_card = true
                   S.input_buf = ""
+                  UI.resume_chat_auto_follow(false)
                   Net.send_to_api(prompt)
                   S.scroll_to_bottom = false
                   S.scroll_to_top = false
@@ -18488,11 +21170,19 @@ function Render.main_window()
              or msg._details_fm_resp_time ~= msg.response_time
              or msg._details_fm_cache_r   ~= msg.tok_cache_read
              or msg._details_fm_cache_c   ~= msg.tok_cache_create
+             or msg._details_fm_usage_quality ~= msg.usage_accounting_quality
              or msg._details_fm_thinking  ~= msg.thinking_label
              or msg._details_fm_fx_cache  ~= msg.fx_cache_label
              or msg._details_fm_api_calls ~= msg.api_calls
              or msg._details_fm_model_calls ~= msg.model_calls
-             or msg._details_fm_transport_retries ~= msg.transport_retries then
+             or msg._details_fm_transport_retries ~= msg.transport_retries
+             or msg._details_fm_actual_cost_count
+                ~= #(msg.actual_cost_calls or {})
+             or msg._details_fm_route ~= msg.routing_provenance
+             or msg._details_fm_response_cache_count
+                ~= #(msg.response_cache_calls or {})
+             or msg._details_fm_transport_event_count
+                ~= #(msg.transport_events or {}) then
             if msg._ctx_display_src ~= msg.ctx_label then
               msg._ctx_display_src = msg.ctx_label
               msg._ctx_display     = (msg.ctx_label
@@ -18508,7 +21198,10 @@ function Render.main_window()
               end
               field_map["Model"] = msg._model_display
             end
-            if msg.tok_in and msg.cost and (msg.cost > 0 or msg.free_tier) then
+            if msg.cost_unknown then
+              field_map["Est. Cost"] = UI.t("details.value.cost_unknown", nil,
+                "Unknown")
+            elseif msg.tok_in and msg.cost and (msg.cost > 0 or msg.free_tier) then
               -- "~" prefix marks the value as approximate (matches the "Est."
               -- in the label -- belt-and-suspenders so scanning either side
               -- makes the estimation clear). Free-tier Gemini exchanges cost
@@ -18540,6 +21233,7 @@ function Render.main_window()
             if msg.response_time then
               field_map["Time"] = str_format("%.1fs", msg.response_time)
             end
+            field_map["Cache Hit/Miss"] = UI.cache_hit_miss_summary(msg)
             do
               local cr = msg.tok_cache_read   or 0
               local cc = msg.tok_cache_create or 0
@@ -18576,6 +21270,54 @@ function Render.main_window()
             if (msg.transport_retries or 0) > 0 then
               field_map["Transport Retries"] = tostring(msg.transport_retries)
             end
+            if type(msg.routing_provenance) == "table" then
+              local route = msg.routing_provenance
+              local provider = tostring(route.selected_provider or "")
+              local endpoint = tostring(route.selected_endpoint or "")
+              local endpoint_part = endpoint ~= "" and (" / " .. endpoint) or ""
+              local fallback = route.fallback_occurred
+                and UI.t("details.value.yes", nil, "yes")
+                or UI.t("details.value.no", nil, "no")
+              local route_text = UI.t("details.value.provider_route", {
+                provider = provider,
+                endpoint = endpoint_part,
+                attempt = tostring(route.attempt or 1),
+                fallback = fallback,
+              }, provider .. endpoint_part .. " / attempt "
+                .. tostring(route.attempt or 1) .. " / fallback " .. fallback)
+              field_map["Provider Route"] = route_text
+            end
+            local cache_summary = response_cache_summary(
+              msg.response_cache_calls)
+            if cache_summary then
+              field_map["Response Cache"] = cache_summary
+            end
+            local request_path = request_path_summary(msg.transport_events)
+            if request_path then field_map["Request Path"] = request_path end
+            local api_protocol = api_protocol_summary(msg.transport_events)
+            if api_protocol then field_map["API Protocol"] = api_protocol end
+            if type(msg.actual_cost_calls) == "table"
+                and #msg.actual_cost_calls > 0 then
+              local exact_costs = {}
+              for _, actual in ipairs(msg.actual_cost_calls) do
+                local display_decimal = type(actual) == "table"
+                  and MODELS.format_exact_cost_decimal(actual.decimal) or nil
+                if type(actual) == "table" and actual.currency == "USD"
+                    and (actual.source == "provider_reported"
+                      or actual.source == "provider_cache_header_derived")
+                    and display_decimal then
+                  exact_costs[#exact_costs + 1] = "$"
+                    .. display_decimal
+                end
+              end
+              if #exact_costs == 1 then
+                field_map["Actual Cost"] = exact_costs[1] .. " USD"
+              elseif #exact_costs > 1 then
+                field_map["Actual Cost"] = table.concat(exact_costs, " + ")
+                  .. " USD (" .. tostring(#exact_costs)
+                  .. " calls; exact total not calculated)"
+              end
+            end
 
             -- Per-field value colour overrides. Est. Cost and Est. Total
             -- use a darkened accent -- the "receipt" lines visually weighted
@@ -18587,6 +21329,9 @@ function Render.main_window()
             local accent_dk = UI.lerp_u32(TK.accent, 0x000000FF, 0.18)
             local color_map = {}
             if field_map["Est. Cost"] then color_map["Est. Cost"] = accent_dk end
+            if field_map["Actual Cost"] then
+              color_map["Actual Cost"] = accent_dk
+            end
             color_map["Est. Total"] = accent_dk
 
             msg._details_field_map    = field_map
@@ -18600,11 +21345,18 @@ function Render.main_window()
             msg._details_fm_resp_time = msg.response_time
             msg._details_fm_cache_r   = msg.tok_cache_read
             msg._details_fm_cache_c   = msg.tok_cache_create
+            msg._details_fm_usage_quality = msg.usage_accounting_quality
             msg._details_fm_thinking  = msg.thinking_label
             msg._details_fm_fx_cache  = msg.fx_cache_label
             msg._details_fm_api_calls = msg.api_calls
             msg._details_fm_model_calls = msg.model_calls
             msg._details_fm_transport_retries = msg.transport_retries
+            msg._details_fm_actual_cost_count = #(msg.actual_cost_calls or {})
+            msg._details_fm_route = msg.routing_provenance
+            msg._details_fm_response_cache_count =
+              #(msg.response_cache_calls or {})
+            msg._details_fm_transport_event_count =
+              #(msg.transport_events or {})
           end
           local field_map = msg._details_field_map
           local color_map = msg._details_color_map
@@ -18665,7 +21417,8 @@ function Render.main_window()
           local rows = {}
           for _, name in ipairs(row_order) do
             local hide = hide_inflight
-              and (name == "Time" or name == "Est. Cost" or name == "Est. Total")
+                and (name == "Time" or name == "Actual Cost"
+                  or name == "Est. Cost" or name == "Est. Total")
             if not hide then
               local value, suffix
               if name == "Est. Total" then
@@ -18919,7 +21672,102 @@ function Render.main_window()
         end
 
         if msg.content and msg.content ~= "" then
-          UI.selectable_text(msg.content, "##amsg_" .. i, content_w, COL.CHAT_TEXT)
+          if msg.engine_provisional == true then
+            local stream_fill = UI.lerp_u32(TK.card, TK.accent_soft, 0.18)
+            local stream_border = UI.lerp_u32(TK.border_str, TK.accent, 0.30)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), stream_fill)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(), stream_border)
+            PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildRounding(), RA.SC(6))
+            PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildBorderSize(), 1)
+            PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(),
+              RA.SC(12), RA.SC(10))
+            local stream_card_open = ImGui.ImGui_BeginChild(RA.ctx,
+              "##engine_stream_card_" .. i, content_w, 0,
+              ImGui.ImGui_ChildFlags_AutoResizeY()
+                | ImGui.ImGui_ChildFlags_Borders())
+            if stream_card_open then
+              local stream_content_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+              UI.selectable_text(msg.content, "##amsg_" .. i,
+                stream_content_w, COL.CHAT_TEXT)
+              ImGui.ImGui_EndChild(RA.ctx)
+            end
+            ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+            PopStyleColor(RA.ctx, 2)
+          else
+            UI.selectable_text(msg.content, "##amsg_" .. i,
+              content_w, COL.CHAT_TEXT)
+          end
+        end
+
+        local reasoning_mode = Net.reasoning_display_mode()
+        local provider_reasoning = reasoning_mode == "provider_visible"
+          and type(msg.provider_reasoning) == "string"
+          and msg.provider_reasoning or nil
+        if provider_reasoning and provider_reasoning ~= "" then
+          if msg.provider_reasoning_open == nil then
+            msg.provider_reasoning_open = true
+          end
+          Dummy(RA.ctx, 1, RA.SC(10))
+          ImGui.ImGui_PushID(RA.ctx, "provider_reasoning_" .. tostring(i))
+          msg.provider_reasoning_open = UI.v5_section_label(
+            UI.t("message.provider_reasoning.label", nil,
+              "Provider reasoning"),
+            msg.provider_reasoning_open)
+          ImGui.ImGui_PopID(RA.ctx)
+          if msg.provider_reasoning_open then
+            UI.selectable_text(provider_reasoning,
+              "##provider_reasoning_text_" .. i, content_w, TK.text_muted)
+            if msg.provider_reasoning_truncated then
+              Dummy(RA.ctx, 1, RA.SC(4))
+              PushFont(RA.ctx, FONT.mono_reg, RA.SC(9))
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
+              Text(RA.ctx, UI.t("message.provider_reasoning.truncated", nil,
+                "Provider reasoning shortened for display."))
+              PopStyleColor(RA.ctx)
+              PopFont(RA.ctx)
+            end
+          end
+        end
+
+        local reasoning_summary = reasoning_mode ~= "off"
+          and type(msg.provider_reasoning_summary) == "string"
+          and msg.provider_reasoning_summary or nil
+        if reasoning_summary and reasoning_summary ~= "" then
+          if msg.provider_reasoning_summary_open == nil then
+            msg.provider_reasoning_summary_open = true
+          end
+          Dummy(RA.ctx, 1, RA.SC(10))
+          ImGui.ImGui_PushID(RA.ctx, "reasoning_summary_" .. tostring(i))
+          msg.provider_reasoning_summary_open = UI.v5_section_label(
+            UI.t("message.reasoning_summary.label", nil,
+              "Reasoning summary"),
+            msg.provider_reasoning_summary_open)
+          ImGui.ImGui_PopID(RA.ctx)
+          if msg.provider_reasoning_summary_open then
+            UI.selectable_text(reasoning_summary,
+              "##reasoning_summary_text_" .. i, content_w, TK.text_muted)
+            if msg.provider_reasoning_summary_truncated then
+              Dummy(RA.ctx, 1, RA.SC(4))
+              PushFont(RA.ctx, FONT.mono_reg, RA.SC(9))
+              PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
+              Text(RA.ctx, UI.t("message.reasoning_summary.truncated", nil,
+                "Summary shortened for display."))
+              PopStyleColor(RA.ctx)
+              PopFont(RA.ctx)
+            end
+          end
+        end
+
+        local retry_label, retry_tooltip =
+          UI.validation_retry_disclosure(msg)
+        if retry_label then
+          Dummy(RA.ctx, 1, RA.SC(6))
+          PushFont(RA.ctx, FONT.mono_med, RA.SC(10))
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
+          Text(RA.ctx, retry_label)
+          PopStyleColor(RA.ctx)
+          PopFont(RA.ctx)
+          UI.tooltip(retry_tooltip)
         end
 
         if msg.local_answer
@@ -19157,6 +22005,7 @@ function Render.main_window()
                 end
                 if last_user_text then
                   msg.recovery_action = "retry_same_model"
+                  UI.resume_chat_auto_follow(true)
                   Net.send_to_api(last_user_text)
                 end
               end
@@ -19452,6 +22301,7 @@ function Render.main_window()
                   S.backup_warn_code = nil
                   S.backup_warn_jsfx = nil
                   S.backup_warn_idx = nil
+                  S.backup_warn_message = nil
                   S.backup_warn_typed_idx = i
                   S.open_backup_warn = true
                 elseif UI.show_float_toast then
@@ -19549,6 +22399,21 @@ function Render.main_window()
               PopStyleColor(RA.ctx, 5)
               ImGui.ImGui_PopStyleVar(RA.ctx, 3)
             end
+          end
+          -- Round thirty, Z-01. No typed-action operation inserts a plug-in,
+          -- so a request that asked for one gets this notice instead of a
+          -- silent success. It is outside the summary branch above because a
+          -- plan with no rendered summary drops the plug-in just as quietly.
+          -- Both interfaces read the one record the guard wrote, so the
+          -- spoken and the visual answer name the same plug-ins.
+          local unserved_notice = Code.fx_requested_unserved_notice
+            and Code.fx_requested_unserved_notice(msg.fx_requested_unserved,
+              UI.t, msg.fx_requested_unserved_kind) or nil
+          if unserved_notice then
+            ImGui.ImGui_Spacing(RA.ctx)
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
+            ImGui.ImGui_TextWrapped(RA.ctx, unserved_notice)
+            PopStyleColor(RA.ctx)
           end
         end
 
@@ -19743,13 +22608,18 @@ function Render.main_window()
           local lua_artifact = nil
           local run_blocked = false
           local profile_guard_run_blocked = is_lua
-            and (msg.auto_run_block_reason == "plugin_profile_guard_validator"
-              or msg.auto_run_block_reason
-                == "fx_param_provenance_validator")
+            and Code.auto_run_block_reason_blocks_manual_lua(msg.auto_run_block_reason)
             and not msg.auto_ran
           local profile_guard_block_message = profile_guard_run_blocked
-            and UI.t("code.plugin_profile_guard_blocked", nil,
+            and ((msg.auto_run_block_reason == "no_guess_mapping_validator"
+                or msg.auto_run_block_reason == "no_guess_execution_contract_invalid")
+              and Code.no_guess_block_message(msg.auto_run_block_reason)
+              or ((msg.auto_run_block_reason == "plugin_profile_guard_validator"
+                or msg.auto_run_block_reason == "fx_param_provenance_validator")
+              and UI.t("code.plugin_profile_guard_blocked", nil,
               "ReaAssist blocked Run because it could not verify the plug-in parameter mapping. Adjust take/item FX manually. For track FX, ask ReaAssist to regenerate the script.")
+              or UI.t("code.run.validation_blocked", nil,
+                "Validation blocked this code. Resend the request before running it.")))
             or nil
           if is_lua then
             if msg._lua_artifact_src ~= msg.code_block then
@@ -19782,6 +22652,13 @@ function Render.main_window()
               auto_run_block_warning = UI.t(
                 "auto_run.blocked.fx_identifier", nil,
                 "Auto-run blocked: the script did not use the exact preferred FX identifier. Review the TrackFX_AddByName plugin names before running manually.")
+            elseif reason == "fx_ident_validator" then
+              -- Name the plug-ins in the completed response too, not only in
+              -- the separate error entry above it.
+              auto_run_block_warning = Code.fx_identifier_block_message(
+                msg.fx_ident_block, UI.t)
+                or UI.t("auto_run.blocked.validator", nil,
+                  "Auto-run blocked: ReaAssist validation flagged this script. Review it before running manually.")
             elseif reason == "proq4_bell_slope_validator" then
               auto_run_block_warning = UI.t(
                 "auto_run.blocked.proq4_bell_slope", nil,
@@ -19810,6 +22687,9 @@ function Render.main_window()
               auto_run_block_warning = UI.t(
                 "auto_run.blocked.project_changed", nil,
                 "Auto-run was paused because the active project changed while ReaAssist prepared the response. Return to the intended project tab, or review the code and use Run to apply it deliberately to the current project.")
+            elseif reason == "no_guess_mapping_validator"
+                or reason == "no_guess_execution_contract_invalid" then
+              auto_run_block_warning = Code.no_guess_block_message(reason)
             elseif reason == "plugin_profile_guard_validator"
                 or reason == "fx_param_provenance_validator"
                 or reason == "typed_action_lua_generation_only" then
@@ -19881,16 +22761,25 @@ function Render.main_window()
             local run_label = "\xe2\x96\xb6 " .. UI.t("common.run", nil, "Run")
             if ImGui.ImGui_Button(RA.ctx, run_label .. "##run_" .. i,
                 action_btn_w(run_label, RA.SC(70), RA.SC(92)), 0) then
+              local run_allowed, run_reason, run_message = true
+              if not run_blocked then
+                run_allowed, run_reason, run_message = Code.preflight_generated_lua_execution(
+                  msg.code_block, Code.generated_lua_run_context(msg, i, msg.code_block))
+              end
               if run_blocked then
                 msg.run_blocked = profile_guard_block_message
                   or Code.lua_artifact_block_message(lua_artifact)
                 Log.add_error(msg.run_blocked)
                 if i == #S.display_messages then S.pending_code = nil end
                 S.refocus_prompt = true
+              elseif not run_allowed then
+                msg.auto_run_block_reason = run_reason
+                msg.run_blocked = run_message
               elseif risk_warning then
                 -- Risky code: require explicit user confirmation before executing.
                 S.risky_warn_code   = msg.code_block
                 S.risky_warn_idx    = i
+                S.risky_warn_message = msg
                 S.risky_warn_detail = risk_warning
                 S.open_risky_warn   = true
               elseif prefs.auto_backup then
@@ -19898,10 +22787,12 @@ function Render.main_window()
                 if berr == "unsaved" then
                   S.backup_warn_code = msg.code_block
                   S.backup_warn_idx  = i
+                  S.backup_warn_message = msg
                   S.open_backup_warn = true
                 elseif Code.safety_backup_can_proceed(berr) then
                   S.status = "running"
-                  local ok = Code.run(msg.code_block)
+                  local ok = Code.run(msg.code_block, nil, msg.conversation_delete,
+                    Code.generated_lua_run_context(msg, i, msg.code_block))
                   Code.bind_pending_deferred_run(i, nil, false, nil)
                   Code.apply_run_result_to_message(msg, ok, "lua",
                     msg.code_block, false)
@@ -19914,7 +22805,8 @@ function Render.main_window()
                 end
               else
                 S.status = "running"
-                local ok = Code.run(msg.code_block)
+                local ok = Code.run(msg.code_block, nil, msg.conversation_delete,
+                  Code.generated_lua_run_context(msg, i, msg.code_block))
                 Code.bind_pending_deferred_run(i, nil, false, nil)
                 Code.apply_run_result_to_message(msg, ok, "lua",
                   msg.code_block, false)
@@ -20066,13 +22958,13 @@ function Render.main_window()
             end
             if ImGui.ImGui_Button(RA.ctx, save_lbl .. "##save_" .. i,
                 save_w, 0) then
-              if not reaper.JS_Dialog_BrowseForSaveFile and not S.js_hint_shown then
+              local save_dialog = RA.preferred_platform_api(
+                "MBH_Dialog_BrowseForSaveFile", "JS_Dialog_BrowseForSaveFile")
+              if not save_dialog and not S.js_hint_shown then
                 S.js_hint_shown = true
                 reaper.ShowMessageBox(
                   UI.t("code.save_browser_tip", nil,
-                    "For a full file browser when saving scripts, install\n"
-                    .. "js_ReaScriptAPI via ReaPack (Extensions menu).\n\n"
-                    .. "The basic filename prompt will open now."),
+                    "The full file browser is unavailable. You can enter a filename now. To enable the browser, finish installing ReaAssist or install js_ReaScriptAPI through ReaPack, then restart REAPER."),
                   UI.t("code.save_browser_tip.title", nil,
                     "ReaAssist - Tip"), 0)
               end
@@ -20364,21 +23256,55 @@ function Render.main_window()
             and fx_insert_evidence.failed_names or nil
           local has_fx_insert_failures = type(failed_fx_names) == "table"
             and #failed_fx_names > 0
+          local fx_reuse_evidence = msg.fx_insert_reuse_evidence
+          local reused_fx_names = type(fx_reuse_evidence) == "table"
+            and fx_reuse_evidence.names or nil
+          local has_fx_insert_reuse = type(reused_fx_names) == "table"
+            and #reused_fx_names > 0
+          -- The substitution notice states only what ran: it is built from the
+          -- wrapper's record of successful inserts, so a failed insert, an
+          -- untaken fallback, an unrun script and a repeated insert cannot
+          -- produce or duplicate it.
+          local substitution_notice = Code.fx_preference_substitution_notice(
+            msg.fx_preference_substitutions, UI.t)
+          -- ROUND THIRTY-TWO, AA-02: the plug-in the script that ran never
+          -- inserted. Code.run wrote the record only for a run that completed
+          -- with no accepted insert call and no AddByName in the script, so
+          -- this renders beside the other run notices rather than in the
+          -- typed-action block above, which no script reaches.
+          local script_unserved_notice = msg.fx_requested_unserved_kind
+              == "script"
+            and Code.fx_requested_unserved_notice
+            and Code.fx_requested_unserved_notice(msg.fx_requested_unserved,
+              UI.t, "script") or nil
           local interval_overlapped = type(msg.change_evidence) == "table"
             and msg.change_evidence.attribution == "interval_overlapped"
           local has_parameter_warning =
             msg.parameter_change_status == "partially_changed"
             or msg.parameter_change_status == "unchanged"
             or msg.parameter_change_status == "returned_to_initial"
+          local midi_notice = Code.midi_note_result_notice(msg.midi_note_change_evidence, UI.t)
           local has_generic_no_change = not has_fx_insert_failures
+            and msg.midi_note_change_evidence == nil
+            and not has_fx_insert_reuse
             and not has_parameter_warning
             and msg.parameter_change_status ~= "changed"
+            and msg.host_value_change_status ~= "changed"
             and msg.observable_change_status == "unchanged"
           if msg.run_status == "ran_ok"
-              and (has_fx_insert_failures or has_parameter_warning
+              and (has_fx_insert_failures or has_fx_insert_reuse
+                or has_parameter_warning or midi_notice
+                or substitution_notice or script_unserved_notice
                 or has_generic_no_change) then
             ImGui.ImGui_Spacing(RA.ctx)
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
+            if script_unserved_notice then
+              ImGui.ImGui_TextWrapped(RA.ctx, script_unserved_notice)
+            end
+            if midi_notice then
+              if script_unserved_notice then ImGui.ImGui_Spacing(RA.ctx) end
+              ImGui.ImGui_TextWrapped(RA.ctx, midi_notice)
+            end
             if has_fx_insert_failures then
               local plugins = table.concat(failed_fx_names, ", ")
               if interval_overlapped then
@@ -20388,11 +23314,20 @@ function Render.main_window()
                   },
                   "ReaAssist could not add: {plugins}. A newer action ran before this older action finished, so ReaAssist cannot tell which change REAPER's Undo would remove. Review the project and REAPER's Undo history before undoing anything. Confirm each named plug-in is installed and available in REAPER, then resend the request."))
               elseif msg.observable_change_status == "changed" then
+                local completed = math.max(0, math.floor(tonumber(
+                  fx_insert_evidence.successful_insert_count) or 0))
+                local partial_key = completed > 0
+                  and "code.run.fx_insert_failed_partial_v3"
+                  or "code.run.fx_insert_failed_partial"
+                local partial_fallback = completed > 0
+                  and "ReaAssist could not add: {plugins}. {completed} plug-in add call(s) were accepted; these calls may reuse existing FX. The action is partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request."
+                  or "ReaAssist could not add: {plugins}. Other project changes were made, so the action may be partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request."
                 ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
-                  "code.run.fx_insert_failed_partial", {
+                  partial_key, {
                     plugins = plugins,
+                    completed = completed,
                   },
-                  "ReaAssist could not add: {plugins}. Other project changes were made, so the action may be partial. Use Undo if you do not want to keep the partial work. Confirm each named plug-in is installed and available in REAPER, then resend the request."))
+                  partial_fallback))
               else
                 ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
                   "code.run.fx_insert_failed_unchanged", {
@@ -20401,15 +23336,32 @@ function Render.main_window()
                   "ReaAssist could not add: {plugins}. No project changes were detected. Confirm each named plug-in is installed and available in REAPER, then resend the request."))
               end
             end
-            if has_fx_insert_failures and has_parameter_warning then
+            if substitution_notice then
+              if has_fx_insert_failures then ImGui.ImGui_Spacing(RA.ctx) end
+              ImGui.ImGui_TextWrapped(RA.ctx, substitution_notice)
+            end
+            if (has_fx_insert_failures or substitution_notice)
+                and has_fx_insert_reuse then
+              ImGui.ImGui_Spacing(RA.ctx)
+            end
+            if has_fx_insert_reuse then
+              ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
+                "code.run.fx_insert_reused_index_v2", {
+                  plugins = table.concat(reused_fx_names, ", "),
+                },
+                "A repeated plug-in request returned the same FX index for: {plugins}. Later settings may have overwritten the earlier instance. Review the chain, or use Undo and regenerate it."))
+            end
+            if (has_fx_insert_failures or has_fx_insert_reuse
+                or substitution_notice) and has_parameter_warning then
               ImGui.ImGui_Spacing(RA.ctx)
             end
             if msg.parameter_change_status == "partially_changed" then
               local parameter_evidence = msg.parameter_change_evidence or {}
               local changed_count = parameter_evidence.changed_target_count or 0
               local target_count = parameter_evidence.target_count or 0
-              if (parameter_evidence.requested_value_confirmed_mismatch_count
-                    or 0) > 0 and changed_count == target_count then
+              if ((parameter_evidence.requested_value_confirmed_mismatch_count
+                    or 0) > 0 or (parameter_evidence.user_target_mismatch_count or 0) > 0)
+                  and changed_count == target_count then
                 ImGui.ImGui_TextWrapped(RA.ctx, UI.t(
                   "code.run.parameter_changed_missed_request", nil,
                   "The parameter values changed, but at least one did not finish at the requested setting. Confirm the displayed plug-in values before continuing."))
@@ -20613,8 +23565,8 @@ function Render.main_window()
     -- slow local LLM is still alive or genuinely stuck. Retry-scheduled keeps
     -- the same whole-turn elapsed clock so provider backoff doesn't look like
     -- a fresh request.
-    if S.status == "waiting" or S.status == "running" or deep_scan.active
-        or S.resolve_popup then
+    if (S.status == "waiting" or S.status == "running" or deep_scan.active
+        or S.resolve_popup) and not status_docked then
       ImGui.ImGui_SetCursorPosY(RA.ctx, ImGui.ImGui_GetCursorPosY(RA.ctx) + BUBBLE_GAP)
       ImGui.ImGui_Indent(RA.ctx, BUBBLE_IND)
 
@@ -20747,15 +23699,7 @@ function Render.main_window()
             end
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
             UI.text_multiline(UI.t("chat.status.deep_scan.detail", nil,
-              "This plugin reports parameter values with a one-frame delay "
-              .. "(common on some VST3 plugins), so a slower defer-paced "
-              .. "scan is needed to read accurate data. This only runs once "
-              .. "per plugin. Future requests for this plugin will use the "
-              .. "cached data and respond instantly.\n\n"
-              .. "If the plugin has heavy selector params (Style, Preset, "
-              .. "Algorithm, Engine), the scan waits for each value to fully "
-              .. "load before moving on, so it can take noticeably longer "
-              .. "than a typical scan."))
+              "This plugin reports parameter values with a one-frame delay (common on some VST3 plugins), so a slower defer-paced scan is needed to read accurate data. This only runs once per plugin. Future requests for this plugin will use the cached data and respond instantly.\n\nIf the plugin has heavy selector params (Style, Preset, Algorithm), the scan waits for each value to fully load before moving on, so it can take noticeably longer than a typical scan."))
             PopStyleColor(RA.ctx)
 
             Dummy(RA.ctx, 1, RA.SC(4))
@@ -20779,7 +23723,15 @@ function Render.main_window()
             PopFont(RA.ctx)
           else
             PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.accent)
-            Text(RA.ctx, UI.t("chat.status.thinking", nil, "Thinking..."))
+            if S.engine_revising then
+              Text(RA.ctx, UI.t("chat.status.revising_answer", nil,
+                "Revising answer..."))
+            elseif S.engine_stream_visible then
+              Text(RA.ctx, UI.t("chat.status.responding", nil,
+                "Responding..."))
+            else
+              Text(RA.ctx, UI.t("chat.status.thinking", nil, "Thinking..."))
+            end
             PopStyleColor(RA.ctx)
 
             Dummy(RA.ctx, 1, RA.SC(4))
@@ -20862,7 +23814,7 @@ function Render.main_window()
     -- that stops a few rows above the true bottom. The boolean set sites
     -- elsewhere in the file stay as `S.scroll_to_bottom = true`; we treat
     -- `true` here as "two frames left" and count down to false.
-    if S.scroll_to_bottom then
+    if S.scroll_to_bottom and S.chat_auto_follow ~= false then
       ImGui.ImGui_SetScrollHereY(RA.ctx, 1.0)
       if S.scroll_to_bottom == true then
         S.scroll_to_bottom = 1  -- one more frame of forced scroll
@@ -20906,7 +23858,6 @@ function Render.main_window()
     -- drag-selection past the visible bounds.
     -- Only activate when the drag started inside the chat child window;
     -- otherwise resizing the main window via the title bar triggers unwanted scroll.
-    local chat_hovered = ImGui.ImGui_IsWindowHovered(RA.ctx, ImGui.ImGui_HoveredFlags_ChildWindows())
     if ImGui.ImGui_IsMouseClicked(RA.ctx, 0) then
       S._chat_drag = chat_hovered
     elseif not ImGui.ImGui_IsMouseDown(RA.ctx, 0) then
@@ -20929,10 +23880,151 @@ function Render.main_window()
     -- This child adjusts scroll/cursor state while rendering chat rows. Leave a
     -- real item at the end so ReaImGui can grow the child bounds before EndChild.
     Dummy(RA.ctx, 1, 1)
+    UI.capture_chat_scroll_extent(
+      ImGui.ImGui_GetScrollY(RA.ctx),
+      ImGui.ImGui_GetScrollMaxY(RA.ctx))
     ImGui.ImGui_EndChild(RA.ctx)
     end  -- if chat_visible
     PopStyleColor(RA.ctx, 5)  -- scrollbar palette + ChildBg
     UI.drop_target()
+
+    -- Keep the ordinary request status outside the growing chat document.
+    -- Its fixed two-row tray remains stationary as streamed lines are added.
+    if status_docked then
+      local STATUS_DOCK_H = RA.SC(64)
+      local dock_fill = UI.lerp_u32(TK.card, TK.accent_soft, 0.14)
+      local dock_border = UI.lerp_u32(TK.border_str, TK.accent, 0.24)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), dock_fill)
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(), dock_border)
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildRounding(), RA.SC(6))
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildBorderSize(), 1)
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(),
+        RA.SC(12), RA.SC(8))
+      local status_dock_open = ImGui.ImGui_BeginChild(RA.ctx,
+        "##request_status_dock", avail_w, STATUS_DOCK_H,
+        ImGui.ImGui_ChildFlags_Borders(),
+        ImGui.ImGui_WindowFlags_NoScrollbar()
+          | ImGui.ImGui_WindowFlags_NoScrollWithMouse())
+      if status_dock_open then
+        local dock_content_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+        local elapsed_start = S.request_start_time or S.send_time
+        local elapsed = elapsed_start and (time_precise() - elapsed_start) or 0
+        local pa = PROVIDERS.active()
+        local poll_timeout = (pa.is_custom
+          and ((tonumber(pa.request_timeout) or 600) + 15))
+          or (prefs.cloud_request_timeout or CFG.CLOUD_TIMEOUT_DEFAULT)
+        poll_timeout = poll_timeout
+          + (S.timeout_extensions or 0) * CFG.EXTEND_BY_SECS
+        local function dock_mss(seconds)
+          seconds = math_max(0, math_floor(seconds))
+          return str_format("%d:%02d", math_floor(seconds / 60), seconds % 60)
+        end
+
+        -- Row one: animated activity marker and the current request phase.
+        local DOT_R = RA.SC(3)
+        local DOT_GAP = RA.SC(8)
+        local dock_dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+        local dock_phase = (time_precise() % 1.4) / 1.4
+        local dot_alpha = 0.55
+          + 0.45 * (0.5 + 0.5 * math.sin(dock_phase * 2 * math.pi))
+        local dock_x, dock_y = ImGui.ImGui_GetCursorScreenPos(RA.ctx)
+        local dock_line_h = ImGui.ImGui_GetTextLineHeight(RA.ctx)
+        local base_rgb = TK.accent & 0xFFFFFF00
+        local dot_cx = dock_x + DOT_R
+        local dot_cy = dock_y + math_floor(dock_line_h * 0.5)
+        ImGui.ImGui_DrawList_AddCircleFilled(dock_dl, dot_cx, dot_cy,
+          RA.SC(6), base_rgb | math_floor(0x20 * dot_alpha), 0)
+        ImGui.ImGui_DrawList_AddCircleFilled(dock_dl, dot_cx, dot_cy,
+          RA.SC(4.5), base_rgb | math_floor(0x40 * dot_alpha), 0)
+        ImGui.ImGui_DrawList_AddCircleFilled(dock_dl, dot_cx, dot_cy,
+          DOT_R, base_rgb | math_max(math_floor(0xFF * dot_alpha), 0x80), 0)
+        Dummy(RA.ctx, DOT_R * 2 + DOT_GAP, dock_line_h)
+        SameLine(RA.ctx, 0, 0)
+        PushFont(RA.ctx, FONT.inter_med, RA.SC(12))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.accent)
+        if S.engine_revising then
+          Text(RA.ctx, UI.t("chat.status.revising_answer", nil,
+            "Revising answer..."))
+        elseif S.engine_stream_visible then
+          Text(RA.ctx, UI.t("chat.status.responding", nil,
+            "Responding..."))
+        else
+          Text(RA.ctx, UI.t("chat.status.thinking", nil, "Thinking..."))
+        end
+        PopStyleColor(RA.ctx)
+        PopFont(RA.ctx)
+
+        -- Row two: fixed-position counters and controls. Button visibility
+        -- can change near timeout without changing the tray height.
+        local row_two_y = dock_y + RA.SC(25)
+        ImGui.ImGui_SetCursorScreenPos(RA.ctx, dock_x, row_two_y + RA.SC(4))
+        PushFont(RA.ctx, FONT.mono_med, RA.SC(10))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
+        Text(RA.ctx, UI.t("chat.status.elapsed", nil, "Elapsed"))
+        PopStyleColor(RA.ctx)
+        SameLine(RA.ctx, 0, RA.SC(8))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+        Text(RA.ctx, dock_mss(elapsed))
+        PopStyleColor(RA.ctx)
+        SameLine(RA.ctx, 0, RA.SC(16))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
+        Text(RA.ctx, UI.t("chat.status.timeout", nil, "Timeout"))
+        PopStyleColor(RA.ctx)
+        SameLine(RA.ctx, 0, RA.SC(8))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+        Text(RA.ctx, dock_mss(poll_timeout))
+        PopStyleColor(RA.ctx)
+        PopFont(RA.ctx)
+
+        local cancel_label = UI.t("chat.status.cancel", nil, "Cancel")
+        local extend_label = UI.t("chat.status.extend_by",
+          { seconds = CFG.EXTEND_BY_SECS },
+          "Extend by " .. CFG.EXTEND_BY_SECS .. "s")
+        local show_extend = S.send_time
+          and (poll_timeout - elapsed) <= CFG.EXTEND_SHOW_BEFORE_TIMEOUT
+        PushFont(RA.ctx, FONT.mono_med, RA.SC(11))
+        local cancel_w = CalcTextSize(RA.ctx, cancel_label) + RA.SC(20)
+        local extend_w = CalcTextSize(RA.ctx, extend_label) + RA.SC(20)
+        PopFont(RA.ctx)
+        local controls_w = cancel_w
+          + (show_extend and (extend_w + RA.SC(6)) or 0)
+        ImGui.ImGui_SetCursorScreenPos(RA.ctx,
+          dock_x + dock_content_w - controls_w,
+          row_two_y)
+        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameBorderSize(), 1)
+        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FrameRounding(), RA.SC(4))
+        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),
+          RA.SC(10), RA.SC(4))
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(), TK.border)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(), 0x00000000)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonHovered(),
+          (TK.card_hover & 0xFFFFFF00) | 0x80)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_ButtonActive(), TK.card_hover)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+        PushFont(RA.ctx, FONT.mono_med, RA.SC(11))
+        if show_extend then
+          if ImGui.ImGui_Button(RA.ctx, extend_label, extend_w, 0) then
+            S.send_time = S.send_time + CFG.EXTEND_BY_SECS
+            S.timeout_extensions = (S.timeout_extensions or 0) + 1
+          end
+          UI.tooltip(UI.t("chat.status.extend_tooltip",
+            { seconds = CFG.EXTEND_BY_SECS },
+            "Give the model another " .. CFG.EXTEND_BY_SECS
+              .. "s before the request times out. Click again for more time."))
+          SameLine(RA.ctx, 0, RA.SC(6))
+        end
+        if ImGui.ImGui_Button(RA.ctx, cancel_label, cancel_w, 0) then
+          Net.cancel_active_request("cancelled")
+        end
+        PopFont(RA.ctx)
+        PopStyleColor(RA.ctx, 5)
+        ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+        ImGui.ImGui_EndChild(RA.ctx)
+      end
+      ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+      PopStyleColor(RA.ctx, 2)
+      Dummy(RA.ctx, 1, RA.SC(6))
+    end
 
     -- ------ Input row -------------------------------------------------------------------------
     -- Top pad shifts the whole bottom section (input + mode row + footer) down
@@ -21431,32 +24523,56 @@ function Render.main_window()
         or "projected_token_limit"
       local tb_headline = UI.t("dialog.turn_budget.headline", nil,
         "This request would exceed a limit you set.")
-      local tb_body
-      if tb_matched == "projected_cost_limit" then
-        tb_body = UI.t("dialog.turn_budget.cost_body", {
-          projected = MODELS.format_cost(tb_budget.projected_cost or 0),
-          limit = MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
-            or CFG.TURN_COST_LIMIT_DEFAULT),
-          next = MODELS.format_cost(tb_budget.next_cost or 0),
-        }, str_format(
-          "Projected cost for this request: %s (your limit: %s). This next model call could cost up to %s.",
-          MODELS.format_cost(tb_budget.projected_cost or 0),
-          MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
-            or CFG.TURN_COST_LIMIT_DEFAULT),
-          MODELS.format_cost(tb_budget.next_cost or 0)))
-      else
-        local tb_projected = fmt_num(tb_budget.projected_tokens or 0)
-        local tb_limit = fmt_num(tonumber(prefs.turn_token_limit)
-          or CFG.TURN_TOKEN_LIMIT_DEFAULT)
-        local tb_next = fmt_num(tb_budget.next_tokens or 0)
-        tb_body = UI.t("dialog.turn_budget.token_body", {
-          projected = tb_projected,
-          limit = tb_limit,
-          next = tb_next,
-        }, str_format(
-          "Projected token use for this request: %s (your limit: %s). This next model call could use up to %s tokens.",
-          tb_projected, tb_limit, tb_next))
+      local tb_conditions = type(tb_budget.matched_conditions) == "table"
+        and tb_budget.matched_conditions or { tb_matched }
+      if #tb_conditions == 0 then tb_conditions = { tb_matched } end
+      local tb_body_parts = {}
+      for _, tb_condition in ipairs(tb_conditions) do
+        local tb_part
+        if tb_condition == "unknown_provider_price" then
+          tb_part = UI.t("dialog.turn_budget.unknown_provider_price_body", nil,
+            "This billable Custom provider has no trusted input and output price estimate. ReaAssist cannot prove that this request stays within your per-turn dollar limit.")
+        elseif tb_condition == "unknown_cache_price" then
+          tb_part = UI.t("dialog.turn_budget.unknown_cache_price_body", nil,
+            "The previous model call used a cache category whose price is blank. The exact turn cost is Unknown, so ReaAssist cannot safely estimate this additional billable request.")
+        elseif tb_condition == "actual_cost_limit" then
+          tb_part = UI.t("dialog.turn_budget.actual_cost_body", {
+            actual = MODELS.format_cost(tb_budget.actual_cost or 0),
+            limit = MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
+              or CFG.TURN_COST_LIMIT_DEFAULT),
+          }, str_format(
+            "Provider-reported actual cost already used: %s (your limit: %s). A trusted estimate is unavailable for the next model call.",
+            MODELS.format_cost(tb_budget.actual_cost or 0),
+            MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
+              or CFG.TURN_COST_LIMIT_DEFAULT)))
+        elseif tb_condition == "projected_cost_limit" then
+          tb_part = UI.t("dialog.turn_budget.cost_body", {
+            projected = MODELS.format_cost(tb_budget.projected_cost or 0),
+            limit = MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
+              or CFG.TURN_COST_LIMIT_DEFAULT),
+            next = MODELS.format_cost(tb_budget.next_cost or 0),
+          }, str_format(
+            "Projected cost for this request: %s (your limit: %s). This next model call could cost up to %s.",
+            MODELS.format_cost(tb_budget.projected_cost or 0),
+            MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
+              or CFG.TURN_COST_LIMIT_DEFAULT),
+            MODELS.format_cost(tb_budget.next_cost or 0)))
+        elseif tb_condition == "projected_token_limit" then
+          local tb_projected = fmt_num(tb_budget.projected_tokens or 0)
+          local tb_limit = fmt_num(tonumber(prefs.turn_token_limit)
+            or CFG.TURN_TOKEN_LIMIT_DEFAULT)
+          local tb_next = fmt_num(tb_budget.next_tokens or 0)
+          tb_part = UI.t("dialog.turn_budget.token_body", {
+            projected = tb_projected,
+            limit = tb_limit,
+            next = tb_next,
+          }, str_format(
+            "Projected token use for this request: %s (your limit: %s). This next model call could use up to %s tokens.",
+            tb_projected, tb_limit, tb_next))
+        end
+        if tb_part then tb_body_parts[#tb_body_parts + 1] = tb_part end
       end
+      local tb_body = tbl_concat(tb_body_parts, "\n\n")
       local tb_not_sent = UI.t("dialog.turn_budget.not_sent", nil,
         "No additional model request has been sent.")
       local tb_one_call = UI.t("dialog.turn_budget.one_call", nil,
@@ -21713,7 +24829,8 @@ function Render.main_window()
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
         S.backup_warn_code = nil
         S.backup_warn_jsfx = nil
-        S.backup_warn_idx  = nil
+        S.backup_warn_idx = nil
+        S.backup_warn_message = nil
         S.backup_warn_typed_idx = nil
         S.refocus_prompt   = true
       end
@@ -21721,9 +24838,15 @@ function Render.main_window()
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
         S.backup_warn_code = nil
         S.backup_warn_jsfx = nil
-        S.backup_warn_idx  = nil
+        S.backup_warn_idx = nil
+        S.backup_warn_message = nil
         S.backup_warn_typed_idx = nil
         S.refocus_prompt   = true
+      end
+      if (do_continue or do_disable or do_save_project) and S.backup_warn_code
+          and not UI.preflight_staged_lua("backup") then
+        do_continue, do_disable, do_save_project = false, false, false
+        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
       end
       if do_disable then
         prefs.auto_backup = false
@@ -21756,7 +24879,8 @@ function Render.main_window()
             ImGui.ImGui_CloseCurrentPopup(RA.ctx)
             S.backup_warn_code = nil
             S.backup_warn_jsfx = nil
-            S.backup_warn_idx  = nil
+            S.backup_warn_idx = nil
+            S.backup_warn_message = nil
             S.backup_warn_typed_idx = nil
             S.refocus_prompt   = true
             Log.add_error(UI.t("code.backup_failed_after_save",
@@ -21777,14 +24901,18 @@ function Render.main_window()
           S.backup_warn_jsfx = nil
         end
         S.status = "running"
-        local ok = Code.run(S.backup_warn_code)
+        local ok = Code.run(S.backup_warn_code, nil,
+          S.display_messages[S.backup_warn_idx] and S.display_messages[S.backup_warn_idx].conversation_delete,
+          Code.generated_lua_run_context(S.display_messages[S.backup_warn_idx],
+            S.backup_warn_idx, S.backup_warn_code))
         Code.bind_pending_deferred_run(S.backup_warn_idx, nil, false, nil)
         Code.apply_run_result_to_message(S.display_messages[S.backup_warn_idx],
           ok, "lua", S.backup_warn_code, false)
         if S.backup_warn_idx == #S.display_messages then S.pending_code = nil end
         S.status = ok and "idle" or "error"
         S.backup_warn_code = nil
-        S.backup_warn_idx  = nil
+        S.backup_warn_idx = nil
+        S.backup_warn_message = nil
         S.backup_warn_typed_idx = nil
         S.refocus_prompt   = true
       end
@@ -22294,7 +25422,8 @@ function Render.main_window()
             S.wrap_cache = {}
             if #S.history >= 1 then S.history[#S.history] = nil end
           end
-          S.pending_display_idx  = nil
+          S.pending_display_idx = nil
+          S.pending_no_guess_seed = nil
           S.pending_orig_prompt  = nil
           S.pending_snapshot     = nil
           S.pending_attachments  = nil
@@ -22468,16 +25597,22 @@ function Render.main_window()
           risky_cancel_label, rbtn2_w, 0) then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
         S.risky_warn_code   = nil
-        S.risky_warn_idx    = nil
+        S.risky_warn_idx = nil
+        S.risky_warn_message = nil
         S.risky_warn_detail = nil
         S.refocus_prompt    = true
       end
       if ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
         S.risky_warn_code   = nil
-        S.risky_warn_idx    = nil
+        S.risky_warn_idx = nil
+        S.risky_warn_message = nil
         S.risky_warn_detail = nil
         S.refocus_prompt    = true
+      end
+      if do_run and S.risky_warn_code and not UI.preflight_staged_lua("risky") then
+        do_run = false
+        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
       end
       if do_run and S.risky_warn_code then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
@@ -22487,21 +25622,27 @@ function Render.main_window()
           if berr == "unsaved" then
             S.backup_warn_code = S.risky_warn_code
             S.backup_warn_idx  = S.risky_warn_idx
+            S.backup_warn_message = S.risky_warn_message
             S.open_backup_warn = true
             S.risky_warn_code   = nil
-            S.risky_warn_idx    = nil
+            S.risky_warn_idx = nil
+            S.risky_warn_message = nil
             S.risky_warn_detail = nil
             -- Control will continue through the backup modal.
           elseif Code.safety_backup_can_proceed(berr) then
             S.status = "running"
-            local ok = Code.run(S.risky_warn_code)
+            local ok = Code.run(S.risky_warn_code, nil,
+              S.display_messages[S.risky_warn_idx] and S.display_messages[S.risky_warn_idx].conversation_delete,
+              Code.generated_lua_run_context(S.display_messages[S.risky_warn_idx],
+                S.risky_warn_idx, S.risky_warn_code))
             Code.bind_pending_deferred_run(S.risky_warn_idx, nil, false, nil)
             Code.apply_run_result_to_message(S.display_messages[S.risky_warn_idx],
               ok, "lua", S.risky_warn_code, false)
             if S.risky_warn_idx == #S.display_messages then S.pending_code = nil end
             S.status = ok and "idle" or "error"
             S.risky_warn_code   = nil
-            S.risky_warn_idx    = nil
+            S.risky_warn_idx = nil
+            S.risky_warn_message = nil
             S.risky_warn_detail = nil
             S.refocus_prompt    = true
           else
@@ -22509,20 +25650,25 @@ function Render.main_window()
             local blocked = S.display_messages[S.risky_warn_idx]
             if blocked then blocked.run_blocked = blocked_msg end
             S.risky_warn_code   = nil
-            S.risky_warn_idx    = nil
+            S.risky_warn_idx = nil
+            S.risky_warn_message = nil
             S.risky_warn_detail = nil
             S.refocus_prompt    = true
           end
         else
           S.status = "running"
-          local ok = Code.run(S.risky_warn_code)
+          local ok = Code.run(S.risky_warn_code, nil,
+              S.display_messages[S.risky_warn_idx] and S.display_messages[S.risky_warn_idx].conversation_delete,
+              Code.generated_lua_run_context(S.display_messages[S.risky_warn_idx],
+                S.risky_warn_idx, S.risky_warn_code))
           Code.bind_pending_deferred_run(S.risky_warn_idx, nil, false, nil)
           Code.apply_run_result_to_message(S.display_messages[S.risky_warn_idx],
             ok, "lua", S.risky_warn_code, false)
           if S.risky_warn_idx == #S.display_messages then S.pending_code = nil end
           S.status = ok and "idle" or "error"
           S.risky_warn_code   = nil
-          S.risky_warn_idx    = nil
+          S.risky_warn_idx = nil
+          S.risky_warn_message = nil
           S.risky_warn_detail = nil
           S.refocus_prompt    = true
         end
@@ -22966,6 +26112,7 @@ function Render.main_window()
     Render._reaper_version_notice_popup()
     Render.feedback_modal()
     Render._ceiling_alert_popup()
+    Render._engine_installer_notice_popup()
     -- Render after every screen/modal has had a chance to register a tooltip,
     -- so UI.tooltip() and UI.tooltip_v5() share one consistent global path.
     UI.tooltip_render_v5()

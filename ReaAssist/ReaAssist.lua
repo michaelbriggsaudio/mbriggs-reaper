@@ -76,6 +76,7 @@ local FALLBACK_CRITICAL = {
   "Resources/UI.lua",
   "Resources/Context.lua",
   "Resources/Diag.lua",
+  "Resources/Engine.lua",
   "Resources/I18N.lua",
   "Resources/CodeRuntime.lua",
   "Resources/Relaunch.lua",
@@ -199,7 +200,7 @@ local SAFE_OUTCOMES = {
 
 local HOST_SEAMS = {
   "message_box", "announce", "exec", "read_file", "write_file",
-  "file_size", "make_dir", "remove", "rename", "sleep", "os_name",
+  "file_size", "present", "make_dir", "remove", "rename", "sleep", "os_name",
 }
 
 -- The canonical manifest, and the one name in this engine that means the same
@@ -246,8 +247,8 @@ function P.ensure_parent(path)
 end
 
 function P.exists(path)
-  local size = C.host.file_size(path)
-  return size ~= nil
+  -- An unreadable path still needs recovery and cleanup accounting.
+  return C.host.present(path) ~= false
 end
 
 -- Filename allowlist, trimmed from Updater.is_safe_filename. Manifest names
@@ -819,7 +820,7 @@ end
 -- transaction, for whether a backup was ever made, and for files whose bytes
 -- are identical on both sides, none of which a destination hash can answer.
 
-function P.journal_write(j)
+function P.journal_text(j)
   local parts = {}
   for _, f in ipairs(j.files) do
     parts[#parts + 1] = string.format(
@@ -828,13 +829,30 @@ function P.journal_write(j)
       f.bak_existed and "true" or "false",
       f.dest_existed and "true" or "false")
   end
-  local text = string.format(
+  return string.format(
     '{"schema":1,"phase":%s,"source":%s,"version":%s,"candidate":%s,'
     .. '"files":[%s]}',
     P.json_string(j.phase), P.json_string(j.source), P.json_string(j.version),
     P.json_string(j.candidate), table.concat(parts, ","))
+end
+
+function P.journal_write(j)
+  local text = P.journal_text(j)
   local tmp, old = C.journal_path .. ".tmp", C.journal_path .. ".old"
   P.ensure_parent(tmp)
+  -- A failed rotation can leave .tmp as the only readable recovery record.
+  -- Preserve its exact bytes in .old before reusing the staging path. A failed
+  -- copy leaves .tmp untouched; a failed subsequent write leaves .old intact.
+  if P.exists(tmp) then
+    local prior = C.host.read_file(tmp)
+    if prior and P.journal_valid(P.json_decode(prior))
+        and not P.journal_valid(P.json_decode(C.host.read_file(C.journal_path) or ""))
+        and not P.journal_valid(P.json_decode(C.host.read_file(old) or "")) then
+      if not C.host.write_file(old, prior) or C.host.read_file(old) ~= prior then
+        return false
+      end
+    end
+  end
   C.host.remove(tmp)
   if not C.host.write_file(tmp, text) then
     C.host.remove(tmp)
@@ -1220,6 +1238,11 @@ function P.rollback(j)
   -- would walk the same rollback again and take them out.
   j.phase = "rolled_back"
   if not P.journal_write(j) then return "unjournaled" end
+  return P.finish_rollback(j)
+end
+
+function P.finish_rollback(j)
+  if not P.cleanup_files(j, false) then return P.defer_cleanup(j, "rollback_deferred") end
   local cleaned = P.journal_delete()
   if cleaned == "gone" then return "rollback" end
   if cleaned == "primary" then
@@ -1293,15 +1316,15 @@ function P.roll_forward(j)
   return (done == "closed") and "forward" or done
 end
 
--- Cleanup is journaled like every other step. A backup that will not delete
--- changes what later runs may do: the next apply refuses a destination whose
--- leftover backup it cannot clear, so the journal stays in its committed phase
--- until the cleanup really happened and the next launch retries the same
--- idempotent walk.
+-- Cleanup is journaled like every other step. Backups, sibling staging files
+-- and candidate files must all be gone before the retry record is removed.
+-- The next apply also refuses a destination whose backup it cannot clear.
+-- The journal stays committed while cleanup is incomplete, and the next launch
+-- retries the same idempotent walk.
 --
 -- Three outcomes, and the callers must keep them apart:
 --   "closed"            the journal is gone and the transaction is over
---   "cleanup_deferred"  the committed phase is durable, backups remain
+--   "cleanup_deferred"  the committed phase is durable, cleanup remains
 --   "unjournaled"       the committed phase never reached disk
 -- The last one is fatal for the launch. What is on disk still says "applying",
 -- so a body allowed to run could edit its own files through the updater while
@@ -1312,32 +1335,45 @@ function P.commit(j)
     j.phase = "committed"
     if not P.journal_write(j) then return "unjournaled" end
   end
+  if not P.cleanup_files(j, true) then return P.defer_cleanup(j, "cleanup_deferred") end
+  local cleaned = P.journal_delete()
+  -- Only named safe answers permit startup. An unknown answer must preserve
+  -- the primary and refuse startup, as a surviving older generation would.
+  if cleaned == "gone" then return "closed" end
+  if cleaned == "primary" then return "cleanup_deferred" end
+  return "stale_generation"
+end
+
+function P.defer_cleanup(j, outcome)
+  -- The usual retry already has one authoritative terminal primary. Avoid
+  -- rotating that record just because a temporary file is still locked.
+  if not P.exists(C.journal_path .. ".tmp") and not P.exists(C.journal_path .. ".old") then
+    local current = P.journal_valid(P.json_decode(C.host.read_file(C.journal_path) or ""))
+    if current and P.journal_text(current) == P.journal_text(j) then return outcome end
+  end
+  -- Recovery may have read a fallback generation. Republish the terminal
+  -- record and prove .tmp and .old are gone before permitting startup with
+  -- cleanup pending. Otherwise a later read could repeat an old undo.
+  if not P.journal_write(j) then return "stale_generation" end
+  return outcome
+end
+
+-- Terminal rollback preserves any backup it did not consume during undo.
+-- Commit removes its backups after the new body has passed verification.
+function P.cleanup_files(j, include_backups)
   local stuck = 0
   for _, f in ipairs(j.files) do
     local dest = P.path(C.body_root, f.name)
-    if not P.drop_backup(dest) then stuck = stuck + 1 end
-    C.host.remove(P.staged_path(dest))
-    C.host.remove(P.path(j.candidate or C.candidate_root, f.name))
+    if include_backups and not P.drop_backup(dest) then stuck = stuck + 1 end
+    -- Keep the durable retry list until every transaction file is gone.
+    -- A successful remove return alone does not prove absence.
+    for _, path in ipairs({ P.staged_path(dest),
+        P.path(j.candidate or C.candidate_root, f.name) }) do
+      C.host.remove(path)
+      if P.exists(path) then stuck = stuck + 1 end
+    end
   end
-  if stuck > 0 then return "cleanup_deferred" end
-  local cleaned = P.journal_delete()
-  -- A committed primary that would not delete is the same kind of leftover as
-  -- a backup that would not delete: harmless to launch on, because resolve
-  -- routes a committed journal to this function and never to the walk, and
-  -- worth reporting so the next update is not surprised by recovery state
-  -- nobody accounted for. An older generation surviving is a different thing
-  -- entirely: it holds the pre-commit phase, and if it ever became the only
-  -- readable generation the transaction would be walked as if it were still
-  -- applying, against a body that has moved on since.
-  if cleaned == "gone" then return "closed" end
-  if cleaned == "primary" then return "cleanup_deferred" end
-  -- Every other answer, including one a later journal_delete might learn to
-  -- give, is treated as a surviving older generation. Listing the safe answers
-  -- rather than the unsafe ones is the same shape as SAFE_OUTCOMES and for the
-  -- same reason: an unclassified value reaching a catch-all `closed` would let
-  -- a future change hand this function something it has never seen and be told
-  -- the transaction is finished.
-  return "stale_generation"
+  return stuck == 0
 end
 
 function P.resolve(j)
@@ -1345,10 +1381,8 @@ function P.resolve(j)
     -- Terminal. The undo happened and was recorded before any cleanup was
     -- attempted, so there is nothing to walk again and walking it would be the
     -- dangerous move: anything installed since would be taken back out.
-    local cleaned = P.journal_delete()
-    if cleaned == "gone" then return "finished" end
-    if cleaned == "primary" then return "rollback_deferred" end
-    return "stale_generation"
+    local done = P.finish_rollback(j)
+    return done == "rollback" and "finished" or done
   end
   if j.phase == "committed" then
     -- Everything landed and was verified before the phase flipped, so there is
@@ -1543,6 +1577,13 @@ end
 -- Public contract
 -- ----------------------------------------------------------------------------
 
+-- Selection records use the same parser as installation journals. The caller
+-- bounds the input and validates its own record schema.
+function M.decode_json(text)
+  if type(text)~="string" then return nil end
+  return P.json_decode(text)
+end
+
 function M.configure(opts)
   if type(opts) ~= "table" then return nil, "an options table is required" end
   local host = opts.host
@@ -1594,7 +1635,7 @@ function M.configure(opts)
     -- because this is a configure option rather than a seam and the engine may
     -- not stop working when a caller leaves it out.
     run_token    = P.run_token(opts.run_token),
-    -- Optional twelfth seam, defaulted rather than required. loadfile is
+    -- Optional compile seam, defaulted rather than required. loadfile is
     -- standard Lua and not a REAPER API, so compiling the body main here keeps
     -- the engine's no-body-dependency rule intact; the seam exists so the
     -- tests can inject a failure and Phase B can swap in a different check.
@@ -1724,7 +1765,7 @@ local lock = (function()
 --
 -- Failure `kind` values: "busy" (someone else has it and the user cancelled or
 -- the budget ran out), "disk" (the lock could not be written), "conflict" (a
--- stale break turned out to take a lock nobody evaluated), "config".
+-- stale break turned out to take a lock nobody evaluated), "identity", "config".
 --
 -- ----------------------------------------------------------------------------
 -- The atomic acquire, per operating system
@@ -1956,8 +1997,12 @@ local DISK_DIALOG =
   .. "changed. Check that the REAPER resource folder is writable, then start "
   .. "ReaAssist again."
 
+local IDENTITY_DIALOG =
+  "ReaAssist could not check which copy of REAPER is running.\n\n"
+  .. "Restart REAPER and try again. If this keeps happening, contact support."
+
 local SEAMS = {
-  "message_box", "announce", "read_file", "write_file", "file_size",
+  "message_box", "announce", "read_file", "write_file", "file_size", "present",
   "make_dir", "remove", "rename", "sleep", "os_name",
 }
 
@@ -1985,7 +2030,7 @@ function P.emit(state, detail)
 end
 
 function P.exists(path)
-  return C.host.file_size(path) ~= nil
+  return C.host.present(path) ~= false
 end
 
 -- Whole seconds since the epoch. An optional host seam rather than a direct
@@ -2012,8 +2057,8 @@ end
 -- available to this chunk when it is embedded alongside rather than inside it,
 -- and a lock record has four fields.
 function P.encode(rec)
-  return string.format("schema=1\ttoken=%s\tacquired=%d\tmode=%s\tpid=%s\n",
-    rec.token, rec.acquired, rec.mode, rec.pid or "-")
+  return string.format("schema=1\ttoken=%s\tacquired=%d\tmode=%s\tpid=%s\tstart=%s\n",
+    rec.token, rec.acquired, rec.mode, rec.pid or "-", rec.start or "-")
 end
 
 function P.decode(text)
@@ -2022,11 +2067,15 @@ function P.decode(text)
   local acquired = tonumber(text:match("acquired=(%d+)"))
   if not token or not acquired then return nil end
   if not token:match("^[%w%-]+$") then return nil end
+  local start = text:match("\tstart=([^\t\r\n]+)")
+  if start == "-" then start = nil end
+  if start and (#start > 160 or start:find("[%c]")) then return nil end
   return {
     token = token,
     acquired = acquired,
     mode = text:match("mode=([^\t\r\n]+)") or "standard",
     pid = text:match("pid=([^\t\r\n]+)"),
+    start = start,
   }
 end
 
@@ -2123,11 +2172,13 @@ end
 -- still be finishing the transaction it opened.
 function P.owner_gone(rec)
   if rec.pid and rec.pid ~= "-" and type(C.host.pid_alive) == "function" then
-    -- Only the "gone" answer is conclusive. true and nil both fall through to
-    -- the evidence below.
-    if C.host.pid_alive(rec.pid) == false then
+    -- Refresh admission keeps a live process claim through modal startup.
+    -- The older recovery policy may still use heartbeat expiry below.
+    local alive = C.host.pid_alive(rec.pid, rec.start)
+    if alive == false then
       return true, "the owning process is gone"
     end
+    if alive == true and C.require_dead_owner then return false end
   end
   if C.hold_blocks_remove then
     -- Destructive on purpose, and only destructive when the answer is "gone":
@@ -2152,6 +2203,7 @@ function P.stale_reason(rec)
   local gone, why = P.owner_gone(rec)
   if gone == true then return why end
   if gone == false then return nil end
+  if C.require_dead_owner then return nil end
   local seen = P.last_seen(rec)
   local age = P.now() - seen
   -- A clock that moved backwards leaves a negative age. That is not evidence
@@ -2174,13 +2226,41 @@ function P.claim()
     pid = (type(C.host.pid) == "function") and C.host.pid() or nil,
   }
   local staging = C.lock_path .. "." .. rec.token .. ".tmp"
+  if C.require_dead_owner and C.style == "dir" then
+    rec.start = type(C.host.pid_start) == "function" and C.host.pid_start(rec.pid) or nil
+    if not tostring(rec.pid or ""):match("^%d+$") or type(rec.start) ~= "string"
+        or rec.start == "" or #rec.start > 160 or rec.start:find("[%c]") then
+      return nil, "the process identity could not be established", "identity"
+    end
+  end
   P.ensure_parent(staging)
   P.destroy(staging)
   if not P.stage(staging, rec) then
     P.destroy(staging)
     return nil, "the lock file could not be written"
   end
+  local handle
+  local function clear_staged_hold()
+    if handle then pcall(C.host.unhold, handle) end
+    if C.require_dead_owner and C.hold_blocks_remove then
+      C.host.remove(P.held_path(rec.token))
+    end
+  end
+  -- Publish Windows liveness before the canonical claim. A crash immediately
+  -- after publication must leave evidence that the next process can reclaim.
+  if C.require_dead_owner and C.hold_blocks_remove then
+    if type(C.host.hold) == "function" and type(C.host.unhold) == "function" then
+      local ok, value = pcall(C.host.hold, P.held_path(rec.token))
+      if ok then handle = value end
+    end
+    if not handle then
+      clear_staged_hold()
+      P.destroy(staging)
+      return nil, "the process liveness file could not be held"
+    end
+  end
   if not C.host.rename(staging, C.lock_path) then
+    clear_staged_hold()
     P.destroy(staging)
     return false
   end
@@ -2189,13 +2269,16 @@ function P.claim()
   -- difference between owning the lock and having quietly replaced somebody.
   local got = P.read_record(C.lock_path)
   if not got or got.token ~= rec.token then
+    clear_staged_hold()
     return false
   end
   C.record = rec
   -- The held file is opened after the lock is ours, so a failure to open it
   -- costs the Windows liveness signal and nothing else. The heartbeat still
   -- covers this owner.
-  if type(C.host.hold) == "function" then
+  if handle then
+    C.hold_handle = handle
+  elseif type(C.host.hold) == "function" then
     C.hold_handle = C.host.hold(P.held_path(rec.token))
   end
   M.beat()
@@ -2271,6 +2354,7 @@ function M.configure(opts)
     sep = sep,
     style = style,
     hold_blocks_remove = hold_blocks and true or false,
+    require_dead_owner = opts.require_dead_owner == true,
     mode = (opts.mode == "sr") and "sr" or "standard",
     lock_path = opts.lock_path,
     wait_seconds = tonumber(opts.wait_seconds) or 30,
@@ -2371,14 +2455,15 @@ function M.acquire(progress_cb)
   local breaks = 0
   local asked = 0
   while true do
-    local claimed, why = P.claim()
+    local claimed, why, claim_kind = P.claim()
     if claimed then
       P.emit("lock_ok")
       return true, "acquired"
     end
     if claimed == nil then
-      pcall(C.host.message_box, DISK_DIALOG, P.title())
-      return nil, "disk", why
+      pcall(C.host.message_box,
+        claim_kind == "identity" and IDENTITY_DIALOG or DISK_DIALOG, P.title())
+      return nil, claim_kind or "disk", why
     end
 
     local retry_now = false
@@ -2420,8 +2505,13 @@ function M.acquire(progress_cb)
       if asked > C.max_dialogs then
         return nil, "busy", "the wait was retried too many times"
       end
-      local answer = C.host.message_box(
-        string.format(WAIT_DIALOG, now - started), P.title(), "retrycancel")
+      local message = string.format(WAIT_DIALOG, now - started)
+      if C.require_dead_owner then
+        message = message .. "\n\nIf waiting does not help, close every copy "
+          .. "of REAPER using this installation. Then remove the lock below "
+          .. "before reopening REAPER:\n" .. C.lock_path
+      end
+      local answer = C.host.message_box(message, P.title(), "retrycancel")
       -- REAPER's MB returns 4 for Retry and 2 for Cancel. Anything else is
       -- treated as Cancel, on the safe-list principle the engine uses: an
       -- answer nobody classified must not be read as consent to continue.
@@ -2615,8 +2705,8 @@ local Host = (function()
 -- Without it every instance starts again at exec1 and a wrapper the launcher
 -- timed out on (which is deliberately left running) can hand its exit code and
 -- its output to a later launcher's job of the same number. With it, a late
--- wrapper writes files nobody reads, and the next run sweeps them as debris of
--- a token that is not its own.
+-- wrapper writes to its own files. A later run can remove those files only
+-- after the wrapper publishes its exact completion marker.
 --
 -- The detached launch is the shape ReaAssist.lua already ships and has run in
 -- the field for every chat request, every update download and every dependency
@@ -2898,12 +2988,14 @@ end
 -- Plain file helpers, shared by the seams and by the wrapper plumbing
 -- ----------------------------------------------------------------------------
 
-function P.read(path)
+function P.read(path, limit)
+  if limit~=nil and (type(limit)~="number" or limit<1 or limit%1~=0) then return nil end
   local f = io.open(path, "rb")
   if not f then return nil end
-  local data = f:read("*a")
-  f:close()
-  return data
+  local read_ok,data,read_error = pcall(f.read,f,limit or "*a")
+  local close_ok,closed = pcall(f.close,f)
+  if not read_ok or read_error~=nil or not close_ok or not closed then return nil end
+  return data or ""
 end
 
 function P.write(path, data)
@@ -2927,9 +3019,8 @@ end
 --
 -- io.open answering nil is not proof of absence: a file that is there but
 -- locked or unreadable answers the same way as one that is not there at all.
--- The only caller is the uninstall gate in the launcher, where a wrong
--- "absent" is the expensive answer, so a rename probe follows the open and
--- only a real ENOENT counts as gone.
+-- The uninstall gate and transaction recovery both require proof of absence.
+-- A rename probe follows the open; only a real ENOENT counts as gone.
 function P.present(path)
   local f = io.open(path, "rb")
   if f then f:close() return true end
@@ -2990,6 +3081,15 @@ function H.new_host(opts)
   host.file_size = P.size
   host.present = P.present
 
+  function host.generation_token()
+    if type(reaper.genGuid)~="function" then return nil end
+    local ok,guid=pcall(reaper.genGuid,"")
+    if not ok or type(guid)~="string" then return nil end
+    local token=guid:match("^%{([%x%-]+)%}$")
+    if not token or not token:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$") then return nil end
+    return token:gsub("%-",""):lower()
+  end
+
   function host.make_dir(path)
     reaper.RecursiveCreateDirectory(path, 0)
   end
@@ -3030,7 +3130,7 @@ function H.new_host(opts)
   -- direct child of REAPER, so its $PPID is REAPER's process id.
   function host.pid()
     if is_windows() then return nil end
-    local ok, pipe = pcall(io.popen, "sh -c 'echo $PPID'")
+    local ok, pipe = pcall(io.popen, "printf '%s\\n' \"$PPID\"")
     if not ok or not pipe then return nil end
     local text = pipe:read("*a") or ""
     pcall(function() pipe:close() end)
@@ -3038,15 +3138,60 @@ function H.new_host(opts)
     return pid
   end
 
-  -- true, false, or nil for "cannot tell". Only exit status 1 from kill means
-  -- the process is gone; anything else (a missing shell, a permissions
-  -- refusal) is unknown, and unknown must never be read as gone.
-  function host.pid_alive(pid)
+  -- A PID can be reused after a process exits. Keep its birth identity with
+  -- strict claims so an unrelated later process does not strand the lock.
+  function host.pid_start(pid)
+    pid = tostring(pid or "")
+    if is_windows() or not pid:match("^%d+$") then return nil end
+    local platform = host.os_name() or ""
+    if platform == "Other" or platform:match("^Linux") then
+      local stat = host.read_file("/proc/" .. pid .. "/stat")
+      local boot = host.read_file("/proc/sys/kernel/random/boot_id")
+      local fields = type(stat) == "string" and stat:match("^%d+ %(.+%) (.+)$")
+      boot = type(boot) == "string" and boot:match("^([%x%-]+)%s*$")
+      if not fields or not boot or #boot ~= 36 then return nil end
+      local index = 0
+      for value in fields:gmatch("%S+") do
+        index = index + 1
+        if index == 20 then
+          if not value:match("^%d+$") then return nil end
+          return "linux:" .. boot .. ":" .. value
+        end
+      end
+      return nil
+    end
+    if platform ~= "macOS-arm64" and not platform:match("^OSX") then return nil end
+    local opened, pipe = pcall(io.popen,
+      "LC_ALL=C TZ=UTC0 /bin/ps -p " .. pid .. " -o lstart= 2>/dev/null")
+    if not opened or not pipe then return nil end
+    local read_ok, text = pcall(pipe.read, pipe, "*a")
+    local closed, ok = pcall(pipe.close, pipe)
+    if not read_ok or not closed or (ok ~= true and ok ~= 0) then return nil end
+    text = tostring(text):match("^%s*(.-)%s*$")
+    if not text:match("^%a%a%a %a%a%a +%d%d? %d%d:%d%d:%d%d %d%d%d%d$") then return nil end
+    return "mac:" .. text
+  end
+
+  -- true, false, or nil for "cannot tell". Unlike kill -0, ps distinguishes
+  -- an absent process from a signal-permission failure.
+  function host.pid_alive(pid, start)
     if is_windows() then return nil end
     if not tostring(pid or ""):match("^%d+$") then return nil end
-    local ok, how, code = os.execute("kill -0 " .. pid .. " 2>/dev/null")
-    if ok == true or ok == 0 then return true end
-    if how == "exit" and code == 1 then return false end
+    local opened, pipe = pcall(io.popen, "ps -p " .. pid .. " -o pid= 2>/dev/null")
+    if not opened or not pipe then return nil end
+    local read_ok, text = pcall(pipe.read, pipe, "*a")
+    local closed, ok, how, code = pcall(pipe.close, pipe)
+    if not read_ok or not closed then return nil end
+    text = tostring(text):match("^%s*(.-)%s*$")
+    if (ok == true or ok == 0) and text == tostring(pid) then
+      if start ~= nil then
+        local actual = host.pid_start(pid)
+        if not actual then return nil end
+        return actual == start
+      end
+      return true
+    end
+    if how == "exit" and code == 1 and text == "" then return false end
     return nil
   end
 
@@ -3062,24 +3207,15 @@ function H.new_host(opts)
     end
     jobs = jobs + 1
     host.make_dir(work)
-    -- Whatever a launch that died mid-bootstrap left behind. Done on the first
-    -- job rather than at startup, so the ordinary launch never looks. Its
-    -- removals carry their own gate rather than leaning on the one above: the
-    -- entry check is one answer and the sweep is many deletions, and a run that
-    -- has "ended" is only ever a run whose token is not this one.
+    -- Retry completed command cleanup on the first job. Unfinished commands
+    -- can outlive their launcher and must keep their files.
     if jobs == 1 then H.sweep_work(host, work, run_token) end
     local base = work .. sep .. "exec." .. run_token .. "." .. tostring(jobs)
     local job = H.build_exec_job(cmd, base, host.os_name(),
       "token=" .. run_token .. " job=" .. tostring(jobs))
-    -- Through the seams rather than straight to os.remove and io.open, so the
-    -- wrapper's own file work is fenced exactly as the engine's is.
     for _, path in ipairs({ job.script, job.out, job.code, job.done }) do
-      host.remove(path)
+      if host.present(path) ~= false then return nil end
     end
-    -- Nothing can legitimately be here: the token is this run's and the number
-    -- is one this run has not used. Anything left is a removal that failed,
-    -- and waiting on a marker this call did not cause is the whole hazard.
-    if P.size(job.done) ~= nil then return nil end
     if not host.write_file(job.script, job.script_text) then return nil end
     H.gate(host, "exec launch")
     if job.style == "win" then
@@ -3096,38 +3232,41 @@ function H.new_host(opts)
       last = now
       -- The marker's content, not its existence. A file at this path that
       -- names another job is not this job finishing.
-      local text = P.read(job.done)
-      return text ~= nil and text:find(job.marker, 1, true) ~= nil
+      return H.exec_completed(host, job)
     end, budget)
     local answer = nil
     if finished then
       local code = (P.read(job.code) or ""):match("(%-?%d+)")
       if code then answer = code .. "\n" .. (P.read(job.out) or "") end
     end
-    for _, path in ipairs({ job.script, job.out, job.code, job.done }) do
-      host.remove(path)
-    end
+    if finished then H.cleanup_exec(host, job) end
     return answer
   end
 
   return host
 end
 
--- Cheap, bounded, and skipped entirely when REAPER cannot enumerate. Only ever
--- removes wrapper files, and only ones belonging to a run that is not this
--- one. A wrapper of this run may be in flight and a wrapper of an older run may
--- still be writing; the first must not be touched and the second cannot matter,
--- because nothing reads a file whose name carries somebody else's token.
---
--- Every removal goes through the host's own remove seam rather than straight to
--- os.remove, and that is the whole of Codex round 11's third finding. "Another
--- run" is only ever "a token that is not mine": an instance revoked between
--- exec's entry gate and this loop would be looking at the wrapper files of the
--- run that took over, deciding they belong to somebody finished, and deleting
--- the files that run is waiting on. A raw loop made that one fence check
--- covering up to five hundred deletions, which is not the one-mutation bound
--- README.md claims. Fenced, the first removal after a revocation raises and the
--- sweep stops at that file.
+function H.exec_completed(host, job)
+  local text = host.read_file(job.done, #job.marker + 3)
+  return text == job.marker .. "\n" or text == job.marker .. "\r\n"
+end
+
+-- Keep completion evidence until every payload is positively absent. Every
+-- removal uses the fenced seam, including retries after a sharing failure.
+function H.cleanup_exec(host, job)
+  if not H.exec_completed(host, job) then return false end
+  local cleared = true
+  for _, path in ipairs({ job.script, job.out, job.code }) do
+    if host.present(path) ~= false then host.remove(path) end
+    if host.present(path) ~= false then cleared = false end
+  end
+  if not cleared then return false end
+  host.remove(job.done)
+  return host.present(job.done) == false
+end
+
+-- Bounded completion sweep. A foreign run token alone never proves that its
+-- command finished. Unknown files and jobs without final evidence stay put.
 function H.sweep_work(host, dir, token)
   if type(reaper) ~= "table"
       or type(reaper.EnumerateFiles) ~= "function" then
@@ -3139,12 +3278,18 @@ function H.sweep_work(host, dir, token)
   while true do
     local name = reaper.EnumerateFiles(dir, i)
     if not name then break end
-    local owner = name:match("^exec%.([%w%-]+)%.%d+%.")
-    if owner and owner ~= token then names[#names + 1] = name end
+    local owner, number = name:match("^exec%.([%w%-]+)%.([1-9]%d*)%.done$")
+    if owner and #owner <= 128 and #number <= 16 and owner ~= token then
+      names[#names + 1] = { owner = owner, number = number }
+    end
     i = i + 1
     if i > 500 then break end
   end
-  for _, name in ipairs(names) do host.remove(dir .. sep .. name) end
+  for _, entry in ipairs(names) do
+    local base = dir .. sep .. "exec." .. entry.owner .. "." .. entry.number
+    H.cleanup_exec(host, H.build_exec_job("", base, host.os_name(),
+      "token=" .. entry.owner .. " job=" .. entry.number))
+  end
 end
 
 -- ----------------------------------------------------------------------------
@@ -3227,7 +3372,7 @@ end
 -- behalf. It only decides whether to queue first.
 function H.pending_journal(host, journal_path)
   for _, path in ipairs(H.journal_generations(journal_path)) do
-    if host.file_size(path) ~= nil then return true end
+    if host.present(path) ~= false then return true end
   end
   return false
 end
@@ -3395,11 +3540,15 @@ function H.run(deps)
     -- about the body, another copy of REAPER has been installing over it
     -- since, and the sentence the user needs is the same one.
     if deps.lock.revoked and deps.lock.revoked() then return give_up() end
-    pcall(deps.lock.release)
     H.surface_close()
     if state == "run" then
-      deps.launch()
+      -- Keep the claim until synchronous app initialization publishes its
+      -- life file. Releasing before dofile leaves an unannounced reader.
+      local launched, launch_error = pcall(deps.launch)
+      pcall(deps.lock.release)
+      if not launched then error(launch_error, 0) end
     else
+      pcall(deps.lock.release)
       local _ = kind, detail
     end
   end

@@ -1,15 +1,90 @@
 {
-  "version": "1.5.0",
-  "payload_ref": "3436ca3dd5abad88c3a2d945ff61a34417312b51",
-  "removed_files": [],
+  "version": "1.6.0",
+  "engine": {
+    "schema": 1,
+    "delivery": "shared-v1",
+    "shared_path": "Helper-Engine/1.0.2",
+    "source_ref": "v1.6.0",
+    "source": {
+      "commit": "b6400403943daafa58d50940cbbe27335d453f73",
+      "release": "kit-v1.0.2-prep-b640040",
+      "kit_sha256": "1eb6e48d9b0fc5ee3cd810eb3a1e567d812d515f6a99ab65fcf7d2906c69f256"
+    },
+    "descriptor": {
+      "schema": 3,
+      "version": "1.0.2",
+      "core_abi": 2,
+      "build_channel": "production",
+      "subsystems": {
+        "core": 1,
+        "client": 1,
+        "inference": 2,
+        "input_media": 1,
+        "openrouter_catalog": 1,
+        "stateless_helpers": 1
+      },
+      "protocols": [
+        "openai_responses",
+        "openrouter_responses",
+        "deepseek_responses",
+        "openai_chat_completions",
+        "openrouter_chat_completions",
+        "deepseek_chat_completions",
+        "anthropic_messages",
+        "google_generate_content",
+        "google_interactions"
+      ],
+      "inference_profiles": [
+        "custom_openai_chat_v1",
+        "custom_openai_responses_v1",
+        "local_openai_chat_v1",
+        "local_openai_responses_v1",
+        "local_openai_chat_private_v1",
+        "local_openai_responses_private_v1"
+      ],
+      "artifacts": {
+        "win-x64": {
+          "filename": "reaper_mbriggs_helper-x64.dll",
+          "sha256": "c8e01db52c6268217d3f44a25c2426ecdef203ad7637daa17774754ec581254d",
+          "signature": "signed-timestamped"
+        },
+        "win-arm64": {
+          "filename": "reaper_mbriggs_helper-arm64.dll",
+          "sha256": "daac326816c45d7d1166ed36a93879ff91bf10d39154e7d76bae2df964abff78",
+          "signature": "signed-timestamped"
+        },
+        "mac-arm64": {
+          "filename": "reaper_mbriggs_helper-arm64.dylib",
+          "sha256": "e19c41dd6ff03f7d995fc893a4790778e3904cf678524fa4b3ee65e57fd32a35",
+          "signature": "developer-id-notarized"
+        },
+        "mac-x64": {
+          "filename": "reaper_mbriggs_helper-x86_64.dylib",
+          "sha256": "9ab847dabfdb181c26e028bec9c206ce239a45519d77341c25e8c6d566529cd9",
+          "signature": "developer-id-notarized"
+        },
+        "linux-x64": {
+          "filename": "reaper_mbriggs_helper-x86_64.so",
+          "sha256": "94a3fadddd02efcb29221fb56ca79cfec327fcc6ccc760a60a17952d106cd007",
+          "signature": "sha256"
+        },
+        "linux-arm64": {
+          "filename": "reaper_mbriggs_helper-aarch64.so",
+          "sha256": "f8599a7260cfc250599c198a336b1337b8d07c323cd9421399cbd706476ea16a",
+          "signature": "sha256"
+        }
+      },
+      "payload_layout": "native-bytes-txt-v1"
+    }
+  },
+  "removed_files": [
+    "App/CHANGELOG.md",
+    "App/Resources/ReEQ/LICENSE.txt"
+  ],
   "files": [
     {
-      "name": "App/CHANGELOG.md",
-      "sha256": "ffdd64887cca90d26c8f0ff99abcf9e0a1d77602b5df5ba50f8ada5a7f69d1d0"
-    },
-    {
       "name": "App/LICENSE.txt",
-      "sha256": "ee866e370188e92b5ac35bf47e286b071b8a14fd1ef7a0ded18f61a0564cad25"
+      "sha256": "3522334324884eebbb9bf12d2cd181ea3fd10c5dd971a977cbf60a392dc37ffa"
     },
     {
       "name": "App/README.md",
@@ -17,39 +92,43 @@
     },
     {
       "name": "App/ReaAssist.lua",
-      "sha256": "c51523a26c3f13aa6807204646e4d591562af6a3ed0529887ec9ffd99530e863"
+      "sha256": "7048acbc46e3a320a2b740b365b92821ae309d1733c10e8b8c90a02e6ea5582f"
     },
     {
       "name": "App/ReaAssist_Screen_Reader_Mode.lua",
-      "sha256": "d914ef19f94f8b2a61e9957a7b1e6b1fcd7e1808adc86296e5184f487aa779d5"
+      "sha256": "078489590fbd83df71e79d44f492565b9d8b5eb999e447b012693ec70a498c36"
     },
     {
       "name": "App/Resources/API_Ref.md",
-      "sha256": "0f5526dc27c4fb735f0ec4e8bcf2462b8aa2932722cf778804714a73cdde60fd"
+      "sha256": "31b61b745b2213f7125dae43d97f4d40812d054924407a60746c1e6ffdf59610"
     },
     {
       "name": "App/Resources/CodeRuntime.lua",
-      "sha256": "e8e1de91e7149f8e26802f179796e4e1ac83b8fd0960ace133ab7106fd9ef51f"
+      "sha256": "07c4902f39ed69c6c887c31fe060925116e5fbf3ec43aa21c5e4dfecebe067c5"
     },
     {
       "name": "App/Resources/Context.lua",
-      "sha256": "01b333447037325c1996c1e8fc135cb1ddacfb613343af5f3fcf6c8345222cef"
+      "sha256": "d2776ec9ded829d78342ea94af577c17b4bf83f97bd71335dbb213121fec6791"
     },
     {
       "name": "App/Resources/Diag.lua",
-      "sha256": "511c9fcd7987973f5df3677d947c80ae93fcf0e8ab1e687037c49fa8046a9827"
+      "sha256": "951db1f1459dd3e2c9b8f81a4c351bb5c68188e1bc4b64ace43f9c01c796c04f"
+    },
+    {
+      "name": "App/Resources/Engine.lua",
+      "sha256": "1eb6e48d9b0fc5ee3cd810eb3a1e567d812d515f6a99ab65fcf7d2906c69f256"
     },
     {
       "name": "App/Resources/I18N.lua",
-      "sha256": "a1c2072b7c8941b3e1f18971b36afd040b21e07375cbe7179e7f6a76c8e67847"
+      "sha256": "18d5b673cddc744c3b3d39d813bd8801631934f6d111303d15657135e6cefc4e"
     },
     {
       "name": "App/Resources/Plugin_Pack.md",
-      "sha256": "06ef8d86ad295938e6bee3f157e749c98c5ab479a612891d2f5b6fb4addfe01c"
+      "sha256": "6a3104a12629f884ae6e7ff81b413e7a9f772dc2e77b73e5cffef30ad94797dd"
     },
     {
       "name": "App/Resources/Prompts.md",
-      "sha256": "130dcf2fac43aa06406097edfec72bc438cc594572c581c0d7a0bce047201e78"
+      "sha256": "392e5aa0808db24cd990fe8973ba2dad751a0d83308a64c26167fb8d59b444c5"
     },
     {
       "name": "App/Resources/ReEQ/Dependencies/firhalfband.jsfx-inc",
@@ -64,28 +143,24 @@
       "sha256": "e1162241f9097a3a866b9db692733fd2aa059b1c793ee4190c581670880e81bd"
     },
     {
-      "name": "App/Resources/ReEQ/LICENSE.txt",
-      "sha256": "9e0332342bcaa078724b5daa6a711e037378daa230a8a766b10694bcfd185cd0"
-    },
-    {
       "name": "App/Resources/ReEQ/ReEQ.jsfx",
       "sha256": "f32d3fa5c30b934cd0f1707d61d795f3d0a8f8eba505d0d52782a67e76bb4a9e"
     },
     {
       "name": "App/Resources/Reaper_Recent_Changes.md",
-      "sha256": "180ae4668240a8bbbe214342176e6d87bf70aec07f2300d30740194a3ef5b3b4"
+      "sha256": "c390f27e4ae1bc037bd32099938d51f359646cf6e59b13c9a1bc0d5c33a4b05b"
     },
     {
       "name": "App/Resources/Relaunch.lua",
-      "sha256": "4957542c8dca3c0f5db472abd5c52eb4350b40d3a62b8ab3eaab7fd819c04a1f"
+      "sha256": "12bef0cbf402b2febfc8609e775f89fd947103f7e1bdfc0b58589bbfa19bec26"
     },
     {
       "name": "App/Resources/System_Prompt.md",
-      "sha256": "378524a927976246b11cf05996a990c3c28a5b74ac1b6c3588a5394c903362b1"
+      "sha256": "f88928d2919651d9092e939af40f3efb752fb92df0db8c306582d2a026c21c70"
     },
     {
       "name": "App/Resources/UI.lua",
-      "sha256": "f45510ef8c3b49070cb1c59d4d0fce42a8da9aa2794a26f52917a91ed797d12d"
+      "sha256": "5d136db3723807ea6756a2d5b2509357f2c1eeb79faeecb8c7aa1c7bfee088da"
     },
     {
       "name": "App/Resources/fonts/Inter_18pt-Bold.ttf",
@@ -117,15 +192,19 @@
     },
     {
       "name": "App/manifest.json",
-      "sha256": "e2f3088aeed8beebf8aaa586aa500ef7103ca7ec842aa5f9ce46a5383b3720ed"
+      "sha256": "dd8f60f01ca1964debff78e877970eacd2554999d562678c11bab38713412977"
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "fc257ecd07fde7c68fe3a6cc1d0a661c95ae6a88ae189f0fa7c4dda95b06c233"
+      "sha256": "3f286b9e589ded7b8fa7df74d2b8c3696147a526c912ca9f2495e39e8618c246"
     },
     {
       "name": "ReaAssist_Screen_Reader_Mode.lua",
       "sha256": "0d884697c2be0f63db4582686574e7e747db662e9e915eab6d65072e39456074"
+    },
+    {
+      "name": "Resources/Relaunch.lua",
+      "sha256": "12bef0cbf402b2febfc8609e775f89fd947103f7e1bdfc0b58589bbfa19bec26"
     }
   ]
 }

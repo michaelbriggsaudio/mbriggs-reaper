@@ -39,7 +39,7 @@ end
 -- Constants
 -- ============================================================================
 Diag.SCHEMA_VERSION    = 2
-Diag.PAYLOAD_REVISION  = 8
+Diag.PAYLOAD_REVISION  = 12
 Diag.PAYLOAD_CAP_BYTES = 1024 * 1024     -- 1 MB server-side cap (manual feedback)
 -- Bug-report tier carries the full Advanced Log inline as a JSON string.
 -- Logs are auto-pruned to MAX_LOG_TURNS (40) at write time, but each turn can
@@ -68,7 +68,7 @@ Diag.LEGACY_STORAGE_CLEANUP_DELAY_S = 3
 Diag.LEGACY_STORAGE_CLEANUP_VERSION = 6
 Diag.PRICE_TABLE_VERSION        = "2026-05-27"
 
-Diag.PROVIDER_VOCABULARY     = { "anthropic", "openai", "google", "deepseek", "custom", "unknown" }
+Diag.PROVIDER_VOCABULARY     = { "anthropic", "openai", "google", "deepseek", "openrouter", "custom", "unknown" }
 Diag.MODEL_TIER_VOCABULARY   = { "fast", "balanced", "smart", "custom", "unknown" }
 Diag.BUCKET_TYPE_VOCABULARY  = { "session", "docs", "docs_section", "api_ref", "midi",
                                   "theme", "plugin_ref", "preferred_plugins", "fx_params",
@@ -84,7 +84,7 @@ Diag.RETRY_REASON_VOCABULARY = {
   "validator", "docs_gate", "plugin_helper", "semantic", "context_fetch",
   "response_shape", "provider_capacity", "http_5xx", "timeout", "rate_limit",
   "schannel_revocation_offline",
-  "length", "empty", "action", "action_relevance", "api", "arity",
+  "length", "empty", "action", "prose_only_action", "action_relevance", "api", "arity",
   "audio_accessor_nil", "audio_sync", "bus_routing", "context_needed", "defer",
   "drum_marker_sync", "drum_quantize", "existing_fx_add",
   "explicit_seconds_marker", "fx_param_provenance", "fx_param_scope",
@@ -675,6 +675,110 @@ function Diag.redact_log(content)
   return Diag.redact(content)
 end
 
+-- Keep local attachment names in Show Details, but remove them from report and
+-- log context labels before those labels leave the machine.
+local CONTEXT_COMPONENT_SAFE_TOKENS = {
+  ["none"] = true, ["snapshot"] = true, ["screen_reader"] = true,
+  ["api_ref"] = true, ["midi"] = true, ["theme"] = true,
+  ["custom_instr"] = true, ["typed_actions"] = true,
+  ["docs_extended"] = true, ["recent_reaper_changes"] = true,
+  ["fx_chains"] = true, ["fx_list"] = true, ["fx_params"] = true,
+  ["pref_plugins"] = true, ["tracks"] = true, ["docs"] = true,
+  ["plugin_ref"] = true, ["track_flags"] = true,
+  ["fx_inspect"] = true, ["attachment"] = true,
+  ["attachment review"] = true, ["refs/snapshot suppressed"] = true,
+  ["presentation only"] = true, ["answer-only follow-up"] = true,
+  ["reusable action"] = true, ["snapshot suppressed"] = true,
+}
+local CONTEXT_COMPONENT_SAFE_PREFIXES = {
+  "starter:", "plugin_ref:", "pref:", "prompt_bundle:", "docs:",
+  "fx_list:", "fx_inspect:", "fx:", "fx_params:",
+}
+
+function Diag.sanitize_context_components(value)
+  local parts = {}
+  for raw in tostring(value or ""):gmatch("([^+]+)") do
+    local part = raw:match("^%s*(.-)%s*$") or ""
+    local lower = part:lower()
+    local safe = CONTEXT_COMPONENT_SAFE_TOKENS[lower] == true
+    if not safe then
+      for _, prefix in ipairs(CONTEXT_COMPONENT_SAFE_PREFIXES) do
+        if lower:sub(1, #prefix) == prefix then
+          safe = true
+          break
+        end
+      end
+    end
+    parts[#parts + 1] = safe and part or "contextual"
+  end
+  return #parts > 0 and table.concat(parts, " + ") or "none"
+end
+
+function Diag.sanitize_context_label(label, attachment_names)
+  label = tostring(label or "")
+  if type(attachment_names) == "table" then
+    for _, name in ipairs(attachment_names) do
+      if type(name) == "string" and name ~= "" then
+        label = label:gsub(_esc_pat(name), "attachment")
+      end
+    end
+  end
+  return Diag.sanitize_context_components(label)
+end
+
+-- Historical debug logs can contain local attachment names in machine-authored
+-- exchange-summary Context fields. User-authored Context lines stay unchanged.
+function Diag.sanitize_diagnostic_log(content)
+  content = Diag.redact_log(content)
+  if type(content) ~= "string" or content == "" then return content or "" end
+  local out, pos, exchange_header, expect_components = {}, 1, false, false
+  while pos <= #content do
+    local newline = content:find("\n", pos, true)
+    local raw = newline and content:sub(pos, newline - 1) or content:sub(pos)
+    local carriage = raw:sub(-1) == "\r"
+    local line = carriage and raw:sub(1, -2) or raw
+    if line:find("^------- EXCHANGE SUMMARY") then
+      exchange_header = true
+      expect_components = false
+    elseif exchange_header then
+      if line:find("^Model:%s*") or line:find("^Thinking:%s*") then
+        -- Context follows these optional machine-authored fields.
+      elseif line:find("^Context:%s*") then
+        line = line:gsub("^(Context:%s*)[^\r\n]+", "%1contextual")
+        exchange_header = false
+        expect_components = true
+      else
+        exchange_header = false
+      end
+    elseif expect_components then
+      local prefix, value = line:match("^(Context components:%s*)(.*)$")
+      if prefix then
+        line = prefix .. Diag.sanitize_context_components(value)
+      end
+      expect_components = false
+    end
+    out[#out + 1] = line .. (carriage and "\r" or "")
+      .. (newline and "\n" or "")
+    if not newline then break end
+    pos = newline + 1
+  end
+  return table.concat(out)
+end
+
+-- Diagnostic reports also carry a machine-authored recent-chat metadata line.
+function Diag.sanitize_diagnostic_report(content)
+  content = Diag.sanitize_diagnostic_log(content)
+  if type(content) ~= "string" or content == "" then return content or "" end
+  local sanitized = content:gsub(
+    "(%f[^\r\n]%s+%[context:%s*)[^|%]]+", "%1contextual ")
+  sanitized = sanitized:gsub(
+    "(%f[^\r\n]%s+%[context:[^\r\n]-context_components:%s*)([^|%]]+)",
+    function(prefix, value)
+      return prefix .. Diag.sanitize_context_components(value) .. " "
+    end)
+  return sanitized
+end
+
 -- ============================================================================
 -- Helpers
 -- ============================================================================
@@ -748,7 +852,7 @@ local function _safe_turn_provider_id(raw)
   local id = raw:lower()
   if id == "gemini" then return "google" end
   if id == "anthropic" or id == "openai" or id == "google"
-     or id == "deepseek" then return id end
+     or id == "deepseek" or id == "openrouter" then return id end
   return "custom"
 end
 
@@ -907,6 +1011,40 @@ local function _turn_run_result(msg, err_kind, redact_content)
   out.error_debug = nil
   put("error_kind", err_kind, true)
   put("observable_change_status", msg.observable_change_status, true)
+  put("host_value_change_status", msg.host_value_change_status, true)
+  do
+    local count = out.fx_insert_accepted_call_count
+    if count == nil then count = msg.fx_insert_accepted_call_count end
+    out.fx_insert_accepted_call_count = nil
+    if type(count) == "number" and count >= 0 and count <= 1000000000
+        and count % 1 == 0 then
+      out.fx_insert_accepted_call_count = count
+      has = true
+    end
+  end
+  -- The substitution record, bounded and role-only. The user's prompt is
+  -- never copied here: the record carries the product the run inserted, the
+  -- role it filled and the saved preference it left unused.
+  do
+    local raw = msg.fx_preference_substitutions
+      or out.fx_preference_substitutions
+    out.fx_preference_substitutions = nil
+    if type(raw) == "table" and #raw > 0 then
+      local lines = {}
+      for _, entry in ipairs(raw) do
+        if #lines >= 8 then break end
+        if type(entry) == "table" then
+          lines[#lines + 1] = tostring(entry.role or "?") .. "="
+            .. tostring(entry.used or "?") .. "/"
+            .. tostring(entry.preference or "?")
+        end
+      end
+      if #lines > 0 then
+        out.fx_preference_substitutions = lines
+        has = true
+      end
+    end
+  end
   local raw_parameter_evidence = msg.parameter_change_evidence
     or out.parameter_change_evidence
   if type(raw_parameter_evidence) == "table" then
@@ -918,9 +1056,12 @@ local function _turn_run_result(msg, err_kind, redact_content)
        "requested_value_confirmed_mismatch_count",
        "requested_value_quantized_match_count",
        "setter_rejected_target_count", "profile_guarded_target_count",
+       "user_target_match_count", "user_target_mismatch_count", "user_target_unknown_count",
     }
     local safe_parameter_evidence = {
       status = tostring(raw_parameter_evidence.status or "unknown"),
+      user_target_status = ({matched=true, mismatched=true, unknown=true})[
+        raw_parameter_evidence.user_target_status] and raw_parameter_evidence.user_target_status or "unknown",
     }
     for _, key in ipairs(allowed_counts) do
       local count = tonumber(raw_parameter_evidence[key])
@@ -929,6 +1070,67 @@ local function _turn_run_result(msg, err_kind, redact_content)
       end
     end
     out.parameter_change_evidence = safe_parameter_evidence
+    has = true
+  end
+  local raw_midi = msg.midi_note_change_evidence or out.midi_note_change_evidence
+  out.midi_note_change_evidence, out.midi_note_change_status = nil, nil
+  if type(raw_midi) == "table" then
+    local status = ({changed=true, partially_changed=true, unchanged=true,
+      returned_to_initial=true, unknown=true})[raw_midi.status] and raw_midi.status or "unknown"
+    local safe = {status=status, truncated=raw_midi.truncated == true,
+      unique_target_status=raw_midi.unique_target_status == "stable" and "stable" or "unknown"}
+    if raw_midi.observation_status == "complete" or raw_midi.observation_status == "limited" then
+      safe.observation_status = raw_midi.observation_status
+    end
+    for _, key in ipairs({"operation_count", "setter_accepted_operation_count",
+      "setter_rejected_operation_count", "setter_error_operation_count",
+      "setter_unknown_result_operation_count", "requested_different_operation_count",
+      "readback_confirmed_operation_count", "readback_mismatch_operation_count",
+      "readback_unknown_operation_count", "confirmed_changed_operation_count",
+      "target_count", "changed_target_count", "unchanged_target_count",
+      "returned_to_initial_count", "unknown_target_count"}) do
+      local n = raw_midi[key]
+      if type(n) == "number" and n >= 0 and n <= 1000000000 and n % 1 == 0 then
+        safe[key] = n
+      end
+    end
+    for _, key in ipairs({"observation_limit", "observed_operation_count", "unobserved_operation_count"}) do
+      local n = raw_midi[key]
+      if type(n) == "number" and n >= 0 and n <= 1000000000 and n % 1 == 0 then safe[key] = n end
+    end
+    if safe.observation_status == "limited" or (safe.unobserved_operation_count or 0) > 0 then
+      safe.observation_status, safe.truncated = "limited", true
+      for _, key in ipairs({"requested_different_operation_count",
+        "readback_confirmed_operation_count", "readback_mismatch_operation_count",
+        "readback_unknown_operation_count", "confirmed_changed_operation_count"}) do safe[key] = nil end
+    end
+    if safe.truncated or safe.unique_target_status ~= "stable" then
+      safe.unique_target_status, safe.status, status = "unknown", "unknown", "unknown"
+      for _, key in ipairs({"target_count", "changed_target_count", "unchanged_target_count",
+        "returned_to_initial_count", "unknown_target_count"}) do safe[key] = nil end
+    end
+    out.midi_note_change_evidence, out.midi_note_change_status = safe, status
+    has = true
+  end
+  local raw_host_value_evidence = msg.host_value_change_evidence
+    or out.host_value_change_evidence
+  if type(raw_host_value_evidence) == "table" then
+    local safe_host_value_evidence = {
+      status = tostring(raw_host_value_evidence.status or "unknown"),
+      truncated = raw_host_value_evidence.truncated == true,
+    }
+    local allowed_counts = {
+      "target_count", "write_count", "changed_target_count",
+      "unchanged_target_count", "returned_to_initial_count",
+      "unknown_target_count",
+    }
+    for _, key in ipairs(allowed_counts) do
+      local count = tonumber(raw_host_value_evidence[key])
+      if count ~= nil then
+        safe_host_value_evidence[key] = math.max(0, math.floor(count))
+      end
+    end
+    out.host_value_change_evidence = safe_host_value_evidence
     has = true
   end
   if msg.change_evidence ~= nil and out.change_evidence == nil then
@@ -974,6 +1176,11 @@ local function _turn_to_table(msg, redact_content)
     end
   end
   if msg.role == "assistant" then
+    if type(msg.transport_events) == "table" then
+      local events, dropped = Diag.sanitize_transport_events(msg.transport_events)
+      t.transport_events = events
+      t.transport_events_dropped_count = dropped or 0
+    end
     local provider_id = _safe_turn_provider_id(msg.provider_id)
     if msg.provider_id ~= nil then t.provider_id = provider_id end
     if msg.model_id then t.model_id = _safe_turn_model_id(msg.model_id, provider_id) end
@@ -1058,8 +1265,12 @@ local function _turn_to_table(msg, redact_content)
               math.floor(tonumber(usage.cache_read_tokens) or 0)),
             cache_create_tokens = math.max(0,
               math.floor(tonumber(usage.cache_create_tokens) or 0)),
-            uncached_input_tokens = math.max(0,
-              math.floor(tonumber(usage.uncached_input_tokens) or 0)),
+            accounting_quality = type(usage.accounting_quality) == "string"
+              and usage.accounting_quality:sub(1, 64) or nil,
+            cost_unknown = usage.cost_unknown == true or nil,
+            uncached_input_tokens = usage.uncached_input_tokens ~= nil
+              and math.max(0, math.floor(
+                tonumber(usage.uncached_input_tokens) or 0)) or nil,
             context_class = Diag.normalize_context_class(usage.context_label),
           }
         end
@@ -1067,6 +1278,11 @@ local function _turn_to_table(msg, redact_content)
       if #t.model_call_usage == 0 then t.model_call_usage = nil end
     end
     if msg.cost          ~= nil then t.cost          = msg.cost end
+    if msg.cost_unknown  == true then t.cost_unknown = true end
+    if type(msg.usage_accounting_quality) == "string" then
+      t.usage_accounting_quality =
+        msg.usage_accounting_quality:sub(1, 64)
+    end
     if msg.recovery_kind ~= nil or msg.recovery ~= nil then
       t.retry_reason = Diag.normalize_retry_reason(
         msg.recovery_kind or msg.recovery)
@@ -1288,11 +1504,14 @@ function Diag.sanitize_request_status(status)
   if type(status) ~= "table" then return nil end
   local out = {
     state = Diag.normalize_request_status(status.state or status.status),
-    retry_count = math.max(0, math.floor(tonumber(status.retry_count) or 0)),
-    retry_max = math.max(0, math.floor(tonumber(status.retry_max) or 0)),
+    retry_count = math.max(0, math.min(8,
+      math.floor(tonumber(status.retry_count) or 0))),
+    retry_max = math.max(0, math.min(8,
+      math.floor(tonumber(status.retry_max) or 0))),
   }
   local reasons, seen = {}, {}
   local function add_reason(value)
+    if #reasons >= 8 then return end
     local reason = Diag.normalize_retry_reason(value)
     if reason ~= "unknown" and not seen[reason] then
       seen[reason] = true
@@ -1306,6 +1525,442 @@ function Diag.sanitize_request_status(status)
   if #reasons > 0 then out.retry_reasons = reasons end
   if status.error_kind ~= nil then
     out.error_kind = Diag.safe_error_kind(status.error_kind) or "unknown"
+  end
+  local state_modes = {canonical = true, legacy = true, none = true, unknown = true}
+  local terminal_statuses = {
+    completed = true, failed = true, cancelled = true,
+    incomplete = true, none = true, unknown = true,
+  }
+  local incomplete_reasons = {
+    none = true, truncated = true, dropped_events = true,
+    adapter_error = true, assembly_error = true, encoding_error = true,
+    provider_incomplete = true, unknown = true,
+  }
+  if status.provider_state_mode ~= nil then
+    local value = tostring(status.provider_state_mode)
+    out.provider_state_mode = state_modes[value] and value or "unknown"
+  end
+  if status.provider_terminal_status ~= nil then
+    local value = tostring(status.provider_terminal_status)
+    out.provider_terminal_status = terminal_statuses[value]
+      and value or "unknown"
+  end
+  if status.provider_incomplete_reason ~= nil then
+    local value = tostring(status.provider_incomplete_reason)
+    out.provider_incomplete_reason = incomplete_reasons[value]
+      and value or "unknown"
+  end
+  if status.provider_unknown_nonterminal_event_count ~= nil
+      or status.provider_unknown_nonterminal_event_count_bucket ~= nil then
+    local value = status.provider_unknown_nonterminal_event_count_bucket
+    local buckets = {
+      ["0"] = true, ["1"] = true, ["2_3"] = true, ["4_7"] = true,
+      ["8_15"] = true, ["16_31"] = true, ["32_63"] = true,
+      ["64_plus"] = true,
+    }
+    if buckets[value] then
+      out.provider_unknown_nonterminal_event_count_bucket = value
+    else
+      local count = math.max(0, math.floor(tonumber(
+        status.provider_unknown_nonterminal_event_count) or 0))
+      out.provider_unknown_nonterminal_event_count_bucket = count == 0 and "0"
+        or count == 1 and "1" or count <= 3 and "2_3"
+        or count <= 7 and "4_7" or count <= 15 and "8_15"
+        or count <= 31 and "16_31" or count <= 63 and "32_63"
+        or "64_plus"
+    end
+  end
+  return out
+end
+
+function Diag.sanitize_transport_events(events)
+  if type(events) ~= "table" then return nil end
+  local source = {}
+  for _, event in ipairs(events) do
+    if type(event) == "table" then source[#source + 1] = event end
+    if #source > 16 then return nil end
+  end
+  local retained = source
+  local dropped = 0
+  if #source > 12 then
+    retained = {}
+    for index = 1, 6 do retained[#retained + 1] = source[index] end
+    for index = #source - 5, #source do
+      retained[#retained + 1] = source[index]
+    end
+    dropped = #source - 12
+  end
+  local protocols = {
+    anthropic_messages = true, deepseek_chat_completions = true,
+    deepseek_responses = true, openai_chat_completions = true,
+    openai_responses = true, openrouter_chat_completions = true,
+    openrouter_responses = true, google_generate_content = true,
+    google_interactions = true,
+  }
+  local profile_kinds = {
+    built_in = true, custom = true, ["local"] = true, unknown = true,
+  }
+  local openrouter_preset_modes = {
+    none = true, preset_only = true, request_override = true,
+  }
+  local openrouter_preset_sources = {
+    none = true, current_catalog = true, direct_unverified = true,
+  }
+  local start_outcomes = {
+    started = true, refused = true, unavailable = true,
+    launch_failed = true, unknown = true,
+  }
+  local transmissions = {not_sent = true, sent = true, unknown = true}
+  local adapter_errors = {
+    none = true, protocol = true, stream = true, assembly = true,
+    encoding = true, usage = true, provider = true, unknown = true,
+  }
+  local recovery_kinds = {
+    none = true, preflight_curl = true, same_protocol_curl = true,
+    blocked = true, unknown = true,
+  }
+  local recovery_reasons = {
+    none = true, engine_unavailable = true, protocol_unavailable = true,
+    local_refusal = true, safe_pretransmission_failure = true,
+    cancelled = true, policy_blocked = true, unknown = true,
+  }
+  local duration_buckets = {
+    not_started = true, lt_1s = true, ["1_3s"] = true, ["4_9s"] = true,
+    ["10_29s"] = true, ["30_89s"] = true, ["90s_plus"] = true,
+    unknown = true,
+  }
+  local count_buckets = {
+    ["0"] = true, ["1"] = true, ["2_3"] = true, ["4_7"] = true,
+    ["8_15"] = true, ["16_31"] = true, ["32_63"] = true,
+    ["64_plus"] = true,
+  }
+  local function token(value, allowed, fallback)
+    value = type(value) == "string" and value or nil
+    return value and allowed[value] and value or fallback
+  end
+  local function count_bucket(value)
+    if count_buckets[value] then return value end
+    local count = math.max(0, math.floor(tonumber(value) or 0))
+    return count == 0 and "0" or count == 1 and "1"
+      or count <= 3 and "2_3" or count <= 7 and "4_7"
+      or count <= 15 and "8_15" or count <= 31 and "16_31"
+      or count <= 63 and "32_63" or "64_plus"
+  end
+  local function duration_bucket(event)
+    local existing = token(event.duration_bucket, duration_buckets, nil)
+    if existing then return existing end
+    local started = tonumber(event._started_at)
+    local completed = tonumber(event._completed_at)
+    if not started then return "not_started" end
+    if not completed or completed < started then return "unknown" end
+    local seconds = completed - started
+    return seconds < 1 and "lt_1s" or seconds < 4 and "1_3s"
+      or seconds < 10 and "4_9s" or seconds < 30 and "10_29s"
+      or seconds < 90 and "30_89s" or "90s_plus"
+  end
+  local out = {}
+  for _, event in ipairs(retained) do
+      local lane = event.lane == "engine" and "engine" or "curl"
+      local item = {
+        call_index = math.max(1, math.min(8,
+          math.floor(tonumber(event.call_index) or (#out + 1)))),
+        attempt_index = math.max(1, math.min(2,
+          math.floor(tonumber(event.attempt_index) or 1))),
+        lane = lane,
+        streaming = event.streaming == true,
+        protocol = token(event.protocol, protocols, "unknown"),
+        profile_kind = token(event.profile_kind, profile_kinds, "unknown"),
+        openrouter_preset_mode = token(event.openrouter_preset_mode,
+          openrouter_preset_modes, "none"),
+        openrouter_preset_source = token(event.openrouter_preset_source,
+          openrouter_preset_sources, "none"),
+        start_outcome = token(event.start_outcome, start_outcomes, "unknown"),
+        transmission_state = token(
+          event.transmission_state or event.transmission,
+          transmissions, "unknown"),
+        adapter_error_category = token(event.adapter_error_category,
+          adapter_errors, "none"),
+        recovery_kind = token(event.recovery_kind, recovery_kinds, "none"),
+        recovery_reason = token(event.recovery_reason,
+          recovery_reasons, "none"),
+        duration_bucket = duration_bucket(event),
+        event_queue_high_water_bucket = count_bucket(
+          event.event_queue_high_water_bucket or event.event_queue_high_water),
+      }
+      if item.transmission_state == "sent" then
+        item.request_sent = true
+      elseif item.transmission_state == "not_sent" then
+        item.request_sent = false
+      elseif event.request_sent ~= nil then
+        item.request_sent = event.request_sent == true
+      end
+      local error_code = tonumber(event.error_code)
+      if error_code and error_code >= 0 and error_code <= 9999 then
+        item.error_code = math.floor(error_code)
+      end
+      local engine_abi = tonumber(event.engine_abi)
+      if engine_abi and engine_abi >= 0 and engine_abi <= 1000 then
+        item.engine_abi = math.floor(engine_abi)
+      end
+      if type(event.engine_version) == "string"
+          and event.engine_version:match("^[%w%.%+%-_]+$") then
+        item.engine_version = event.engine_version:sub(1, 40)
+      end
+      item.fallback_reason = Diag.normalize_transport_fallback_reason(
+        event.fallback_reason)
+      out[#out + 1] = item
+  end
+  return #out > 0 and out or nil, dropped
+end
+
+-- Local Advanced Log view of one transport attempt. Automatic diagnostics use
+-- aggregate categories, while this formatter adds bounded per-attempt evidence
+-- for the local support log.
+function Diag.sanitize_transport_log_event(event)
+  local events = Diag.sanitize_transport_events({ event })
+  local item = type(events) == "table" and events[1] or nil
+  if type(item) ~= "table" then return nil end
+  local outcomes = {
+    started = true, completed = true, failed = true, cancelled = true,
+  }
+  local outcome = type(event) == "table" and tostring(event.outcome or "") or ""
+  item.terminal_outcome = outcomes[outcome] and outcome or "unknown"
+  item.client_recovered = type(event) == "table"
+    and event.lane == "engine" and event.client_recovered == true
+  local http_status = type(event) == "table"
+    and tonumber(event.http_status) or nil
+  if http_status and http_status >= 100 and http_status <= 599
+      and http_status == math.floor(http_status) then
+    item.http_status = http_status
+  end
+  return item
+end
+
+function Diag.normalize_transport_fallback_reason(value)
+  if value == nil then return nil end
+  local reason = tostring(value)
+  if reason == "screen_reader_mode" or reason == "debug_force_curl"
+      or reason == "request_bypass"
+      or reason == "engine_module_unavailable"
+      or reason == "engine_unavailable"
+      or reason == "engine_detection_error"
+      or reason == "engine_start_refused"
+      or reason == "engine_pretransmission_failure"
+      or reason == "engine_unavailable_other" then
+    return reason
+  end
+  if reason:sub(1, #"start_refused:") == "start_refused:" then
+    return "engine_start_refused"
+  end
+  if reason:sub(1, #"engine_failure:") == "engine_failure:" then
+    return "engine_pretransmission_failure"
+  end
+  return "engine_unavailable_other"
+end
+
+function Diag.summarize_transport_events(events, max_calls_per_turn)
+  max_calls_per_turn = tonumber(max_calls_per_turn) or 8
+  if max_calls_per_turn ~= math.floor(max_calls_per_turn)
+      or max_calls_per_turn < 1 then
+    return nil
+  end
+  local attempt_cap = 2 * max_calls_per_turn
+  local out = {
+    engine_attempt_count = 0,
+    lua_curl_attempt_count = 0,
+    engine_to_lua_fallback_count = 0,
+    direct_lua_count = 0,
+    fallback_reason_counts = {},
+    engine_protocol_attempt_counts = {},
+    lua_curl_protocol_attempt_counts = {},
+    terminal_outcome_counts = {},
+    start_outcome_counts = {},
+    transmission_state_counts = {},
+    adapter_error_category_counts = {},
+    duration_bucket_counts = {},
+    failure_stage_counts = {},
+    http_status_category_counts = {},
+    curl_error_category_counts = {},
+  }
+  if events == nil then return out end
+  if type(events) ~= "table" then return nil end
+  local source = {}
+  for _, event in ipairs(events) do
+    if type(event) ~= "table" then return nil end
+    source[#source + 1] = event
+    if #source > attempt_cap then return nil end
+  end
+  local engine_by_call, engine_anywhere_by_call = {}, {}
+  local recovery_by_call, inferred_engine_by_call = {}, {}
+  local protocols = {
+    anthropic_messages = true, deepseek_chat_completions = true,
+    deepseek_responses = true, openai_chat_completions = true,
+    openai_responses = true, openrouter_chat_completions = true,
+    openrouter_responses = true, google_generate_content = true,
+    google_interactions = true,
+  }
+  local start_outcomes = {
+    started = true, refused = true, unavailable = true,
+    launch_failed = true, unknown = true,
+  }
+  local transmissions = {not_sent = true, sent = true, unknown = true}
+  local adapter_errors = {
+    none = true, protocol = true, stream = true, assembly = true,
+    encoding = true, usage = true, provider = true, unknown = true,
+  }
+  local duration_buckets = {
+    not_started = true, lt_1s = true, ["1_3s"] = true, ["4_9s"] = true,
+    ["10_29s"] = true, ["30_89s"] = true, ["90s_plus"] = true,
+    unknown = true,
+  }
+  local function fixed(value, allowed, fallback)
+    value = type(value) == "string" and value or nil
+    return value and allowed[value] and value or fallback
+  end
+  local function inc(target, key)
+    target[key] = math.min(65535, (target[key] or 0) + 1)
+  end
+  local function terminal_outcome(event)
+    local value = tostring(event.outcome or "")
+    if value == "settled" then value = "completed" end
+    if value == "completed" or value == "failed" or value == "cancelled" then
+      return value
+    end
+    return "unknown"
+  end
+  local function http_status_category(event)
+    local status = tonumber(event.http_status)
+    if not status or status ~= math.floor(status)
+        or status < 100 or status > 599 then return nil end
+    if status >= 200 and status <= 299 then return "success_2xx" end
+    if status >= 300 and status <= 399 then return "redirect_3xx" end
+    if status == 401 then return "auth_401" end
+    if status == 403 then return "auth_403" end
+    if status == 404 then return "not_found_404" end
+    if status == 429 then return "throttle_429" end
+    if status >= 400 and status <= 499 then return "client_other_4xx" end
+    if status >= 500 then return "server_5xx" end
+    return "other"
+  end
+  local function curl_error_category(event)
+    if event.lane ~= "curl" then return nil end
+    local code = tonumber(event.error_code)
+    if not code or code == 0 or code ~= math.floor(code) then return nil end
+    if code == 5 or code == 6 then return "dns" end
+    if code == 7 then return "connect" end
+    if code == 28 then return "timeout" end
+    if code == 23 or code == 26 then return "local_io" end
+    local tls = {
+      [35] = true, [51] = true, [53] = true, [54] = true,
+      [58] = true, [59] = true, [60] = true, [64] = true,
+      [66] = true, [77] = true, [80] = true, [82] = true,
+      [83] = true, [90] = true, [91] = true,
+    }
+    return tls[code] and "tls" or "other"
+  end
+  local function failure_stage(event, outcome, start_outcome, transmission,
+      adapter_error, http_category, curl_category)
+    if outcome == "completed" then return "completed" end
+    if outcome == "cancelled" then return "cancelled" end
+    if start_outcome == "refused" or start_outcome == "unavailable"
+        or start_outcome == "launch_failed" or transmission == "not_sent" then
+      return "start"
+    end
+    if adapter_error == "protocol" then return "protocol" end
+    if adapter_error == "stream" then return "stream" end
+    if adapter_error == "assembly" or adapter_error == "encoding" then
+      return "assembly"
+    end
+    if adapter_error == "provider" or adapter_error == "usage"
+        or (http_category and http_category ~= "success_2xx"
+          and http_category ~= "redirect_3xx") then
+      return "provider"
+    end
+    if curl_category or outcome == "failed" then return "transport" end
+    return "unknown"
+  end
+  for _, event in ipairs(source) do
+    local lane = event.lane
+    local call_index = tonumber(event.call_index)
+    if (lane ~= "engine" and lane ~= "curl") or not call_index
+        or call_index ~= math.floor(call_index)
+        or call_index < 1 or call_index > max_calls_per_turn then
+      return nil
+    end
+    if event.recovery_kind == "same_protocol_curl" then
+      local attempt_index = tonumber(event.attempt_index)
+      if lane ~= "curl" or attempt_index ~= 2 then return nil end
+    end
+    if lane == "engine" then engine_anywhere_by_call[call_index] = true end
+  end
+  for _, event in ipairs(source) do
+    local lane = event.lane
+    local call_index = tonumber(event.call_index)
+    if lane == "engine" then
+      out.engine_attempt_count = out.engine_attempt_count + 1
+      engine_by_call[call_index] = true
+    else
+      out.lua_curl_attempt_count = out.lua_curl_attempt_count + 1
+      local explicit_recovery = event.recovery_kind == "same_protocol_curl"
+        and tonumber(event.attempt_index) == 2
+      if explicit_recovery and not engine_anywhere_by_call[call_index]
+          and not inferred_engine_by_call[call_index] then
+        -- A bounded sanitized event list can omit the earlier Engine detail
+        -- from a same-protocol pair. The curl marker still proves that
+        -- attempt one existed. Live request recording appends the Engine
+        -- attempt before the curl recovery.
+        inferred_engine_by_call[call_index] = true
+        engine_by_call[call_index] = true
+        out.engine_attempt_count = out.engine_attempt_count + 1
+        inc(out.engine_protocol_attempt_counts, "unknown")
+        inc(out.terminal_outcome_counts, "unknown")
+        inc(out.start_outcome_counts, "unknown")
+        inc(out.transmission_state_counts, "unknown")
+        inc(out.adapter_error_category_counts, "unknown")
+        inc(out.duration_bucket_counts, "unknown")
+        inc(out.failure_stage_counts, "unknown")
+      end
+      if (explicit_recovery or engine_by_call[call_index])
+          and not recovery_by_call[call_index] then
+        recovery_by_call[call_index] = true
+        out.engine_to_lua_fallback_count =
+          out.engine_to_lua_fallback_count + 1
+      else
+        out.direct_lua_count = out.direct_lua_count + 1
+      end
+      local reason = Diag.normalize_transport_fallback_reason(
+        event.fallback_reason)
+      if reason then
+        out.fallback_reason_counts[reason] =
+          (out.fallback_reason_counts[reason] or 0) + 1
+      end
+    end
+    local protocol = fixed(event.protocol, protocols, "unknown")
+    inc(lane == "engine" and out.engine_protocol_attempt_counts
+      or out.lua_curl_protocol_attempt_counts, protocol)
+    local outcome = terminal_outcome(event)
+    local start_outcome = fixed(event.start_outcome, start_outcomes, "unknown")
+    local transmission = fixed(
+      event.transmission_state or event.transmission, transmissions, "unknown")
+    local adapter_error = fixed(
+      event.adapter_error_category, adapter_errors, "unknown")
+    local duration = fixed(event.duration_bucket, duration_buckets, nil)
+    if not duration then
+      local sanitized = Diag.sanitize_transport_events({event})
+      duration = type(sanitized) == "table" and sanitized[1]
+        and sanitized[1].duration_bucket or "unknown"
+    end
+    local http_category = http_status_category(event)
+    local curl_category = curl_error_category(event)
+    inc(out.terminal_outcome_counts, outcome)
+    inc(out.start_outcome_counts, start_outcome)
+    inc(out.transmission_state_counts, transmission)
+    inc(out.adapter_error_category_counts, adapter_error)
+    inc(out.duration_bucket_counts, duration)
+    if http_category then inc(out.http_status_category_counts, http_category) end
+    if curl_category then inc(out.curl_error_category_counts, curl_category) end
+    inc(out.failure_stage_counts, failure_stage(event, outcome, start_outcome,
+      transmission, adapter_error, http_category, curl_category))
   end
   return out
 end
@@ -1422,8 +2077,9 @@ function Diag.sanitize_validation_trace(trace)
             math.floor(tonumber(usage.cache_read_tokens) or 0)),
           cache_create_tokens = math.max(0,
             math.floor(tonumber(usage.cache_create_tokens) or 0)),
-          uncached_input_tokens = math.max(0,
-            math.floor(tonumber(usage.uncached_input_tokens) or 0)),
+          uncached_input_tokens = usage.uncached_input_tokens ~= nil
+            and math.max(0, math.floor(
+              tonumber(usage.uncached_input_tokens) or 0)) or nil,
           context_class = Diag.normalize_context_class(usage.context_label),
         }
       end
@@ -1451,11 +2107,13 @@ end
 function Diag.sanitize_error_debug(debug)
   if type(debug) ~= "table" then return _redact_payload_value(debug) end
   local out = _redact_payload_value(debug)
-  if out.ctx_label ~= nil or out.context_label ~= nil then
+  if out.ctx_label ~= nil or out.context_label ~= nil
+     or out.display_context ~= nil then
     out.context_class = Diag.normalize_context_class(
-      out.ctx_label or out.context_label)
+      out.ctx_label or out.context_label or out.display_context)
     out.ctx_label = nil
     out.context_label = nil
+    out.display_context = nil
   end
   if out.recovery_kind ~= nil then
     out.retry_reason = Diag.normalize_retry_reason(out.recovery_kind)
@@ -1779,7 +2437,7 @@ function Diag.client_context()
   return out
 end
 
-local function _environment_summary()
+local function _environment_summary(include_bounded_operational)
   local fx_cache_size = _safe_try(function()
     if type(FXCache) == "table" and type(FXCache.load) == "function" then
       local cache = FXCache.load()
@@ -1837,6 +2495,119 @@ local function _environment_summary()
       return tostring(reaper.JS_ReaScriptAPI_Version())
     end
   end, nil)
+  local protocol_names = {
+    "anthropic_messages", "deepseek_chat_completions",
+    "deepseek_responses", "openai_chat_completions", "openai_responses",
+    "openrouter_chat_completions", "openrouter_responses",
+    "google_generate_content", "google_interactions",
+  }
+  local function unavailable_engine_summary()
+    local capabilities = {}
+    for _, name in ipairs(protocol_names) do capabilities[name] = false end
+    return {
+      present = false,
+      usable = false,
+      pinned_to_curl = false,
+      diagnostic_log_fallback = false,
+      js_subset = false,
+      inference_capability = false,
+      protocol_capabilities = capabilities,
+      activation_category = "engine_unavailable",
+    }
+  end
+  local engine = _safe_try(function()
+    if type(Engine) ~= "table" or type(Engine.describe) ~= "function" then
+      return unavailable_engine_summary()
+    end
+    local desc = Engine.describe()
+    if type(desc) ~= "table" then
+      return unavailable_engine_summary()
+    end
+    local advertised = {}
+    for _, name in ipairs(type(desc.protocols) == "table" and desc.protocols or {}) do
+      if type(name) == "string" then advertised[name] = true end
+    end
+    local protocol_capabilities = {}
+    for _, name in ipairs(protocol_names) do
+      protocol_capabilities[name] = advertised[name] == true
+    end
+    local activation_category = not desc.present and "engine_unavailable"
+      or desc.pinned_to_curl == true and "pinned_to_curl"
+      or desc.client_open == true and "native_active"
+      or desc.routing_available == true and "native_ready"
+      or "curl_selected"
+    local output = {
+      present = desc.present == true,
+      usable = desc.present == true and desc.routing_available == true
+        and desc.pinned_to_curl ~= true,
+      version = type(desc.version) == "string"
+        and desc.version:match("^[%w%.%+%-_]+$") and desc.version:sub(1, 40)
+        or nil,
+      abi = tonumber(desc.abi) and math.max(0, math.floor(desc.abi)) or nil,
+      pinned_to_curl = desc.pinned_to_curl == true,
+      diagnostic_log_fallback = desc.diagnostic_log_fallback == true,
+      diagnostic_log_name = desc.diagnostic_log_fallback == true
+        and type(desc.diagnostic_log_name) == "string"
+        and desc.diagnostic_log_name:match("^[%w_.%-]+$")
+        and desc.diagnostic_log_name:sub(1, 128) or nil,
+      js_subset = type(RA) == "table"
+        and type(RA.engine_js_subset_available) == "function"
+        and RA.engine_js_subset_available() or false,
+      inference_capability = desc.routing_available == true,
+      protocol_capabilities = protocol_capabilities,
+      activation_category = activation_category,
+    }
+    local consented = include_bounded_operational == true
+      or (type(Diag.current_tier) == "function"
+        and Diag.current_tier() ~= "off")
+    if consented and desc.client_open == true
+        and type(Engine.operational_stats) == "function" then
+      local stats = Engine.operational_stats()
+      if type(stats) == "table" and type(stats.exact) == "table"
+          and type(stats.observer) == "table" then
+        local function bucket(value)
+          value = math.max(0, math.floor(tonumber(value) or 0))
+          return value == 0 and "0" or value == 1 and "1"
+            or value <= 3 and "2_3" or value <= 7 and "4_7"
+            or value <= 15 and "8_15" or value <= 31 and "16_31"
+            or value <= 63 and "32_63" or "64_plus"
+        end
+        local function observer_bucket(value)
+          local translated = type(value) == "string"
+            and value:gsub("%-", "_"):gsub("%+", "_plus") or nil
+          local allowed = {
+            ["0"] = true, ["1"] = true, ["2_3"] = true,
+            ["4_7"] = true, ["8_15"] = true, ["16_31"] = true,
+            ["32_63"] = true, ["64_plus"] = true,
+          }
+          return allowed[translated] and translated or "0"
+        end
+        local refusals = math.min(65535,
+          (tonumber(stats.exact.local_refusals) or 0)
+          + (tonumber(stats.exact.capacity_refusals) or 0))
+        output.operational = {
+          resources_started = bucket(stats.exact.resources_started),
+          resources_settled = bucket(stats.exact.resources_settled),
+          cancellations = bucket(stats.exact.cancellations),
+          refusals = bucket(refusals),
+          invalid_lifecycle = bucket(stats.exact.invalid_lifecycle),
+          event_queue_high_water = bucket(stats.exact.event_queue_high_water),
+          statistics_reads = bucket(stats.exact.statistics_reads),
+          resources_reaped = bucket(stats.exact.resources_reaped),
+          origin = "Unknown",
+          other_client_activity_since_open = observer_bucket(
+            stats.observer.other_client_activity_since_open),
+          other_active_clients_now = observer_bucket(
+            stats.observer.other_active_clients_now),
+          other_active_client_high_water_since_open = observer_bucket(
+            stats.observer.other_active_client_high_water_since_open),
+          capability_denials_since_open = observer_bucket(
+            stats.observer.capability_denials_since_open),
+        }
+      end
+    end
+    return output
+  end, unavailable_engine_summary())
   return {
     sws_version = sws_version,
     js_reascriptapi_version = js_version,
@@ -1848,11 +2619,111 @@ local function _environment_summary()
     plugin_ref_schema_version = plugin_ref_present and 1 or nil,
     preferred_plugins_count = preferred_plugins_count,
     fallback_chains_count = chains_count,
+    engine = engine,
     extensions_present = {
       shellexecute = type(reaper) == "table" and reaper.CF_ShellExecute ~= nil,
       locateinexplorer = type(reaper) == "table" and reaper.CF_LocateInExplorer ~= nil,
-      browseforsavefile = type(reaper) == "table" and reaper.JS_Dialog_BrowseForSaveFile ~= nil,
+      browseforsavefile = type(RA) == "table"
+        and type(RA.preferred_platform_api) == "function"
+        and RA.preferred_platform_api(
+          "MBH_Dialog_BrowseForSaveFile", "JS_Dialog_BrowseForSaveFile") ~= nil,
     },
+  }
+end
+
+-- Explicit support-report view of the same bounded Engine data admitted by
+-- automatic diagnostics. This never exposes the exact local counters or the
+-- local event ring returned by Diag.local_engine_operational_support().
+function Diag.engine_support_summary()
+  local summary = _environment_summary(true)
+  return type(summary) == "table" and type(summary.engine) == "table"
+    and summary.engine or nil
+end
+
+-- Human-readable, subsystem-neutral Engine support lines. Protocols come from
+-- the admitted capability table so future additive protocols cannot disappear
+-- from the report because a second vocabulary list was not updated.
+function Diag.engine_support_report_lines(support)
+  if type(support) ~= "table" then return {} end
+  local lines = {
+    "Native helper ABI:        " .. tostring(support.abi or "unknown"),
+    "Native helper activation: "
+      .. tostring(support.activation_category or "unknown"),
+  }
+  local supported_protocols = {}
+  if type(support.protocol_capabilities) == "table" then
+    for protocol_name, enabled in pairs(support.protocol_capabilities) do
+      if enabled == true and type(protocol_name) == "string"
+          and protocol_name:match("^[a-z0-9_]+$") then
+        supported_protocols[#supported_protocols + 1] = protocol_name
+      end
+    end
+  end
+  table.sort(supported_protocols)
+  lines[#lines + 1] = "Native helper protocols:  "
+    .. (#supported_protocols > 0
+      and table.concat(supported_protocols, ", ") or "none")
+
+  local operational = support.operational
+  if type(operational) ~= "table" then
+    lines[#lines + 1] = "Native helper lifecycle:  unavailable (client closed)"
+    lines[#lines + 1] = "Native helper observers:  unavailable (client closed)"
+    return lines
+  end
+  lines[#lines + 1] = "Native helper lifecycle:  " .. table.concat({
+    "started=" .. tostring(operational.resources_started or "0"),
+    "settled=" .. tostring(operational.resources_settled or "0"),
+    "cancelled=" .. tostring(operational.cancellations or "0"),
+    "refused=" .. tostring(operational.refusals or "0"),
+    "invalid=" .. tostring(operational.invalid_lifecycle or "0"),
+    "reaped=" .. tostring(operational.resources_reaped or "0"),
+    "queue_hwm=" .. tostring(operational.event_queue_high_water or "0"),
+    "stats_reads_including_report="
+      .. tostring(operational.statistics_reads or "0"),
+  }, " ")
+  lines[#lines + 1] = "Native helper observers:  " .. table.concat({
+    "origin=" .. tostring(operational.origin or "Unknown"),
+    "interpretation=unattributed",
+    "other_activity="
+      .. tostring(operational.other_client_activity_since_open or "0"),
+    "active_now=" .. tostring(operational.other_active_clients_now or "0"),
+    "active_hwm="
+      .. tostring(operational.other_active_client_high_water_since_open or "0"),
+    "capability_denials="
+      .. tostring(operational.capability_denials_since_open or "0"),
+  }, " ")
+  return lines
+end
+
+-- Explicit local support evidence. Automatic diagnostics and report assembly
+-- must not call this function because it includes the requesting client's exact
+-- counters and bounded local event ring.
+function Diag.local_engine_operational_support()
+  if type(Engine) ~= "table" or type(Engine.operational_stats) ~= "function" then
+    return nil, "operational_stats_unavailable"
+  end
+  local stats, reason = Engine.operational_stats()
+  if type(stats) ~= "table" or type(stats.exact) ~= "table"
+      or type(stats.observer) ~= "table" or type(stats.ring) ~= "table" then
+    return nil, reason or "operational_stats_unavailable"
+  end
+  local exact, observer, ring = {}, {}, {}
+  for key, value in pairs(stats.exact) do exact[key] = value end
+  for key, value in pairs(stats.observer) do observer[key] = value end
+  for index, item in ipairs(stats.ring) do
+    ring[index] = {
+      sequence = item.sequence,
+      subsystem = item.subsystem,
+      event = item.event,
+      outcome = item.outcome,
+    }
+  end
+  return {
+    origin = "Unknown",
+    exact = exact,
+    observer = observer,
+    ring = ring,
+    interpretation = "Origin is Unknown. Reloads, live orphans, second instances, defects, third-party scripts, and deliberate counter forcing can raise observer buckets. A spike is not evidence on its own.",
   }
 end
 
@@ -1865,6 +2736,9 @@ local function _settings_shape()
     active_provider = provider_id,
     active_model_tier = _model_tier(provider_id, model_id),
     auto_run_enabled = type(prefs) == "table" and prefs.auto_run or false,
+    stream_responses = type(prefs) ~= "table" or prefs.stream_responses ~= false,
+    show_reasoning_summaries = type(prefs) == "table"
+      and prefs.show_reasoning_summaries == true or false,
     include_snapshot = type(prefs) == "table" and prefs.include_snapshot or false,
     include_api_ref = type(prefs) == "table" and prefs.include_api_ref or false,
     max_history_turns = type(CFG) == "table" and CFG.MAX_HISTORY_TURNS or nil,
@@ -1955,6 +2829,28 @@ local function _metrics_summary()
   local terminal_outcome_counts, recovery_action_counts = {}, {}
   local recovery_dispatch_counts, prompt_mode_counts = {}, {}
   local cache_disposition_counts = {}
+  local transport_summary = {
+    engine_attempt_count = 0,
+    lua_curl_attempt_count = 0,
+    engine_to_lua_fallback_count = 0,
+    direct_lua_count = 0,
+    fallback_reason_counts = {},
+    engine_protocol_attempt_counts = {},
+    lua_curl_protocol_attempt_counts = {},
+    terminal_outcome_counts = {},
+    start_outcome_counts = {},
+    transmission_state_counts = {},
+    adapter_error_category_counts = {},
+    duration_bucket_counts = {},
+    failure_stage_counts = {},
+    http_status_category_counts = {},
+    curl_error_category_counts = {},
+  }
+  local transport_count_max = 65535
+  local function add_transport_count(target, key, value)
+    target[key] = math.min(transport_count_max,
+      (tonumber(target[key]) or 0) + (tonumber(value) or 0))
+  end
   local typed_action_parse_errors = {
     invalid_json = true,
     invalid_json_shape = true,
@@ -2154,6 +3050,37 @@ local function _metrics_summary()
           end
           generated_refresh_recovered_count =
             generated_refresh_recovered_count + (recovered or 0)
+        end
+        local turn_transport = Diag.summarize_transport_events(
+          m.transport_events,
+          type(CFG) == "table" and CFG.MAX_CALLS_PER_TURN or nil)
+        if turn_transport then
+          add_transport_count(transport_summary, "engine_attempt_count",
+            turn_transport.engine_attempt_count)
+          add_transport_count(transport_summary, "lua_curl_attempt_count",
+            turn_transport.lua_curl_attempt_count)
+          add_transport_count(transport_summary,
+            "engine_to_lua_fallback_count",
+            turn_transport.engine_to_lua_fallback_count)
+          add_transport_count(transport_summary, "direct_lua_count",
+            turn_transport.direct_lua_count)
+          for reason, count in pairs(
+              turn_transport.fallback_reason_counts or {}) do
+            add_transport_count(transport_summary.fallback_reason_counts,
+              reason, count)
+          end
+          for _, field in ipairs({
+              "engine_protocol_attempt_counts",
+              "lua_curl_protocol_attempt_counts",
+              "terminal_outcome_counts", "start_outcome_counts",
+              "transmission_state_counts", "adapter_error_category_counts",
+              "duration_bucket_counts", "failure_stage_counts",
+              "http_status_category_counts", "curl_error_category_counts",
+            }) do
+            for key, count in pairs(turn_transport[field] or {}) do
+              add_transport_count(transport_summary[field], key, count)
+            end
+          end
         end
       end
       if m.recovery ~= nil or m.recovery_kind ~= nil then
@@ -2386,7 +3313,10 @@ local function _metrics_summary()
     model_tiers_used = tier ~= "unknown" and { tier } or {},
     tokens = tokens,
     api_call_count = api_call_count,
-    cost_total_usd = (type(S) == "table" and tonumber(S.session_cost)) or 0,
+    cost_total_usd = not (type(S) == "table" and S.session_cost_unknown == true)
+      and ((type(S) == "table" and tonumber(S.session_cost)) or 0) or nil,
+    cost_total_unknown = type(S) == "table"
+      and S.session_cost_unknown == true or nil,
     failed_request_latency_ms = failed_request_latency_ms,
     price_table_version = Diag.PRICE_TABLE_VERSION,
     latency_ms = {
@@ -2423,6 +3353,7 @@ local function _metrics_summary()
       http_status_codes = {},
       by_provider = network_by_provider,
     },
+    transport = transport_summary,
     outcomes = {
       validated_no_runtime_error_count = validated_no_runtime_error_count,
       docs_retry_count = docs_retry_count,
@@ -2588,7 +3519,9 @@ function Diag.assemble_auto_payload(tier)
     }
     if type(Diag.build_report) == "function" then
       local ok, rep = pcall(Diag.build_report, { skip_followup_note = true })
-      if ok and type(rep) == "string" then payload.diagnostic_report = Diag.redact_log(rep) end
+      if ok and type(rep) == "string" then
+        payload.diagnostic_report = Diag.sanitize_diagnostic_report(rep)
+      end
     end
     local prefs_t = (type(prefs) == "table") and prefs or {}
     local log_path = (type(Log) == "table") and Log.path or nil
@@ -2597,8 +3530,8 @@ function Diag.assemble_auto_payload(tier)
       if f then
         local content = f:read("*a") or ""
         f:close()
-        if #content > 0 then
-          local ok, redacted = pcall(Diag.redact_log, content)
+        if Diag.advanced_log_content_has_evidence(content) then
+          local ok, redacted = pcall(Diag.sanitize_diagnostic_log, content)
           if ok and type(redacted) == "string" and redacted ~= "" then
             payload.debug_log = redacted
             payload.debug_log_raw_size = #content
@@ -2782,7 +3715,7 @@ function Diag.begin_draft(target_idx)
   if type(Diag) == "table" and type(Diag.build_report) == "function" then
     local ok, rep = pcall(Diag.build_report, { skip_followup_note = true })
     if ok and type(rep) == "string" then
-      diagnostic_report = Diag.redact_log(rep)
+      diagnostic_report = Diag.sanitize_diagnostic_report(rep)
     end
   end
   local custom_instructions = _custom_instructions_context()
@@ -3095,6 +4028,67 @@ local function _trim_string(s, n)
   return s:sub(1, n)
 end
 
+-- A session header by itself does not contain evidence from a reproduced
+-- request. Use one shared predicate for the submitted draft, visual preview,
+-- and Screen Reader summary so all three choose the same attachment.
+local _ADVANCED_LOG_INSUFFICIENT_TAGS = {
+  BOOTSTRAP = true,
+  CACHE = true,
+  CONTEXT = true,
+  DIAG = true,
+  FONT = true,
+  FX_CACHE = true,
+  GEMINI = true,
+  GEMINI_CACHE = true,
+  I18N = true,
+  IMGUI = true,
+  LANG = true,
+  LOCAL = true,
+  MIGRATE = true,
+  PLUGIN_PACK = true,
+  PREF = true,
+  PROMPT = true,
+  SAFETY = true,
+  SENTINEL = true,
+  UPDATE = true,
+}
+
+function Diag.advanced_log_content_has_evidence(content)
+  if type(content) ~= "string" or content == "" then return false end
+  if content:match("^======= REQUEST #%d+")
+      or content:match("\n======= REQUEST #%d+") then
+    return true
+  end
+  -- These tags can appear without a user reproduction, so they are
+  -- insufficient by themselves. Any other tag counts as evidence. Unknown
+  -- future tags therefore fail open to collection instead of being silently
+  -- discarded.
+  local tagged = "\n" .. content
+  for tag in tagged:gmatch("\n%[%d%d:%d%d:%d%d%] %[([^%]\r\n]+)%] ") do
+    if not _ADVANCED_LOG_INSUFFICIENT_TAGS[tag] then return true end
+  end
+  return false
+end
+
+function Diag.advanced_log_file_probe(path)
+  if type(path) ~= "string" or path == "" then return nil, false end
+  local f = io.open(path, "rb")
+  if not f then return nil, false end
+  local size = f:seek("end") or 0
+  f:seek("set", 0)
+  local has_evidence = false
+  -- Request and tagged FX evidence is written near the header. The only EOF
+  -- scan is a small header-only log.
+  for line in f:lines() do
+    if Diag.advanced_log_content_has_evidence(line) then
+      has_evidence = true
+      break
+    end
+  end
+  f:close()
+  return size, has_evidence
+end
+
 function Diag.begin_bug_report_draft()
   -- Provider id (NOT the table) -- mirrors begin_draft.
   local provider_id = "unknown"
@@ -3131,7 +4125,7 @@ function Diag.begin_bug_report_draft()
   if type(Diag.build_report) == "function" then
     local ok, rep = pcall(Diag.build_report, { skip_followup_note = true })
     if ok and type(rep) == "string" then
-      diagnostic_report = Diag.redact_log(rep)
+      diagnostic_report = Diag.sanitize_diagnostic_report(rep)
     end
   end
   local custom_instructions = _custom_instructions_context()
@@ -3152,9 +4146,11 @@ function Diag.begin_bug_report_draft()
     if f then
       local content = f:read("*a") or ""
       f:close()
+      -- This size is draft-only evidence that a local file existed. It is not
+      -- serialized when chat or diagnostic-report fallback is selected.
       debug_log_raw_size = #content
-      if #content > 0 then
-        local ok, redacted = pcall(Diag.redact_log, content)
+      if Diag.advanced_log_content_has_evidence(content) then
+        local ok, redacted = pcall(Diag.sanitize_diagnostic_log, content)
         if ok and type(redacted) == "string" then
           debug_log_redacted     = redacted
           debug_log_redacted_size = #redacted
@@ -4099,7 +5095,7 @@ end
 -- Records the earliest moment the tick lane may spawn the probe. Called at
 -- module init. Windows deliberately arms nothing here: its PowerShell launcher
 -- costs 1 to 3 seconds cold, which is only acceptable attached to work the
--- user just asked for, so Windows waits for Diag.note_curl_launched. The POSIX
+-- user just asked for, so Windows waits for Diag.note_request_started. The POSIX
 -- hand-off is a millisecond-scale /bin/sh spawn and can ride a plain timer.
 function Diag.arm_platform_probe()
   if platform_probe.fired or platform_probe.defer_until ~= nil then return end
@@ -4107,15 +5103,19 @@ function Diag.arm_platform_probe()
   platform_probe.defer_until = _probe_clock() + Diag.PLATFORM_PROBE_DEFER_S
 end
 
--- Called by Net.fire_curl when a user-initiated chat POST has launched its
--- curl process. Windows only, first such send per session: PowerShell is warm
--- from the curl spawn and the user has explicitly asked for visible work, so
--- the version probe costs nothing they would notice. If no send happens all
--- session, os_version_label stays absent for that session, which is honest.
-function Diag.note_curl_launched()
+-- Called after a user-initiated chat POST starts through Engine or curl.
+-- Windows runs this once per session at defer cadence. If no send happens,
+-- os_version_label stays absent for that session.
+function Diag.note_request_started()
   if platform_probe.fired or platform_probe.defer_until ~= nil then return end
   if Diag.normalize_os_family(_detect_os()) ~= "windows" then return end
   platform_probe.defer_until = _probe_clock() + Diag.PLATFORM_PROBE_SEND_DEFER_S
+end
+
+-- Historical name retained for the curl fallback during the revision 10
+-- transition. Both lanes now use the request-neutral trigger above.
+function Diag.note_curl_launched()
+  return Diag.note_request_started()
 end
 
 function Diag.start_platform_probe()

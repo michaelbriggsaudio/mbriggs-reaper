@@ -7,6 +7,16 @@ model training cutoffs. This is not the full changelog.
 If a user asks outside this slice, do not invent details. Say the installed
 REAPER changelog is authoritative, or ask for the relevant changelog lines.
 
+## REAPER 7.80 - September 2026
+
+- `Edit > Repair Pops/Clicks` finds pops and clicks and applies sample-edit
+  spectral repair. Actions can move to the next or previous detected pop/click.
+- New actions set track or item/take colors according to focus and control
+  default fade-in/fade-out when recording or importing media items.
+- ReaScript can query an FX parameter's normalized default value when the
+  plug-in provides it. MIDI editor queries expose the timebase unit and zoom
+  scale. Check the API reference for the keys and REAPER version requirements.
+
 ## REAPER 7.79 - August 2026
 
 - ReaScript: new undo history APIs can inspect entry counts, the current entry,

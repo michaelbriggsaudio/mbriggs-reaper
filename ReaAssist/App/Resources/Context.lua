@@ -31,7 +31,8 @@ function CTX.reaassist_version()
 end
 
 -- Local answer for extension-availability questions (SWS, ReaImGui,
--- JS_ReaScriptAPI, or a broad installed-extensions status request).
+-- JS_ReaScriptAPI, the mbriggs helper Engine, or a broad installed-extensions
+-- status request).
 function CTX.extension_status(user_text)
   local text = tostring(user_text or ""):lower()
   local clean = text:gsub("[_%-%s]+", " ")
@@ -41,13 +42,18 @@ function CTX.extension_status(user_text)
   local wants_jsapi = compact:find("jsreascriptapi", 1, true) ~= nil
     or clean:find("js reascript api", 1, true) ~= nil
     or clean:find("js api", 1, true) ~= nil
+  local wants_engine = clean:find("reaassist engine", 1, true) ~= nil
+    or clean:find("helper engine", 1, true) ~= nil
+    or clean:find("mbriggs helper", 1, true) ~= nil
+    or clean:find("engine extension", 1, true) ~= nil
   local wants_all = clean:find("%f[%w]extensions?%f[%W]") ~= nil
     and (clean:find("%f[%w]installed%f[%W]") ~= nil
       or clean:find("%f[%w]available%f[%W]") ~= nil
       or clean:find("%f[%w]status%f[%W]") ~= nil
       or clean:find("%f[%w]version%f[%W]") ~= nil
       or clean:find("%f[%w]have%f[%W]") ~= nil)
-  if not (wants_imgui or wants_sws or wants_jsapi or wants_all) then
+  if not (wants_imgui or wants_sws or wants_jsapi or wants_engine
+      or wants_all) then
     return nil
   end
 
@@ -85,13 +91,31 @@ function CTX.extension_status(user_text)
     local ver = installed and try(function()
       return reaper.JS_ReaScriptAPI_Version()
     end) or nil
+    if not installed and RA and RA.engine_js_subset_available
+        and RA.engine_js_subset_available() then
+      return "js_ReaScriptAPI: not installed "
+        .. "(ReaAssist functions provided by Engine)"
+    end
     return fmt("js_ReaScriptAPI", installed, ver)
+  end
+  local function engine_line()
+    if type(Engine) ~= "table" or type(Engine.describe) ~= "function" then
+      return fmt("mbriggs helper Engine", false)
+    end
+    local desc = try(function() return Engine.describe() end)
+    if type(desc) ~= "table" or desc.present ~= true then
+      return fmt("mbriggs helper Engine", false)
+    end
+    local line = fmt("mbriggs helper Engine", true, desc.version)
+    if desc.pinned_to_curl then line = line .. " (session using curl)" end
+    return line
   end
 
   local lines = {}
   if wants_all or wants_imgui then lines[#lines + 1] = imgui_line() end
   if wants_all or wants_sws then lines[#lines + 1] = sws_line() end
   if wants_all or wants_jsapi then lines[#lines + 1] = jsapi_line() end
+  if wants_all or wants_engine then lines[#lines + 1] = engine_line() end
   if #lines == 1 then return lines[1] end
   return "ReaAssist extension status:\n" .. tbl_concat(lines, "\n")
 end
@@ -212,6 +236,10 @@ function CTX.reaassist_settings_status(user_text)
     or "English"
   return "ReaAssist settings:\n"
     .. "Auto-run scripts: " .. onoff(prefs.auto_run) .. "\n"
+    .. "Stream responses: " .. onoff(prefs.stream_responses ~= false) .. "\n"
+    .. "Reasoning display: " .. tostring(type(Net) == "table"
+      and type(Net.reasoning_display_mode) == "function"
+      and Net.reasoning_display_mode() or "off") .. "\n"
     .. "Auto-backup before run: " .. onoff(prefs.auto_backup) .. "\n"
     .. "Include project snapshot: " .. onoff(prefs.include_snapshot) .. "\n"
     .. "Always include API reference: " .. onoff(prefs.include_api_ref) .. "\n"
@@ -1949,10 +1977,16 @@ function CTX.dynamic_split_file_stamp(path)
     if ok and stamp ~= nil then return "mtime:" .. tostring(stamp) end
   end
 
-  if reaper and type(reaper.JS_File_Stat) == "function" then
-    local ok, _, size, _, modified = pcall(reaper.JS_File_Stat, path)
+  local file_stat = RA and RA.preferred_platform_api and
+    RA.preferred_platform_api("MBH_File_Stat", "JS_File_Stat") or nil
+  if not file_stat and reaper and type(reaper.JS_File_Stat) == "function" then
+    file_stat = reaper.JS_File_Stat
+  end
+  if file_stat then
+    local ok, _, size, _, modified = pcall(file_stat, path)
     if ok and (size ~= nil or modified ~= nil) then
-      return "js:" .. tostring(size or "?") .. ":" .. tostring(modified or "?")
+      return "native:" .. tostring(size or "?") .. ":"
+        .. tostring(modified or "?")
     end
   end
 
@@ -2635,6 +2669,9 @@ function CTX.local_read_session_overview(proj, opts)
       selected = opts.t("response.local_session_overview.selected", {
         tracks = tbl_concat(names, ", "),
       })
+      if selected ~= "" and selected:sub(-1) ~= "\n" then
+        selected = selected .. "\n"
+      end
     end
     return opts.t("response.local_session_overview.body", {
       project = facts.project_name or opts.t("session.unsaved"),
@@ -4327,9 +4364,66 @@ end
 --      like "reverb" matching "ValhallaVintageVerb" or "q3" matching "ProQ3".
 -- Returning on the first match avoids redundant work when multiple terms are
 -- provided.
+-- A query often carries the plug-in format as a bare leading word ("JS volume
+-- pan smoother"). Installed rows carry it as a colon prefix ("JS: Volume/Pan
+-- Smoother [utility/volume_pan]"), which fx_normalize_name strips, so that bare
+-- word appears in no normalized row and the word-level pass below fails on an
+-- otherwise exact query. The stripped form is only ever tried after the full
+-- term has already failed, so this can widen a match but never narrow one.
+local FX_FORMAT_WORDS = {
+  js = true, jsfx = true, vst = true, vst2 = true, vst3 = true,
+  vsti = true, vst3i = true, au = true, aui = true, clap = true,
+  clapi = true, lv2 = true, dx = true, dxi = true,
+}
+
+local function fx_term_without_format_word(term)
+  local head, rest = term:match("^%s*([%a%d]+)%s+(.+)$")
+  if head and rest and FX_FORMAT_WORDS[head:lower()] then return rest end
+  return nil
+end
+
+-- X-01, the Flash Lite p10 cell of the 2026-09-12 rerun: a search term often
+-- carries a joining word the installed row does not. The p10 prompt reads "the
+-- volume and pan smoother", the installed rows are `JS: Volume/Pan Smoother`
+-- and `JS: Volume/Pan Smoother v5`, and the word-level pass below requires ALL
+-- words, so the three letters of "and" took both rows out of the candidate
+-- list the model was then told to copy an identifier from. These words are
+-- dropped from BOTH sides of the word-level pass and from nowhere else. Level
+-- 1 and level 2 are untouched, so a term that already matched still matches.
+local FX_JOINING_WORDS = {
+  ["and"] = true, ["&"] = true, ["plus"] = true, ["with"] = true,
+  ["the"] = true, ["a"] = true, ["of"] = true,
+}
+
+-- The words of a name, normalized one at a time, with the joining words and
+-- the words that normalize away dropped. The second group is why "&" never
+-- needed the list: it normalizes to the empty string, as a format prefix
+-- ("JS:") and a vendor parenthetical ("(Cockos)") do. It is listed anyway so
+-- the list reads as the whole set of joining words rather than the subset that
+-- survives normalization.
+local function fx_significant_words(name)
+  local words = {}
+  for word in tostring(name or ""):gmatch("%S+") do
+    local normalized = CTX.fx_normalize_name(word)
+    if normalized ~= "" and not FX_JOINING_WORDS[normalized] then
+      words[#words+1] = normalized
+    end
+  end
+  return words
+end
+
 function CTX.fx_name_matches(fx_full_name, search_terms)
   local norm_fx = CTX.fx_normalize_name(fx_full_name)
+  -- X-01: the same row with its joining words dropped, so the word-level pass
+  -- compares like with like. Built once, and only if a term reaches level 3.
+  local norm_fx_significant = nil
+  local expanded = {}
   for _, term in ipairs(search_terms) do
+    expanded[#expanded+1] = term
+    local stripped = fx_term_without_format_word(tostring(term or ""))
+    if stripped then expanded[#expanded+1] = stripped end
+  end
+  for _, term in ipairs(expanded) do
     local norm_term = CTX.fx_normalize_name(term)
     if norm_term ~= "" then
       -- Level 1: normalized substring match (whole term).
@@ -4355,16 +4449,21 @@ function CTX.fx_name_matches(fx_full_name, search_terms)
       -- Level 3: word-level match. Split the ORIGINAL term on spaces and
       -- normalize each word individually, then check ALL appear in norm_fx.
       -- Catches "Fabfilter ProQ" matching "Pro-Q 4" -- "proq" is in "proq4"
-      -- even though the full "fabfilterproq" is not.
-      local words = {}
-      for w in term:gmatch("%S+") do
-        local nw = CTX.fx_normalize_name(w)
-        if nw ~= "" then words[#words+1] = nw end
-      end
+      -- even though the full "fabfilterproq" is not. X-01: the joining words
+      -- are dropped from the term and from the row, so "Volume and Pan
+      -- Smoother" reaches `JS: Volume/Pan Smoother`.
+      local words = fx_significant_words(term)
       if #words > 1 then
+        if norm_fx_significant == nil then
+          norm_fx_significant = ""
+          for _, row_word in ipairs(fx_significant_words(fx_full_name)) do
+            norm_fx_significant = norm_fx_significant .. row_word
+          end
+        end
         local all_words = true
         for _, w in ipairs(words) do
-          if not norm_fx:find(w, 1, true) then
+          if not norm_fx:find(w, 1, true)
+              and not norm_fx_significant:find(w, 1, true) then
             all_words = false
             break
           end
@@ -5420,8 +5519,26 @@ function CTX.plugin_pack_schedule()
   end
 end
 
-function CTX.plugin_pack_start()
+-- STARTUP_PLUGIN_PACK_DEFER_GATE_BEGIN
+function CTX.plugin_pack_start_allowed()
+  if S and S.screen_reader_mode ~= true
+      and S.startup_post_paint_phase ~= nil
+      and S.startup_post_paint_phase ~= "done" then
+    return false
+  end
+  return true
+end
+-- STARTUP_PLUGIN_PACK_DEFER_GATE_END
+
+function CTX.plugin_pack_start(opts)
   if CTX._plugin_pack_owner and CTX._plugin_pack_owner.ready then return true end
+  -- Visual startup owns the first request. UI lookups during the first two
+  -- frames must not race the post-paint scheduler and silently choose a
+  -- different checksum lane. The scheduler advances the phase to done before
+  -- calling back here. Screen Reader mode keeps its existing on-demand path.
+  if not CTX.plugin_pack_start_allowed() then
+    return false, "Plugin pack warm-up is waiting for first paint."
+  end
   local load = CTX._plugin_pack_load
   if load then
     if load.phase == "error" then return false, load.error end
@@ -5430,7 +5547,7 @@ function CTX.plugin_pack_start()
   end
   local ok, raw_err = Code.plugin_pack_raw_begin()
   if not ok then return CTX.plugin_pack_fail(raw_err, "raw") end
-  local integrity = Code.start_plugin_pack_integrity()
+  local integrity = Code.start_plugin_pack_integrity(opts)
   CTX._plugin_pack_load = {
     phase = "raw",
     started_at = CTX.plugin_pack_now(),
@@ -5638,6 +5755,12 @@ function CTX.plugin_pack_publish(load, integrity)
   return true
 end
 
+-- STARTUP_PLUGIN_PACK_INTEGRITY_CONSUMER_BEGIN
+function CTX.plugin_pack_integrity_publish_allowed(integrity)
+  return type(integrity) == "table" and integrity.invalid_method ~= true
+end
+-- STARTUP_PLUGIN_PACK_INTEGRITY_CONSUMER_END
+
 function CTX.plugin_pack_load_tick()
   local load = CTX._plugin_pack_load
   if not load or load.phase == "ready" or load.phase == "error" then return end
@@ -5717,6 +5840,10 @@ function CTX.plugin_pack_load_tick()
       .. tostring(integrity.reason or ""))
   end
   if load.phase == "wait_integrity" and integrity_done then
+    if not CTX.plugin_pack_integrity_publish_allowed(integrity) then
+      return CTX.plugin_pack_fail(
+        "checksum method unavailable", "integrity")
+    end
     CTX.plugin_pack_publish(load, integrity)
   end
   load.active_seconds = load.active_seconds
@@ -5724,12 +5851,12 @@ function CTX.plugin_pack_load_tick()
   CTX.plugin_pack_schedule()
 end
 
-function CTX.ensure_plugin_pack_cache()
+function CTX.ensure_plugin_pack_cache(opts)
   if CTX._plugin_pack_owner and CTX._plugin_pack_owner.ready then return true end
   if CTX._plugin_pack_load and CTX._plugin_pack_load.phase == "error" then
     return false, CTX._plugin_pack_error or "Plugin pack is unavailable."
   end
-  return CTX.plugin_pack_start()
+  return CTX.plugin_pack_start(opts)
 end
 
 -- Compatibility name for the existing model bucket and older internal tests.
@@ -5759,7 +5886,19 @@ end
 function CTX.plugin_profile_key(value)
   if not CTX.ensure_plugin_pack_cache() then return nil end
   local normalized = _profile_route_key(value)
-  return PLUGIN_REF_ALIASES[normalized]
+  if PLUGIN_REF_ALIASES[normalized] then return PLUGIN_REF_ALIASES[normalized] end
+  -- Installed labels can split a product name, such as Valhalla VintageVerb.
+  -- Accept spacing differences only when every matching alias has one owner.
+  local compact = normalized:gsub("^vst3? ", ""):gsub("^au ", ""):gsub("%s", "")
+  local found
+  for alias, key in pairs(PLUGIN_REF_ALIASES) do
+    local candidate = alias:gsub("^vst3? ", ""):gsub("^au ", ""):gsub("%s", "")
+    if candidate == compact then
+      if found and found ~= key then return nil end
+      found = key
+    end
+  end
+  return found
 end
 
 function CTX.plugin_profile_ensure_validation(value)
@@ -6111,8 +6250,7 @@ function CTX.plugin_ref(filter_names, options)
 
   local entries = {}
   for _, name in ipairs(filter_names) do
-    local key = _profile_route_key(name)
-    key = PLUGIN_REF_ALIASES[key] or key
+    local key = CTX.plugin_profile_key(name) or _profile_route_key(name)
     if CTX._plugin_ref_cache[key] then
       local rendered = CTX.plugin_profile_render_section(
         key, type(S) == "table" and S.pending_orig_prompt or "")
@@ -6168,6 +6306,41 @@ function _is_fabfilter_ident(ident)
     if lc:find(stem, 1, true) then return true end
   end
   return false
+end
+
+-- True when the current enumeration filter hides this identifier's row rather
+-- than the host lacking the plug-in. Today that is only the dev
+-- "Hide FabFilter" toggle, which removes FabFilter rows from
+-- CTX.populate_installed_fx.
+function CTX.identifier_hidden_by_fx_filter(identifier)
+  if not identifier or identifier == "" then return false end
+  if reaper.GetExtState(CFG.EXT_NS, "dev_hide_fabfilter") ~= "1" then
+    return false
+  end
+  return _is_fabfilter_ident(identifier) and true or false
+end
+
+-- One effective view of the saved preferences: what the user saved, minus the
+-- roles whose identifier the enumeration filter hides. The pinned pref_map,
+-- the FX identity/preference validator and its retry hint all read this one
+-- view, so the model is never told to use an identifier the same turn then
+-- reports as missing, and a stock fallback for a hidden role is not faulted
+-- against a preference the model was never shown. Returns the effective map
+-- and the hidden map, both keyed by lowercase role.
+function CTX.effective_preferred_types(pref_types)
+  local effective, hidden = {}, {}
+  if type(pref_types) ~= "table" then return effective, hidden end
+  for tkey, ident in pairs(pref_types) do
+    if type(ident) == "string" and ident ~= "" then
+      local key = tostring(tkey):lower()
+      if CTX.identifier_hidden_by_fx_filter(ident) then
+        hidden[key] = ident
+      else
+        effective[key] = ident
+      end
+    end
+  end
+  return effective, hidden
 end
 
 function CTX.populate_installed_fx()
@@ -6253,12 +6426,126 @@ function CTX.populate_installed_fx()
 end
 
 -- =============================================================================
+-- CTX.fx_format_priority_sentence / CTX.fx_no_match_sentence
+-- =============================================================================
+-- The closing sentences of an INSTALLED FX block, written in ONE place. Two
+-- call sites reach the model with that block, the pinned installed-catalog
+-- reference in `Net.process_response_buckets` and the FX identity validator's
+-- repair note, and both build it through `CTX.installed_fx`, so neither
+-- sentence can drift between them.
+--
+-- W-01, the Luna p10 cell of the 2026-09-12 confirm rerun: the priority
+-- sentence left JS out of the list. On a prompt that asked for "the JS
+-- utilities" the candidate list offered `VST3: MiniMeters - Loudness (Direct)`
+-- above the Cockos JS loudness meter, the model applied the rule literally,
+-- and a commercial VST3 shipped in the chain on a cell that reported success.
+-- JS is now at the tail of the list. Absent from the list, a literal reader
+-- must reject every JS candidate that has a sibling in a listed format, which
+-- is worse than last place; at the tail it is a ranked, selectable option.
+--
+-- Round twenty-four answered W-01 by reading the turn's prompt and choosing
+-- between two sentences. Round twenty-five replaces that with ONE sentence
+-- pair that is true on every turn. The block is pinned under a
+-- prompt-independent key and reused verbatim on later turns, so a sentence
+-- that reads the FIRST turn's prompt is wrong on every later turn that reuses
+-- it: a block built for a neutral request and reused on a request that names
+-- JS would still carry the neutral reading. Stating the rule unconditionally
+-- is correct on every turn and needs no prompt at all, so the prompt argument
+-- and the round twenty-four predicates are gone.
+-- Round twenty-six: round twenty-five wrote the rule as a ranking, "what the
+-- CURRENT request names comes first ... or one it rules out". A ranking reads
+-- as a preference, and an exclusion is not a preference: a small model that
+-- ranks rather than obeys can still reach for the plug-in the request ruled
+-- out when the ranking's other end looks stronger. The rule is now two plain
+-- imperatives, one to obey what the request names and one that forbids what it
+-- rules out, and the priority list stands unchanged behind them for the
+-- request that names neither.
+local FX_FORMAT_PRIORITY_LIST = "VST3 > VSTi > VST > AU > CLAP > JS"
+
+function CTX.fx_format_priority_sentence()
+  return "Use the plug-in family, scope or product the CURRENT request names "
+    .. "(JS / stock / built-in, or a product by name), even if another "
+    .. "format is listed above. Never use one the current request rules out. "
+    .. "Only when the current request names none of those, "
+    .. "pick the BEST match by format priority (" .. FX_FORMAT_PRIORITY_LIST
+    .. ") and newest version number."
+end
+
+-- X-02, the Flash Lite p10 cell of the 2026-09-12 rerun: the no-match branch
+-- has two readers and one instruction cannot serve both. The pinned reference
+-- is read on a turn where the model may still ask the user a question. The FX
+-- identity validator's repair note is not: it says "Regenerate the FULL script
+-- ... Respond as if this is your FIRST reply", so "ask them for the exact
+-- name" and the note's own instruction cannot both be obeyed. Flash Lite
+-- resolved that by doing neither, regenerating the script with the plug-in it
+-- could not name silently dropped. `render_for` picks the reading, and both
+-- readings live here so the two cannot drift apart.
+--
+-- Round twenty-six bounds the substitution the repair-note reading allows.
+-- Offering the nearest installed match authorized any product, while the note
+-- that carries this sentence (`ReaAssist.lua`, the FX identity validator's
+-- repair note) says to keep a product the user named and to use the saved
+-- preference for a generic role. For a named product that is not installed the
+-- two instructions contradicted each other, and the validator's one repair
+-- allowance is already spent by the time this note is read, so a model that
+-- picks the wrong one ships an unchecked substitution. The reading now names
+-- the three cases it covers: ask for the exact name, keep a named product and
+-- say it is not installed, and fill a generic role from the saved preference
+-- or from the family the request permits.
+--
+-- Round twenty-seven orders those cases. The branch only establishes that the
+-- first search returned no matches; the shorter or differently spelled search
+-- this reading asks for can still find the plug-in. Round twenty-six stated
+-- the absence unconditionally, so a model could request the second search and
+-- report a named product as uninstalled in the same breath. The reading asks
+-- for the search first and gates the absence cases on that second search also
+-- finding nothing.
+--
+-- Round twenty-eight separates the two constraints from the three outcomes.
+-- Round twenty-seven gated everything after the search instruction on the
+-- search finding nothing, the saved-preference rule with it, so a successful
+-- lookup of a product the model guessed at could override a saved preference
+-- for a generic role. The note that carries this sentence states both
+-- constraints without any condition ("Keep a product the user named. For a
+-- generic role with a saved preference, use that preference."), so this
+-- reading now states them first and unconditionally, then asks for the
+-- search, and gates only the two absence cases.
+local FX_NO_MATCH_LEAD = "No installed plugins matched. The user may be using "
+  .. "a nickname or abbreviation. "
+
+function CTX.fx_no_match_sentence(render_for)
+  if render_for == "repair_note" then
+    return FX_NO_MATCH_LEAD
+      .. "KEEP the step: do NOT drop this plug-in from the script and do NOT "
+      .. "ask the user for its name. Never replace a product the user named "
+      .. "with a different product. If a saved preference is listed for a "
+      .. "generic role, use that preference, whatever any search returns. "
+      .. "Request <context_needed>fx_list:<name></context_needed> with a "
+      .. "shorter or differently spelled name; if it returns the plug-in you "
+      .. "are looking for (the named product, or that saved preference), use "
+      .. "its exact identifier as listed. Only if that search also finds "
+      .. "nothing: for a named product, keep the step under that name and say "
+      .. "in your visible reply that it is not installed; for a generic role "
+      .. "with no saved preference, use an installed plug-in of the same "
+      .. "function from a family the request permits and name it in your "
+      .. "visible reply."
+  end
+  return FX_NO_MATCH_LEAD
+    .. "Ask them for the exact name as it appears in their FX browser."
+end
+
+-- =============================================================================
 -- Searches installed FX plugins by name and returns matching entries.
 -- Uses reaper.EnumInstalledFX (REAPER 7.42+). The full list is cached
 -- internally; only entries matching the search terms are returned.
 -- search_terms is a list of strings to fuzzy-match (uses CTX.fx_name_matches).
+-- render_for names the reader of the block and changes the no-match sentence
+-- only: "repair_note" for the FX identity validator's repair note, which
+-- cannot ask the user a question, and nothing for the pinned reference, which
+-- can. The format-priority sentence is the same for every reader on every
+-- turn, so no prompt is passed here and none is read.
 -- Returns (formatted_string, match_count) on success, or (nil, error) on failure.
-function CTX.installed_fx(search_terms)
+function CTX.installed_fx(search_terms, render_for)
   -- Build/cache the full list on first call.
   if not CTX.populate_installed_fx() then
     return nil, "Your REAPER version does not support listing installed plugins "
@@ -6270,15 +6557,16 @@ function CTX.installed_fx(search_terms)
   end
   local matches = {}
   for _, name in ipairs(CTX._installed_fx_list) do
-    if CTX.fx_name_matches(name, search_terms) then
+    if CTX.fx_name_matches(name, search_terms)
+        or (type(CTX.installed_fx_vendor_matches) == "function"
+          and CTX.installed_fx_vendor_matches(name, search_terms)) then
       matches[#matches+1] = name
     end
   end
   if #matches == 0 then
     return "INSTALLED FX SEARCH (no matches for: "
       .. tbl_concat(search_terms, ", ") .. "):\n"
-      .. "No installed plugins matched. The user may be using a nickname or "
-      .. "abbreviation. Ask them for the exact name as it appears in their FX browser.",
+      .. CTX.fx_no_match_sentence(render_for),
       0
   end
   -- Format each match inside backticks with a leading dash. Makes it
@@ -6298,9 +6586,23 @@ function CTX.installed_fx(search_terms)
     .. "that don't already have them. Do NOT remove suffixes. Each entry "
     .. "above is an EXACT string from EnumInstalledFX; REAPER only "
     .. "accepts these exact strings.\n"
-    .. "Pick the BEST match by format priority (VST3 > VSTi > VST > AU > "
-    .. "CLAP) and newest version number.",
+    .. CTX.fx_format_priority_sentence(),
     #matches
+end
+
+-- A displayed product label can omit its manufacturer. Resolve only known
+-- profile ownership, and still return the exact enumerated installed label.
+function CTX.installed_fx_vendor_matches(name, search_terms)
+  if type(CTX.plugin_profile_key) ~= "function" then return false end
+  local key = CTX.plugin_profile_key(name)
+  local meta = key and (CTX._plugin_profile_metadata or {})[key]
+  local vendor = type(meta) == "table" and tostring(meta.vendor or ""):lower() or ""
+  if vendor == "" then return false end
+  for _, term in ipairs(search_terms or {}) do
+    local query = tostring(term):lower():match("^%s*(.-)%s*$")
+    if query == vendor or query == vendor:match("^([%w]+)") then return true end
+  end
+  return false
 end
 
 -- =============================================================================
@@ -8179,6 +8481,45 @@ CTX._snapshot_heavy_cache = nil
 -- Saved per matched phrase: one full API round-trip (~2s + small request
 -- cost) on common vocal-chain and explicitly requested bus/kit-processing
 -- workflows.
+
+-- Alias words that are too generic to name a plug-in role. A saved alias of
+-- "bus" or "master" would fire on any routing sentence.
+local ALIAS_SCAN_SKIP = {
+  ["a"] = true, ["an"] = true, ["the"] = true, ["add"] = true,
+  ["make"] = true, ["create"] = true, ["set"] = true, ["setup"] = true,
+  ["route"] = true, ["send"] = true, ["sends"] = true, ["track"] = true,
+  ["tracks"] = true, ["bus"] = true, ["buses"] = true, ["fx"] = true,
+  ["selected"] = true, ["selection"] = true, ["master"] = true,
+  ["folder"] = true, ["drive"] = true, ["limit"] = true, ["echo"] = true,
+  ["tuner"] = true, ["multiband"] = true,
+}
+
+-- The user's alias words per preferred type, with the generic ones removed.
+-- One list, read by the preferred-plugin preempt loop and by the enumerated
+-- chain-role reader, so both recognise the same words for the same role.
+local function _aliases_by_pref_type()
+  local out = {}
+  if type(pref_plugins) ~= "table"
+      or type(pref_plugins.alias_lookup) ~= "function" then
+    return out
+  end
+  for alias, key in pairs(pref_plugins.alias_lookup() or {}) do
+    alias = tostring(alias or ""):lower()
+    key = tostring(key or ""):lower()
+    if key ~= "" and alias ~= "" and alias ~= key and #alias >= 3
+        and not ALIAS_SCAN_SKIP[alias] then
+      local list = out[key]
+      if not list then
+        list = {}
+        out[key] = list
+      end
+      list[#list + 1] = alias
+    end
+  end
+  for _, list in pairs(out) do table.sort(list) end
+  return out
+end
+
 local CHAIN_PHRASE_HINTS = {
   { "drum%s+kit",         {"eq", "compressor", "gate"}, true },
   { "drum%s+chain",       {"eq", "compressor", "gate"} },
@@ -8197,11 +8538,20 @@ local CHAIN_PHRASE_HINTS = {
   -- vocal") that don't ask for a chain. Genre-prefixed phrasings
   -- like "rock vocal chain" already hit via vocal%s+chain anyway,
   -- since the substring "vocal chain" is present.
-  { "chain%s+of%s+effects.-vocal", {"eq", "compressor", "deesser", "reverb"} },
-  { "chain.-rock%s+vocal", {"eq", "compressor", "deesser", "reverb"} },
-  { "chain.-vocal", {"eq", "compressor", "deesser", "reverb"} },
+  --
+  -- The gap patterns are bounded to the sentence the first word starts in:
+  -- `[^%.%!%?;\n]-` stops at a full stop, an exclamation mark, a question
+  -- mark, a semicolon or a newline. An unbounded gap spans whole paragraphs,
+  -- so "route Lead Vocal ... into it. Give the Mix Bus a chain" read as a
+  -- vocal chain and implied a de-esser and a reverb the user never asked for.
+  -- A sentence is the unit a phrase can mean something in.
+  { "chain%s+of%s+effects[^%.%!%?;\n]-vocal",
+    {"eq", "compressor", "deesser", "reverb"} },
+  { "chain[^%.%!%?;\n]-rock%s+vocal",
+    {"eq", "compressor", "deesser", "reverb"} },
+  { "chain[^%.%!%?;\n]-vocal", {"eq", "compressor", "deesser", "reverb"} },
   { "vocal%s+chain",      {"eq", "compressor", "deesser", "reverb"} },
-  { "vocal.-chain",       {"eq", "compressor", "deesser", "reverb"} },
+  { "vocal[^%.%!%?;\n]-chain", {"eq", "compressor", "deesser", "reverb"} },
   { "vocal%s+bus",        {"eq", "compressor"}, true },
   { "guitar%s+chain",     {"eq", "compressor", "saturation"} },
   { "bass%s+chain",       {"eq", "compressor"} },
@@ -8260,21 +8610,164 @@ local function _prompt_has_chain_effect_intent(text)
   return false
 end
 
-local function _chain_phrase_matches(text, hint)
-  if type(text) ~= "string" or type(hint) ~= "table"
-      or not text:find(hint[1]) then
+-- ROUND THIRTY-NINE: A TRACK NAME MUST NOT ERASE A REQUESTED CHAIN.
+--
+-- Round thirty-eight hands every hint the masked request, which is right when
+-- the track name is the whole of the phrase and wrong when the turn also asks
+-- for the chain: with a session track named Vocal, "Give Vocal a vocal chain."
+-- masks both occurrences and the hint has nothing left to match.
+--
+-- A hint that finds nothing on the masked request is read again on the
+-- unmasked one, and only for the token a track name cannot supply unless the
+-- track is named with it: the word "chain". `unmasked` is the reader that
+-- answers with the unmasked prepared request when that word has an occurrence
+-- outside every naming span, and with nil otherwise. A caller that passes
+-- none, and every hint that does not anchor on the word, reads the masked
+-- request alone, which is what round thirty-eight shipped.
+--
+-- AND ONLY FOR A CONTIGUOUS PHRASE. The gap patterns pair their two words
+-- across a whole sentence, so on the unmasked request p02 reads its own
+-- "route Lead Vocal ... give the Mix Bus a chain" as a vocal chain: the word
+-- "vocal" is the session track name, the word "chain" belongs to another
+-- clause, and the de-esser and reverb V-08 recorded come straight back. A
+-- phrase whose words sit next to each other cannot pair across a clause that
+-- way, and it is the only shape the Vocal case needs.
+local CHAIN_HINT_SENTENCE_GAP = "[^%.%!%?;\n]-"
+
+local function _chain_hint_reads_chain_keyword(hint)
+  if type(hint) ~= "table" then return false end
+  local pattern = tostring(hint[1] or "")
+  if pattern:find(CHAIN_HINT_SENTENCE_GAP, 1, true) then return false end
+  return pattern:find("chain", 1, true) ~= nil
+end
+
+local function _chain_phrase_matches(text, hint, unmasked)
+  if type(hint) ~= "table" then return false end
+  if type(text) == "string" and text:find(hint[1])
+      and (not hint[3] or _prompt_has_chain_effect_intent(text)) then
+    return true
+  end
+  if type(unmasked) ~= "function"
+      or not _chain_hint_reads_chain_keyword(hint) then
     return false
   end
-  return not hint[3] or _prompt_has_chain_effect_intent(text)
+  local raw = unmasked()
+  if type(raw) ~= "string" or not raw:find(hint[1]) then return false end
+  return not hint[3] or _prompt_has_chain_effect_intent(raw)
+end
+
+-- The unmasked reading, read once per scan and only when a hint asks for it.
+-- It costs a full preparation of the request, so two cheap tests come first:
+-- a request that never uses the word has no keyword for this reading to
+-- accept, and a turn that names no track masks to the text it started from,
+-- which the masked reading has already been given.
+local function _chain_unmasked_reader(user_text, masked)
+  local answer
+  return function()
+    if answer == nil then
+      answer = false
+      local prompt = tostring(user_text or ""):lower()
+      if prompt:find("%f[%w]chain%f[%W]") then
+        local raw = CTX.prompt_text_including_track_names(user_text)
+        if type(raw) == "string" and raw ~= "" and raw ~= masked
+            and CTX.chain_keyword_outside_track_names(user_text, "chain") then
+          answer = raw
+        end
+      end
+    end
+    if answer == false then return nil end
+    return answer
+  end
+end
+
+-- Bounds on the pref_map sticky entry pinned by CTX.preempt_buckets_for_prompt.
+local PREF_MAP_MAX_LINES = 24
+local PREF_MAP_MAX_BYTES = 2048
+
+-- "Add a chain to it" and "add a chain to this track" name a chain without
+-- naming a source, so the source-word list below never sees them. Each phrase
+-- pairs the literal word "chain" with an explicit request target, which keeps
+-- this narrow: a sentence that only mentions the word "chain" still does not
+-- match. English matching, like the rest of this function.
+local CHAIN_TARGET_PHRASES = {
+  "chain%s+to%s+it%f[%W]",
+  "chain%s+on%s+it%f[%W]",
+  "chain%s+to%s+th[ie]s?%s+track",
+  "chain%s+to%s+that%s+track",
+  "chain%s+on%s+th[ie]s?%s+track",
+  "chain%s+on%s+that%s+track",
+  "chain%s+for%s+th[ie]s?%s+track",
+  "chain%s+for%s+that%s+track",
+  "chain%s+to%s+the%s+selected%s+track",
+  "chain%s+on%s+the%s+selected%s+track",
+  "chain%s+for%s+the%s+selected%s+track",
+  "chain%s+to%s+the%s+new%s+track",
+  "chain%s+to%s+a%s+new%s+track",
+}
+
+-- ROUND THIRTY-EIGHT: A CHAIN PHRASE THAT ONLY NAMES A TRACK IMPLIES NO
+-- CHAIN.
+--
+-- The hint patterns match words, and a track the turn names or works with
+-- carries words: "Add a track called Vocal FX Chain." matched the vocal-chain
+-- hint and implied an EQ, a compressor, a de-esser and a reverb for a turn
+-- that asked for a track. Every chain-phrase reader below is handed the
+-- request with the track-naming spans blanked, so a phrase whose trigger
+-- words all sit inside one matches nothing and a phrase with its own
+-- occurrence outside them matches as it did.
+--
+-- A runtime that cannot mask answers with the lowercase request, which is the
+-- text each reader had before this round.
+function CTX.prompt_text_outside_track_names(user_text)
+  local text = tostring(user_text or ""):lower()
+  if text == "" then return text end
+  if type(Code) ~= "table"
+      or type(Code.prompt_text_without_track_names) ~= "function" then
+    return text
+  end
+  local ok, masked = pcall(Code.prompt_text_without_track_names, user_text)
+  if not ok or type(masked) ~= "string" or masked == "" then return text end
+  return masked
+end
+
+-- ROUND THIRTY-NINE. The same prepared request with nothing blanked, and the
+-- reader that says whether the word "chain" survives the blanking. A runtime
+-- that cannot prepare answers with the lowercase request and with false, and
+-- those two together leave every caller on the masked reading alone.
+function CTX.prompt_text_including_track_names(user_text)
+  local text = tostring(user_text or ""):lower()
+  if text == "" then return text end
+  if type(Code) ~= "table"
+      or type(Code.prompt_text_with_track_names) ~= "function" then
+    return text
+  end
+  local ok, prepared = pcall(Code.prompt_text_with_track_names, user_text)
+  if not ok or type(prepared) ~= "string" or prepared == "" then return text end
+  return prepared
+end
+
+function CTX.chain_keyword_outside_track_names(user_text, keyword)
+  if type(Code) ~= "table"
+      or type(Code.prompt_chain_keyword_outside_track_names) ~= "function" then
+    return false
+  end
+  local ok, outside = pcall(Code.prompt_chain_keyword_outside_track_names,
+    user_text, keyword)
+  if not ok then return false end
+  return outside == true
 end
 
 function CTX.prompt_indicates_chain_context(text)
   if type(text) ~= "string" or text == "" then return false end
-  local t = text:lower()
+  local t = CTX.prompt_text_outside_track_names(text)
+  local unmasked = _chain_unmasked_reader(text, t)
   for _, hint in ipairs(CHAIN_PHRASE_HINTS) do
-    if _chain_phrase_matches(t, hint) then return true end
+    if _chain_phrase_matches(t, hint, unmasked) then return true end
   end
   if not t:find("%f[%w]chain%f[%W]") then return false end
+  for _, phrase in ipairs(CHAIN_TARGET_PHRASES) do
+    if t:find(phrase) then return true end
+  end
   return t:find("%f[%w]drum%f[%W]") ~= nil
     or t:find("%f[%w]drums%f[%W]") ~= nil
     or t:find("%f[%w]snare%f[%W]") ~= nil
@@ -8290,6 +8783,195 @@ function CTX.prompt_indicates_chain_context(text)
     or t:find("%f[%w]recording%f[%W]") ~= nil
     or t:find("%f[%w]effects%f[%W]") ~= nil
     or t:find("%f[%w]processing%f[%W]") ~= nil
+end
+
+-- The chain roles a prompt names for itself.
+--
+-- The FINAL CHAIN REQUIREMENTS note lists every already-resolved preferred
+-- type, which is right when the user asked for "a vocal chain" and wrong when
+-- the user wrote the chain out. The p02 prompt named EQ, compressor,
+-- saturation and limiter in that order and the note asked for a de-esser and a
+-- reverb on top of them, so the request contradicted itself and the turn was
+-- spent on a clarifying question.
+--
+-- Returns the subset of `type_keys` the prompt names by the role's own word or
+-- by one of the user's aliases for it, and only when it names two or more: one
+-- role word is a mention, two or more written out is an enumeration. Returns
+-- nil when the prompt enumerates nothing, so the caller keeps the full
+-- resolved list and a generic "vocal chain" request is unchanged.
+--
+-- An open-ended tail returns nil too. "EQ and compressor, and whatever else
+-- you think it needs" names two roles and then hands the rest back, so the
+-- list is not the whole request and cutting the note down to the two named
+-- roles would drop the roles the user asked for by not naming them.
+--
+-- The tail has to be where the enumeration ends, though, and it has to be
+-- open. "EQ and compressor, and more output gain" carries "and more" in the
+-- middle of a request for one named thing, and "and whatever else you think"
+-- three sentences earlier is not this list's tail either. So a tail counts
+-- only where it follows the last role the prompt named, with nothing between
+-- them but space, a comma and one connector ("and", "plus", "or"); and the
+-- tails that are open only when nothing follows them ("and more", "and so on",
+-- "etc.") are read as tails only at the end of their own sentence. `terminal`
+-- marks those. The end of the sentence is the bound, not the end of the
+-- prompt: "EQ and compressor, etc. Return only the Lua code." ends its
+-- enumeration at the "etc.", and the response-format sentence after it does
+-- not close the list. The other four say the list is open in their own words
+-- and may be followed by more of the sentence ("whatever else you think it
+-- needs").
+local CHAIN_ENUMERATION_OPEN_TAILS = {
+  { pattern = "whatever else" },
+  { pattern = "anything else" },
+  { pattern = "whatever you think" },
+  { pattern = "anything you think" },
+  { pattern = "and so on", terminal = true },
+  { pattern = "and more", terminal = true },
+  { pattern = "%f[%w]etc%f[%W]", terminal = true },
+}
+
+-- True when one of those tails stands immediately after position `after`.
+local function _chain_enumeration_tail_follows(t, after)
+  for _, tail in ipairs(CHAIN_ENUMERATION_OPEN_TAILS) do
+    local start_at, stop_at = t:find(tail.pattern, after + 1)
+    if start_at then
+      local gap = t:sub(after + 1, start_at - 1)
+      if gap:find("^[%s,]*$")
+        or gap:find("^[%s,]*and[%s,]*$")
+        or gap:find("^[%s,]*plus[%s,]*$")
+        or gap:find("^[%s,]*or[%s,]*$") then
+        local rest_of_sentence =
+          t:sub(stop_at + 1):match("^([^%.%!%?;\n]*)") or ""
+        if not tail.terminal or rest_of_sentence:find("^[%s%p]*$") then
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
+-- What the enumeration asks the model to do with the roles it names:
+-- "all" for a list to build, "choice" for one of the roles named, and nil
+-- when the list says neither plainly and the user's own wording is what
+-- decides.
+--
+-- The span runs from the first role named to the last. With no "or" in it
+-- the list reads as the all-members list it has always been: "EQ and
+-- compressor", "EQ, compressor and limiter", and the p02 chain that spells
+-- its order out. With an "or" in it, the list is a choice only where it is
+-- plainly a choice between the roles themselves: every gap between two
+-- named roles carries nothing but a connector, so "EQ or compressor" and
+-- "EQ, compressor or limiter" are choices.
+--
+-- Anything else in a gap leaves both mandates off. "EQ and either
+-- compressor or limiter" carries an "and" between its roles and asks for
+-- two of the three; "EQ for harsh or muddy frequencies followed by a
+-- compressor" spends its "or" on the frequencies, not on the roles. Neither
+-- is a plain list of interchangeable roles, and both say what they want in
+-- the user's own words, so the note names the pinned preferences and
+-- issues no mandate over them.
+local CHAIN_CHOICE_GAP_WORDS = {
+  ["or"] = true, ["either"] = true,
+  ["a"] = true, ["an"] = true, ["the"] = true,
+}
+
+-- `spans` are the role mentions inside the enumeration, in order, each a
+-- table with `start` and `stop`.
+local function _chain_enumeration_mandate(t, spans, first_start, last_stop)
+  if not first_start or last_stop <= first_start then return "all" end
+  if not t:sub(first_start, last_stop):find("%f[%w]or%f[%W]") then
+    return "all"
+  end
+  local saw_or = false
+  for i = 2, #spans do
+    local gap = t:sub(spans[i - 1].stop + 1, spans[i].start - 1)
+    if gap:find("[^%s,%a]") then return nil end
+    for word in gap:gmatch("%a+") do
+      if not CHAIN_CHOICE_GAP_WORDS[word] then return nil end
+      if word == "or" then saw_or = true end
+    end
+  end
+  if not saw_or then return nil end
+  return "choice"
+end
+
+-- Returns the enumerated roles, and the mandate the enumeration carries as a
+-- second value: "all" when the caller should order every listed role
+-- inserted, "choice" when it should ask for one of them, and nil when the
+-- list plainly says neither and the caller should order nothing.
+function CTX.prompt_enumerated_chain_roles(text, type_keys)
+  if type(text) ~= "string" or text == "" then return nil end
+  if type(type_keys) ~= "table" or #type_keys < 2 then return nil end
+  local t = text:lower()
+  local aliases = type(_aliases_by_pref_type) == "function"
+    and _aliases_by_pref_type() or {}
+  -- Where the role is last named, so the tail test knows where the
+  -- enumeration ends, and where it is first named, so the choice test knows
+  -- where the enumeration begins. nil when the prompt does not name the role
+  -- at all.
+  -- Every mention is collected, not only the outer two, because the mandate
+  -- test reads the gaps between them.
+  local function role_named_at(tkey)
+    local words = { tkey }
+    for _, alias in ipairs(aliases[tkey] or {}) do
+      words[#words + 1] = alias
+    end
+    local last_stop, first_start, mentions = nil, nil, {}
+    for _, word in ipairs(words) do
+      if word ~= "" then
+        local pattern = "%f[%w]" .. word:gsub("(%W)", "%%%1") .. "%f[%W]"
+        local from = 1
+        while true do
+          local start_at, stop_at = t:find(pattern, from)
+          if not start_at then break end
+          if not last_stop or stop_at > last_stop then last_stop = stop_at end
+          if not first_start or start_at < first_start then
+            first_start = start_at
+          end
+          mentions[#mentions + 1] = { start = start_at, stop = stop_at }
+          from = stop_at + 1
+        end
+      end
+    end
+    return last_stop, first_start, mentions
+  end
+  local named, last_role_stop, first_role_start = {}, 0, nil
+  local spans = {}
+  for _, tkey in ipairs(type_keys) do
+    if type(tkey) == "string" then
+      local stop_at, start_at, mentions = role_named_at(tkey)
+      if stop_at then
+        named[#named + 1] = tkey
+        if stop_at > last_role_stop then last_role_stop = stop_at end
+        if not first_role_start or start_at < first_role_start then
+          first_role_start = start_at
+        end
+        for _, mention in ipairs(mentions) do
+          spans[#spans + 1] = mention
+        end
+      end
+    end
+  end
+  if #named < 2 then return nil end
+  if _chain_enumeration_tail_follows(t, last_role_stop) then return nil end
+  -- One word can answer to two roles, and a role can answer to several of
+  -- its own aliases, so the mentions are ordered and any that overlap are
+  -- merged before the gaps between them are read.
+  table.sort(spans, function(a, b)
+    if a.start == b.start then return a.stop > b.stop end
+    return a.start < b.start
+  end)
+  local merged = {}
+  for _, mention in ipairs(spans) do
+    local last = merged[#merged]
+    if last and mention.start <= last.stop then
+      if mention.stop > last.stop then last.stop = mention.stop end
+    else
+      merged[#merged + 1] = { start = mention.start, stop = mention.stop }
+    end
+  end
+  return named,
+    _chain_enumeration_mandate(t, merged, first_role_start, last_role_stop)
 end
 
 function CTX.prompt_indicates_typed_action_plan(text)
@@ -8345,6 +9027,23 @@ local DOCS_PHRASE_HINTS = {
   { "receive from",          "routing"   },
   { "%f[%w]route%f[%W]",     "routing"   },
   { "%f[%w]routing%f[%W]",   "routing"   },
+  -- Side-chain wording that names no send and no route. The p01 prompt
+  -- ("feed the Drum Bus", "feed it the Kick on channels 3 and 4", "so the
+  -- bass ducks under the kick", "stop going straight to the master") matched
+  -- none of the entries above, so the R-06 rule about which track owns a send
+  -- never reached the model and the cell wrote the destination track into
+  -- SetTrackSendInfo_Value. "side-chain" and "side chain" are separate forms:
+  -- the entry above matches only the solid spelling, and a hyphen is a
+  -- quantifier in a Lua pattern, so it is escaped here.
+  { "side%-chain",           "routing"   },
+  { "side chain",            "routing"   },
+  { "%f[%w]ducks?%f[%W]",    "routing"   },
+  { "%f[%w]ducking%f[%W]",   "routing"   },
+  { "feed it",               "routing"   },
+  { "feed the",              "routing"   },
+  { "%f[%w]feeds%f[%W]",     "routing"   },
+  { "%f[%w]channels?%s+%d+%s+and%s+%d+", "routing" },
+  { "straight to the master", "routing"  },
   -- Portuguese and Spanish action wording observed in localized requests.
   { "%f[%w]rotear%f[%W]",        "routing" },
   { "%f[%w]roteamento%f[%W]",    "routing" },
@@ -8411,6 +9110,17 @@ local DOCS_PHRASE_HINTS = {
   -- so pre-pinning docs:items would duplicate context and violate the one-pass
   -- MIDI path.
   { "media item",            "items"     },
+  { "%f[%a]selected items?%f[%A]", "items", "selected_item_action" },
+  -- Audio item edits. The destructive item surface (splits, fades,
+  -- crossfades, trims, clearing a razor area) lives in docs:items, and the
+  -- complex-task bench showed both p05 and p09 discovering it only by
+  -- refetch. The MIDI exclusion above still applies through
+  -- `audio_edit_action`.
+  { "%f[%a]fades?%f[%A]",      "items", "audio_edit_action" },
+  { "%f[%a]cross%-?fades?%f[%A]", "items", "audio_edit_action" },
+  { "%f[%a]splits?%f[%A]",     "items", "audio_edit_action" },
+  { "%f[%a]trims?%f[%A]",      "items", "audio_edit_action" },
+  { "%f[%a]razor%f[%A]",       "items", "audio_edit_action" },
   { "glue items",            "items"     },
   { "glue the items",        "items"     },
   { "glue selected items",   "items"     },
@@ -8599,6 +9309,41 @@ function CTX.each_docs_phrase_hint(fn)
   return true
 end
 
+local function _docs_hint_text_is_midi(text)
+  return text:find("%f[%a]midi%f[%A]") ~= nil
+    or (type(Code) == "table"
+      and type(Code.prompt_has_midi_workflow_intent) == "function"
+      and Code.prompt_has_midi_workflow_intent(text))
+end
+
+function CTX.docs_phrase_text_for_hint(text, hint)
+  text = tostring(text or "")
+  if type(hint) == "table" and hint[3] == "audio_edit_action" then
+    if _docs_hint_text_is_midi(text) then return "" end
+  end
+  if type(hint) == "table" and hint[3] == "selected_item_action" then
+    if _docs_hint_text_is_midi(text) then return "" end
+    for _, other in ipairs(DOCS_PHRASE_HINTS) do
+      if other[2] == "take_fx" and text:find(other[1]) then return "" end
+    end
+    local action = false
+    for _, verb in ipairs({ "move", "trim", "split", "copy", "duplicate",
+        "delete", "remove", "glue", "resize", "stretch", "fade", "rename" }) do
+      if text:find("%f[%a]" .. verb .. "%f[%A]") then
+        action = true
+        break
+      end
+    end
+    if not action then return "" end
+  end
+  if type(hint) == "table"
+      and hint[1] == "%f[%w]tempo%f[%W]"
+      and hint[2] == "tempo" then
+    text = text:gsub("%f[%w]tempo%s+real%f[%W]", "realtime")
+  end
+  return text
+end
+
 -- JSFX-intent detection: returns true when the user's prompt explicitly
 -- asks for JSFX/EEL2/custom-DSP work. Intentionally narrow -- only fires on
 -- the literal "jsfx" / "eel2" / "reajs" tokens, the "@init" / "@sample"
@@ -8720,11 +9465,295 @@ function CTX.prompt_has_explicit_stock_fx_constraint(text)
   for _, name in ipairs(names) do
     if t:find(name, 1, true) then return true end
   end
-  return t:find("%f[%w]only%f[%W]") ~= nil
-    or t:find("stock only", 1, true) ~= nil
-    or t:find("stock%-only", 1, false) ~= nil
-    or t:find("no third%-party", 1, false) ~= nil
-    or t:find("no third party", 1, true) ~= nil
+  if t:find("%f[%w]only%f[%W]") ~= nil
+      or t:find("stock only", 1, true) ~= nil
+      or t:find("stock%-only", 1, false) ~= nil then
+    return true
+  end
+  -- The exclusion is written many ways. "Nothing third party" is the form the
+  -- complex-task bench caught escaping, which left the preferred-plugin
+  -- keyword loop free to pin FabFilter references on a stock-only turn.
+  for _, lead in ipairs({ "no", "nothing", "not", "avoid", "without" }) do
+    for _, party in ipairs({ "third party", "third%-party",
+        "3rd party", "3rd%-party" }) do
+      if t:find(lead .. "%s+" .. party) ~= nil then return true end
+    end
+  end
+  return false
+end
+
+-- The stock product for a role, when this conversation already pinned its
+-- curated profile.
+--
+-- Item 1.9's constraint reads one prompt and stands the whole keyword loop
+-- down. This reads what the turn already carries: the vocal-delay follow-ups
+-- named "stock Cockos ReaDelay" on turn two, and turns three to five then
+-- pinned Timeless 3 and pref:delay beside the ReaDelay profile because the
+-- word "Delay" appears in the track name "Vocal Delay Return". The caller
+-- uses this only on a turn that inserts no FX, so a later turn that does ask
+-- for a plug-in still gets the user's saved preference.
+--
+-- Returns the curated stock name, or nil.
+function CTX.stock_product_pinned_for_type(type_key)
+  if type(Code) ~= "table" or type(Code.get_stock_fallback) ~= "function" then
+    return nil
+  end
+  if type(S) ~= "table" or type(S.sticky_context) ~= "table" then return nil end
+  local stock = Code.get_stock_fallback(type_key)
+  local add = stock and tostring(stock.add or "") or ""
+  if add == "" then return nil end
+  local curated = _curated_for_ident(add) or add
+  if S.sticky_context["plugin_ref:" .. curated] then return curated end
+  return nil
+end
+
+-- CTX.prompt_names_product_for_type
+-- =============================================================================
+-- The product this prompt named for a generic role, or nil.
+--
+-- R-13: the preempt decided what a turn needed from keyword shape alone, so a
+-- prompt that named the stock product by name ("add ReaDelay to the vocal")
+-- still pinned the user's preferred third-party delay and its preference. The
+-- FX-IDENT validator already exempts an identifier the user asked for by name
+-- through Code.prompt_names_product; the pin decision now reads the same test,
+-- so one turn cannot be told to use a product the validator will not enforce.
+--
+-- The candidates for a role are the products the pack routes that role to: the
+-- stock fallback and the curated chain entries. A candidate whose own name the
+-- role word alone would match is dropped, because matching it proves nothing
+-- about a product: the saturation fallback is `JS: LOSER/Saturation`, whose
+-- final path component is the role word, so "then some saturation" would
+-- otherwise read as the user naming a product.
+--
+-- A product the prompt names only to keep it out of scope is not a product
+-- named for the role. The test reads the prompt with the leave-alone spans of
+-- CTX.untouched_constraint_spans removed, the same spans the profile exclusion
+-- uses on explicit_type_named, so both answers come from one reading.
+--
+-- Returns the matched product name (truthy) or nil. Any failure returns nil,
+-- which leaves the existing pin behavior in place.
+function CTX.prompt_names_product_for_type(user_text, type_key)
+  if type(user_text) ~= "string" or user_text == "" then return nil end
+  type_key = tostring(type_key or ""):lower()
+  if type_key == "" then return nil end
+  if type(CTX.prompt_names_vendor_for_type) == "function" then
+    local vendor = CTX.prompt_names_vendor_for_type(user_text, type_key)
+    if vendor then return vendor end
+  end
+  if type(Code) ~= "table"
+      or type(Code.prompt_names_product) ~= "function" then
+    return nil
+  end
+  local candidates = {}
+  if type(Code.get_stock_fallback) == "function" then
+    local ok, stock = pcall(Code.get_stock_fallback, type_key)
+    if ok and type(stock) == "table" and type(stock.add) == "string"
+        and stock.add ~= "" then
+      candidates[#candidates + 1] = stock.add
+    end
+  end
+  if type(Code.get_fallback_chains) == "function" then
+    local ok, chains = pcall(Code.get_fallback_chains)
+    local entry = ok and type(chains) == "table" and chains[type_key] or nil
+    for _, name in ipairs(type(entry) == "table" and entry.chain or {}) do
+      if type(name) == "string" and name ~= "" then
+        candidates[#candidates + 1] = name
+      end
+    end
+  end
+  if #candidates == 0 then return nil end
+  -- The prompt as a request. A product the user named only to leave it alone
+  -- is a bystander, not a product named for this role, so the leave-alone
+  -- spans come out before the test runs. The profile exclusion that drops the
+  -- same product from explicit_type_named reads those spans through the same
+  -- helper, so a prompt cannot be read one way there and another way here.
+  local request_text = CTX.prompt_without_untouched_constraints(user_text)
+  -- The role's own words, as a prompt that names the role and nothing else.
+  local role_words = { (type_key:gsub("_", " ")) }
+  local aliases = type(_aliases_by_pref_type) == "function"
+    and _aliases_by_pref_type() or {}
+  for _, alias in ipairs(aliases[type_key] or {}) do
+    role_words[#role_words + 1] = alias
+  end
+  local role_only = tbl_concat(role_words, " ")
+  for _, name in ipairs(candidates) do
+    local generic_ok, generic = pcall(Code.prompt_names_product, role_only, name)
+    if not (generic_ok and generic == true) then
+      local named_ok, named =
+        pcall(Code.prompt_names_product, request_text, name)
+      if named_ok and named == true then return name end
+    end
+  end
+  return nil
+end
+
+-- CTX.prompt_named_preference_roles
+-- =============================================================================
+-- The saved-preference roles this prompt names, each with the identifier that
+-- preference holds. One reader, built from the tests the preferred-plugin
+-- preempt already applies to the same prompt: the role key or one of the
+-- user's own aliases, word-bounded; the internal-control exemption of
+-- CTX.prompt_type_keyword_is_internal_control; and the named-product exemption
+-- of CTX.prompt_names_product_for_type; and, from round thirty-two, the
+-- per-term negation of Code.prompt_requests_jsfx_term, so a role every one of
+-- whose matched words sits inside a prohibition is not a role the turn asked
+-- for. The prompt is read with the
+-- leave-alone spans removed, so a role named only to keep it out of scope is
+-- not a role the turn asked for. A preference the current enumeration filter
+-- hides is left out, because a preference the model was never shown is not
+-- what the turn asked for either.
+--
+-- Round thirty reads it for the typed-action FX guard. That lane is reachable
+-- only through a prompt Code.typed_actions_exact_nonplugin_scope accepted, so
+-- a role that reaches this reader is one whose word lies outside the
+-- typed-action classifier's own plug-in vocabulary, such as a role label the
+-- user typed on the Preferred Plugins page.
+--
+-- Returns a bounded ordered list of
+-- { role = <key>, preference = <identifier>, terms = { <matched word>, ... } },
+-- or nil. Any failure returns nil, which costs one notice rather than a turn.
+-- ROUND THIRTY-FOUR CARRIES `terms`: the words that actually matched, the role
+-- key and any of the user's own aliases, so the plug-in guard can ask where in
+-- the prompt each of them sits rather than guessing at the role key alone.
+local PREFERENCE_ROLE_MAX = 4
+
+function CTX.prompt_named_preference_roles(user_text)
+  local raw = tostring(user_text or "")
+  if raw == "" then return nil end
+  if type(FXCache) ~= "table"
+      or type(FXCache.get_preferred_types) ~= "function" then
+    return nil
+  end
+  local saved_ok, saved = pcall(FXCache.get_preferred_types)
+  if not saved_ok or type(saved) ~= "table" then return nil end
+  local effective = {}
+  local view_ok, view = pcall(CTX.effective_preferred_types, saved)
+  if view_ok and type(view) == "table" then
+    effective = view
+  else
+    for tkey, ident in pairs(saved) do
+      if type(ident) == "string" and ident ~= "" then
+        effective[tostring(tkey):lower()] = ident
+      end
+    end
+  end
+  local text = raw
+  local clean_ok, clean = pcall(CTX.prompt_without_untouched_constraints, raw)
+  if clean_ok and type(clean) == "string" then text = clean end
+  text = text:lower()
+  if text == "" then return nil end
+  local aliases = type(_aliases_by_pref_type) == "function"
+    and _aliases_by_pref_type() or {}
+  local keys = {}
+  for tkey in pairs(effective) do keys[#keys + 1] = tostring(tkey):lower() end
+  table.sort(keys)
+  local out = {}
+  for _, tkey in ipairs(keys) do
+    if #out >= PREFERENCE_ROLE_MAX then break end
+    local ident = effective[tkey]
+    if type(ident) == "string" and ident ~= "" and tkey ~= "" then
+      -- Every term that matched, not only the first: round thirty-two reads
+      -- each one back through the per-term negation below, and a role named
+      -- once affirmatively and once inside a prohibition is still named.
+      local matched = {}
+      if text:find("%f[%w]" .. tkey:gsub("(%W)", "%%%1") .. "%f[%W]") then
+        matched[#matched + 1] = tkey
+      end
+      for _, alias in ipairs(aliases[tkey] or {}) do
+        if text:find("%f[%w]" .. alias:gsub("(%W)", "%%%1") .. "%f[%W]") then
+          matched[#matched + 1] = alias
+        end
+      end
+      local hit = #matched > 0
+      -- ROUND THIRTY-TWO: "Add a track called Drive Bus. Do not add a
+      -- compressor." asks for no compressor, and the role source fed the
+      -- saved compressor preference into the guard's hint as a plug-in to
+      -- insert. Code.prompt_requests_jsfx_term reads the same prohibition
+      -- openers per term that the product source is read with, so the two
+      -- sources of one list cannot disagree about what the prompt forbids.
+      if hit and type(Code) == "table"
+          and type(Code.prompt_requests_jsfx_term) == "function" then
+        local asked = false
+        for _, term in ipairs(matched) do
+          local term_ok, requested = pcall(Code.prompt_requests_jsfx_term,
+            text, term, false)
+          if not term_ok or requested == true then
+            asked = true
+            break
+          end
+        end
+        if not asked then hit = false end
+      end
+      if hit and type(CTX.prompt_type_keyword_is_internal_control)
+          == "function" then
+        local control_ok, control = pcall(
+          CTX.prompt_type_keyword_is_internal_control, tkey, text, {})
+        if control_ok and control == true then hit = false end
+      end
+      if hit then
+        local named_ok, named = pcall(CTX.prompt_names_product_for_type,
+          raw, tkey)
+        if named_ok and named then hit = false end
+      end
+      if hit then
+        out[#out + 1] = { role = tkey, preference = ident, terms = matched }
+      end
+    end
+  end
+  if #out == 0 then return nil end
+  return out
+end
+
+-- CTX.prompt_names_channel_pair
+-- =============================================================================
+-- True when the prompt names a pair of channel numbers ("channels 3 and 4",
+-- "channels 3/4"). A side-chain feed is described by its channel pair more
+-- often than by the word "send", and the p01 prompt named no send at all.
+function CTX.prompt_names_channel_pair(text)
+  local t = tostring(text or ""):lower()
+  if t == "" then return false end
+  return t:find("%f[%w]channels?%s+%d+%s+and%s+%d+") ~= nil
+    or t:find("%f[%w]channels?%s+%d+%s*[/&]%s*%d+") ~= nil
+    or t:find("%f[%w]channels?%s+%d+%s*%-%s*%d+") ~= nil
+end
+
+-- CTX.compressor_reference_pinned
+-- =============================================================================
+-- The sticky key that put a compressor in front of the model this turn, or
+-- nil. Reads what the turn RESOLVED rather than what its wording looked like:
+-- a turn holding a compressor reference and naming a channel pair is a
+-- side-chain turn whatever words it used.
+function CTX.compressor_reference_pinned()
+  if type(S) ~= "table" or type(S.sticky_context) ~= "table" then return nil end
+  if S.sticky_context["pref:compressor"] then return "pref:compressor" end
+  local keys = {}
+  for key in pairs(S.sticky_context) do
+    if key:match("^plugin_ref:") then keys[#keys + 1] = key end
+  end
+  table.sort(keys)
+  for _, key in ipairs(keys) do
+    local name = key:match("^plugin_ref:(.+)$")
+    -- A plugin_ref is pinned under the display name ("Pro-C 3") and under the
+    -- profile key ("fabfilter-pro-c-3"); both alias to the same profile, so
+    -- the route metadata answers for both.
+    local role = nil
+    if name and type(CTX.plugin_profile_key) == "function" then
+      local ok, profile_key = pcall(CTX.plugin_profile_key, name)
+      local meta = ok and profile_key
+        and (CTX._plugin_profile_metadata or {})[profile_key] or nil
+      if type(meta) == "table" then
+        role = meta.preference_type or PROFILE_TYPE_BY_NAME[meta.display_name]
+      end
+    end
+    if not role and name then role = PROFILE_TYPE_BY_NAME[name] end
+    if not role and name and type(FXCache) == "table"
+        and type(FXCache.preferred_identifier_type) == "function" then
+      local ok, value = pcall(FXCache.preferred_identifier_type, name)
+      role = ok and value or nil
+    end
+    if tostring(role or ""):lower() == "compressor" then return key end
+  end
+  return nil
 end
 
 function CTX.sticky_has_fx_params_for_ident(ident)
@@ -9281,38 +10310,217 @@ function CTX.explicit_validated_plugin_profile_names(user_text)
   return found
 end
 
+-- The one reading of "the user named this product only to leave it alone",
+-- shared by everything that has to tell a target apart from a bystander. The
+-- profile exclusion below drops such a product from explicit_type_named, and
+-- CTX.prompt_names_product_for_type reads the prompt with these spans removed,
+-- so the two decisions cannot drift apart.
+--
+-- Three narrow forms, all returned as byte ranges into `user_text`:
+--   a whole sentence that calls something unrelated and requires it unchanged
+--   ("Leave the unrelated ReaEQ on Drum Bus unchanged."),
+--   a "leave ... alone" span inside one sentence, from the verb to the closing
+--   word ("leave ReaEQ alone"), and
+--   a "keep ... unchanged" span, the same shape with the keep verbs and the
+--   "as it is" closing phrase ("Keep ReaEQ unchanged on Drum Bus.").
+-- A span stops at its closing word, so a product named elsewhere in the same
+-- sentence is still a target: "Add ReaEQ to Lead Vocal and leave the settings
+-- alone." names ReaEQ. It also stops before a separate affirmative action, so
+-- "Leave the track name as it is, add ReaEQ to Lead Vocal, and keep its
+-- settings unchanged." names ReaEQ too.
+-- Text outside every returned span is what the user asked to have done.
+function CTX.untouched_constraint_spans(user_text)
+  local lower = tostring(user_text or ""):lower()
+  local spans = {}
+  if lower == "" then return spans end
+  local leave_words = { "leave", "leaves", "leaving",
+    "keep", "keeps", "keeping" }
+  local close_words = { "alone", "untouched", "unchanged",
+    "as it is", "as is" }
+  -- A clause boundary followed by an action verb starts a separate request,
+  -- and a product named there is a target. Own list on purpose: the one
+  -- existing word table near here, ALIAS_SCAN_SKIP, holds nouns such as
+  -- "bus", "track" and "fx" that would end a span on any routing wording.
+  local action_boundaries = {}
+  for _, verb in ipairs({ "add", "insert", "put", "create", "set",
+      "route" }) do
+    action_boundaries[#action_boundaries + 1] = ",%s*" .. verb .. "%f[%W]"
+    action_boundaries[#action_boundaries + 1] =
+      "%f[%w]and%s+" .. verb .. "%f[%W]"
+    action_boundaries[#action_boundaries + 1] =
+      "%f[%w]then%s+" .. verb .. "%f[%W]"
+  end
+  local pos = 1
+  while pos <= #lower do
+    local brk = lower:find("[%.!%?;\n]", pos)
+    local stop = (brk and brk - 1) or #lower
+    if stop >= pos then
+      local sentence = lower:sub(pos, stop)
+      if sentence:find("unrelated", 1, true)
+          and sentence:find("unchanged", 1, true) then
+        spans[#spans + 1] = { first = pos, last = stop }
+      else
+        local from = 1
+        while true do
+          local verb_first, verb_last = nil, nil
+          for _, word in ipairs(leave_words) do
+            local first, last =
+              sentence:find("%f[%w]" .. word .. "%f[%W]", from)
+            if first and (not verb_first or first < verb_first) then
+              verb_first, verb_last = first, last
+            end
+          end
+          if not verb_first then break end
+          local limit = #sentence
+          for _, pat in ipairs(action_boundaries) do
+            local first = sentence:find(pat, verb_last + 1)
+            if first and first - 1 < limit then limit = first - 1 end
+          end
+          local close_last = nil
+          for _, word in ipairs(close_words) do
+            local _, last =
+              sentence:find("%f[%w]" .. word .. "%f[%W]", verb_last + 1)
+            if last and last <= limit
+                and (not close_last or last < close_last) then
+              close_last = last
+            end
+          end
+          if close_last then
+            spans[#spans + 1] = {
+              first = pos + verb_first - 1,
+              last = pos + close_last - 1,
+            }
+          end
+          from = verb_last + 1
+        end
+      end
+    end
+    if not brk then break end
+    pos = brk + 1
+  end
+  return spans
+end
+
+-- The prompt with every leave-alone span blanked out, for a reader that scans
+-- the whole prompt and has no match positions of its own. Blanks keep byte
+-- offsets and word boundaries, so the surviving text reads exactly as written.
+function CTX.prompt_without_untouched_constraints(user_text)
+  local raw = tostring(user_text or "")
+  local spans = CTX.untouched_constraint_spans(raw)
+  local out = raw
+  for _, span in ipairs(spans) do
+    local first = tonumber(span.first) or 0
+    local last = tonumber(span.last) or 0
+    if first >= 1 and last >= first and last <= #out then
+      out = out:sub(1, first - 1)
+        .. string.rep(" ", last - first + 1)
+        .. out:sub(last + 1)
+    end
+  end
+  return out
+end
+
 -- A product name can appear only to identify an effect that must stay out of
 -- scope. Supplying that product's parameter map adds irrelevant tokens and can
 -- cause a small model to copy its values into the requested plug-in. Keep this
--- test narrow: every explicit mention must be in a sentence that calls the
--- product unrelated and requires it to remain unchanged.
+-- test narrow: every explicit mention must sit inside a leave-alone span.
 function CTX.prompt_profile_mentions_only_untouched_constraint(user_text, meta)
   local raw = tostring(user_text or "")
   local matches = CTX.plugin_profile_explicit_alias_matches(raw, meta)
   if raw == "" or #matches == 0 then return false end
-  local lower = raw:lower()
+  local spans = CTX.untouched_constraint_spans(raw)
+  if #spans == 0 then return false end
   for _, match in ipairs(matches) do
     local first = tonumber(match.first) or 0
     local last = tonumber(match.last) or 0
     if first < 1 or last < first then return false end
-    local sentence_start = 1
-    for pos = 1, first - 1 do
-      local ch = lower:sub(pos, pos)
-      if ch == "." or ch == "!" or ch == "?" or ch == ";"
-          or ch == "\n" then
-        sentence_start = pos + 1
+    local covered = false
+    for _, span in ipairs(spans) do
+      if span.first <= first and last <= span.last then
+        covered = true
+        break
       end
     end
-    local sentence_end = #lower
-    local boundary = lower:find("[%.!%?;\n]", last + 1)
-    if boundary then sentence_end = boundary - 1 end
-    local sentence = lower:sub(sentence_start, sentence_end)
-    if not (sentence:find("unrelated", 1, true)
-        and sentence:find("unchanged", 1, true)) then
-      return false
-    end
+    if not covered then return false end
   end
   return true
+end
+
+-- ROUND THIRTY-SEVEN: A WORD THE REQUEST ONLY PROHIBITS, OR ONLY NAMES A
+-- TRACK WITH, PINS NOTHING.
+--
+-- The two readers below are the preempt lanes' half of the reading
+-- Code.prompt_affirms_outside_track_names carries: the track-naming spans are
+-- blanked and the per-term negation reader answers on what is left. The role
+-- reader is asked with the words that produced the keyword or alias hit, and
+-- the product reader with the aliases the profile actually matched on, so
+-- neither has to guess which word put the candidate on the list.
+--
+-- Both answer true on every failure, which is the reading each caller had
+-- before this round: an absent runtime reader, a faulting call, a profile
+-- whose match carries no position (the existing-instance case, which names no
+-- span this reader could place), and an empty word list.
+function CTX.prompt_role_named_outside_track_names(user_text, tkey, alias)
+  if type(Code) ~= "table"
+      or type(Code.prompt_affirms_outside_track_names) ~= "function" then
+    return true
+  end
+  local terms = {}
+  if type(tkey) == "string" and tkey ~= "" then terms[#terms + 1] = tkey end
+  if type(alias) == "string" and alias ~= "" then terms[#terms + 1] = alias end
+  if #terms == 0 then return true end
+  local ok, affirmed = pcall(Code.prompt_affirms_outside_track_names,
+    user_text, terms)
+  if not ok then return true end
+  return affirmed ~= false
+end
+
+function CTX.prompt_profile_named_outside_track_names(user_text, meta)
+  if type(meta) ~= "table" or type(Code) ~= "table"
+      or type(Code.prompt_affirms_outside_track_names) ~= "function" then
+    return true
+  end
+  local match_ok, matches = pcall(CTX.plugin_profile_explicit_alias_matches,
+    user_text, meta)
+  if not match_ok or type(matches) ~= "table" or #matches == 0 then
+    return true
+  end
+  local phrases, seen = {}, {}
+  for _, match in ipairs(matches) do
+    if (tonumber(match.first) or 0) < 1 then return true end
+    local alias = tostring(match.alias or "")
+    if alias ~= "" and not seen[alias] then
+      seen[alias] = true
+      phrases[#phrases + 1] = alias
+    end
+  end
+  if #phrases == 0 then return true end
+  local ok, affirmed = pcall(Code.prompt_affirms_outside_track_names,
+    user_text, phrases)
+  if not ok then return true end
+  return affirmed ~= false
+end
+
+-- ROUND THIRTY-EIGHT: AN EXPLICIT PROHIBITION OVERRIDES AN IMPLIED ROLE.
+--
+-- A chain phrase puts a role on the list without the prompt naming the role's
+-- own word, so the readers above cannot answer for it. This one reads the
+-- word directly: "Build the vocal chain but no reverb" implies four roles and
+-- forbids one of them, and the reverb comes off the list. `masked_text` is
+-- the request the chain readers matched on, so a role word that only names a
+-- track was already blanked out of it.
+--
+-- Every failure answers false, which keeps the role the phrase implied.
+function CTX.prompt_term_prohibited(masked_text, term)
+  if type(Code) ~= "table"
+      or type(Code.prompt_prohibits_term) ~= "function" then
+    return false
+  end
+  local word = tostring(term or "")
+  if word == "" then return false end
+  local ok, prohibited = pcall(Code.prompt_prohibits_term, masked_text, word)
+  if not ok then return false end
+  return prohibited == true
 end
 
 function CTX.prompt_has_closed_named_plugin_list(user_text, explicit_matches)
@@ -9371,7 +10579,12 @@ function CTX.plugin_profile_candidates_for_prompt(user_text)
   for key, meta in pairs(CTX._plugin_profile_metadata or {}) do
     if explicit_matches[key]
         and not CTX.prompt_profile_mentions_only_untouched_constraint(
-          user_text, meta) then
+          user_text, meta)
+        -- ROUND THIRTY-SEVEN, AB-02: "Add a track called Saturn and put
+        -- Saturn in the Drums folder." named the track, not the product, and
+        -- this candidate pinned the whole Saturn 2 profile and its exact
+        -- AddByName string before the model was called.
+        and CTX.prompt_profile_named_outside_track_names(user_text, meta) then
       add_candidate(key, "direct_name")
     end
   end
@@ -9380,10 +10593,23 @@ function CTX.plugin_profile_candidates_for_prompt(user_text)
       and not CTX.prompt_has_explicit_stock_fx_constraint(user_text) then
     local cache = FXCache.load()
     local pref_types = cache.preferred_types or {}
+    -- ROUND THIRTY-EIGHT: the hints read the request with every track-naming
+    -- span blanked, so a phrase whose trigger words all sit inside a track
+    -- name implies no chain, and a role the same request explicitly forbids
+    -- comes off the list the phrase put it on.
+    -- ROUND THIRTY-NINE: a hint the blanking cost is read again on the
+    -- unmasked request, and counts when the word "chain" lies outside every
+    -- naming span.
+    local chain_text = CTX.prompt_text_outside_track_names(user_text)
+    local chain_unmasked = _chain_unmasked_reader(user_text, chain_text)
     local phrase_implied = {}
     for _, hint in ipairs(CHAIN_PHRASE_HINTS) do
-      if _chain_phrase_matches(text, hint) then
-        for _, type_key in ipairs(hint[2]) do phrase_implied[type_key] = true end
+      if _chain_phrase_matches(chain_text, hint, chain_unmasked) then
+        for _, type_key in ipairs(hint[2]) do
+          if not CTX.prompt_term_prohibited(chain_text, type_key) then
+            phrase_implied[type_key] = true
+          end
+        end
       end
     end
     local aliases_by_type = {}
@@ -9399,22 +10625,41 @@ function CTX.plugin_profile_candidates_for_prompt(user_text)
     end
     for type_key, ident in pairs(pref_types) do
       type_key = tostring(type_key or ""):lower()
-      local hit = text:find(
+      local keyword_hit = text:find(
         "%f[%w]" .. type_key:gsub("(%W)", "%%%1") .. "%f[%W]") ~= nil
-      if not hit then
+      local alias_hit = nil
+      if not keyword_hit then
         for _, alias in ipairs(aliases_by_type[type_key] or {}) do
           local pattern = "%f[%w]" .. alias:gsub("(%W)", "%%%1") .. "%f[%W]"
           if text:find(pattern) then
-            hit = true
+            alias_hit = alias
             break
           end
         end
+      end
+      local hit = keyword_hit or alias_hit ~= nil
+      -- ROUND THIRTY-SEVEN, AB-01: the word that produced the hit must have an
+      -- affirmative reading outside every track name. "Do not add any more
+      -- reverb" has none, and this candidate pinned the saved reverb
+      -- preference's curated profile before the model was called. A role a
+      -- chain phrase implied is not read here: the phrase, not the word, is
+      -- what put the role on the list.
+      if hit and phrase_implied[type_key] ~= true
+          and not CTX.prompt_role_named_outside_track_names(
+            user_text, keyword_hit and type_key or nil, alias_hit) then
+        hit = false
       end
       hit = hit or phrase_implied[type_key] == true
       if hit and CTX.prompt_type_keyword_is_internal_control
           and CTX.prompt_type_keyword_is_internal_control(
             type_key, text, explicit_type_named) then
         hit = false
+      end
+      if hit and not explicit_type_named[type_key] then
+        if type(CTX.prompt_names_vendor_for_type) == "function"
+            and CTX.prompt_names_vendor_for_type(user_text, type_key) then
+          hit = false
+        end
       end
       if hit and not explicit_type_named[type_key] then
         local curated = _curated_for_ident(ident)
@@ -9500,6 +10745,252 @@ function CTX.prompt_has_named_plugin_pack_signal(user_text)
   return false
 end
 
+-- CTX.catalog_knows_product
+-- =============================================================================
+-- ROUND THIRTY-THREE. True when a catalog this App carries knows `name` as a
+-- product. It is the CERTAIN test of the typed-action plug-in guard: a
+-- capitalised run no catalog knows is a guess, and the guard never tells the
+-- model to insert a guess and never names one to the user.
+--
+-- Three catalogs, cheapest first:
+--   * the shipped plug-in-pack term list, minus its generic role words, so
+--     "Reverb" is not read as a product while "Soothe 2" is;
+--   * the loaded plug-in pack's fallback chains and stock entries, read
+--     through Code.get_fallback_chains, which returns {} until the pack owner
+--     is ready and starts no load of its own;
+--   * the installed FX enumeration.
+--
+-- MATCHING IS EXACT ON THE COMPARISON KEY (format prefix off, trailing vendor
+-- parenthesis off, whitespace collapsed, lowercased), never by substring.
+-- "Kick" must not read as a product because some installed row contains that
+-- word. The cost of a miss here is that a real product is treated as a guess,
+-- which is the harmless class; the cost of a false match is a track name in an
+-- instruction to insert a plug-in.
+--
+-- The enumeration is consulted last and only when the two cheap lists did not
+-- answer. It is cached in CTX._installed_fx_list for the session, so the cost
+-- is one enumeration on the first turn that reaches this point.
+local function _catalog_product_key(value)
+  local text = tostring(value or "")
+  if text == "" then return "" end
+  text = text:gsub("^[%a][%w]*:%s*", "")
+  text = text:gsub("%s*%b()%s*$", "")
+  text = text:gsub("%s+", " ")
+  return (text:match("^%s*(.-)%s*$") or ""):lower()
+end
+
+function CTX.catalog_knows_product(name)
+  local key = _catalog_product_key(name)
+  if key == "" then return false end
+  local generic = CTX.PLUGIN_PACK_GENERIC_SIGNAL_TERMS or {}
+  for _, term in ipairs(CTX.PLUGIN_PACK_SIGNAL_TERMS or {}) do
+    if not generic[term] and tostring(term):lower() == key then return true end
+  end
+  if type(Code) == "table" and type(Code.get_fallback_chains) == "function" then
+    local chains_ok, chains = pcall(Code.get_fallback_chains)
+    if chains_ok and type(chains) == "table" then
+      for _, entry in pairs(chains) do
+        if type(entry) == "table" then
+          for _, candidate in ipairs(type(entry.chain) == "table"
+              and entry.chain or {}) do
+            if _catalog_product_key(candidate) == key then return true end
+          end
+          local stock = type(entry.stock) == "table" and entry.stock or nil
+          if stock and (_catalog_product_key(stock.add) == key
+              or _catalog_product_key(stock.alias) == key) then
+            return true
+          end
+        end
+      end
+    end
+  end
+  local installed = CTX._installed_fx_list
+  if installed == nil and type(CTX.populate_installed_fx) == "function" then
+    pcall(CTX.populate_installed_fx)
+    installed = CTX._installed_fx_list
+  end
+  for _, row in ipairs(type(installed) == "table" and installed or {}) do
+    if _catalog_product_key(row) == key then return true end
+  end
+  return false
+end
+
+-- CTX.session_track_names
+-- =============================================================================
+-- ROUND THIRTY-FOUR. The track names the session snapshot this turn carried
+-- holds, lowercased, trimmed, de-duplicated and bounded. It is the third
+-- track-naming context the typed-action plug-in guard reads: a word the prompt
+-- uses only as the name of a track the session already has is not a plug-in
+-- the turn asked for, and the guard demotes such a candidate to the class that
+-- names nothing.
+--
+-- IT READS THE SNAPSHOT CACHE AND NOTHING LIVE. CTX.build_snapshot fills
+-- CTX._snapshot_heavy_cache with the rows it sent, so these are the names the
+-- model was shown rather than a second walk of the project, and the reader
+-- costs no REAPER call. A turn that sent no snapshot can see the previous
+-- one's names, which can demote a candidate this turn's session does not
+-- carry; that is the harmless direction, because a demoted candidate still
+-- fires the same hidden ask and still renders a notice, only without a name.
+--
+-- Returns a list, or nil when there is no snapshot to read.
+local SESSION_TRACK_NAME_MAX = 200
+local SESSION_TRACK_NAME_BYTES = 96
+
+-- ROUND THIRTY-EIGHT: THE PREPARATION READS THE CURRENT SESSION'S NAMES.
+--
+-- The read-only profile preparation runs in Net.send_to_api BEFORE the turn's
+-- snapshot is built, so the cache above still held the PREVIOUS turn's rows
+-- while the preempt was deciding what to pin. A turn that created Saturn and
+-- a next turn saying "Put Saturn in the Drums folder" therefore pinned the
+-- Saturn 2 profile off a snapshot that did not carry the track, and the
+-- snapshot built afterwards could not retract it.
+--
+-- The fix is a names-only walk of the live project, stamped with the same
+-- four values CTX.build_snapshot validates its heavy cache against. Reading
+-- it costs one CountTracks and one GetTrackName per track and creates
+-- nothing. The stamp is what keeps it honest: a list captured before the
+-- model's script ran is stale the moment the script adds or removes a track,
+-- and a stale list is ignored rather than preferred, so every reader that
+-- runs after the script -- the typed-action plug-in guard above all -- is
+-- left on the snapshot rows it read before.
+local function _session_track_names_stamp(proj)
+  if type(reaper) ~= "table"
+      or type(reaper.GetProjectStateChangeCount) ~= "function"
+      or type(R_CountTracks) ~= "function"
+      or type(R_GetTrack) ~= "function"
+      or type(R_GetTrackName) ~= "function" then
+    return nil
+  end
+  local count = R_CountTracks(proj)
+  if type(count) ~= "number" then return nil end
+  return {
+    proj = proj,
+    state_count = reaper.GetProjectStateChangeCount(proj or 0),
+    track_count = count,
+    first_track = count > 0 and R_GetTrack(proj, 0) or nil,
+    last_track = count > 1 and R_GetTrack(proj, count - 1)
+      or (count > 0 and R_GetTrack(proj, 0) or nil),
+  }
+end
+
+local function _session_track_names_stamp_matches(cache, stamp)
+  return type(cache) == "table" and type(stamp) == "table"
+    and cache.proj == stamp.proj
+    and cache.state_count == stamp.state_count
+    and cache.track_count == stamp.track_count
+    and cache.first_track == stamp.first_track
+    and cache.last_track == stamp.last_track
+end
+
+-- Reads the live project's track names and stamps them. Returns true when a
+-- list was captured. Every failure leaves the previous capture in place and
+-- answers false, which leaves CTX.session_track_names on the snapshot rows.
+-- The project the turn is about to snapshot. Net.send_to_api sets
+-- S.pending_project from reaper.EnumProjects(-1) AFTER the preparation runs,
+-- so at this point S.pending_project still holds the previous turn's tab and
+-- the active project is the one to read.
+local function _session_track_names_project()
+  if type(reaper) == "table" and type(reaper.EnumProjects) == "function" then
+    local ok, proj = pcall(reaper.EnumProjects, -1)
+    if ok then return proj end
+  end
+  local ok, proj = pcall(_resolve_pending_project)
+  if ok then return proj end
+  return 0
+end
+
+function CTX.refresh_session_track_names()
+  local ok, proj = pcall(_session_track_names_project)
+  if not ok then return false end
+  local stamp_ok, stamp = pcall(_session_track_names_stamp, proj)
+  if not stamp_ok or type(stamp) ~= "table" then return false end
+  local names, seen = {}, {}
+  local walk_ok = pcall(function()
+    for i = 0, stamp.track_count - 1 do
+      if #names >= SESSION_TRACK_NAME_MAX then break end
+      local tr = R_GetTrack(proj, i)
+      if tr then
+        local _, nm = R_GetTrackName(tr)
+        local name = tostring(nm or ""):gsub("%s+", " ")
+        name = (name:match("^%s*(.-)%s*$") or ""):lower()
+        if name ~= "" and #name <= SESSION_TRACK_NAME_BYTES
+            and not seen[name] then
+          seen[name] = true
+          names[#names + 1] = name
+        end
+      end
+    end
+  end)
+  if not walk_ok then return false end
+  stamp.names = names
+  CTX._session_track_names_live = stamp
+  return true
+end
+
+-- ROUND THIRTY-NINE: THE CAPTURE IS BOUND TO THE PROJECT THIS TURN IS ABOUT.
+--
+-- Codex on round thirty-eight: the stamp validates a capture against its OWN
+-- project handle, so a capture taken while project A was open still passes
+-- while A sits untouched in another tab. Capture names in A, switch to B, and
+-- A's rows answer for B's turn: A's "Vocal" masks a request B's own rows
+-- would leave alone, and B's fresh snapshot is never reached.
+--
+-- The names a turn reads have to be the names of the project the turn is
+-- about, which is the project the pending snapshot was built from:
+-- CTX.resolve_pending_project(), the same resolver Net.send_to_api hands
+-- CTX.build_snapshot. A capture of any other project is refused here and the
+-- snapshot rows answer instead.
+--
+-- One window reads this conservatively and is left that way deliberately. The
+-- profile preparation runs before S.pending_project is set for this turn, so
+-- the resolver still names the PREVIOUS turn's tab there. On a turn that
+-- switched tabs, the capture of the new tab is refused in that window and the
+-- reader falls back to the snapshot rows, which describe the same previous
+-- tab: both sources agree, which is the property that matters, and the cost
+-- is at most one pin inside this lane's stated leniency. Every reader that
+-- runs after S.pending_project is set, which is every preempt reader, sees
+-- the current project's capture.
+--
+-- A resolver that faults answers false, which puts the reader on the snapshot
+-- rows. That is the direction this reader has always failed in.
+local function _session_track_names_capture_is_current(cache)
+  if type(cache) ~= "table" then return false end
+  local ok, proj = pcall(_resolve_pending_project)
+  if not ok then return false end
+  return cache.proj == proj
+end
+
+function CTX.session_track_names()
+  -- The live capture answers only while its stamp still describes the
+  -- project, and only while that project is the one this turn is about.
+  -- Anything that changed the project since -- the model's script above all
+  -- -- puts this reader back on the snapshot rows.
+  local live = CTX._session_track_names_live
+  if type(live) == "table" and type(live.names) == "table"
+      and #live.names > 0 and _session_track_names_capture_is_current(live) then
+    local ok, stamp = pcall(_session_track_names_stamp, live.proj)
+    if ok and _session_track_names_stamp_matches(live, stamp) then
+      return live.names
+    end
+  end
+  local cache = CTX._snapshot_heavy_cache
+  local rows = type(cache) == "table" and cache.track_rows or nil
+  if type(rows) ~= "table" then return nil end
+  local out, seen = {}, {}
+  for _, row in ipairs(rows) do
+    if #out >= SESSION_TRACK_NAME_MAX then break end
+    local name = type(row) == "table" and tostring(row.name or "") or ""
+    name = name:gsub("%s+", " ")
+    name = (name:match("^%s*(.-)%s*$") or ""):lower()
+    if name ~= "" and #name <= SESSION_TRACK_NAME_BYTES and not seen[name] then
+      seen[name] = true
+      out[#out + 1] = name
+    end
+  end
+  if #out == 0 then return nil end
+  return out
+end
+
 function CTX.plugin_pack_show_notice(kind, detail)
   Log.line("PLUGIN_PACK", "guidance unavailable; continuing without it: "
     .. tostring(kind) .. " " .. tostring(detail or ""))
@@ -9569,6 +11060,19 @@ end
 
 
 function CTX.prepare_plugin_profiles_for_prompt(user_text, callback)
+  -- ROUND THIRTY-EIGHT: this runs before the turn's snapshot is built, so the
+  -- track names every reader below masks with are read from the live project
+  -- first. Names only, no items, no folder depths, and nothing written.
+  --
+  -- ROUND THIRTY-NINE: and it runs BEFORE the plug-in pack signal gate, not
+  -- after it. The readers that mask with these names are not only the ones
+  -- this gate guards: "Give Lead Vocal a vocal chain." carries no pack signal
+  -- term at all, so the gate refused the turn and the refresh never ran,
+  -- while the chain-phrase readers and the pref_map gate went on masking with
+  -- whatever the last refresh had left behind. The walk is names only and
+  -- costs one CountTracks and one GetTrackName per track.
+  CTX.refresh_session_track_names()
+
   if not CTX.prompt_has_plugin_pack_signal(user_text) then return false end
 
   -- Certified pack content is generation guidance. It never authorizes or
@@ -9748,7 +11252,109 @@ function CTX.prompt_uses_only_curated_direct_norm(user_text)
   return true
 end
 
+-- Forward declaration. The wrapper is written ahead of the core so the public
+-- name still opens the preempt in this file.
+local _preempt_buckets_core
+
+-- The preempt's public name: the core below, plus the one pin that is decided
+-- by what the turn RESOLVED rather than by the words the prompt used.
+--
+-- R-06's side-chain rules live in the on-demand docs:routing bucket, and the
+-- p01 prompt named no send and no route, so the phrase hints were the only
+-- route to them and none of them fired. The hints now carry that prompt
+-- class's wording. This is the second route and it cannot be worded around: a
+-- turn holding a compressor reference and naming a channel pair is a
+-- side-chain turn, whatever words it used to say so. It runs here rather than
+-- inside the core because the core returns from six places and a turn that
+-- takes an early return is still a turn that needs the section.
+--
+-- A typed-action plan prompt is excluded, the same exclusion the core makes
+-- for every other bucket.
 function CTX.preempt_buckets_for_prompt(user_text)
+  local injected = _preempt_buckets_core(user_text)
+  if type(injected) ~= "table" then return injected end
+  if type(user_text) ~= "string" or user_text == "" then return injected end
+  if CTX.prompt_indicates_typed_action_plan(user_text) then return injected end
+  if not CTX.prompt_names_channel_pair(user_text) then return injected end
+  local pinned_by = CTX.compressor_reference_pinned()
+  if not pinned_by then return injected end
+  local section = "routing"
+  local sticky_key = "docs:" .. section
+  S.docs_section_sent = S.docs_section_sent or {}
+  if S.sticky_context[sticky_key] or S.docs_section_sent[section] then
+    return injected
+  end
+  local sec_content, sec_err = CTX.docs_section(section)
+  if sec_content then
+    Net.sticky_set(sticky_key, sec_content)
+    S.docs_section_sent[section] = true
+    injected[#injected + 1] = sticky_key
+    Log.line("PREEMPT", "injected " .. sticky_key .. " (" .. pinned_by
+      .. " pinned and the prompt names a channel pair)")
+  else
+    Log.line("PREEMPT", "wanted to inject " .. sticky_key
+      .. " for a pinned compressor and a channel pair but loader failed: "
+      .. (sec_err or "?"))
+  end
+  return injected
+end
+
+-- A vendor name is enough to search the installed catalog, even when it does
+-- not identify one product. Keep discovery read-only and preserve ambiguity.
+function CTX.prompt_plugin_vendor_queries(user_text)
+  local queries, seen = {}, {}
+  local text = CTX.prompt_text_outside_track_names(user_text):lower()
+  for _, meta in pairs(CTX._plugin_profile_metadata or {}) do
+    local vendor = tostring(meta.vendor or "")
+    local word = vendor:match("^([%w]+)")
+    if word and #word >= 4 then
+      local key = word:lower()
+      if not seen[key] and text:find("%f[%w]" .. key .. "%f[%W]")
+          and not CTX.prompt_term_prohibited(text, key) then
+        seen[key] = true
+        queries[#queries + 1] = word
+      end
+    end
+  end
+  table.sort(queries)
+  return queries
+end
+
+function CTX.prompt_names_vendor_for_type(user_text, type_key)
+  local text = CTX.prompt_text_outside_track_names(user_text):lower()
+  local role = tostring(type_key):gsub("_", " "):gsub("(%W)", "%%%1")
+  for _, vendor in ipairs(CTX.prompt_plugin_vendor_queries(user_text)) do
+    if text:find(vendor:lower() .. "%s+%f[%w]" .. role .. "%f[%W]")
+        or text:find("%f[%w]" .. role .. "%s+from%s+" .. vendor:lower() .. "%f[%W]")
+        or text:find("%f[%w]" .. role .. "%s+by%s+" .. vendor:lower() .. "%f[%W]") then
+      return vendor
+    end
+  end
+end
+
+function CTX.plugin_vendor_choice_for_prompt(user_text)
+  for _, role in ipairs({"reverb", "delay", "compressor", "limiter", "eq", "saturator"}) do
+    local vendor = CTX.prompt_names_vendor_for_type(user_text, role)
+    if vendor then
+      local catalog = CTX.installed_fx({vendor})
+      local choices = {}
+      for identifier in tostring(catalog or ""):gmatch("%- `([^`]+)`") do
+        if Code.prompt_names_product(user_text, identifier) then return nil end
+        local product = identifier:gsub("^[^:]+:%s*", ""):gsub("%s*%([^)]*%)%s*$", "")
+          :lower():gsub("^" .. vendor:lower() .. "%s*", "")
+        if #product >= 4 and CTX.prompt_text_outside_track_names(user_text):lower():find(
+            "%f[%w]" .. product:gsub("(%W)", "%%%1") .. "%f[%W]") then return nil end
+        choices[#choices + 1] = identifier
+      end
+      if #choices > 1 and #choices <= 12 then return vendor, choices end
+    end
+  end
+end
+
+-- The core of the preempt. The wrapper above owns the public name, because
+-- this function returns from several places and the second route has to run
+-- after every one of them.
+function _preempt_buckets_core(user_text)
   if not user_text or user_text == "" then return {} end
   local text = user_text:lower()
   if CTX.prompt_indicates_typed_action_plan(user_text) then
@@ -9790,13 +11396,30 @@ function CTX.preempt_buckets_for_prompt(user_text)
   -- Scan chain-phrase hints first. Builds tkey -> matching_phrase so the
   -- main loop below can treat phrase hits identically to keyword hits and
   -- the log line can attribute the trigger.
+  -- ROUND THIRTY-EIGHT: the same two readings the candidate lane applies. The
+  -- hints match on the request with every track-naming span blanked, and a
+  -- role the request explicitly forbids is not a role the phrase implies.
+  -- ROUND THIRTY-NINE: and the same unmasked second reading, so a track name
+  -- cannot cost this loop a chain the turn asked for in its own words.
+  local chain_text = CTX.prompt_text_outside_track_names(user_text)
+  local chain_unmasked = _chain_unmasked_reader(user_text, chain_text)
   local phrase_implied = {}
+  local phrase_forbidden = {}
   if not stock_fx_constraint and not forbids_fx_addition
       and not closed_named_list then
     for _, hint in ipairs(CHAIN_PHRASE_HINTS) do
-      if _chain_phrase_matches(text, hint) then
+      if _chain_phrase_matches(chain_text, hint, chain_unmasked) then
         for _, t in ipairs(hint[2]) do
-          if not phrase_implied[t] then phrase_implied[t] = hint[1] end
+          if not phrase_implied[t] and not phrase_forbidden[t] then
+            if CTX.prompt_term_prohibited(chain_text, t) then
+              phrase_forbidden[t] = true
+              Log.line("PREEMPT", "skipped " .. tostring(t)
+                .. " implied by chain phrase '" .. tostring(hint[1])
+                .. "' (the request forbids it)")
+            else
+              phrase_implied[t] = hint[1]
+            end
+          end
         end
       end
     end
@@ -9824,6 +11447,25 @@ function CTX.preempt_buckets_for_prompt(user_text)
   -- as the caller's "what we just preempted" log payload.
   local injected = {}
 
+  local vendor_queries = {}
+  if not jsfx_intent and not stock_fx_constraint and not forbids_fx_addition then
+    vendor_queries = CTX.prompt_plugin_vendor_queries(user_text)
+    if #vendor_queries > 0 then
+      Net.copin_plugin_bundle(injected, Net.plugin_bundle_variant_for_prompt(user_text), "preempt")
+    end
+    for _, query in ipairs(vendor_queries) do
+      local catalog, count = CTX.installed_fx({query})
+      if catalog then
+        local key = "fx_list:" .. query
+        Net.sticky_set(key, catalog .. "\nSearch the supplied installed choices before asking what is installed. "
+          .. "If several products fit, ask which listed product to use. "
+          .. "A vendor request overrides a generic saved preference for that requested effect.")
+        injected[#injected + 1] = key
+        Log.line("PREEMPT", "injected " .. key .. " (explicit vendor, matches=" .. tostring(count) .. ")")
+      end
+    end
+  end
+
   if manual_only_policy
       and type(Code.manual_only_plugin_guidance) == "function" then
     local policy_key = "manual_only_plugin:"
@@ -9842,7 +11484,7 @@ function CTX.preempt_buckets_for_prompt(user_text)
       "reaper 7.65", "reaper 7.66", "reaper 7.67", "reaper 7.68",
       "reaper 7.69", "reaper 7.70", "reaper 7.71", "reaper 7.72",
       "reaper 7.73", "reaper 7.74", "reaper 7.75", "reaper 7.76",
-      "reaper 7.77",
+      "reaper 7.77", "reaper 7.78", "reaper 7.79", "reaper 7.80",
       "left/right to grid", "envelope points",
       "midi choke", "choke group", "track grouping", "grouped razor",
       "multi-mono", "multi-stereo", "fx container", "fxoffline",
@@ -9891,6 +11533,10 @@ function CTX.preempt_buckets_for_prompt(user_text)
     -- recent-changes half of the answer.
     local recent_code_or_api_intent =
          text:find("reaper lua", 1, true) ~= nil
+      or text:find("set_config_var_string", 1, true) ~= nil
+      or text:find("get_config_var_string", 1, true) ~= nil
+      or text:find("trackfx_getnamedconfigparm", 1, true) ~= nil
+      or text:find("takefx_getnamedconfigparm", 1, true) ~= nil
       or text:find("reascript", 1, true) ~= nil
       or text:find("lua script", 1, true) ~= nil
       or text:find("%f[%w]api%f[%W]") ~= nil
@@ -9970,7 +11616,8 @@ function CTX.preempt_buckets_for_prompt(user_text)
     end
   end
   CTX.each_docs_phrase_hint(function(hint)
-    if docs_phrase_text:find(hint[1]) then
+    local hint_text = CTX.docs_phrase_text_for_hint(docs_phrase_text, hint)
+    if hint_text:find(hint[1]) then
       local section = hint[2]
       if not sec_seen[section] then
         sec_seen[section] = true
@@ -10085,6 +11732,75 @@ function CTX.preempt_buckets_for_prompt(user_text)
       end
     end
   end
+  -- Preference map for an explicit chain request. The per-type keyword loop
+  -- below only fires when the prompt names a type ("reverb") or matches a
+  -- chain phrase, so "add a chain to it suitable for a loud rock snare"
+  -- pinned nothing and three of four providers wrote stock plug-ins over the
+  -- user's saved preferences. One sticky entry lists the saved preference for
+  -- every role, and the FX identity/preference validator asks the model once
+  -- to use it when the generated chain does not.
+  --
+  -- The trigger is CTX.prompt_indicates_chain_context only. It is deliberately
+  -- not Code.prompt_has_chain_or_recipe_intent, which also matches "preset",
+  -- "tone" and "vibe". An explicit product in the prompt does not suppress the
+  -- map: "snare chain with ReaEQ and my preferred compression" still needs the
+  -- other roles. The suppressing predicate is Code.prompt_names_fx_source, not
+  -- CTX.prompt_has_explicit_stock_fx_constraint, which keeps its own callers.
+  --
+  -- The SCOPE is the trivial rule of plan section 7.4: a word-bounded
+  -- "stock", "cockos" or "third-party" anywhere in the prompt means the user
+  -- said something about where the plug-ins come from, so no role takes a
+  -- preference this turn and no map belongs to the turn. No clause reading of
+  -- any kind. The seventeen-round construction parser this replaced kept
+  -- misreading English in both directions.
+  --
+  -- IT IS READ BEFORE THE EARLY RETURNS BELOW, because suppression is only
+  -- half of it: a map an earlier turn pinned stays in sticky context and rides
+  -- the next request whatever this one asks for, and a prompt this function
+  -- stops reading early is still a prompt that names a source.
+  local stock_request = type(Code) == "table"
+    and type(Code.prompt_names_fx_source) == "function"
+    and Code.prompt_names_fx_source(user_text) == true
+  if stock_request then
+    Log.line("PREEMPT",
+      "the prompt names a plug-in source, so no pref_map belongs to this turn")
+  end
+
+  -- A MAP THIS PROMPT DOES NOT BUILD MUST NOT SURVIVE FROM AN EARLIER TURN.
+  -- The suppression above only skipped generation, so an unscoped stock-only
+  -- turn after a chain turn still sent the previous turn's map, with its
+  -- instruction to use the listed identifier for every generic role, to the
+  -- model that had just been asked for stock, and the pinned-references
+  -- manifest still told it not to re-request the map. The post-chain-action
+  -- prune is no answer: it runs after a successful action, so a blocked run, a
+  -- declined auto-run and a turn that generated nothing each leave the map
+  -- pinned. The removal is here, before the request is built, and it takes the
+  -- manifest entry with it, because the manifest is written from the sticky
+  -- order this drops the key from.
+  --
+  -- A prompt that changes the LINE SET rather than removing it needs no
+  -- removal: the rebuild below replaces the entry in place. A turn that reads
+  -- no map either way (a JSFX turn, a prompt with no chain context and no
+  -- source word) leaves the pinned map standing, because the map belongs to
+  -- the chain the session is working on rather than to one turn.
+  local function prune_pinned_pref_map(reason)
+    if not (S.sticky_context and S.sticky_context["pref_map"]) then return end
+    if type(Net.sticky_unset) == "function" then
+      Net.sticky_unset("pref_map")
+    else
+      S.sticky_context["pref_map"] = nil
+    end
+    if S.sticky_context_age then S.sticky_context_age["pref_map"] = nil end
+    for at = #injected, 1, -1 do
+      if injected[at] == "pref_map" then table.remove(injected, at) end
+    end
+    Log.line("PREEMPT", "removed the pinned pref_map (" .. reason .. ")")
+  end
+  -- No role keeps its preference under this request, so no map belongs to it.
+  if stock_request then
+    prune_pinned_pref_map("suppressed")
+  end
+
   if forbids_fx_addition and not jsfx_intent then
     return injected
   end
@@ -10093,6 +11809,72 @@ function CTX.preempt_buckets_for_prompt(user_text)
       "skipped plugin_ref/pref keyword loop (native timecode-generator workflow)")
     return injected
   end
+
+  if not jsfx_intent
+      and CTX.prompt_indicates_chain_context(user_text)
+      and not stock_request then
+    local map_lines, map_types = {}, {}
+    local map_keys = {}
+    for tkey in pairs(pref_types) do map_keys[#map_keys + 1] = tkey end
+    table.sort(map_keys)
+    local map_bytes = 0
+    for _, tkey in ipairs(map_keys) do
+      if #map_lines >= PREF_MAP_MAX_LINES then break end
+      local ident = pref_types[tkey]
+      if ident and ident ~= "" and FXCache and FXCache.preferred_type_plausible then
+        local plausible = FXCache.preferred_type_plausible(tkey, ident)
+        if not plausible then ident = nil end
+      end
+      -- The same effective-preference view the validator uses: a role whose
+      -- identifier the enumeration filter hides is not listed here, and the
+      -- validator does not enforce it either.
+      if ident and ident ~= ""
+          and CTX.identifier_hidden_by_fx_filter(ident) then
+        ident = nil
+      end
+      if ident and ident ~= "" then
+        local canonical = ident
+        if FXCache and FXCache.canonicalize_identifier then
+          canonical = FXCache.canonicalize_identifier(tkey, ident) or ident
+        end
+        local line = "  " .. tkey .. " = " .. canonical
+        if map_bytes + #line + 1 <= PREF_MAP_MAX_BYTES then
+          map_lines[#map_lines + 1] = line
+          map_types[#map_types + 1] = tkey
+          map_bytes = map_bytes + #line + 1
+        end
+      end
+    end
+    if #map_lines > 0 then
+      local content = "SAVED PLUG-IN PREFERENCES FOR GENERIC ROLES:\n"
+        .. tbl_concat(map_lines, "\n") .. "\n"
+        .. "These are the user's saved preferences for generic roles. Use the "
+        .. "listed identifier for any generic role this chain includes. This "
+        .. "list does not say that every listed role belongs in the chain. A "
+        .. "product the user named keeps its place. Request "
+        .. "<context_needed>resolve:<type></context_needed> only for a role "
+        .. "with no listed preference, and "
+        .. "<context_needed>plugin_ref:<name></context_needed> only when you "
+        .. "are writing parameter values."
+      -- Rebuilt on every chain prompt so a preference change replaces a stale
+      -- map instead of leaving the old identifiers pinned.
+      Net.sticky_set("pref_map", content, "preempt")
+      local already_listed = false
+      for _, key in ipairs(injected) do
+        if key == "pref_map" then already_listed = true break end
+      end
+      if not already_listed then injected[#injected + 1] = "pref_map" end
+      Log.line("PREEMPT", "injected pref_map (" .. #map_lines
+        .. " saved role(s): " .. tbl_concat(map_types, ", ") .. ")")
+    else
+      -- The preferences are gone, so the lines are gone, and the map an
+      -- earlier turn pinned goes with them.
+      prune_pinned_pref_map("empty")
+      Log.line("PREEMPT",
+        "no pref_map to inject (no plausible saved preferences)")
+    end
+  end
+
   -- Whenever JSFX intent is detected -- even for a generic request like
   -- "hall reverb" with no family-hint match -- pre-pin the base
   -- `prompt_bundle:jsfx` and `docs` (REAPER core API ref). The base bundle
@@ -10171,33 +11953,7 @@ function CTX.preempt_buckets_for_prompt(user_text)
   local keys = {}
   for k in pairs(pref_types) do keys[#keys+1] = k end
   table.sort(keys)
-  local aliases_by_pref_type = {}
-  if pref_plugins and pref_plugins.alias_lookup then
-    for alias, key in pairs(pref_plugins.alias_lookup() or {}) do
-      alias = tostring(alias or ""):lower()
-      key = tostring(key or ""):lower()
-      local skip_scan_alias =
-        alias == "" or alias == key or #alias < 3 or
-        alias == "a" or alias == "an" or alias == "the" or
-        alias == "add" or alias == "make" or alias == "create" or
-        alias == "set" or alias == "setup" or alias == "route" or
-        alias == "send" or alias == "sends" or
-        alias == "track" or alias == "tracks" or alias == "bus" or alias == "buses" or
-        alias == "fx" or alias == "selected" or alias == "selection" or
-        alias == "master" or alias == "folder" or
-        alias == "drive" or alias == "limit" or alias == "echo" or
-        alias == "tuner" or alias == "multiband"
-      if not skip_scan_alias and key ~= "" then
-        local list = aliases_by_pref_type[key]
-        if not list then
-          list = {}
-          aliases_by_pref_type[key] = list
-        end
-        list[#list+1] = alias
-      end
-    end
-    for _, list in pairs(aliases_by_pref_type) do table.sort(list) end
-  end
+  local aliases_by_pref_type = _aliases_by_pref_type()
   local explicit_type_named = {}
   do
     for curated_name, tkey in pairs(PROFILE_TYPE_BY_NAME) do
@@ -10260,6 +12016,18 @@ function CTX.preempt_buckets_for_prompt(user_text)
     local curated_key = CTX.plugin_profile_key(curated_name)
     local curated_meta = curated_key
       and CTX._plugin_profile_metadata[curated_key] or nil
+    -- ROUND THIRTY-SEVEN, AB-02: a curated product whose every mention in this
+    -- prompt sits inside a track name the turn names or works with, or is
+    -- forbidden, is not a product this turn asked for. The profile, its exact
+    -- AddByName string and the pref hint below all come off the turn with it.
+    if curated_key
+        and not CTX.prompt_profile_named_outside_track_names(
+          user_text, curated_meta) then
+      Log.line("PREEMPT",
+        "skipped " .. curated_name .. " direct-name preempt (the prompt names "
+        .. "it only inside a track name or a prohibition)")
+      goto continue_curated_name
+    end
     if curated_key then
       local direct_live_fx_params = preempt_live_fx_params
         or (curated_meta
@@ -10402,6 +12170,34 @@ function CTX.preempt_buckets_for_prompt(user_text)
           .. explicit_type_named[tkey] .. ")")
         goto continue_preempt
       end
+      -- R-13: the user named a product for this role, so the role takes no
+      -- preference this turn. The FX-IDENT validator already exempts an
+      -- identifier the prompt names; without this the same turn was sent a
+      -- preference and a third-party reference the validator would not
+      -- enforce. The curated products above are covered by the profile match;
+      -- this covers the products the pack routes the role to that carry no
+      -- curated profile, such as the stock fallback.
+      local named_product = CTX.prompt_names_product_for_type(user_text, tkey)
+      if named_product then
+        Log.line("PREEMPT",
+          "skipped " .. tkey .. " preferred-plugin preempt (the prompt names "
+          .. named_product .. " for this role)")
+        goto continue_preempt
+      end
+      -- ROUND THIRTY-SEVEN, AB-01: the word that produced this hit must have
+      -- an affirmative reading outside every track name. "Add a track called
+      -- Reverb Bus. Do not add any more reverb." has none, and this loop
+      -- pinned the saved reverb preference's curated profile and pref:reverb
+      -- before the model was called. A role a chain phrase implied keeps the
+      -- reading it had: the phrase, not the word, is what put it on the list.
+      if not phrase_hit and (kw_hit or alias_hit)
+          and not CTX.prompt_role_named_outside_track_names(
+            user_text, kw_hit and tkey or nil, alias_hit) then
+        Log.line("PREEMPT",
+          "skipped " .. tkey .. " preferred-plugin preempt (the prompt names "
+          .. "the role only inside a track name or a prohibition)")
+        goto continue_preempt
+      end
       local ident = pref_types[tkey]
       if ident and FXCache and FXCache.preferred_type_plausible then
         local plausible, actual =
@@ -10442,6 +12238,22 @@ function CTX.preempt_buckets_for_prompt(user_text)
         Log.line("PREEMPT",
           "skipped " .. tkey .. " plugin_ref (scoped live fx_params already pinned)")
         goto continue_preempt
+      end
+      -- A turn that inserts no FX has no use for a second, third-party
+      -- reference for a role this conversation already settled with a stock
+      -- product the user named. The live fx_params and param-write paths
+      -- above still run, so an edit of an existing instance is unaffected.
+      if type(Code) == "table"
+          and type(Code.prompt_requests_fx_insertion) == "function"
+          and not Code.prompt_requests_fx_insertion(user_text) then
+        local pinned_stock = CTX.stock_product_pinned_for_type(tkey)
+        if pinned_stock then
+          Log.line("PREEMPT",
+            "skipped " .. tkey .. " preferred-plugin preempt (stock "
+            .. pinned_stock .. " already pinned for this role and this turn "
+            .. "inserts no FX)")
+          goto continue_preempt
+        end
       end
       -- Use the prefix/vendor-tolerant lookup so canonicalized prefs
       -- ("VST3: Pro-Q 4") still resolve to the curated section. A direct
@@ -10724,9 +12536,10 @@ CTX.build_snapshot = function(proj, opts)
   return body
 end
 
--- Warm the maintained plug-in guide after startup so the first relevant
--- request can usually use it without waiting. Failure stays internal and the
--- ordinary Lua path continues without the guide.
+-- Screen Reader mode has no visual first-frame scheduler, so it keeps this
+-- background warm-up lane. In visual mode the startup defer gate refuses this
+-- request and Loop.run_post_paint_startup starts the warm-up after first paint.
+-- Failure stays internal and the ordinary Lua path continues without the guide.
 if reaper and reaper.defer then
   reaper.defer(function()
     pcall(CTX.ensure_plugin_pack_cache)

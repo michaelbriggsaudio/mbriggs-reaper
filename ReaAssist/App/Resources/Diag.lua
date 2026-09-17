@@ -216,6 +216,10 @@ local chat_started_at      = os.time()
 local auto_recent_turns    = {}
 local auto_seen_turns      = setmetatable({}, { __mode = "k" })
 local in_flight            = nil
+local send_sequence        = 0
+local feedback_cleanup_pending = {}
+local feedback_cleanup_next_at = 0
+local feedback_cleanup_cursor = 1
 
 -- ============================================================================
 -- UUIDv4
@@ -4636,10 +4640,14 @@ local function _send_body(body, curl_timeout_s, tick_timeout_s, on_done,
     return
   end
 
-  local body_path   = _tmp_path("body")
-  local resp_path   = _tmp_path("resp")
-  local status_path = _tmp_path("status")
-  local exit_path   = _tmp_path("exit")
+  -- A timed-out child may still finish. Its files must never belong to a
+  -- later send in this instance, including when old-file cleanup fails.
+  send_sequence = send_sequence + 1
+  local send_suffix = "_" .. send_sequence
+  local body_path   = _tmp_path("body" .. send_suffix)
+  local resp_path   = _tmp_path("resp" .. send_suffix)
+  local status_path = _tmp_path("status" .. send_suffix)
+  local exit_path   = _tmp_path("exit" .. send_suffix)
 
   local is_win = _detect_os() == "win"
   local cmd, cerr
@@ -4661,8 +4669,6 @@ local function _send_body(body, curl_timeout_s, tick_timeout_s, on_done,
     return
   end
   f:write(body); f:close()
-
-  os.remove(resp_path); os.remove(status_path); os.remove(exit_path)
 
   in_flight = {
     body_path      = body_path,
@@ -5802,17 +5808,65 @@ local function _auto_tick()
   if not in_flight and _dispatch_ready() then _flush_current_auto() end
 end
 
-local function _cleanup_inflight()
+local function _cleanup_feedback_record(record)
+  if not record.completed then
+    local marker = _read_file(record.exit_path)
+    record.completed = marker ~= nil
+      and marker:match("^[ \t]*%-?%d+[ \t]*\r?\n%s*$") ~= nil
+  end
+  local removed_all = true
+  for _, path in ipairs(record.paths) do
+    -- Keep unread completion evidence if the child writes during this pass.
+    if record.completed or path ~= record.exit_path then
+      local removed, _, code = os.remove(path)
+      if not removed and code ~= 2 then removed_all = false end
+    end
+  end
+  -- Absence alone cannot settle a child that may still create its result files.
+  return record.completed and removed_all
+end
+
+local function _retry_feedback_cleanup()
+  if in_flight or #feedback_cleanup_pending == 0 then return end
+  local now = os.time()
+  if now < feedback_cleanup_next_at then return end
+  feedback_cleanup_next_at = now + 1
+  for _ = 1, math.min(4, #feedback_cleanup_pending) do
+    if feedback_cleanup_cursor > #feedback_cleanup_pending then
+      feedback_cleanup_cursor = 1
+    end
+    local record = feedback_cleanup_pending[feedback_cleanup_cursor]
+    if now < (record.next_at or 0) then
+      feedback_cleanup_cursor = feedback_cleanup_cursor + 1
+    elseif _cleanup_feedback_record(record) then
+      table.remove(feedback_cleanup_pending, feedback_cleanup_cursor)
+    else
+      -- Launch errors do not prove the child never started. Keep watching,
+      -- but back off uncertain completion instead of polling files every second.
+      record.delay = record.completed and 1 or math.min((record.delay or 0.5) * 2, 60)
+      record.next_at = now + record.delay
+      feedback_cleanup_cursor = feedback_cleanup_cursor + 1
+    end
+  end
+end
+
+local function _cleanup_inflight(completed)
   if not in_flight then return end
-  os.remove(in_flight.body_path)
-  os.remove(in_flight.resp_path)
-  os.remove(in_flight.status_path)
-  os.remove(in_flight.exit_path)
+  local record = {
+    paths = { in_flight.body_path, in_flight.resp_path,
+      in_flight.status_path, in_flight.exit_path },
+    exit_path = in_flight.exit_path,
+    completed = completed == true,
+  }
+  if not _cleanup_feedback_record(record) then
+    feedback_cleanup_pending[#feedback_cleanup_pending + 1] = record
+  end
 end
 
 function Diag.tick()
   Diag.poll_platform_probe()
   if not in_flight then
+    _retry_feedback_cleanup()
     _auto_tick()
     return
   end
@@ -5835,7 +5889,10 @@ function Diag.tick()
   end
 
   local exit_str = _read_file(in_flight.exit_path)
-  if not exit_str then
+  -- Shell redirection creates the file before echo writes its result. Wait for
+  -- the complete line so an empty or partial write cannot report a false failure.
+  local exit_code = exit_str and tonumber(exit_str:match("^[ \t]*(%-?%d+)[ \t]*\r?\n%s*$"))
+  if not exit_code then
     if os.time() - in_flight.started_at > (in_flight.tick_timeout_s or 60) then
       local cb = in_flight.on_done
       _cleanup_inflight(); in_flight = nil
@@ -5844,7 +5901,6 @@ function Diag.tick()
     return
   end
 
-  local exit_code   = tonumber((exit_str or ""):match("%-?%d+")) or -1
   local status_code = tonumber((_read_file(in_flight.status_path) or ""):match("%d+")) or 0
 
   local ok = (exit_code == 0) and (status_code == 204)
@@ -5856,7 +5912,7 @@ function Diag.tick()
 
   local cb = in_flight.on_done
   local carried_sr_switch = in_flight.carries_sr_switch == true
-  _cleanup_inflight(); in_flight = nil
+  _cleanup_inflight(true); in_flight = nil
 
   if ok then
     Diag.commit_install_id()

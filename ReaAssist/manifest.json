@@ -1,14 +1,13 @@
 {
-  "version": "1.6.0",
-  "payload_ref": "0ad9903a228178f59dbb1fbfb838fbe738719998",
+  "version": "1.6.1",
   "engine": {
     "schema": 1,
     "delivery": "shared-v1",
     "shared_path": "Helper-Engine/1.0.2",
-    "source_ref": "v1.6.0",
+    "source_ref": "v1.6.1",
     "source": {
-      "commit": "b6400403943daafa58d50940cbbe27335d453f73",
-      "release": "kit-v1.0.2-prep-b640040",
+      "commit": "1ecf37fd95bb49d55bb237c677fdcebdb220ff59",
+      "release": "kit-v1.0.2-release-1ecf37f",
       "kit_sha256": "1eb6e48d9b0fc5ee3cd810eb3a1e567d812d515f6a99ab65fcf7d2906c69f256"
     },
     "descriptor": {
@@ -74,8 +73,7 @@
           "sha256": "f8599a7260cfc250599c198a336b1337b8d07c323cd9421399cbd706476ea16a",
           "signature": "sha256"
         }
-      },
-      "payload_layout": "native-bytes-txt-v1"
+      }
     }
   },
   "removed_files": [
@@ -93,7 +91,7 @@
     },
     {
       "name": "App/ReaAssist.lua",
-      "sha256": "7048acbc46e3a320a2b740b365b92821ae309d1733c10e8b8c90a02e6ea5582f"
+      "sha256": "e42052f29cf25670eec7cb2ce7bbbbf9b6173de86c4dcaff6bc941f820321600"
     },
     {
       "name": "App/ReaAssist_Screen_Reader_Mode.lua",
@@ -113,7 +111,7 @@
     },
     {
       "name": "App/Resources/Diag.lua",
-      "sha256": "951db1f1459dd3e2c9b8f81a4c351bb5c68188e1bc4b64ace43f9c01c796c04f"
+      "sha256": "6a2b48ceab9b6aa0de39c293d2c9a1978311d95e2efb6c11e2de53e15c877754"
     },
     {
       "name": "App/Resources/Engine.lua",
@@ -193,7 +191,7 @@
     },
     {
       "name": "App/manifest.json",
-      "sha256": "dd8f60f01ca1964debff78e877970eacd2554999d562678c11bab38713412977"
+      "sha256": "418dbac48f52c30293a8358ff0ceb1637e892db80901f12b6e811797f64631c5"
     },
     {
       "name": "ReaAssist.lua",

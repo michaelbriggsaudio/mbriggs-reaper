@@ -56,7 +56,7 @@ After installing, run the action "Script: ReaAssist.lua" from REAPER's Action Li
         <link rel="website" href="https://github.com/michaelbriggsaudio/mbriggs-reaper">GitHub Repository</link>
         <link rel="website" href="https://reaassist.app">ReaAssist Website</link>
       </metadata>
-      <version name="1.6.0" author="Michael Briggs" time="2026-09-17T16:15:15Z">
+      <version name="1.6.1" author="Michael Briggs" time="2026-09-17T19:41:59Z">
         <changelog><![CDATA[
 - Added a helper extension for more stable and secure network activity in the standard interface. It installs automatically for your system.
 
@@ -75,6 +75,8 @@ After installing, run the action "Script: ReaAssist.lua" from REAPER's Action Li
 - Reduced download size and improved updates from v1.4.x and v1.5 while preserving settings and API keys.
 
 - Updated all 19 language packs and REAPER guidance through v7.80.
+
+- Minor bug fixes.
         ]]></changelog>
         <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.6.0</source>
         <source main="main" file="ReaAssist_Screen_Reader_Mode.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist_Screen_Reader_Mode.lua?v=1.5.0</source>

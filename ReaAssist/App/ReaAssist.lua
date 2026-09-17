@@ -4397,7 +4397,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.6.0", -- public release version
+  VERSION           = "1.6.1", -- public release version
   -- OpenRouter ships as dormant, tested plumbing in 1.6.0. The redesigned
   -- webview release enables its advanced-user UI in 2.0.0. Keep this false
   -- until that release so saved development keys or selections cannot expose
@@ -68874,7 +68874,7 @@ function Download.new(options)
       or type(descriptor.version) ~= "string" or not descriptor.version:match("^%d+%.%d+%.%d+$")
       or metadata.shared_path ~= "Helper-Engine/" .. descriptor.version
       or not (ref:match("^v%d+%.%d+%.%d+$") or (#ref == 40 and ref:match("^[a-f0-9]+$")))
-      or descriptor.payload_layout ~= "native-bytes-txt-v1"
+      or (descriptor.payload_layout ~= nil and descriptor.payload_layout ~= "native-bytes-txt-v1")
       or type(metadata.source) ~= "table"
       or type(metadata.source.commit) ~= "string" or #metadata.source.commit ~= 40
       or not metadata.source.commit:match("^[a-f0-9]+$")
@@ -68966,7 +68966,8 @@ function Download:ensure(action, retry)
     ref = ref .. "/"
   end
   local url = base .. ref .. self.metadata.shared_path .. "/"
-    .. target.platform .. "/" .. target.filename .. ".txt"
+    .. target.platform .. "/" .. target.filename
+    .. (self.descriptor.payload_layout == "native-bytes-txt-v1" and ".txt" or "")
   local started = ra.fire_get_to(url, job.out_path, job.exit_path, Download.TIMEOUT, job,
     "INSTALL", {cache_bust=false, max_bytes=Download.MAX_BYTES})
   if not started then self.job=job; self:_finish("download-start"); return "failed", self.failure end

@@ -61,6 +61,5 @@
       "sha256": "f8599a7260cfc250599c198a336b1337b8d07c323cd9421399cbd706476ea16a",
       "signature": "sha256"
     }
-  },
-  "payload_layout": "native-bytes-txt-v1"
+  }
 }

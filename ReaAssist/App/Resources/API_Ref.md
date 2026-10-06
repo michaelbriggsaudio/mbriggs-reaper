@@ -6,8 +6,8 @@
 <!-- SECTION:core -->
 # REAPER ReaScript Lua API Reference
 
-Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.80),
-plus official Cockos changelog notes through REAPER v7.80.
+Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.82),
+plus official Cockos changelog notes through REAPER v7.82.
 Lua-only. All functions called as reaper.FunctionName().
 Use proj=0 for active project. Track/item indices in the API are 0-based.
 
@@ -31,6 +31,34 @@ SetThemeColor) lives in the `theme` bucket.
 These are high-confusion post-7.62 additions. Use guards if supporting older
 REAPER installs: `if reaper.FunctionName then ... else ... end`.
 
+- REAPER 7.82+: `reaper.EnumThemeColors(idx)` enumerates theme keys and their
+  value types. Request `docs:theme` before writing enumeration code.
+  Use a positive availability guard: `if reaper.EnumThemeColors then ...
+  else error("Theme enumeration requires REAPER 7.82 or newer.", 0) end`.
+  Its end marker is undocumented (Unknown): use a bounded index range,
+  never an unbounded loop, and report that the range may be incomplete.
+  When present, types are numeric: low byte 0=color, 1=font, 2=blend mode, 3=boolean,
+  4=boolean stored in a high bit (position Unknown); preserve -1 for dividers,
+  which can have empty keys.
+  An empty key does not prove the end. GetThemeColor/SetThemeColor support
+  non-color values; preserve their read-back encoding until documented.
+  Type 3 means boolean; the API does not document a 0/1 read-back encoding.
+  Do not claim either type 3 or type 4 is stored as a bare 0 or 1.
+  Do not infer RGB values or invent string type names.
+  Check for a nonempty string key before using a color type or reading its
+  value. Preserve enumeration entries by index; a key can occur under
+  different types. The type return is optional: use an explicit numeric
+  check before bitwise operations. Check GetThemeColor for -1 before RGB
+  conversion.
+  Skip nil-key results when collecting entries, but continue the bounded loop.
+  Retain the original value_type alongside the normalized kind.
+- REAPER 7.81+: `boolean reaper.IsDarkMode()` detects the current dark mode.
+  Guard the function on older installs; unavailable means unknown, not light.
+  New info keys also require REAPER 7.81; an older function can exist without
+  supporting a new key. Request `docs_extended` for `PLAYBACK_STOP` (exact
+  playback stop position in seconds), `docs:items` for `I_MIXFLAG` and the
+  current fade curvature/S keys and their 7.82 compatibility guidance, or `docs:take_fx`
+  for take FX `want_all_kb`. Track FX keyboard-input controls appear below.
 - REAPER 7.72+: `ProjectMarker reaper.AddRegionOrMarker(ReaProject proj, boolean isrgn, number pos, number rgnend, string name, integer wantidx, integer color)`.
   Prefer it over AddProjectMarker/AddProjectMarker2 when you need to reference
   the created marker/region.
@@ -505,6 +533,11 @@ scripts the plain P_RAZOREDITS field is what you want.
 
 ## TRACK FX
 
+FX replacement: create a new instance, check the result, verify identity and
+placement, then delete the old instance. Preserve the old effect and its settings
+on any admission or placement failure. Use negative instantiate even when
+reinstalling the same identifier. Refresh indices after moving effects.
+
 ADDBYNAME vs GETBYNAME (read first -- the most common FX-script bug):
 - A negative instantiate value always creates a new instance. Use `-1` for an
   add/new/insert request, including each requested repeated instance.
@@ -529,8 +562,7 @@ their own balanced deferred undo block; do not open an undo block before
 ```lua
   local fx = reaper.TrackFX_AddByName(tr, "ReaEQ", false, -1)
   if fx < 0 then
-    reaper.ShowMessageBox("Failed to add ReaEQ.", "ReaAssist", 0)
-    return
+    error("Failed to add ReaEQ.", 0)
   end
 
   reaper.defer(function()
@@ -587,6 +619,7 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
   the versioned API before calling it: if
   `not reaper.TrackFX_GetParamSectionName`, show one user-facing message and
   return rather than attempting a fallback action or synthesizing a section.
+  This example shows the deferred API calls; it does not display their results.
   Parameter inspection is deferred: after validating the track and first FX,
   put `TrackFX_GetNumParams`, `TrackFX_GetParamName`, and
   `TrackFX_GetParamSectionName` inside the same callback:
@@ -596,7 +629,6 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
     for param = 0, count - 1 do
       local _, name = reaper.TrackFX_GetParamName(track, 0, param, "")
       local section = reaper.TrackFX_GetParamSectionName(track, 0, param)
-      reaper.ShowConsoleMsg(name .. ": " .. (section ~= "" and section or "(none)") .. "\n")
     end
   end
   reaper.defer(report_params)
@@ -613,16 +645,28 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
   for parameter X when available. `param_hovered` returns the hovered parameter
   index, or -1 when no parameter is hovered, in supporting CLAP plug-ins.
   Check the boolean result before using either value; unsupported queries fail.
+  REAPER 7.81+: `want_all_kb` reads the "Send all keyboard input to plug-in"
+  setting. Convert the returned string to a number; nonzero means enabled.
+  Check retval before interpreting the value on older REAPER versions.
   For dry/wet preview scripts, skip virtual instruments by checking whether
   `fx_type` ends in `i` (or the displayed name begins with VSTi/AUi/etc.), then
   use `TrackFX_GetParamFromIdent(track, fx, ":wet")` for the remaining FX.
   This avoids hard-bypassing `I_FXEN`, which can interrupt DSP and pop.
+
+`boolean reaper.TrackFX_SetNamedConfigParm(MediaTrack track, integer fx, string parmname, string value)`
+  Set supported named configuration values. REAPER 7.81+ supports `want_all_kb`:
+  use `"1"` to enable all keyboard input to the plug-in or `"0"` to disable it.
+  Check the return value; do not report success when the request is unsupported.
 
 `number reaper.TrackFX_GetParamNormalized(MediaTrack track, integer fx, integer param)`
   Get normalized parameter value (0..1).
 
 `boolean reaper.TrackFX_SetParamNormalized(MediaTrack track, integer fx, integer param, number value)`
   Set normalized parameter value (0..1).
+
+`boolean retval, string buf reaper.TrackFX_GetFormattedParamValue(MediaTrack track, integer fx, integer param)`
+  Read the current parameter's displayed value. Check retval before using
+  the returned display text.
 
 `boolean retval, string buf reaper.TrackFX_FormatParamValueNormalized(MediaTrack track, integer fx, integer param, number value)`
   REAPER 7.74+. Format a normalized value as the FX would display it. Lua
@@ -634,7 +678,7 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
   Works only for FX that support Cockos VST extensions.
   Some plug-ins return true but format their current value for every candidate.
   Validate distinct endpoint displays before using this for conversion. A
-  successful call alone is insufficient. Use GetFormattedParamValue for actual
+  successful call alone is insufficient. Use TrackFX_GetFormattedParamValue for actual
   post-write readback; stop or restore the original value if the target misses.
 
 `boolean reaper.TrackFX_GetOpen(MediaTrack track, integer fx)`
@@ -647,7 +691,10 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
   showFlag: 0=hide FX chain window, 1=show FX chain window, 2=hide floating window, 3=show floating window.
 
 `integer reaper.TrackFX_GetByName(MediaTrack track, string fxname, boolean instantiate)`
-  Find FX index by name. Returns -1 if not found. NEVER adds (see ADDBYNAME vs GETBYNAME above).
+  Find the first matching FX index. With instantiate=false, search only;
+  return -1 if missing. With instantiate=true, insert when missing.
+  Deprecated in favor of TrackFX_AddByName. Use the ADDBYNAME vs GETBYNAME
+  guidance above for new or repeated instances.
 
 `boolean reaper.TrackFX_CopyToTrack(MediaTrack src_track, integer src_fx, MediaTrack dest_track, integer dest_fx, boolean is_move)`
   Copy or move FX to another track.
@@ -842,11 +889,14 @@ end
 -- history. Always wrap even single-line state changes.
 
 -- PITFALL: Using CountSelectedTracks inside a loop that changes selection.
--- Cache the count before the loop; changing selection mid-loop alters the
--- count and skips items.
-local count = reaper.CountSelectedTracks(0)
-for i = 0, count - 1 do
-  -- ... your work here ...
+-- Capture the selected track handles before changing selection, then iterate
+-- the captured handles. Caching only the count does not stabilize live indices.
+local selected_tracks = {}
+for i = 0, reaper.CountSelectedTracks(0) - 1 do
+  selected_tracks[#selected_tracks + 1] = reaper.GetSelectedTrack(0, i)
+end
+for _, tr in ipairs(selected_tracks) do
+  -- ... your work here, which may change selection ...
 end
 
 -- PITFALL: Calling UpdateArrange / TrackList_AdjustWindows inside a loop.
@@ -986,6 +1036,10 @@ inserted/skipped counts.
 - `VKB_NOTECENTER` (REAPER 7.79+): virtual MIDI keyboard center note.
 - `VKB_LASTVEL` (REAPER 7.79+): virtual MIDI keyboard last velocity.
 - `VKB_CHANNEL` (REAPER 7.79+): virtual MIDI keyboard channel.
+- `PLAYBACK_STOP` (REAPER 7.81+): exact playback stop position in seconds.
+  Set with `reaper.GetSetProjectInfo(0, "PLAYBACK_STOP", stop_seconds, true)`.
+  Check the installed REAPER version before using this new key; availability
+  of GetSetProjectInfo alone does not establish support for every key.
 
 RULER LANE KEYS (REAPER 7.62+ / 7.65+ / 7.71+):
 - `RULER_HEIGHT`: ruler height in pixels.
@@ -1116,21 +1170,32 @@ Useful string keys:
 
 ## COLORS
 
+`boolean reaper.IsDarkMode()`
+  REAPER 7.81+. Returns whether REAPER is running in dark mode. Guard older
+  installations with `if reaper.IsDarkMode then ... end`; an unavailable
+  function means the mode is unknown, not that light mode is active.
+
 `integer reaper.ColorToNative(integer r, integer g, integer b)`
   Make OS color from RGB (0..255). Use result|0x1000000 for REAPER color fields.
 
 `integer r, integer g, integer b reaper.ColorFromNative(integer col)`
   Extract RGB from OS color.
 
-`reaper.SetThemeColor(string ini_key, integer color, integer flags)`
+`integer reaper.SetThemeColor(string ini_key, integer color, integer flags)`
   Set a theme color at runtime. ini_key = color key (e.g. "col_arrangebg").
   color = reaper.ColorToNative(r,g,b)|0x1000000. flags = 0. Changes are temporary
   (reset on theme reload). Call ThemeLayout_RefreshAll() + UpdateArrange() after.
   Request the "theme" context bucket for the full list of valid ini_key names.
+  Check the return value: -1 means failure; otherwise it is the resulting
+  color/value. REAPER 7.82 fixes error returns to follow that contract.
+  Before 7.82, a result other than -1 does not establish success by itself;
+  verify the intended value through an appropriate read-back. Use the RGB
+  recipe only for color entries, never for fonts, dividers or non-color values.
 
 `integer reaper.GetThemeColor(string ini_key, integer flags)`
   Get current theme color value. Returns OS-native color. flags = 0.
   Use ColorFromNative() to extract RGB.
+  Returns -1 on failure. On 7.82+, blend-mode and boolean keys are not RGB.
 
 `reaper.ThemeLayout_RefreshAll()`
   Refresh all theme layout elements. Call after SetThemeColor.
@@ -1554,13 +1619,30 @@ item.
   B_MUTE, B_LOOPSRC, B_UISEL, C_LOCK,
   D_VOL (0=-inf, 1=+0dB, 2=+6dB), D_POSITION, D_LENGTH, D_SNAPOFFSET,
   D_FADEINLEN, D_FADEOUTLEN, D_FADEINDIR, D_FADEOUTDIR,
+  D_FADEINDIR_NEW, D_FADEOUTDIR_NEW (current fade curvature, -1..1; REAPER 7.82+ for this recipe),
+  D_FADEINDIR2_NEW, D_FADEOUTDIR2_NEW (current fade S parameter, -1..1; REAPER 7.82+ for this recipe),
   C_FADEINSHAPE, C_FADEOUTSHAPE (integer 0..6; 0=linear),
   I_GROUPID (0=no group), I_CURTAKE,
+  I_MIXFLAG (REAPER 7.81+; -1=project default, 0=enclosed items replace
+    enclosing items, 1=items always mix, 2=later items replace earlier items),
   I_CUSTOMCOLOR (reaper.ColorToNative(r,g,b)|0x1000000),
   I_LASTY, I_LASTH (read-only px), P_TRACK (read-only).
 
 `boolean reaper.SetMediaItemInfo_Value(MediaItem item, string parmname, number newvalue)`
   Set item numerical attribute.
+  REAPER 7.82 restores the 7.80 behavior of C_FADEINSHAPE/C_FADEOUTSHAPE
+  and D_FADEINDIR/D_FADEOUTDIR. Legacy shape values are 0..6, with 0 for
+  linear. For the newer two-parameter fades, use D_FADEINDIR_NEW and
+  D_FADEOUTDIR_NEW for curvature, and D_FADEINDIR2_NEW and D_FADEOUTDIR2_NEW
+  for the S parameter, each -1..1. The current docs label these keys 7.81+;
+  require 7.82+ for this recipe to avoid the transitional 7.81 behavior.
+  Version-check before reading or writing and check the setter's result.
+  A function's presence does not establish support for each parameter key.
+  An unsupported read remains Unknown; zero alone does not prove support.
+  Parse the version numerically, for example:
+  local version = tonumber(reaper.GetAppVersion():match("^(%d+%.%d+)"))
+  if not version or version < 7.82 then error("This fade setting requires REAPER 7.82 or newer.", 0) end
+  Do not change the legacy curvature fields as a substitute for a separate S parameter.
 
 RULE: CROSSFADING OVERLAPPING ITEMS MEANS FADING ACROSS THE OVERLAP THEY
 ALREADY HAVE. Use this recipe only for a staggered overlap: the later item
@@ -2325,8 +2407,8 @@ Choosing track FX vs take FX:
   NOTE: TakeFX_AddByName has NO recFX argument (unlike TrackFX_AddByName, which has 4 args).
   Same MANDATORY DEFER RULE applies: do not query or set params in the same execution frame.
 
-`integer reaper.TakeFX_GetByName(MediaItem_Take take, string fxname, boolean instantiate)`
-  Find FX index by name. Returns -1 if not found. Never adds.
+For search-only take FX lookup, use `TakeFX_AddByName(take, fxname, 0)`.
+It returns -1 if no matching FX is found; check the result before editing.
 
 `boolean reaper.TakeFX_Delete(MediaItem_Take take, integer fx)`
   Remove FX from take chain.
@@ -2348,18 +2430,31 @@ Choosing track FX vs take FX:
 `boolean retval, string name reaper.TakeFX_GetParamName(MediaItem_Take take, integer fx, integer param, string buf)`
 `string buf reaper.TakeFX_GetParamSectionName(MediaItem_Take take, integer fx, integer param)`
 `boolean retval, string buf reaper.TakeFX_FormatParamValueNormalized(MediaItem_Take take, integer fx, integer param, number value)`
-`boolean retval, string buf reaper.TakeFX_GetFormattedParamValue(MediaItem_Take take, integer fx, integer param, string buf)`
+`boolean retval, string buf reaper.TakeFX_GetFormattedParamValue(MediaItem_Take take, integer fx, integer param)`
   Param read/write functions. Identical semantics to the TrackFX_* equivalents.
   REAPER 7.67+ GetParamSectionName returns the VST3 unit / CLAP module /
   parameter section name when the plug-in exposes one.
   REAPER 7.74+ FormatParamValueNormalized returns the formatted string directly
   in Lua; do not pass a dummy output buffer.
+  For TakeFX_FormatParamValueNormalized, check retval before using the text.
+  Works only for FX that support Cockos VST extensions.
+  Some plug-ins return true but format their current value for every candidate.
+  Validate distinct endpoint displays before using this for conversion. A
+  successful call alone is insufficient. Use TakeFX_GetFormattedParamValue for
+  actual post-write readback; stop or restore the original value if the target misses.
 
 `boolean retval, string buf reaper.TakeFX_GetNamedConfigParm(MediaItem_Take take, integer fx, string parmname)`
   Read take-FX metadata. Mirrors TrackFX_GetNamedConfigParm for take FX;
   useful keys include `fx_type`, `fx_ident`, `fx_name`, `original_name`,
   `param.X.automatable`, `container_count`, `parent_container`, and
   `container_item.X`. Returns false if unsupported.
+  REAPER 7.81+: `want_all_kb` reads the "Send all keyboard input to plug-in"
+  setting. Check retval, then interpret a nonzero numeric string as enabled.
+
+`boolean reaper.TakeFX_SetNamedConfigParm(MediaItem_Take take, integer fx, string parmname, string value)`
+  REAPER 7.81+ supports `want_all_kb` with `"1"` to enable or `"0"` to disable
+  all keyboard input to the take FX. Check the boolean result before reporting
+  success, including on older REAPER versions.
 
 `boolean reaper.TakeFX_GetOpen(MediaItem_Take take, integer fx)`
 `reaper.TakeFX_SetOpen(MediaItem_Take take, integer fx, boolean open)`
@@ -2577,7 +2672,7 @@ local function reaassist_enable_external_sidechain(track, fx)
         if reaper.TrackFX_SetParamNormalized(track, fx, p, value) then
           local readback = reaper.TrackFX_GetParamNormalized(track, fx, p)
           local _, shown =
-            reaper.TrackFX_GetFormattedParamValue(track, fx, p, "")
+            reaper.TrackFX_GetFormattedParamValue(track, fx, p)
           -- The setter returned true and the control reads back, so the
           -- displayed text is the authority on which entry landed. Do not
           -- compare the readback with `value`: an enum snaps to its own
@@ -3227,7 +3322,10 @@ position across tempo maps better than seconds-based rewriting.
 
 When inserting/setting/deleting MORE THAN ONE event, you MUST disable sorting
 during the loop and sort once at the end. Failing to do this is O(n^2) and can
-hang REAPER on hundreds of notes. Pass noSortIn=true to every Insert/Set call.
+hang REAPER on hundreds of notes.
+MIDI_InsertNote, MIDI_SetNote, and MIDI_SetCC also accept an optional trailing
+noSortIn; pass true inside the batch. MIDI_InsertCC, MIDI_DeleteNote, and
+MIDI_DeleteCC take no noSortIn; rely on MIDI_DisableSort/MIDI_Sort.
 
 ```lua
   reaper.MIDI_DisableSort(take)
@@ -3237,7 +3335,7 @@ hang REAPER on hundreds of notes. Pass noSortIn=true to every Insert/Set call.
   reaper.MIDI_Sort(take)
 ```
 
-This applies to MIDI_InsertNote, MIDI_InsertCC, MIDI_SetNote, MIDI_SetCC,
+This batching rule applies to MIDI_InsertNote, MIDI_InsertCC, MIDI_SetNote, MIDI_SetCC,
 MIDI_DeleteNote, MIDI_DeleteCC. Single-event calls do not need it.
 
 For VERY large operations (>1000 events, e.g. importing a whole MIDI file or
@@ -3263,7 +3361,7 @@ MIDI items across tracks.
 
   Returns retval, notes, ccs, sysex (4 values). Use this to bound iteration.
 
-`boolean retval, boolean selected, boolean muted, number ppqpos, integer pitch, integer vel reaper.MIDI_GetNote(MediaItem_Take take, integer noteidx)`
+`boolean retval, boolean selected, boolean muted, number ppqpos, number ppqpos_end, integer chan, integer pitch, integer vel reaper.MIDI_GetNote(MediaItem_Take take, integer noteidx)`
 
   Get note attributes. Note index is 0-based.
 
@@ -3328,12 +3426,13 @@ MIDI items across tracks.
 `number reaper.MIDI_GetPPQPos_StartOfMeasure(MediaItem_Take take, number ppqpos)`
 `number reaper.MIDI_GetPPQPos_EndOfMeasure(MediaItem_Take take, number ppqpos)`
 
-  Snap a PPQ position to the nearest measure boundary.
+  Return the PPQ positions of the start and end of the measure, respectively.
 
-`number note_len_qn, number swing reaper.MIDI_GetGrid(MediaItem_Take take)`
+`number grid_qn, optional number swing, optional number note_len reaper.MIDI_GetGrid(MediaItem_Take take)`
 
   Get the MIDI editor grid for this take. Returns grid resolution in QN
-  (0.25 = 16th note, 0.5 = 8th, 1.0 = quarter) and swing amount (-1..1).
+  (0.25 = 16th note, 0.5 = 8th, 1.0 = quarter), swing amount (0..1),
+  and note length. A note length of 0 follows the grid size.
   Use for snapping/quantizing to the user's chosen grid instead of hard-coding.
 
 `HWND reaper.MIDIEditor_GetActive()`
@@ -3569,11 +3668,65 @@ local r, g, b = reaper.ColorFromNative(native)
 
 ## API FUNCTIONS
 
-`reaper.SetThemeColor(string ini_key, integer color, integer flags)`
+`integer reaper.SetThemeColor(string ini_key, integer color, integer flags)`
   Set a theme color. ini_key = color key from list below. color = reaper.ColorToNative(r,g,b)|0x1000000. flags = 0.
+  Returns -1 on failure, otherwise the resulting color/value. REAPER 7.82
+  fixes failure returns and adds blend-mode/boolean support. Passing -1 as
+  color restores the theme default. flags & 1 bypasses color transformations.
+  Before 7.82, a result other than -1 does not establish success by itself;
+  verify the intended value through an appropriate read-back. Use the RGB
+  recipe only for color entries, never for fonts, dividers or non-color values.
 
 `integer reaper.GetThemeColor(string ini_key, integer flags)`
   Get current theme color value. Returns OS-native color. Use ColorFromNative() to extract RGB. flags = 0.
+  Returns -1 on failure. flags & 1 reads the original theme value before
+  transformations. On 7.82+, inspect non-color types before interpreting RGB.
+
+`string key, optional integer value_type, optional string name = reaper.EnumThemeColors(integer idx)`
+  REAPER 7.82+. Guard with `if reaper.EnumThemeColors then ... else
+  error("Theme enumeration requires REAPER 7.82 or newer.", 0) end` on older
+  installations. Enumerates zero-based theme entries. The low byte of
+  value_type identifies 0=color, 1=font, 2=blend mode, 3=boolean,
+  4=boolean stored in the high bit. Divider entries can have an empty key
+  and value_type=-1; do not treat every empty key as the end of enumeration.
+  Do not pass font or divider entries to color-edit recipes. Use RGB
+  conversion only for entries identified as colors.
+  The enumeration end value is undocumented (Unknown). Use an explicitly
+  bounded index range until an installed-version probe establishes the end
+  marker. Do not generate an unbounded loop. Reaching the chosen limit does
+  not establish that every entry was returned. An empty key with type -1
+  can be a divider and does not prove enumeration has finished.
+  Before using the returned type or calling GetThemeColor, require a nonempty
+  string key. A Windows REAPER 7.82/x64 probe returned nil keys with type 0
+  beyond the observed entries. A numeric color type alone does not establish
+  a valid key. Keep the loop bounded; this observation is not a cross-version
+  end-marker guarantee.
+  Skip nil-key results when collecting entries; do not count them as entries
+  and do not stop the bounded loop on them. Empty-key dividers are different.
+  Preserve entries by enumeration index, including their full type. Do not
+  deduplicate by ini_key alone: the same probe returned col_main_bg at index 0
+  as type 4 and index 9 as type 0. Those are distinct entries despite sharing
+  a key. Do not infer a high-bit mask or synthesize a boolean write from that
+  observation.
+  Both entries read the same key value through GetThemeColor; enumeration
+  indices do not provide separate GetThemeColor addresses.
+  The type return is optional. Use an explicit if statement to check that it
+  is a number before any bitwise operation, and preserve -1 as the divider
+  value. A Lua expression of the form condition and nil or fallback always
+  reaches fallback, so it cannot safely select nil. Before converting a color
+  read with ColorFromNative, check that GetThemeColor did not return -1.
+  Store the original value_type alongside kind in every collected entry.
+  For numeric types only, this normalization preserves divider values:
+  if type(value_type) == "number" then
+    local kind = (value_type == -1) and -1 or (value_type & 0xFF)
+    -- Use kind only inside this numeric-type branch.
+  end
+  An absent type does not establish RGB or boolean encoding. For non-color
+  entries, preserve the exact read-back value unless the installed API
+  encoding is documented and verified. Type 3 labels a boolean setting; the
+  API documentation does not specify its integer encoding. Do not describe
+  type-3 values as guaranteed 0/1. The type-4 bit position and rules
+  for preserving other bits are Unknown; do not synthesize a bare 0/1.
 
 `reaper.ThemeLayout_RefreshAll()`
   Refresh all theme elements. Call after SetThemeColor to apply changes visually.

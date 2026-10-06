@@ -47,8 +47,8 @@ Diag.PAYLOAD_CAP_BYTES = 1024 * 1024     -- 1 MB server-side cap (manual feedbac
 -- Server must accept up to this size for event_type = "bug_report".
 Diag.BUG_REPORT_CAP_BYTES = 20 * 1024 * 1024   -- 20 MB
 Diag.USER_COMMENT_CAP  = 100 * 1024      -- 100 KB cap on user_comment
-Diag.CONTACT_NAME_CAP  = 200             -- chars; UI also enforces
-Diag.CONTACT_EMAIL_CAP = 320             -- chars; RFC 5321 local+domain ceiling
+Diag.CONTACT_NAME_CAP  = 200             -- bytes; payload cap
+Diag.CONTACT_EMAIL_CAP = 320             -- bytes; existing contact cap
 Diag.URL               = "https://d.reaassist.app/api/feedback/v1/submit"
 Diag.CONNECT_TIMEOUT_S = 10
 Diag.CURL_TIMEOUT_S    = 30
@@ -133,7 +133,7 @@ Diag.RECOVERY_ACTION_VOCABULARY = {
   "lower_thinking", "retry_same_model", "switch_fallback", "unknown",
 }
 Diag.RECOVERY_DISPATCH_VOCABULARY = {
-  "settings_changed", "sent", "send_failed", "switch_failed", "unknown",
+  "settings_changed", "sent", "preparing", "send_failed", "switch_failed", "unknown",
 }
 Diag.PROMPT_MODE_VOCABULARY = {
   "local_answer", "model_answer", "generated_lua", "generated_jsfx",
@@ -459,6 +459,130 @@ Diag._utf8_truncate_with_marker = utf8_truncate_with_marker
 -- (Live keys must run BEFORE provider prefixes so an exact match becomes
 -- "***" rather than the generic "sk-***".)
 -- ============================================================================
+local _home_paths = (function()
+-- Isolated candidate. Only exact known references gain stronger guarantees.
+local H={}
+local function shadow(s)
+  local chars,starts,ends={}, {}, {}
+  local i=1
+  while i<=#s do
+    local c=s:sub(i,i); local finish=i
+    if c=='\\' then
+      local n=s:sub(i+1,i+1)
+      if n=='\\' or n=='/' then finish=i+1 end
+      c='/'
+    end
+    chars[#chars+1]=c;starts[#chars]=i;ends[#chars]=finish
+    i=finish+1
+  end
+  return table.concat(chars),starts,ends
+end
+function H.references(getenv)
+  local refs={}
+  if type(getenv)~='function' then return refs end
+  local function env(key) local ok,v=pcall(getenv,key);return ok and type(v)=='string' and v or '' end
+  local profile,drive,path,home=env('USERPROFILE'),env('HOMEDRIVE'),env('HOMEPATH'),env('HOME')
+  local fallback=drive~='' and path~='' and drive..path or ''
+  for _,value in ipairs({profile~='' and profile or fallback,home}) do
+    local normalized=shadow(value)
+    local root,user=normalized:match('^([A-Za-z]:/[Uu][Ss][Ee][Rr][Ss]/)([^/]+)$')
+    local windows=root~=nil
+    if not root then root,user=normalized:match('^(/Users/)([^/]+)$') end
+    if not root then root,user=normalized:match('^(/home/)([^/]+)$') end
+    if root and user~='.' and user~='..' and not user:find('[\r\n"\'<>|]') then
+      refs[#refs+1]={value=normalized,root_length=#root,windows=windows,user=user}
+    end
+  end
+  return refs
+end
+function H.paths(s,refs,reduce_files)
+  if type(s)~='string' or s=='' then return s end
+  refs=refs or H.references(os and os.getenv)
+  for _,ref in ipairs(refs) do
+    local probe=ref.windows and s:lower() or s
+    local user=ref.windows and ref.user:lower() or ref.user
+    if probe:find(user,1,true) then
+    local normalized,starts,ends=shadow(s)
+    local hay=ref.windows and normalized:lower() or normalized
+    local needle=ref.windows and ref.value:lower() or ref.value
+    local out,cursor,search={},1,1
+    while true do
+      local a,b=hay:find(needle,search,true)
+      if not a then break end
+      local nextchar=normalized:sub(b+1,b+1)
+      local before=normalized:sub(1,a-1):match('([^%s"\']*)$') or ''
+      local previous=normalized:sub(a-1,a-1)
+      local boundary=(a==1 or previous:match('[%s"\'=:(]') or previous=='`' or previous=='[' or previous==',')
+      local final=nextchar=='' or nextchar=='/' or nextchar=='"' or nextchar=="'"
+        or (ref.windows and nextchar:match('[<>:|%?%*]'))
+      if boundary and final and not before:find('://',1,true) then
+        local raw_start,raw_end=starts[a],ends[b]
+        out[#out+1]=s:sub(cursor,raw_start-1)
+        local root=s:sub(raw_start,ends[a+ref.root_length-1])
+        local replacement=root..'<user>'
+        if reduce_files and nextchar=='/' then
+          local tail=normalized:sub(b+1)
+          local quote=normalized:sub(a-1,a-1)
+          local path
+          if quote=='"' or quote=="'" then
+            local closing=tail:find(quote,1,true)
+            local whole=closing and tail:sub(1,closing-1) or nil
+            if whole and not whole:find('[\r\n<>|]') and whole:match('%.[%w_%-]+$') then path=whole end
+          else
+            path=tail:match('^(/[^%s"\'<>|]-%.[%w_%-]+)')
+          end
+          if path then
+            local basename_start=assert(path:match('.*()/'))+1
+            local separator=s:sub(starts[b+1],ends[b+1])
+            replacement=replacement..separator..s:sub(starts[b+basename_start],ends[b+#path])
+            raw_end=ends[b+#path]
+            search=b+#path+1
+          end
+        end
+        out[#out+1]=replacement;cursor=raw_end+1
+      end
+      search=math.max(search,b+1)
+    end
+    out[#out+1]=s:sub(cursor);s=table.concat(out)
+    end
+  end
+  return s
+end
+local identity={event_id=true,install_id=true,launch_id=true,chat_id=true,target_content_hash=true,content_hash=true,content_hash_scope=true}
+function H.copy(payload,J)
+  local active={}
+  local function walk(v,key,depth)
+    if (J.NULL ~= nil and rawequal(v,J.NULL)) or (J.EMPTY_ARRAY ~= nil and rawequal(v,J.EMPTY_ARRAY)) then return v end
+    local t=type(v)
+    if t=='string' then
+      if identity[key] or (depth==1 and (key=='contact_name'or key=='contact_email'))then return v end
+      return H.paths(v)
+    elseif t=='nil'or t=='boolean'or t=='number'then return v
+    elseif t~='table'then return v end
+    if active[v]then error('cyclic payload')end
+    active[v]=true;local out={}
+    if getmetatable(v)==J._EMPTY_ARRAY_TAG then setmetatable(out,J._EMPTY_ARRAY_TAG)end
+    for k,x in pairs(v)do
+      out[k]=walk(x,k,depth+1)
+    end
+    active[v]=nil
+    if type(out.content)=='string'and out.redacted_bytes~=nil then out.redacted_bytes=#out.content end
+    if type(out.debug_log)=='string'and out.debug_log_redacted_size~=nil then out.debug_log_redacted_size=#out.debug_log end
+    return out
+  end
+  local ok,value=pcall(walk,payload,nil,0)
+  if not ok then return nil,value end
+  return value
+end
+function H.body(payload,J)
+  local value,err=H.copy(payload,J)
+  if value==nil then return nil,err end
+  return J.encode(value,'  ')
+end
+
+return H
+end)()
+
 local function _esc_pat(s)
   return (s:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0"))
 end
@@ -585,6 +709,7 @@ function Diag.redact(s)
   end)
 
   -- 4. Home paths
+  s = _home_paths.paths(s, nil, true)
   s = _redact_file_paths(s)
   s = s:gsub("([A-Za-z]:[/\\][Uu]sers[/\\])[^/\\%s\"']+", "%1<user>")
   s = s:gsub("(/Users/)[^/%s\"']+", "%1<user>")
@@ -828,27 +953,115 @@ local function _shallow_copy(t)
   return c
 end
 
-local function _redact_payload_value(v, depth)
-  depth = depth or 0
-  if depth > 6 then return "[nested diagnostic value omitted]" end
-  local tv = type(v)
-  if tv == "string" then return Diag.redact_log(v)
-  elseif tv == "number" or tv == "boolean" or tv == "nil" then return v
-  elseif tv == "table" then
-    local out = {}
-    local n = 0
-    for k, vv in pairs(v) do
-      n = n + 1
-      if n > 80 then
-        out._truncated = "diagnostic table exceeded 80 fields"
-        break
-      end
-      local kk = type(k) == "string" and k or tostring(k)
-      out[kk] = _redact_payload_value(vv, depth + 1)
+local function _redact_payload_value(v, depth, omit_execution_state)
+  local json = type(RA) == "table" and type(RA.JSON) == "table" and RA.JSON or {}
+  local context = { keys = 0, values = 0, exhausted = false }
+  local function copy(value, level, root)
+    context.values = context.values + 1
+    if context.values > 4096 then
+      context.exhausted = true
+      return "[diagnostic copy budget exceeded]", "diagnostic copy budget exceeded"
     end
+    if level > 6 then return "[nested diagnostic value omitted]" end
+    if (json.NULL ~= nil and rawequal(value, json.NULL))
+        or (json.EMPTY_ARRAY ~= nil and rawequal(value, json.EMPTY_ARRAY)) then
+      -- Root callers add record fields. Never give them a shared sentinel.
+      return root and {} or value
+    end
+    local kind = type(value)
+    if kind == "string" then return (Diag.redact_log(value))
+    elseif kind == "number" or kind == "boolean" or kind == "nil" then return value
+    elseif kind ~= "table" then return "[unsupported diagnostic value omitted]" end
+
+    local entries, count, scanned, dense, omitted = {}, 0, 0, true, false
+    for key, child in next, value do
+      scanned = scanned + 1
+      context.keys = context.keys + 1
+      if context.keys > 4096 then
+        context.exhausted = true
+        return "[diagnostic copy budget exceeded]", "diagnostic copy budget exceeded"
+      end
+      if scanned > 1024 then
+        local marker = "diagnostic table exceeded 1024 inspected keys"
+        return root and { _truncated = marker } or "[diagnostic table inspection limit exceeded]", marker
+      end
+      if not (omit_execution_state and (key == "_typed_action_undo_receipt"
+          or key == "_typed_action_apply_state" or key == "_execution_project"
+          or key == "_typed_action_run_project" or key == "_lua_run_project")) then
+        local key_type = type(key)
+        if key_type ~= "string" and not (key_type == "number" and key == key
+            and key ~= math.huge and key ~= -math.huge) then
+          dense, omitted = false, true
+        else
+          local name = key_type == "string" and key or tostring(key)
+          local previous = entries[name]
+          if previous then
+            omitted = true
+            if key_type == "string" or (type(previous.key) == "number" and key < previous.key) then
+              entries[name] = { key = key, value = child }
+            end
+          else
+            count = count + 1
+            entries[name] = { key = key, value = child }
+          end
+          if key_type ~= "number" or math.type(key) ~= "integer" or key < 1 then
+            dense = false
+          end
+        end
+      end
+    end
+    if dense then
+      for _, entry in pairs(entries) do
+        if entry.key > count then dense = false; break end
+      end
+    end
+    -- Empty JSON lists retain their tag; ordinary empty tables remain objects.
+    if count == 0 then
+      local out = {}
+      if not omitted and json._EMPTY_ARRAY_TAG ~= nil
+          and getmetatable(value) == json._EMPTY_ARRAY_TAG then
+        setmetatable(out, json._EMPTY_ARRAY_TAG)
+      end
+      if omitted then out._truncated = "diagnostic fields omitted" end
+      return out
+    end
+    local out, nested_marker = {}, nil
+    if dense then
+      for index = 1, math.min(count, 80) do
+        local copied, marker = copy(entries[tostring(index)].value, level + 1, false)
+        out[index] = copied
+        nested_marker = nested_marker or marker
+        if context.exhausted then break end
+      end
+      if count > 80 then nested_marker = "diagnostic list exceeded 80 items" end
+      if root and nested_marker then
+        -- Normal roots are records. Unexpected truncated root lists retain the
+        -- legacy numbered-object shape so their omission cannot disappear.
+        local legacy = {}
+        for index, child in ipairs(out) do legacy[tostring(index)] = child end
+        legacy._truncated = nested_marker
+        return legacy
+      end
+      return out, nested_marker
+    end
+    local keys = {}
+    for key in pairs(entries) do keys[#keys + 1] = key end
+    table.sort(keys)
+    for index = 1, math.min(count, 80) do
+      local key = keys[index]
+      local copied, marker = copy(entries[key].value, level + 1, false)
+      out[key] = copied
+      nested_marker = nested_marker or marker
+      if context.exhausted then break end
+    end
+    if count > 80 then out._truncated = "diagnostic table exceeded 80 fields"
+    elseif omitted then out._truncated = "diagnostic fields omitted"
+    elseif nested_marker then out._truncated = nested_marker end
     return out
   end
-  return tostring(v)
+  local result = copy(v, depth or 0, true)
+  if context.exhausted then return { _truncated = "diagnostic copy budget exceeded" } end
+  return result
 end
 
 local function _safe_turn_provider_id(raw)
@@ -910,7 +1123,7 @@ function Diag.normalize_error_kind(raw, debug)
      or k == "503" or k == "504" or k == "529" then
     return "provider_capacity"
   end
-  if k == "provider_api_error" or k == "api_error" then
+  if k == "provider_api_error" or k == "api_error" or k == "engine_provider_error" then
     return "provider_api_error"
   end
   if k == "local_answer_available" or k == "local_call_unnecessary"
@@ -983,7 +1196,8 @@ end
 
 local function _turn_run_result(msg, err_kind, redact_content)
   local explicit = type(msg.run_result) == "table"
-  local out = explicit and _redact_payload_value(msg.run_result) or {}
+  -- Project handles and typed Undo authority are volatile card state.
+  local out = explicit and _redact_payload_value(msg.run_result, nil, true) or {}
   if type(out) ~= "table" then out = {} end
   local has = explicit
   local function put(key, value, stringify)
@@ -1724,6 +1938,7 @@ function Diag.sanitize_transport_log_event(event)
   local events = Diag.sanitize_transport_events({ event })
   local item = type(events) == "table" and events[1] or nil
   if type(item) ~= "table" then return nil end
+  item.engine_warnings = Diag.normalize_engine_warnings(event.engine_warnings)
   local outcomes = {
     started = true, completed = true, failed = true, cancelled = true,
   }
@@ -2108,9 +2323,87 @@ function Diag.sanitize_validation_trace(trace)
   return out
 end
 
+-- Fixed native diagnostics only. Unknown values never become report labels.
+function Diag.normalize_engine_warnings(value)
+  if type(value) ~= "table" then return nil end
+  local allowed = {
+    "google_completed_id_omitted", "google_created_id_omitted",
+    "google_created_status_omitted", "google_status_update_extra_fields",
+    "google_status_update_id_omitted", "google_status_update_status_ignored",
+  }
+  local seen, out = {}, {}
+  for index = 1, math.min(#value, 16) do
+    if type(value[index]) == "string" then seen[value[index]] = true end
+  end
+  for _, name in ipairs(allowed) do
+    if seen[name] then out[#out + 1] = name end
+  end
+  return #out > 0 and out or nil
+end
+
+function Diag.normalize_engine_failure(value)
+  if type(value) ~= "table" then return nil end
+  local categories = {
+    provider = true, protocol = true, transport = true, internal = true,
+    capacity = true, not_supported = true, invalid_argument = true,
+    capability = true, invalid_state = true,
+    unsupported_acceptance_token = true, unsupported_output_modality = true,
+    unsupported_input_modality = true,
+  }
+  local diagnostics = {
+    google_interactions_envelope = true, google_interactions_created = true,
+    google_interactions_status_update = true, google_interactions_step_start = true,
+    google_interactions_status_update_envelope = true,
+    google_interactions_status_update_order = true,
+    google_interactions_status_update_event_id = true,
+    google_interactions_status_update_capacity = true,
+    google_interactions_status_update_id_missing = true,
+    google_interactions_status_update_id_invalid = true,
+    google_interactions_status_update_id_mismatch = true,
+    google_interactions_status_update_status_missing = true,
+    google_interactions_status_update_status_invalid = true,
+    google_interactions_step_delta = true, google_interactions_step_stop = true,
+    google_interactions_completed = true, google_interactions_completed_envelope = true,
+    google_interactions_completed_metadata = true, google_interactions_completed_steps = true,
+    google_interactions_completed_status = true, google_interactions_completed_usage = true,
+    google_interactions_completed_usage_shape = true, google_interactions_completed_usage_decrease = true,
+    google_interactions_usage_totals = true, google_interactions_usage_details = true,
+    google_interactions_usage_grounding = true, google_interactions_usage_traffic = true,
+    google_interactions_usage_raw_prompt = true, google_interactions_usage_invocation_counts = true,
+    google_interactions_done = true,
+    responses_closed_or_terminal = true, responses_envelope = true, responses_sequence = true,
+    responses_created = true, responses_in_progress = true, responses_queued = true,
+    responses_item_added = true, responses_part_added = true, responses_part_delta = true,
+    responses_text_delta = true, responses_text_done = true, responses_part_done = true,
+    responses_summary_part_added = true, responses_summary_delta = true,
+    responses_summary_text_done = true, responses_summary_part_done = true,
+    responses_reasoning_text = true, responses_item_done = true,
+    responses_item_done_envelope = true, responses_item_done_identity = true,
+    responses_item_done_status = true, responses_item_done_message = true,
+    responses_item_done_reasoning = true, responses_item_done_opaque = true,
+    responses_item_done_capacity = true, responses_terminal = true,
+    responses_top_level_error = true, responses_unknown_actionable = true,
+    responses_before_created = true, anthropic_signature_shape = true,
+    anthropic_signature_duplicate = true, anthropic_signature_capacity = true,
+    anthropic_signature_missing = true,
+  }
+  local states = {failed = true, cancelled = true}
+  return {
+    category = type(value.category) == "string" and categories[value.category]
+      and value.category or "unknown",
+    diagnostic = type(value.diagnostic) == "string" and diagnostics[value.diagnostic]
+      and value.diagnostic or "unknown",
+    state = type(value.state) == "string" and states[value.state]
+      and value.state or "unknown",
+  }
+end
+
 function Diag.sanitize_error_debug(debug)
   if type(debug) ~= "table" then return _redact_payload_value(debug) end
   local out = _redact_payload_value(debug)
+  if debug.engine_failure ~= nil then
+    out.engine_failure = Diag.normalize_engine_failure(debug.engine_failure)
+  end
   if out.ctx_label ~= nil or out.context_label ~= nil
      or out.display_context ~= nil then
     out.context_class = Diag.normalize_context_class(
@@ -2446,8 +2739,8 @@ local function _environment_summary(include_bounded_operational)
     if type(FXCache) == "table" and type(FXCache.load) == "function" then
       local cache = FXCache.load()
       local n = 0
-      if type(cache) == "table" then
-        for _ in pairs(cache) do n = n + 1 end
+      if type(cache) == "table" and type(cache.plugins) == "table" then
+        for _ in pairs(cache.plugins) do n = n + 1 end
       end
       return n
     end
@@ -2485,8 +2778,8 @@ local function _environment_summary(include_bounded_operational)
     return false
   end, false)
   local imgui_version = _safe_try(function()
-    if type(ImGui) == "table" and type(ImGui.ImGui_GetVersion) == "function" then
-      return select(1, ImGui.ImGui_GetVersion())
+    if type(reaper) == "table" and type(reaper.ImGui_GetVersion) == "function" then
+      return select(1, reaper.ImGui_GetVersion())
     end
   end, nil)
   local sws_version = _safe_try(function()
@@ -3557,6 +3850,7 @@ function Diag.assemble_auto_payload(tier)
     if provider_id ~= "custom" and model_id then payload.active_model_raw = model_id end
   end
 
+  payload = assert(_home_paths.copy(payload, RA.JSON), "Diagnostic payload copy failed")
   local s = _serialize(payload)
   if #s > Diag.AUTO_CAP_BYTES and tier == "extended" and payload.debug_log then
     local trunc = payload.truncation_info or { applied = true }
@@ -3663,6 +3957,108 @@ end
 -- ============================================================================
 -- Draft API: snapshot at modal open, render byte-exact at preview/send time
 -- ============================================================================
+-- The request path only records references. Draft capture and presentation wait
+-- for idle UI time, after the fallback has settled. No upload occurs here.
+-- Only a recorded failed Engine attempt can authorize an error prompt. Normal
+-- curl selection, unavailable capabilities and seed mapping refusals are routes.
+function Diag.fallback_feedback_evidence(event, message)
+  if type(event) ~= "table" or event.lane ~= "curl"
+      or type(message) ~= "table" then return nil end
+  local reason = event.fallback_reason
+  if type(reason) ~= "string" or not (reason:match("^engine_failure:")
+      or reason:match("^start_refused:")) then return nil end
+  for _, prior in ipairs(message.transport_events or {}) do
+    if prior.lane == "engine" and prior.call_index == event.call_index
+        and prior.call_index ~= nil and prior.terminal == true
+        and prior.outcome == "failed" and prior.transmission == "not_sent" then
+      local cause = Diag.normalize_engine_failure(prior.engine_failure or {})
+      local function bounded(value, maximum)
+        local n = tonumber(value)
+        return n and n >= 0 and n <= maximum and n == math.floor(n) and n or 0
+      end
+      local code = bounded(prior.error_code, 65535)
+      local curl = bounded(prior.engine_curl_code, 127)
+      local kind = cause.category .. ":" .. cause.diagnostic .. ":" .. code .. ":" .. curl
+      return {type_key = kind, cause = cause, engine_error_code = code,
+        engine_curl_code = curl, failed_attempt = prior}
+    end
+  end
+end
+
+function Diag.note_fallback_feedback(event, message)
+  if type(S) ~= "table" or S.screen_reader_mode then return end
+  local evidence = Diag.fallback_feedback_evidence(event, message)
+  if not evidence or type(reaper.GetExtState) ~= "function" then return end
+  local key = "engine_fallback_feedback_v2:" .. evidence.type_key
+  Diag._fallback_feedback_seen = Diag._fallback_feedback_seen or {}
+  if Diag._fallback_feedback_seen[key] then return end
+  local ok, value = pcall(reaper.GetExtState, EXT_NS, key)
+  if not ok or value == "1" then return end
+  local queue = Diag._fallback_feedback_pending or {}
+  Diag._fallback_feedback_pending = queue
+  -- Remove stale references before capacity checks. A cancelled or cleared chat
+  -- must not hold the queue or replace a later report's original chat.
+  for i = #queue, 1, -1 do
+    local present = false
+    for _, row in ipairs(S.display_messages or {}) do
+      if row == queue[i].message then present = true; break end
+    end
+    if not present then table.remove(queue, i) end
+  end
+  for _, pending in ipairs(queue) do
+    if pending.key == key then return end
+  end
+  if #queue >= 16 then return end
+  queue[#queue + 1] = {event = event, message = message, key = key, evidence = evidence}
+end
+
+function Diag.take_fallback_feedback_draft()
+  local queue = Diag._fallback_feedback_pending
+  if not queue or not Diag.uploader_enabled or in_flight
+      or type(S) ~= "table" or S.screen_reader_mode
+      or (S.status ~= "idle" and S.status ~= "error")
+      or S.curl_pid ~= nil or S.retry_scheduled == true
+      or S.turn_budget_confirmation ~= nil or S.feedback_modal_open
+      or S.fallback_feedback_open or S.show_bug_report then return nil end
+  if type(reaper.GetExtState) ~= "function"
+      or type(reaper.SetExtState) ~= "function" then return nil end
+  while #queue > 0 do
+    local pending = table.remove(queue, 1)
+    local present, target_idx = false, nil
+    for i, message in ipairs(S.display_messages or {}) do
+      if message == pending.message then present = true end
+      if message.role == "assistant"
+          and message.transport_events == pending.message.transport_events then
+        target_idx = i
+      end
+    end
+    local ok, seen = pcall(reaper.GetExtState, EXT_NS, pending.key)
+    -- At idle, an unfinished orphan has no valid report owner. Discard it and
+    -- continue to later candidates instead of blocking this session forever.
+    if present and target_idx and pending.event.terminal == true and ok
+        and seen ~= "1" and not Diag._fallback_feedback_seen[pending.key] then
+      local captured, draft = pcall(Diag.begin_draft, target_idx)
+      if captured and type(draft) == "table" then
+        local evidence = pending.evidence
+        draft._connection_fallback = {
+          version = 1, type_key = evidence.type_key, cause = evidence.cause,
+          engine_error_code = evidence.engine_error_code,
+          engine_curl_code = evidence.engine_curl_code,
+          failed_attempt = Diag.sanitize_transport_log_event(evidence.failed_attempt),
+          fallback_attempt = Diag.sanitize_transport_log_event(pending.event),
+        }
+        -- Shared scripts cannot interleave this synchronous check and write.
+        -- Mark before opening, including Close. Failed persistence stays quiet.
+        Diag._fallback_feedback_seen[pending.key] = true
+        local saved = pcall(reaper.SetExtState, EXT_NS, pending.key, "1", true)
+        local read_ok, readback = pcall(reaper.GetExtState, EXT_NS, pending.key)
+        if saved and read_ok and readback == "1" then return draft, target_idx end
+      end
+    end
+  end
+  return nil
+end
+
 function Diag.begin_draft(target_idx)
   target_idx = target_idx or 0
 
@@ -3819,6 +4215,13 @@ function Diag.assemble_payload(draft, comment, flags)
     user_comment     = Diag.redact(comment),
     structured_flags = flags,
   }
+  -- Manual consent report only. Keep automatic revision 12 payloads unchanged.
+  if type(draft._connection_fallback) == "table" then
+    payload.connection_fallback = draft._connection_fallback
+    payload.structured_flags = {}
+    for key, value in pairs(flags) do payload.structured_flags[key] = value end
+    payload.structured_flags.connection_fallback_prompt = true
+  end
   -- Diagnostic Report (optional). Already redacted in begin_draft.
   -- Field is omitted when nil so the JSON stays clean for old test fixtures.
   if draft._diagnostic_report then
@@ -3838,6 +4241,8 @@ function Diag.assemble_payload(draft, comment, flags)
     end
   end
 
+  payload = assert(_home_paths.copy(payload, RA.JSON), "Diagnostic payload copy failed")
+  local safe_turns = payload.session.turns
   local serialized = _serialize(payload)
   if #serialized <= Diag.PAYLOAD_CAP_BYTES then
     return payload, nil
@@ -3863,7 +4268,7 @@ function Diag.assemble_payload(draft, comment, flags)
     local kept = {}
     for i = 1, original_turn_count do
       if mandatory[i] or i > original_turn_count - last_n then
-        kept[#kept + 1] = draft._turns[i]   -- reference; do NOT mutate
+        kept[#kept + 1] = safe_turns[i]
       end
     end
     payload.session.turns = kept
@@ -4029,7 +4434,7 @@ end
 local function _trim_string(s, n)
   if type(s) ~= "string" then return "" end
   if #s <= n then return s end
-  return s:sub(1, n)
+  return utf8_safe_prefix_bytes(s, n)
 end
 
 -- A session header by itself does not contain evidence from a reproduced
@@ -4302,6 +4707,7 @@ function Diag.assemble_bug_report_payload(draft, comment, name, email)
     payload.custom_instructions = draft._custom_instructions
   end
 
+  payload = assert(_home_paths.copy(payload, RA.JSON), "Diagnostic payload copy failed")
   local serialized = _serialize(payload)
   if #serialized <= Diag.BUG_REPORT_CAP_BYTES then
     return payload, nil
@@ -4354,7 +4760,9 @@ function Diag.assemble_bug_report_payload(draft, comment, name, email)
 
   -- Phase 1b: chat fallback - shrink largest turn iteratively.
   if draft.attachment_kind == "chat" and payload.session then
-    local kept = payload.session.turns
+    local kept = {}
+    for i, turn in ipairs(payload.session.turns) do kept[i] = turn end
+    payload.session.turns = kept
     local copied = {}
     local function ensure_copy(i)
       if kept[i] and not copied[i] then
@@ -4741,6 +5149,7 @@ local auto_state = {
   last_scan_at = 0,
   ping_done = false,
   ping_retry_count = 0,
+  failed_claims = {},
 }
 
 local function _auto_dir()
@@ -5686,8 +6095,8 @@ _dispatch_ready = function()
   return true
 end
 
-local function _finalize_wrapper(wrapper)
-  local now = os.time()
+local function _finalize_wrapper(wrapper, now)
+  now = now or os.time()
   if not wrapper.first_send_attempt_at then wrapper.first_send_attempt_at = now end
   wrapper.last_send_attempt_at = now
   wrapper.payload_finalized = true
@@ -5710,21 +6119,77 @@ local function _sending_claim_is_fresh(file, wrapper, now)
     - (tonumber(Diag.AUTO_SEND_CLAIM_STALE_S) or 300)
 end
 
+local function _prepare_home_queue(wrapper, J, Home, finalize, now, cap, transform)
+  local payload=type(wrapper)=='table'and wrapper.payload or nil
+  if type(payload)~='table'or rawequal(payload,J.NULL) or rawequal(payload,J.EMPTY_ARRAY)
+      or getmetatable(payload)==J._EMPTY_ARRAY_TAG or #payload>0 then
+    return nil,'Automatic diagnostics were not sent: the saved payload is not a JSON object.'
+  end
+  local raw,err=J.encode(wrapper,'  ')
+  if not raw then return nil,'Automatic diagnostics were not sent: the saved payload could not be serialized.'end
+  local ephemeral=J.decode(raw,nil,true)
+  if type(ephemeral)~='table'then return nil,'Automatic diagnostics were not sent: the saved payload copy could not be decoded.'end
+  if transform then transform(ephemeral)end
+  finalize(ephemeral,now)
+  local original_body=J.encode(ephemeral.payload,'  ')
+  local safe_body=Home.body(ephemeral.payload,J)
+  if not safe_body then return nil,'Automatic diagnostics were not sent: home-path redaction could not prepare a safe payload.'end
+  if #safe_body>cap and #original_body<=cap then
+    return nil,'Automatic diagnostics were not sent: home-path redaction increased the payload from '
+      ..#original_body..' to '..#safe_body..' bytes, above the '..cap..'-byte limit. The saved retry record was kept.'
+  end
+  return {body=safe_body,wrapper=ephemeral,now=now,original_bytes=#original_body,safe_bytes=#safe_body}
+end
+
+local function _decode_queue_json(s)
+  if type(RA.JSON.decode) ~= "function" then return nil end
+  local ok, value = pcall(RA.JSON.decode, s, nil, true)
+  if ok and type(value) == "table" then return value end
+  return nil
+end
+
+local _home_refusals = {}
+local function _home_refusal_pending(path, tier)
+  local now = os.time()
+  for i = #_home_refusals, 1, -1 do
+    local entry = _home_refusals[i]
+    if now < entry.at or now - entry.at >= 300 then
+      table.remove(_home_refusals, i)
+    elseif entry.path == path and entry.tier == tier then
+      return true
+    end
+  end
+  return false
+end
+local function _report_home_refusal(path, tier, reason)
+  if _home_refusal_pending(path, tier) then return end
+  if #_home_refusals >= 32 then table.remove(_home_refusals, 1) end
+  _home_refusals[#_home_refusals + 1] = {path=path, tier=tier, at=os.time()}
+  if type(Store) == "table" and type(Store._log) == "function" then Store._log("DIAG", reason) end
+end
+
 local function _process_auto_file(file)
   if in_flight or not _dispatch_ready() then return false end
   if file.owner == _current_owner() then return false end
+  local paused = auto_state.failed_claims[file.path]
+  local tier = Diag.current_tier()
+  if paused and tier ~= "off"
+     and not (tier == "basic" and paused == "extended") then
+    return false
+  end
+  if tier ~= "off" and _home_refusal_pending(file.path, tier) then return false end
   local raw = _read_file(file.path)
-  local wrapper = raw and _decode_json(raw) or nil
+  local wrapper = raw and _decode_queue_json(raw) or nil
   if type(wrapper) ~= "table" or type(wrapper.payload) ~= "table" then
+    if paused then return false end
     os.remove(file.path)
     return true
   end
   if _sending_claim_is_fresh(file, wrapper) then
     return false
   end
-  local tier = Diag.current_tier()
   if tier == "off" then
-    os.remove(file.path)
+    if os.remove(file.path) then auto_state.failed_claims[file.path] = nil end
     return true
   end
   if (wrapper.last_activity_at or 0) >= os.time() - Diag.AUTO_SEND_IDLE_S then
@@ -5732,24 +6197,35 @@ local function _process_auto_file(file)
   end
   if tier == "basic" and wrapper.tier_at_capture == "extended" then
     if wrapper.payload_finalized then
-      os.remove(file.path)
+      if os.remove(file.path) then auto_state.failed_claims[file.path] = nil end
       return true
     end
-    _downgrade_wrapper_to_basic(wrapper)
+    -- Apply the downgrade to the ephemeral copy after read-only admission.
   end
-  _finalize_wrapper(wrapper)
+  if paused then return false end
+  local transform = tier == "basic" and wrapper.tier_at_capture == "extended"
+    and _downgrade_wrapper_to_basic or nil
+  local ok, ready, reason = pcall(_prepare_home_queue, wrapper, RA.JSON,
+    _home_paths, _finalize_wrapper, os.time(), Diag.AUTO_CAP_BYTES, transform)
+  if not ok or not ready then
+    _report_home_refusal(file.path, tier, ok and reason or
+      "Automatic diagnostics were not sent: payload preparation failed. The saved retry record was kept.")
+    return false
+  end
+  wrapper = ready.wrapper
   local claimed = file.path
   if file.kind == "pending"
      or (file.kind == "sending" and file.claimer ~= _current_owner()) then
     claimed = _ensure_auto_dir() .. "diag_auto_sending."
       .. file.owner .. "." .. _current_owner() .. ".json"
+    if auto_state.failed_claims[claimed] then return false end
     os.remove(claimed)
     if os.rename(file.path, claimed) ~= true then return false end
   end
   local write_err = _write_wrapper(claimed, wrapper)
   if write_err then _report_write_failure(claimed, write_err) end
-  local body = _serialize(wrapper.payload)
-  if #body > Diag.AUTO_CAP_BYTES then
+  local body = ready.body
+  if ready.original_bytes > Diag.AUTO_CAP_BYTES or #body > Diag.AUTO_CAP_BYTES then
     os.remove(claimed)
     return true
   end
@@ -5779,13 +6255,19 @@ local function _process_auto_file(file)
     wrapper.payload_finalized = true
     local pending = _auto_pending_path(file.owner)
     local pending_err = _write_wrapper(pending, wrapper)
-    if pending_err then _report_write_failure(pending, pending_err) end
-    os.remove(claimed)
+    if pending_err then
+      auto_state.failed_claims[claimed] = wrapper.tier_at_capture == "extended" and "extended" or true
+      _report_write_failure(pending, pending_err)
+    else
+      os.remove(claimed)
+    end
   end, wrapper.payload.sr_switched_to_visual == true)
   return true
 end
 
 local function _auto_tick()
+  -- A visible consent popup owns the next manual upload opportunity.
+  if type(S) == "table" and S.fallback_feedback_open then return end
   local now = os.time()
   if not auto_state.initialized then
     auto_state.initialized = true

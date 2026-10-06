@@ -12,6 +12,24 @@ I18N.catalogs = {
       reviewed_by = "",
     },
     strings = {
+      ["auto_run.blocked.confirmation_pending"] = "Another run confirmation is open. Finish or cancel it, then review this response and use Run.",
+      ["a11y.sr.run_confirmation_changed"] = "Nothing ran. The action or project changed, or its confirmation expired. Run again to review it.",
+      ["a11y.sr.run_confirmation_unavailable"] = "Nothing ran. ReaAssist files do not match. Complete the update and reopen ReaAssist.",
+      ["a11y.sr.run_request_active"] = "Nothing ran. Wait for the current request to finish, then run the action again.",
+      ["settings.fx_cache.toast.cleanup_stopped"] = "Scan cleanup stopped. Check the inspection track in its original project; remove it manually if retained.",
+      ["settings.fx_cache.toast.resource_uncertain"] = "Scan resource state is uncertain. Save your work and restart REAPER before scanning again.",
+      ["settings.pref_plugins.toast.scan_failed"] = "Scan failed.",
+      ["validator.folder_default_parent_blocked"] = "The script would use an existing track as a folder parent without an explicit request. Auto-run is blocked. Ask for a separate parent or specify which existing track to use.",
+      ["jsfx.companion_ignored"] = "An extra script was omitted and did not run. Use the effect card to save or add the JSFX. Request other project changes separately.",
+      ["network.engine.response_processing"] = "ReaAssist could not process the response. The request was not resent automatically. Try sending your message again. If this repeats, report the error.",
+      ["network.engine.failure"] = "ReaAssist could not complete this request. It was not resent automatically. Try sending your message again. If this repeats, report the error.",
+      ["network.engine.cancelled"] = "The request stopped before it finished. It was not resent automatically. You can send your message again.",
+      ["network.engine.transport_failure"] = "The connection failed before the response finished. The request was not resent automatically. Check your connection and try again.",
+      ["network.engine.provider_limit_unknown"] = "The provider returned HTTP 429. This can mean a temporary limit or an account quota. Wait and try again, or check your provider account.",
+      ["network.engine.provider_http_refusal"] = "The provider returned HTTP {status}. Try again later or check your provider account.",
+      ["response.google_503_without_retry"] = "Google's Gemini service returned 503 UNAVAILABLE. The selected model is at capacity or temporarily unavailable. No automatic retry was made. Try again shortly or choose another model.",
+      ["retry.reason.for_unsafe_fx_replacement"] = "for unsafe FX replacement",
+      ["validator.fx_replacement_order_blocked"] = "The script would remove an existing effect before confirming its replacement. Auto-run is blocked to protect the existing effect and its settings. Ask for a corrected script.",
       ["common.cancel"] = "Cancel",
       ["common.save"] = "Save",
       ["common.discard"] = "Discard",
@@ -322,17 +340,29 @@ I18N.catalogs = {
       ["mode.model.paid_only.tooltip"] =
         "Requires Google's paid API tier. Upgrade at aistudio.google.com/apikey.",
       ["mode.model_tip.claude-haiku-4-5"] =
-        "Lowest-cost Claude. Use High thinking. Choose Sonnet None for complex work.",
-      ["mode.model_tip.claude-sonnet-5"] =
-        "Default Claude for this app. Use None thinking. Raise the level only if a request struggles.",
-      ["mode.model_tip.claude-opus-5"] =
-        "Premium Claude. Use None thinking. Best tested Opus balance of quality, speed, and cost.",
-      ["mode.model_tip.gpt-5.6-luna"] =
-        "Default GPT for this app. Use None thinking. Fastest and lowest-cost GPT-5.6 tested.",
-      ["mode.model_tip.gpt-5.6-terra"] =
-        "Balanced GPT-5.6. Use None thinking. Choose it when Luna struggles.",
-      ["mode.model_tip.gpt-5.6-sol"] =
-        "Premium GPT-5.6. Use None thinking. Choose it for difficult work when capability matters more than cost.",
+        "Lowest-cost Claude. Use High thinking. Choose Sonnet 5.5 Low for complex work.",
+      ["mode.model_tip.claude-sonnet-5-5"] =
+        "Default Claude for this app. Use Low thinking. Higher levels have not been bench tested.",
+      ["mode.model_tip.claude-opus-5-5"] =
+        "Premium Claude. Medium thinking is the default. Low is the lowest supported level.",
+      ["mode.model_tip.gpt-6-luna"] =
+        "Default GPT for this app. Use Low thinking. Lowest-cost GPT-6; ReaAssist testing is pending.",
+      ["mode.model_tip.gpt-6-sol"] =
+        "More capable GPT-6. Use None thinking. Choose it for difficult work; ReaAssist testing is pending.",
+      ["mode.combo_hint.openai.gpt-6.1-sol.low"] = "Starting level | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6.1-sol.medium"] = "More reasoning | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6.1-sol.high"] = "High reasoning | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6.1-sol.xhigh"] = "Extra-high reasoning | Higher token use possible | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6.1-sol.max"] = "Maximum reasoning | Higher token use possible | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6-astra.low"] = "Starting level | Premium cost | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6-astra.medium"] = "More reasoning | Premium cost | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6-astra.high"] = "High reasoning | Premium cost | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6-astra.xhigh"] = "Extra-high reasoning | Premium cost | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6-astra.max"] = "Maximum reasoning | Premium cost | ReaAssist testing pending",
+      ["mode.model_tip.gpt-6.1-sol"] =
+        "Updated Sol model. Low thinking is the starting setting. ReaAssist testing is pending.",
+      ["mode.model_tip.gpt-6-astra"] =
+        "Premium GPT model. Low thinking is the starting setting. ReaAssist testing is pending.",
       ["mode.model_tip.gemini-3.5-flash-lite"] =
         "Lowest-cost Gemini. Use Low thinking. Choose it for budget-sensitive work; Flash 3.6 Minimal is stronger overall.",
       ["mode.model_tip.gemini-3.6-flash"] =
@@ -350,47 +380,39 @@ I18N.catalogs = {
       ["mode.combo_hint.anthropic.claude-haiku-4-5.medium"] =
         "General work with caveats | Lowest Claude cost | Slow with retries | Use Sonnet for complex work",
       ["mode.combo_hint.anthropic.claude-haiku-4-5.high"] =
-        "Recommended level | General work with caveats | Lowest Claude cost | Moderate speed | Sonnet None is stronger for complex work",
-      ["mode.combo_hint.anthropic.claude-sonnet-5.none"] =
-        "Recommended level | General and complex work | Balanced Claude cost | Fast",
-      ["mode.combo_hint.anthropic.claude-sonnet-5.low"] =
-        "General and complex work | Balanced Claude cost | Slower | Use only if None struggles",
-      ["mode.combo_hint.anthropic.claude-sonnet-5.medium"] =
-        "General and complex work | Balanced Claude cost | Very slow | Use only if None struggles",
-      ["mode.combo_hint.anthropic.claude-sonnet-5.high"] =
-        "Avoid long requests | Balanced Claude cost | Very slow; timeouts seen | Use None or Opus None",
-      ["mode.combo_hint.anthropic.claude-opus-5.none"] =
-        "Recommended level | General and complex work | Highest Claude cost | Fastest tested Opus setting",
-      ["mode.combo_hint.anthropic.claude-opus-5.low"] =
-        "General and complex work | Highest Claude cost | Slower | One runtime failure in testing; use None",
-      ["mode.combo_hint.anthropic.claude-opus-5.medium"] =
-        "General and complex work | Highest Claude cost | Slowest tested | No quality gain over None",
-      ["mode.combo_hint.anthropic.claude-opus-5.high"] =
-        "Bench data unavailable | Highest Claude cost | Speed unknown | Use None unless you measure a benefit",
-      ["mode.combo_hint.openai.gpt-5.6-luna.none"] =
-        "Recommended level | General and complex work | Lowest GPT-5.6 cost | Fastest tested",
-      ["mode.combo_hint.openai.gpt-5.6-luna.low"] =
-        "General and complex work | Lowest GPT-5.6 cost | Slower than None | No measured gain",
-      ["mode.combo_hint.openai.gpt-5.6-luna.medium"] =
-        "Avoid routine use | Lowest GPT-5.6 base price | Very slow on large code | One runtime failure in testing",
-      ["mode.combo_hint.openai.gpt-5.6-luna.high"] =
-        "Bench data unavailable | Higher reasoning cost | Speed unknown | Use None, or Terra None if Luna struggles",
-      ["mode.combo_hint.openai.gpt-5.6-terra.none"] =
-        "Recommended level | General and complex work | Balanced GPT-5.6 cost | Fastest tested Terra setting",
-      ["mode.combo_hint.openai.gpt-5.6-terra.low"] =
-        "General and complex work | Balanced GPT-5.6 cost | Slower than None | No measured gain",
-      ["mode.combo_hint.openai.gpt-5.6-terra.medium"] =
-        "General and complex work | Balanced GPT-5.6 cost | Slower | Passed testing, with no gain over None",
-      ["mode.combo_hint.openai.gpt-5.6-terra.high"] =
-        "Bench data unavailable | Higher reasoning cost | Speed unknown | Use None unless testing shows a benefit",
-      ["mode.combo_hint.openai.gpt-5.6-sol.none"] =
-        "Recommended level | General and complex work | Highest GPT-5.6 cost | Fastest tested Sol setting",
-      ["mode.combo_hint.openai.gpt-5.6-sol.low"] =
-        "General and complex work | Highest GPT-5.6 cost | Slower than None | No measured gain",
-      ["mode.combo_hint.openai.gpt-5.6-sol.medium"] =
-        "Avoid routine use | Highest GPT-5.6 cost | Higher latency | One runtime failure in testing",
-      ["mode.combo_hint.openai.gpt-5.6-sol.high"] =
-        "Bench data unavailable | Highest reasoning cost | Speed unknown | Use None unless quality justifies the cost",
+        "Recommended level | General work with caveats | Lowest Claude cost | Moderate speed | Use Sonnet 5.5 Low for complex work",
+      ["mode.combo_hint.anthropic.claude-opus-5-5.low"] =
+        "Lowest supported effort | Premium Claude cost | Bench tested on REAPER tasks",
+      ["mode.combo_hint.anthropic.claude-sonnet-5-5.low"] =
+        "Default effort in ReaAssist | Bench tested on REAPER tasks",
+      ["mode.combo_hint.anthropic.claude-sonnet-5-5.medium"] =
+        "Higher effort | Bench data unavailable",
+      ["mode.combo_hint.anthropic.claude-sonnet-5-5.high"] =
+        "Higher effort | Higher token use possible | Bench data unavailable",
+      ["mode.combo_hint.anthropic.claude-sonnet-5-5.xhigh"] =
+        "Very high effort | Higher token use possible | Bench data unavailable",
+      ["mode.combo_hint.anthropic.claude-sonnet-5-5.max"] =
+        "Maximum effort | Higher token use possible | Bench data unavailable",
+      ["mode.combo_hint.anthropic.claude-opus-5-5.medium"] =
+        "Default effort | General and complex work | Premium Claude cost | Bench data unavailable",
+      ["mode.combo_hint.anthropic.claude-opus-5-5.high"] =
+        "Higher effort | Difficult work | Higher token use possible | Bench data unavailable",
+      ["mode.combo_hint.openai.gpt-6-luna.none"] =
+        "No reasoning | General work | Lowest GPT-6 cost | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6-luna.low"] =
+        "Default level | Lowest GPT-6 cost | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6-luna.medium"] =
+        "More reasoning | Higher token use possible | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6-luna.high"] =
+        "High reasoning | Higher token use possible | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6-sol.none"] =
+        "Default level | Difficult work | Higher GPT-6 cost | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6-sol.low"] =
+        "More reasoning | Difficult work | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6-sol.medium"] =
+        "More reasoning | Higher token use possible | ReaAssist testing pending",
+      ["mode.combo_hint.openai.gpt-6-sol.high"] =
+        "High reasoning | Higher token use possible | ReaAssist testing pending",
       ["mode.combo_hint.google.gemini-3.5-flash-lite.MINIMAL"] =
         "Simple requests and scripts | Lowest Gemini cost | Fast | Low was faster in testing",
       ["mode.combo_hint.google.gemini-3.5-flash-lite.LOW"] =
@@ -430,6 +452,8 @@ I18N.catalogs = {
       ["mode.thinking.level.low"] = "Low",
       ["mode.thinking.level.medium"] = "Medium",
       ["mode.thinking.level.high"] = "High",
+      ["mode.thinking.level.xhigh"] = "Xhigh",
+      ["mode.thinking.level.max"] = "Max",
       ["mode.thinking.level.minimal"] = "Minimal",
       ["mode.thinking.level.disabled"] = "Non-Thinking",
       ["mode.ask"] = "ASK",
@@ -457,6 +481,13 @@ I18N.catalogs = {
       ["feedback.not_helpful"] = "Not helpful",
       ["feedback.modal.title"] = "Send Feedback",
       ["feedback.modal.subtitle"] = "Help improve ReaAssist",
+      ["feedback.fallback.title"] = "Connection error",
+      ["feedback.fallback.intro"] =
+        "ReaAssist encountered a connection error and switched to its backup connection. Please send a report to help us investigate. You can keep using ReaAssist.",
+      ["feedback.fallback.privacy"] =
+        "Sends this chat, custom instructions and diagnostic details. Audio is never sent.",
+      ["feedback.fallback.failed"] =
+        "The report could not be sent. Please try Send again or close this window.",
       ["feedback.modal.intro"] =
         "Sends the current chat session plus your tags and comment below to help improve ReaAssist. API keys, bearer tokens, and home paths are automatically redacted before sending. Project, track, or plugin names you typed may still appear in the chat content; review the preview to verify. Audio is never sent.",
       ["feedback.modal.bug_link.label"] = "Bug Reports",
@@ -832,6 +863,23 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["typed_actions.kind.track_setup"] = "Track setup",
       ["typed_actions.undo.tooltip"] =
         "Undo the last REAPER action (Ctrl+Z)",
+      ["typed_actions.undo.native_history"] =
+        "Restore REAPER's recorded state before this edit. Unrecorded changes made before or after it may also be undone.",
+      ["typed_actions.undo.not_available"] =
+        "This edit's Undo entry is no longer available.",
+      ["typed_actions.undo.uncertain"] =
+        "Undo may have run. Review REAPER history before continuing.",
+      ["typed_actions.undo.refused"] =
+        "REAPER did not complete Undo. You can try again.",
+      ["code.undo.unconfirmed"] =
+        "Project Undo could not be confirmed. Review REAPER history before continuing.",
+      ["code.undo.unavailable"] =
+        "Project Undo is no longer available.",
+      ["typed_actions.status.no_change"] = "No project changes were made.",
+      ["typed_actions.status.effect_uncertain"] =
+        "Changes may have been made, but could not be confirmed.",
+      ["typed_actions.error.run_identity"] =
+        "This edit could not start. Restart ReaAssist and try again.",
       ["typed_actions.undo_lua"] = "Undo and Request Lua",
       ["typed_actions.undo_lua.tooltip"] =
         "Undo this structured edit, then ask for the Lua/ReaScript version. Auto-run still follows your current setting.",
@@ -852,6 +900,23 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["code.save_theme.tooltip"] =
         "Save the current theme color changes permanently to the theme file",
       ["code.theme_saved"] = "Theme colors saved to:\n{path}",
+      ["code.theme_saved_with_previous"] = "Theme colors saved to:\n{path}\n\nPrevious theme kept at:\n{previous}",
+      ["code.theme_error.windows_save_failed"] = "Theme save did not complete: {error}\n\n{recovery}\n\nTheme path:\n{path}\nPrevious path ({previous_state}):\n{previous}\nCandidate path ({candidate_state}):\n{candidate}",
+      ["code.theme_error.windows_published_present"] = "New colors are in the theme file, but save verification is incomplete. Undo restores runtime colors only.",
+      ["code.theme_error.windows_restored_changed"] = "The moved theme file was returned to its path. Its bytes differ from the version ReaAssist read.",
+      ["code.theme_error.windows_restored_unverified"] = "The moved theme file was returned to its path, but its bytes could not be verified.",
+      ["code.theme_error.windows_park_failed"] = "Could not move the theme aside.",
+      ["code.theme_error.publish_failed"] = "Could not publish the new theme.",
+      ["code.theme_error.windows_restore_failed"] = "Could not move the previous theme back.",
+      ["code.theme_file_state.readable"] = "readable",
+      ["code.theme_file_state.unreadable"] = "unreadable",
+      ["code.theme_file_state.absent"] = "absent",
+      ["code.theme_file_state.unknown"] = "unknown",
+      ["code.theme_error.windows_original_present"] = "The prior theme is at its original path.",
+      ["code.theme_error.windows_target_absent"] = "The theme path is absent. Recover only the exact previous file to an absent target. Do not overwrite another file.",
+      ["code.theme_error.windows_target_occupied"] = "A file is at the theme path. Recovery did not overwrite it. Inspect the files before choosing a recovery version.",
+      ["code.theme_error.windows_target_unknown"] = "The theme path could not be verified. Keep the listed files and inspect them before recovery.",
+      ["code.theme_error.posix_save_failed"] = "Theme save did not complete: {error}\n\nTheme path:\n{path}\nCandidate path:\n{candidate}\nInspect the listed paths before retrying.",
       ["code.theme_error.no_changes"] = "No theme changes to save.",
       ["code.theme_error.no_theme_file"] =
         "Could not determine the current theme file.",
@@ -871,6 +936,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["code.save_jsfx.fallback_label"] =
         "Filename (saved to REAPER Effects folder):,extrawidth=260",
       ["code.save_lua.dialog_title"] = "Save Lua Script",
+      ["code.save.confirm_destination"] =
+        "Save this file?\n\n{path}\n\nIf a file already exists, its contents will be replaced.",
       ["code.save_lua.filter"] = "Lua files (.lua)\0*.lua\0All files\0*.*\0",
       ["code.save_lua.fallback_title"] = "Save Script",
       ["code.save_lua.fallback_label"] =
@@ -949,6 +1016,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["dialog.ceiling.muted_tooltip"] =
         "Muted: output ceiling tripped",
       ["dialog.ceiling.diagnose"] = "Diagnose with Model",
+      ["dialog.ceiling.draft_pending"] =
+        "Use Back to draft to send or clear your draft, then choose Review alert to diagnose.",
+      ["dialog.ceiling.back_to_draft"] = "Back to draft",
+      ["dialog.ceiling.review_alert"] = "Review alert",
       ["dialog.ceiling.unknown"] = "(unknown)",
       ["dialog.ceiling.master"] = "Master",
       ["dialog.ceiling.track"] = "Track {index}",
@@ -1130,7 +1201,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.legacy_substitution_status.meaning"] =
         "Reports the session-only provider and model used for Screen Reader compatibility.",
       ["a11y.sr.legacy_substitution_announcement"] =
-        "The saved provider selection uses a newer or unsupported provider format. For this Screen Reader session only, ReaAssist is using its legacy compatibility selection. Shared provider settings were not changed.",
+        "The saved provider or model is unavailable or unsupported. For this Screen Reader session only, ReaAssist is using its legacy compatibility selection. Your saved selection was not changed.",
       ["a11y.sr.legacy_auth_missing"] =
         "Sending is unavailable in Screen Reader Mode. Add an API key for {provider} in Provider API Keys.",
       ["a11y.sr.legacy_endpoint_missing"] =
@@ -1712,6 +1783,16 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Could not save custom providers: {error}",
       ["a11y.sr.custom_providers_loaded"] =
         "Loaded {count} custom provider(s).",
+      ["a11y.sr.custom_providers_replace_title"] =
+        "Replace Custom Providers?",
+      ["a11y.sr.custom_providers_replace_confirm"] =
+        "Replace all {count} saved custom provider records with this file?\nRemoved or disabled entries: {removed}\nSaved keys are retained. This does not change native provider records.",
+      ["a11y.sr.custom_providers_import_cancelled"] =
+        "Provider import cancelled.",
+      ["a11y.sr.custom_providers_selection_fallback"] =
+        "Using the Screen Reader compatibility selection: {provider}, {model}. Your saved selection was not changed.",
+      ["a11y.sr.custom_providers_loaded_preserved"] =
+        "Loaded {count} custom provider(s). Preserved {preserved} unsupported record(s) without activating them.",
       ["a11y.sr.custom_providers_source_opened"] =
         "Providers JSON opened: {path}",
       ["a11y.sr.custom_providers_source_missing"] =
@@ -2037,6 +2118,12 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["a11y.sr.api_key_unknown_prefix"] =
         "That key does not match the expected {provider} key format.",
       ["a11y.sr.api_key_saved"] = "API key saved.",
+      ["a11y.sr.api_key_save_uncertain"] =
+        "API key save could not be confirmed. Check the key before retrying.",
+      ["a11y.sr.api_key_save_update_required"] =
+        "Key saving requires matching ReaAssist files. Repair or update ReaAssist and try again.",
+      ["a11y.sr.api_key_replacement_not_saved"] =
+        "Replacement key was not saved.",
       ["a11y.sr.api_key_save_failed"] =
         "API key could not be saved.",
       ["a11y.sr.api_key_cleared"] = "API key cleared.",
@@ -2148,6 +2235,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "ReaAssist files need repair. Choose Repair Now.",
       ["a11y.sr.update_prompt.update_opened"] =
         "ReaAssist update available. Choose Update Now, Later, or View Changelog.",
+      ["a11y.sr.update_prompt.v2_actions"] =
+        "Choose Upgrade Now, Later, or View Changelog.",
       ["a11y.sr.update_prompt.later_status"] =
         "Update reminder postponed.",
       ["a11y.sr.check_updates"] = "Check Updates",
@@ -2764,7 +2853,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["net.cap.call"] =
         "Stopped after {calls} API calls in one turn to avoid runaway cost. {hint}",
       ["net.cap.call.hint_haiku"] =
-        "Try Sonnet 5 or Opus 5 for this request.",
+        "Try Sonnet 5.5 or Opus 5.5 for this request.",
       ["net.cap.call.hint_gemini"] =
         "Try Gemini 3.1 Pro for this request.",
       ["net.cap.call.hint_openai"] =
@@ -3215,6 +3304,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "No generated-action project change was detected. Ask ReaAssist to fix and retry the last action.",
       ["code.runtime_error_outcome.detached_changed"] =
         "This older generated action changed the project before it failed, and a newer action has run since. Review the project and REAPER Undo history before undoing anything, then ask ReaAssist to fix and retry the older action.",
+      ["code.runtime_error_outcome.detached_unknown"] =
+        "This older generated action may have changed its project before it failed, and a newer action has run since. The result is Unknown. Review that project and its REAPER Undo history before deciding what to do.",
       ["code.runtime_error_outcome.detached_unchanged"] =
         "This older generated action failed without a detected project change, and a newer action has run since. Do not use Undo for the older action. Ask ReaAssist to fix and retry it.",
       ["attach.error.openai_pdf_unsupported"] =
@@ -3349,7 +3440,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["update.available.desc1"] =
         "The update is quick and applies directly.",
       ["update.available.desc2"] = "(No manual download needed)",
+      ["update.available.v2_desc"] =
+        "Version 2 is a fresh, clean install and comes with many upgrades and improvements.",
       ["update.action.update_now"] = "Update Now",
+      ["update.action.upgrade_now"] = "Upgrade Now",
       ["update.action.view_changelog"] = "View Changelog",
       ["settings.lang.checking"] = "Checking languages...",
       ["settings.lang.download_suffix"] = "Download",
@@ -3440,6 +3534,10 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.status.connected"] = "CONNECTED",
       ["settings.status.testing"] = "TESTING",
       ["settings.toast.saved"] = "Settings saved",
+      ["settings.error.save_failed"] =
+        "Settings could not be saved. Your changes are still on this screen.",
+      ["settings.warning.legacy_cleanup_pending"] =
+        "Settings saved. Legacy settings cleanup is incomplete. Save again to retry.",
       ["settings.toast.saved_need_key"] =
         "Settings saved. Add a provider API key or configure an advanced local or custom provider to continue.",
       ["settings.error.need_key_or_custom"] =
@@ -3478,6 +3576,21 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.api_key.error.custom_model_test_failed"] =
         "The endpoint responded but the model test failed.",
       ["settings.api_key.error.server_said"] = "Server said: {message}",
+      ["settings.api_key.error.openai_quota_short"] =
+        "OpenAI reported insufficient API quota.",
+      ["settings.api_key.error.openai_quota_detail"] =
+        "The key test could not complete because OpenAI reported insufficient API quota.",
+      ["settings.api_key.error.openai_quota_hint"] =
+        "Check your OpenAI API balance and usage limits. API billing is separate from a ChatGPT subscription. Add funds or adjust limits if needed, then test again.",
+      ["settings.api_key.error.unexpected_short"] =
+        "The provider returned an unexpected response. The key was not saved.",
+      ["settings.api_key.error.unexpected_detail"] =
+        "The {provider} response did not prove that this key works.",
+      ["settings.api_key.error.unexpected_hint"] =
+        "Try again. If the provider is reporting an outage or capacity limit, wait and retest later.",
+      ["network.key_test.launch_failed_short"] = "The key test could not start.",
+      ["network.key_test.launch_failed_detail"] =
+        "ReaAssist could not start the network request for this key test. The key was not saved.",
       ["settings.api_key.error.anthropic_workspace_short"] =
         "Anthropic needs a key scoped to one workspace.",
       ["settings.api_key.error.anthropic_workspace_detail"] =
@@ -3641,7 +3754,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.custom.header.model_id"] = "MODEL IDENTIFIER",
       ["settings.custom.header.notes"] = "NOTES",
       ["settings.custom.tip.header.model_id"] =
-        "The model name as your server expects it (e.g. qwen2.5-coder-14b, kimi-k2.6, claude-opus-5). Open Details to set prices, context, the same notes tag shown next to it, and extra JSON body fields.",
+        "The model name as your server expects it (e.g. qwen2.5-coder-14b, kimi-k2.6, claude-opus-5-5). Open Details to set prices, context, the same notes tag shown next to it, and extra JSON body fields.",
       ["settings.custom.tip.header.notes"] =
         "Optional short tag appended to the model id in the main-screen model dropdown, so rows that share an id but differ in tuning (thinking on/off, temperature, etc.) are distinguishable at a glance.",
       ["settings.custom.field.model_id_hint"] = "qwen2.5-coder-14b",
@@ -3705,7 +3818,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.custom.tip.details.modern_token_limit"] =
         "Enable this for newer OpenAI-compatible models that reject max_tokens and require max_completion_tokens. Leave it off for the broadest compatibility with older or local servers.",
       ["settings.custom.tip.details.context_window"] =
-        "Maximum combined input + output token capacity for this model. The preflight check warns if a pending send would overflow this window. Kimi k2.6 = 262144, Claude Opus 5 = 1000000, most local 8B models = 8192.",
+        "Maximum combined input + output token capacity for this model. The preflight check warns if a pending send would overflow this window. Kimi k2.6 = 262144, Claude Opus 5.5 = 1000000, most local 8B models = 8192.",
       ["settings.custom.tip.details.extra_body"] =
         "A JSON object merged into the outgoing chat-completions body. Overrides any same-named keys set in the provider-level Extra Body field. Use for vendor-specific knobs that don't map to the OpenAI schema.\n\nExamples:\n  Kimi, GLM:        {\"thinking\":{\"type\":\"disabled\"}}\n  Qwen3:            {\"enable_thinking\":false}\n  OpenRouter:       {\"reasoning\":{\"effort\":\"high\"}}\n  LiteLLM-Anthropic: {\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":1024}}\n  Any OpenAI-compat: {\"temperature\":0.3,\"top_p\":0.9}\n\nMust be a valid JSON object (wrapped in {...}), not an array or scalar. Validated on Save.",
       ["settings.custom.tip.duplicate_model"] = "Duplicate this model row",
@@ -4095,6 +4208,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Notes must be {count} characters or fewer.",
       ["settings.custom.error.notes_chars"] =
         "Notes cannot contain pipe (|), tab, or newline characters.",
+      ["settings.custom.error.notes_type"] = "Notes must be text.",
       ["settings.custom.error.details_reopen"] =
         "Details has errors - reopen to fix.",
       ["settings.custom.error.timeout_min"] =
@@ -4338,6 +4452,12 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Could not save the Custom Instructions toggle.",
       ["settings.custom_instructions.unsaved_enabled"] =
         "Unsaved text. Save to apply it.",
+      ["settings.custom_instructions.error.too_large_bytes"] =
+        "Keep Custom Instructions under {limit} bytes.",
+      ["settings.custom_instructions.limit_warning_bytes"] =
+        "Too large. Keep this under {limit} bytes.",
+      ["settings.custom_instructions.counter_bytes"] =
+        "{count} / {limit} bytes  ·  ~{tokens} tokens",
       ["settings.pref.check_updates.label"] = "Check for Updates",
       ["settings.pref.check_updates.tooltip_v2"] =
         "Check now for a newer ReaAssist release or missing files. This "
@@ -4374,6 +4494,19 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["engine.install.action_expired"] = "That action is no longer available. The installation state changed while this dialog was open.",
       ["attach.error.import_failed"] = "ReaAssist could not import this image. Remove it and attach it again.",
       ["attach.error.aggregate_limit"] = "Attachments are too large for one request. Remove an attachment or use smaller files.",
+      ["attach.error.saved_image_limit"] = "Saved images reached this ReaAssist session's limit. Remove a draft image or release saved images from an error card before attaching another.",
+      ["attach.error.encoding_failed"] = "This attachment could not be prepared. Remove it before sending.",
+      ["attach.error.image_prepare_failed"] = "This image could not be attached. Try again.",
+      ["message.saved_retry_too_large"] = "This saved message is too large to send with the selected model. It remains on its original error card. Your current draft is unchanged.",
+      ["message.saved_retry_send_failed"] = "This saved request could not be sent. It remains on its original error card. Your current draft is unchanged.",
+      ["image.saved.release"] = "Release Saved Images",
+      ["image.saved.release.tooltip"] = "Release the images saved for this error card. Sending again will require attaching them to a new message.",
+      ["image.saved.copy_original"] = "Copy Original Prompt",
+      ["image.saved.copy_request"] = "Copy Saved Request Prompt",
+      ["image.saved.released"] = "Saved images released. Copy the prompt and attach the files to a new message to send again.",
+      ["image.saved.budget"] = "Saved-image allowance: {original} / {original_limit} MiB originals; {encoded} / {encoded_limit} MiB encoded.",
+      ["image.saved.confirm.title"] = "Release Saved Images?",
+      ["image.saved.confirm.body"] = "Release the images saved for this error card? This card will no longer be able to retry or switch models with these images. If this is the last saved copy of a screenshot or older file version, releasing it may be irreversible. You must supply the images again to send a new message. Other messages and draft attachments stay unchanged.",
       ["network.response_unreadable"] = "The provider finished the request, but ReaAssist could not read the saved response. The request will not be sent again automatically. Please send your message again.",
       ["engine.install.busy"] = "Finish the current request or update before starting installation.",
       ["engine.dialog.title"] = "ReaAssist",
@@ -4773,6 +4906,81 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
 I18N.SOURCE_REVISION = 1
 -- Keys added or changed since public v1.5 require current translations.
 I18N.KEY_MIN_REVISION = {
+  ["auto_run.blocked.confirmation_pending"] = 1,
+  ["a11y.sr.run_confirmation_changed"] = 1,
+  ["a11y.sr.run_confirmation_unavailable"] = 1,
+  ["a11y.sr.run_request_active"] = 1,
+  ["a11y.sr.api_key_save_uncertain"] = 1,
+  ["a11y.sr.api_key_save_update_required"] = 1,
+  ["a11y.sr.api_key_replacement_not_saved"] = 1,
+  ["a11y.sr.custom_providers_replace_title"] = 1,
+  ["a11y.sr.custom_providers_replace_confirm"] = 1,
+  ["a11y.sr.custom_providers_import_cancelled"] = 1,
+  ["a11y.sr.custom_providers_selection_fallback"] = 1,
+  ["a11y.sr.custom_providers_loaded_preserved"] = 1,
+  ["code.save.confirm_destination"] = 1,
+  ["settings.custom_instructions.error.too_large_bytes"] = 1,
+  ["settings.custom_instructions.limit_warning_bytes"] = 1,
+  ["settings.custom_instructions.counter_bytes"] = 1,
+  ["settings.error.save_failed"] = 1,
+  ["settings.warning.legacy_cleanup_pending"] = 1,
+  ["code.runtime_error_outcome.detached_unknown"] = 1,
+  ["settings.fx_cache.toast.cleanup_stopped"] = 1,
+  ["settings.fx_cache.toast.resource_uncertain"] = 1,
+  ["settings.pref_plugins.toast.scan_failed"] = 1,
+  ["typed_actions.undo.native_history"] = 1,
+  ["typed_actions.undo.not_available"] = 1,
+  ["typed_actions.undo.uncertain"] = 1,
+  ["typed_actions.undo.refused"] = 1,
+  ["code.undo.unconfirmed"] = 1,
+  ["code.undo.unavailable"] = 1,
+  ["typed_actions.status.no_change"] = 1,
+  ["typed_actions.status.effect_uncertain"] = 1,
+  ["typed_actions.error.run_identity"] = 1,
+  ["code.theme_saved_with_previous"] = 1,
+  ["code.theme_error.windows_save_failed"] = 1,
+  ["code.theme_error.windows_published_present"] = 1,
+  ["code.theme_error.windows_restored_changed"] = 1,
+  ["code.theme_error.windows_restored_unverified"] = 1,
+  ["code.theme_error.windows_park_failed"] = 1,
+  ["code.theme_error.publish_failed"] = 1,
+  ["code.theme_error.windows_restore_failed"] = 1,
+  ["code.theme_file_state.readable"] = 1,
+  ["code.theme_file_state.unreadable"] = 1,
+  ["code.theme_file_state.absent"] = 1,
+  ["code.theme_file_state.unknown"] = 1,
+  ["code.theme_error.windows_original_present"] = 1,
+  ["code.theme_error.windows_target_absent"] = 1,
+  ["code.theme_error.windows_target_occupied"] = 1,
+  ["code.theme_error.windows_target_unknown"] = 1,
+  ["code.theme_error.posix_save_failed"] = 1,
+  ["feedback.fallback.title"] = 1,
+  ["feedback.fallback.intro"] = 1,
+  ["feedback.fallback.privacy"] = 1,
+  ["feedback.fallback.failed"] = 1,
+  ["mode.combo_hint.openai.gpt-6.1-sol.low"] = 1,
+  ["mode.combo_hint.openai.gpt-6.1-sol.medium"] = 1,
+  ["mode.combo_hint.openai.gpt-6.1-sol.high"] = 1,
+  ["mode.combo_hint.openai.gpt-6.1-sol.xhigh"] = 1,
+  ["mode.combo_hint.openai.gpt-6.1-sol.max"] = 1,
+  ["mode.combo_hint.openai.gpt-6-astra.low"] = 1,
+  ["mode.combo_hint.openai.gpt-6-astra.medium"] = 1,
+  ["mode.combo_hint.openai.gpt-6-astra.high"] = 1,
+  ["mode.combo_hint.openai.gpt-6-astra.xhigh"] = 1,
+  ["mode.combo_hint.openai.gpt-6-astra.max"] = 1,
+  ["mode.model_tip.gpt-6.1-sol"] = 1,
+  ["mode.model_tip.gpt-6-astra"] = 1,
+  ["retry.reason.for_unsafe_fx_replacement"] = 1,
+  ["validator.folder_default_parent_blocked"] = 1,
+  ["jsfx.companion_ignored"] = 1,
+  ["network.engine.response_processing"] = 1,
+  ["network.engine.failure"] = 1,
+  ["network.engine.cancelled"] = 1,
+  ["network.engine.transport_failure"] = 1,
+  ["network.engine.provider_limit_unknown"] = 1,
+  ["network.engine.provider_http_refusal"] = 1,
+  ["response.google_503_without_retry"] = 1,
+  ["validator.fx_replacement_order_blocked"] = 1,
   ["response.local_peak_level_clarification"] = 1,
   ["response.local_compound_audio_sync_clarification"] = 1,
   ["network.curl.dns_retry"] = 1,
@@ -4799,9 +5007,23 @@ I18N.KEY_MIN_REVISION = {
   ["a11y.sr.response_ready_fx_insert_failed_partial_v2"] = 1,
   ["a11y.sr.response_ready_fx_insert_failed_partial_v3"] = 1,
   ["a11y.sr.response_ready_fx_preference_substituted"] = 1,
+  ["a11y.sr.update_prompt.v2_actions"] = 1,
   ["attach.error.aggregate_limit"] = 1,
   ["attach.error.file_picker"] = 1,
   ["attach.error.import_failed"] = 1,
+  ["attach.error.saved_image_limit"] = 1,
+  ["attach.error.encoding_failed"] = 1,
+  ["attach.error.image_prepare_failed"] = 1,
+  ["message.saved_retry_too_large"] = 1,
+  ["message.saved_retry_send_failed"] = 1,
+  ["image.saved.release"] = 1,
+  ["image.saved.release.tooltip"] = 1,
+  ["image.saved.copy_original"] = 1,
+  ["image.saved.copy_request"] = 1,
+  ["image.saved.released"] = 1,
+  ["image.saved.budget"] = 1,
+  ["image.saved.confirm.title"] = 1,
+  ["image.saved.confirm.body"] = 1,
   ["bug_report.debug.capture_order"] = 1,
   ["bug_report.debug.enabled_reproduce"] = 1,
   ["bug_report.item.chat_log_empty.many"] = 1,
@@ -4918,11 +5140,38 @@ I18N.KEY_MIN_REVISION = {
   ["message.provider_reasoning.truncated"] = 1,
   ["message.reasoning_summary.label"] = 1,
   ["message.reasoning_summary.truncated"] = 1,
+  ["mode.combo_hint.anthropic.claude-opus-5-5.low"] = 1,
+  ["mode.combo_hint.anthropic.claude-opus-5-5.medium"] = 1,
+  ["mode.combo_hint.anthropic.claude-opus-5-5.high"] = 1,
+  ["mode.model_tip.claude-haiku-4-5"] = 1,
+  ["mode.combo_hint.anthropic.claude-haiku-4-5.high"] = 1,
+  ["mode.combo_hint.openai.gpt-6-luna.none"] = 1,
+  ["mode.combo_hint.openai.gpt-6-luna.low"] = 1,
+  ["mode.combo_hint.openai.gpt-6-luna.medium"] = 1,
+  ["mode.combo_hint.openai.gpt-6-luna.high"] = 1,
+  ["mode.combo_hint.openai.gpt-6-sol.none"] = 1,
+  ["mode.combo_hint.openai.gpt-6-sol.low"] = 1,
+  ["mode.combo_hint.openai.gpt-6-sol.medium"] = 1,
+  ["mode.combo_hint.openai.gpt-6-sol.high"] = 1,
   ["mode.combo_hint.google.gemini-3.8-flash.HIGH"] = 1,
   ["mode.combo_hint.google.gemini-3.8-flash.LOW"] = 1,
   ["mode.combo_hint.google.gemini-3.8-flash.MEDIUM"] = 1,
   ["mode.model_tip.deepseek-flash"] = 1,
+  ["mode.model_tip.claude-opus-5-5"] = 1,
+  ["mode.model_tip.claude-sonnet-5-5"] = 1,
+  ["mode.combo_hint.anthropic.claude-sonnet-5-5.low"] = 1,
+  ["mode.combo_hint.anthropic.claude-sonnet-5-5.medium"] = 1,
+  ["mode.combo_hint.anthropic.claude-sonnet-5-5.high"] = 1,
+  ["mode.combo_hint.anthropic.claude-sonnet-5-5.xhigh"] = 1,
+  ["mode.combo_hint.anthropic.claude-sonnet-5-5.max"] = 1,
+  ["mode.thinking.level.xhigh"] = 1,
+  ["mode.thinking.level.max"] = 1,
+  ["net.cap.call.hint_haiku"] = 1,
+  ["settings.custom.tip.details.context_window"] = 1,
+  ["settings.custom.tip.header.model_id"] = 1,
   ["mode.model_tip.gemini-3.8-flash"] = 1,
+  ["mode.model_tip.gpt-6-luna"] = 1,
+  ["mode.model_tip.gpt-6-sol"] = 1,
   ["net.turn_budget.actual_cost_stop"] = 1,
   ["net.turn_budget.unknown_cache_price_stop"] = 1,
   ["net.turn_budget.unknown_provider_price_stop"] = 1,
@@ -4945,6 +5194,14 @@ I18N.KEY_MIN_REVISION = {
   ["settings.adv.reasoning_summaries.tooltip"] = 1,
   ["settings.api_key.error.anthropic_workspace_detail"] = 1,
   ["settings.api_key.error.anthropic_workspace_hint"] = 1,
+  ["settings.api_key.error.openai_quota_short"] = 1,
+  ["settings.api_key.error.openai_quota_detail"] = 1,
+  ["settings.api_key.error.openai_quota_hint"] = 1,
+  ["settings.api_key.error.unexpected_short"] = 1,
+  ["settings.api_key.error.unexpected_detail"] = 1,
+  ["settings.api_key.error.unexpected_hint"] = 1,
+  ["network.key_test.launch_failed_short"] = 1,
+  ["network.key_test.launch_failed_detail"] = 1,
   ["settings.api_key.error.anthropic_workspace_short"] = 1,
   ["settings.custom.details.modern_token_limit"] = 1,
   ["settings.custom.details.native_price_summary_v2"] = 1,
@@ -4966,6 +5223,10 @@ I18N.KEY_MIN_REVISION = {
   ["settings.custom.error.native_price_pair"] = 1,
   ["settings.custom.error.native_test_incomplete"] = 1,
   ["settings.custom.error.native_timeouts"] = 1,
+  ["settings.custom.error.notes_type"] = 1,
+  ["dialog.ceiling.draft_pending"] = 1,
+  ["dialog.ceiling.back_to_draft"] = 1,
+  ["dialog.ceiling.review_alert"] = 1,
   ["settings.custom.error.price_cache_write"] = 1,
   ["settings.custom.error.private_ack_required"] = 1,
   ["settings.custom.error.private_ack_stale"] = 1,
@@ -5161,6 +5422,8 @@ I18N.KEY_MIN_REVISION = {
   ["settings.openrouter.warning"] = 1,
   ["settings.pref.stream_responses.label"] = 1,
   ["settings.pref.stream_responses.tooltip"] = 1,
+  ["update.action.upgrade_now"] = 1,
+  ["update.available.v2_desc"] = 1,
   ["validator.fx_identifier_missing_blocked"] = 1,
   ["validator.fx_identifier_unmatched_warning"] = 1,
 }
@@ -5580,6 +5843,8 @@ end
 
 I18N.local_overrides = I18N.local_overrides or {}
 I18N.local_overrides.es = {
+    ["code.save.confirm_destination"] =
+      "¿Guardar este archivo?\n\n{path}\n\nSi ya existe un archivo, se reemplazará su contenido.",
     ["response.local_peak_level_clarification"] =
       "¿Quiere reducir esos picos en esa cantidad de dB o alcanzar un nivel de pico absoluto en dBFS? ¿Debo usar la ganancia de toma, una envolvente de volumen o un compresor?",
     ["response.local_compound_audio_sync_clarification"] =

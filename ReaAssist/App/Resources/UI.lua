@@ -1134,24 +1134,110 @@ function UI.render_float_toast(anchor_x, anchor_y, anchor_w, anchor_h)
   PopStyleColor(RA.ctx, 2)
 end
 
--- Keep every visual run surface consistent when a requested safety backup
--- fails. Execution has already been stopped by the caller; this helper makes
--- that stop visible and gives the user a deliberate recovery path.
+function UI.refuse_run_confirmation(kind, text)
+  TypedActionController.clear_visual_run_confirmation(kind)
+  S.refocus_prompt = true
+  if UI.show_float_toast then UI.show_float_toast(text, "err") end
+  return false
+end
+
+function UI.run_confirmation_refusal_text(busy)
+  if busy then
+    return UI.t("a11y.sr.run_request_active", nil,
+      "Nothing ran. Wait for the current request to finish, then run the action again.")
+  end
+  return UI.t("a11y.sr.run_confirmation_changed", nil,
+    "Nothing ran. The action or project changed, or its confirmation expired. Run again to review it.")
+end
+
+function UI.stage_lua_confirmation(kind, msg, idx, code, detail)
+  local staged = TypedActionController.stage_visual_lua_confirmation(
+    kind, msg, idx, code, detail)
+  if not staged and UI.show_float_toast then
+    UI.show_float_toast(UI.run_confirmation_refusal_text(), "err")
+  end
+  return staged
+end
+
 function UI.preflight_staged_lua(kind)
   local prefix = kind .. "_warn_"
   local idx, code = S[prefix .. "idx"], S[prefix .. "code"]
   local msg = S.display_messages and S.display_messages[idx] or nil
+  local opts = S[prefix .. "opts"] or {}
+  local busy = TypedActionController.request_is_active()
+  if busy or not msg or S[prefix .. "message"] ~= msg
+      or S[prefix .. "jsfx"] ~= nil
+      or not TypedActionController.run_confirmation_matches(
+        opts.binding, "lua", msg, idx, code, opts) then
+    return UI.refuse_run_confirmation(kind, UI.run_confirmation_refusal_text(busy))
+  end
   local context = Code.generated_lua_run_context(msg, idx, code)
-  if not msg or S[prefix .. "message"] ~= msg then context.invalid = true end
   local ok, reason, message = Code.preflight_generated_lua_execution(code, context)
   if not ok then
-    if msg then msg.auto_run_block_reason, msg.run_blocked = reason, message end
-    S[prefix .. "code"], S[prefix .. "idx"], S[prefix .. "message"] = nil, nil, nil
-    S[prefix .. "jsfx"], S[prefix .. "detail"] = nil, nil
+    msg.auto_run_block_reason, msg.run_blocked = reason, message
+    return UI.refuse_run_confirmation(kind, message)
   end
-  return ok, context
+  return true, context
 end
 
+function UI.preflight_backup_confirmation()
+  if S.backup_warn_code then return UI.preflight_staged_lua("backup") end
+  local idx = S.backup_warn_typed_idx
+  local msg = S.display_messages and S.display_messages[idx] or nil
+  local opts = S.backup_warn_typed_opts or {}
+  local busy = TypedActionController.request_is_active()
+  if busy or not idx or not msg or S.backup_warn_jsfx ~= nil
+      or not TypedActionController.run_confirmation_matches
+      or not TypedActionController.run_confirmation_matches(opts.binding,
+        "typed", msg, idx, TypedActionController.generated_code_text(msg), opts) then
+    return UI.refuse_run_confirmation("backup", UI.run_confirmation_refusal_text(busy))
+  end
+  return true
+end
+
+function UI.execute_staged_lua(kind)
+  local admitted, context = UI.preflight_staged_lua(kind)
+  if not admitted then return false end
+  local prefix = kind .. "_warn_"
+  local idx, code, msg, opts = S[prefix .. "idx"], S[prefix .. "code"],
+    S[prefix .. "message"], S[prefix .. "opts"]
+  local identity, project = opts.binding.project, opts.binding.project_pointer
+  if not TypedActionController.consume_run_confirmation(opts.binding,
+      "lua", msg, idx, code, opts) then
+    return UI.refuse_run_confirmation(kind, UI.run_confirmation_refusal_text())
+  end
+  TypedActionController.clear_visual_run_confirmation(kind)
+  local backup_error
+  if prefs.auto_backup then
+    local _, err = Code.safety_backup()
+    backup_error = err
+  end
+  -- This comparison admits no new action and never resets the consumed binding.
+  if Code.conversation_project_identity(reaper.EnumProjects(-1)) ~= identity then
+    return UI.refuse_run_confirmation(kind, UI.run_confirmation_refusal_text())
+  end
+  if backup_error == "unsaved" and not opts.skip_backup then
+    local staged = TypedActionController.stage_visual_lua_confirmation("backup", msg,
+      idx, code, nil, project, false, opts.confirm_risky)
+    if not staged and UI.show_float_toast then
+      UI.show_float_toast(UI.run_confirmation_refusal_text(), "err")
+    end
+    return false, "backup_unsaved"
+  elseif backup_error ~= "unsaved" and not Code.safety_backup_can_proceed(backup_error) then
+    msg.run_blocked = UI.report_backup_run_blocked(backup_error)
+    return false
+  end
+  S.status = "running"
+  local ok = Code.run(code, project, msg.conversation_delete, context)
+  Code.bind_pending_deferred_run(idx, nil, false, nil)
+  Code.apply_run_result_to_message(msg, ok, "lua", code, false)
+  if idx == #S.display_messages then S.pending_code = nil end
+  S.status = ok and "idle" or "error"
+  S.refocus_prompt = true
+  return ok
+end
+
+-- Report a backup failure after its caller has stopped execution.
 function UI.report_backup_run_blocked(err)
   local message = UI.t("code.backup_failed_run", {
     error = tostring(err or "unknown_error"),
@@ -1240,15 +1326,19 @@ function UI.tooltip_render_v5()
     end
   else
     -- Not hovered this frame: start (or continue) fade-out.
-    tip.fade_start = tip.fade_start or now
+    if not tip.fade_start then
+      tip.fade_start = now
+      tip.fade_alpha = tip.alpha or 0
+    end
     local t = now - tip.fade_start
-    alpha = 1.0 - t / UI.TIP_FADE_S
+    alpha = tip.fade_alpha * (1.0 - t / UI.TIP_FADE_S)
     if alpha <= 0 then
       S._tip = nil
       S._tip_hovered_this_frame = false
       return
     end
   end
+  tip.alpha = alpha
   if alpha > 0 then
     ImGui.ImGui_SetNextWindowPos(RA.ctx, tip.anchor_x, tip.anchor_y)
     ImGui.ImGui_SetNextWindowBgAlpha(RA.ctx, alpha)
@@ -1791,31 +1881,80 @@ function UI.unwrap_wrapped_selection(original, wrapped, a, b)
   wrapped = tostring(wrapped or "")
   a = math_max(0, math_min(tonumber(a) or 0, #wrapped))
   b = math_max(a, math_min(tonumber(b) or #wrapped, #wrapped))
-  local result = {}
+  local first, last
   local wi, oi = 1, 1
-  while wi <= #wrapped and wi <= b do
-    local wc = str_sub(wrapped, wi, wi)
-    local oc = oi <= #original and str_sub(original, oi, oi) or ""
-    local emit = wi > a
-    if wc == oc then
-      if emit then result[#result + 1] = wc end
-      wi = wi + 1
-      oi = oi + 1
-    elseif wc == "\n" and oc == " " then
-      if emit then result[#result + 1] = " " end
-      wi = wi + 1
-      oi = oi + 1
-    elseif wc == "\n" then
-      -- Hard wrap inserted inside a long word; omit the artificial break and
-      -- do not advance original text so the next glyph rejoins the word.
-      wi = wi + 1
-    else
-      if emit then result[#result + 1] = wc end
-      wi = wi + 1
-      oi = oi + 1
+  local function is_gap(ch) return ch == " " or ch == "\n" end
+  local function include(wpos, from, to)
+    if wpos > a and wpos <= b and to >= from then
+      first = first or from
+      last = to
     end
   end
-  return tbl_concat(result)
+  while wi <= #wrapped and wi <= b do
+    local wc = str_sub(wrapped, wi, wi)
+    if is_gap(wc) then
+      local we, oe = wi, oi
+      while is_gap(str_sub(wrapped, we, we)) do we = we + 1 end
+      while is_gap(str_sub(original, oe, oe)) do oe = oe + 1 end
+      local breaks, pending_first, pending_last = {}, nil, nil
+      local indent, para = oi, oi
+      local previous = oi > 1 and not is_gap(str_sub(original, oi - 1, oi - 1))
+      for nl = oi, oe - 1 do
+        if str_sub(original, nl, nl) == "\n" then
+          if previous then
+            pending_first, pending_last = para, nl
+            previous = false
+          elseif nl == para then
+            -- Empty paragraphs are rendered; space-only paragraphs are omitted.
+            if pending_first then breaks[#breaks + 1] = { pending_first, pending_last } end
+            pending_first, pending_last = nl, nl
+          elseif pending_first then
+            pending_last = nl
+          end
+          para, indent = nl + 1, nl + 1
+        end
+      end
+      if indent > oi then
+        if oe <= #original and pending_first then
+          breaks[#breaks + 1] = { pending_first, pending_last }
+        end
+        local bi = 1
+        while wi < we do
+          wc = str_sub(wrapped, wi, wi)
+          if wc == "\n" and breaks[bi] then
+            include(wi, breaks[bi][1], breaks[bi][2])
+            bi = bi + 1
+          elseif wc == " " and indent < oe then
+            -- Visible indentation belongs to the final source paragraph.
+            include(wi, indent, indent)
+            indent = indent + 1
+          end
+          wi = wi + 1
+        end
+      elseif previous then
+        -- A collapsed word gap owns its complete source-space run.
+        include(wi, oi, oe - 1)
+        wi = we
+      else
+        while wi < we do
+          if str_sub(wrapped, wi, wi) == " " and indent < oe then
+            include(wi, indent, indent)
+            indent = indent + 1
+          end
+          wi = wi + 1
+        end
+      end
+      oi = oe
+    else
+      while is_gap(str_sub(original, oi, oi)) do oi = oi + 1 end
+      if wc ~= str_sub(original, oi, oi) then
+        return str_sub(wrapped, a + 1, b)
+      end
+      include(wi, oi, oi)
+      wi, oi = wi + 1, oi + 1
+    end
+  end
+  return first and str_sub(original, first, last) or ""
 end
 
 function UI.expire_missing_scroll_to_msg()
@@ -2096,6 +2235,42 @@ function UI.chat_message_value_cull_sig(v, depth)
   return "{" .. tbl_concat(parts, "\30") .. "}"
 end
 
+-- Recovery culling tracks rendering facts without copying retained payloads.
+UI._recovery_attachment_cull_fields = {"kind", "name", "media_type", "size_bytes",
+  "saved_image_released", "image_original_revision", "image_original_bytes",
+  "image_encoded_bytes", "image_encoding_error", "b64_pos", "native_media_state"}
+
+function UI.recovery_cull_scalar(value)
+  local kind = type(value)
+  if kind == "string" or kind == "number" or kind == "boolean" then
+    local text = tostring(value)
+    return kind .. #text .. ":" .. text
+  end
+  return kind .. ":"
+end
+
+function UI.recovery_cull_payload(value)
+  local kind = type(value)
+  return kind .. ":" .. ((kind == "string" or kind == "table") and #value or 0)
+end
+
+function UI.recovery_attachment_cull_sig(attachments)
+  if type(attachments) ~= "table" then return type(attachments) end
+  local parts = { "attachments:" .. #attachments }
+  for index, att in ipairs(attachments) do
+    parts[#parts + 1] = "entry:" .. index .. ":" .. type(att)
+    if type(att) == "table" then
+      for _, field in ipairs(UI._recovery_attachment_cull_fields) do
+        parts[#parts + 1] = UI.recovery_cull_scalar(att[field])
+      end
+      parts[#parts + 1] = UI.recovery_cull_payload(att.data)
+      parts[#parts + 1] = UI.recovery_cull_payload(att.b64)
+      parts[#parts + 1] = UI.recovery_cull_payload(att.b64_parts)
+    end
+  end
+  return tbl_concat(parts, "\30")
+end
+
 function UI.chat_message_static_cull_sig(msg)
   if type(msg) ~= "table" then return "" end
   local generated = msg.generated_code and msg.generated_code.content or ""
@@ -2120,7 +2295,7 @@ function UI.chat_message_static_cull_sig(msg)
   local lua_artifact_sig = UI.chat_message_value_cull_sig(msg.lua_artifact)
   local ceiling_sig = UI.chat_message_value_cull_sig(msg.ceiling_inject_info)
   local recovery_attach_sig =
-    UI.chat_message_value_cull_sig(msg.recovery_attachments)
+    UI.recovery_attachment_cull_sig(msg.recovery_attachments)
 
   if msg._chat_cull_sig_content ~= msg.content
       or msg._chat_cull_sig_code ~= msg.code_block
@@ -2262,6 +2437,10 @@ function UI.chat_message_cull_key(msg, i, count, avail_w, chat_font_key,
     msg.recovery,
     msg.recovery_used,
     msg.recovery_consumed,
+    msg.recovery_images_released,
+    msg.recovery_original_prompt,
+    Net and Net.saved_images_release_available
+      and Net.saved_images_release_available(msg) or false,
     msg.recovery_dispatch,
     msg.recovery_note,
     msg.recovery_prompt,
@@ -2685,7 +2864,12 @@ function UI.logo(inner_w, title_size)
   return logo_sx0, logo_sy0, title_tw, TITLE_SIZE
 end
 
+function UI.settings_request_busy()
+  return S.status == "waiting" or S.turn_budget_confirmation ~= nil
+end
+
 function UI.open_settings(return_to)
+  if UI.settings_request_busy() then return false end
   if api_keys.cancel_visual_key_test_navigation then
     api_keys.cancel_visual_key_test_navigation()
   end
@@ -2719,6 +2903,7 @@ function UI.open_settings(return_to)
   api_keys.saved_auto_backup           = prefs.auto_backup
   api_keys.saved_stream_responses      = prefs.stream_responses
   api_keys.saved_reasoning_display_mode = Net.reasoning_display_mode()
+  api_keys.staged_reasoning_display_mode = nil
   api_keys.saved_chat_font_idx         = prefs.chat_font_idx
   api_keys.saved_reply_language_idx    = prefs.reply_language_idx
   api_keys.saved_include_snapshot      = prefs.include_snapshot
@@ -3673,7 +3858,8 @@ function UI.session_strip_v5()
     .. tostring(_session_cache.items) .. ":"
     .. tostring(_session_cache.fx) .. ":"
     .. tostring(_session_cache.unsaved)
-  if _session_cache.labels_key ~= session_labels_key then
+  if _session_cache.labels_key ~= session_labels_key
+      or _session_cache.labels_catalog ~= session_catalog then
     if _session_cache.unsaved then
       _session_cache.name = UI.t("session.unsaved", nil, "unsaved")
     end
@@ -3687,6 +3873,7 @@ function UI.session_strip_v5()
       UI.t("session.fx", { count = _session_cache.fx },
         tostring(_session_cache.fx) .. " fx")
     _session_cache.labels_key = session_labels_key
+    _session_cache.labels_catalog = session_catalog
   end
 
   local card_x_local = start_x_local + CONT_PAD_X
@@ -3775,7 +3962,8 @@ function UI.session_strip_v5()
   -- amber when paused, muted grey when stopped.
   local st = reaper.GetPlayState() or 0
   local transport_key = session_locale_key .. ":" .. tostring(st)
-  if _session_cache.transport_key ~= transport_key then
+  if _session_cache.transport_key ~= transport_key
+      or _session_cache.transport_catalog ~= session_catalog then
     if (st & 4) ~= 0 then
       _session_cache.transport_label = UI.t("session.transport.rec", nil, "REC")
       _session_cache.transport_col = 0xFF5555FF
@@ -3790,6 +3978,7 @@ function UI.session_strip_v5()
       _session_cache.transport_col = TK.text_faint
     end
     _session_cache.transport_key = transport_key
+    _session_cache.transport_catalog = session_catalog
   end
   local st_label = _session_cache.transport_label or "STOP"
   local st_col = _session_cache.transport_col or TK.text_faint
@@ -4965,7 +5154,7 @@ function UI.footer_rail_v5()
   PopFont(RA.ctx)
 
   -- ---- RIGHT SIDE: drawn right-to-left --------------------------------------
-  local req_live = (S.status == "waiting")
+  local req_live = UI.settings_request_busy()
   local right_edge = sx + avail_w - PAD_X
   local cursor_x = right_edge
 
@@ -6300,6 +6489,7 @@ function UI.v5_select_row(id, label, items_str, cur_idx, tooltip, col_w, badge_t
     ImGui.ImGui_SetNextWindowSize(RA.ctx, popup_w, popup_h,
       ImGui.ImGui_Cond_Always())
     if ImGui.ImGui_BeginPopup(RA.ctx, popup_id) then
+    local popup_dl = ImGui.ImGui_GetWindowDrawList(RA.ctx)
     if actual_cols > 1 and item_count > 0 then
       local col_w_each = math_max(
         math_floor((popup_w - RA.SC(16)) / actual_cols), RA.SC(90))
@@ -6328,7 +6518,7 @@ function UI.v5_select_row(id, label, items_str, cur_idx, tooltip, col_w, badge_t
               local ix2, iy2 = ImGui.ImGui_GetItemRectMax(RA.ctx)
               local check_sz = RA.SC(10)
               local check_y = iy1 + math_floor((iy2 - iy1 - check_sz) * 0.5)
-              ImGui.ImGui_DrawList_AddTextEx(dl, FONT.lucide, check_sz,
+              ImGui.ImGui_DrawList_AddTextEx(popup_dl, FONT.lucide, check_sz,
                 ix2 - check_sz - RA.SC(6), check_y, TK.text, ICON.CHECK)
             end
           end
@@ -6440,6 +6630,11 @@ function UI.selectable_text(text, widget_id, avail_w, color, chars_per_line_over
           local rest = line
           while #rest > 0 do
             local head, tail = UI._utf8_safe_prefix_bytes(rest, SEG_MAX_BYTES)
+            if head == "" then
+              -- Preserve malformed bytes while ensuring this loop advances.
+              head, tail = str_sub(rest, 1, SEG_MAX_BYTES),
+                str_sub(rest, SEG_MAX_BYTES + 1)
+            end
             chunks[#chunks+1] = head
             rest = tail
           end
@@ -6463,6 +6658,9 @@ function UI.selectable_text(text, widget_id, avail_w, color, chars_per_line_over
       if line:match("^%s*|") then
         local rows, next_i, num_cols = parse_md_table(all_lines, li)
         if #rows > 0 then
+          for _, cells in ipairs(rows) do
+            for ci, cell in ipairs(cells) do cells[ci] = UI.strip_markdown(cell) end
+          end
           segments[#segments+1] = { type = "table", rows = rows, num_cols = num_cols }
         end
         li = next_i
@@ -6980,12 +7178,14 @@ function Render.tos_screen()
   if api_keys._tos_text_lang ~= tos_lang
       or api_keys._tos_text_year ~= tos_year
       or api_keys._tos_text_source ~= api_keys.tos_text
-      or api_keys._tos_text_source_version ~= tos_source_version then
+      or api_keys._tos_text_source_version ~= tos_source_version
+      or api_keys._tos_text_catalog ~= tos_catalog then
     api_keys._tos_text = UI.t("tos.body", { year = tos_year }, api_keys.tos_text)
     api_keys._tos_text_lang = tos_lang
     api_keys._tos_text_year = tos_year
     api_keys._tos_text_source = api_keys.tos_text
     api_keys._tos_text_source_version = tos_source_version
+    api_keys._tos_text_catalog = tos_catalog
   end
 
   -- Parse localized TOS text into structured blocks on first render. Cached on
@@ -7059,6 +7259,15 @@ function Render.tos_screen()
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
       ImGui.ImGui_PushTextWrapPos(RA.ctx, _wrap_x())
       Text(RA.ctx, blk.body)
+      ImGui.ImGui_PopTextWrapPos(RA.ctx)
+      PopStyleColor(RA.ctx)
+      PopFont(RA.ctx)
+    elseif blk.type == "body" then
+      if bi > 1 then Dummy(RA.ctx, 1, RA.SC(8)) end
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
+      ImGui.ImGui_PushTextWrapPos(RA.ctx, _wrap_x())
+      Text(RA.ctx, blk.text)
       ImGui.ImGui_PopTextWrapPos(RA.ctx)
       PopStyleColor(RA.ctx)
       PopFont(RA.ctx)
@@ -7190,6 +7399,7 @@ local function load_help_sections()
     .. tostring(help_catalog_ready and true or false) .. ":"
     .. tostring(meta and meta.source_version or "")
   if UI._help_sections_cache_key == help_cache_key
+      and UI._help_sections_catalog == catalog
       and UI._help_sections_cache then
     return UI._help_sections_cache
   end
@@ -7253,6 +7463,7 @@ local function load_help_sections()
     },
   }}
   UI._help_sections_cache_key = help_cache_key
+  UI._help_sections_catalog = catalog
   UI._help_sections_cache = sections
   return sections
 end
@@ -8783,9 +8994,145 @@ end
 -- per frame would ask ReaPack who owns the launchers on every frame the modal
 -- is open. The one thing not frozen with it is ownership at the destructive
 -- moment, which the body re-asks for itself.
+function Render._uninstall_review_instances_open(receipt)
+  local ok, review = pcall(Updater.legacy_instance_review)
+  if not ok or type(review) ~= "table" then
+    review = { records = {}, error = UI.t("settings.uninstall.review_failed", nil,
+      "Could not review instance records. No records were cleared.") }
+  end
+  Render._uninstall_instance_review = review
+  Render._uninstall_instance_selected = {}
+  Render._uninstall_instance_attested = false
+  Render._uninstall_instance_receipt = receipt
+end
+
+function Render._uninstall_clear_reviewed_instances()
+  local review = Render._uninstall_instance_review
+  local selected, count = {}, 0
+  if review and Render._uninstall_instance_attested == true then
+    for _, record in ipairs(review.records or {}) do
+      if record.eligible == true
+          and (record.kind == "legacy" or record.kind == "unavailable")
+          and Render._uninstall_instance_selected[record.path] == true then
+        selected[record.path] = true
+        count = count + 1
+      end
+    end
+  end
+  if count == 0 then return end
+  local ok, receipt = pcall(Updater.clear_legacy_instance_records,
+    review, selected, true)
+  if not ok or type(receipt) ~= "table" then
+    receipt = { ok = false, cleared = {}, message = UI.t(
+      "settings.uninstall.clear_failed", nil,
+      "Could not clear the selected records. Review them again before retrying.") }
+  end
+  -- The backend can stop after partial progress. Keep its receipt and request
+  -- a new review; neither a selection nor the attestation carries into retry.
+  Render._uninstall_review_instances_open(receipt)
+  local plan_ok, plan = pcall(Updater.uninstall_plan,
+    { remove_user_data = Render._uninstall_remove_data == true })
+  if plan_ok and type(plan) == "table" then
+    Render._uninstall_plan = plan
+  else
+    Render._uninstall_instance_receipt.plan_error = UI.t(
+      "settings.uninstall.plan_refresh_failed", nil,
+      "Could not refresh the Uninstall check. Close this window and review again.")
+  end
+end
+
+function Render._uninstall_instance_review_body(ctx, cw)
+  local review = Render._uninstall_instance_review
+  Text(ctx, UI.t("settings.uninstall.review_heading", nil, "Review instance records"))
+  ImGui.ImGui_Spacing(ctx)
+  UI.text_multiline(UI.t("settings.uninstall.review_intro", nil,
+    "Only selected, eligible records can be cleared. This check cannot confirm sessions on another computer. Records stay protected when recovery dependencies cannot be ruled out."))
+  if ImGui.ImGui_BeginChild(ctx, "##uninstall_instance_records", cw, RA.SC(210),
+      ImGui.ImGui_ChildFlags_Borders()) then
+    if review.error then UI.text_multiline(tostring(review.error)) end
+    for index, record in ipairs(review.records or {}) do
+      local kind = record.kind == "unavailable"
+        and UI.t("settings.uninstall.identity_unavailable", nil, "Identity unavailable")
+        or UI.t("settings.uninstall.legacy_record", nil, "Historical instance record")
+      Text(ctx, kind)
+      UI.text_multiline(tostring(record.path))
+      if record.reason then
+        local reasons = {
+          ready = "This record is eligible for review. Confirmation is still required.",
+          live = "This session has current activity evidence.",
+          dependencies = "Scratch or recovery files still depend on this record.",
+          incomplete = "The dependency check could not finish.",
+          ineligible = "This record cannot be cleared safely.",
+          untracked_outputs = "Generated-file recovery locations could not be fully checked. This ownership record was kept and cannot be cleared here.",
+        }
+        UI.text_multiline(UI.t("settings.uninstall.record_reason." .. record.reason,
+          nil, reasons[record.reason] or tostring(record.reason)))
+      end
+      for _, path in ipairs(record.dependencies or {}) do
+        UI.text_multiline(tostring(path))
+      end
+      if record.eligible == true then
+        local changed, value = ImGui.ImGui_Checkbox(ctx,
+          UI.t("settings.uninstall.select_record", nil, "Select this record")
+            .. "##instance_record_" .. index,
+          Render._uninstall_instance_selected[record.path] == true)
+        if changed then Render._uninstall_instance_selected[record.path] = value == true end
+      end
+      ImGui.ImGui_Spacing(ctx)
+    end
+    if #(review.records or {}) == 0 and not review.error then
+      UI.text_multiline(UI.t("settings.uninstall.no_review_records", nil,
+        "No historical or identity-unavailable records were found."))
+    end
+    local receipt = Render._uninstall_instance_receipt
+    if receipt then
+      UI.text_multiline(receipt.message or (receipt.ok
+        and UI.t("settings.uninstall.records_cleared", nil, "Selected records were cleared.")
+        or UI.t("settings.uninstall.records_not_cleared", nil, "The requested clearing did not complete.")))
+      for _, path in ipairs(receipt.cleared or {}) do UI.text_multiline(tostring(path)) end
+      if receipt.path then UI.text_multiline(tostring(receipt.path)) end
+      if receipt.plan_error then UI.text_multiline(receipt.plan_error) end
+    end
+  end
+  ImGui.ImGui_EndChild(ctx)
+  ImGui.ImGui_Spacing(ctx)
+  local changed, value = ImGui.ImGui_Checkbox(ctx,
+    UI.t("settings.uninstall.sessions_closed", nil,
+      "I closed every other ReaAssist session using this folder."),
+    Render._uninstall_instance_attested == true)
+  if changed then Render._uninstall_instance_attested = value == true end
+  UI.text_multiline(UI.t("settings.uninstall.sessions_closed_detail", nil,
+    "This includes every user and computer sharing the folder."))
+  local can_clear = false
+  for _, record in ipairs(review.records or {}) do
+    if record.eligible == true and Render._uninstall_instance_selected[record.path] == true then
+      can_clear = Render._uninstall_instance_attested == true
+      if can_clear then break end
+    end
+  end
+  if type(ImGui.ImGui_BeginDisabled) == "function" then
+    ImGui.ImGui_BeginDisabled(ctx, not can_clear)
+  end
+  if ImGui.ImGui_Button(ctx, UI.t("settings.uninstall.clear_selected", nil,
+      "Clear selected records"), RA.SC(190), 0) and can_clear then
+    Render._uninstall_clear_reviewed_instances()
+  end
+  if type(ImGui.ImGui_EndDisabled) == "function" then ImGui.ImGui_EndDisabled(ctx) end
+  SameLine(ctx, 0, RA.SC(16))
+  if ImGui.ImGui_Button(ctx, UI.t("common.back", nil, "Back"), RA.SC(72), 0) then
+    Render._uninstall_instance_review = nil
+    Render._uninstall_instance_selected = {}
+    Render._uninstall_instance_attested = false
+  end
+end
+
 function Render._uninstall_open()
   Render._uninstall_remove_data = false
   Render._uninstall_result = nil
+  Render._uninstall_instance_review = nil
+  Render._uninstall_instance_selected = {}
+  Render._uninstall_instance_attested = false
+  Render._uninstall_instance_receipt = nil
   Render._uninstall_plan = Updater.uninstall_plan({ remove_user_data = false })
 end
 
@@ -8806,6 +9153,9 @@ function Render._uninstall_popup(ctx)
   UI.push_modal_style()
   if ImGui.ImGui_BeginPopupModal(ctx, popup_id, true, 0) then
     local cw = ImGui.ImGui_GetContentRegionAvail(ctx)
+    if Render._uninstall_instance_review then
+      Render._uninstall_instance_review_body(ctx, cw)
+    else
     local blockers = plan.blockers or {}
     ImGui.ImGui_Spacing(ctx)
     local head = (#blockers > 0)
@@ -8848,6 +9198,18 @@ function Render._uninstall_popup(ctx)
     ImGui.ImGui_Spacing(ctx)
 
     local do_uninstall = false
+    local instance_blocker = false
+    for _, blocker in ipairs(blockers) do
+      if blocker.code == "instance" then instance_blocker = true; break end
+    end
+    if instance_blocker and type(Updater.legacy_instance_review) == "function"
+        and type(Updater.clear_legacy_instance_records) == "function" then
+      if ImGui.ImGui_Button(ctx, UI.t("settings.uninstall.review_instances", nil,
+          "Review instance records"), RA.SC(190), 0) then
+        Render._uninstall_review_instances_open()
+      end
+      ImGui.ImGui_Spacing(ctx)
+    end
     if #blockers == 0 then
       -- The user-data offer, and it is an offer: it starts clear, it is never
       -- ticked by anything else, and the copy above changes to match it the
@@ -8890,6 +9252,11 @@ function Render._uninstall_popup(ctx)
     end
     if do_uninstall then
       Render._uninstall_pending = true
+      ImGui.ImGui_CloseCurrentPopup(ctx)
+    end
+    end -- instance review or ordinary Uninstall confirmation
+    if Render._uninstall_instance_review
+        and ImGui.ImGui_IsKeyPressed(ctx, ImGui.ImGui_Key_Escape()) then
       ImGui.ImGui_CloseCurrentPopup(ctx)
     end
     ImGui.ImGui_EndPopup(ctx)
@@ -9224,6 +9591,123 @@ local function _fb_end_disabled()
   if _fb_has_disabled then ImGui.ImGui_EndDisabled(RA.ctx) end
 end
 
+function Render.offer_fallback_feedback()
+  if type(Diag) ~= "table"
+      or type(Diag.take_fallback_feedback_draft) ~= "function"
+      or S.fallback_feedback_open or S.feedback_modal_open
+      or S.show_settings or S.show_bug_report
+      or (type(api_keys) == "table" and api_keys.screen)
+      or (type(Updater) == "table" and type(Updater.is_busy) == "function"
+        and Updater.is_busy())
+      or ImGui.ImGui_IsPopupOpen(RA.ctx, "",
+        ImGui.ImGui_PopupFlags_AnyPopup()) then return end
+  local ok, draft = pcall(Diag.take_fallback_feedback_draft)
+  if not ok or not draft then return end
+  S.fallback_feedback_open = true
+  S.fallback_feedback_draft = draft
+  S.fallback_feedback_state = "idle"
+  S._fallback_feedback_opened = false
+end
+
+function Render.close_fallback_feedback()
+  S.fallback_feedback_open = false
+  S._fallback_feedback_opened = false
+  S.fallback_feedback_draft = nil
+  S.fallback_feedback_state = nil
+end
+
+function Render.send_fallback_feedback()
+  local draft = S.fallback_feedback_draft
+  if not S.fallback_feedback_open or not draft
+      or S.fallback_feedback_state == "sending"
+      or S.fallback_feedback_state == "success" then return end
+  S.fallback_feedback_state = "sending"
+  local ok = pcall(Diag.send_draft, draft, "", {}, function(sent)
+    -- A closed popup or a different draft must not receive this callback.
+    if S.fallback_feedback_draft ~= draft then return end
+    S.fallback_feedback_state = sent and "success" or "error"
+  end)
+  if not ok and S.fallback_feedback_draft == draft then
+    S.fallback_feedback_state = "error"
+  end
+end
+
+function Render.fallback_feedback_popup()
+  if not S.fallback_feedback_open then return end
+  if not S.fallback_feedback_draft then
+    Render.close_fallback_feedback()
+    return
+  end
+  local title = UI.t("feedback.fallback.title", nil, "Connection error")
+    .. "###fallback_feedback"
+  if not S._fallback_feedback_opened then
+    S._fallback_feedback_opened = true
+    ImGui.ImGui_OpenPopup(RA.ctx, title)
+  end
+  local width = math.min(RA.SC(440), (update._main_w or RA.SC(500)) - RA.SC(32))
+  if update._main_w then
+    ImGui.ImGui_SetNextWindowPos(RA.ctx,
+      update._main_x + update._main_w * 0.5,
+      update._main_y + update._main_h * 0.5,
+      ImGui.ImGui_Cond_Appearing(), 0.5, 0.5)
+  end
+  ImGui.ImGui_SetNextWindowSize(RA.ctx, width, 0, ImGui.ImGui_Cond_Always())
+  UI.push_modal_style()
+  local visible, open = ImGui.ImGui_BeginPopupModal(RA.ctx, title, true,
+    ImGui.ImGui_WindowFlags_AlwaysAutoResize()
+      | ImGui.ImGui_WindowFlags_NoResize())
+  if visible then
+    PushFont(RA.ctx, FONT.inter_reg, RA.SC(14))
+    UI.text_multiline(UI.t("feedback.fallback.intro", nil,
+      "ReaAssist encountered a connection error and switched to its backup connection. "
+        .. "Please send a report to help us investigate. You can keep using ReaAssist."))
+    Dummy(RA.ctx, 1, RA.SC(12))
+    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+    UI.text_multiline(UI.t("feedback.fallback.privacy", nil,
+      "Sends this chat, custom instructions and diagnostic details. Audio is never sent."))
+    PopStyleColor(RA.ctx)
+    Dummy(RA.ctx, 1, RA.SC(16))
+    local sending = S.fallback_feedback_state == "sending"
+    if sending then
+      Text(RA.ctx, UI.t("feedback.status.sending", nil, "Sending..."))
+    elseif S.fallback_feedback_state == "error" then
+      UI.text_multiline(UI.t("feedback.fallback.failed", nil,
+        "The report could not be sent. Please try Send again or close this window."))
+    end
+    local send_label = UI.t("common.send", nil, "Send")
+    local close_label = UI.t("common.close", nil, "Close")
+    local button_w = math.max(RA.SC(90),
+      CalcTextSize(RA.ctx, send_label) + RA.SC(28),
+      CalcTextSize(RA.ctx, close_label) + RA.SC(28))
+    UI.push_modal_primary_btn()
+    _fb_begin_disabled(sending)
+    local send_clicked = ImGui.ImGui_Button(RA.ctx, send_label, button_w, RA.SC(32))
+    _fb_end_disabled()
+    UI.pop_modal_primary_btn()
+    ImGui.ImGui_SameLine(RA.ctx, 0, RA.SC(8))
+    local close_clicked = ImGui.ImGui_Button(RA.ctx, close_label, button_w, RA.SC(32))
+    -- Only explicit Send activation grants consent. Close wins in this frame.
+    if not open or close_clicked
+        or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
+      ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+      Render.close_fallback_feedback()
+    elseif S.fallback_feedback_state == "success" then
+      ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+      Render.close_fallback_feedback()
+      if UI.show_float_toast then
+        UI.show_float_toast(UI.t("feedback.toast.sent", nil, "Feedback sent. Thanks!"), "ok")
+      end
+    elseif send_clicked then
+      Render.send_fallback_feedback()
+    end
+    PopFont(RA.ctx)
+    ImGui.ImGui_EndPopup(RA.ctx)
+  elseif not open then
+    Render.close_fallback_feedback()
+  end
+  UI.pop_modal_style()
+end
+
 function Render.feedback_modal()
   if not S.feedback_modal_open then
     S._feedback_modal_opened = false
@@ -9312,8 +9796,7 @@ function Render.feedback_modal()
     PopFont(RA.ctx)
     PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-    Text(RA.ctx, UI.t("feedback.modal.subtitle", nil,
-      "Help improve ReaAssist"))
+    Text(RA.ctx, UI.t("feedback.modal.subtitle", nil, "Help improve ReaAssist"))
     PopStyleColor(RA.ctx)
     PopFont(RA.ctx)
     Dummy(RA.ctx, 1, RA.SC(10))
@@ -9880,7 +10363,8 @@ function Render.feedback_modal()
     -- Send / Try Again. Capture event_id BEFORE send_draft so the callback
     -- can verify the same draft is still active (defends against the
     -- title-bar X close mid-send race).
-    if (send_clicked or _fb_enter_to_send) and not locked then
+    if S.feedback_modal_open and (send_clicked or _fb_enter_to_send)
+        and not locked then
       S.feedback_modal_state = "sending"
       S.feedback_modal_error = nil
       local send_event_id = draft.event_id
@@ -10061,7 +10545,8 @@ end
 -- or the muted list goes empty (e.g. user hit Play and the JSFX-side
 -- auto-clear wiped state).
 function Render._ceiling_alert_popup()
-  if S._ceiling_alert_pending and not S._ceiling_alert_open then
+  if S._ceiling_alert_pending and not S._ceiling_alert_open
+      and not S._ceiling_alert_held then
     S._ceiling_alert_pending = false
     S._ceiling_alert_open    = true
     ImGui.ImGui_OpenPopup(RA.ctx, UI.t("dialog.ceiling.title", nil,
@@ -10085,86 +10570,41 @@ function Render._ceiling_alert_popup()
   -- its contents (ChildFlags_AutoResizeY).
   local CARD_GAP = RA.SC(6)        -- vertical gap between cards
 
-  -- Both the popup AND the inner list region have FIXED dimensions, so
-  -- the Dismiss row never shifts and the list area is the only thing
-  -- that can scroll. LIST_H was tuned to fit three single-location
-  -- cards comfortably (each card is ~SC(70) tall once WindowPadding,
-  -- ItemSpacing, and the FramePadding'd Diagnose button are factored
-  -- in) -- see the math in the inline comment below. Anything above
-  -- three cards triggers the inner scrollbar; one or two cards stack
-  -- at the top of the region with empty space underneath, which is
-  -- the price for the "Dismiss never moves" UX the user asked for.
-  --
-  -- Card height empirics:
-  --   border (2) + WindowPadding y top (10) + title row (~22 button)
-  --   + ItemSpacing.y (4) + Dummy(2) + ItemSpacing.y (4)
-  --   + 1 location row (~15) + WindowPadding y bottom (10) = ~69
-  -- Three cards: 3 * 69 + 2 * (CARD_GAP + ItemSpacing.y * 2) = ~235.
-  -- LIST_H rounded up so multi-location cards still fit three at a
-  -- time more often than not (a 2-location card adds ~SC(18)).
-  local LIST_H  = RA.SC(245)
-  local pop_w   = RA.SC(500)
-  local pop_h   = RA.SC(490)
+  -- Keep the modal inside the application at every scale. Its footer stays
+  -- fixed while the complete alert body scrolls, including long translations.
+  local margin = RA.SC(12)
+  local pop_w = math.min(RA.SC(500), math.max(1, (update._main_w or RA.SC(524)) - margin * 2))
+  local pop_h = math.min(RA.SC(490), math.max(1, (update._main_h or RA.SC(514)) - margin * 2))
   if update._main_w then
     ImGui.ImGui_SetNextWindowPos(RA.ctx,
       update._main_x + (update._main_w - pop_w) * 0.5,
       update._main_y + (update._main_h - pop_h) * 0.5,
-      ImGui.ImGui_Cond_Appearing())
+      ImGui.ImGui_Cond_Always())
   end
-  ImGui.ImGui_SetNextWindowSize(RA.ctx, pop_w, pop_h, ImGui.ImGui_Cond_Appearing())
+  ImGui.ImGui_SetNextWindowSize(RA.ctx, pop_w, pop_h, ImGui.ImGui_Cond_Always())
 
   UI.push_modal_style()
   if ImGui.ImGui_BeginPopupModal(RA.ctx,
         UI.t("dialog.ceiling.title", nil,
           "Output Ceiling Engaged") .. "###ceiling_alert", true,
         ImGui.ImGui_WindowFlags_NoScrollbar()
-          | ImGui.ImGui_WindowFlags_NoScrollWithMouse()) then
+          | ImGui.ImGui_WindowFlags_NoScrollWithMouse()
+          | ImGui.ImGui_WindowFlags_NoMove()
+          | ImGui.ImGui_WindowFlags_NoResize()) then
 
-    local body_avail_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
-    local body_start_x = GetCursorPosX(RA.ctx)
-
-    -- ===== Headline (Inter Bold SC(15), red) =====
-    PushFont(RA.ctx, FONT.inter_bold, RA.SC(15))
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.red)
-    Text(RA.ctx, UI.t("dialog.ceiling.headline", nil,
-      "Safety ceiling tripped"))
-    PopStyleColor(RA.ctx)
-    PopFont(RA.ctx)
-    Dummy(RA.ctx, 1, RA.SC(4))
-
-    -- ===== Body explanation (Inter Reg SC(12), muted, wrapped) =====
+    local body_avail_w, available_h = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+    local dismiss_label = UI.t("common.dismiss", nil, "Dismiss")
+    local b_w = math_max(RA.SC(92), CalcTextSize(RA.ctx, dismiss_label) + RA.SC(28))
+    local footer_h = ImGui.ImGui_GetFrameHeightWithSpacing(RA.ctx)
     PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
-    PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-    ImGui.ImGui_PushTextWrapPos(RA.ctx,
-      body_start_x + body_avail_w - RA.SC(4))
-    Text(RA.ctx, UI.t("dialog.ceiling.body", nil,
-      "These effects exceeded the safety ceiling for >50 ms and self-muted "
-        .. "to prevent runaway feedback. Mute clears on transport restart; if "
-        .. "it re-trips, click Diagnose to attach the JSFX file and ask the "
-        .. "model to analyze it."))
-    ImGui.ImGui_PopTextWrapPos(RA.ctx)
-    PopStyleColor(RA.ctx)
+    local checkbox_h = ImGui.ImGui_GetFrameHeightWithSpacing(RA.ctx)
+    local checkbox_w = CalcTextSize(RA.ctx, UI.t("dialog.ceiling.dont_show_session", nil,
+      "Don't show again this session")) + checkbox_h
     PopFont(RA.ctx)
-    Dummy(RA.ctx, 1, RA.SC(12))
-
-    -- ===== Section label "MUTED EFFECTS" with count on the right =====
-    -- Mirrors Settings-screen v5 section labels (API KEYS, PREFERENCES).
-    local count_key = (#entries == 1) and "dialog.ceiling.count.one"
-                                      or "dialog.ceiling.count.many"
-    local count_label = UI.t(count_key, { count = #entries },
-      (#entries == 1) and "1 effect" or (#entries .. " effects"))
-    UI.v5_section_label(UI.t("dialog.ceiling.section", nil, "MUTED EFFECTS"),
-      nil, count_label)
-
-    -- ===== Cards list (fixed-size, scrollable when content overflows) =====
-    -- Fixed LIST_H -- popup chrome + this child + footer = pop_h, all
-    -- precomputed, so the Dismiss row sits at the same Y on every
-    -- frame regardless of how many cards are present. The inner
-    -- BeginChild auto-shows its scrollbar when the stacked cards
-    -- exceed LIST_H (in practice, when there are 4 or more entries
-    -- with single-location cards). Padding 0 + transparent bg keeps
-    -- the cards reading as the only surface in this region. Muted
-    -- scrollbar matches the V5 settings palette.
+    local footer_stacked = checkbox_w + b_w + RA.SC(12) > body_avail_w
+    footer_h = footer_stacked and (footer_h + checkbox_h) or math.max(footer_h, checkbox_h)
+    local _, item_spacing_y = ImGui.ImGui_GetStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ItemSpacing())
+    local body_h = math.max(1, available_h - footer_h - RA.SC(6) - item_spacing_y)
     PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(), 0, 0)
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(),            0x00000000)
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarBg(),        0x00000000)
@@ -10173,139 +10613,200 @@ function Render._ceiling_alert_popup()
       UI.lerp_u32(TK.border_str, TK.text, 0.30))
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_ScrollbarGrabActive(),
       UI.lerp_u32(TK.border_str, TK.text, 0.55))
-    if ImGui.ImGui_BeginChild(RA.ctx, "##ceiling_entries",
-          body_avail_w, LIST_H, 0) then
-      local card_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+    if ImGui.ImGui_BeginChild(RA.ctx, "##ceiling_body", body_avail_w, body_h, 0) then
+      body_avail_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+      local body_start_x = GetCursorPosX(RA.ctx)
 
-      for idx, e in ipairs(entries) do
-        if idx > 1 then Dummy(RA.ctx, 1, CARD_GAP) end
+      -- ===== Headline (Inter Bold SC(15), red) =====
+      PushFont(RA.ctx, FONT.inter_bold, RA.SC(15))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.red)
+      Text(RA.ctx, UI.t("dialog.ceiling.headline", nil,
+        "Safety ceiling tripped"))
+      PopStyleColor(RA.ctx)
+      PopFont(RA.ctx)
+      Dummy(RA.ctx, 1, RA.SC(4))
 
-        -- Card: TK.card bg, 1px TK.border, SC(6) rounding, SC(12 x 10)
-        -- inner padding -- identical to the settings provider cards.
-        PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), TK.card)
-        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),  TK.border)
-        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildBorderSize(), 1)
-        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildRounding(),  RA.SC(6))
-        PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(),
-          RA.SC(12), RA.SC(10))
-        if ImGui.ImGui_BeginChild(RA.ctx, "##ceil_card_" .. e.slot,
-              card_w, 0,
-              ImGui.ImGui_ChildFlags_AutoResizeY()
-                | ImGui.ImGui_ChildFlags_Borders()) then
+      -- ===== Body explanation (Inter Reg SC(12), muted, wrapped) =====
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+      ImGui.ImGui_PushTextWrapPos(RA.ctx,
+        body_start_x + body_avail_w - RA.SC(4))
+      Text(RA.ctx, UI.t("dialog.ceiling.body", nil,
+        "These effects exceeded the safety ceiling for >50 ms and self-muted "
+          .. "to prevent runaway feedback. Mute clears on transport restart; if "
+          .. "it re-trips, click Diagnose to attach the JSFX file and ask the "
+          .. "model to analyze it."))
+      ImGui.ImGui_PopTextWrapPos(RA.ctx)
+      PopStyleColor(RA.ctx)
+      PopFont(RA.ctx)
+      Dummy(RA.ctx, 1, RA.SC(12))
 
-          -- Capture row metrics BEFORE any items so the right-aligned
-          -- Diagnose button anchors to the card's inner-right edge
-          -- regardless of label length. (Same pattern as the console
-          -- URL link in the API-key cards.)
-          local row_start_x = GetCursorPosX(RA.ctx)
-          local row_avail_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+      -- ===== Section label "MUTED EFFECTS" with count on the right =====
+      -- Mirrors Settings-screen v5 section labels (API KEYS, PREFERENCES).
+      local count_key = (#entries == 1) and "dialog.ceiling.count.one"
+                                        or "dialog.ceiling.count.many"
+      local count_label = UI.t(count_key, { count = #entries },
+        (#entries == 1) and "1 effect" or (#entries .. " effects"))
+      UI.v5_section_label(UI.t("dialog.ceiling.section", nil, "MUTED EFFECTS"),
+        nil, count_label)
 
-          -- Pre-measure the Diagnose button so its right-anchor X is
-          -- known before we draw the title.
-          local btn_label = UI.t("dialog.ceiling.diagnose", nil,
-            "Diagnose with Model")
-          PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
-          local btn_text_w = CalcTextSize(RA.ctx, btn_label)
-          PopFont(RA.ctx)
-          local btn_w = btn_text_w + RA.SC(20)
+      -- Cards share the scrollable alert body.
+      do
+        local card_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
 
-          -- Status dot: red, halo'd. Drawn via InvisibleButton so it
-          -- reserves layout space and emits hover events for the
-          -- tooltip. Mirrors the green/grey provider-card dot.
-          do
-            local dot_r   = RA.SC(4)
-            local dot_dia = dot_r * 2
-            local font_h  = ImGui.ImGui_GetTextLineHeight(RA.ctx)
-            ImGui.ImGui_InvisibleButton(RA.ctx,
-              "##ceil_dot_" .. e.slot, dot_dia + 2, font_h)
-            local bx1, by1 = ImGui.ImGui_GetItemRectMin(RA.ctx)
-            local dl       = ImGui.ImGui_GetWindowDrawList(RA.ctx)
-            local dot_cy   = by1 + font_h * 0.5 - RA.SC(1)
-            local halo_col = (TK.red & 0xFFFFFF00) | 0x40
-            ImGui.ImGui_DrawList_AddCircleFilled(dl,
-              bx1 + dot_r + 1, dot_cy, dot_r * 2, halo_col, 20)
-            ImGui.ImGui_DrawList_AddCircleFilled(dl,
-              bx1 + dot_r + 1, dot_cy, dot_r, TK.red, 16)
-            UI.tooltip(UI.t("dialog.ceiling.muted_tooltip", nil,
-              "Muted: output ceiling tripped"))
-            SameLine(RA.ctx, 0, RA.SC(6))
-          end
-
-          -- Effect name -- card title (Inter SemiBold SC(12), TK.text)
-          local label = (e.desc and e.desc ~= "") and e.desc
-            or (e.file and e.file:match("[^/\\]+$")
-              or UI.t("dialog.ceiling.unknown", nil, "(unknown)"))
-          PushFont(RA.ctx, FONT.inter_semi, RA.SC(12))
+        if (S.input_buf ~= nil and S.input_buf ~= "") or #S.attachments > 0 then
+          PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
           PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
-          Text(RA.ctx, label)
+          ImGui.ImGui_PushTextWrapPos(RA.ctx, GetCursorPosX(RA.ctx) + card_w)
+          Text(RA.ctx, UI.t("dialog.ceiling.draft_pending", nil,
+            "Use Back to draft to send or clear your draft, then choose Review alert to diagnose."))
+          ImGui.ImGui_PopTextWrapPos(RA.ctx)
           PopStyleColor(RA.ctx)
-          PopFont(RA.ctx)
-
-          -- Diagnose button, right-aligned to the card's inner-right
-          -- edge. Compact FramePadding + Inter SemiBold SC(11) so the
-          -- button height matches the title row visually.
-          SameLine(RA.ctx)
-          SetCursorPosX(RA.ctx, row_start_x + row_avail_w - btn_w)
-          PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
-          PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),
-            RA.SC(10), RA.SC(4))
           UI.push_modal_primary_btn()
           if ImGui.ImGui_Button(RA.ctx,
-                btn_label .. "##ceiling_diag_" .. e.slot,
-                btn_w, 0) then
-            Code.ceiling_diagnose_one(e.slot)
+              UI.t("dialog.ceiling.back_to_draft", nil, "Back to draft")
+                .. "##ceiling_back_to_draft", 0, 0) then
+            ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+            S._ceiling_alert_held = true
+            S._ceiling_alert_open = false
+            S._ceiling_alert_pending = false
+            S.refocus_prompt = true
           end
           UI.pop_modal_primary_btn()
-          ImGui.ImGui_PopStyleVar(RA.ctx, 1)
           PopFont(RA.ctx)
-
-          -- Per-location rows: Inter Reg SC(11), TK.text_muted,
-          -- indented under the title. Quiet enough to not compete
-          -- with the title, but readable.
-          Dummy(RA.ctx, 1, RA.SC(2))
-          local locs = e.locations or {}
-          PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
-          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-          if #locs == 0 then
-            local fname = e.file and e.file:match("[^/\\]+$") or "?"
-            Text(RA.ctx, "  " .. fname)
-          else
-            for _, loc in ipairs(locs) do
-              local idx_str = (loc.track_idx == "M")
-                and UI.t("dialog.ceiling.master", nil, "Master")
-                or UI.t("dialog.ceiling.track",
-                  { index = tostring(loc.track_idx) },
-                  "Track " .. tostring(loc.track_idx))
-              local tname = loc.track_name and loc.track_name ~= ""
-                              and (' "' .. loc.track_name .. '"') or ""
-              Text(RA.ctx, ("  %s%s   \xc2\xb7   FX %d"):format(
-                idx_str, tname, loc.fx_idx or 0))
-            end
-          end
-          PopStyleColor(RA.ctx)
-          PopFont(RA.ctx)
-
-          ImGui.ImGui_EndChild(RA.ctx)
+          Dummy(RA.ctx, 1, CARD_GAP)
         end
-        ImGui.ImGui_PopStyleVar(RA.ctx, 3)
-        PopStyleColor(RA.ctx, 2)
+        for idx, e in ipairs(entries) do
+          if idx > 1 then Dummy(RA.ctx, 1, CARD_GAP) end
+
+          -- Card: TK.card bg, 1px TK.border, SC(6) rounding, SC(12 x 10)
+          -- inner padding -- identical to the settings provider cards.
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), TK.card)
+          PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),  TK.border)
+          PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildBorderSize(), 1)
+          PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_ChildRounding(),  RA.SC(6))
+          PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_WindowPadding(),
+            RA.SC(12), RA.SC(10))
+          if ImGui.ImGui_BeginChild(RA.ctx, "##ceil_card_" .. e.slot,
+                card_w, 0,
+                ImGui.ImGui_ChildFlags_AutoResizeY()
+                  | ImGui.ImGui_ChildFlags_Borders()) then
+
+            -- Capture row metrics BEFORE any items so the right-aligned
+            -- Diagnose button anchors to the card's inner-right edge
+            -- regardless of label length. (Same pattern as the console
+            -- URL link in the API-key cards.)
+            local row_start_x = GetCursorPosX(RA.ctx)
+            local row_avail_w = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+
+            -- Pre-measure the Diagnose button so its right-anchor X is
+            -- known before we draw the title.
+            local btn_label = UI.t("dialog.ceiling.diagnose", nil,
+              "Diagnose with Model")
+            PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
+            local btn_text_w = CalcTextSize(RA.ctx, btn_label)
+            PopFont(RA.ctx)
+            local btn_w = btn_text_w + RA.SC(20)
+
+            -- Status dot: red, halo'd. Drawn via InvisibleButton so it
+            -- reserves layout space and emits hover events for the
+            -- tooltip. Mirrors the green/grey provider-card dot.
+            do
+              local dot_r   = RA.SC(4)
+              local dot_dia = dot_r * 2
+              local font_h  = ImGui.ImGui_GetTextLineHeight(RA.ctx)
+              ImGui.ImGui_InvisibleButton(RA.ctx,
+                "##ceil_dot_" .. e.slot, dot_dia + 2, font_h)
+              local bx1, by1 = ImGui.ImGui_GetItemRectMin(RA.ctx)
+              local dl       = ImGui.ImGui_GetWindowDrawList(RA.ctx)
+              local dot_cy   = by1 + font_h * 0.5 - RA.SC(1)
+              local halo_col = (TK.red & 0xFFFFFF00) | 0x40
+              ImGui.ImGui_DrawList_AddCircleFilled(dl,
+                bx1 + dot_r + 1, dot_cy, dot_r * 2, halo_col, 20)
+              ImGui.ImGui_DrawList_AddCircleFilled(dl,
+                bx1 + dot_r + 1, dot_cy, dot_r, TK.red, 16)
+              UI.tooltip(UI.t("dialog.ceiling.muted_tooltip", nil,
+                "Muted: output ceiling tripped"))
+              SameLine(RA.ctx, 0, RA.SC(6))
+            end
+
+            -- Effect name -- card title (Inter SemiBold SC(12), TK.text)
+            local label = (e.desc and e.desc ~= "") and e.desc
+              or (e.file and e.file:match("[^/\\]+$")
+                or UI.t("dialog.ceiling.unknown", nil, "(unknown)"))
+            PushFont(RA.ctx, FONT.inter_semi, RA.SC(12))
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text)
+            Text(RA.ctx, label)
+            PopStyleColor(RA.ctx)
+            PopFont(RA.ctx)
+
+            -- Diagnose button, right-aligned to the card's inner-right
+            -- edge. Compact FramePadding + Inter SemiBold SC(11) so the
+            -- button height matches the title row visually.
+            SameLine(RA.ctx)
+            SetCursorPosX(RA.ctx, row_start_x + row_avail_w - btn_w)
+            PushFont(RA.ctx, FONT.inter_semi, RA.SC(11))
+            PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(),
+              RA.SC(10), RA.SC(4))
+            UI.push_modal_primary_btn()
+            ImGui.ImGui_BeginDisabled(RA.ctx,
+              (S.input_buf ~= nil and S.input_buf ~= "") or #S.attachments > 0)
+            if ImGui.ImGui_Button(RA.ctx,
+                  btn_label .. "##ceiling_diag_" .. e.slot,
+                  btn_w, 0) then
+              Code.ceiling_diagnose_one(e.slot)
+              if not S._ceiling_alert_open then
+                ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+              end
+            end
+            ImGui.ImGui_EndDisabled(RA.ctx)
+            UI.pop_modal_primary_btn()
+            ImGui.ImGui_PopStyleVar(RA.ctx, 1)
+            PopFont(RA.ctx)
+
+            -- Per-location rows: Inter Reg SC(11), TK.text_muted,
+            -- indented under the title. Quiet enough to not compete
+            -- with the title, but readable.
+            Dummy(RA.ctx, 1, RA.SC(2))
+            local locs = e.locations or {}
+            PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+            PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+            if #locs == 0 then
+              local fname = e.file and e.file:match("[^/\\]+$") or "?"
+              Text(RA.ctx, "  " .. fname)
+            else
+              for _, loc in ipairs(locs) do
+                local idx_str = (loc.track_idx == "M")
+                  and UI.t("dialog.ceiling.master", nil, "Master")
+                  or UI.t("dialog.ceiling.track",
+                    { index = tostring(loc.track_idx) },
+                    "Track " .. tostring(loc.track_idx))
+                local tname = loc.track_name and loc.track_name ~= ""
+                                and (' "' .. loc.track_name .. '"') or ""
+                Text(RA.ctx, ("  %s%s   \xc2\xb7   FX %d"):format(
+                  idx_str, tname, loc.fx_idx or 0))
+              end
+            end
+            PopStyleColor(RA.ctx)
+            PopFont(RA.ctx)
+
+            ImGui.ImGui_EndChild(RA.ctx)
+          end
+          ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+          PopStyleColor(RA.ctx, 2)
+        end
       end
       ImGui.ImGui_EndChild(RA.ctx)
     end
     PopStyleColor(RA.ctx, 5)            -- ChildBg + 4 Scrollbar*
     ImGui.ImGui_PopStyleVar(RA.ctx, 1)  -- WindowPadding for the scroll child
 
-    -- Tight gap above the footer -- the dynamic list_h above already
-    -- consumed the slack, so this is just the visual breathing room
-    -- between the bottom card and the Dismiss row.
+    -- The body reserves this gap and the measured footer height.
     Dummy(RA.ctx, 1, RA.SC(6))
 
     -- ===== Footer: checkbox left, Dismiss button right =====
     do
       local footer_avail = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
-      local dismiss_label = UI.t("common.dismiss", nil, "Dismiss")
-      local b_w = math_max(RA.SC(92),
-        CalcTextSize(RA.ctx, dismiss_label) + RA.SC(28))
       local cb_x = GetCursorPosX(RA.ctx)
       local cb_y = ImGui.ImGui_GetCursorPosY(RA.ctx)
 
@@ -10325,10 +10826,12 @@ function Render._ceiling_alert_popup()
       PopStyleColor(RA.ctx, 4)
       if changed then S._ceiling_alert_dismissed = val end
 
-      -- Dismiss button on the same row, right-aligned.
-      SameLine(RA.ctx)
+      -- Stack the button when translated controls cannot share a row.
+      if not footer_stacked then
+        SameLine(RA.ctx)
+        ImGui.ImGui_SetCursorPosY(RA.ctx, cb_y)
+      end
       SetCursorPosX(RA.ctx, cb_x + footer_avail - b_w)
-      ImGui.ImGui_SetCursorPosY(RA.ctx, cb_y)
       UI.push_modal_primary_btn()
       local dismiss = ImGui.ImGui_Button(RA.ctx,
         dismiss_label .. "##ceiling_alert", b_w, 0)
@@ -10338,6 +10841,7 @@ function Render._ceiling_alert_popup()
          or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
         S._ceiling_alert_open = false
         S._ceiling_muted_fx   = {}
+        S._ceiling_alert_held = nil
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
       end
     end
@@ -10348,6 +10852,7 @@ function Render._ceiling_alert_popup()
     -- Treat the same as Dismiss -- clear so a new trip can re-open.
     S._ceiling_alert_open = false
     S._ceiling_muted_fx   = {}
+    S._ceiling_alert_held = nil
   end
   UI.pop_modal_style()
 end
@@ -10943,9 +11448,9 @@ function Render.custom_instructions_screen()
     refresh_editor_state()
     if over_limit then
       api_keys.custom_instr_status = UI.t(
-        "settings.custom_instructions.error.too_large",
+        "settings.custom_instructions.error.too_large_bytes",
         { limit = limit },
-        str_format("Keep Custom Instructions under %d characters.", limit))
+        str_format("Keep Custom Instructions under %d bytes.", limit))
       api_keys.custom_instr_status_kind = "err"
       return false
     end
@@ -11006,6 +11511,8 @@ function Render.custom_instructions_screen()
     UI.lerp_u32(TK.border_str, TK.text, 0.55))
   local back_clicked, clear_clicked = false, false
   local save_clicked, save_back_clicked = false, false
+  local save_back_label = UI.t("settings.custom_instructions.save_back", nil,
+    "Save & Back")
   local custom_instr_body_open = ImGui.ImGui_BeginChild(RA.ctx, "##custom_instr_body",
     _body_avail_w, _body_h, 0)
   if custom_instr_body_open then
@@ -11044,8 +11551,9 @@ function Render.custom_instructions_screen()
   PushFont(RA.ctx, FONT.mono_reg, RA.SC(10))
   PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),
     over_limit and TK.red or TK.text_muted)
-  Text(RA.ctx, str_format("%d / %d chars  ·  ~%d tokens",
-    #buf, limit, approx_tokens))
+  Text(RA.ctx, UI.t("settings.custom_instructions.counter_bytes",
+    { count = #buf, limit = limit, tokens = approx_tokens },
+    str_format("%d / %d bytes  ·  ~%d tokens", #buf, limit, approx_tokens)))
   PopStyleColor(RA.ctx)
   PopFont(RA.ctx)
   Dummy(RA.ctx, 1, RA.SC(5))
@@ -11102,9 +11610,9 @@ function Render.custom_instructions_screen()
     Dummy(RA.ctx, 1, RA.SC(8))
     PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.red)
-    UI.text_multiline(UI.t("settings.custom_instructions.limit_warning",
+    UI.text_multiline(UI.t("settings.custom_instructions.limit_warning_bytes",
       { limit = limit },
-      str_format("Too large. Keep this under %d characters.", limit)))
+      str_format("Too large. Keep this under %d bytes.", limit)))
     PopStyleColor(RA.ctx)
     PopFont(RA.ctx)
   elseif enabled and dirty then
@@ -11138,8 +11646,6 @@ function Render.custom_instructions_screen()
   local back_label = UI.t("common.back", nil, "Back")
   local clear_label = UI.t("common.clear", nil, "Clear")
   local save_label = UI.t("common.save", nil, "Save")
-  local save_back_label = UI.t("settings.custom_instructions.save_back", nil,
-    "Save & Back")
   do
     Dummy(RA.ctx, 1, RA.SC(12))
     PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
@@ -11221,6 +11727,7 @@ function Render.custom_instructions_screen()
   local examples_key = tostring(examples_lang) .. ":"
     .. tostring(examples_meta and examples_meta.source_version or "")
   if UI._custom_instr_examples_key ~= examples_key
+      or UI._custom_instr_examples_catalog ~= examples_catalog
       or not UI._custom_instr_examples then
     UI._custom_instr_examples = {
       {
@@ -11305,6 +11812,7 @@ function Render.custom_instructions_screen()
       },
     }
     UI._custom_instr_examples_key = examples_key
+    UI._custom_instr_examples_catalog = examples_catalog
   end
   local examples = UI._custom_instr_examples
   local EXAMPLE_GAP = RA.SC(8)
@@ -11571,6 +12079,7 @@ local function _exit_settings_screen()
   api_keys.saved_auto_backup           = nil
   api_keys.saved_stream_responses      = nil
   api_keys.saved_reasoning_display_mode = nil
+  api_keys.staged_reasoning_display_mode = nil
   api_keys.saved_chat_font_idx         = nil
   api_keys.saved_reply_language_idx    = nil
   api_keys.saved_include_snapshot      = nil
@@ -12169,7 +12678,8 @@ function Render._shared_key_screen_impl()
           if shift_down then
             for j = i - 1, 1, -1 do
               local pj = PROVIDERS[j]
-              if pj and not pj.is_custom and not S.api_key_map[pj.id] then
+              if pj and not pj.is_custom and PROVIDERS.user_visible(pj)
+                  and not S.api_key_map[pj.id] then
                 target = j
                 break
               end
@@ -12177,7 +12687,8 @@ function Render._shared_key_screen_impl()
           else
             for j = i + 1, #PROVIDERS do
               local pj = PROVIDERS[j]
-              if pj and not pj.is_custom and not S.api_key_map[pj.id] then
+              if pj and not pj.is_custom and PROVIDERS.user_visible(pj)
+                  and not S.api_key_map[pj.id] then
                 target = j
                 break
               end
@@ -12313,8 +12824,10 @@ function Render._shared_key_screen_impl()
         and api_keys.key_bufs[i]
       if buf and buf:match("%S") then has_keys = true; break end
     end
-    ImGui.ImGui_BeginDisabled(RA.ctx, not has_keys or api_keys.key_validating)
-    if ImGui.ImGui_Button(RA.ctx, test_label .. "##key_recheck") then
+    ImGui.ImGui_BeginDisabled(RA.ctx,
+      not has_keys or api_keys.key_validating or UI.settings_request_busy())
+    if ImGui.ImGui_Button(RA.ctx, test_label .. "##key_recheck")
+        and not UI.settings_request_busy() then
       api_keys.start_key_test("visual_manual")
       -- Stage buffered keys outside the stored-key map. A candidate is sent
       -- only through the exact key-test override and reaches the map after a
@@ -12368,10 +12881,12 @@ function Render._shared_key_screen_impl()
         -- exhaust branch in advance_key_test_queue restores from this
         -- snapshot. Without it, "Test API Keys" silently switches the
         -- active provider to whichever was last in the queue.
+        Store.begin_key_test_selection(api_keys)
         api_keys._test_orig_provider_idx = prefs.provider_idx
         S.api_key = api_keys.key_for_test(first.prov)
         prefs.provider_idx = first.idx
         MODELS.refresh()
+        Store._key_test_selection.test_provider_id = PROVIDERS.active().id
         Net.fire_key_test(first.prov)
       else
         api_keys.finish_key_test_session()
@@ -12740,7 +13255,10 @@ function Render._shared_key_screen_impl()
     -- Provider-written reasoning is optional display metadata. It remains
     -- outside chat history, request context, saved chats, and diagnostics.
     if not S.screen_reader_mode then
-      local mode = Net.reasoning_display_mode()
+      local reasoning_save_active = api_keys.key_test_origin == "visual_save"
+      ImGui.ImGui_BeginDisabled(RA.ctx, reasoning_save_active)
+      local mode = api_keys.staged_reasoning_display_mode
+        or Net.reasoning_display_mode()
       local current = mode == "summaries" and 1
         or mode == "provider_visible" and 2 or 0
       local changed, selected = UI.v5_segmented_row(
@@ -12758,10 +13276,11 @@ function Render._shared_key_screen_impl()
             .. "both summaries and readable reasoning returned by the provider. "
             .. "Encrypted or hidden reasoning is never shown."),
         inner_w)
-      if changed then
-        Net.set_reasoning_display_mode(selected == 1 and "summaries"
-          or selected == 2 and "provider_visible" or "off")
+      if changed and api_keys.key_test_origin ~= "visual_save" then
+        api_keys.staged_reasoning_display_mode = selected == 1 and "summaries"
+          or selected == 2 and "provider_visible" or "off"
       end
+      ImGui.ImGui_EndDisabled(RA.ctx)
       PushFont(RA.ctx, FONT.inter_reg, RA.SC(10))
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_faint)
       ImGui.ImGui_PushTextWrapPos(RA.ctx, GetCursorPosX(RA.ctx) + inner_w)
@@ -13481,10 +14000,7 @@ function Render._shared_key_screen_impl()
         if api_keys.saved_stream_responses ~= nil then
           prefs.stream_responses = api_keys.saved_stream_responses
         end
-        if api_keys.saved_reasoning_display_mode ~= nil then
-          Net.set_reasoning_display_mode(
-            api_keys.saved_reasoning_display_mode)
-        end
+        api_keys.staged_reasoning_display_mode = nil
         if api_keys.saved_chat_font_idx then
           prefs.chat_font_idx = api_keys.saved_chat_font_idx
         end
@@ -13564,9 +14080,8 @@ function Render._shared_key_screen_impl()
     and prefs.auto_backup ~= api_keys.saved_auto_backup
   local stream_changed  = api_keys.saved_stream_responses ~= nil
     and prefs.stream_responses ~= api_keys.saved_stream_responses
-  local reasoning_display_changed = api_keys.saved_reasoning_display_mode ~= nil
-    and Net.reasoning_display_mode()
-      ~= api_keys.saved_reasoning_display_mode
+  local reasoning_display_changed = api_keys.staged_reasoning_display_mode ~= nil
+    and api_keys.staged_reasoning_display_mode ~= Net.reasoning_display_mode()
   local font_changed    = api_keys.saved_chat_font_idx
     and prefs.chat_font_idx ~= api_keys.saved_chat_font_idx
   local lang_changed    = api_keys.saved_reply_language_idx
@@ -13611,7 +14126,8 @@ function Render._shared_key_screen_impl()
   -- bottom (drawn after the body content to overlay on top). Both
   -- feed the submit/discard handler below.
   local save_clicked, cancel_clicked = false, false
-  if api_keys.pending_settings_save_from_unsaved then
+  if api_keys.pending_settings_save_from_unsaved
+      and not UI.settings_request_busy() then
     api_keys.pending_settings_save_from_unsaved = nil
     if can_submit then save_clicked = true end
   end
@@ -13624,7 +14140,7 @@ function Render._shared_key_screen_impl()
   -- handler right after, re-writing default prefs into the ExtState
   -- that the reset just wiped. Ctrl+S (Cmd+S on Mac) fires Save the
   -- same way; UI.is_save_shortcut shares the popup guard.
-  if can_submit
+  if can_submit and not UI.settings_request_busy()
     and not UI._popup_was_open
     and (ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Enter())
       or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_KeypadEnter())
@@ -13759,7 +14275,8 @@ function Render._shared_key_screen_impl()
       -- Save (primary, accent). Bold label for visual emphasis; rect is
       -- identical SC(80) so the bold stroke stays inside the fixed width.
       PushFont(RA.ctx, FONT.inter_bold, RA.SC(12))
-      ImGui.ImGui_BeginDisabled(RA.ctx, not can_submit)
+      ImGui.ImGui_BeginDisabled(RA.ctx,
+        not can_submit or UI.settings_request_busy())
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.accent_text)
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),        TK.accent)
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        TK.accent)
@@ -13778,7 +14295,9 @@ function Render._shared_key_screen_impl()
       PopStyleColor(RA.ctx, 5)
       ImGui.ImGui_EndDisabled(RA.ctx)
       PopFont(RA.ctx)
-      if not can_submit then
+      if S.turn_budget_confirmation ~= nil then
+        -- The shared confirmation owns the pending choice; suppress save hints.
+      elseif not can_submit then
         local tip_flags = ImGui.ImGui_HoveredFlags_AllowWhenDisabled()
         if ImGui.ImGui_IsItemHovered(RA.ctx, tip_flags) then
           UI.tooltip(api_keys.key_validating
@@ -13833,7 +14352,8 @@ function Render._shared_key_screen_impl()
       local SAVE_W = RA.SC(160)
       local save_x_screen = win_x + win_w - BAR_PAD_X - SAVE_W
       PushFont(RA.ctx, FONT.inter_reg, RA.SC(12))
-      ImGui.ImGui_BeginDisabled(RA.ctx, not can_submit)
+      ImGui.ImGui_BeginDisabled(RA.ctx,
+        not can_submit or UI.settings_request_busy())
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),          TK.accent_text)
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Border(),        TK.accent)
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Button(),        TK.accent)
@@ -13854,7 +14374,8 @@ function Render._shared_key_screen_impl()
       ImGui.ImGui_EndDisabled(RA.ctx)
       PopFont(RA.ctx)
       local tip_flags = ImGui.ImGui_HoveredFlags_AllowWhenDisabled()
-      if ImGui.ImGui_IsItemHovered(RA.ctx, tip_flags) then
+      if ImGui.ImGui_IsItemHovered(RA.ctx, tip_flags)
+          and S.turn_budget_confirmation == nil then
         if not can_submit then
           UI.tooltip(api_keys.key_validating
             and UI.t("settings.footer.save_disabled_validating", nil,
@@ -13898,7 +14419,7 @@ function Render._shared_key_screen_impl()
   -- Handle submit. Validate format for all non-empty new fields, then fire a
   -- test for the first newly entered valid key. If no new keys were entered
   -- (re-entry with only removals), return to the main UI immediately.
-  if save_clicked and can_submit then
+  if save_clicked and can_submit and not UI.settings_request_busy() then
     api_keys.key_error    = nil
     local first_valid_idx  = nil
     local has_format_error = false
@@ -13928,9 +14449,60 @@ function Render._shared_key_screen_impl()
       -- passes. If validation fails, the saved_* snapshots must stay intact so
       -- the dirty indicator, Cancel/Discard, and retry flow still reflect the
       -- real unsaved state.
+      local settings_prior_dpi_map = prefs.ui_scale_by_dpi
+      local settings_prior_dpi_fields
+      if type(settings_prior_dpi_map) == "table" then
+        settings_prior_dpi_fields = {}
+        for key, value in pairs(settings_prior_dpi_map) do
+          settings_prior_dpi_fields[key] = value
+        end
+      end
       if scale_changed and UI.remember_ui_scale_for_current_dpi then
         UI.remember_ui_scale_for_current_dpi(api_keys.saved_ui_scale_idx)
       end
+      local settings_doc = Store.config_doc()
+      local settings_prior_doc_preferences = settings_doc.preferences
+      local settings_prior_reasoning_mode = prefs.reasoning_display_mode
+      local settings_prior_reasoning_legacy = prefs.show_reasoning_summaries
+      if api_keys.staged_reasoning_display_mode ~= nil then
+        prefs.reasoning_display_mode = api_keys.staged_reasoning_display_mode
+        prefs.show_reasoning_summaries =
+          api_keys.staged_reasoning_display_mode ~= "off"
+      end
+      local settings_save_ok, settings_save_err, settings_cleanup_warning,
+        settings_save_notice = pcall(Store.save_config)
+      if not settings_save_ok or settings_save_err ~= nil then
+        prefs.reasoning_display_mode = settings_prior_reasoning_mode
+        prefs.show_reasoning_summaries = settings_prior_reasoning_legacy
+        settings_doc.preferences = settings_prior_doc_preferences
+        if settings_prior_dpi_fields then
+          for key in pairs(settings_prior_dpi_map) do
+            settings_prior_dpi_map[key] = nil
+          end
+          for key, value in pairs(settings_prior_dpi_fields) do
+            settings_prior_dpi_map[key] = value
+          end
+        end
+        prefs.ui_scale_by_dpi = settings_prior_dpi_map
+        pcall(function()
+          api_keys.key_error = UI.t("settings.error.save_failed", nil,
+            "Settings could not be saved. Your changes are still on this screen.")
+          if type(settings_save_notice) == "string" and settings_save_notice ~= "" then
+            api_keys.key_error = api_keys.key_error .. "\n\n" .. settings_save_notice
+          end
+          UI.show_float_toast(api_keys.key_error, "err", true)
+          api_keys.settings_save_failure_toast = S.float_toast
+        end)
+      else
+        if api_keys.settings_save_failure_toast
+            and S.float_toast == api_keys.settings_save_failure_toast then
+          S.float_toast = nil
+        end
+        api_keys.settings_save_failure_toast = nil
+        if api_keys.staged_reasoning_display_mode ~= nil then
+          Net.set_reasoning_display_mode(api_keys.staged_reasoning_display_mode)
+        end
+        api_keys.staged_reasoning_display_mode = nil
       if api_keys.saved_ui_scale_idx then
         api_keys.saved_ui_scale_idx = nil
       end
@@ -13973,7 +14545,6 @@ function Render._shared_key_screen_impl()
       if api_keys.saved_turn_token_limit then
         api_keys.saved_turn_token_limit = nil
       end
-      if Store and Store.save_config then Store.save_config() end
       if first_valid_idx then
         -- Keep every candidate outside the stored-key map and test all of
         -- them in provider order. A partial failure stays on this screen with
@@ -13994,12 +14565,14 @@ function Render._shared_key_screen_impl()
             end
           end
         end
+        Store.begin_key_test_selection(api_keys)
         api_keys._test_orig_provider_idx = prefs.provider_idx
         local first = api_keys.test_queue[1]
         local test_prov = first.prov
         S.api_key = api_keys.key_for_test(test_prov)
         prefs.provider_idx = first.idx
         MODELS.refresh()
+        Store._key_test_selection.test_provider_id = PROVIDERS.active().id
         api_keys.key_validating = true
         api_keys.key_validating_idx = first.idx
         Net.fire_key_test(test_prov)
@@ -14060,6 +14633,14 @@ function Render._shared_key_screen_impl()
           "Add a valid provider API key or configure an advanced local or "
           .. "custom provider.")
       end
+        if settings_cleanup_warning == "legacy_cleanup_incomplete" then
+          pcall(function()
+            UI.show_float_toast(UI.t("settings.warning.legacy_cleanup_pending",
+              nil, "Settings saved. Legacy settings cleanup is incomplete. "
+                .. "Save again to retry."), "warn", true)
+          end)
+        end
+      end -- settings persistence succeeded
     end
   end
 
@@ -14244,6 +14825,7 @@ function api_keys.enter_custom_duplicate(source)
 end
 
 function api_keys.persist_custom_provider_record(record, edit)
+  if UI.settings_request_busy() then return false, "request_busy" end
   local save_err
   if edit and edit.storage_kind == "native_engine" then
     save_err = CustomNative.save_record(record)
@@ -16339,7 +16921,7 @@ function Render.custom_llm_screen()
     Text(RA.ctx, UI.t("settings.custom.header.model_id", nil, "MODEL IDENTIFIER"))
     UI.tooltip(UI.t("settings.custom.tip.header.model_id", nil,
       "The model name as your server expects it (e.g. qwen2.5-coder-14b, "
-      .. "kimi-k2.6, claude-opus-5). Open Details to set prices, context, "
+      .. "kimi-k2.6, claude-opus-5-5). Open Details to set prices, context, "
       .. "the same notes tag shown next to it, and extra JSON body fields."))
     SameLine(RA.ctx, 0, 0)
     ImGui.ImGui_SetCursorPosX(RA.ctx, hdr_x0 + id_w + row_gap)
@@ -16811,7 +17393,7 @@ function Render.custom_llm_screen()
         UI.tooltip(UI.t("settings.custom.tip.details.context_window", nil,
           "Maximum combined input + output token capacity for this "
           .. "model. The preflight check warns if a pending send would "
-          .. "overflow this window. Kimi k2.6 = 262144, Claude Opus 5 = "
+          .. "overflow this window. Kimi k2.6 = 262144, Claude Opus 5.5 = "
           .. "1000000, most local 8B models = 8192."))
 
         Dummy(RA.ctx, 1, RA.SC(10))
@@ -17199,6 +17781,7 @@ function Render.custom_llm_screen()
   local save_label = UI.t("common.save", nil, "Save")
   local cancel_label = UI.t("common.cancel", nil, "Cancel")
   can_save_custom = not api_keys.key_validating and not test_active
+    and not UI.settings_request_busy()
 
   -- Measure button widths from their real label widths so the row
   -- auto-adjusts when "Test Connection" flips to "Cancel Test".
@@ -17232,9 +17815,12 @@ function Render.custom_llm_screen()
   ImGui.ImGui_EndDisabled(RA.ctx)
 
   SameLine(RA.ctx, 0, BTN_GAP)
+  ImGui.ImGui_BeginDisabled(RA.ctx,
+    UI.settings_request_busy() and not test_active)
   local cllm_test_clicked = ImGui.ImGui_Button(RA.ctx,
     test_btn_lbl .. "##cllm_test", test_w, 0)
   UI.pressable()
+  ImGui.ImGui_EndDisabled(RA.ctx)
   UI.tooltip(test_active
     and UI.t("settings.custom.tip.cancel_test", nil,
       "Cancel the in-flight connection test")
@@ -17285,7 +17871,7 @@ function Render.custom_llm_screen()
   if cllm_test_clicked then
     if test_active then
       CTX.custom_conn_test_cancel()
-    else
+    elseif not UI.settings_request_busy() then
       CTX.custom_llm_start_conn_test()
     end
   end
@@ -18708,225 +19294,135 @@ end
 -- If `deep` is true, the param probe runs via the defer-paced coroutine,
 -- which is the only way to get accurate data from VST3 plugins with
 -- one-cycle readback lag (e.g. Soundtoys EchoBoy).
-local function fx_cache_rescan_close_undo(rs, label)
-  if rs and rs.undo_open then
-    reaper.Undo_EndBlock(label or "ReaAssist: rescan plugin", 0)
-    rs.undo_open = false
-    return true
-  end
-  return false
+local function fx_cache_rescan_terminal(rs, lease)
+  if rs.lease ~= lease then return false, "stale rescan callback" end
+  local ok, reason = CTX.scan_lease_finish(lease)
+  rs.active, rs.phase, rs.deep = false, "done", false
+  rs.track, rs.lease = nil, nil
+  return ok, reason
 end
 
 function CTX.fx_cache_rescan_start(identifier, deep)
   local rs = fx_cache_ui.rescan
   if RA.context_loaded and not RA.context_loaded() then
-    local msg = RA.context_unavailable_message(
-      "before rescanning FX parameters")
-    rs.status = msg
-    UI.show_float_toast(msg, "err")
-    return
-  end
-  if rs.active or deep_scan.active then return end
-
-  reaper.Undo_BeginBlock()
-  rs.undo_open = true
-  reaper.PreventUIRefresh(1)
-  reaper.InsertTrackAtIndex(reaper.CountTracks(0), false)
-  local tr = reaper.GetTrack(0, reaper.CountTracks(0) - 1)
-  if not tr then
-    reaper.PreventUIRefresh(-1)
-    fx_cache_rescan_close_undo(rs, "ReaAssist: rescan (failed)")
-    rs.status = UI.t("settings.fx_cache.status.failed_temp_track", nil,
-      "Failed to create temporary track.")
-    UI.show_float_toast(UI.t("settings.fx_cache.toast.rescan_failed", nil,
-      "Rescan failed"), "err")
-    return
-  end
-  -- Hide from TCP and mixer so user doesn't see it flash.
-  reaper.SetMediaTrackInfo_Value(tr, "B_SHOWINTCP", 0)
-  reaper.SetMediaTrackInfo_Value(tr, "B_SHOWINMIXER", 0)
-
-  local fx_idx = reaper.TrackFX_AddByName(tr, identifier, false, -1)
-  if fx_idx < 0 then
-    reaper.DeleteTrack(tr)
-    reaper.PreventUIRefresh(-1)
-    fx_cache_rescan_close_undo(rs, "ReaAssist: rescan (failed)")
-    rs.status = UI.t("settings.fx_cache.status.failed_load",
-      { identifier = identifier }, "Failed to load: " .. identifier)
-    UI.show_float_toast(UI.t("settings.fx_cache.toast.failed_load", nil,
-      "Failed to load plugin"), "err")
-    return
-  end
-  reaper.TrackFX_Show(tr, fx_idx, 2)
-  -- Do not leave this setup block open while the deferred reader or deep-scan
-  -- coroutine waits for plugin parameter initialization on later frames.
-  fx_cache_rescan_close_undo(rs, "ReaAssist: rescan plugin load")
-
-  rs.active = true
-  rs.phase  = "reading"
-  rs.track  = tr
-  rs.ident  = identifier
-  rs.fx_idx = fx_idx
-  rs.deep   = deep and true or false
-  rs.status = deep and UI.t("settings.fx_cache.status.deep_scanning", nil,
-    "Deep scanning...") or UI.t("settings.fx_cache.status.scanning", nil,
-    "Scanning...")
-
-  -- For deep rescans, kick off the coroutine directly; the normal
-  -- fx_cache_rescan_read path (called one frame later from loop) would
-  -- invoke the shallow scanner first.
-  if deep then
-    rs.phase = "deep"
-    local started = CTX.start_deep_scan({
-      tr           = tr,
-      fx_idx       = fx_idx,
-      identifier   = identifier,
-      search_names = { identifier },
-      origin       = "fx_cache",
-      on_complete  = function(dparams, dmax, dcount)
-        FXCache.put_plugin(identifier, dparams, dcount, dmax, false)
-        if reaper.ValidatePtr2(0, tr, "MediaTrack*") then
-          reaper.DeleteTrack(tr)
-        end
-        -- PreventUIRefresh(-1) already done by scan_fx_params_deep_body.
-        fx_cache_rescan_close_undo(rs, "ReaAssist: deep rescan plugin")
-        rs.active = false
-        rs.phase  = "done"
-        rs.track  = nil
-        rs.deep   = false
-        rs.status = UI.t("settings.fx_cache.status.deep_rescanned",
-          { identifier = identifier }, "Deep rescanned: " .. identifier)
-        UI.show_float_toast(UI.t("settings.fx_cache.toast.deep_complete",
-          nil, "Deep rescan complete"), "ok")
-      end,
-      on_cancel    = function(reason)
-        if reaper.ValidatePtr2(0, tr, "MediaTrack*") then
-          reaper.DeleteTrack(tr)
-        end
-        -- PreventUIRefresh(-1) already done by scan_fx_params_deep_body.
-        fx_cache_rescan_close_undo(rs, "ReaAssist: deep rescan (cancelled)")
-        rs.active = false
-        rs.phase  = "done"
-        rs.track  = nil
-        rs.deep   = false
-        if reason == "cancelled" then
-          rs.status = UI.t("settings.fx_cache.status.deep_cancelled",
-            { identifier = identifier },
-            "Deep rescan cancelled: " .. identifier)
-          UI.show_float_toast(UI.t(
-            "settings.fx_cache.toast.deep_cancelled", nil,
-            "Deep rescan cancelled"), "err")
-        else
-          rs.status = UI.t("settings.fx_cache.status.deep_failed",
-            { reason = tostring(reason) },
-            "Deep rescan failed: " .. tostring(reason))
-          UI.show_float_toast(UI.t("settings.fx_cache.toast.deep_failed",
-            nil, "Deep rescan failed"), "err")
-        end
-      end,
-    })
-    if not started then
-      if reaper.ValidatePtr2(0, tr, "MediaTrack*") then
-        reaper.DeleteTrack(tr)
-      end
-      reaper.PreventUIRefresh(-1)
-      fx_cache_rescan_close_undo(rs, "ReaAssist: deep rescan (start failed)")
-      rs.active = false
-      rs.phase  = "done"
-      rs.track  = nil
-      rs.deep   = false
-      rs.status = UI.t("settings.fx_cache.status.deep_failed",
-        { reason = "start failed" }, "Deep rescan failed: start failed")
-      UI.show_float_toast(UI.t("settings.fx_cache.toast.deep_failed",
-        nil, "Deep rescan failed"), "err")
-    end
-  end
-end
-
--- Step 2 of the rescan state machine: read params from the temp
--- plugin, update the cache, and clean up.
-function CTX.fx_cache_rescan_read()
-  local rs = fx_cache_ui.rescan
-  if not rs.active or rs.phase ~= "reading" then return end
-  if RA.context_loaded and not RA.context_loaded() then
-    if rs.track and reaper.ValidatePtr2(0, rs.track, "MediaTrack*") then
-      reaper.DeleteTrack(rs.track)
-    end
-    reaper.PreventUIRefresh(-1)
-    fx_cache_rescan_close_undo(rs, "ReaAssist: rescan (context unavailable)")
-    rs.active = false
-    rs.phase  = "done"
-    rs.track  = nil
-    rs.status = RA.context_unavailable_message(
-      "before rescanning FX parameters")
+    rs.status = RA.context_unavailable_message("before rescanning FX parameters")
     UI.show_float_toast(rs.status, "err")
     return
   end
-
-  local tr = rs.track
-  -- ValidatePtr2: stale userdata from a project switch or explicit track
-  -- deletion between scan_start and this reader would crash the scanner.
-  if not tr or not reaper.ValidatePtr2(0, tr, "MediaTrack*") then
-    rs.active = false
-    rs.phase  = "done"
-    rs.track  = nil
-    rs.status = UI.t("settings.fx_cache.status.rescan_lost", nil,
-      "Rescan failed: temp track lost.")
-    reaper.PreventUIRefresh(-1)
-    fx_cache_rescan_close_undo(rs, "ReaAssist: rescan (failed)")
+  if rs.active or deep_scan.active or pref_plugins.scan.active then return end
+  local lease, admission_err = CTX.scan_lease_begin()
+  if not lease then
+    rs.status = UI.t("settings.fx_cache.status.failed_temp_track", nil, "Failed to create temporary track.")
+    Log.line("FX_CACHE_RESCAN", tostring(admission_err))
+    UI.show_float_toast(rs.status, "err")
     return
   end
-
-  -- Wrap the scan in xpcall so a thrown error doesn't skip the cleanup below
-  -- (orphaned hidden track + stuck PreventUIRefresh). Treat a thrown scan like
-  -- the ValidatePtr2-fail path above.
-  local _ok, params_list, max_group, total_count, needs_deep_scan =
-    xpcall(function()
-      return CTX.scan_fx_params(tr, rs.fx_idx)
-    end, debug.traceback)
-  if not _ok then
-    Log.line("FX_CACHE_RESCAN", string.format(
-      "scan_fx_params threw for %s: %s",
-      rs.ident or "?", tostring(params_list)))
-    if reaper.ValidatePtr2(0, tr, "MediaTrack*") then
-      reaper.DeleteTrack(tr)
-    end
-    reaper.PreventUIRefresh(-1)
-    fx_cache_rescan_close_undo(rs, "ReaAssist: rescan (scan error)")
-    rs.active = false
-    rs.phase  = "done"
-    rs.track  = nil
-    rs.status = UI.t("settings.fx_cache.status.rescan_error", nil,
-      "Rescan failed: scan threw an error.")
-    if fx_cache_ui.rescan_all.active then
-      fx_cache_ui.rescan_all.failures[#fx_cache_ui.rescan_all.failures+1] = rs.ident
-      CTX.fx_cache_rescan_all_advance()
-    else
-      UI.show_float_toast(UI.t("settings.fx_cache.toast.rescan_failed", nil,
-        "Rescan failed"), "err")
-    end
+  rs.lease = lease
+  lease.owner = rs
+  local tr, fx_idx
+  local ok, err = CTX.scan_setup(lease, "ReaAssist: rescan plugin load", function()
+    tr = CTX.scan_lease_insert(lease)
+    rs.track = tr
+    reaper.SetMediaTrackInfo_Value(tr, "B_SHOWINTCP", 0)
+    reaper.SetMediaTrackInfo_Value(tr, "B_SHOWINMIXER", 0)
+    assert(CTX.scan_lease_check(lease))
+    fx_idx = reaper.TrackFX_AddByName(tr, identifier, false, -1)
+    assert(type(fx_idx) == "number" and fx_idx >= 0, "scan FX load failed")
+    CTX.scan_lease_bind_fx(lease, fx_idx)
+    reaper.TrackFX_Show(tr, fx_idx, 2)
+    CTX.scan_lease_seal(lease)
+  end)
+  if not ok then
+    fx_cache_rescan_terminal(rs, lease)
+    rs.status = UI.t("settings.fx_cache.status.failed_load", { identifier = identifier }, "Failed to load: " .. identifier)
+    Log.line("FX_CACHE_RESCAN", tostring(err))
+    UI.show_float_toast(rs.status, "err")
     return
   end
-  FXCache.put_plugin(rs.ident, params_list, total_count, max_group, needs_deep_scan)
+  rs.active, rs.phase = true, "reading"
+  rs.ident, rs.fx_idx, rs.deep = identifier, fx_idx, deep and true or false
+  rs.status = deep and UI.t("settings.fx_cache.status.deep_scanning", nil, "Deep scanning...")
+    or UI.t("settings.fx_cache.status.scanning", nil, "Scanning...")
+  if not deep then return end
+  rs.phase = "deep"
+  local started = CTX.start_deep_scan({
+    tr = tr, fx_idx = fx_idx, lease = lease, identifier = identifier,
+    search_names = { identifier }, origin = "fx_cache",
+    on_complete = function(dparams, dmax, dcount)
+      if rs.lease ~= lease then return end
+      local clean, reason = fx_cache_rescan_terminal(rs, lease)
+      local saved, save_err = false, reason
+      if clean then
+        saved, save_err = pcall(FXCache.put_plugin, identifier, dparams, dcount, dmax, false)
+      end
+      if not saved then
+        rs.status = UI.t("settings.fx_cache.status.deep_failed", { reason = tostring(save_err) }, "Deep rescan failed: " .. tostring(save_err))
+        UI.show_float_toast(rs.status, "err")
+        return
+      end
+      rs.status = UI.t("settings.fx_cache.status.deep_rescanned", { identifier = identifier }, "Deep rescanned: " .. identifier)
+      UI.show_float_toast(UI.t("settings.fx_cache.toast.deep_complete", nil, "Deep rescan complete"), "ok")
+    end,
+    on_cancel = function(reason)
+      if rs.lease ~= lease then return end
+      fx_cache_rescan_terminal(rs, lease)
+      if reason == "cancelled" then
+        rs.status = UI.t("settings.fx_cache.status.deep_cancelled", { identifier = identifier }, "Deep rescan cancelled: " .. identifier)
+      else
+        rs.status = UI.t("settings.fx_cache.status.deep_failed", { reason = tostring(reason) }, "Deep rescan failed: " .. tostring(reason))
+      end
+      UI.show_float_toast(rs.status, "err")
+    end,
+  })
+  if not started then
+    fx_cache_rescan_terminal(rs, lease)
+    rs.status = UI.t("settings.fx_cache.status.deep_failed", { reason = "start failed" }, "Deep rescan failed: start failed")
+    UI.show_float_toast(rs.status, "err")
+  end
+end
 
-  reaper.DeleteTrack(tr)
-  reaper.PreventUIRefresh(-1)
-  fx_cache_rescan_close_undo(rs, "ReaAssist: rescan plugin")
-
-  rs.active = false
-  rs.phase  = "done"
-  rs.track  = nil
-  rs.status = UI.t("settings.fx_cache.status.rescanned",
-    { identifier = rs.ident }, "Rescanned: " .. rs.ident)
-
-  -- If a batch rescan is in flight, auto-advance to the next plugin. The
-  -- batch handler fires its own toast on full completion, so suppress the
-  -- per-item toast while batching (otherwise we'd flash one per plugin).
+function CTX.fx_cache_rescan_read()
+  local rs = fx_cache_ui.rescan
+  if not rs.active or rs.phase ~= "reading" then return end
+  local lease = rs.lease
+  local identifier = rs.ident
+  local ok, params, max_group, count, needs_deep
+  local context_error
+  if RA.context_loaded and not RA.context_loaded() then
+    context_error = RA.context_unavailable_message("before rescanning FX parameters")
+    ok, params = false, context_error
+  else
+    ok, params, max_group, count, needs_deep = CTX.scan_with_refresh(lease, function()
+      assert(CTX.scan_lease_check(lease, rs.fx_idx))
+      assert(rs.track == lease.track, "scan track alias changed")
+      return CTX.scan_fx_params(lease.track, rs.fx_idx, lease)
+    end)
+  end
+  local clean, reason = fx_cache_rescan_terminal(rs, lease)
+  if not clean and fx_cache_ui.rescan_all.active then
+    local batch = fx_cache_ui.rescan_all
+    batch.active, batch.queue, batch.current = false, {}, nil
+    CTX.scan_lease_finish(batch.lease)
+    batch.lease = nil
+  end
+  if ok and clean then
+    ok, params = pcall(FXCache.put_plugin, identifier, params, count, max_group, needs_deep)
+  else
+    ok, params = false, params or reason
+  end
+  if ok then
+    rs.status = UI.t("settings.fx_cache.status.rescanned", { identifier = identifier }, "Rescanned: " .. identifier)
+  else
+    Log.line("FX_CACHE_RESCAN", tostring(params))
+    rs.status = context_error or UI.t("settings.fx_cache.status.rescan_error", nil, "Rescan failed: scan threw an error.")
+  end
   if fx_cache_ui.rescan_all.active then
+    if not ok then
+      fx_cache_ui.rescan_all.failures[#fx_cache_ui.rescan_all.failures + 1] = identifier
+    end
     CTX.fx_cache_rescan_all_advance()
   else
-    UI.show_float_toast(UI.t("settings.fx_cache.toast.rescan_complete", nil,
-      "Rescan complete"), "ok")
+    UI.show_float_toast(rs.status, ok and "ok" or "err")
   end
 end
 
@@ -18937,7 +19433,7 @@ end
 -- continues with the rest.
 function CTX.fx_cache_rescan_all_start(idents)
   local ra = fx_cache_ui.rescan_all
-  if ra.active or fx_cache_ui.rescan.active or deep_scan.active then
+  if ra.active or fx_cache_ui.rescan.active or deep_scan.active or pref_plugins.scan.active then
     return
   end
   ra.queue = {}
@@ -18945,6 +19441,13 @@ function CTX.fx_cache_rescan_all_start(idents)
     ra.queue[#ra.queue+1] = id
   end
   if #ra.queue == 0 then return end
+  local lease, reason = CTX.scan_lease_begin()
+  if not lease then
+    ra.queue = {}
+    Log.line("FX_CACHE_RESCAN", tostring(reason))
+    return
+  end
+  ra.lease, lease.owner = lease, ra
   ra.total    = #ra.queue
   ra.index    = 0
   ra.current  = nil
@@ -18961,7 +19464,19 @@ end
 function CTX.fx_cache_rescan_all_advance()
   local ra = fx_cache_ui.rescan_all
   if not ra.active then return end
+  if not CTX.scan_lease_check(ra.lease) or CTX._scan_refresh_uncertain or CTX._scan_undo_uncertain then
+    ra.active, ra.queue, ra.current = false, {}, nil
+    CTX.scan_lease_finish(ra.lease)
+    ra.lease = nil
+    return
+  end
   while #ra.queue > 0 do
+    if not CTX.scan_lease_check(ra.lease) or CTX._scan_refresh_uncertain or CTX._scan_undo_uncertain then
+      ra.active, ra.queue, ra.current = false, {}, nil
+      CTX.scan_lease_finish(ra.lease)
+      ra.lease = nil
+      return
+    end
     local next_ident = table.remove(ra.queue, 1)
     ra.index   = ra.index + 1
     ra.current = next_ident
@@ -18996,6 +19511,8 @@ function CTX.fx_cache_rescan_all_advance()
     }, str_format("Rescanned %d/%d plugin%s.",
       succeeded, ra.total, ra.total == 1 and "" or "s"))
   end
+  CTX.scan_lease_finish(ra.lease)
+  ra.lease = nil
   ra.active  = false
   ra.current = nil
   fx_cache_ui.rescan.status = msg
@@ -19009,6 +19526,8 @@ function CTX.fx_cache_rescan_all_cancel()
   local ra = fx_cache_ui.rescan_all
   if not ra.active then return end
   local done_so_far = ra.index - (fx_cache_ui.rescan.active and 1 or 0)
+  CTX.scan_lease_finish(ra.lease)
+  ra.lease = nil
   ra.active  = false
   ra.queue   = {}
   ra.current = nil
@@ -19776,6 +20295,144 @@ end
 -- =============================================================================
 -- Attachment UI renderer
 -- =============================================================================
+-- Saved-image actions use the backend's exact-card holder and logical census.
+function UI.saved_image_button(label, id)
+  local width = math_min(ImGui.ImGui_CalcTextSize(RA.ctx, label) + RA.SC(20),
+    math_max(1, (ImGui.ImGui_GetContentRegionAvail(RA.ctx))))
+  return ImGui.ImGui_Button(RA.ctx, label .. (id or ""), width, 0)
+end
+
+function UI.saved_image_controls(msg, index)
+  local available = Net.saved_images_release_available(msg)
+  local text, label_kind = Net.saved_images_copy_prompt(msg)
+  if not available and not text and not msg.recovery_images_released then return end
+  ImGui.ImGui_Spacing(RA.ctx)
+  if available then
+    if UI.saved_image_button(UI.t("image.saved.release", nil,
+        "Release Saved Images"), "##saved_images_release_" .. index) then
+      local holder = Net.request_saved_images_release(msg)
+      if holder then
+        holder.open_requested = true
+        holder.focus_cancel = true
+      end
+    end
+    UI.tooltip(UI.t("image.saved.release.tooltip", nil,
+      "Release the images saved for this error card. Sending again will require attaching them to a new message."))
+  end
+  if text then
+    local label = label_kind == "original"
+      and UI.t("image.saved.copy_original", nil, "Copy Original Prompt")
+      or UI.t("image.saved.copy_request", nil, "Copy Saved Request Prompt")
+    if UI.saved_image_button(label, "##saved_images_copy_" .. index) then
+      ImGui.ImGui_SetClipboardText(RA.ctx, text)
+    end
+    UI.tooltip(label)
+  end
+  if msg.recovery_images_released then
+    ImGui.ImGui_TextWrapped(RA.ctx, UI.t("image.saved.released", nil,
+      "Saved images released. Copy the prompt and attach the files to a new message to send again."))
+  end
+end
+
+function UI.saved_image_budget_height(avail_w)
+  local snapshot = Attach.saved_image_budget_snapshot()
+  if snapshot.original_bytes <= 0 and snapshot.encoded_bytes <= 0 then return 0 end
+  return UI.measure_multiline_height(UI.saved_image_budget_text(snapshot), avail_w)
+    + RA.SC(8)
+end
+
+function UI.draft_encoding_error_text()
+  for _, att in ipairs(S.attachments) do
+    if att.image_encoding_error then
+      local text = UI.t("attach.error.encoding_failed", nil,
+        "This attachment could not be prepared. Remove it before sending.")
+      if S.attach_error == text and (time_precise() - S.attach_error_time) < 5 then
+        return nil
+      end
+      return text
+    end
+  end
+end
+
+function UI.saved_image_budget_text(snapshot)
+  return UI.t("image.saved.budget", {
+    original = str_format("%.1f", snapshot.original_bytes / 1048576),
+    original_limit = str_format("%.1f", snapshot.original_limit_bytes / 1048576),
+    encoded = str_format("%.1f", snapshot.encoded_bytes / 1048576),
+    encoded_limit = str_format("%.1f", snapshot.encoded_limit_bytes / 1048576),
+  }, str_format("Saved-image allowance: %.1f / %.1f MiB originals; %.1f / %.1f MiB encoded.",
+    snapshot.original_bytes / 1048576, snapshot.original_limit_bytes / 1048576,
+    snapshot.encoded_bytes / 1048576, snapshot.encoded_limit_bytes / 1048576))
+end
+
+function UI.saved_image_release_popup(chat_rendered)
+  local holder = S.image_release_confirmation
+  local popup = UI.t("image.saved.confirm.title", nil,
+    "Release Saved Images?") .. "###release_saved_images"
+  local valid = holder and chat_rendered
+    and Net.saved_images_release_valid(holder)
+  if holder and not valid then
+    Net.cancel_saved_images_release(holder, "not_available")
+  end
+  if valid and holder.open_requested then
+    holder.open_requested = nil
+    if ImGui.ImGui_IsPopupOpen(RA.ctx, "", ImGui.ImGui_PopupFlags_AnyPopup()) then
+      Net.cancel_saved_images_release(holder, "competing_popup")
+      return
+    end
+    ImGui.ImGui_OpenPopup(RA.ctx, popup)
+  end
+  -- A stale own popup can only be closed while its own Begin succeeded.
+  if not valid and not ImGui.ImGui_IsPopupOpen(RA.ctx, popup) then return end
+  ImGui.ImGui_SetNextWindowSize(RA.ctx, RA.SC(480), 0,
+    ImGui.ImGui_Cond_Appearing())
+  UI.push_modal_style()
+  local visible, open = ImGui.ImGui_BeginPopupModal(RA.ctx, popup,
+    true, ImGui.ImGui_WindowFlags_NoResize())
+  if visible then
+    if not valid then
+      ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+    else
+      holder.opened = true
+      ImGui.ImGui_TextWrapped(RA.ctx, UI.t("image.saved.confirm.body", nil,
+        "Release the images saved for this error card? This card will no longer be able to retry or switch models with these images. If this is the last saved copy of a screenshot or older file version, releasing it may be irreversible. You must supply the images again to send a new message. Other messages and draft attachments stay unchanged."))
+      for _, entry in ipairs(holder.entries) do
+        if entry.kind == "image" then
+          ImGui.ImGui_TextWrapped(RA.ctx, tostring(entry.name or ""))
+        end
+      end
+      ImGui.ImGui_Spacing(RA.ctx)
+      ImGui.ImGui_TextWrapped(RA.ctx,
+        UI.saved_image_budget_text(Attach.saved_image_budget_snapshot()))
+      local cancel = not open
+        or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape())
+      if holder.focus_cancel then
+        ImGui.ImGui_SetKeyboardFocusHere(RA.ctx)
+        holder.focus_cancel = nil
+      end
+      if UI.saved_image_button(UI.t("common.cancel", nil, "Cancel")) then
+        cancel = true
+      end
+      UI.push_modal_danger_btn()
+      local confirm = UI.saved_image_button(
+        UI.t("image.saved.release", nil, "Release Saved Images"))
+      UI.pop_modal_danger_btn()
+      if cancel then
+        Net.cancel_saved_images_release(holder, "dismissed")
+        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+      elseif confirm then
+        local ok = Net.confirm_saved_images_release(holder)
+        if not ok then Net.cancel_saved_images_release(holder, "stale") end
+        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+      end
+    end
+    ImGui.ImGui_EndPopup(RA.ctx)
+  elseif holder then
+    Net.cancel_saved_images_release(holder, "not_visible")
+  end
+  UI.pop_modal_style()
+end
+
 -- Renders the Attach/Screenshot/Paste button row and the attachment
 -- queue strip below the prompt input.
 
@@ -19784,6 +20441,15 @@ end
 -- render. Centralising lets a fourth attachment kind be added in one
 -- place rather than diverging across the two consumers.
 local _ATTACH_KIND_PREFIX = { image = "[IMG] ", pdf = "[PDF] " }
+function Attach.kind_from_name(name)
+  if name == "Screenshot" or name == "Clipboard image" then return "image" end
+  local ext = name:match("%.([^%.]+)$")
+  ext = ext and ext:lower() or ""
+  if ext == "png" or ext == "jpg" or ext == "jpeg"
+      or ext == "gif" or ext == "webp" then return "image" end
+  return ext == "pdf" and "pdf" or "text"
+end
+
 function Attach.kind_prefix(kind)
   return _ATTACH_KIND_PREFIX[kind] or "[TXT] "
 end
@@ -19876,6 +20542,12 @@ Attach.render_ui = function(fhs, avail_w)
   end
 
   -- Transient error display (auto-fades after 5 seconds)
+  if Attach.saved_image_budget_snapshot then
+    local snapshot = Attach.saved_image_budget_snapshot()
+    if snapshot.original_bytes > 0 or snapshot.encoded_bytes > 0 then
+      ImGui.ImGui_TextWrapped(RA.ctx, UI.saved_image_budget_text(snapshot))
+    end
+  end
   if S.attach_error and (time_precise() - S.attach_error_time) < 5 then
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), COL.WARN)
     local short_err = S.attach_error:match("^([^\n]+)") or S.attach_error
@@ -19886,6 +20558,14 @@ Attach.render_ui = function(fhs, avail_w)
   end
 
   -- Attachment queue strip (shown when files are queued)
+  do
+    local encoding_error = UI.draft_encoding_error_text()
+    if encoding_error then
+      PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), COL.WARN)
+      ImGui.ImGui_TextWrapped(RA.ctx, encoding_error)
+      PopStyleColor(RA.ctx)
+    end
+  end
   if #S.attachments > 0 then
     ImGui.ImGui_SetCursorPosY(RA.ctx, ImGui.ImGui_GetCursorPosY(RA.ctx) + 2)
     PushStyleColor(RA.ctx, ImGui.ImGui_Col_ChildBg(), COL.FRAME_BG)
@@ -19992,6 +20672,7 @@ end
 -- Returns `open` from ImGui_Begin so loop() can detect the X-button
 -- close on frames where the window is minimised / collapsed.
 function Render.main_window()
+  local image_release_chat_rendered = false
   -- Set initial window size on first open; user can freely resize thereafter.
   -- When UI scale changes, re-apply the scaled default size immediately.
   -- Minimum width matches the default so the welcome text never needs to wrap.
@@ -20324,6 +21005,7 @@ function Render.main_window()
       api_keys.saved_auto_backup          = nil
       api_keys.saved_stream_responses     = nil
       api_keys.saved_reasoning_display_mode = nil
+      api_keys.staged_reasoning_display_mode = nil
       api_keys.saved_chat_font_idx        = nil
       api_keys.saved_reply_language_idx   = nil
       api_keys.saved_include_snapshot     = nil
@@ -20360,10 +21042,9 @@ function Render.main_window()
 
     -- First-run flow: when api_keys.screen is set, render one of the
     -- full-window onboarding screens INSTEAD of the main UI. The main UI
-    -- chat/input/buttons/popups are all skipped until api_keys.screen is
-    -- nil. The popup modals stay inside the main-UI branch -- they cannot
-    -- be opened while a first-run screen is active because the buttons
-    -- that open them are not rendered.
+    -- chat/input/buttons are skipped until api_keys.screen is nil. Most
+    -- popup modals stay in that branch; the shared turn-budget confirmation
+    -- also renders over Settings so its pending choice remains reachable.
     if api_keys.screen == "tos" then
       Render.tos_screen()
     elseif api_keys.screen == "first_run" then
@@ -20390,6 +21071,8 @@ function Render.main_window()
       Render.credits_screen()
     else
 
+    api_keys.visual_home_entered = true
+    image_release_chat_rendered = true
     -- V5 hero band (persistent across empty + chat states). Target is
     -- derived from whether any messages exist; UI.transition.tick advances
     -- the phase scalar toward target each frame. The hero reads the eased
@@ -20466,7 +21149,7 @@ function Render.main_window()
 
     -- ------ Chat scroll area ------------------------------------------------
     -- Reserve space for every bottom element (prompt row + 10px gap + mode
-    -- row + 10px gap + 32px footer) so the chat child fills the remaining
+    -- row + hint line + 10px gap + 32px footer) so the chat child fills the remaining
     -- height exactly and the V5 footer pins to the window bottom. Extra
     -- reserve kicks in when attachments are queued (the strip sits above
     -- the input) or the update indicator is visible.
@@ -20479,6 +21162,7 @@ function Render.main_window()
       S.status, S.retry_scheduled, deep_scan.active, S.resolve_popup)
     local bottom_reserve = PROMPT_TOP_PAD + V5_PROMPT_H
                          + MODE_ROW_GAP + MODE_ROW_H + MODE_ROW_GAP
+                         + RA.SC(10) -- the model hint must remain above the footer
                          + FOOTER_H
                          -- ItemSpacing slack + visible pad at the bottom of
                          -- the footer. 12px comes out of the chat column and
@@ -20487,8 +21171,23 @@ function Render.main_window()
                          -- as breathing room under the credits row).
                          + RA.SC(31)
                          + (status_docked and RA.SC(70) or 0)
+    if S._ceiling_alert_held and next(S._ceiling_muted_fx or {}) ~= nil then
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(), 6, 5)
+      bottom_reserve = bottom_reserve + ImGui.ImGui_GetFrameHeightWithSpacing(RA.ctx)
+      ImGui.ImGui_PopStyleVar(RA.ctx)
+      PopFont(RA.ctx)
+    end
     if #S.attachments > 0 then
       bottom_reserve = bottom_reserve + math_floor(fhs * 1.5)
+    end
+    bottom_reserve = bottom_reserve + UI.saved_image_budget_height(avail_w)
+    do
+      local encoding_error = UI.draft_encoding_error_text()
+      if encoding_error then
+        bottom_reserve = bottom_reserve + UI.measure_multiline_height(encoding_error, avail_w)
+          + RA.SC(8)
+      end
     end
     if update.state == "downloading_batch"
        or update.state == "verifying_download"
@@ -20738,6 +21437,7 @@ function Render.main_window()
 
     local scroll_to_msg_y = nil  -- captured Y for smooth-scroll target
     local chat_cull_running_cost, chat_cull_running_cost_count = 0, 0
+    local chat_details_language = UI.active_language_code()
     for i, msg in ipairs(S.display_messages) do
       if msg.cost then
         chat_cull_running_cost = chat_cull_running_cost + msg.cost
@@ -20809,12 +21509,7 @@ function Render.main_window()
           end
           if msg.attach_names then
             for _, aname in ipairs(msg.attach_names) do
-              local is_img = aname:match("%.png$") or aname:match("%.jpg$")
-                          or aname:match("%.jpeg$") or aname:match("%.gif$")
-                          or aname:match("%.webp$") or aname == "Screenshot"
-                          or aname == "Clipboard image"
-              local kind = is_img and "image"
-                or (aname:match("%.pdf$") and "pdf" or "text")
+              local kind = Attach.kind_from_name(aname)
               local prefix = Attach.kind_prefix(kind)
               local aw = CalcTextSize(RA.ctx, prefix .. aname)
               if aw > nw then nw = aw end
@@ -21084,12 +21779,7 @@ function Render.main_window()
           ImGui.ImGui_Spacing(RA.ctx)
           PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), COL.DETAIL)
           for _, aname in ipairs(msg.attach_names) do
-            local icon = aname:match("%.png$") or aname:match("%.jpg$") or
-                         aname:match("%.jpeg$") or aname:match("%.gif$") or
-                         aname:match("%.webp$") or aname == "Screenshot" or
-                         aname == "Clipboard image"
-            local kind = icon and "image"
-              or aname:match("%.pdf$") and "pdf" or "text"
+            local kind = Attach.kind_from_name(aname)
             local prefix = Attach.kind_prefix(kind)
             Text(RA.ctx, prefix .. aname)
           end
@@ -21161,6 +21851,7 @@ function Render.main_window()
           -- nulls these on theme switch since color_map embeds u32 from
           -- TK.accent.
           if msg._details_field_map        == nil
+             or msg._details_fm_language  ~= chat_details_language
              or msg._details_fm_ctx       ~= msg.ctx_label
              or msg._details_fm_model     ~= msg.model_label
              or msg._details_fm_tok_in    ~= msg.tok_in
@@ -21183,8 +21874,10 @@ function Render.main_window()
                 ~= #(msg.response_cache_calls or {})
              or msg._details_fm_transport_event_count
                 ~= #(msg.transport_events or {}) then
-            if msg._ctx_display_src ~= msg.ctx_label then
+            if msg._ctx_display_src ~= msg.ctx_label
+                or msg._ctx_display_language ~= chat_details_language then
               msg._ctx_display_src = msg.ctx_label
+              msg._ctx_display_language = chat_details_language
               msg._ctx_display     = (msg.ctx_label
                 :gsub("snapshot", UI.t("details.value.session", nil, "Session"))
                 :gsub("api_ref",  "API"))
@@ -21335,6 +22028,7 @@ function Render.main_window()
             color_map["Est. Total"] = accent_dk
 
             msg._details_field_map    = field_map
+            msg._details_fm_language  = chat_details_language
             msg._details_color_map    = color_map
             msg._details_fm_ctx       = msg.ctx_label
             msg._details_fm_model     = msg.model_label
@@ -22067,6 +22761,7 @@ function Render.main_window()
             PopStyleColor(RA.ctx, 1) -- Border
             ImGui.ImGui_PopStyleVar(RA.ctx, 3)
         end
+        UI.saved_image_controls(msg, i)
         if msg.recovery_note and msg.recovery_note ~= "" then
           ImGui.ImGui_Spacing(RA.ctx)
           UI.selectable_text(msg.recovery_note,
@@ -22107,6 +22802,7 @@ function Render.main_window()
               or msg._typed_receipt_auto_ran ~= msg.auto_ran
               or msg._typed_receipt_lang ~= ta_lang
               or msg._typed_receipt_source_version ~= ta_source_version
+              or msg._typed_receipt_catalog ~= ta_catalog
               or msg._typed_receipt_font_state ~= ta_font_key then
             local summary = Code.typed_actions_display_text
               and Code.typed_actions_display_text(plan_text,
@@ -22162,6 +22858,7 @@ function Render.main_window()
             msg._typed_receipt_auto_ran = msg.auto_ran
             msg._typed_receipt_lang = ta_lang
             msg._typed_receipt_source_version = ta_source_version
+            msg._typed_receipt_catalog = ta_catalog
             msg._typed_receipt_font_state = ta_font_key
             msg._typed_receipt_summary = summary
             msg._typed_receipt_font = summary and summary ~= ""
@@ -22294,15 +22991,15 @@ function Render.main_window()
                   + RA.SC(22)))
               if ImGui.ImGui_Button(RA.ctx,
                   run_edit_label .. "##ta_run_" .. i, run_edit_w, 0) then
-                local ok_apply, reason, apply_msg = TypedActionController
-                  and TypedActionController.apply_typed_action_message
-                  and TypedActionController.apply_typed_action_message(msg, i)
+                local ok_apply, reason, apply_msg, next_opts
+                if TypedActionController and TypedActionController.apply_typed_action_message then
+                  ok_apply, reason, apply_msg, next_opts = TypedActionController.apply_typed_action_message(msg, i)
+                end
                 if reason == "backup_unsaved" then
-                  S.backup_warn_code = nil
-                  S.backup_warn_jsfx = nil
-                  S.backup_warn_idx = nil
-                  S.backup_warn_message = nil
+                  TypedActionController.clear_visual_run_confirmation("backup")
+                  TypedActionController.clear_visual_run_confirmation("risky")
                   S.backup_warn_typed_idx = i
+                  S.backup_warn_typed_opts = next_opts
                   S.open_backup_warn = true
                 elseif UI.show_float_toast then
                   UI.show_float_toast(apply_msg or (ok_apply
@@ -22330,10 +23027,10 @@ function Render.main_window()
               if ImGui.ImGui_Button(RA.ctx,
                   request_lua_label .. "##ta_request_lua_" .. i,
                   request_lua_w, 0) then
-                local ok_req, req_msg, req_handling = TypedActionController
-                  and TypedActionController.request_lua_for_typed_action_message
-                  and TypedActionController.request_lua_for_typed_action_message(
-                    msg, i)
+                local ok_req, req_msg, req_handling
+                if TypedActionController and TypedActionController.request_lua_for_typed_action_message then
+                  ok_req, req_msg, req_handling = TypedActionController.request_lua_for_typed_action_message(msg, i)
+                end
                 if not ok_req and req_handling ~= "surfaced"
                     and UI.show_float_toast then
                   UI.show_float_toast(req_msg or UI.t(
@@ -22368,12 +23065,15 @@ function Render.main_window()
                   RA.SC(78), 0)
                   and TypedActionController
                     .message_can_undo_generated_action(msg) then
-                reaper.Main_OnCommand(40029, 0)
-                msg.typed_action_undo_clicked = true
+                local ok_undo, undo_reason = TypedActionController.undo_typed_action_message(msg)
+                if not ok_undo and UI.show_float_toast then
+                  UI.show_float_toast(
+                    TypedActionController.typed_action_undo_failure_text(undo_reason), "err")
+                end
                 S.refocus_prompt = true
               end
-              UI.tooltip(UI.t("typed_actions.undo.tooltip", nil,
-                "Undo the last REAPER action (Ctrl+Z)"))
+              UI.tooltip(UI.t("typed_actions.undo.native_history", nil,
+                "Restore REAPER's recorded state before this edit. Unrecorded changes made before or after it may also be undone."))
               if msg.typed_action_lua_generation_pending ~= true
                   and msg.typed_action_lua_requested ~= true then
                 ImGui.ImGui_SameLine(RA.ctx, 0, RA.SC(6))
@@ -22381,10 +23081,10 @@ function Render.main_window()
                     UI.t("typed_actions.request_lua", nil,
                       "Request Lua") .. "##ta_request_lua_applied_" .. i,
                     0, 0) then
-                  local ok_req, req_msg, req_handling = TypedActionController
-                    and TypedActionController.request_lua_for_typed_action_message
-                    and TypedActionController.request_lua_for_typed_action_message(
-                      msg, i)
+                  local ok_req, req_msg, req_handling
+                  if TypedActionController and TypedActionController.request_lua_for_typed_action_message then
+                    ok_req, req_msg, req_handling = TypedActionController.request_lua_for_typed_action_message(msg, i)
+                  end
                   if not ok_req and req_handling ~= "surfaced" then
                     UI.show_float_toast(req_msg or UI.t(
                       "typed_actions.no_original_prompt", nil,
@@ -22398,6 +23098,9 @@ function Render.main_window()
               PopFont(RA.ctx)
               PopStyleColor(RA.ctx, 5)
               ImGui.ImGui_PopStyleVar(RA.ctx, 3)
+              UI.selectable_text(UI.t("typed_actions.undo.native_history", nil,
+                "Restore REAPER's recorded state before this edit. Unrecorded changes made before or after it may also be undone."),
+                "##ta_undo_notice_" .. i, body_w, COL.DETAIL, body_cpl)
             end
           end
           -- Round thirty, Z-01. No typed-action operation inserts a plug-in,
@@ -22683,6 +23386,9 @@ function Render.main_window()
               auto_run_block_warning = msg.manual_review_reason or UI.t(
                 "validator.midi_record_mode_review", nil,
                 "The script still assigns an output-recording I_RECMODE value to a MIDI recording workflow after an automatic correction attempt. Automatic execution is paused because that mode can record track output instead of the requested MIDI behavior. Review the code before using Run. MIDI overdub is 7 and MIDI replace is 8.")
+            elseif reason == "confirmation_pending" then
+              auto_run_block_warning = UI.t("auto_run.blocked.confirmation_pending", nil,
+                "Another run confirmation is open. Finish or cancel it, then review this response and use Run.")
             elseif reason == "project_changed" then
               auto_run_block_warning = UI.t(
                 "auto_run.blocked.project_changed", nil,
@@ -22777,18 +23483,11 @@ function Render.main_window()
                 msg.run_blocked = run_message
               elseif risk_warning then
                 -- Risky code: require explicit user confirmation before executing.
-                S.risky_warn_code   = msg.code_block
-                S.risky_warn_idx    = i
-                S.risky_warn_message = msg
-                S.risky_warn_detail = risk_warning
-                S.open_risky_warn   = true
+                UI.stage_lua_confirmation("risky", msg, i, msg.code_block, risk_warning)
               elseif prefs.auto_backup then
                 local _, berr = Code.safety_backup()
                 if berr == "unsaved" then
-                  S.backup_warn_code = msg.code_block
-                  S.backup_warn_idx  = i
-                  S.backup_warn_message = msg
-                  S.open_backup_warn = true
+                  UI.stage_lua_confirmation("backup", msg, i, msg.code_block)
                 elseif Code.safety_backup_can_proceed(berr) then
                   S.status = "running"
                   local ok = Code.run(msg.code_block, nil, msg.conversation_delete,
@@ -22840,9 +23539,35 @@ function Render.main_window()
                   action_btn_w(undo_label, RA.SC(55), RA.SC(84)), 0)
                   and TypedActionController
                     .message_can_undo_generated_action(msg) then
-                Theme.restore_backups()
-                reaper.Main_OnCommand(40029, 0)
-                msg.lua_undo_clicked = true
+                local _, theme_restore_err, theme_restore = Theme.restore_backups()
+                if not theme_restore_err and not theme_restore then
+                  local manifest_ok, manifest = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__KEYS")
+                  local journal_ok, journal = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__RESTORE")
+                  if not manifest_ok or manifest ~= "" or not journal_ok or journal ~= "" then
+                    theme_restore_err = RA.t("code.theme_error.restore_pending", nil,
+                      "Theme recovery is incomplete. Saved colors were kept for retry.")
+                  end
+                end
+                if theme_restore_err then
+                  reaper.ShowMessageBox(theme_restore_err, "ReaAssist", 0)
+                else
+                  if theme_restore and theme_restore.warning then
+                    reaper.ShowMessageBox(theme_restore.warning, "ReaAssist", 0)
+                  end
+                  if TypedActionController.message_can_undo_generated_action(msg) then
+                    local ok_undo, result = pcall(reaper.Undo_DoUndo2, msg._lua_run_project)
+                    if ok_undo and type(result) == "number" and result > 0
+                        and result % 1 == 0 then
+                      msg.lua_undo_clicked = true
+                    elseif UI.show_float_toast then
+                      UI.show_float_toast(UI.t("code.undo.unconfirmed", nil,
+                        "Project Undo could not be confirmed. Review REAPER history before continuing."), "err")
+                    end
+                  elseif UI.show_float_toast then
+                    UI.show_float_toast(UI.t("code.undo.unavailable", nil,
+                      "Project Undo is no longer available."), "err")
+                  end
+                end
                 S.refocus_prompt = true
               end
               UI.tooltip(UI.t("code.undo.tooltip", nil,
@@ -22863,14 +23588,21 @@ function Render.main_window()
               if ImGui.ImGui_Button(RA.ctx,
                   save_theme_label .. "##thsave_" .. i,
                   action_btn_w(save_theme_label, RA.SC(95), RA.SC(125)), 0) then
-                local ok, save_err = Theme.save_to_file()
+                local ok, save_err, saved_theme = Theme.save_to_file()
                 if ok then
+                  local saved_path = saved_theme and saved_theme.path or ""
+                  local saved_text
+                  if saved_theme and saved_theme.previous_retained then
+                    saved_text = UI.t("code.theme_saved_with_previous", {
+                      path = saved_path, previous = saved_theme.previous_path,
+                    }, "Theme colors saved to:\n" .. saved_path
+                      .. "\n\nPrevious theme kept at:\n" .. saved_theme.previous_path)
+                  else
+                    saved_text = UI.t("code.theme_saved", { path = saved_path },
+                      "Theme colors saved to:\n" .. saved_path)
+                  end
                   reaper.ShowMessageBox(
-                    UI.t("code.theme_saved", {
-                      path = reaper.GetLastColorThemeFile(),
-                    }, "Theme colors saved to:\n"
-                      .. reaper.GetLastColorThemeFile()),
-                    "ReaAssist", 0)
+                    saved_text, "ReaAssist", 0)
                 else
                   reaper.ShowMessageBox(save_err, "ReaAssist", 0)
                 end
@@ -24055,6 +24787,19 @@ function Render.main_window()
     PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_GrabRounding(),   RA.SC(4))
     PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_PopupRounding(),  RA.SC(4))
 
+    if S._ceiling_alert_held and next(S._ceiling_muted_fx or {}) ~= nil then
+      PushFont(RA.ctx, FONT.inter_reg, RA.SC(11))
+      PushStyleVar(RA.ctx, ImGui.ImGui_StyleVar_FramePadding(), 6, 5)
+      SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx) + V5_ROW_INSET)
+      if ImGui.ImGui_Button(RA.ctx,
+          UI.t("dialog.ceiling.review_alert", nil, "Review alert")
+            .. "##ceiling_review_alert", 0, 0) then
+        S._ceiling_alert_held = nil
+        S._ceiling_alert_pending = true
+      end
+      ImGui.ImGui_PopStyleVar(RA.ctx)
+      PopFont(RA.ctx)
+    end
     -- V5 layout -- InputTextMultiline driven by pre-computed wrap lines from
     -- the outer block. Widget grows 1 -> 2 lines as content wraps; bottom
     -- stays pinned so the prompt appears to expand upward. Constants come
@@ -24376,14 +25121,13 @@ function Render.main_window()
     UI.drop_target()
 
 
-    -- Show a character counter inline after buttons when approaching the limit.
+    -- Show the byte count against the admitted prompt limit.
     local input_bytes = #S.input_buf
     if input_bytes > INPUT_BUF_SIZE * 0.8 then
-      local input_chars = UI._utf8_char_count(S.input_buf)
       SameLine(RA.ctx, 0, BTN_GAP)
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(),
         input_bytes >= INPUT_BUF_SIZE - 1 and COL.ERROR or COL.WARN)
-      ImGui.ImGui_TextWrapped(RA.ctx, str_format("%d / %d", input_chars, INPUT_BUF_SIZE))
+      ImGui.ImGui_TextWrapped(RA.ctx, str_format("%d / %d", input_bytes, UI.PROMPT_INPUT_MAX_BYTES))
       PopStyleColor(RA.ctx)
     end
 
@@ -24505,163 +25249,7 @@ function Render.main_window()
     -- do...end scopes popup modal locals to stay under the 200-local limit.
     do -- popup modals
 
-    -- ------ Per-turn limit confirmation popup -------------------------------
-    -- The exact next request is held in memory by Net until the user makes an
-    -- explicit choice. Continue is intentionally danger-styled and never
-    -- keyboard-defaulted; Cancel Request receives initial focus and Escape also
-    -- cancels. The separate MAX_CALLS_PER_TURN runaway cap remains a hard gate.
-    local turn_budget_popup = UI.t("dialog.turn_budget.title", nil,
-      "Continue This Request?") .. "###turn_budget_confirmation"
-    if S.open_turn_budget_confirmation and S.turn_budget_confirmation then
-      ImGui.ImGui_OpenPopup(RA.ctx, turn_budget_popup)
-      S.open_turn_budget_confirmation = false
-    end
-    if S.turn_budget_confirmation then
-      local tb_pending = S.turn_budget_confirmation
-      local tb_budget = tb_pending.budget or {}
-      local tb_matched = tb_pending.matched_condition
-        or "projected_token_limit"
-      local tb_headline = UI.t("dialog.turn_budget.headline", nil,
-        "This request would exceed a limit you set.")
-      local tb_conditions = type(tb_budget.matched_conditions) == "table"
-        and tb_budget.matched_conditions or { tb_matched }
-      if #tb_conditions == 0 then tb_conditions = { tb_matched } end
-      local tb_body_parts = {}
-      for _, tb_condition in ipairs(tb_conditions) do
-        local tb_part
-        if tb_condition == "unknown_provider_price" then
-          tb_part = UI.t("dialog.turn_budget.unknown_provider_price_body", nil,
-            "This billable Custom provider has no trusted input and output price estimate. ReaAssist cannot prove that this request stays within your per-turn dollar limit.")
-        elseif tb_condition == "unknown_cache_price" then
-          tb_part = UI.t("dialog.turn_budget.unknown_cache_price_body", nil,
-            "The previous model call used a cache category whose price is blank. The exact turn cost is Unknown, so ReaAssist cannot safely estimate this additional billable request.")
-        elseif tb_condition == "actual_cost_limit" then
-          tb_part = UI.t("dialog.turn_budget.actual_cost_body", {
-            actual = MODELS.format_cost(tb_budget.actual_cost or 0),
-            limit = MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
-              or CFG.TURN_COST_LIMIT_DEFAULT),
-          }, str_format(
-            "Provider-reported actual cost already used: %s (your limit: %s). A trusted estimate is unavailable for the next model call.",
-            MODELS.format_cost(tb_budget.actual_cost or 0),
-            MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
-              or CFG.TURN_COST_LIMIT_DEFAULT)))
-        elseif tb_condition == "projected_cost_limit" then
-          tb_part = UI.t("dialog.turn_budget.cost_body", {
-            projected = MODELS.format_cost(tb_budget.projected_cost or 0),
-            limit = MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
-              or CFG.TURN_COST_LIMIT_DEFAULT),
-            next = MODELS.format_cost(tb_budget.next_cost or 0),
-          }, str_format(
-            "Projected cost for this request: %s (your limit: %s). This next model call could cost up to %s.",
-            MODELS.format_cost(tb_budget.projected_cost or 0),
-            MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
-              or CFG.TURN_COST_LIMIT_DEFAULT),
-            MODELS.format_cost(tb_budget.next_cost or 0)))
-        elseif tb_condition == "projected_token_limit" then
-          local tb_projected = fmt_num(tb_budget.projected_tokens or 0)
-          local tb_limit = fmt_num(tonumber(prefs.turn_token_limit)
-            or CFG.TURN_TOKEN_LIMIT_DEFAULT)
-          local tb_next = fmt_num(tb_budget.next_tokens or 0)
-          tb_part = UI.t("dialog.turn_budget.token_body", {
-            projected = tb_projected,
-            limit = tb_limit,
-            next = tb_next,
-          }, str_format(
-            "Projected token use for this request: %s (your limit: %s). This next model call could use up to %s tokens.",
-            tb_projected, tb_limit, tb_next))
-        end
-        if tb_part then tb_body_parts[#tb_body_parts + 1] = tb_part end
-      end
-      local tb_body = tbl_concat(tb_body_parts, "\n\n")
-      local tb_not_sent = UI.t("dialog.turn_budget.not_sent", nil,
-        "No additional model request has been sent.")
-      local tb_one_call = UI.t("dialog.turn_budget.one_call", nil,
-        "If you choose Continue Anyway, ReaAssist will send only this one model call. It will ask again before any later call that would exceed a limit.")
-      local tb_w = RA.SC(520)
-      local tb_wrap_w = tb_w - RA.SC(48)
-      local tb_h = RA.SC(150)
-        + UI.measure_multiline_height(tb_headline, tb_wrap_w)
-        + UI.measure_multiline_height(tb_body, tb_wrap_w)
-        + UI.measure_multiline_height(tb_not_sent, tb_wrap_w)
-        + UI.measure_multiline_height(tb_one_call, tb_wrap_w)
-      local tb_win_x, tb_win_y = ImGui.ImGui_GetWindowPos(RA.ctx)
-      local tb_win_w, tb_win_h = ImGui.ImGui_GetWindowSize(RA.ctx)
-      local tb_max_w = math_max(tb_w, tb_win_w - RA.SC(40))
-      local tb_max_h = math_max(RA.SC(300), tb_win_h - RA.SC(40))
-      tb_h = math_min(tb_h, tb_max_h)
-      ImGui.ImGui_SetNextWindowPos(RA.ctx,
-        tb_win_x + (tb_win_w - tb_w) * 0.5,
-        tb_win_y + (tb_win_h - tb_h) * 0.5,
-        ImGui.ImGui_Cond_Appearing())
-      ImGui.ImGui_SetNextWindowSizeConstraints(RA.ctx,
-        RA.SC(400), RA.SC(250), tb_max_w, tb_max_h)
-      ImGui.ImGui_SetNextWindowSize(RA.ctx, tb_w, tb_h,
-        ImGui.ImGui_Cond_Appearing())
-      UI.push_modal_style()
-      if ImGui.ImGui_BeginPopupModal(RA.ctx, turn_budget_popup, nil,
-          ImGui.ImGui_WindowFlags_NoResize()) then
-        local tb_cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
-        ImGui.ImGui_Spacing(RA.ctx)
-        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
-        ImGui.ImGui_TextWrapped(RA.ctx, tb_headline)
-        PopStyleColor(RA.ctx)
-        ImGui.ImGui_Spacing(RA.ctx)
-        ImGui.ImGui_TextWrapped(RA.ctx, tb_body)
-        ImGui.ImGui_Spacing(RA.ctx)
-        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
-        ImGui.ImGui_TextWrapped(RA.ctx, tb_not_sent)
-        ImGui.ImGui_Spacing(RA.ctx)
-        ImGui.ImGui_TextWrapped(RA.ctx, tb_one_call)
-        PopStyleColor(RA.ctx)
-        ImGui.ImGui_Spacing(RA.ctx)
-        ImGui.ImGui_Spacing(RA.ctx)
-
-        local tb_cancel = false
-        local tb_continue = false
-        local tb_cancel_label = UI.t("dialog.turn_budget.cancel", nil,
-          "Cancel Request")
-        local tb_continue_label = UI.t("dialog.turn_budget.continue", nil,
-          "Continue Anyway")
-        local tb_cancel_w = math_max(RA.SC(104),
-          CalcTextSize(RA.ctx, tb_cancel_label) + RA.SC(28))
-        local tb_continue_w = math_max(RA.SC(136),
-          CalcTextSize(RA.ctx, tb_continue_label) + RA.SC(28))
-        local tb_gap = RA.SC(16)
-        local tb_row_w = tb_cancel_w + tb_gap + tb_continue_w
-        SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx)
-          + math_floor((tb_cw - tb_row_w) * 0.5))
-        if S.turn_budget_confirm_focus_cancel then
-          ImGui.ImGui_SetKeyboardFocusHere(RA.ctx, 0)
-          S.turn_budget_confirm_focus_cancel = false
-        end
-        if ImGui.ImGui_Button(RA.ctx, tb_cancel_label, tb_cancel_w, 0) then
-          tb_cancel = true
-        end
-        SameLine(RA.ctx, 0, tb_gap)
-        UI.push_modal_danger_btn()
-        if ImGui.ImGui_Button(RA.ctx, tb_continue_label,
-            tb_continue_w, 0) then
-          tb_continue = true
-        end
-        UI.pop_modal_danger_btn()
-        if ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
-          tb_cancel = true
-        end
-        -- No Enter shortcut: approving more spend/tokens requires an explicit
-        -- activation of Continue Anyway rather than a habitual confirmation.
-        if tb_cancel then
-          ImGui.ImGui_CloseCurrentPopup(RA.ctx)
-          Net.cancel_turn_budget_confirmation()
-          S.refocus_prompt = true
-        elseif tb_continue then
-          ImGui.ImGui_CloseCurrentPopup(RA.ctx)
-          Net.continue_turn_budget_confirmation()
-        end
-
-        ImGui.ImGui_EndPopup(RA.ctx)
-      end
-      UI.pop_modal_style()
-    end
+    UI.saved_image_release_popup(true)
 
     -- ------ Clear confirmation popup -----------------------------------------
     -- Prevents accidental wipe of conversation history by requiring explicit
@@ -24771,7 +25359,9 @@ function Render.main_window()
       ImGui.ImGui_Cond_Appearing())
     ImGui.ImGui_SetNextWindowSize(RA.ctx, popup_w, popup_h, ImGui.ImGui_Cond_Appearing())
     UI.push_modal_style()
-    if ImGui.ImGui_BeginPopupModal(RA.ctx, backup_popup, true, ImGui.ImGui_WindowFlags_NoResize()) then
+    local backup_visible, backup_open = ImGui.ImGui_BeginPopupModal(RA.ctx, backup_popup, true, ImGui.ImGui_WindowFlags_NoResize())
+    if backup_visible then
+      S._backup_confirmation_active = true
       local bw_cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
       ImGui.ImGui_Spacing(RA.ctx)
       ImGui.ImGui_TextWrapped(RA.ctx, UI.t("dialog.backup.body", nil,
@@ -24827,24 +25417,16 @@ function Render.main_window()
       SameLine(RA.ctx, 0, r2_gap)
       if ImGui.ImGui_Button(RA.ctx, cancel_label, r2_b, btn_h) then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
-        S.backup_warn_code = nil
-        S.backup_warn_jsfx = nil
-        S.backup_warn_idx = nil
-        S.backup_warn_message = nil
-        S.backup_warn_typed_idx = nil
+        TypedActionController.clear_visual_run_confirmation("backup")
         S.refocus_prompt   = true
       end
       if ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
-        S.backup_warn_code = nil
-        S.backup_warn_jsfx = nil
-        S.backup_warn_idx = nil
-        S.backup_warn_message = nil
-        S.backup_warn_typed_idx = nil
+        TypedActionController.clear_visual_run_confirmation("backup")
         S.refocus_prompt   = true
       end
-      if (do_continue or do_disable or do_save_project) and S.backup_warn_code
-          and not UI.preflight_staged_lua("backup") then
+      if (do_continue or do_disable or do_save_project)
+          and not UI.preflight_backup_confirmation() then
         do_continue, do_disable, do_save_project = false, false, false
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
       end
@@ -24852,78 +25434,32 @@ function Render.main_window()
         prefs.auto_backup = false
         if Store and Store.save_config then Store.save_config() end
       end
-      -- Save Project: trigger native "File: Save project" (40026). If the
-      -- project has never been saved, REAPER puts up the native Save-As
-      -- dialog and Main_OnCommand blocks until the user picks a path or
-      -- cancels. After it returns, re-check EnumProjects: if a path is
-      -- now set, the save succeeded and we can do the backup + run. If
-      -- the user cancelled the native dialog, leave our popup open so
-      -- they can pick a different option.
+      -- Native Save can return after the active project or pending action changed.
       local saved_now = false
       if do_save_project then
         reaper.Main_OnCommand(40026, 0)
-        local _, after_path = reaper.EnumProjects(-1)
-        if after_path and after_path ~= "" then
-          -- Now that the project has a path, do the safety backup the
-          -- popup originally blocked on. Treat a real backup failure
-          -- (write_error / read_error) as a hard stop here: the user
-          -- explicitly chose Save Project specifically to get the
-          -- backup, and silently running the generated code without
-          -- one would defeat the popup's whole purpose. "unchanged"
-          -- can't happen on the first backup of a freshly-saved
-          -- project, but accept it defensively as success.
-          local _, berr = Code.safety_backup()
-          if Code.safety_backup_can_proceed(berr) then
-            saved_now = true
-          else
-            ImGui.ImGui_CloseCurrentPopup(RA.ctx)
-            S.backup_warn_code = nil
-            S.backup_warn_jsfx = nil
-            S.backup_warn_idx = nil
-            S.backup_warn_message = nil
-            S.backup_warn_typed_idx = nil
-            S.refocus_prompt   = true
-            Log.add_error(UI.t("code.backup_failed_after_save",
-              { error = tostring(berr) },
-              "Project saved, but the safety backup failed ("
-                .. tostring(berr) .. "). The generated code was NOT run. "
-                .. "Resolve the disk/permission issue and try again, or "
-                .. "click Run manually if you want to proceed without a "
-                .. "backup."))
-          end
+        if UI.preflight_backup_confirmation() then
+          local _, after_path = reaper.EnumProjects(-1)
+          saved_now = after_path ~= nil and after_path ~= ""
+        else
+          ImGui.ImGui_CloseCurrentPopup(RA.ctx)
         end
       end
       if (do_continue or do_disable or saved_now) and S.backup_warn_code then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
-        -- If there's a JSFX to save alongside the Lua companion, save it first.
-        if S.backup_warn_jsfx then
-          Code.auto_save_jsfx(S.backup_warn_jsfx)
-          S.backup_warn_jsfx = nil
-        end
-        S.status = "running"
-        local ok = Code.run(S.backup_warn_code, nil,
-          S.display_messages[S.backup_warn_idx] and S.display_messages[S.backup_warn_idx].conversation_delete,
-          Code.generated_lua_run_context(S.display_messages[S.backup_warn_idx],
-            S.backup_warn_idx, S.backup_warn_code))
-        Code.bind_pending_deferred_run(S.backup_warn_idx, nil, false, nil)
-        Code.apply_run_result_to_message(S.display_messages[S.backup_warn_idx],
-          ok, "lua", S.backup_warn_code, false)
-        if S.backup_warn_idx == #S.display_messages then S.pending_code = nil end
-        S.status = ok and "idle" or "error"
-        S.backup_warn_code = nil
-        S.backup_warn_idx = nil
-        S.backup_warn_message = nil
-        S.backup_warn_typed_idx = nil
-        S.refocus_prompt   = true
+        UI.execute_staged_lua("backup")
       end
       if (do_continue or do_disable or saved_now) and S.backup_warn_typed_idx then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
         local typed_idx = S.backup_warn_typed_idx
         local typed_msg = S.display_messages and S.display_messages[typed_idx] or nil
-        local ok_apply, _, apply_msg = TypedActionController
-          and TypedActionController.apply_typed_action_message
-          and TypedActionController.apply_typed_action_message(typed_msg,
-            typed_idx, { skip_backup = true })
+        local opts = S.backup_warn_typed_opts or {skip_backup = true}
+        TypedActionController.clear_visual_run_confirmation("backup")
+        local ok_apply, _, apply_msg
+        if TypedActionController and TypedActionController.apply_typed_action_message then
+          ok_apply, _, apply_msg = TypedActionController.apply_typed_action_message(typed_msg,
+            typed_idx, opts)
+        end
         if UI.show_float_toast then
           UI.show_float_toast(apply_msg or (ok_apply
             and UI.t("a11y.sr.apply_action_plan_done", nil,
@@ -24933,10 +25469,16 @@ function Render.main_window()
             ok_apply and "ok" or "err")
         end
         S.backup_warn_typed_idx = nil
+        S.backup_warn_typed_opts = nil
         S.refocus_prompt = true
       end
 
       ImGui.ImGui_EndPopup(RA.ctx)
+      if backup_open == false then
+        TypedActionController.clear_visual_run_confirmation("backup")
+      end
+    elseif S._backup_confirmation_active then
+      UI.refuse_run_confirmation("backup", UI.run_confirmation_refusal_text())
     end
     UI.pop_modal_style()
 
@@ -24970,7 +25512,7 @@ function Render.main_window()
     ImGui.ImGui_SetNextWindowSize(RA.ctx, rsv_w, rsv_h, ImGui.ImGui_Cond_Appearing())
     UI.push_modal_style()
     -- (push_modal_style already centers WindowTitleAlign.)
-    if ImGui.ImGui_BeginPopupModal(RA.ctx, resolve_popup, true,
+    if ImGui.ImGui_BeginPopupModal(RA.ctx, resolve_popup, nil,
         ImGui.ImGui_WindowFlags_NoResize()
         | ImGui.ImGui_WindowFlags_NoNavInputs()) then
       local rsv_type = (S.resolve_popup and S.resolve_popup.type) or "plugin"
@@ -25561,7 +26103,9 @@ function Render.main_window()
       ImGui.ImGui_Cond_Appearing())
     ImGui.ImGui_SetNextWindowSize(RA.ctx, rpop_w, rpop_h, ImGui.ImGui_Cond_Appearing())
     UI.push_modal_style()
-    if ImGui.ImGui_BeginPopupModal(RA.ctx, risky_popup, true, ImGui.ImGui_WindowFlags_NoResize()) then
+    local risky_visible, risky_open = ImGui.ImGui_BeginPopupModal(RA.ctx, risky_popup, true, ImGui.ImGui_WindowFlags_NoResize())
+    if risky_visible then
+      S._risky_confirmation_active = true
       ImGui.ImGui_TextWrapped(RA.ctx,
         UI.t("modal.risky.intro", nil,
           "This code uses operations that could affect files or system state "
@@ -25596,85 +26140,25 @@ function Render.main_window()
       if ImGui.ImGui_Button(RA.ctx,
           risky_cancel_label, rbtn2_w, 0) then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
-        S.risky_warn_code   = nil
-        S.risky_warn_idx = nil
-        S.risky_warn_message = nil
-        S.risky_warn_detail = nil
+        TypedActionController.clear_visual_run_confirmation("risky")
         S.refocus_prompt    = true
       end
       if ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
-        S.risky_warn_code   = nil
-        S.risky_warn_idx = nil
-        S.risky_warn_message = nil
-        S.risky_warn_detail = nil
+        TypedActionController.clear_visual_run_confirmation("risky")
         S.refocus_prompt    = true
-      end
-      if do_run and S.risky_warn_code and not UI.preflight_staged_lua("risky") then
-        do_run = false
-        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
       end
       if do_run and S.risky_warn_code then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
-        -- Still honour the backup-before-run preference.
-        if prefs.auto_backup then
-          local _, berr = Code.safety_backup()
-          if berr == "unsaved" then
-            S.backup_warn_code = S.risky_warn_code
-            S.backup_warn_idx  = S.risky_warn_idx
-            S.backup_warn_message = S.risky_warn_message
-            S.open_backup_warn = true
-            S.risky_warn_code   = nil
-            S.risky_warn_idx = nil
-            S.risky_warn_message = nil
-            S.risky_warn_detail = nil
-            -- Control will continue through the backup modal.
-          elseif Code.safety_backup_can_proceed(berr) then
-            S.status = "running"
-            local ok = Code.run(S.risky_warn_code, nil,
-              S.display_messages[S.risky_warn_idx] and S.display_messages[S.risky_warn_idx].conversation_delete,
-              Code.generated_lua_run_context(S.display_messages[S.risky_warn_idx],
-                S.risky_warn_idx, S.risky_warn_code))
-            Code.bind_pending_deferred_run(S.risky_warn_idx, nil, false, nil)
-            Code.apply_run_result_to_message(S.display_messages[S.risky_warn_idx],
-              ok, "lua", S.risky_warn_code, false)
-            if S.risky_warn_idx == #S.display_messages then S.pending_code = nil end
-            S.status = ok and "idle" or "error"
-            S.risky_warn_code   = nil
-            S.risky_warn_idx = nil
-            S.risky_warn_message = nil
-            S.risky_warn_detail = nil
-            S.refocus_prompt    = true
-          else
-            local blocked_msg = UI.report_backup_run_blocked(berr)
-            local blocked = S.display_messages[S.risky_warn_idx]
-            if blocked then blocked.run_blocked = blocked_msg end
-            S.risky_warn_code   = nil
-            S.risky_warn_idx = nil
-            S.risky_warn_message = nil
-            S.risky_warn_detail = nil
-            S.refocus_prompt    = true
-          end
-        else
-          S.status = "running"
-          local ok = Code.run(S.risky_warn_code, nil,
-              S.display_messages[S.risky_warn_idx] and S.display_messages[S.risky_warn_idx].conversation_delete,
-              Code.generated_lua_run_context(S.display_messages[S.risky_warn_idx],
-                S.risky_warn_idx, S.risky_warn_code))
-          Code.bind_pending_deferred_run(S.risky_warn_idx, nil, false, nil)
-          Code.apply_run_result_to_message(S.display_messages[S.risky_warn_idx],
-            ok, "lua", S.risky_warn_code, false)
-          if S.risky_warn_idx == #S.display_messages then S.pending_code = nil end
-          S.status = ok and "idle" or "error"
-          S.risky_warn_code   = nil
-          S.risky_warn_idx = nil
-          S.risky_warn_message = nil
-          S.risky_warn_detail = nil
-          S.refocus_prompt    = true
-        end
+        UI.execute_staged_lua("risky")
       end
 
       ImGui.ImGui_EndPopup(RA.ctx)
+      if risky_open == false then
+        TypedActionController.clear_visual_run_confirmation("risky")
+      end
+    elseif S._risky_confirmation_active then
+      UI.refuse_run_confirmation("risky", UI.run_confirmation_refusal_text())
     end
     UI.pop_modal_style()
 
@@ -25842,6 +26326,173 @@ function Render.main_window()
 
     end  -- end of api_keys.screen else (main UI branch)
 
+    do -- turn budget confirmation across screens
+    -- ------ Per-turn limit confirmation popup -------------------------------
+    -- The exact next request is held in memory by Net until the user makes an
+    -- explicit choice. Continue is intentionally danger-styled and never
+    -- keyboard-defaulted; Cancel Request receives initial focus and Escape also
+    -- cancels. The separate MAX_CALLS_PER_TURN runaway cap remains a hard gate.
+    local turn_budget_popup = UI.t("dialog.turn_budget.title", nil,
+      "Continue This Request?") .. "###turn_budget_confirmation"
+    if S.open_turn_budget_confirmation and S.turn_budget_confirmation then
+      ImGui.ImGui_OpenPopup(RA.ctx, turn_budget_popup)
+      S.open_turn_budget_confirmation = false
+    elseif S.turn_budget_confirmation
+        and not ImGui.ImGui_IsPopupOpen(RA.ctx, turn_budget_popup)
+        and not ImGui.ImGui_IsPopupOpen(RA.ctx, "",
+          ImGui.ImGui_PopupFlags_AnyPopup()) then
+      ImGui.ImGui_OpenPopup(RA.ctx, turn_budget_popup)
+      S.turn_budget_confirm_focus_cancel = true
+    end
+    if S.turn_budget_confirmation then
+      local tb_pending = S.turn_budget_confirmation
+      local tb_budget = tb_pending.budget or {}
+      local tb_matched = tb_pending.matched_condition
+        or "projected_token_limit"
+      local tb_headline = UI.t("dialog.turn_budget.headline", nil,
+        "This request would exceed a limit you set.")
+      local tb_conditions = type(tb_budget.matched_conditions) == "table"
+        and tb_budget.matched_conditions or { tb_matched }
+      if #tb_conditions == 0 then tb_conditions = { tb_matched } end
+      local tb_body_parts = {}
+      for _, tb_condition in ipairs(tb_conditions) do
+        local tb_part
+        if tb_condition == "unknown_provider_price" then
+          tb_part = UI.t("dialog.turn_budget.unknown_provider_price_body", nil,
+            "This billable Custom provider has no trusted input and output price estimate. ReaAssist cannot prove that this request stays within your per-turn dollar limit.")
+        elseif tb_condition == "unknown_cache_price" then
+          tb_part = UI.t("dialog.turn_budget.unknown_cache_price_body", nil,
+            "The previous model call used a cache category whose price is blank. The exact turn cost is Unknown, so ReaAssist cannot safely estimate this additional billable request.")
+        elseif tb_condition == "actual_cost_limit" then
+          tb_part = UI.t("dialog.turn_budget.actual_cost_body", {
+            actual = MODELS.format_cost(tb_budget.actual_cost or 0),
+            limit = MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
+              or CFG.TURN_COST_LIMIT_DEFAULT),
+          }, str_format(
+            "Provider-reported actual cost already used: %s (your limit: %s). A trusted estimate is unavailable for the next model call.",
+            MODELS.format_cost(tb_budget.actual_cost or 0),
+            MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
+              or CFG.TURN_COST_LIMIT_DEFAULT)))
+        elseif tb_condition == "projected_cost_limit" then
+          tb_part = UI.t("dialog.turn_budget.cost_body", {
+            projected = MODELS.format_cost(tb_budget.projected_cost or 0),
+            limit = MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
+              or CFG.TURN_COST_LIMIT_DEFAULT),
+            next = MODELS.format_cost(tb_budget.next_cost or 0),
+          }, str_format(
+            "Projected cost for this request: %s (your limit: %s). This next model call could cost up to %s.",
+            MODELS.format_cost(tb_budget.projected_cost or 0),
+            MODELS.format_cost(tonumber(prefs.turn_cost_limit_usd)
+              or CFG.TURN_COST_LIMIT_DEFAULT),
+            MODELS.format_cost(tb_budget.next_cost or 0)))
+        elseif tb_condition == "projected_token_limit" then
+          local tb_projected = fmt_num(tb_budget.projected_tokens or 0)
+          local tb_limit = fmt_num(tonumber(prefs.turn_token_limit)
+            or CFG.TURN_TOKEN_LIMIT_DEFAULT)
+          local tb_next = fmt_num(tb_budget.next_tokens or 0)
+          tb_part = UI.t("dialog.turn_budget.token_body", {
+            projected = tb_projected,
+            limit = tb_limit,
+            next = tb_next,
+          }, str_format(
+            "Projected token use for this request: %s (your limit: %s). This next model call could use up to %s tokens.",
+            tb_projected, tb_limit, tb_next))
+        end
+        if tb_part then tb_body_parts[#tb_body_parts + 1] = tb_part end
+      end
+      local tb_body = tbl_concat(tb_body_parts, "\n\n")
+      local tb_not_sent = UI.t("dialog.turn_budget.not_sent", nil,
+        "No additional model request has been sent.")
+      local tb_one_call = UI.t("dialog.turn_budget.one_call", nil,
+        "If you choose Continue Anyway, ReaAssist will send only this one model call. It will ask again before any later call that would exceed a limit.")
+      local tb_w = RA.SC(520)
+      local tb_wrap_w = tb_w - RA.SC(48)
+      local tb_h = RA.SC(150)
+        + UI.measure_multiline_height(tb_headline, tb_wrap_w)
+        + UI.measure_multiline_height(tb_body, tb_wrap_w)
+        + UI.measure_multiline_height(tb_not_sent, tb_wrap_w)
+        + UI.measure_multiline_height(tb_one_call, tb_wrap_w)
+      local tb_win_x, tb_win_y = ImGui.ImGui_GetWindowPos(RA.ctx)
+      local tb_win_w, tb_win_h = ImGui.ImGui_GetWindowSize(RA.ctx)
+      local tb_max_w = math_max(tb_w, tb_win_w - RA.SC(40))
+      local tb_max_h = math_max(RA.SC(300), tb_win_h - RA.SC(40))
+      tb_h = math_min(tb_h, tb_max_h)
+      ImGui.ImGui_SetNextWindowPos(RA.ctx,
+        tb_win_x + (tb_win_w - tb_w) * 0.5,
+        tb_win_y + (tb_win_h - tb_h) * 0.5,
+        ImGui.ImGui_Cond_Appearing())
+      ImGui.ImGui_SetNextWindowSizeConstraints(RA.ctx,
+        RA.SC(400), RA.SC(250), tb_max_w, tb_max_h)
+      ImGui.ImGui_SetNextWindowSize(RA.ctx, tb_w, tb_h,
+        ImGui.ImGui_Cond_Appearing())
+      UI.push_modal_style()
+      if ImGui.ImGui_BeginPopupModal(RA.ctx, turn_budget_popup, nil,
+          ImGui.ImGui_WindowFlags_NoResize()) then
+        local tb_cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+        ImGui.ImGui_Spacing(RA.ctx)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.amber)
+        ImGui.ImGui_TextWrapped(RA.ctx, tb_headline)
+        PopStyleColor(RA.ctx)
+        ImGui.ImGui_Spacing(RA.ctx)
+        ImGui.ImGui_TextWrapped(RA.ctx, tb_body)
+        ImGui.ImGui_Spacing(RA.ctx)
+        PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
+        ImGui.ImGui_TextWrapped(RA.ctx, tb_not_sent)
+        ImGui.ImGui_Spacing(RA.ctx)
+        ImGui.ImGui_TextWrapped(RA.ctx, tb_one_call)
+        PopStyleColor(RA.ctx)
+        ImGui.ImGui_Spacing(RA.ctx)
+        ImGui.ImGui_Spacing(RA.ctx)
+
+        local tb_cancel = false
+        local tb_continue = false
+        local tb_cancel_label = UI.t("dialog.turn_budget.cancel", nil,
+          "Cancel Request")
+        local tb_continue_label = UI.t("dialog.turn_budget.continue", nil,
+          "Continue Anyway")
+        local tb_cancel_w = math_max(RA.SC(104),
+          CalcTextSize(RA.ctx, tb_cancel_label) + RA.SC(28))
+        local tb_continue_w = math_max(RA.SC(136),
+          CalcTextSize(RA.ctx, tb_continue_label) + RA.SC(28))
+        local tb_gap = RA.SC(16)
+        local tb_row_w = tb_cancel_w + tb_gap + tb_continue_w
+        SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx)
+          + math_floor((tb_cw - tb_row_w) * 0.5))
+        if S.turn_budget_confirm_focus_cancel then
+          ImGui.ImGui_SetKeyboardFocusHere(RA.ctx, 0)
+          S.turn_budget_confirm_focus_cancel = false
+        end
+        if ImGui.ImGui_Button(RA.ctx, tb_cancel_label, tb_cancel_w, 0) then
+          tb_cancel = true
+        end
+        SameLine(RA.ctx, 0, tb_gap)
+        UI.push_modal_danger_btn()
+        if ImGui.ImGui_Button(RA.ctx, tb_continue_label,
+            tb_continue_w, 0) then
+          tb_continue = true
+        end
+        UI.pop_modal_danger_btn()
+        if ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
+          tb_cancel = true
+        end
+        -- No Enter shortcut: approving more spend/tokens requires an explicit
+        -- activation of Continue Anyway rather than a habitual confirmation.
+        if tb_cancel then
+          ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+          Net.cancel_turn_budget_confirmation()
+          S.refocus_prompt = true
+        elseif tb_continue then
+          ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+          Net.continue_turn_budget_confirmation()
+        end
+
+        ImGui.ImGui_EndPopup(RA.ctx)
+      end
+      UI.pop_modal_style()
+    end
+
+    end
+
     UI.draw_drop_overlay()
     -- Finalize cursor after any SetCursorPosX calls (popups, centering, etc.)
     -- so ImGui can resolve window boundaries without warnings.
@@ -25968,10 +26619,13 @@ function Render.main_window()
       local recheck_w = CalcTextSize(RA.ctx, recheck_label) + 24
       local off3 = (inner_w - recheck_w) * 0.5
       if off3 > 0 then SetCursorPosX(RA.ctx, gem_pad + off3) end
-      if ImGui.ImGui_Button(RA.ctx, recheck_label, recheck_w, 0) then
+      ImGui.ImGui_BeginDisabled(RA.ctx, S.turn_budget_confirmation ~= nil)
+      if ImGui.ImGui_Button(RA.ctx, recheck_label, recheck_w, 0)
+          and S.turn_budget_confirmation == nil then
         ImGui.ImGui_CloseCurrentPopup(RA.ctx)
         Net.fire_gemini_tier_test()
       end
+      ImGui.ImGui_EndDisabled(RA.ctx)
       -- Manual override row (centered).
       ImGui.ImGui_Spacing(RA.ctx)
       local mark_label = UI.t("dialog.gemini.mark_paid", nil,
@@ -26005,11 +26659,11 @@ function Render.main_window()
       ImGui.ImGui_OpenPopup(RA.ctx, scale_popup)
       S._open_scale_confirm = nil
     end
-    -- Auto-revert if timer expired.
-    if S._scale_confirm_deadline and reaper.time_precise() >= S._scale_confirm_deadline then
+    -- Revert promptly, then retire the popup within its own scope.
+    local scale_expired = S._scale_confirm_deadline
+      and reaper.time_precise() >= S._scale_confirm_deadline
+    if scale_expired then
       prefs.ui_scale_idx = S._scale_prev_idx
-      S._scale_confirm_deadline = nil
-      S._scale_prev_idx = nil
     end
     if S._scale_confirm_deadline then
       local sc_pw, sc_ph = RA.SC(300), RA.SC(120)
@@ -26022,44 +26676,53 @@ function Render.main_window()
       ImGui.ImGui_SetNextWindowSize(RA.ctx, sc_pw, sc_ph, ImGui.ImGui_Cond_Appearing())
       UI.push_modal_style()
       if ImGui.ImGui_BeginPopupModal(RA.ctx, scale_popup, true, ImGui.ImGui_WindowFlags_NoResize()) then
-        local sc_cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
-        local remaining = math.ceil(S._scale_confirm_deadline - reaper.time_precise())
-        ImGui.ImGui_Spacing(RA.ctx)
-        local sc_txt = UI.t("dialog.scale.reverting",
-          { seconds = remaining },
-          string.format("Reverting in %ds...", remaining))
-        local sc_tw = CalcTextSize(RA.ctx, sc_txt)
-        SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx) + math_floor((sc_cw - sc_tw) * 0.5))
-        Text(RA.ctx, sc_txt)
-        ImGui.ImGui_Spacing(RA.ctx)
-        ImGui.ImGui_Spacing(RA.ctx)
-        local keep_label = UI.t("dialog.scale.keep", nil, "Keep Scale")
-        local revert_label = UI.t("dialog.scale.revert", nil, "Revert Now")
-        local keep_w = math_max(RA.SC(84),
-          CalcTextSize(RA.ctx, keep_label) + RA.SC(24))
-        local revert_w = math_max(RA.SC(92),
-          CalcTextSize(RA.ctx, revert_label) + RA.SC(24))
-        local sc_gap = RA.SC(12)
-        local sc_row = keep_w + sc_gap + revert_w
-        SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx) + math_floor((sc_cw - sc_row) * 0.5))
-        UI.push_modal_primary_btn()
-        if ImGui.ImGui_Button(RA.ctx, keep_label, keep_w, 0)
-          or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Enter())
-          or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_KeypadEnter()) then
+        if scale_expired then
           S._scale_confirm_deadline = nil
           S._scale_prev_idx = nil
           ImGui.ImGui_CloseCurrentPopup(RA.ctx)
-        end
-        UI.pop_modal_primary_btn()
-        SameLine(RA.ctx, 0, sc_gap)
-        if ImGui.ImGui_Button(RA.ctx, revert_label, revert_w, 0)
-          or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
-          prefs.ui_scale_idx = S._scale_prev_idx
-          S._scale_confirm_deadline = nil
-          S._scale_prev_idx = nil
-          ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+        else
+          local sc_cw = ImGui.ImGui_GetContentRegionAvail(RA.ctx)
+          local remaining = math.ceil(S._scale_confirm_deadline - reaper.time_precise())
+          ImGui.ImGui_Spacing(RA.ctx)
+          local sc_txt = UI.t("dialog.scale.reverting",
+            { seconds = remaining },
+            string.format("Reverting in %ds...", remaining))
+          local sc_tw = CalcTextSize(RA.ctx, sc_txt)
+          SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx) + math_floor((sc_cw - sc_tw) * 0.5))
+          Text(RA.ctx, sc_txt)
+          ImGui.ImGui_Spacing(RA.ctx)
+          ImGui.ImGui_Spacing(RA.ctx)
+          local keep_label = UI.t("dialog.scale.keep", nil, "Keep Scale")
+          local revert_label = UI.t("dialog.scale.revert", nil, "Revert Now")
+          local keep_w = math_max(RA.SC(84),
+            CalcTextSize(RA.ctx, keep_label) + RA.SC(24))
+          local revert_w = math_max(RA.SC(92),
+            CalcTextSize(RA.ctx, revert_label) + RA.SC(24))
+          local sc_gap = RA.SC(12)
+          local sc_row = keep_w + sc_gap + revert_w
+          SetCursorPosX(RA.ctx, GetCursorPosX(RA.ctx) + math_floor((sc_cw - sc_row) * 0.5))
+          UI.push_modal_primary_btn()
+          if ImGui.ImGui_Button(RA.ctx, keep_label, keep_w, 0)
+            or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Enter())
+            or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_KeypadEnter()) then
+            S._scale_confirm_deadline = nil
+            S._scale_prev_idx = nil
+            ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+          end
+          UI.pop_modal_primary_btn()
+          SameLine(RA.ctx, 0, sc_gap)
+          if ImGui.ImGui_Button(RA.ctx, revert_label, revert_w, 0)
+            or ImGui.ImGui_IsKeyPressed(RA.ctx, ImGui.ImGui_Key_Escape()) then
+            prefs.ui_scale_idx = S._scale_prev_idx
+            S._scale_confirm_deadline = nil
+            S._scale_prev_idx = nil
+            ImGui.ImGui_CloseCurrentPopup(RA.ctx)
+          end
         end
         ImGui.ImGui_EndPopup(RA.ctx)
+      elseif scale_expired and not ImGui.ImGui_IsPopupOpen(RA.ctx, scale_popup) then
+        S._scale_confirm_deadline = nil
+        S._scale_prev_idx = nil
       end
       UI.pop_modal_style()
     end
@@ -26110,6 +26773,8 @@ function Render.main_window()
     -- pattern as the Settings page's per-row "Details" popup, which
     -- lives inside its render scope and doesn't have this z-order bug.
     Render._reaper_version_notice_popup()
+    Render.offer_fallback_feedback()
+    Render.fallback_feedback_popup()
     Render.feedback_modal()
     Render._ceiling_alert_popup()
     Render._engine_installer_notice_popup()
@@ -26125,6 +26790,11 @@ function Render.main_window()
     -- label (e.g. gem_w) -- Lua only allows a goto into a label that
     -- sits at the very end of its enclosing block.
     ::after_main_window::
+  end
+  if visible and not image_release_chat_rendered then
+    UI.saved_image_release_popup(false)
+  elseif not visible and S.image_release_confirmation then
+    Net.cancel_saved_images_release(S.image_release_confirmation, "main_not_visible")
   end
   -- ImGui_End is paired with Begin only on the visible path. ReaImGui
   -- auto-pops the window when Begin returns false (collapsed or fully
@@ -26594,16 +27264,23 @@ function Render.main_window()
         UI.update_dialog_center_cursor(dlg_cw, title_w)
         ImGui.ImGui_TextWrapped(RA.ctx, title_text)
         ImGui.ImGui_Spacing(RA.ctx)
-        local desc1 = UI.t("update.available.desc1", nil,
-          "The update is quick and applies directly.")
-        local desc1_w = CalcTextSize(RA.ctx, desc1)
-        UI.update_dialog_center_cursor(dlg_cw, desc1_w)
-        Text(RA.ctx, desc1)
-        local desc2 = UI.t("update.available.desc2", nil,
-          "(No manual download needed)")
-        local desc2_w = CalcTextSize(RA.ctx, desc2)
-        UI.update_dialog_center_cursor(dlg_cw, desc2_w)
-        Text(RA.ctx, desc2)
+        local is_v2 = Updater.is_v2_release(update.remote_version)
+        if is_v2 then
+          local v2_desc = UI.t("update.available.v2_desc", nil,
+            "Version 2 is a fresh, clean install and comes with many upgrades and improvements.")
+          ImGui.ImGui_TextWrapped(RA.ctx, v2_desc)
+        else
+          local desc1 = UI.t("update.available.desc1", nil,
+            "The update is quick and applies directly.")
+          local desc1_w = CalcTextSize(RA.ctx, desc1)
+          UI.update_dialog_center_cursor(dlg_cw, desc1_w)
+          Text(RA.ctx, desc1)
+          local desc2 = UI.t("update.available.desc2", nil,
+            "(No manual download needed)")
+          local desc2_w = CalcTextSize(RA.ctx, desc2)
+          UI.update_dialog_center_cursor(dlg_cw, desc2_w)
+          Text(RA.ctx, desc2)
+        end
         ImGui.ImGui_Spacing(RA.ctx)
         ImGui.ImGui_Spacing(RA.ctx)
         -- Primary decision row first; secondary release-notes action
@@ -26611,8 +27288,9 @@ function Render.main_window()
         -- auto-check does not re-nag the user for a week; clicking the
         -- footer version link or hitting Settings > Advanced > Check for Updates
         -- still bypasses the snooze for an on-demand check.
-        local update_label = UI.t("update.action.update_now", nil,
-          "Update Now")
+        local update_label = is_v2
+          and UI.t("update.action.upgrade_now", nil, "Upgrade Now")
+          or UI.t("update.action.update_now", nil, "Update Now")
         local later_label = UI.t("common.later", nil, "Later")
         local changelog_label = UI.t("update.action.view_changelog", nil,
           "View Changelog")
@@ -26815,14 +27493,56 @@ function UI.strip_markdown(text)
     saved[#saved+1] = code
     return "\0CODE" .. #saved .. "\0"
   end)
-  t = t:gsub("%*%*(.-)%*%*", "%1")
-  t = t:gsub("%*(.-)%*", "%1")
+  local function word_byte(ch)
+    return ch ~= "" and ch:match("[%w_]")
+  end
+  local function strip_pairs(value, marker, same_line)
+    local parts, pos = {}, 1
+    while pos <= #value do
+      local a = value:find(marker, pos, true)
+      if not a then parts[#parts + 1] = value:sub(pos); break end
+      local pair_marker = marker
+      if marker == "**" then
+        local run_end = a + #marker
+        while value:sub(run_end, run_end) == "*" do run_end = run_end + 1 end
+        local run_length = run_end - a
+        if run_length > 2 and run_length % 2 == 0 then
+          pair_marker = string.rep("*", run_length)
+        end
+      end
+      local before = value:sub(a - 1, a - 1)
+      local after = value:sub(a + #pair_marker, a + #pair_marker)
+      local b = value:find(pair_marker, a + #pair_marker, true)
+      local inner = b and value:sub(a + #pair_marker, b - 1)
+      local tail = b and value:sub(b + #pair_marker, b + #pair_marker) or ""
+      local admitted = after ~= "" and not after:match("%s")
+        and after ~= "." and after ~= "/" and after ~= "\\"
+        and not word_byte(before) and before ~= "\\"
+        and inner and inner ~= "" and not inner:sub(-1):match("%s")
+        and inner:sub(-1) ~= "\\" and not word_byte(tail)
+        and tail ~= "/" and tail ~= "\\"
+        and (marker ~= "*" or (before ~= "*" and after ~= "*"
+          and inner:sub(-1) ~= "*" and tail ~= "*"))
+        and (not same_line or not inner:find("[\r\n]"))
+      if admitted then
+        parts[#parts + 1] = value:sub(pos, a - 1) .. inner
+        pos = b + #pair_marker
+      else
+        parts[#parts + 1] = value:sub(pos, a + #pair_marker - 1)
+        pos = a + #pair_marker
+      end
+    end
+    return table.concat(parts)
+  end
+  -- Recognize list markers before scanning emphasis delimiters.
   -- Bullet-ify list markers at line starts. The leading "(\n)" / "^" capture
   -- ensures we only match list markers at the start of a line, not mid-text
   -- where a hyphen could be part of a word or range. The bullet glyph is
   -- a BMP character handled correctly by ImGui's default font.
   t = t:gsub("^[%-%*%+] +", "  \xE2\x80\xA2 ")
   t = t:gsub("\n[%-%*%+] +",  "\n  \xE2\x80\xA2 ")
+  t = strip_pairs(t, "**", false)
+  t = strip_pairs(t, "*", true)
   t = t:gsub("\0CODE(%d+)\0", function(idx)
     return saved[tonumber(idx)] or ""
   end)

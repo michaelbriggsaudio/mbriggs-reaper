@@ -1,0 +1,65 @@
+{
+  "schema": 3,
+  "version": "1.0.3",
+  "core_abi": 2,
+  "build_channel": "production",
+  "subsystems": {
+    "core": 1,
+    "client": 1,
+    "inference": 2,
+    "input_media": 1,
+    "openrouter_catalog": 1,
+    "stateless_helpers": 1
+  },
+  "protocols": [
+    "openai_responses",
+    "openrouter_responses",
+    "deepseek_responses",
+    "openai_chat_completions",
+    "openrouter_chat_completions",
+    "deepseek_chat_completions",
+    "anthropic_messages",
+    "google_generate_content",
+    "google_interactions"
+  ],
+  "inference_profiles": [
+    "custom_openai_chat_v1",
+    "custom_openai_responses_v1",
+    "local_openai_chat_v1",
+    "local_openai_responses_v1",
+    "local_openai_chat_private_v1",
+    "local_openai_responses_private_v1"
+  ],
+  "artifacts": {
+    "win-x64": {
+      "filename": "reaper_mbriggs_helper-x64.dll",
+      "sha256": "90dc15a86241678337e28bc40943b846ee460c4a90e42ead384bdb920c85b396",
+      "signature": "signed-timestamped"
+    },
+    "win-arm64": {
+      "filename": "reaper_mbriggs_helper-arm64.dll",
+      "sha256": "eb972a63fbee53931b05e7bcb092c4cac30cdd0383a9ef43c1683f614f7a547d",
+      "signature": "signed-timestamped"
+    },
+    "mac-arm64": {
+      "filename": "reaper_mbriggs_helper-arm64.dylib",
+      "sha256": "75fade85f4ce8d485432335cf07fc6dda6ce0b1a5c259818376a9df11b46fb47",
+      "signature": "developer-id-notarized"
+    },
+    "mac-x64": {
+      "filename": "reaper_mbriggs_helper-x86_64.dylib",
+      "sha256": "b00017968a9c5a30e40a4e54e3c7e2ab79e0ad2e1db9843d8085c6caaa8d9050",
+      "signature": "developer-id-notarized"
+    },
+    "linux-x64": {
+      "filename": "reaper_mbriggs_helper-x86_64.so",
+      "sha256": "e9cb263c972f77ce1a2d720d4085860eb488837f46efd35ad5ec4296f28c7591",
+      "signature": "sha256"
+    },
+    "linux-arm64": {
+      "filename": "reaper_mbriggs_helper-aarch64.so",
+      "sha256": "6b7184dd86d48a13018fa7bd6bb97c46ead37ea8fc65565e8e436c7db0bf84cf",
+      "signature": "sha256"
+    }
+  }
+}

@@ -8435,7 +8435,7 @@ local OPERATIONAL_BUCKETS = {
   ["8-15"] = true, ["16-31"] = true, ["32-63"] = true, ["64+"] = true,
 }
 local OPERATIONAL_RING_SUBSYSTEMS = {
-  client = true, inference = true, inference_cache = true,
+  client = true, inference = true, inference_conversation = true, inference_cache = true,
   input_media = true, openrouter_catalog = true,
 }
 local OPERATIONAL_RING_EVENTS = {
@@ -9922,6 +9922,31 @@ function OPENROUTER_CATALOG.status(document, handle)
     return nil, OPENROUTER_CATALOG.failure("protocol")
   end
   local status = {ok = true, state = decoded.state}
+  if decoded.diagnostic ~= nil then
+    if decoded.state ~= "failed" or (decoded.diagnostic ~= "openrouter_catalog_endpoint_shape"
+        and decoded.diagnostic ~= "openrouter_catalog_endpoint_conflict") then
+      return nil, OPENROUTER_CATALOG.failure("protocol")
+    end
+    status.diagnostic = decoded.diagnostic
+  end
+  if decoded.warnings ~= nil then
+    if type(decoded.warnings) ~= "table" or #decoded.warnings < 1 or #decoded.warnings > 2 then
+      return nil, OPENROUTER_CATALOG.failure("protocol")
+    end
+    local seen, warnings = {}, {}
+    for key, warning in pairs(decoded.warnings) do
+      if type(key) ~= "number" or key < 1 or key > #decoded.warnings
+          or key ~= math.floor(key) or seen[warning]
+          or (warning ~= "openrouter_catalog_duplicate_endpoint"
+            and warning ~= "openrouter_catalog_metrics_omitted") then
+        return nil, OPENROUTER_CATALOG.failure("protocol")
+      end
+      seen[warning] = true
+      warnings[#warnings + 1] = warning
+    end
+    table.sort(warnings)
+    status.warnings = warnings
+  end
   if decoded.error ~= nil then
     if not OPENROUTER_CATALOG.errors[decoded.error] then
       return nil, OPENROUTER_CATALOG.failure("protocol")

@@ -1,19 +1,18 @@
 {
-  "version": "1.6.1",
-  "payload_ref": "323d9a8c93f39ad200962b1300aafd5d711fa63c",
+  "version": "1.6.2",
   "engine": {
     "schema": 1,
     "delivery": "shared-v1",
-    "shared_path": "Helper-Engine/1.0.2",
-    "source_ref": "v1.6.1",
+    "shared_path": "Helper-Engine/1.0.3",
+    "source_ref": "v1.6.2",
     "source": {
-      "commit": "1ecf37fd95bb49d55bb237c677fdcebdb220ff59",
-      "release": "kit-v1.0.2-release-1ecf37f",
-      "kit_sha256": "1eb6e48d9b0fc5ee3cd810eb3a1e567d812d515f6a99ab65fcf7d2906c69f256"
+      "commit": "2c5b0675ea36b06dd693934deed67b7dd9ae9406",
+      "release": "kit-v1.0.3-prep-2c5b067",
+      "kit_sha256": "33a6320d3c7f313792a210f98e5394bd750a18e0e4d1a337114514f94dd12170"
     },
     "descriptor": {
       "schema": 3,
-      "version": "1.0.2",
+      "version": "1.0.3",
       "core_abi": 2,
       "build_channel": "production",
       "subsystems": {
@@ -46,32 +45,32 @@
       "artifacts": {
         "win-x64": {
           "filename": "reaper_mbriggs_helper-x64.dll",
-          "sha256": "c8e01db52c6268217d3f44a25c2426ecdef203ad7637daa17774754ec581254d",
+          "sha256": "90dc15a86241678337e28bc40943b846ee460c4a90e42ead384bdb920c85b396",
           "signature": "signed-timestamped"
         },
         "win-arm64": {
           "filename": "reaper_mbriggs_helper-arm64.dll",
-          "sha256": "daac326816c45d7d1166ed36a93879ff91bf10d39154e7d76bae2df964abff78",
+          "sha256": "eb972a63fbee53931b05e7bcb092c4cac30cdd0383a9ef43c1683f614f7a547d",
           "signature": "signed-timestamped"
         },
         "mac-arm64": {
           "filename": "reaper_mbriggs_helper-arm64.dylib",
-          "sha256": "e19c41dd6ff03f7d995fc893a4790778e3904cf678524fa4b3ee65e57fd32a35",
+          "sha256": "75fade85f4ce8d485432335cf07fc6dda6ce0b1a5c259818376a9df11b46fb47",
           "signature": "developer-id-notarized"
         },
         "mac-x64": {
           "filename": "reaper_mbriggs_helper-x86_64.dylib",
-          "sha256": "9ab847dabfdb181c26e028bec9c206ce239a45519d77341c25e8c6d566529cd9",
+          "sha256": "b00017968a9c5a30e40a4e54e3c7e2ab79e0ad2e1db9843d8085c6caaa8d9050",
           "signature": "developer-id-notarized"
         },
         "linux-x64": {
           "filename": "reaper_mbriggs_helper-x86_64.so",
-          "sha256": "94a3fadddd02efcb29221fb56ca79cfec327fcc6ccc760a60a17952d106cd007",
+          "sha256": "e9cb263c972f77ce1a2d720d4085860eb488837f46efd35ad5ec4296f28c7591",
           "signature": "sha256"
         },
         "linux-arm64": {
           "filename": "reaper_mbriggs_helper-aarch64.so",
-          "sha256": "f8599a7260cfc250599c198a336b1337b8d07c323cd9421399cbd706476ea16a",
+          "sha256": "6b7184dd86d48a13018fa7bd6bb97c46ead37ea8fc65565e8e436c7db0bf84cf",
           "signature": "sha256"
         }
       }
@@ -84,8 +83,8 @@
   "launchers": [
     {
       "name": "ReaAssist.lua",
-      "sha256": "3f286b9e589ded7b8fa7df74d2b8c3696147a526c912ca9f2495e39e8618c246",
-      "version": "1.6.0"
+      "sha256": "0044b21d92eaea5e65e5a23ac778d764d0d636214444dc12f1ec4130e6119454",
+      "version": "1.6.2"
     },
     {
       "name": "ReaAssist_Screen_Reader_Mode.lua",
@@ -104,50 +103,50 @@
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "e42052f29cf25670eec7cb2ce7bbbbf9b6173de86c4dcaff6bc941f820321600",
+      "sha256": "6b52cffba98c3d3dd859d9941e38584b5a38a59fe48de6745e11ee04fcb5e63a",
       "critical": true
     },
     {
       "name": "ReaAssist_Screen_Reader_Mode.lua",
-      "sha256": "078489590fbd83df71e79d44f492565b9d8b5eb999e447b012693ec70a498c36"
+      "sha256": "6f4307988b07809a38118b82fb1a9f6e134e9ba04375c315c06482cc3afa8bf2"
     },
     {
       "name": "Resources/API_Ref.md",
-      "sha256": "31b61b745b2213f7125dae43d97f4d40812d054924407a60746c1e6ffdf59610",
+      "sha256": "0b1d5241bab64bec97afb22d2e3a93b6d41aecc894989667e4ecb1381a78417c",
       "critical": true
     },
     {
       "name": "Resources/CodeRuntime.lua",
-      "sha256": "07c4902f39ed69c6c887c31fe060925116e5fbf3ec43aa21c5e4dfecebe067c5",
+      "sha256": "65d152d29a3da42b2485a8c0def6525453a7d5418550d6eed13baf51c877a4ed",
       "critical": true
     },
     {
       "name": "Resources/Context.lua",
-      "sha256": "d2776ec9ded829d78342ea94af577c17b4bf83f97bd71335dbb213121fec6791",
+      "sha256": "c6ea78d430188a5b3b2212ac355213512595f24c4aade802a3655e15132badf4",
       "critical": true
     },
     {
       "name": "Resources/Diag.lua",
-      "sha256": "6a2b48ceab9b6aa0de39c293d2c9a1978311d95e2efb6c11e2de53e15c877754",
+      "sha256": "30d90058cac63c95bed167cf771055302f09f4209f9291af8077d2cc0529ac48",
       "critical": true
     },
     {
       "name": "Resources/Engine.lua",
-      "sha256": "1eb6e48d9b0fc5ee3cd810eb3a1e567d812d515f6a99ab65fcf7d2906c69f256",
+      "sha256": "33a6320d3c7f313792a210f98e5394bd750a18e0e4d1a337114514f94dd12170",
       "critical": true
     },
     {
       "name": "Resources/I18N.lua",
-      "sha256": "18d5b673cddc744c3b3d39d813bd8801631934f6d111303d15657135e6cefc4e",
+      "sha256": "713df997663b83dbb2a3d0a235582bca0b53eae82ab7f3e3518f85afbfa21800",
       "critical": true
     },
     {
       "name": "Resources/Plugin_Pack.md",
-      "sha256": "6a3104a12629f884ae6e7ff81b413e7a9f772dc2e77b73e5cffef30ad94797dd"
+      "sha256": "c44c2f92272f40c2c4105d2d8eb3131eab197aad24fb557f4eccee5c7c7f2b76"
     },
     {
       "name": "Resources/Prompts.md",
-      "sha256": "392e5aa0808db24cd990fe8973ba2dad751a0d83308a64c26167fb8d59b444c5",
+      "sha256": "d2598ab8fdacc4f28e9bb14908c748a83fe677feebde1a49b886c921444c451b",
       "critical": true
     },
     {
@@ -168,7 +167,7 @@
     },
     {
       "name": "Resources/Reaper_Recent_Changes.md",
-      "sha256": "c390f27e4ae1bc037bd32099938d51f359646cf6e59b13c9a1bc0d5c33a4b05b"
+      "sha256": "08afffa83568c30f078bf978ad0745a7098936aae54d5ed5e12f6773b2ec5d0d"
     },
     {
       "name": "Resources/Relaunch.lua",
@@ -177,12 +176,12 @@
     },
     {
       "name": "Resources/System_Prompt.md",
-      "sha256": "f88928d2919651d9092e939af40f3efb752fb92df0db8c306582d2a026c21c70",
+      "sha256": "4c32a2f8e4c422c1c79ea748222d637cd51716a96692239e1e23e9464aa5e595",
       "critical": true
     },
     {
       "name": "Resources/UI.lua",
-      "sha256": "5d136db3723807ea6756a2d5b2509357f2c1eeb79faeecb8c7aa1c7bfee088da",
+      "sha256": "9689565d68e36b778bd58895f795ea483d47196f70f4cd3c8e0da0c39dd95cc3",
       "critical": true
     },
     {

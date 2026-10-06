@@ -10,6 +10,7 @@ local title = "ReaAssist - Screen Reader Mode"
 local ext_ns = "reaassist"
 local osara_url = "https://osara.reaperaccessibility.com/snapshots/"
 local reagirl_url = "https://reaassist.app/vendor/reagirl/1.3-ra2/reagirl.lua"
+-- A new library pin must also pass text-string compilation (no BOM or shebang).
 local reagirl_sha256 =
   "d93e291ea448741dd7baaa9fd01fe11c808ff8ea528b38f1340cc29464a9bf44"
 local reagirl_min_bytes = 1000000
@@ -886,13 +887,13 @@ end
 
 function ScreenReader.reagirl_path()
   local path = ScreenReader.reagirl_dest_path()
-  local ok, err = ScreenReader.verify_reagirl_file(path)
+  local ok, data_or_err = ScreenReader.verify_reagirl_file(path)
   if ok then
     if S then S._screen_reader_reagirl_load_error = nil end
-    return path
+    return path, data_or_err
   end
-  if err and err ~= "missing_reagirl" then pcall(os.remove, path) end
-  if S then S._screen_reader_reagirl_load_error = err end
+  if data_or_err and data_or_err ~= "missing_reagirl" then pcall(os.remove, path) end
+  if S then S._screen_reader_reagirl_load_error = data_or_err end
   return nil
 end
 
@@ -923,11 +924,14 @@ function ScreenReader.load_reagirl()
     ScreenReader.wrap_reagirl_sentence_validators()
     return true
   end
-  local path = ScreenReader.reagirl_path()
+  local path, data = ScreenReader.reagirl_path()
   if not path then
     return false, S and S._screen_reader_reagirl_load_error or "missing_reagirl"
   end
-  local ok, err = pcall(dofile, path)
+  -- Execute the exact bytes that passed verification, even if the path changes.
+  local chunk, compile_err = load(data, "@" .. path, "t", _ENV)
+  if not chunk then return false, tostring(compile_err) end
+  local ok, err = pcall(chunk)
   if not ok then return false, tostring(err) end
   if not (reagirl and reagirl.Gui_New and reagirl.Gui_Open) then
     return false, "reagirl_api_missing"
@@ -1416,7 +1420,10 @@ function ScreenReader.response_details_text(payload)
   end
   local cost = tonumber(payload.cost or msg.cost)
   local free_tier = payload.free_tier == true or msg.free_tier == true
-  if cost and (cost > 0 or free_tier) then
+  if payload.cost_unknown == true or msg.cost_unknown == true then
+    add(ScreenReader.t("details.label.est_cost", nil, "Estimated cost"),
+      ScreenReader.t("details.value.cost_unknown", nil, "Unknown"))
+  elseif cost and (cost > 0 or free_tier) then
     local cost_text = MODELS and MODELS.format_cost
       and MODELS.format_cost(cost) or string.format("$%.4f", cost)
     if free_tier then
@@ -1944,6 +1951,10 @@ function ScreenReader.auto_run_block_text(payload)
       or ScreenReader.t("auto_run.blocked.relevance", nil,
         "Auto-run was blocked because the generated action did not clearly match the request and captured session. Review the target tracks, plugins, and REAPER actions before running it manually.")
   end
+  if reason == "confirmation_pending" then
+    return ScreenReader.t("auto_run.blocked.confirmation_pending", nil,
+      "Another run confirmation is open. Finish or cancel it, then review this response and use Run.")
+  end
   if reason == "risky_code_confirmation" then
     return ScreenReader.t("a11y.sr.run_code_risky", nil,
       "This generated code needs confirmation before it runs.")
@@ -2004,8 +2015,8 @@ end
 
 function ScreenReader.undo_meaning(payload)
   if ScreenReader.payload_is_typed_action(payload) then
-    return ScreenReader.t("a11y.sr.undo_edit.meaning", nil,
-      "Sends REAPER Undo for the structured edit that just ran.")
+    return ScreenReader.t("typed_actions.undo.native_history", nil,
+      "Restore REAPER's recorded state before this edit. Unrecorded changes made before or after it may also be undone.")
   end
   if ScreenReader.payload_is_jsfx(payload) then
     return ScreenReader.t("a11y.sr.undo_jsfx.meaning", nil,
@@ -3422,6 +3433,9 @@ function ScreenReader.refresh_actions(opts)
   local key_configured = key_status and key_status.configured == true
   local key_console = key_status and key_status.console_url
     and tostring(key_status.console_url) ~= ""
+  if ui.ids.provider and reagirl and reagirl.DropDownMenu_SetDisabled then
+    pcall(reagirl.DropDownMenu_SetDisabled, ui.ids.provider, key_test_active)
+  end
   ScreenReader.set_input_disabled(ui.ids.api_key_input, key_test_active)
   ScreenReader.set_button_disabled(ui.ids.test_key,
     key_test_active or request_active or not key_configured)
@@ -3471,7 +3485,14 @@ end
 function ScreenReader.select_provider(menu_idx)
   local ui = S and S.screen_reader_ui or nil
   local provider_idx = ui and ui.provider_map and ui.provider_map[menu_idx]
-  local ok = provider_idx and AppController.select_provider_idx(provider_idx)
+  local ok, reason
+  if provider_idx then ok, reason = AppController.select_provider_idx(provider_idx) end
+  if not ok and reason == "request_active" then
+    ScreenReader.refresh_menus()
+    ScreenReader.set_status(ScreenReader.t("a11y.sr.request_already_running", nil,
+      "A request is already running."), true)
+    return
+  end
   if not ok then
     ScreenReader.set_status(ScreenReader.t("a11y.sr.invalid_provider", nil,
       "That provider cannot be selected."), true)
@@ -4417,16 +4438,30 @@ function ScreenReader.open_run_confirm(reason, message, opts)
   ScreenReader.open_view("run_confirm")
 end
 
+function ScreenReader.report_run_failure(message)
+  if S and S._screen_reader_view == "run_confirm" then
+    ScreenReader.set_status_after_rebuild(message, true)
+    ScreenReader.open_view("reader")
+  else
+    ScreenReader.set_status(message, true)
+    ScreenReader.refresh_actions()
+  end
+end
+
 function ScreenReader.run_code(opts)
   local payload = AppController.latest_response_payload()
   if ScreenReader.payload_is_jsfx(payload) then
+    if opts and (opts.binding or opts.confirm_risky or opts.skip_backup) then
+      local _, _, text = TypedActionController.run_confirmation_refusal()
+      return ScreenReader.report_run_failure(text)
+    end
     local next_view = (S and S._screen_reader_view == "reader")
       and "reader" or "response_ready"
     ScreenReader.add_latest_jsfx_to_selected_tracks(next_view)
     return
   end
 
-  local ok, reason, msg = AppController.run_latest_code(opts or {})
+  local ok, reason, msg, next_opts = AppController.run_latest_code(opts or {})
   if ok then
     ScreenReader.queue_response_ready_announcement(
       AppController.latest_response_payload(),
@@ -4436,20 +4471,19 @@ function ScreenReader.run_code(opts)
     return
   end
   if reason == "risky_confirmation_required" then
-    return ScreenReader.open_run_confirm(reason, msg, { confirm_risky = true })
+    return ScreenReader.open_run_confirm(reason, msg, next_opts)
   end
   if reason == "backup_unsaved" then
-    return ScreenReader.open_run_confirm(reason, msg, { skip_backup = true })
+    return ScreenReader.open_run_confirm(reason, msg, next_opts)
   end
-  ScreenReader.set_status(msg or ScreenReader.t("a11y.sr.run_code_failed", nil,
-    "Generated code failed. Check the response and debug log."), true)
-  ScreenReader.refresh_actions()
+  ScreenReader.report_run_failure(msg or ScreenReader.t("a11y.sr.run_code_failed", nil,
+    "Generated code failed. Check the response and debug log."))
 end
 
 function ScreenReader.apply_typed_action(opts)
-  local ok, reason, msg
+  local ok, reason, msg, next_opts
   if AppController.apply_latest_typed_action then
-    ok, reason, msg = AppController.apply_latest_typed_action(opts or {})
+    ok, reason, msg, next_opts = AppController.apply_latest_typed_action(opts or {})
   else
     ok, reason, msg = false, "unavailable", ScreenReader.t(
       "a11y.sr.apply_action_plan_unavailable", nil,
@@ -4464,41 +4498,31 @@ function ScreenReader.apply_typed_action(opts)
     return
   end
   if reason == "backup_unsaved" then
-    return ScreenReader.open_run_confirm(reason, msg, {
-      apply_typed_action = true,
-      skip_backup = true,
-    })
+    next_opts.apply_typed_action = true
+    return ScreenReader.open_run_confirm(reason, msg, next_opts)
   end
-  ScreenReader.set_status(msg or ScreenReader.t(
+  ScreenReader.report_run_failure(msg or ScreenReader.t(
     "a11y.sr.apply_action_plan_failed", nil,
-    "Structured edit could not run."), true)
-  ScreenReader.refresh_actions()
+    "Structured edit could not run."))
 end
 
 function ScreenReader.confirm_run_code()
-  local confirm = S and S._screen_reader_run_confirm or {}
+  local confirm = S and S._screen_reader_run_confirm
+  if not confirm then
+    if S and S._screen_reader_view == "run_confirm" then
+      ScreenReader.report_run_failure(ScreenReader.t(
+        "a11y.sr.run_confirmation_changed", nil,
+        "Nothing ran. The action or project changed, or its confirmation expired. Run again to review it."))
+    end
+    return
+  end
+  S._screen_reader_run_confirm = nil
   if confirm.opts and confirm.opts.apply_typed_action then
-    local opts = confirm.opts or {}
+    local opts = confirm.opts
     opts.apply_typed_action = nil
-    S._screen_reader_run_confirm = nil
     return ScreenReader.apply_typed_action(opts)
   end
-  local ok, reason, msg = AppController.run_latest_code(confirm.opts or {})
-  S._screen_reader_run_confirm = nil
-  if ok then
-    ScreenReader.queue_response_ready_announcement(
-      AppController.latest_response_payload(),
-      msg or ScreenReader.t("a11y.sr.run_code_ok", nil,
-        "Generated code ran."))
-    ScreenReader.open_view("response_ready")
-  elseif reason == "backup_unsaved" then
-    ScreenReader.open_run_confirm(reason, msg, { skip_backup = true })
-  else
-    ScreenReader.set_status_after_rebuild(msg or ScreenReader.t(
-      "a11y.sr.run_code_failed", nil,
-      "Generated code failed. Check the response and debug log."), true)
-    ScreenReader.open_view("reader")
-  end
+  return ScreenReader.run_code(confirm.opts or {})
 end
 
 function ScreenReader.cancel_run_code()
@@ -4732,7 +4756,7 @@ function ScreenReader.open_uninstall_confirm()
   S._screen_reader_uninstall_remove_data = false
   S._screen_reader_uninstall_result = nil
   S._screen_reader_uninstall_plan =
-    Updater.uninstall_plan({ remove_user_data = false })
+    Updater.uninstall_plan({ remove_user_data = false, surface = "screen_reader" })
   ScreenReader.open_view("uninstall_confirm")
 end
 
@@ -5607,6 +5631,7 @@ function ScreenReader.cancel_visual_switch()
 end
 
 function ScreenReader.open_view(view)
+  if view ~= "run_confirm" then S._screen_reader_run_confirm = nil end
   S._screen_reader_view = view or "main"
   if not S._screen_reader_focus_after_rebuild then
     ScreenReader.focus_after_rebuild(
@@ -5862,14 +5887,11 @@ function ScreenReader.api_key_test_result_text(passed, after_save, recovery)
 end
 
 function ScreenReader.save_api_key()
-  local ok, err = AppController.save_active_provider_key(
+  local ok, err, pending = AppController.save_active_provider_key(
     ScreenReader.api_key_input_text())
   if ok then
-    local ui = S and S.screen_reader_ui or nil
-    if ui and ui.ids and ui.ids.api_key_input
-        and reagirl and reagirl.Inputbox_SetText then
-      pcall(reagirl.Inputbox_SetText, ui.ids.api_key_input, "")
-    end
+    S._screen_reader_key_save_pending = pending
+    S._screen_reader_key_test_active = true
     S._screen_reader_key_test_after_save = true
     ScreenReader.set_status(ScreenReader.t("a11y.sr.api_key_testing", nil,
       "Testing API key."), true)
@@ -5882,7 +5904,6 @@ function ScreenReader.save_api_key()
   ScreenReader.refresh_menus()
   ScreenReader.refresh_api_key_status()
   ScreenReader.refresh_actions()
-  if ok then ScreenReader.test_api_key({ after_save = true }) end
 end
 
 function ScreenReader.clear_api_key()
@@ -5922,8 +5943,30 @@ function ScreenReader.handle_key_test_ready()
   local after_save = S._screen_reader_key_test_after_save == true
   S._screen_reader_key_test_after_save = nil
   local passed = AppController.active_provider_is_usable() and S.status ~= "error"
+  if after_save then
+    local pending = S._screen_reader_key_save_pending
+    local result = api_keys and api_keys.screen_reader_save_result
+    passed = pending ~= nil and result ~= nil and result.saved == true
+      and result.generation == pending.generation
+      and result.provider_id == pending.provider_id
+    if passed and S.api_key_map
+        and AppController.trim_text(ScreenReader.api_key_input_text())
+          == S.api_key_map[result.provider_id] then
+      local ui = S.screen_reader_ui
+      if ui and ui.ids and ui.ids.api_key_input
+          and reagirl and reagirl.Inputbox_SetText then
+        pcall(reagirl.Inputbox_SetText, ui.ids.api_key_input, "")
+      end
+    end
+    S._screen_reader_key_save_pending = nil
+    if api_keys then api_keys.screen_reader_save_result = nil end
+  end
   local recovery = api_keys and api_keys.key_test_recovery or nil
-  local msg = ScreenReader.api_key_test_result_text(passed, after_save, recovery)
+  local msg = ScreenReader.api_key_test_result_text(passed, after_save and passed, recovery)
+  if after_save and not passed and not (recovery and recovery.save_uncertain) then
+    msg = ScreenReader.t("a11y.sr.api_key_replacement_not_saved", nil,
+      "Replacement key was not saved.") .. " " .. msg
+  end
   if api_keys then api_keys.key_test_recovery = nil end
   ScreenReader.set_status(msg, false)
   ScreenReader.api_key_message_box(msg)
@@ -6116,6 +6159,10 @@ function ScreenReader.update_prompt_body_text()
       " file(s) that need repair. Repair now to restore the required files.")
   end
   local remote = tostring(update and update.remote_version or "?")
+  if Updater.is_v2_release(remote) then
+    return ScreenReader.t("update.available.v2_desc", nil,
+      "Version 2 is a fresh, clean install and comes with many upgrades and improvements.")
+  end
   return ScreenReader.t("a11y.sr.update_prompt.update_body", {
     remote = remote,
     current = tostring(CFG and CFG.VERSION or "?"),
@@ -6286,15 +6333,34 @@ function ScreenReader.commit_language(idx, code)
     ScreenReader.refresh_language_menu()
     return
   end
+  if not (Store and type(Store.save_config) == "function"
+      and type(Store.config_doc) == "function") then
+    ScreenReader.set_status(ScreenReader.t("a11y.sr.settings_save_failed", {
+      error = "settings storage unavailable",
+    }, "Settings could not be saved: settings storage unavailable"), true)
+    ScreenReader.refresh_language_menu()
+    return
+  end
+  local old_idx, old_code = prefs.reply_language_idx, prefs.language_code
+  local config = Store and Store.config_doc and Store.config_doc()
+  local old_preferences, old_selection, old_schema = config.preferences, config.selection, config.schema_version
   prefs.reply_language_idx = idx
   prefs.language_code = code
-  if I18N and I18N.reload_language then pcall(I18N.reload_language, code) end
-  if ScreenReader.save_config() then
-    ScreenReader.set_status_after_rebuild(
-      ScreenReader.language_changed_status_text(code), true)
-    ScreenReader.focus_after_rebuild("language")
-    ScreenReader.open_view(return_view)
+  local ok, err = pcall(Store.save_config)
+  if not ok or err then
+    prefs.reply_language_idx, prefs.language_code = old_idx, old_code
+    config.preferences, config.selection, config.schema_version = old_preferences, old_selection, old_schema
+    ScreenReader.set_status(ScreenReader.t("a11y.sr.settings_save_failed", {
+      error = tostring(err),
+    }, "Settings could not be saved: " .. tostring(err)), true)
+    ScreenReader.refresh_language_menu()
+    return
   end
+  if I18N and I18N.reload_language then pcall(I18N.reload_language, code) end
+  ScreenReader.set_status_after_rebuild(
+    ScreenReader.language_changed_status_text(code), true)
+  ScreenReader.focus_after_rebuild("language")
+  ScreenReader.open_view(return_view)
 end
 
 function ScreenReader.select_language(menu_idx)
@@ -6550,11 +6616,11 @@ end
 
 function ScreenReader.diagnostics_menu()
   local labels = {
+    ScreenReader.t("a11y.sr.diagnostics_off", nil, "Off"),
     ScreenReader.t("settings.adv.diagnostics.basic", nil, "Basic"),
     ScreenReader.t("settings.adv.diagnostics.extended", nil, "Extended"),
-    ScreenReader.t("a11y.sr.diagnostics_off", nil, "Off"),
   }
-  local map = { "basic", "extended", "off" }
+  local map = { "off", "basic", "extended" }
   local selected = 1
   local tier = (Diag and Diag.current_tier and Diag.current_tier())
     or (prefs and prefs.diag_auto_tier) or "off"
@@ -6576,8 +6642,31 @@ end
 
 function ScreenReader.select_diagnostics_tier(menu_idx)
   local ui = S and S.screen_reader_ui or nil
+  if ui and ui.diagnostics_restoring then return end
   local value = ui and ui.diagnostics_map and ui.diagnostics_map[menu_idx]
   if not value then return end
+  local current = (Diag and Diag.current_tier and Diag.current_tier())
+    or (prefs and prefs.diag_auto_tier) or "off"
+  if value == current then return end
+  if value == "extended" and current ~= "extended" then
+    local tier_label = ScreenReader.diagnostics_tier_label(value)
+    local disclosure = ScreenReader.t("settings.diag.popup.next_launch", { tier = tier_label },
+      tier_label .. " diagnostics are sent on the next launch, when ReaAssist is idle.")
+      .. "\n\n" .. ScreenReader.t("settings.diag.popup.extended_body", nil,
+        "Extended includes Basic metrics plus redacted chat, diagnostics, recent errors, and redacted Advanced Log/report detail.")
+    local ok, answer = pcall(message_box, disclosure, 4)
+    if not ok or answer ~= 6 then
+      if ui and ui.ids and ui.ids.diagnostics_tier then
+        local labels, map, selected = ScreenReader.diagnostics_menu()
+        ui.diagnostics_map = map
+        ui.diagnostics_restoring = true
+        ScreenReader.set_dropdown_items(ui.ids.diagnostics_tier, labels, selected)
+        ui.diagnostics_restoring = nil
+      end
+      ScreenReader.refresh_settings_summary()
+      return
+    end
+  end
   if Diag and Diag.set_auto_tier then Diag.set_auto_tier(value)
   elseif prefs then prefs.diag_auto_tier = value end
   if ScreenReader.save_config() then
@@ -7556,6 +7645,37 @@ function ScreenReader.copy_custom_provider_template()
 end
 
 function ScreenReader.load_custom_providers_file()
+  local function refuse(reason)
+    ScreenReader.set_status(ScreenReader.t(
+      "a11y.sr.custom_providers_save_failed", { error = tostring(reason) },
+      "Could not save custom providers: " .. tostring(reason)), true)
+  end
+  local function busy()
+    return AppController.request_is_active()
+      or S.key_test_pending or S.key_test_armed or S.gemini_tier_pending
+      or api_keys._test_orig_provider_idx ~= nil
+      or Store._key_test_selection ~= nil
+      or (api_keys.custom_conn_test and api_keys.custom_conn_test.active)
+  end
+  if not (Store and type(Store._schema_classification) == "function"
+      and Custom and type(Custom.load_all) == "function"
+      and type(Custom.register_all) == "function"
+      and Custom.REGISTER_ALL_RECORDS_REVISION == 1
+      and type(Store.providers_document) == "function"
+      and AppController and type(AppController.request_is_active) == "function"
+      and ScreenReaderLegacy and ScreenReaderLegacy.runtime
+      and type(ScreenReaderLegacy._tuple_allowed) == "function"
+      and type(ScreenReaderLegacy._copy) == "function"
+      and type(ScreenReaderLegacy.provider_idx) == "function"
+      and type(ScreenReaderLegacy.DEFAULT) == "table"
+      and MODELS and type(MODELS.refresh) == "function"
+      and CFG and type(CFG.EXT_NS) == "string"
+      and type(ScreenReaderLegacy.finalize_startup) == "function"
+      and api_keys and reaper and type(reaper.GetExtState) == "function"
+      and JSON and type(JSON.encode) == "function") then
+    return refuse("provider import dependencies unavailable")
+  end
+  if busy() then return refuse("Finish or cancel the active request or key test first.") end
   local path = ScreenReader.custom_providers_path()
   local text, read_err = ScreenReader.read_file(path)
   if not text then
@@ -7566,47 +7686,205 @@ function ScreenReader.load_custom_providers_file()
         .. tostring(read_err or "unknown error")), true)
     return
   end
-  local doc, decode_err = JSON.decode(text)
-  if not doc or type(doc) ~= "table" or type(doc.records) ~= "table" then
+  local doc, decode_err = JSON.decode(text, true, true)
+  if decode_err then return refuse("Invalid JSON: " .. tostring(decode_err)) end
+  if Store._schema_classification(doc, 1) ~= "current" then
+    return refuse("The provider file must use schema_version 1.")
+  end
+  local collection = type(doc) == "table" and doc.records or nil
+  local valid_array = type(collection) == "table" and collection ~= JSON.NULL
+  local count = 0
+  if valid_array then
+    for key in pairs(collection) do
+      if type(key) ~= "number" or key < 1 or key ~= math.floor(key) then
+        valid_array = false
+        break
+      end
+      count = count + 1
+    end
+    valid_array = valid_array and count == #collection
+      and (count > 0 or (JSON._EMPTY_ARRAY_TAG ~= nil
+        and getmetatable(collection) == JSON._EMPTY_ARRAY_TAG))
+  end
+  if not valid_array then
     ScreenReader.set_status(ScreenReader.t(
       "a11y.sr.custom_providers_invalid_json",
-      { error = tostring(decode_err or "records missing") },
+      { error = tostring(decode_err or "records must be an array") },
       "Custom providers JSON is invalid: "
-        .. tostring(decode_err or "records missing")), true)
+        .. tostring(decode_err or "records must be an array")), true)
     return
   end
-  local records = {}
-  for i, src in ipairs(doc.records) do
-    local rec = Store and Store._provider_record_from_json
-      and Store._provider_record_from_json(src, i) or nil
-    if rec then records[#records + 1] = rec end
+  if not (Store and type(Store.save_providers) == "function"
+      and type(Store._provider_record_from_json) == "function") then
+    ScreenReader.set_status(ScreenReader.t(
+      "a11y.sr.custom_providers_save_failed", { error = "provider storage unavailable" },
+      "Could not save custom providers: provider storage unavailable"), true)
+    return
   end
-  if #records == 0 and #doc.records > 0 then
+  local records, usable, ids = {}, 0, {}
+  for i, src in ipairs(doc.records) do
+    local rec = Store._provider_record_from_json(src, i)
+    if not rec then
+      ScreenReader.set_status(ScreenReader.t(
+        "a11y.sr.custom_providers_no_valid_records", nil,
+        "No valid provider records were found in the file."), true)
+      return
+    end
+    local id = rec._provider_opaque == true and rec._provider_opaque_id or rec.id
+    if type(id) == "string" and id ~= "" then
+      if ids[id] then return refuse("The provider file contains duplicate IDs.") end
+      ids[id] = true
+    end
+    records[#records + 1] = rec
+    if rec._provider_opaque ~= true then usable = usable + 1 end
+  end
+  if usable == 0 and #doc.records > 0 then
     ScreenReader.set_status(ScreenReader.t(
       "a11y.sr.custom_providers_no_valid_records", nil,
       "No valid provider records were found in the file."), true)
     return
   end
-  local err = Store and Store.save_providers and Store.save_providers(records)
-  if err then
-    ScreenReader.set_status(ScreenReader.t(
-      "a11y.sr.custom_providers_save_failed", { error = tostring(err) },
-      "Could not save custom providers: " .. tostring(err)), true)
-    return
+  local function saved_snapshot()
+    local ok, saved = pcall(Custom.load_all)
+    local state = Store._providers_load_state
+    if not ok or type(saved) ~= "table"
+        or (state ~= "current" and state ~= "missing" and state ~= "empty")
+        or (Store._provider_load_incomplete and Store._provider_load_incomplete()) then
+      return nil, "The saved provider list could not be read completely."
+    end
+    local seen = {}
+    for _, rec in ipairs(saved) do
+      local id = rec._provider_opaque == true and rec._provider_opaque_id or rec.id
+      if type(id) == "string" and id ~= "" then
+        if seen[id] then return nil, "The saved provider list contains ambiguous duplicate IDs." end
+        seen[id] = true
+      end
+    end
+    local encoded_ok, encoded = pcall(function()
+      return JSON.encode(Store.providers_document(saved))
+    end)
+    if not encoded_ok or not encoded then return nil, "Could not compare the saved provider list." end
+    return saved, encoded
   end
-  if Custom and Custom.register_all then Custom.register_all() end
-  if prefs and PROVIDERS and prefs.provider_idx > #PROVIDERS then
-    prefs.provider_idx = 1
+  local function keys_match(saved)
+    local by_id = {}
+    for _, rec in ipairs(saved) do
+      if rec._provider_opaque ~= true then by_id[rec.id] = rec end
+    end
+    for _, rec in ipairs(records) do
+      if rec._provider_opaque ~= true then
+        local live = S.api_key_map and S.api_key_map[rec.id]
+        local stored = reaper.GetExtState(CFG.EXT_NS, "api_key_" .. rec.id)
+        if (type(live) == "string" and live ~= "") or stored ~= "" then
+          local old = by_id[rec.id]
+          if not old or old.endpoint ~= rec.endpoint
+              or (old.allow_insecure == true) ~= (rec.allow_insecure == true) then return false end
+        end
+      end
+    end
+    return true
+  end
+  local saved, snapshot = saved_snapshot()
+  if not saved then return refuse(snapshot) end
+  if not keys_match(saved) then
+    return refuse("A saved key belongs to a different or unavailable provider endpoint. Clear that key before importing this ID.")
+  end
+  if #saved > 0 then
+    local enabled = {}
+    for _, rec in ipairs(records) do
+      if rec._provider_opaque ~= true then enabled[rec.id] = true end
+    end
+    local removed = {}
+    for _, rec in ipairs(saved) do
+      local id = rec._provider_opaque == true and rec._provider_opaque_id or rec.id
+      if type(id) ~= "string" or id == "" or not ids[id]
+          or (rec._provider_opaque ~= true and not enabled[id]) then
+        removed[#removed + 1] = tostring(rec.label or id or "unsupported record")
+      end
+    end
+    local message = ScreenReader.t("a11y.sr.custom_providers_replace_confirm", {
+      count = tostring(#saved), removed = #removed > 0 and table.concat(removed, ", ") or "None",
+    }, "Replace all " .. tostring(#saved) .. " saved custom provider records with this file?"
+      .. "\nRemoved or disabled entries: " .. (#removed > 0 and table.concat(removed, ", ") or "None")
+      .. "\nSaved keys are retained. This does not change native provider records.")
+    local ok, answer = false, nil
+    if type(reaper.ShowMessageBox) == "function" then
+      ok, answer = pcall(reaper.ShowMessageBox, message,
+        ScreenReader.t("a11y.sr.custom_providers_replace_title", nil, "Replace Custom Providers?"), 4)
+    end
+    if not ok or answer ~= 6 then
+      ScreenReader.set_status(ScreenReader.t("a11y.sr.custom_providers_import_cancelled", nil,
+        "Provider import cancelled."), true)
+      return
+    end
+  end
+  if busy() then return refuse("Provider activity changed. Finish or cancel it before importing.") end
+  local current, current_snapshot = saved_snapshot()
+  if not current then return refuse(current_snapshot) end
+  if current_snapshot ~= snapshot then return refuse("The saved provider list changed. Review the file and try again.") end
+  if not keys_match(current) then return refuse("Saved provider keys changed. Review the provider endpoints before importing.") end
+  local runtime = ScreenReaderLegacy.runtime
+  local effective = runtime and runtime.effective
+  if not (effective and effective.provider_id and effective.model_id and effective.protocol_id) then
+    return refuse("Screen Reader selection is unavailable.")
+  end
+  local ok, err = pcall(Store.save_providers, records)
+  if not ok or err then return refuse("Import did not finish: " .. tostring(err)) end
+  -- Register the validated snapshot; a second disk read could change its endpoints.
+  Custom.register_all(records)
+  local function use_compatibility_default()
+    runtime.effective = ScreenReaderLegacy._copy(ScreenReaderLegacy.DEFAULT)
+    runtime.substitution_active = true
+    runtime.substitution_reason = "provider_import_changed"
+    prefs.provider_idx = ScreenReaderLegacy.provider_idx(PROVIDERS)
+  end
+  local function fallback_status()
+    local provider = PROVIDERS[prefs.provider_idx]
+    local model = MODELS[prefs.model_idx] or MODELS[1]
+    local provider_name = tostring(provider and (provider.label or provider.id) or "unknown provider")
+    local model_name = tostring(model and (model.label or model.id) or "unknown model")
+    return ScreenReader.t("a11y.sr.custom_providers_selection_fallback",
+      { provider = provider_name, model = model_name },
+      "Using the Screen Reader compatibility selection: " .. provider_name .. ", "
+        .. model_name .. ". Your saved selection was not changed.")
+  end
+  local active, active_idx
+  for i, provider in ipairs(PROVIDERS) do
+    if provider.id == effective.provider_id then active, active_idx = provider, i; break end
+  end
+  local kept = active and ScreenReaderLegacy._tuple_allowed(
+    active, effective.model_id, effective.protocol_id)
+  if kept then
+    prefs.provider_idx = active_idx
+  else
+    use_compatibility_default()
   end
   if MODELS and MODELS.refresh then MODELS.refresh() end
-  if AppController and AppController.active_provider then
-    local active = AppController.active_provider()
-    S.api_key = active and S.api_key_map and S.api_key_map[active.id] or nil
+  ScreenReaderLegacy.finalize_startup(PROVIDERS, MODELS, prefs, S)
+  local registered = {}
+  for _, provider in ipairs(PROVIDERS) do registered[provider.id] = true end
+  for _, rec in ipairs(records) do
+    if rec._provider_opaque ~= true and not registered[rec.id] then
+      use_compatibility_default()
+      MODELS.refresh()
+      ScreenReaderLegacy.finalize_startup(PROVIDERS, MODELS, prefs, S)
+      return refuse("The provider list was saved but could not be fully loaded. "
+        .. fallback_status())
+    end
   end
-  ScreenReader.set_status_after_rebuild(ScreenReader.t(
-    "a11y.sr.custom_providers_loaded",
-    { count = tostring(#records) },
-    "Loaded " .. tostring(#records) .. " custom provider(s)."), true)
+  local preserved = #records - usable
+  local status = preserved > 0 and ScreenReader.t(
+    "a11y.sr.custom_providers_loaded_preserved",
+    { count = tostring(usable), preserved = tostring(preserved) },
+    "Loaded " .. tostring(usable) .. " custom provider(s). Preserved "
+      .. tostring(preserved) .. " unsupported record(s) without activating them.")
+    or ScreenReader.t("a11y.sr.custom_providers_loaded",
+      { count = tostring(usable) },
+      "Loaded " .. tostring(usable) .. " custom provider(s).")
+  if not kept then
+    status = status .. " " .. fallback_status()
+  end
+  ScreenReader.set_status_after_rebuild(status, true)
   ScreenReader.open_view("custom_providers")
 end
 
@@ -8043,6 +8321,8 @@ function ScreenReader.build_update_prompt_ui()
   local ui = S.screen_reader_ui
   local state = ScreenReader.update_prompt_state() or "available"
   local is_repair = state == "repair_available"
+  local is_v2 = not is_repair
+    and Updater.is_v2_release(update and update.remote_version)
   ScreenReader.begin_reagirl_ui()
 
   ui.ids.title = reagirl.Label_Add(18, 18, ScreenReader.view_title(),
@@ -8068,7 +8348,9 @@ function ScreenReader.build_update_prompt_ui()
   ui.ids.apply_update = reagirl.Button_Add(nil, nil, 10, 5,
     is_repair
       and ScreenReader.t("update.repair.now", nil, "Repair Now")
-      or ScreenReader.t("update.action.update_now", nil, "Update Now"),
+      or (is_v2
+        and ScreenReader.t("update.action.upgrade_now", nil, "Upgrade Now")
+        or ScreenReader.t("update.action.update_now", nil, "Update Now")),
     ScreenReader.t("a11y.sr.update_prompt.apply.meaning", nil,
       "Applies the available ReaAssist update or file repair now."),
     function() ScreenReader.apply_update() end,
@@ -8109,6 +8391,9 @@ function ScreenReader.build_update_prompt_ui()
     ScreenReader.announce(is_repair
       and ScreenReader.t("a11y.sr.update_prompt.repair_opened", nil,
         "ReaAssist files need repair. Choose Repair Now.")
+      or (is_v2 and (ScreenReader.update_prompt_body_text() .. " "
+        .. ScreenReader.t("a11y.sr.update_prompt.v2_actions", nil,
+          "Choose Upgrade Now, Later, or View Changelog.")))
       or ScreenReader.t("a11y.sr.update_prompt.update_opened", nil,
         "ReaAssist update available. Choose Update Now, Later, or View Changelog."))
   end
@@ -11651,14 +11936,27 @@ function AppController.save_active_provider_key(key)
       provider = p.label or p.id or "",
     }, "That key does not match the expected " .. tostring(p.label or "provider") .. " key format.")
   end
-  S.api_key_map[p.id] = key
-  S.api_key = key
-  if Key and Key.save and p.key_extstate then Key.save(key, p.key_extstate) end
-  if Store and Store.save_config then Store.save_config() end
-  return true
+  if not (api_keys and api_keys.SR_SAVE_REVISION == 1
+      and api_keys.start_screen_reader_key_save) then
+    return false, AppController.t("a11y.sr.api_key_save_update_required", nil,
+      "Key saving requires matching ReaAssist files. Repair or update ReaAssist and try again.")
+  end
+  if AppController.request_is_active() or api_keys.screen_reader_key_save_busy() then
+    return false, AppController.t("a11y.sr.request_already_running", nil,
+      "A request is already running.")
+  end
+  local started, generation = api_keys.start_screen_reader_key_save(p, key)
+  if not started then
+    return false, AppController.t("a11y.sr.api_key_save_failed", nil,
+      "API key could not be saved.")
+  end
+  return true, nil, { generation = generation, provider_id = p.id }
 end
 
 function AppController.clear_active_provider_key()
+  if S._screen_reader_key_test_active or S.key_test_pending or S.key_test_armed then
+    return false
+  end
   local p = AppController.active_provider()
   if not p then return false end
   if p.key_extstate and Key and Key.clear then Key.clear(p.key_extstate) end
@@ -11669,6 +11967,10 @@ function AppController.clear_active_provider_key()
 end
 
 function AppController.test_active_provider_key()
+  if S._screen_reader_key_test_active or S.key_test_pending or S.key_test_armed then
+    return false, AppController.t("a11y.sr.request_already_running", nil,
+      "A request is already running.")
+  end
   local p = AppController.active_provider()
   if not p then
     return false, AppController.t("a11y.sr.api_key_no_provider", nil,
@@ -11816,6 +12118,9 @@ function AppController._refresh_attachment_costs(model)
 end
 
 function AppController.select_provider_idx(idx)
+  if S._screen_reader_key_test_active or S.key_test_pending then
+    return false, "request_active"
+  end
   idx = tonumber(idx)
   if not (idx and PROVIDERS and PROVIDERS[idx]) then
     return false, "invalid_provider"
@@ -12598,35 +12903,65 @@ end
 
 function AppController.run_latest_code(opts)
   opts = opts or {}
+  if not (TypedActionController and TypedActionController.capture_run_confirmation
+      and TypedActionController.consume_run_confirmation) then
+    return false, "confirmation_unavailable", AppController.t(
+      "a11y.sr.run_confirmation_unavailable", nil,
+      "Nothing ran. ReaAssist files do not match. Complete the update and reopen ReaAssist.")
+  end
   local info = AppController.latest_code_run_info()
+  local consent_ok = true
+  if opts.binding or opts.confirm_risky or opts.skip_backup then
+    consent_ok = TypedActionController.consume_run_confirmation(opts.binding, "lua",
+      info.message_obj, info.message_idx, info.code, opts)
+  end
+  if AppController.request_is_active() then
+    return false, "request_active", AppController.t(
+      "a11y.sr.run_request_active", nil, "Nothing ran. Wait for the current request to finish, then run the action again.")
+  end
   if not info.can_run then return false, info.reason, info.message end
+  if not consent_ok then return TypedActionController.run_confirmation_refusal() end
   local context = Code.generated_lua_run_context(info.message_obj, info.message_idx, info.code)
   local allowed, reason, message = Code.preflight_generated_lua_execution(info.code, context)
   if not allowed then return false, reason, message end
   if Code and Code.scan_risky and not opts.confirm_risky then
     local risk = Code.scan_risky(info.code)
     if risk then
+      local next_opts = { confirm_risky = true }
+      next_opts.binding = TypedActionController.capture_run_confirmation(
+        "lua", info.message_obj, info.message_idx, info.code, next_opts)
+      if not next_opts.binding then return TypedActionController.run_confirmation_refusal() end
       return false, "risky_confirmation_required",
         AppController.t("a11y.sr.run_code_risky", nil,
           "This generated code needs confirmation before it runs.")
+          .. " " .. tostring(risk):gsub("^Warning:%s*", ""):gsub("^%l", string.upper), next_opts
     end
   end
-  if prefs and prefs.auto_backup and not opts.skip_backup
-      and Code and Code.safety_backup then
+  local run_project = opts.binding and opts.binding.project_pointer or reaper.EnumProjects(-1)
+  local run_identity = Code.conversation_project_identity(run_project)
+  if not run_identity then return TypedActionController.run_confirmation_refusal() end
+  if prefs and prefs.auto_backup and Code and Code.safety_backup then
     local _, berr = Code.safety_backup()
-    if berr == "unsaved" then
+    if berr == "unsaved" and not opts.skip_backup then
+      local next_opts = { confirm_risky = opts.confirm_risky == true, skip_backup = true }
+      next_opts.binding = TypedActionController.capture_run_confirmation(
+        "lua", info.message_obj, info.message_idx, info.code, next_opts)
+      if not next_opts.binding then return TypedActionController.run_confirmation_refusal() end
       return false, "backup_unsaved",
         AppController.t("a11y.sr.run_code_backup_unsaved", nil,
-          "Auto-backup is on, but the project has not been saved.")
-    elseif not Code.safety_backup_can_proceed(berr) then
+          "Auto-backup is on, but the project has not been saved."), next_opts
+    elseif berr ~= "unsaved" and not Code.safety_backup_can_proceed(berr) then
       return false, "backup_failed",
         AppController.t("a11y.sr.run_code_backup_failed", {
           error = tostring(berr),
         }, "Safety backup failed: " .. tostring(berr))
     end
   end
+  if Code.conversation_project_identity(reaper.EnumProjects(-1)) ~= run_identity then
+    return TypedActionController.run_confirmation_refusal()
+  end
   S.status = "running"
-  local ok = Code and Code.run and Code.run(info.code, nil, nil, context)
+  local ok = Code and Code.run and Code.run(info.code, run_project, nil, context)
   if Code and Code.bind_pending_deferred_run then
     Code.bind_pending_deferred_run(info.message_idx, nil, false, nil)
   end
@@ -12646,159 +12981,17 @@ function AppController.run_latest_code(opts)
 end
 
 function AppController.apply_latest_typed_action(opts)
-  opts = opts or {}
+  if not (TypedActionController and TypedActionController.capture_run_confirmation
+      and TypedActionController.consume_run_confirmation) then
+    return false, "confirmation_unavailable", AppController.t(
+      "a11y.sr.run_confirmation_unavailable", nil,
+      "Nothing ran. ReaAssist files do not match. Complete the update and reopen ReaAssist.")
+  end
   local payload = AppController.latest_response_payload()
-  local msg = payload and payload.message or nil
-  if not AppController.message_has_typed_actions(msg) then
-    return false, "no_plan", AppController.t(
-      "a11y.sr.apply_action_plan_unavailable", nil,
-      "There is no validated edit to run.")
-  end
-  if AppController.message_has_applied_typed_action(msg) then
-    return false, "already_applied", AppController.t(
-      "a11y.sr.apply_action_plan_already_applied", nil,
-      "This structured edit has already been run.")
-  end
-  if AppController.request_is_active() then
-    return false, "request_active", AppController.t(
-      "a11y.sr.request_already_running", nil,
-      "A request is already running.")
-  end
-  if msg.run_status == "pending"
-      or (msg.typed_actions and msg.typed_actions.deferred_pending == true) then
-    return false, "pending", AppController.t(
-      "a11y.sr.apply_action_plan_pending", nil,
-      "Structured edit is running.")
-  end
-  if not (Code and type(Code.execute_typed_actions_from_text) == "function") then
-    return false, "executor_unavailable", AppController.t(
-      "typed_actions.error.executor_unavailable", nil,
-      "Structured edit executor is unavailable.")
-  end
-  if prefs and prefs.auto_backup and not opts.skip_backup
-      and Code and Code.safety_backup then
-    local _, berr = Code.safety_backup()
-    if berr == "unsaved" then
-      return false, "backup_unsaved", AppController.t(
-        "a11y.sr.apply_action_plan_backup_unsaved", nil,
-        "Auto-backup is on, but the project has not been saved.")
-    elseif not Code.safety_backup_can_proceed(berr) then
-      return false, "backup_failed", AppController.t(
-        "a11y.sr.apply_action_plan_backup_failed",
-        { error = tostring(berr) },
-        "Safety backup failed: " .. tostring(berr))
-    end
-  end
-
-  local plan_text = AppController.generated_code_text(msg)
-  if plan_text == "" then
-    return false, "no_plan", AppController.t(
-      "a11y.sr.apply_action_plan_unavailable", nil,
-      "There is no validated edit to run.")
-  end
-
-  local user_text = AppController.user_prompt_before_message(
-    payload and payload.message_idx or nil) or ""
-  local profile = Code and Code.typed_actions_model_profile
-    and Code.typed_actions_model_profile(msg.provider_id, msg.model_id) or nil
-
-  local function apply_result(done_ok, exec_result)
-    local completed_result = exec_result
-      and (exec_result.result or exec_result) or nil
-    local applied_now = completed_result
-      and type(completed_result.action_results) == "table"
-      and #completed_result.action_results > 0
-    msg.auto_run_block_reason = nil
-    msg._typed_action_run_project = completed_result
-      and completed_result._execution_project or nil
-    msg.typed_actions = msg.typed_actions or { present = true }
-    msg.typed_actions.deferred_pending = nil
-    msg.typed_actions.executed = done_ok == true
-    if completed_result and completed_result.action_results then
-      msg.typed_actions.action_results = completed_result.action_results
-    end
-    if done_ok then
-      msg.auto_ran = false
-      msg.typed_action_undo_clicked = nil
-      msg.screen_reader_undo_clicked = nil
-      msg.run_status = "ran_ok"
-      msg.validation_status = "passed"
-      msg.validation_block_kind = nil
-      msg.typed_actions.error = nil
-      msg.content = AppController.t("a11y.sr.apply_action_plan_done", nil,
-        "Structured edit ran.")
-      if type(Code.typed_actions_display_text) == "function" then
-        msg.typed_action_summary = Code.typed_actions_display_text(plan_text,
-          msg.typed_actions.action_results)
-      end
-      if type(Code.build_run_result) == "function" then
-        msg.run_result = Code.build_run_result("typed_actions", plan_text,
-          "ran_ok", "passed", {
-            auto_ran = false,
-            validation_block_kind = nil,
-          })
-      end
-    else
-      local err = exec_result and exec_result.code or "execution_failed"
-      msg.auto_ran = false
-      if applied_now then
-        msg.typed_action_undo_clicked = nil
-        msg.screen_reader_undo_clicked = nil
-      end
-      msg.run_status = "errored"
-      msg.validation_status = "failed"
-      msg.validation_block_kind = err
-      msg.typed_actions.error = err
-      msg.content = Code.typed_actions_user_failure_message(exec_result)
-      if type(Code.build_run_result) == "function" then
-        msg.run_result = Code.build_run_result("typed_actions", plan_text,
-          "errored", "failed", {
-            auto_ran = false,
-            validation_block_kind = err,
-            error_kind = "runtime_error",
-            runtime_error = tostring(msg.content or err),
-            error_debug = {
-              failure_kind = "runtime_error",
-              source = "typed_action_executor",
-              typed_action_error = tostring(err),
-            },
-          })
-      end
-    end
-  end
-
-  local exec_ok, exec_result = Code.execute_typed_actions_from_text(plan_text, {
-    allow_raw_json = true,
-    user_text = user_text,
-    profile = profile,
-    on_done = function(done_ok, done_result)
-      apply_result(done_ok == true, done_result)
-      S.scroll_to_bottom = true
-    end,
-  })
-  local exec_pending = exec_ok and exec_result
-    and exec_result.deferred == true
-    and exec_result.completed ~= true
-  if exec_pending then
-    msg.run_status = "pending"
-    msg.validation_status = "pending"
-    msg.typed_actions = msg.typed_actions or { present = true }
-    msg.typed_actions.deferred = true
-    msg.typed_actions.deferred_pending = true
-    msg.content = AppController.t("a11y.sr.apply_action_plan_pending", nil,
-      "Structured edit is running.")
-    return true, nil, msg.content
-  end
-
-  apply_result(exec_ok == true, exec_result)
-  if exec_ok then
-    return true, nil, AppController.t("a11y.sr.apply_action_plan_done", nil,
-      "Structured edit ran.")
-  end
-  return false, "execution_failed",
-    Code.typed_actions_user_failure_message(exec_result)
+  return TypedActionController.apply_typed_action_message(
+    payload and payload.message or nil,
+    payload and payload.message_idx or nil, opts)
 end
-
 function AppController.undo_latest_typed_action()
   local payload = AppController.latest_response_payload()
   local msg = payload and payload.message or nil
@@ -12810,7 +13003,10 @@ function AppController.undo_latest_typed_action()
     return false, AppController.t("a11y.sr.undo_edit_unavailable", nil,
       "There is no structured edit to undo.")
   end
-  reaper.Main_OnCommand(40029, 0)
+  local ok, reason = TypedActionController.undo_typed_action_message(msg)
+  if not ok then
+    return false, TypedActionController.typed_action_undo_failure_text(reason)
+  end
   msg.screen_reader_undo_clicked = true
   msg.typed_action_undo_clicked = true
   msg.auto_ran = false
@@ -12923,7 +13119,23 @@ function AppController.undo_latest_generated_action()
     return false, AppController.t("a11y.sr.undo_run_unavailable", nil,
       "There is no completed action to undo.")
   end
-  reaper.Main_OnCommand(40029, 0)
+  if AppController.message_has_typed_actions(msg) then
+    local ok, reason = TypedActionController.undo_typed_action_message(msg)
+    if not ok then
+      return false, TypedActionController.typed_action_undo_failure_text(reason)
+    end
+  else
+    -- Repeat the unchanged Lua receipt check immediately before bound dispatch.
+    if not AppController.message_can_undo_generated_action(msg) then
+      return false, AppController.t("code.undo.unavailable", nil,
+        "Project Undo is no longer available.")
+    end
+    local ok, result = pcall(reaper.Undo_DoUndo2, msg._lua_run_project)
+    if not ok or type(result) ~= "number" or result <= 0 or result % 1 ~= 0 then
+      return false, AppController.t("code.undo.unconfirmed", nil,
+        "Project Undo could not be confirmed. Review REAPER history before continuing.")
+    end
+  end
   msg.screen_reader_undo_clicked = true
   if AppController.message_has_typed_actions(msg) then
     msg.typed_action_undo_clicked = true
@@ -12983,7 +13195,9 @@ function AppController.chat_transcript_text()
           parts[#parts + 1] = string.format("  Cache: %d read, %d created",
             cr, cc)
         end
-        if msg.cost and MODELS and MODELS.format_cost then
+        if msg.cost_unknown then
+          parts[#parts + 1] = "  Estimated cost: Unknown"
+        elseif msg.cost and MODELS and MODELS.format_cost then
           if msg.free_tier then
             parts[#parts + 1] =
               "  Estimated cost: Free Tier (would have been ~"
@@ -13017,7 +13231,8 @@ function AppController.chat_transcript_text()
     parts[#parts + 1] = string.format(
       "Session: %d in / %d out  |  Est. cost: %s",
       S.session_tok_in or 0, S.session_tok_out or 0,
-      MODELS.format_cost(S.session_cost or 0))
+      S.session_cost_unknown and "Unknown"
+        or MODELS.format_cost(S.session_cost or 0))
   end
   return table.concat(parts, "\n")
 end
@@ -13138,29 +13353,29 @@ end
 -- never inherit these defaults. Bump TABLE_REVISION whenever an allowed tuple
 -- or frozen default changes.
 ScreenReaderLegacy = ScreenReaderLegacy or {}
-ScreenReaderLegacy.TABLE_REVISION = 1
+ScreenReaderLegacy.TABLE_REVISION = 5
 ScreenReaderLegacy.DEFAULT = {
   provider_id = "anthropic",
-  model_id = "claude-sonnet-5",
+  model_id = "claude-sonnet-5-5",
   protocol_id = "anthropic_messages",
 }
 ScreenReaderLegacy.PROVIDERS = {
   anthropic = {
     protocol_id = "anthropic_messages",
-    default_model_id = "claude-sonnet-5",
+    default_model_id = "claude-sonnet-5-5",
     models = {
       ["claude-haiku-4-5"] = true,
-      ["claude-sonnet-5"] = true,
-      ["claude-opus-5"] = true,
+      ["claude-sonnet-5-5"] = true,
+      ["claude-opus-5-5"] = true,
     },
   },
   openai = {
     protocol_id = "openai_chat_completions",
-    default_model_id = "gpt-5.6-luna",
+    default_model_id = "gpt-6-luna",
     models = {
-      ["gpt-5.6-luna"] = true,
-      ["gpt-5.6-terra"] = true,
-      ["gpt-5.6-sol"] = true,
+      ["gpt-6-luna"] = true,
+      ["gpt-6.1-sol"] = true,
+      ["gpt-6-astra"] = true,
     },
   },
   google = {
@@ -13663,6 +13878,14 @@ function ScreenReaderLegacy.compatibility_status_text()
       .. ". Choose an available Screen Reader model to replace the saved selection.")
   end
   if not runtime.substitution_active then return "" end
+  if runtime.substitution_reason == "provider_import_changed" then
+    local provider_name = tostring(provider and (provider.label or provider.id) or "unknown provider")
+    local model_name = tostring(model and (model.label or model.id) or "unknown model")
+    return RA.t("a11y.sr.custom_providers_selection_fallback",
+      { provider = provider_name, model = model_name },
+      "Using the Screen Reader compatibility selection: " .. provider_name .. ", "
+        .. model_name .. ". Your saved selection was not changed.")
+  end
   return RA.t("a11y.sr.legacy_substitution_status", {
     provider = provider and (provider.label or provider.id) or "unknown provider",
     model = model and (model.label or model.id) or "unknown model",
@@ -13722,18 +13945,18 @@ function ScreenReaderLegacy.pending_announcement(store, providers, state, sha256
     providers, state, sha256)
   if not fingerprint then
     return RA.t("a11y.sr.legacy_substitution_announcement", nil,
-      "The saved provider selection uses a newer or unsupported provider format. "
+      "The saved provider or model is unavailable or unsupported. "
         .. "For this Screen Reader session only, ReaAssist is using its legacy "
-        .. "compatibility selection. Shared provider settings were not changed.")
+        .. "compatibility selection. Your saved selection was not changed.")
   end
   local marker = ScreenReaderLegacy._notice_state(store)
   if marker and marker.last_announced_fingerprint == fingerprint then return nil end
   ScreenReaderLegacy._pending_fingerprint = fingerprint
   ScreenReaderLegacy._pending_announcement = true
   return RA.t("a11y.sr.legacy_substitution_announcement", nil,
-    "The saved provider selection uses a newer or unsupported provider format. "
+    "The saved provider or model is unavailable or unsupported. "
       .. "For this Screen Reader session only, ReaAssist is using its legacy "
-      .. "compatibility selection. Shared provider settings were not changed.")
+      .. "compatibility selection. Your saved selection was not changed.")
 end
 
 function ScreenReaderLegacy.mark_announcement_delivered(store)

@@ -5,10 +5,10 @@
 <!-- builder_version:2 -->
 <!-- builder_script_sha256:8a7e968f1323dc59feceb215c460d67ccf103ae06c815d13d50c3785d2387166 -->
 <!-- section_count:66 -->
-<!-- source_set_sha256:073d8a648599a9f748cc3d2784233fe10e359e1c497985299eb0d176c647e706 -->
+<!-- source_set_sha256:404c2648a30f8475565e988cf27646756690bc06ab58e1fe881bbcb5a9a53eba -->
 <!-- stoplist_version:1 -->
 <!-- aggregate_injected_limit_bytes:98304 -->
-<!-- pack_revision:eb545bbf72007f19a0f0b5c354c4245a6118f382a948120552409a6f5f97ab7b -->
+<!-- pack_revision:098e3921ff6cec42ae5dd2563ff35ca4451e78c9151d46f49af24dd33e5b45c4 -->
 <!-- Plugin_Pack.md - markers are PLUGIN:Name (NOT SECTION:) because each block -->
 <!-- is a typed, addressable plugin entry served as plugin_ref:Name. SECTION: -->
 <!-- is reserved for generic on-demand buckets in API_Ref.md / Prompts.md.    -->
@@ -282,7 +282,7 @@ when the user says they do not know.
 <!-- /PLUGIN:Auto-Key 2 -->
 
 <!-- PLUGIN:AutoTune -->
-<!-- SECTION-REVISION:d89a8cc069524dad933de142f18254f14cb2841cb769d00291138a48a4f35993 -->
+<!-- SECTION-REVISION:1d93c88915a246c1e5c89cf5bb246d3629cb6fd697e3f70324b7571a7d9759b8 -->
 ## AutoTune
 
 ```json plugin-route
@@ -290,7 +290,7 @@ when the user says they do not know.
 ```
 
 ```json plugin-validate
-{"key":"autotune","safety":{"settle_ms":250,"heavy_selectors":["Key","Scale","Vocal Range"],"unsafe_to_sweep":["AutoKey Listen","Note C through Note B"],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: AutoTune","loaded_name":"VST3: AutoTune (Antares)","parameter_count":{"mode":"exact","value":27},"required_parameters":[{"index":0,"name":"Master Bypass","section":"","section_required":false},{"index":2,"name":"Retune Speed","section":"","section_required":false},{"index":5,"name":"Key","section":"","section_required":false},{"index":6,"name":"Scale","section":"","section_required":false},{"index":19,"name":"Detune","section":"","section_required":false},{"index":23,"name":"Pitch Tracking","section":"","section_required":false}],"observed_fingerprint_sha256":"28cee950d98c47b9aacd4a5d8b29fa025e33e5db87bf30bc5a1d867ee9e07bb4"}],"status":"pilot","provenance":{"source":"AutoTune 1.1.0.1244 isolated campaign","migrated_at":"2026-07-29","body_sha256":"1af3e32bab2e58d68275e6d52298eca37f7de66c3caa5b2051f3ecb4579d79f7","verified_at":"2026-07-29","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"8825000ed916db5a86560b88e08ff4f8c3bd3474fa77125170b2aad23686b3f1","binary_version":"1.1.0.1244","binary_sha256":"9307502d768873a9f8bb86b7f0bba90cb85b751d389b46ed0e0bb77a83abd79e"}}
+{"key":"autotune","safety":{"settle_ms":250,"heavy_selectors":["Key","Scale","Vocal Range"],"unsafe_to_sweep":["AutoKey Listen","Note C through Note B"],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: AutoTune","loaded_name":"VST3: AutoTune (Antares)","parameter_count":{"mode":"exact","value":27},"required_parameters":[{"index":0,"name":"Master Bypass","section":"","section_required":false},{"index":2,"name":"Retune Speed","section":"","section_required":false},{"index":5,"name":"Key","section":"","section_required":false},{"index":6,"name":"Scale","section":"","section_required":false},{"index":19,"name":"Detune","section":"","section_required":false},{"index":23,"name":"Pitch Tracking","section":"","section_required":false}],"observed_fingerprint_sha256":"28cee950d98c47b9aacd4a5d8b29fa025e33e5db87bf30bc5a1d867ee9e07bb4"}],"status":"pilot","provenance":{"source":"AutoTune 1.1.0.1244 isolated campaign","migrated_at":"2026-07-29","body_sha256":"30b9b7d0f29d2456119364b8d8d644b6b3420e100d585cbbbd7b23f8e4eaec3e","verified_at":"2026-07-29","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"8825000ed916db5a86560b88e08ff4f8c3bd3474fa77125170b2aad23686b3f1","binary_version":"1.1.0.1244","binary_sha256":"9307502d768873a9f8bb86b7f0bba90cb85b751d389b46ed0e0bb77a83abd79e"}}
 ```
 
 <!-- CHUNK:control -->
@@ -303,18 +303,18 @@ target by index, exact live name and explicit empty section before any write.
 Primary controls:
 
 ```
-idx  Name            Default       Type and safe write strategy
+idx  Name            Default       Type
 ---  --------------  ------------  -------------------------------------------
-2    Retune Speed    20            numeric display; set_param_display
-3    Humanize        0             numeric display; set_param_display
-4    Flex Tune       0             numeric display; set_param_display
-5    Key             C             enum; set_param_enum
-6    Scale           Chromatic     enum; set_param_enum
-19   Detune          440.0         numeric display; set_param_display
-20   Latency Mode    Low Latency   enum; set_param_enum
-21   Algorithm       Modern        enum; set_param_enum
-22   Vocal Range     Alto/Tenor    enum; set_param_enum
-23   Pitch Tracking  50            numeric display; set_param_display
+2    Retune Speed    20            numeric display
+3    Humanize        0             numeric display
+4    Flex Tune       0             numeric display
+5    Key             C             discrete
+6    Scale           Chromatic     discrete
+19   Detune          440.0         numeric display
+20   Latency Mode    Low Latency   discrete
+21   Algorithm       Modern        discrete
+22   Vocal Range     Alto/Tenor    discrete
+23   Pitch Tracking  50            numeric display
 ```
 
 Retune Speed has a descending normalized-to-display relationship in this build.
@@ -2057,7 +2057,7 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 32, 0.10)    -- Release: 10%
 <!-- /PLUGIN:Pro-MB -->
 
 <!-- PLUGIN:Pro-Q 4 -->
-<!-- SECTION-REVISION:870bef40b8ae218c3c37d76cc1ecafb1bffc87a5dddd7c2476de31d12bf5d5bf -->
+<!-- SECTION-REVISION:dff35b0f9c2de18ed154a05b5ba22d3ec0b8c894b1a9ba702ddd0bdcbc1806d1 -->
 ## Pro-Q 4
 
 ```json plugin-route
@@ -2065,7 +2065,7 @@ reaper.TrackFX_SetParamNormalized(tr, fx, 32, 0.10)    -- Release: 10%
 ```
 
 ```json plugin-validate
-{"key":"fabfilter-pro-q-4","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Pro-Q 4","loaded_name":"VST3: Pro-Q 4 (FabFilter)","parameter_count":{"mode":"exact","value":740},"required_parameters":[{"index":0,"name":"Band 1 Used","section":"Band 1","section_required":true},{"index":149,"name":"Band 7 Dynamics Auto","section":"Band 7","section_required":true},{"index":299,"name":"Band 14 Used","section":"Band 14","section_required":true},{"index":448,"name":"Band 20 Dynamics Auto","section":"Band 20","section_required":true},{"index":599,"name":"Band 24 Spectral Tilt","section":"Band 24","section_required":true}],"observed_fingerprint_sha256":"b90f26794dbf05ba04b652c813c932f02ec066c6996988a722d94d35449eb5ce"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"58364f66e62ceded7798a0543182596c84b79cc10e975182831879627daa6f87","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
+{"key":"fabfilter-pro-q-4","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Pro-Q 4","loaded_name":"VST3: Pro-Q 4 (FabFilter)","parameter_count":{"mode":"exact","value":740},"required_parameters":[{"index":0,"name":"Band 1 Used","section":"Band 1","section_required":true},{"index":149,"name":"Band 7 Dynamics Auto","section":"Band 7","section_required":true},{"index":299,"name":"Band 14 Used","section":"Band 14","section_required":true},{"index":448,"name":"Band 20 Dynamics Auto","section":"Band 20","section_required":true},{"index":599,"name":"Band 24 Spectral Tilt","section":"Band 24","section_required":true}],"observed_fingerprint_sha256":"b90f26794dbf05ba04b652c813c932f02ec066c6996988a722d94d35449eb5ce"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"3cbd9733e8caf2a7ddb1ca41b266af11a2f874336adba73ae5418720eb4fe814","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
 ```
 
 <!-- CHUNK:control -->
@@ -2075,6 +2075,15 @@ Use these formulas before any table of examples below. Indices are zero-based.
 For Band N, `base=(N-1)*23`. Write Used at `base+0`, Enabled at `base+1`,
 Frequency at `base+2`, Gain at `base+3`, Q at `base+4`, Shape at `base+5`, and
 Slope at `base+6`.
+
+Exact host parameter names retain the `Band` prefix: `Band N Used`,
+`Band N Enabled`, `Band N Frequency`, `Band N Gain`, `Band N Q`,
+`Band N Shape`, and `Band N Slope`. Substitute the numeric band for N.
+For example, compare `Band 1 Frequency`, never `1 Frequency`.
+The abbreviated labels in the layout table are not literal host names.
+The active Used control formats as `Used`, not `In Use`, on the observed VST3
+build. Verify Used and Enabled through normalized readback of 1, and Bell
+Shape through normalized readback of 0. Do not invent formatted-value labels.
 
 ```lua
 local function proq_freq_norm(hz)
@@ -2101,11 +2110,11 @@ the same 23-param stride.
 
 ### CRITICAL CONSTRAINTS
 
-1. **Bands default to "Unused".** Set `Band N Used` (offset +0) to "In Use"
+1. **Bands default to "Unused".** Set `Band N Used` (offset +0) to "Used"
    (slider 1.0) before any other band params take effect. "Enabled" (offset
    +1) is a separate toggle that temporarily bypasses an in-use band.
 
-2. **Setting a band's `Used` to In Use creates a point at default Freq/Gain.**
+2. **Setting a band's `Used` to 1 creates a point at default Freq/Gain.**
    Always follow with Frequency + Gain + Shape + Q to position it. For Bell
    boosts/cuts, also set Slope to 12 dB/oct unless the user specifies a
    different slope.
@@ -2164,7 +2173,7 @@ Formula: base = (N - 1) * 23
 
 Offset  Name                          Type        Notes
 ------  ----------------------------  ----------  --------------------------
-+0      N Used                        enum        0=Unused, 1=In Use
++0      N Used                        enum        0=Unused, 1=Used
 +1      N Enabled                     toggle      1=Enabled (default)
 +2      N Frequency                   continuous  Hz 10..30000 (see Freq scale)
 +3      N Gain                        continuous  dB -30..+30 linear
@@ -3067,7 +3076,7 @@ if not ok then error(err) end
 <!-- /PLUGIN:Saturn 2 -->
 
 <!-- PLUGIN:Timeless 3 -->
-<!-- SECTION-REVISION:d34a50dc1c1446024bdaa8104e97afb1b8cf994e4d69b4ae0478d46252111136 -->
+<!-- SECTION-REVISION:777f3bdc9f3d039b0d15627ac68e9289a97038278b9b2a20eda930765afcb215 -->
 ## Timeless 3
 
 ```json plugin-route
@@ -3075,7 +3084,7 @@ if not ok then error(err) end
 ```
 
 ```json plugin-validate
-{"key":"fabfilter-timeless-3","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Timeless 3","loaded_name":"VST3: Timeless 3 (FabFilter)","parameter_count":{"mode":"exact","value":1147},"required_parameters":[{"index":0,"name":"Delay Time","section":"","section_required":false},{"index":251,"name":"XLFO 1 Step 14 Glide function","section":"XLFO 1","section_required":true},{"index":502,"name":"XLFO 5 Step 4 Glide","section":"XLFO 5","section_required":true},{"index":754,"name":"Auto Mute Self-Osc","section":"","section_required":false},{"index":1006,"name":"Slot 50 Target","section":"Slot 50","section_required":true}],"observed_fingerprint_sha256":"8cf71e1b255ce2b697b436ec2fbd7ea2651691272863ac5d90409fc2349890c8"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"648ae333ff15516cd1e7435bfac82b97397550c4b7be8a1eade5ff7164383d46","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
+{"key":"fabfilter-timeless-3","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Timeless 3","loaded_name":"VST3: Timeless 3 (FabFilter)","parameter_count":{"mode":"exact","value":1147},"required_parameters":[{"index":0,"name":"Delay Time","section":"","section_required":false},{"index":251,"name":"XLFO 1 Step 14 Glide function","section":"XLFO 1","section_required":true},{"index":502,"name":"XLFO 5 Step 4 Glide","section":"XLFO 5","section_required":true},{"index":754,"name":"Auto Mute Self-Osc","section":"","section_required":false},{"index":1006,"name":"Slot 50 Target","section":"Slot 50","section_required":true}],"observed_fingerprint_sha256":"8cf71e1b255ce2b697b436ec2fbd7ea2651691272863ac5d90409fc2349890c8"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"0d4dbd3d3aef3051e992d7117dd233e27490a55419e6c2facace398c3dd534aa","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
 ```
 
 <!-- CHUNK:control -->
@@ -3169,13 +3178,13 @@ idx  Name                  Default val   Type        Notes
 6    Ping Pong             0             toggle      0=Off, 1=On
 85   Feedback              0.175         continuous  % 0..100+ (default 35%)
 87   Feedback Cross Mix    0             continuous  % cross-channel feedback
-90   Filter 1 Freq         0.386         continuous  Hz (see Crossover scale)
+90   Filter 1 Freq         0.386         continuous  Hz
 91   Filter 1 Gain         0.5           continuous  dB bipolar (0.5=0dB)
 94   Filter 1 Style        1.0           enum        Clean / Character styles
 95   Filter 1 Shape        0.167         enum        Low Pass / High Pass / Bell / etc.
 96   Filter 1 Slope        0.333         enum        dB/oct (see Slope enum)
 97   Filter 1 Enabled      1             toggle      1=enabled
-99   Filter 2 Freq         0.719         continuous  Hz (Filter 1 shares scale)
+99   Filter 2 Freq         0.719         continuous  Hz
 103  Filter 2 Style        1.0           enum        Same as Filter 1
 104  Filter 2 Shape        0             enum        0=Low Pass default
 105  Filter 2 Slope        0.667         enum        Same as Filter 1
@@ -3302,7 +3311,7 @@ Linear, 0..100%. Default 30%.
 
 ### COMMON RECIPES
 
-**"Classic 1/8-note tape echo on guitar:"**
+**"Classic 300 ms tape echo on guitar:"**
 
 ```lua
 local mapped, guard_err = reaassist_resolve_profile_params(tr, fx, {
@@ -4961,7 +4970,7 @@ end)
 <!-- /PLUGIN:ReaComp -->
 
 <!-- PLUGIN:ReaDelay -->
-<!-- SECTION-REVISION:2d1505761e84723a1c31653eb2ecaaa027231e7ca884df9483e26c5923698314 -->
+<!-- SECTION-REVISION:bf27aef6186463b8841469d7aaf095fc906982abdb1e8b5586459d619178df33 -->
 ## ReaDelay
 
 ```json plugin-route
@@ -4969,7 +4978,7 @@ end)
 ```
 
 ```json plugin-validate
-{"key":"readelay","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST","identifier":"ReaDelay","loaded_name":"VST: ReaDelay (Cockos)","parameter_count":{"mode":"exact","value":15},"required_parameters":[{"index":1,"name":"Dry","section":"","section_required":false},{"index":3,"name":"1: Length (time)","section":"","section_required":false},{"index":6,"name":"1: Lowpass","section":"","section_required":false},{"index":8,"name":"1: Resolution","section":"","section_required":false},{"index":11,"name":"1: Pan","section":"","section_required":false}],"observed_fingerprint_sha256":"848477142e5111653874aff0ab9fdb729bb8b0dad7babd74646e123aa1d8ac4d"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"d122578ae663f206bd14c10c130e0609e8d408874e6ea78790a49ec23b36b7b2","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
+{"key":"readelay","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST","identifier":"ReaDelay","loaded_name":"VST: ReaDelay (Cockos)","parameter_count":{"mode":"exact","value":15},"required_parameters":[{"index":1,"name":"Dry","section":"","section_required":false},{"index":3,"name":"1: Length (time)","section":"","section_required":false},{"index":6,"name":"1: Lowpass","section":"","section_required":false},{"index":8,"name":"1: Resolution","section":"","section_required":false},{"index":11,"name":"1: Pan","section":"","section_required":false}],"observed_fingerprint_sha256":"848477142e5111653874aff0ab9fdb729bb8b0dad7babd74646e123aa1d8ac4d"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"8b845c5d6177ae73bd30df32f2645bc887b1bdfff747195541e02132225fba9b","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
 ```
 
 <!-- CHUNK:control -->
@@ -4988,7 +4997,7 @@ idx  Name                  Default val   Min    Max    Notes
 0    Wet                   0.5           0.0    2.0    Effect wet level: 0.5=-6dB; duplicate-name guard below
 1    Dry                   1.0           0.0    2.0    Dry level: 1.0=0dB
 2    1: Enabled            1.0           0.0    1.0    Tap 1 on/off
-3    1: Length (time)       0.0           0.0    1.0    Delay in seconds (0=off)
+3    1: Length (time)       0.0           0.0    1.0    Control units, not seconds; formatted display is ms
 4    1: Length (musical)    0.0078        0.0    1.0    Whole notes; raw = display/256 (default 0.0078 -> 2.00)
 5    1: Feedback           0.0           0.0    2.0    Feedback: 0=off, 1.0=0dB
 6    1: Lowpass            1.0           0.0    1.0    Filter normalized (20000Hz)
@@ -5005,8 +5014,12 @@ idx  Name                  Default val   Min    Max    Notes
 ### DELAY TIME
 
 There are two length params per tap. Use "Length (musical)" for tempo-synced delay,
-"Length (time)" for free time in seconds. To set a specific delay in ms, use
-set_param_display on "Length (time)".
+"Length (time)" for free-time delay. Its raw 0..1 value is not seconds:
+raw 0.125 was observed to display 1250.0 ms, not 125 ms. Do not pass seconds
+directly to this parameter. To set a specific delay in ms, use the maintained
+bounded numeric setter/readback search on "Length (time)" and compare the
+formatted number in milliseconds. For a slap delay, set Length (musical) to
+zero so its tempo-synced delay does not add to the free-time delay.
 Length (musical) is in whole notes and its raw value is display/256 (verified on
 REAPER 7.76: raw 0.25/256 = 0.000977 displays 0.25 = quarter note; the DEFAULT raw
 0.0078 displays 2.00 = TWO WHOLE NOTES). A tempo-synced recipe that does not set
@@ -5023,6 +5036,47 @@ Leave host Wet at index 13 unchanged unless the user explicitly requests the
 host control.
 
 ### COMMON RECIPE
+
+**"Slap" or "slapback delay":**
+
+Use a short free-time echo. Unless the user specifies a time, start at 100 ms,
+set Length (musical) to zero and Feedback to zero for a single repeat. Use the
+measured normalized anchor `0.010002136230469` for the default 100 ms: isolated
+REAPER readback displayed `100.0`. Verify that display after writing. Do not use
+`0.1`, which displays `1000.0` ms. For another time, use the bounded setter/readback
+search for Length (time) and verify the display in ms.
+Do not use the quarter-note recipe below for a slap request. On a dedicated
+return, set effect Wet to unity and Dry to silence, leave host Wet unchanged,
+and keep the return routed to the master unless another output was requested.
+Feedback off is raw amplitude `0.0`, which displays `-inf` dB. Verify its raw
+zero value or silence display, not a formatted numeric target of 0 dB. The
+same rule applies to Dry. Effect Wet at raw `1.0` displays 0 dB and is unity:
+use `reaper.TrackFX_SetParam(tr, fx, 0, 1.0)`. Its normalized equivalent is
+`0.5`. Raw `2.0` or normalized `1.0` displays +6 dB and is not unity.
+
+For a new dedicated slap return, these are the exact five effect writes:
+
+```lua
+reaper.TrackFX_SetParam(tr, fx, 0, 1.0) -- Effect Wet: 0 dB unity
+reaper.TrackFX_SetParam(tr, fx, 1, 0.0) -- Dry: silence
+reaper.TrackFX_SetParamNormalized(tr, fx, 3, 0.010002136230469) -- 100 ms
+reaper.TrackFX_SetParam(tr, fx, 4, 0.0) -- Musical length off
+reaper.TrackFX_SetParam(tr, fx, 5, 0.0) -- Feedback off
+```
+
+For these known mappings, prefer raw-value checks for Wet, Dry, musical length
+and Feedback. Read each with `TrackFX_GetParam` and compare in the same units
+used by `TrackFX_SetParam`. For example:
+
+```lua
+local feedback = reaper.TrackFX_GetParam(tr, fx, 5)
+if math.abs(feedback) > 1e-9 then error("Delay feedback did not turn off.") end
+```
+
+Feedback raw zero and its formatted `-inf` display are the same setting. Never
+compare that formatted dB display to numeric zero. If checking the free-time
+length, its formatted target is `100.0` ms. Formatting differences such as
+`0.0` versus `+0.0` do not imply a failed write. Keep the return's master send on.
 
 **"Simple quarter-note echo":**
 
@@ -5940,7 +5994,7 @@ idx  Name        Default   Min    Max    Notes
 <!-- /PLUGIN:ReaTune -->
 
 <!-- PLUGIN:ReaVerbate -->
-<!-- SECTION-REVISION:bb9eafc4eefb54c86e3281d40aba2897e757df288417116930afbecc89f2abc6 -->
+<!-- SECTION-REVISION:9d9d129f8801780e4245d2e60568c0e0a584646625c85ab1e488a3ca8364663f -->
 ## ReaVerbate
 
 ```json plugin-route
@@ -5948,7 +6002,7 @@ idx  Name        Default   Min    Max    Notes
 ```
 
 ```json plugin-validate
-{"key":"reaverbate","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST","identifier":"ReaVerbate","loaded_name":"VST: ReaVerbate (Cockos)","parameter_count":{"mode":"exact","value":11},"required_parameters":[{"index":0,"name":"Wet","section":"","section_required":true},{"index":1,"name":"Dry","section":"","section_required":true},{"index":2,"name":"Room size","section":"","section_required":true},{"index":3,"name":"Dampening","section":"","section_required":true},{"index":4,"name":"Width","section":"","section_required":true},{"index":5,"name":"Delay","section":"","section_required":true},{"index":6,"name":"Lowpass","section":"","section_required":true},{"index":7,"name":"Hipass","section":"","section_required":true}],"observed_fingerprint_sha256":"7dd690fb0aa873dd3042b1c216612edeac621d5c9400b6b225c97c6ce2361bc2"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"3aa4351eea79f3c6777b4f9a0e1e9f282b06aba09a3991d0e6ae39b2849643b6","verified_at":"2026-07-26","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
+{"key":"reaverbate","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST","identifier":"ReaVerbate","loaded_name":"VST: ReaVerbate (Cockos)","parameter_count":{"mode":"exact","value":11},"required_parameters":[{"index":0,"name":"Wet","section":"","section_required":true},{"index":1,"name":"Dry","section":"","section_required":true},{"index":2,"name":"Room size","section":"","section_required":true},{"index":3,"name":"Dampening","section":"","section_required":true},{"index":4,"name":"Width","section":"","section_required":true},{"index":5,"name":"Delay","section":"","section_required":true},{"index":6,"name":"Lowpass","section":"","section_required":true},{"index":7,"name":"Hipass","section":"","section_required":true}],"observed_fingerprint_sha256":"7dd690fb0aa873dd3042b1c216612edeac621d5c9400b6b225c97c6ce2361bc2"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"e42467da3478e7abd711c1391285570561e42a6fdfc6542baa060879b29997ab","verified_at":"2026-07-26","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
 ```
 
 <!-- CHUNK:control -->
@@ -5991,6 +6045,15 @@ signal, so a moderate high-pass reduces low-frequency buildup and a moderate
 low-pass keeps the tail behind the source.
 
 On a dedicated reverb send or auxiliary track, use Dry off and Wet at unity.
+For this return balance, use the exact raw-value writes below after verifying
+the effect parameter names. Wet raw `1.0` displays `+0.0` dB; raw `2.0`
+displays `+6.0` dB and is not unity. Dry raw `0.0` displays `-inf`.
+
+```lua
+reaper.TrackFX_SetParam(tr, fx, 0, 1.0) -- Effect Wet: 0 dB unity
+reaper.TrackFX_SetParam(tr, fx, 1, 0.0) -- Dry: silence
+```
+
 Only change that routing balance when the user clearly identifies a send,
 return or auxiliary track. Do not silently apply send routing to an insert.
 
@@ -6984,7 +7047,7 @@ the previous Amount value without removing the existing instance.
 <!-- /PLUGIN:Saturation -->
 
 <!-- PLUGIN:Crystallizer -->
-<!-- SECTION-REVISION:36c2dd3897f3e1495e2d568154413c17e022b030d3ee0831b73f22be940d60d7 -->
+<!-- SECTION-REVISION:4eaf27f8b4f26a2979f0470b047b8a20a6d049628590457f7fb553669ec52a7b -->
 ## Crystallizer
 
 ```json plugin-route
@@ -6992,7 +7055,7 @@ the previous Amount value without removing the existing instance.
 ```
 
 ```json plugin-validate
-{"key":"soundtoys-crystallizer","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[5],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Crystallizer","loaded_name":"VST3: Crystallizer (Soundtoys)","parameter_count":{"mode":"exact","value":27},"required_parameters":[{"index":3,"name":"Mix","section":"","section_required":false},{"index":5,"name":"Regenerate","section":"","section_required":false},{"index":10,"name":"SyncMode","section":"","section_required":false},{"index":14,"name":"Pitch","section":"","section_required":false},{"index":16,"name":"SpliceValue","section":"","section_required":false},{"index":18,"name":"DelayValue","section":"","section_required":false}],"observed_fingerprint_sha256":"07059f7424388071c8c1958c5c4bf1b55ee1769d0d1ad706db399081169f1dab"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/wp-content/uploads/Crystallizer-Manual.pdf","document_title":"Crystallizer User's Guide Version 5","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"07059f7424388071c8c1958c5c4bf1b55ee1769d0d1ad706db399081169f1dab","body_sha256":"51f93c49134d394c537c601bfa9689ea3d5a5c8fd8402a9c8ab12bd39b38436f"}}
+{"key":"soundtoys-crystallizer","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[5],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: Crystallizer","loaded_name":"VST3: Crystallizer (Soundtoys)","parameter_count":{"mode":"exact","value":27},"required_parameters":[{"index":3,"name":"Mix","section":"","section_required":false},{"index":5,"name":"Regenerate","section":"","section_required":false},{"index":10,"name":"SyncMode","section":"","section_required":false},{"index":14,"name":"Pitch","section":"","section_required":false},{"index":16,"name":"SpliceValue","section":"","section_required":false},{"index":18,"name":"DelayValue","section":"","section_required":false}],"observed_fingerprint_sha256":"07059f7424388071c8c1958c5c4bf1b55ee1769d0d1ad706db399081169f1dab"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/wp-content/uploads/Crystallizer-Manual.pdf","document_title":"Crystallizer User's Guide Version 5","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"07059f7424388071c8c1958c5c4bf1b55ee1769d0d1ad706db399081169f1dab","body_sha256":"a41e5804fcf3e1993ecfc7fe697a50a0d55f23699eb029156390428be73a8ef6"}}
 ```
 
 <!-- CHUNK:control -->
@@ -7124,9 +7187,13 @@ Crystallizer exposes product controls 1 through 23. Do not write Bypass 0 or
 host controls 24 through 26. Use the complete automatable menu map above.
 
 Regenerate can create sustained feedback. Keep it at or below 0.40 for unheard
-audio unless the user explicitly requests a runaway effect. Resolve all
-targets first, use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer` callback. Verify delayed readback and preserve offsets, filters, dynamics
-and every unrelated control.
+audio unless the user explicitly requests a runaway effect.
+
+Resolve all targets first. Preserve offsets, filters, dynamics and every
+unrelated control.
+
+Use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer`
+callback. Verify delayed readback.
 End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
 survive Redo and save/reload.
 <!-- /CHUNK:control -->
@@ -7719,7 +7786,7 @@ without listening.
 <!-- /PLUGIN:EchoBoy -->
 
 <!-- PLUGIN:EchoBoy Jr -->
-<!-- SECTION-REVISION:00cfec45aebbc886b08408f43e76b0975b531827ed7652b76748fa333aeea255 -->
+<!-- SECTION-REVISION:1510197b5d33bdd2d458d12d549f3c137eb8bd5459907763ae15754028be8752 -->
 ## EchoBoy Jr
 
 ```json plugin-route
@@ -7727,7 +7794,7 @@ without listening.
 ```
 
 ```json plugin-validate
-{"key":"soundtoys-echoboy-jr","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[10],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: EchoBoy Jr","loaded_name":"VST3: EchoBoy Jr (Soundtoys)","parameter_count":{"mode":"exact","value":17},"required_parameters":[{"index":3,"name":"Mix","section":"","section_required":false},{"index":4,"name":"Mode","section":"","section_required":false},{"index":5,"name":"Style","section":"","section_required":false},{"index":7,"name":"EchoMode","section":"","section_required":false},{"index":8,"name":"EchoNote","section":"","section_required":false},{"index":10,"name":"Feedback","section":"","section_required":false}],"observed_fingerprint_sha256":"6da848693c12b98bfe0e768498890d01ac8d77fdf5f9af55315417fd9e583753"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/echoboy-jr/","document_title":"EchoBoy Jr Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"6da848693c12b98bfe0e768498890d01ac8d77fdf5f9af55315417fd9e583753","body_sha256":"7fd16c20f44a20690e6a188504b5993e1e6372b8c8ca935e26fb2c20d161fbce"}}
+{"key":"soundtoys-echoboy-jr","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[10],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: EchoBoy Jr","loaded_name":"VST3: EchoBoy Jr (Soundtoys)","parameter_count":{"mode":"exact","value":17},"required_parameters":[{"index":3,"name":"Mix","section":"","section_required":false},{"index":4,"name":"Mode","section":"","section_required":false},{"index":5,"name":"Style","section":"","section_required":false},{"index":7,"name":"EchoMode","section":"","section_required":false},{"index":8,"name":"EchoNote","section":"","section_required":false},{"index":10,"name":"Feedback","section":"","section_required":false}],"observed_fingerprint_sha256":"6da848693c12b98bfe0e768498890d01ac8d77fdf5f9af55315417fd9e583753"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/echoboy-jr/","document_title":"EchoBoy Jr Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"6da848693c12b98bfe0e768498890d01ac8d77fdf5f9af55315417fd9e583753","body_sha256":"5ba1edd186fd54910d4ba8c4f250a6fe4d805cf19c5b16ec574539af16b95917"}}
 ```
 
 <!-- CHUNK:control -->
@@ -7867,9 +7934,13 @@ EchoBoy Jr product controls are 1 through 13. Do not write Bypass 0 or host
 controls 14 through 16. Use the complete automatable menu map above.
 
 Feedback can self-oscillate. Keep it at or below 0.35 for unheard audio unless
-explicitly requested. Resolve all targets, use literal `mapped[N]` setters,
-one Undo block and exactly one `reaper.defer` callback. Preserve EchoTime when Note mode
-is selected, verify delayed readback and preserve unrelated controls.
+explicitly requested.
+
+Resolve all targets. Preserve EchoTime when Note mode is selected and preserve
+unrelated controls.
+
+Use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer`
+callback. Verify delayed readback.
 End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
 survive Redo and save/reload.
 <!-- /CHUNK:control -->
@@ -9247,7 +9318,7 @@ how it sounds in context.
 <!-- /PLUGIN:PhaseMistress -->
 
 <!-- PLUGIN:PrimalTap -->
-<!-- SECTION-REVISION:b4d1fdb6c40a0da0e75527ddc8b7e6c052268ccb4a04237d9c73e90b662461e2 -->
+<!-- SECTION-REVISION:beb3b84254f1d75bd36c56ee185cdb81c4d7b58799144887d8851ee7bd6d3cec -->
 ## PrimalTap
 
 ```json plugin-route
@@ -9255,7 +9326,7 @@ how it sounds in context.
 ```
 
 ```json plugin-validate
-{"key":"soundtoys-primaltap","safety":{"settle_ms":100,"heavy_selectors":[19],"unsafe_to_sweep":[12,13,19],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: PrimalTap","loaded_name":"VST3: PrimalTap (Soundtoys)","parameter_count":{"mode":"exact","value":36},"required_parameters":[{"index":1,"name":"AB_Link","section":"","section_required":false},{"index":2,"name":"Sync_Mode_A","section":"","section_required":false},{"index":5,"name":"Beats_A","section":"","section_required":false},{"index":9,"name":"Multiply","section":"","section_required":false},{"index":11,"name":"Algorithm","section":"","section_required":false},{"index":12,"name":"Feedback_A","section":"","section_required":false},{"index":16,"name":"Mix","section":"","section_required":false},{"index":19,"name":"Freeze","section":"","section_required":false},{"index":31,"name":"VCO_Shape","section":"","section_required":false}],"observed_fingerprint_sha256":"dc2d51e534c89212c8a5b5ce684a51529db02cc6d51aa7ffdb75a3859aa16a6b"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/primaltap/","document_title":"PrimalTap Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"dc2d51e534c89212c8a5b5ce684a51529db02cc6d51aa7ffdb75a3859aa16a6b","body_sha256":"6db22f3fc205ea2c11aa9ee45af109eb0f3cb18096ede1c567fbab7efb809962"}}
+{"key":"soundtoys-primaltap","safety":{"settle_ms":100,"heavy_selectors":[19],"unsafe_to_sweep":[12,13,19],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: PrimalTap","loaded_name":"VST3: PrimalTap (Soundtoys)","parameter_count":{"mode":"exact","value":36},"required_parameters":[{"index":1,"name":"AB_Link","section":"","section_required":false},{"index":2,"name":"Sync_Mode_A","section":"","section_required":false},{"index":5,"name":"Beats_A","section":"","section_required":false},{"index":9,"name":"Multiply","section":"","section_required":false},{"index":11,"name":"Algorithm","section":"","section_required":false},{"index":12,"name":"Feedback_A","section":"","section_required":false},{"index":16,"name":"Mix","section":"","section_required":false},{"index":19,"name":"Freeze","section":"","section_required":false},{"index":31,"name":"VCO_Shape","section":"","section_required":false}],"observed_fingerprint_sha256":"dc2d51e534c89212c8a5b5ce684a51529db02cc6d51aa7ffdb75a3859aa16a6b"}],"status":"pilot","provenance":{"source":"https://www.soundtoys.com/product/primaltap/","document_title":"PrimalTap Product Guide","product_version":"5.5.5 64 bit","verified_at":"2026-07-31","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"dc2d51e534c89212c8a5b5ce684a51529db02cc6d51aa7ffdb75a3859aa16a6b","body_sha256":"9879fc60b362c12ffb69e14cb62736ca6267cee8dea7ef02bccf111406362009"}}
 ```
 
 <!-- CHUNK:control -->
@@ -9417,10 +9488,13 @@ controls 33 through 35. The complete stepped menus are:
 
 Freeze and high Feedback can sustain audio indefinitely. Keep Freeze Off and
 both Feedback values at or below 35% for unheard audio unless explicitly
-requested. Resolve every target before writing, use literal `mapped[N]`
-setters, one Undo block and exactly one `reaper.defer` callback. Link A and B before
-writing both tap settings. Verify delayed readback and preserve unrelated
-controls.
+requested.
+
+Resolve every target before writing. Link A and B before writing both tap
+settings. Preserve unrelated controls.
+
+Use literal `mapped[N]` setters, one Undo block and exactly one `reaper.defer`
+callback. Verify delayed readback.
 End the deferred callback with `reaper.UpdateArrange()` immediately after `reaper.Undo_EndBlock(...)`. This flush is required for Soundtoys state to
 survive Redo and save/reload.
 <!-- /CHUNK:control -->
@@ -10248,7 +10322,7 @@ and right timing, Tape mode, Past era, 30.0 % Feedback, a 5000 Hz HighCut and
 <!-- /PLUGIN:ValhallaDelay -->
 
 <!-- PLUGIN:ValhallaVintageVerb -->
-<!-- SECTION-REVISION:386d39136e05f449951994d942035e78f3c1fd746a04a715b2cb10471a9b4c91 -->
+<!-- SECTION-REVISION:07865d642353436f576f509f619c1d6558bc0d2a437a38a5d5a7aea25cc3f098 -->
 ## ValhallaVintageVerb
 
 ```json plugin-route
@@ -10256,7 +10330,7 @@ and right timing, Tape mode, Past era, 30.0 % Feedback, a 5000 Hz HighCut and
 ```
 
 ```json plugin-validate
-{"key":"valhalla-vintage-verb","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: ValhallaVintageVerb","loaded_name":"VST3: ValhallaVintageVerb (Valhalla DSP, LLC)","parameter_count":{"mode":"exact","value":21},"required_parameters":[{"index":0,"name":"Mix","section":"","section_required":false},{"index":12,"name":"ModDepth","section":"","section_required":false},{"index":15,"name":"ColorMode","section":"","section_required":false},{"index":16,"name":"ReverbMode","section":"","section_required":false}],"observed_fingerprint_sha256":"e9e5ec6ca0ca2a3fd0e9cab0286d9d048712ce9614a69ceb56be576f700e6352"}],"status":"pilot","provenance":{"source":"https://valhalladsp.com/shop/reverb/valhalla-vintage-verb/","migrated_at":"2026-07-30","body_sha256":"c2b3f96bfc8e135a86a151ac4adfd305460d707c6588d00a236c298fc0915ee8","verified_at":"2026-07-30","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"e9e5ec6ca0ca2a3fd0e9cab0286d9d048712ce9614a69ceb56be576f700e6352"}}
+{"key":"valhalla-vintage-verb","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST3","identifier":"VST3: ValhallaVintageVerb","loaded_name":"VST3: ValhallaVintageVerb (Valhalla DSP, LLC)","parameter_count":{"mode":"exact","value":21},"required_parameters":[{"index":0,"name":"Mix","section":"","section_required":false},{"index":12,"name":"ModDepth","section":"","section_required":false},{"index":15,"name":"ColorMode","section":"","section_required":false},{"index":16,"name":"ReverbMode","section":"","section_required":false}],"observed_fingerprint_sha256":"e9e5ec6ca0ca2a3fd0e9cab0286d9d048712ce9614a69ceb56be576f700e6352"}],"status":"pilot","provenance":{"source":"https://valhalladsp.com/shop/reverb/valhalla-vintage-verb/","migrated_at":"2026-07-30","body_sha256":"1754e7f97e08078ec3bdededd1ca4bbdcce217abdbb8b12c5800fb44599e89a4","verified_at":"2026-07-30","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"e9e5ec6ca0ca2a3fd0e9cab0286d9d048712ce9614a69ceb56be576f700e6352"}}
 ```
 
 <!-- CHUNK:control -->
@@ -10278,9 +10352,10 @@ Resolve each requested index and name before the first write. Use the reviewed
 normalized anchors below for the certified recipe. The provenance validator
 must see every literal `mapped[N]` index at its setter call, so do not put
 mapped indices in a target table, loop or wrapper. Use exactly one
-`reaper.defer` callback and no follow-up verification callback. For an insert,
-start with Mix at or below 25.0 %. Use 100.0 % only when the user explicitly
-identifies a dedicated reverb return.
+`reaper.defer` callback and no follow-up verification callback.
+
+For an insert, start with Mix at or below 25.0 %. Use 100.0 % only when the user
+explicitly identifies a dedicated reverb return.
 
 For an explicit `100.0 %` Mix request on a dedicated return, write exactly
 `1.0` to Mix index 0. Do not substitute `0.5`, which displays `50.0 %`.

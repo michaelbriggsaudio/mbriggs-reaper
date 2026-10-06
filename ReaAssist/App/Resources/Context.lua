@@ -70,8 +70,8 @@ function CTX.extension_status(user_text)
     local installed = reaper.ImGui_CreateContext ~= nil
     local ver = nil
     if installed and reaper.ImGui_GetVersion then
-      local a, _, _, d = try(function() return reaper.ImGui_GetVersion() end)
-      ver = d or a
+      local a, b, c = try(function() return reaper.ImGui_GetVersion() end)
+      ver = c or (type(b) == "string" and b) or a
     end
     return fmt("ReaImGui", installed, ver)
   end
@@ -1929,12 +1929,13 @@ function CTX.project_length(proj)
 end
 
 -- CTX.sample_rate(proj) -> string
--- Reports the project sample rate. Uses GetSetProjectInfo with "PROJECT_SRATE"
+-- Reports the numeric project sample-rate setting.
+-- Uses GetSetProjectInfo with "PROJECT_SRATE"
 -- which is the project-aware API for reading sample rate as a numeric value.
--- Falls back to 44100 if the call returns 0 (e.g. unsaved new project).
+-- Reports Unknown when PROJECT_SRATE is missing or nonpositive.
 function CTX.sample_rate(proj)
   local sr = reaper.GetSetProjectInfo(proj, "PROJECT_SRATE", 0, false)
-  if not sr or sr <= 0 then sr = 44100 end
+  if not sr or sr <= 0 then return "Sample rate: Unknown" end
   return str_format("Sample rate: %d Hz", math_floor(sr))
 end
 
@@ -2743,7 +2744,7 @@ function CTX.local_installed_plugin_answer(user_text)
     or raw:match("^[Ii]s%s+(.+)%s+available%??%s*$")
   term = tostring(term or ""):gsub("^%s+", ""):gsub("%s+$", "")
   term = term:gsub("%?+$", ""):gsub("%s+$", "")
-  term = term:gsub("^the%s+", ""):gsub("%s+plugin$", "")
+  term = (term:match("^[Aa][Nn]?%s+(.+)$") or term:match("^the%s+(.+)$") or term):gsub("%s+plugin$", "")
   local term_l = term:lower()
   if term == ""
      or term_l == "plugin"
@@ -2948,6 +2949,30 @@ function CTX.local_read_answer(user_text, proj)
       or lt:find("fx installed", 1, true)
       or lt:find("plugin inventory", 1, true)
       or lt:find("fx inventory", 1, true) then
+    -- An explicit local scope must not become a global installed list.
+    local scope_text = lt:gsub("\226\128\153", "'")
+    if scope_text:find("%f[%w]tracks?'s?%s")
+        or scope_text:find("%f[%w]track%s+%d+'s?%s")
+        or scope_text:find("%f[%w]project's%s")
+        or scope_text:find("%f[%w]session's%s")
+        or scope_text:find("%f[%w]master's%s") then return nil end
+    local scope = lt:match("%f[%w]on%s+(.+)$") or lt:match("%f[%w]in%s+(.+)$")
+      or lt:match("%f[%w]for%s+(.+)$") or lt:match("%f[%w]within%s+(.+)$")
+      or lt:match("%f[%w]across%s+(.+)$")
+    if scope then
+      local locations = 0
+      for word in lt:gmatch("%f[%w](%a+)%s+") do
+        if word == "on" or word == "in" or word == "for"
+            or word == "within" or word == "across" then locations = locations + 1 end
+      end
+      if locations > 1 then return nil end
+      scope = scope:gsub("%s+$", ""):gsub("[%.%?%!]+$", ""):gsub("%s+$", "")
+      scope = scope:gsub("^the%s+", ""):gsub("^my%s+", ""):gsub("^this%s+", "")
+        :gsub("^current%s+", ""):gsub("^our%s+", ""):gsub("^local%s+", "")
+      if scope ~= "machine" and scope ~= "system" and scope ~= "reaper"
+          and scope ~= "computer" and scope ~= "pc"
+          and scope ~= "mac" and scope ~= "windows" and scope ~= "linux" then return nil end
+    end
     return CTX.installed_fx_inventory_summary()
   end
   local installed_plugin_answer = CTX.local_installed_plugin_answer(raw)
@@ -3053,6 +3078,78 @@ function CTX.local_read_answer(user_text, proj)
 
   proj = proj or reaper.EnumProjects(-1)
   local facts = CTX.local_project_facts(proj)
+  local fx_inventory_target = CTX.local_fx_inventory_target(lt)
+  local summary_read = lt:find("project summary", 1, true)
+      or lt:find("session summary", 1, true)
+      or lt:find("project status", 1, true)
+      or lt:find("session status", 1, true)
+      or lt:find("^%s*summarize")
+      or lt:find("^%s*summary")
+  local tempo_read = lt:find("%f[%w]tempo%f[%W]")
+      or lt:find("%f[%w]bpm%f[%W]")
+      or lt:find("song speed", 1, true)
+      or lt:find("time signature", 1, true)
+  local cursor_read = lt:find("edit cursor", 1, true)
+      or lt:find("cursor position", 1, true)
+      or lt:find("play cursor", 1, true)
+      or lt:find("playhead", 1, true)
+      or lt:find("play head", 1, true)
+  -- These project-property answers cannot satisfy a scoped entity question.
+  local cursor_item_query = false
+  if lt:find("%f[%w]items?%f[%W]") then
+    cursor_item_query = cursor_read ~= nil
+    if not cursor_item_query then
+      local location_text = lt:gsub("%f[%w]the%s+mouse%s+cursor%f[%W]", "cursor")
+        :gsub("%f[%w]mouse%s+cursor%f[%W]", "cursor")
+        :gsub("%f[%w]the%s+cursor%f[%W]", "cursor")
+        :gsub("%f[%w]my%s+cursor%f[%W]", "cursor")
+      local locations = { at=true, under=true, after=true, before=true, near=true,
+        past=true, around=true, beyond=true, over=true, crossing=true }
+      for prep in location_text:gmatch("%f[%w](%a+)%s+cursor%f[%W]") do
+        if locations[prep] then cursor_item_query = true; break end
+      end
+    end
+  end
+  if not fx_inventory_target and cursor_item_query then return nil end
+  if not fx_inventory_target
+      and lt:find("%f[%w]items?%s+in%s+the%s+time%s+selection%f[%W]") then
+    return nil
+  end
+  if not fx_inventory_target and (summary_read or tempo_read or cursor_read) then
+    local competing_entity =
+         lt:find("%f[%w]tempo%s*%-?%s*sync")
+      or lt:find("^%s*which%s+tracks?%f[%W]")
+      or lt:find("^%s*what%s+tracks?%f[%W]")
+      or lt:find("^%s*which%s+items?%f[%W]")
+      or lt:find("^%s*what%s+items?%f[%W]")
+      or lt:find("^%s*how%s+many%s+items?%f[%W]")
+      or lt:find("%f[%w]on%s+tracks?%f[%W]")
+      or lt:find("%f[%w]items?%s+at%s+")
+      or lt:find("%f[%w]items?%s+under%s+")
+      or lt:find("%f[%w]items?%s+in%s+")
+    local function tempo_pair_property(clause)
+      if not clause then return nil end
+      local property = clause:match("^%s*what%s+is%s+(.+)%s*$")
+        or clause:match("^%s*what's%s+(.+)%s*$")
+      if not property then return nil end
+      property = property:gsub("^the%s+", ""):gsub("%s+$", "")
+      if property == "tempo" then return "tempo" end
+      if property:match("^time%s+signature$") then return "signature" end
+    end
+    local pair_text = lt:gsub("[%?%.]%s*$", "")
+    local left_clause, right_clause = pair_text:match("^%s*(.-)%s+and%s+(.-)%s*$")
+    local left_property, right_property = tempo_pair_property(left_clause), tempo_pair_property(right_clause)
+    local complete_tempo_pair = left_property and right_property and left_property ~= right_property
+    local compound_question =
+         lt:find("%s+and%s+what%s+")
+      or lt:find("%s+and%s+which%s+")
+      or lt:find("%s+and%s+where%s+")
+      or lt:find("%s+and%s+how%s+")
+      or lt:find("%s+and%s+can%s+")
+      or lt:find("%s+and%s+should%s+")
+      or lt:find("%s+and%s+then%s+")
+    if competing_entity or (compound_question and not complete_tempo_pair) then return nil end
+  end
   if session_overview then
     return CTX.local_read_session_overview(facts)
   end
@@ -3066,12 +3163,7 @@ function CTX.local_read_answer(user_text, proj)
       or lt:find("^%s*is%s+anything%s+selected") then
     return CTX.local_read_selection_summary(proj, facts)
   end
-  if lt:find("project summary", 1, true)
-      or lt:find("session summary", 1, true)
-      or lt:find("project status", 1, true)
-      or lt:find("session status", 1, true)
-      or lt:find("^%s*summarize")
-      or lt:find("^%s*summary") then
+  if not fx_inventory_target and summary_read then
     return CTX.local_read_project_summary(facts)
   end
   if lt:find("project name", 1, true)
@@ -3098,20 +3190,17 @@ function CTX.local_read_answer(user_text, proj)
   if settings_status then return settings_status end
   local diagnostics_status = CTX.diagnostics_status(raw)
   if diagnostics_status then return diagnostics_status end
-  if lt:find("%f[%w]tempo%f[%W]")
-      or lt:find("%f[%w]bpm%f[%W]")
-      or lt:find("song speed", 1, true)
-      or lt:find("time signature", 1, true) then
+  if not fx_inventory_target and tempo_read then
     return CTX.tempo(proj)
   end
-  if lt:find("time selection", 1, true) then
+  if not fx_inventory_target and (lt:find("time selection", 1, true)) then
     return CTX.time_selection(proj, {
       include_length = lt:find("^%s*how%s+long", 1, false) ~= nil
         or lt:find("%f[%w]duration%f[%W]") ~= nil
         or lt:find("%f[%w]length%f[%W]") ~= nil,
     })
   end
-  if lt:find("project length", 1, true)
+  if not fx_inventory_target and (lt:find("project length", 1, true)
       or lt:find("project duration", 1, true)
       or lt:find("session length", 1, true)
       or lt:find("session duration", 1, true)
@@ -3120,32 +3209,28 @@ function CTX.local_read_answer(user_text, proj)
       or lt:find("^%s*how%s+long%s+is%s+this%s+session")
       or lt:find("^%s*how%s+long%s+is%s+the%s+session")
       or lt:find("^%s*how%s+long%s+is%s+this%s+song")
-      or lt:find("^%s*how%s+long%s+is%s+the%s+song") then
+      or lt:find("^%s*how%s+long%s+is%s+the%s+song")) then
     return CTX.project_length(proj)
   end
-  if lt:find("edit cursor", 1, true)
-      or lt:find("cursor position", 1, true)
-      or lt:find("play cursor", 1, true)
-      or lt:find("playhead", 1, true)
-      or lt:find("play head", 1, true) then
+  if not fx_inventory_target and cursor_read then
     return CTX.cursor(proj)
   end
-  if lt:find("sample rate", 1, true) then
+  if not fx_inventory_target and (lt:find("sample rate", 1, true)) then
     return CTX.sample_rate(proj)
   end
-  if lt:find("transport", 1, true)
+  if not fx_inventory_target and (lt:find("transport", 1, true)
       or lt:find("play state", 1, true)
-      or lt:find("playback state", 1, true) then
+      or lt:find("playback state", 1, true)) then
     return CTX.play_state(proj)
   end
-  if lt:find("loop points", 1, true)
+  if not fx_inventory_target and (lt:find("loop points", 1, true)
       or lt:find("loop range", 1, true)
       or lt:find("loop status", 1, true)
       or lt:find("loop length", 1, true)
       or lt:find("loop duration", 1, true)
       or lt:find("length of the loop", 1, true)
       or lt:find("duration of the loop", 1, true)
-      or lt:find("^%s*how%s+long%s+is%s+the%s+loop") then
+      or lt:find("^%s*how%s+long%s+is%s+the%s+loop")) then
     return CTX.loop(proj, {
       include_length = lt:find("^%s*how%s+long", 1, false) ~= nil
         or lt:find("%f[%w]duration%f[%W]") ~= nil
@@ -3684,7 +3769,6 @@ function CTX.local_read_answer(user_text, proj)
         proj, source_track, source_index, source_name)
     end
   end
-  local fx_inventory_target = CTX.local_fx_inventory_target(lt)
   if fx_inventory_target then
     local source_track, source_index, source_name, target_error =
       CTX.local_selected_track_index_in_text(facts, fx_inventory_target)
@@ -4908,6 +4992,7 @@ local API_REF_SECTION_NAMES = {
   theme     = true,
 }
 local DOCS_SECTION_NAMES = {
+  theme     = true,
   items     = true,
   envelopes = true,
   take_fx   = true,
@@ -5260,35 +5345,212 @@ function Theme._t(key, values, fallback)
   return (RA and RA.t and RA.t(key, values, fallback)) or fallback or key
 end
 
-function Theme.restore_backups()
-  -- Read the manifest of changed keys written by the theme change script.
-  local manifest = reaper.GetExtState("ReaAssist", "ThemeBackup__KEYS")
-  if manifest == "" then return 0 end
-  local keys = {}
-  for k in manifest:gmatch("[^,]+") do
-    keys[#keys+1] = k:match("^%s*(.-)%s*$")
+function Theme._manifest_keys(manifest)
+  if type(manifest) ~= "string" then
+    return nil, Theme._t("code.theme_error.invalid_manifest", nil, "Invalid theme change list.")
   end
-  if #keys == 0 then return 0 end
-  reaper.PreventUIRefresh(1)
-  -- Wrap in pcall so a corrupted ext-state value (or any unexpected
-  -- SetThemeColor failure) cannot leave PreventUIRefresh suppressed.
-  pcall(function()
-    for _, ini_key in ipairs(keys) do
-      local saved = reaper.GetExtState("ReaAssist", "ThemeBackup_" .. ini_key)
-      if saved ~= "" then
-        local n = tonumber(saved)
-        if n then
-          reaper.SetThemeColor(ini_key, n, 0)
+  if manifest == "" then return {}, nil end
+  local keys, seen = {}, {}
+  -- Include empty CSV fields so a malformed list cannot save only its prefix.
+  for field in (manifest .. ","):gmatch("(.-),") do
+    local key = field:match("^%s*(.-)%s*$")
+    if not key:match("^[A-Za-z_][A-Za-z0-9_]*$") then
+      return nil, Theme._t("code.theme_error.invalid_key", nil, "Invalid theme color key in the change list.")
+    end
+    if not seen[key] then
+      seen[key] = true
+      keys[#keys+1] = key
+    end
+  end
+  return keys
+end
+
+function Theme._restore_record(text)
+  if text == "" then return nil end
+  local version, manifest, body = text:match("^(v1)\n([0-9a-f]*)\n(.*)$")
+  if not version or #manifest % 2 ~= 0 then return nil, "invalid" end
+  local unhex = function(value)
+    return (value:gsub("..", function(pair) return string.char(tonumber(pair, 16)) end))
+  end
+  local record = { manifest = unhex(manifest), entries = {} }
+  local identities = {}
+  for field in (record.manifest .. ","):gmatch("(.-),") do
+    local key = field:match("^%s*(.-)%s*$")
+    if key:match("^[A-Za-z_][A-Za-z0-9_]*$") then identities[key] = true end
+  end
+  for line in body:gmatch("[^\n]+") do
+    local key, saved, expected = line:match("^([A-Za-z_][A-Za-z0-9_]*):([0-9a-f]*):(-?%d+)$")
+    expected = tonumber(expected)
+    if not key or #saved % 2 ~= 0 or not expected or not math.tointeger(expected)
+        or record.entries[key] then return nil, "invalid" end
+    if not identities[key] then return nil, "invalid" end
+    saved = unhex(saved)
+    -- A -1 receipt records an observed unsupported key with no saved color.
+    -- It must never settle a useful explicit color or malformed saved bytes.
+    if expected == -1 and tonumber(saved) ~= -1 then return nil, "invalid" end
+    record.entries[key] = { saved = saved, expected = expected }
+  end
+  return record
+end
+
+function Theme.restore_backups()
+  local report = { pending = 0, warnings = 0 }
+  local fail = function(count)
+    report.pending = count
+    return Theme._t("code.theme_error.restore_pending", nil,
+      "Theme recovery is incomplete. Saved colors were kept for retry.")
+  end
+  local read_ok, manifest = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__KEYS")
+  if not read_ok or type(manifest) ~= "string" then return 0, fail(1), report end
+  local journal_ok, journal = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__RESTORE")
+  if not journal_ok or type(journal) ~= "string" then return 0, fail(1), report end
+  local record, record_err = Theme._restore_record(journal)
+  if record_err then return 0, fail(1), report end
+  if manifest == "" and not record then return 0, nil, report end
+  local restored, completed, residual, seen, identities = 0, {}, {}, {}, {}
+  -- Restore admits each recoverable key independently. Empty fields name no
+  -- color; malformed nonempty fields retain their recovery identity.
+  local combined = manifest .. (record and ("," .. record.manifest) or "")
+  for field in (combined .. ","):gmatch("(.-),") do
+    local key = field:match("^%s*(.-)%s*$")
+    if key == "" then
+      report.warnings = report.warnings + 1
+    elseif not key:match("^[A-Za-z_][A-Za-z0-9_]*$") then
+      if not seen[field] then
+        residual[#residual+1] = field; identities[#identities+1] = field; seen[field] = true
+      end
+    elseif not seen[key] then
+      seen[key] = true
+      identities[#identities+1] = key
+      local saved_ok, saved = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup_" .. key)
+      local value = saved_ok and type(saved) == "string" and tonumber(saved) or nil
+      local receipt = record and record.entries[key]
+      if saved_ok and saved == "" and receipt then value = receipt.expected end
+      value = value and math.tointeger(value)
+      local current_ok, current = pcall(reaper.GetThemeColor, key, 0)
+      local noop_receipt = saved_ok and saved == "" and receipt and receipt.expected == -1
+      if value == -1 and current_ok and (current == -1 or noop_receipt) then
+        -- No explicit original exists for this unsupported key. Retain the
+        -- observation through checked cleanup; never call the default setter.
+        report.unsupported = (report.unsupported or 0) + 1
+        completed[#completed+1] = { key = key, saved = saved, expected = -1,
+          journal_saved = noop_receipt and receipt.saved or saved }
+      elseif value and math.tointeger(value) and current_ok and current ~= -1 then
+        local expected = value
+        if value == -1 or current ~= value then
+          -- A host call can fail after applying the value. Readback decides
+          -- completion, so an idempotent retry cannot lose a valid backup.
+          local set_ok, set_value = pcall(reaper.SetThemeColor, key, value, value == -1 and 0 or 1)
+          if value == -1 then
+            -- -1 is a documented default-color request, not the resulting
+            -- color. The successful setter result supplies its readback value.
+            expected = set_ok and type(set_value) == "number"
+              and set_value ~= -1 and math.tointeger(set_value) or nil
+          end
+          current_ok, current = pcall(reaper.GetThemeColor, key, 0)
         end
-        reaper.DeleteExtState("ReaAssist", "ThemeBackup_" .. ini_key, false)
+        if expected ~= nil and current_ok and current == expected then
+          restored = restored + 1
+          completed[#completed+1] = { key = key, saved = saved, expected = expected }
+        else
+          residual[#residual+1] = key
+        end
+      else
+        residual[#residual+1] = key
       end
     end
-    reaper.DeleteExtState("ReaAssist", "ThemeBackup__KEYS", false)
-  end)
-  reaper.PreventUIRefresh(-1)
-  reaper.ThemeLayout_RefreshAll()
-  reaper.UpdateArrange()
-  return #keys
+  end
+  local remaining = table.concat(residual, ",")
+  -- Observe changed backup identities before publishing their removal.
+  for index = #completed, 1, -1 do
+    local entry = completed[index]
+    local saved_ok, saved = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup_" .. entry.key)
+    if not saved_ok or saved ~= entry.saved then
+      residual[#residual+1] = entry.key
+      table.remove(completed, index)
+    end
+  end
+  remaining = table.concat(residual, ",")
+  local current_ok, current_manifest = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__KEYS")
+  if not current_ok or current_manifest ~= manifest then return restored, fail(#residual + #completed + 1), report end
+  -- REAPER serializes this synchronous helper on its script thread. ExtState
+  -- has no compare-and-swap; these checks detect observed changes, not an
+  -- arbitrary writer racing between every check and mutation.
+  local hex = function(value)
+    return (value:gsub(".", function(char) return string.format("%02x", char:byte()) end))
+  end
+  local encoded = "v1\n" .. hex(table.concat(identities, ",")) .. "\n"
+  local written_entries = {}
+  for _, entry in ipairs(completed) do
+    encoded = encoded .. entry.key .. ":" .. hex(entry.journal_saved or entry.saved) .. ":" .. tostring(entry.expected) .. "\n"
+    written_entries[entry.key] = true
+  end
+  -- A receipt remains useful when the backup was already removed and a
+  -- later retry cannot read or restore the runtime value.
+  for key, entry in pairs(record and record.entries or {}) do
+    if not written_entries[key] then
+      encoded = encoded .. key .. ":" .. hex(entry.saved) .. ":" .. tostring(entry.expected) .. "\n"
+    end
+  end
+  local current
+  journal_ok, current = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__RESTORE")
+  if not journal_ok or current ~= journal then return restored, fail(1), report end
+  pcall(reaper.SetExtState, "ReaAssist", "ThemeBackup__RESTORE", encoded, false)
+  journal_ok, current = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__RESTORE")
+  if not journal_ok or current ~= encoded then return restored, fail(1), report end
+  -- Publish and verify retry identities before removing completed backups. An
+  -- interruption before this point leaves every saved value available.
+  if remaining ~= manifest then
+    pcall(reaper.SetExtState, "ReaAssist", "ThemeBackup__KEYS", remaining, false)
+    current_ok, current_manifest = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__KEYS")
+    if not current_ok or current_manifest ~= remaining then
+      return restored, fail(#residual + #completed + 1), report
+    end
+  end
+  for _, entry in ipairs(completed) do
+    local saved_ok, saved = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup_" .. entry.key)
+    if saved_ok and saved == entry.saved then
+      pcall(reaper.DeleteExtState, "ReaAssist", "ThemeBackup_" .. entry.key, false)
+      local deleted_ok, retained = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup_" .. entry.key)
+      if deleted_ok and (retained == "" or retained == entry.saved) then
+        if retained ~= "" then report.warnings = report.warnings + 1 end
+      else
+        residual[#residual+1] = entry.key
+      end
+    else
+      residual[#residual+1] = entry.key
+    end
+  end
+  local final_remaining = table.concat(residual, ",")
+  if final_remaining ~= remaining then
+    pcall(reaper.SetExtState, "ReaAssist", "ThemeBackup__KEYS", final_remaining, false)
+    current_ok, current_manifest = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__KEYS")
+    if not current_ok or current_manifest ~= final_remaining then return restored, fail(#residual), report end
+  end
+  if #residual == 0 then
+    current_ok, current_manifest = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__KEYS")
+    if not current_ok or current_manifest ~= final_remaining then return restored, fail(1), report end
+    journal_ok, current = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__RESTORE")
+    if not journal_ok or current ~= encoded then return restored, fail(1), report end
+    pcall(reaper.DeleteExtState, "ReaAssist", "ThemeBackup__RESTORE", false)
+    journal_ok, current = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__RESTORE")
+    if not journal_ok or current ~= "" then return restored, fail(1), report end
+  end
+  if restored > 0 then
+    if not pcall(reaper.ThemeLayout_RefreshAll) then report.warnings = report.warnings + 1 end
+    if not pcall(reaper.UpdateArrange) then report.warnings = report.warnings + 1 end
+  end
+  if report.warnings > 0 then
+    report.warning = Theme._t("code.theme_error.restore_warning", nil,
+      "Theme colors were restored. Some recovery cleanup or display refresh could not finish.")
+  end
+  if report.unsupported then
+    local warning = Theme._t("code.theme_error.restore_unsupported", nil,
+      "Some theme color names had no saved color to restore.")
+    report.warning = warning .. (report.warning and ("\n\n" .. report.warning) or "")
+  end
+  if #residual > 0 then return restored, fail(#residual), report end
+  return restored, nil, report
 end
 
 -- ---------------------------------------------------------------------------
@@ -5297,9 +5559,252 @@ end
 -- .ReaperTheme files; shows a message for .ReaperThemeZip.
 -- Returns true on success, false + error string on failure.
 -- ---------------------------------------------------------------------------
+function Theme._updated_content(content, keys)
+  local lines, position = {}, 1
+  while position <= #content do
+    local boundary = content:find("[\r\n]", position)
+    if not boundary then
+      lines[#lines+1] = { text = content:sub(position), eol = "" }
+      break
+    end
+    local eol = content:sub(boundary, boundary)
+    if eol == "\r" and content:sub(boundary+1, boundary+1) == "\n" then eol = "\r\n" end
+    lines[#lines+1] = { text = content:sub(position, boundary-1), eol = eol }
+    position = boundary + #eol
+  end
+  local section, target, insert_at, newline = 0, nil, nil, nil
+  for index, line in ipairs(lines) do
+    local text = line.text
+    if index == 1 then text = text:gsub("^\239\187\191", "") end
+    local header = text:match("^[ \t]*%[([^%]]+)%]")
+    if not header and text:match("^[ \t]*%[") then
+      return nil, Theme._t("code.theme_error.invalid_header", nil, "The theme file has an invalid section header.")
+    end
+    if header then
+      section = section + 1
+      if target and not insert_at then insert_at = index end
+      if header:match("^%s*(.-)%s*$"):lower() == "color theme" then
+        if target then return nil, Theme._t("code.theme_error.duplicate_section", nil,
+          "The theme file has multiple [color theme] sections.") end
+        target = section
+        newline = line.eol ~= "" and line.eol or nil
+      end
+    end
+    line.section = section
+    if section == target and not newline and line.eol ~= "" then newline = line.eol end
+  end
+  if not target then return nil, Theme._t("code.theme_error.missing_section", nil,
+    "The theme file has no [color theme] section.") end
+  local found = {}
+  for _, line in ipairs(lines) do
+    if line.section == target then
+      local key = line.text:match("^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=")
+      if key and keys[key] ~= nil then
+        local prefix, value = line.text:match("^([ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*)(.*)$")
+        local suffix = value:match("([ \t]*[;#].*)$") or value:match("([ \t]*)$")
+        line.text = prefix .. tostring(keys[key]) .. suffix
+        found[key] = true
+      end
+    end
+  end
+  local missing = {}
+  for key in pairs(keys) do if not found[key] then missing[#missing+1] = key end end
+  table.sort(missing)
+  insert_at = insert_at or #lines + 1
+  newline = newline or "\n"
+  if #missing > 0 and lines[insert_at-1].eol == "" then lines[insert_at-1].eol = newline end
+  local output = {}
+  for index = 1, #lines + 1 do
+    if index == insert_at then
+      for _, key in ipairs(missing) do output[#output+1] = key .. "=" .. tostring(keys[key]) .. newline end
+    end
+    if lines[index] then output[#output+1] = lines[index].text .. lines[index].eol end
+  end
+  return table.concat(output)
+end
+
+-- A successful read or paired checked probes classify this observation.
+-- Neither a GUID nor an absence observation makes a subsequent wb exclusive.
+function Theme._file_state(path)
+  local opened, f, open_err, open_code = pcall(io.open, path, "rb")
+  if opened and f then
+    local read_ok, bytes, read_err = pcall(f.read, f, "*a")
+    local close_ok, closed, close_err = pcall(f.close, f)
+    if read_ok and type(bytes) == "string" and close_ok and closed then return "readable", bytes end
+    return "unreadable", nil, tostring(read_err or close_err or "read/close failed")
+  end
+  if not opened then return "unknown", nil, tostring(f or "open failed") end
+  local probed, renamed, rename_err, rename_code = pcall(os.rename, path, path)
+  if probed and renamed then return "unreadable", nil, tostring(open_err or "read denied") end
+  -- reaper.file_exists includes readability. False cannot prove absence.
+  -- Hosted Windows rename errno may repeat an earlier error.
+  -- Neither probe errno is an independent absence guarantee.
+  if probed and tonumber(open_code) == 2 and tonumber(rename_code) == 2 then return "absent" end
+  return "unknown", nil, tostring(open_err or rename_err or "presence unavailable")
+end
+
+function Theme._save_windows_file(path, original, content)
+  local result = { path = path, published = false, previous_retained = false }
+  local function matches(name, expected)
+    local state, bytes = Theme._file_state(name)
+    return state == "readable" and bytes == expected
+  end
+  local function failed(reason)
+    local state, bytes = Theme._file_state(path)
+    result.target_state = state
+    if result.previous_path then
+      result.previous_state = Theme._file_state(result.previous_path)
+      result.candidate_state = Theme._file_state(result.candidate_path)
+      result.previous_retained = result.previous_state == "readable"
+    end
+    local status
+    if result.published and state == "readable" and bytes == content then
+      result.recovery = "published_present"
+      status = Theme._t("code.theme_error.windows_published_present", nil,
+        "New colors are in the theme file, but save verification is incomplete. Undo restores runtime colors only.")
+    elseif result.restore_moved and state == "readable" and bytes ~= original then
+      result.recovery = "restored_changed"
+      status = Theme._t("code.theme_error.windows_restored_changed", nil,
+        "The moved theme file was returned to its path. Its bytes differ from the version ReaAssist read.")
+    elseif result.restore_moved and (state == "unreadable" or state == "unknown") then
+      result.recovery = "restored_unverified"
+      status = Theme._t("code.theme_error.windows_restored_unverified", nil,
+        "The moved theme file was returned to its path, but its bytes could not be verified.")
+    elseif not result.published and state == "readable" and bytes == original then
+      result.recovery = "original_present"
+      status = Theme._t("code.theme_error.windows_original_present", nil, "The prior theme is at its original path.")
+    elseif state == "absent" then
+      result.recovery = "target_absent"
+      status = Theme._t("code.theme_error.windows_target_absent", nil,
+        "The theme path is absent. Recover only the exact previous file to an absent target. Do not overwrite another file.")
+    elseif state == "readable" then
+      result.recovery = "target_occupied"
+      status = Theme._t("code.theme_error.windows_target_occupied", nil,
+        "A file is at the theme path. Recovery did not overwrite it. Inspect the files before choosing a recovery version.")
+    else
+      result.recovery = "target_unknown"
+      status = Theme._t("code.theme_error.windows_target_unknown", nil,
+        "The theme path could not be verified. Keep the listed files and inspect them before recovery.")
+    end
+    local previous, candidate = result.previous_path or "", result.candidate_path or ""
+    local previous_state = Theme._t("code.theme_file_state." .. (result.previous_state or "unknown"), nil, result.previous_state or "unknown")
+    local candidate_state = Theme._t("code.theme_file_state." .. (result.candidate_state or "unknown"), nil, result.candidate_state or "unknown")
+    return false, Theme._t("code.theme_error.windows_save_failed", {
+      error = tostring(reason), path = path, previous = previous, candidate = candidate, recovery = status,
+      previous_state = previous_state, candidate_state = candidate_state,
+    }, "Theme save did not complete: " .. tostring(reason) .. "\n\n" .. status
+      .. "\n\nTheme path:\n" .. path .. "\nPrevious path (" .. previous_state .. "):\n" .. previous
+      .. "\nCandidate path (" .. candidate_state .. "):\n" .. candidate), result
+  end
+  local function rename(from, to)
+    local called, moved, detail = pcall(os.rename, from, to)
+    return called and moved, tostring(detail or (not called and moved) or "rename refused")
+  end
+  local function restore(reason)
+    -- Windows rename refuses an occupied destination. Never remove that file.
+    local restored, detail = rename(result.previous_path, path)
+    result.restore_moved = restored and true or false
+    if not restored then result.raw_restore_error = detail end
+    return failed(reason .. (restored and "" or " " .. Theme._t("code.theme_error.windows_restore_failed", nil,
+      "Could not move the previous theme back.")))
+  end
+  local guid_ok, guid = pcall(reaper.genGuid)
+  if not guid_ok or type(guid) ~= "string" then return failed("save identity unavailable") end
+  guid = guid:gsub("[{}]", "")
+  if not guid:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$") then
+    return failed("invalid save identity")
+  end
+  result.previous_path = path .. ".reaassist-" .. guid .. ".previous"
+  result.candidate_path = path .. ".reaassist-" .. guid .. ".pending"
+  if not matches(path, original) then return failed("theme changed before staging") end
+  if Theme._file_state(result.previous_path) ~= "absent" or Theme._file_state(result.candidate_path) ~= "absent" then
+    return failed("save sibling already exists or cannot be classified")
+  end
+  local opened, f, open_err = pcall(io.open, result.candidate_path, "wb")
+  if not opened or not f then return failed(tostring(open_err or f or "candidate open failed")) end
+  local wrote, write_result, write_err = pcall(f.write, f, content)
+  local closed, close_result, close_err = pcall(f.close, f)
+  if not wrote or not write_result or not closed or not close_result then
+    return failed(tostring(write_err or close_err or "candidate write/close failed"))
+  end
+  if not matches(result.candidate_path, content) then return failed("candidate readback failed") end
+  if not matches(path, original) then return failed("theme changed before park") end
+  local parked, park_err = rename(path, result.previous_path)
+  if not parked then
+    result.failure_operation, result.raw_error = "park", park_err
+    return failed(Theme._t("code.theme_error.windows_park_failed", nil, "Could not move the theme aside."))
+  end
+  result.parked = true
+  if not matches(result.previous_path, original) then return restore("parked theme changed or could not be read") end
+  if not matches(result.candidate_path, content) then return restore("candidate changed before publication") end
+  local published, publish_err = rename(result.candidate_path, path)
+  if not published then
+    result.failure_operation, result.raw_error = "publish", publish_err
+    return restore(Theme._t("code.theme_error.publish_failed", nil, "Could not publish the new theme."))
+  end
+  result.published = true
+  if not matches(path, content) then return failed("published theme readback failed") end
+  result.previous_state = Theme._file_state(result.previous_path)
+  if result.previous_state ~= "readable" then return failed("previous theme could not be verified") end
+  result.previous_retained = true
+  result.target_state = "readable"
+  return true, nil, result
+end
+
+function Theme._save_posix_file(path, original, content)
+  local result = { path = path, published = false }
+  local function failed(reason)
+    result.target_state = Theme._file_state(path)
+    if result.candidate_path then result.candidate_state = Theme._file_state(result.candidate_path) end
+    local candidate = result.candidate_path or ""
+    return false, Theme._t("code.theme_error.posix_save_failed", {
+      error = tostring(reason), path = path, candidate = candidate,
+    }, "Theme save did not complete: " .. tostring(reason) .. "\n\nTheme path:\n" .. path
+      .. "\nCandidate path:\n" .. candidate .. "\nInspect the listed paths before retrying."), result
+  end
+  local function matches(name, expected)
+    local state, bytes = Theme._file_state(name)
+    return state == "readable" and bytes == expected
+  end
+  local guid_ok, guid = pcall(reaper.genGuid)
+  if not guid_ok or type(guid) ~= "string" then return failed("save identity unavailable") end
+  guid = guid:gsub("[{}]", "")
+  if not guid:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$") then
+    return failed("invalid save identity")
+  end
+  result.candidate_path = path .. ".reaassist-" .. guid .. ".pending"
+  if not matches(path, original) then return failed("theme changed before staging") end
+  if Theme._file_state(result.candidate_path) ~= "absent" then return failed("save candidate already exists or cannot be classified") end
+  local opened, f, open_err = pcall(io.open, result.candidate_path, "wb")
+  if not opened or not f then return failed(tostring(open_err or f or "candidate open failed")) end
+  local wrote, write_result, write_err = pcall(f.write, f, content)
+  local closed, close_result, close_err = pcall(f.close, f)
+  if not wrote or not write_result or not closed or not close_result then
+    return failed(tostring(write_err or close_err or "candidate write/close failed"))
+  end
+  if not matches(result.candidate_path, content) then return failed("candidate readback failed") end
+  -- An external update between this check and rename may be replaced.
+  if not matches(path, original) then return failed("theme changed before publication") end
+  local called, published, detail = pcall(os.rename, result.candidate_path, path)
+  if not called or not published then
+    result.failure_operation, result.raw_error = "publish", tostring(detail or published or "rename refused")
+    return failed(Theme._t("code.theme_error.publish_failed", nil, "Could not publish the new theme."))
+  end
+  result.published = true
+  if not matches(path, content) then return failed("published theme readback failed") end
+  return true, nil, result
+end
+
 function Theme.save_to_file()
+  local journal_ok, journal = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__RESTORE")
+  if not journal_ok or journal ~= "" then
+    return false, Theme._t("code.theme_error.restore_pending", nil,
+      "Theme recovery is incomplete. Saved colors were kept for retry.")
+  end
   local manifest = reaper.GetExtState("ReaAssist", "ThemeBackup__KEYS")
-  if manifest == "" then
+  local admitted, manifest_err = Theme._manifest_keys(manifest)
+  if not admitted then return false, manifest_err end
+  if #admitted == 0 then
     return false, Theme._t("code.theme_error.no_changes", nil,
       "No theme changes to save.")
   end
@@ -5317,86 +5822,46 @@ function Theme.save_to_file()
   end
   -- Collect the keys and their current runtime values.
   local keys = {}
-  for k in manifest:gmatch("[^,]+") do
-    local trimmed = k:match("^%s*(.-)%s*$")
-    keys[trimmed] = reaper.GetThemeColor(trimmed, 0)
+  for _, key in ipairs(admitted) do
+    local value = reaper.GetThemeColor(key, 0)
+    if type(value) ~= "number" or value == -1 or not math.tointeger(value) then
+      return false, Theme._t("code.theme_error.unsupported_key", { key = key },
+        "Cannot save unsupported theme color key: " .. key)
+    end
+    keys[key] = value
   end
   -- Read the existing theme file.
-  local f, err = io.open(theme_path, "r")
+  local f, err = io.open(theme_path, "rb")
   if not f then
     local detail = err or theme_path
     return false, Theme._t("code.theme_error.read_failed",
       { error = detail }, "Cannot read theme file: " .. detail)
   end
-  local content = f:read("*a")
-  f:close()
-  -- Update existing keys and track which ones were found.
-  local found = {}
-  for key, val in pairs(keys) do
-    local pattern = "(" .. key:gsub("([%(%)%.%%%+%-%*%?%[%^%$])", "%%%1") .. "=)[^\r\n]*"
-    local new_content, count = content:gsub(pattern, "%1" .. tostring(val))
-    if count > 0 then
-      content = new_content
-      found[key] = true
-    end
+  local content, read_err = f:read("*a")
+  local read_closed, read_close_err = f:close()
+  if type(content) ~= "string" or not read_closed then
+    local detail = tostring(read_err or read_close_err or "read failed")
+    return false, Theme._t("code.theme_error.read_failed", { error = detail }, "Cannot read theme file: " .. detail)
   end
-  -- Append any new keys that weren't already in the file.
-  local to_append = {}
-  for key, val in pairs(keys) do
-    if not found[key] then
-      to_append[#to_append+1] = key .. "=" .. tostring(val)
-    end
-  end
-  if #to_append > 0 then
-    -- Insert before the end of the [color theme] section or at end of file.
-    local append_str = table.concat(to_append, "\n") .. "\n"
-    -- Find the end of the [color theme] section (next section header or EOF).
-    local next_section = content:find("\n%[", 2)
-    if next_section then
-      -- Slice INCLUSIVE of the newline before the next [section] header;
-      -- slicing at next_section - 1 glued the first appended key onto the
-      -- last character of the previous line, corrupting the theme file.
-      content = content:sub(1, next_section) .. append_str .. content:sub(next_section + 1)
-    else
-      -- No other sections; append at end.
-      if content:sub(-1) ~= "\n" then content = content .. "\n" end
-      content = content .. append_str
-    end
-  end
-  -- Write back. Use a temp file + rename so a partial write or process kill
-  -- mid-write cannot corrupt the user's .ReaperTheme. On Windows os.rename
-  -- fails if the destination exists, so we delete the original first; this
-  -- leaves a small window where the file is briefly absent, but a complete
-  -- file is much better than a half-written one.
-  local tmp_path = theme_path .. ".tmp"
-  f, err = io.open(tmp_path, "w")
-  if not f then
-    local detail = err or tmp_path
-    return false, Theme._t("code.theme_error.write_failed",
-      { error = detail }, "Cannot write theme file: " .. detail)
-  end
-  local ok_w, err_w = f:write(content)
-  local ok_c, err_c = f:close()
-  if not ok_w or not ok_c then
-    os.remove(tmp_path)
-    local detail = tostring(err_w or err_c or "close failed")
-    return false, Theme._t("code.theme_error.write_close_failed",
-      { error = detail }, "Failed to write theme file: " .. detail)
-  end
-  os.remove(theme_path)
-  local ok_r, err_r = os.rename(tmp_path, theme_path)
-  if not ok_r then
-    os.remove(tmp_path)
-    local detail = tostring(err_r)
-    return false, Theme._t("code.theme_error.replace_failed",
-      { error = detail }, "Failed to replace theme file: " .. detail)
+  local original, update_err = content, nil
+  content, update_err = Theme._updated_content(content, keys)
+  if not content then return false, update_err end
+  local save_result
+  if reaper.GetOS and reaper.GetOS():match("^Win") then
+    local saved, save_err
+    saved, save_err, save_result = Theme._save_windows_file(theme_path, original, content)
+    if not saved then return false, save_err, save_result end
+  else
+    local saved, save_err
+    saved, save_err, save_result = Theme._save_posix_file(theme_path, original, content)
+    if not saved then return false, save_err, save_result end
   end
   -- Clear backups since the changes are now permanent.
   for key in pairs(keys) do
     reaper.DeleteExtState("ReaAssist", "ThemeBackup_" .. key, false)
   end
   reaper.DeleteExtState("ReaAssist", "ThemeBackup__KEYS", false)
-  return true
+  return true, nil, save_result
 end
 
 -- theme color ini_key names for SetThemeColor/GetThemeColor, plus usage patterns.
@@ -6618,7 +7083,267 @@ end
 --   max_group:   highest numbered group found (0 if none)
 --   total_param_count: raw TrackFX_GetNumParams value
 
-function CTX.scan_fx_params(tr, fx_idx)
+-- Scan leases are session-local authority, never recovered from saved GUIDs.
+-- Each synchronous segment checks membership before dereferencing captured handles.
+function CTX.scan_lease_begin()
+  if CTX._scan_refresh_uncertain or CTX._scan_undo_uncertain then
+    CTX.scan_cleanup_notice(true)
+    return nil, "scan resource state uncertain"
+  end
+  local ok, lease = pcall(function()
+    local project, filename = reaper.EnumProjects(-1, "")
+    local live = false
+    for i = 0, math.huge do
+      local p = reaper.EnumProjects(i, "")
+      if not p then break end
+      if p == project then live = true; break end
+    end
+    assert(live, "scan project unavailable")
+    local master = reaper.GetMasterTrack(project)
+    assert(master and reaper.ValidatePtr2(project, master, "MediaTrack*"), "scan master unavailable")
+    local guid = reaper.GetTrackGUID(master)
+    assert(type(guid) == "string" and guid ~= "", "scan master identity unavailable")
+    CTX._scan_generation = (CTX._scan_generation or 0) + 1
+    return { project = project, filename = filename, master_guid = guid,
+      generation = CTX._scan_generation, fx = {} }
+  end)
+  if not ok then return nil, tostring(lease) end
+  CTX._scan_leases = CTX._scan_leases or {}
+  CTX._scan_leases[lease.generation] = lease
+  return lease
+end
+
+function CTX.scan_lease_retire(lease, reason)
+  if not lease then return end
+  lease.retired = lease.retired or reason or "scan finished"
+  if not lease.finished then
+    CTX._scan_pending_cleanup = CTX._scan_pending_cleanup or {}
+    CTX._scan_pending_cleanup[lease] = true
+  end
+  if CTX._scan_leases and CTX._scan_leases[lease.generation] == lease then
+    CTX._scan_leases[lease.generation] = nil
+  end
+end
+
+function CTX.scan_lease_check(lease, fx_idx)
+  if not lease or lease.retired or not CTX._scan_leases
+      or CTX._scan_leases[lease.generation] ~= lease then
+    return false, (lease and lease.retired) or "stale scan generation"
+  end
+  local ok, why = pcall(function()
+    local live = false
+    for i = 0, math.huge do
+      local p, filename = reaper.EnumProjects(i, "")
+      if not p then break end
+      if p == lease.project then live = true; lease.filename = filename; break end
+    end
+    assert(live, "scan project closed")
+    assert(reaper.EnumProjects(-1, "") == lease.project, "scan project switched")
+    local master = reaper.GetMasterTrack(lease.project)
+    assert(master and reaper.ValidatePtr2(lease.project, master, "MediaTrack*"), "scan master lost")
+    assert(reaper.GetTrackGUID(master) == lease.master_guid, "scan master changed")
+    if lease.track then
+      assert(reaper.ValidatePtr2(lease.project, lease.track, "MediaTrack*"), "scan track lost")
+      assert(reaper.GetTrackGUID(lease.track) == lease.track_guid, "scan track changed")
+      local fx_count = reaper.TrackFX_GetCount(lease.track)
+      assert(type(fx_count) == "number" and fx_count >= 0, "scan FX inventory unavailable")
+      for idx, guid in pairs(lease.fx) do
+        assert(idx < fx_count, "scan FX removed")
+        assert(reaper.TrackFX_GetFXGUID(lease.track, idx) == guid, "scan FX changed")
+      end
+      if lease.structure then
+        local s = lease.structure
+        assert(fx_count == s.fx_count, "scan FX inventory changed")
+        assert(reaper.CountTrackMediaItems(lease.track) == s.items, "scan track items changed")
+        for category, count in pairs(s.routes) do
+          assert(reaper.GetTrackNumSends(lease.track, category) == count, "scan track routes changed")
+        end
+        for key, value in pairs(s.values) do
+          assert(reaper.GetMediaTrackInfo_Value(lease.track, key) == value, "scan track configuration changed")
+        end
+      end
+    elseif fx_idx ~= nil then
+      error("scan track unavailable")
+    end
+    if fx_idx ~= nil then assert(lease.fx[fx_idx], "unowned scan FX") end
+  end)
+  if not ok then
+    CTX.scan_lease_retire(lease, tostring(why))
+    return false, tostring(why)
+  end
+  return true
+end
+
+function CTX.scan_lease_insert(lease)
+  assert(CTX.scan_lease_check(lease))
+  local before = {}
+  local count = reaper.CountTracks(lease.project)
+  for i = 0, count - 1 do before[i] = reaper.GetTrack(lease.project, i) end
+  lease.creation_uncertain = true
+  local inserted, insert_err = pcall(reaper.InsertTrackAtIndex, count, false)
+  assert(CTX.scan_lease_check(lease))
+  local after_count = reaper.CountTracks(lease.project)
+  if after_count == count then lease.creation_uncertain = false end
+  assert(after_count == count + 1, "scan track insertion failed")
+  for i = 0, count - 1 do
+    assert(reaper.GetTrack(lease.project, i) == before[i], "scan track insertion ambiguous")
+  end
+  local tr = reaper.GetTrack(lease.project, count)
+  assert(tr and reaper.ValidatePtr2(lease.project, tr, "MediaTrack*"), "scan track insertion unavailable")
+  local guid = reaper.GetTrackGUID(tr)
+  assert(type(guid) == "string" and guid ~= "", "scan track identity unavailable")
+  lease.track, lease.track_guid = tr, guid
+  lease.creation_uncertain = false
+  assert(inserted, insert_err)
+  return tr
+end
+
+function CTX.scan_lease_bind_fx(lease, idx)
+  assert(CTX.scan_lease_check(lease))
+  assert(type(idx) == "number" and idx >= 0 and idx < reaper.TrackFX_GetCount(lease.track), "scan FX insertion failed")
+  local guid = reaper.TrackFX_GetFXGUID(lease.track, idx)
+  assert(type(guid) == "string" and guid ~= "", "scan FX identity unavailable")
+  lease.fx[idx] = guid
+end
+
+function CTX.scan_lease_seal(lease)
+  assert(CTX.scan_lease_check(lease))
+  local tr = lease.track
+  local s = { fx_count = reaper.TrackFX_GetCount(tr), items = reaper.CountTrackMediaItems(tr), routes = {}, values = {} }
+  for category = -1, 1 do s.routes[category] = reaper.GetTrackNumSends(tr, category) end
+  for _, key in ipairs({ "B_SHOWINTCP", "B_SHOWINMIXER", "B_MAINSEND", "I_RECARM", "I_RECMON", "I_RECINPUT" }) do
+    s.values[key] = reaper.GetMediaTrackInfo_Value(tr, key)
+  end
+  lease.structure = s
+end
+
+-- Only synchronous, non-yielding callbacks may acquire a refresh hold.
+-- A raised native call has unknown effect. Never guess a compensating call.
+function CTX.scan_with_refresh(lease, fn)
+  local valid, reason = CTX.scan_lease_check(lease)
+  if not valid then return false, reason end
+  if CTX._scan_refresh_uncertain then return false, "scan refresh state uncertain; save work and restart REAPER" end
+  if lease.refresh then return false, "scan refresh already held" end
+  local acquired, err = pcall(reaper.PreventUIRefresh, 1)
+  if not acquired then
+    CTX._scan_refresh_uncertain = true
+    lease.refresh = "unknown"
+    return false, tostring(err)
+  end
+  lease.refresh = "held"
+  local result = table.pack(xpcall(fn, debug.traceback))
+  lease.refresh = "release attempted"
+  local released, release_err = pcall(reaper.PreventUIRefresh, -1)
+  if released then lease.refresh = nil else lease.refresh = "unknown" end
+  if not released then
+    CTX._scan_refresh_uncertain = true
+    return false, tostring(release_err)
+  end
+  return table.unpack(result, 1, result.n)
+end
+
+function CTX.scan_setup(lease, label, fn)
+  if CTX._scan_undo_uncertain then return false, "scan Undo state uncertain; save work and restart REAPER" end
+  local valid, reason = CTX.scan_lease_check(lease)
+  if not valid then return false, reason end
+  local begun, err = pcall(reaper.Undo_BeginBlock2, lease.project)
+  if not begun then
+    CTX._scan_undo_uncertain = true
+    CTX.scan_lease_retire(lease, "scan Undo begin uncertain")
+    return false, tostring(err)
+  end
+  lease.undo_open = true
+  local result = table.pack(CTX.scan_with_refresh(lease, fn))
+  -- The callback cannot yield or switch projects. Explicit project ownership
+  -- keeps completion independent of the active-project alias.
+  local membership_ok, live = pcall(function()
+    for i = 0, math.huge do
+      local p = reaper.EnumProjects(i, "")
+      if not p then break end
+      if p == lease.project then return true end
+    end
+    return false
+  end)
+  lease.undo_open = "end attempted"
+  local ended, end_err = false, "scan project unavailable at Undo completion"
+  if membership_ok and live then
+    ended, end_err = pcall(reaper.Undo_EndBlock2, lease.project, label, 0)
+  end
+  if ended then lease.undo_open = nil else lease.undo_open = "unknown" end
+  if not ended then
+    CTX._scan_undo_uncertain = true
+    CTX.scan_lease_retire(lease, "scan Undo end uncertain")
+    return false, tostring(end_err)
+  end
+  return table.unpack(result, 1, result.n)
+end
+
+function CTX.scan_cleanup_notice(uncertain)
+  if uncertain and CTX._scan_uncertain_reported then return end
+  if uncertain then CTX._scan_uncertain_reported = true end
+  local key = uncertain and "settings.fx_cache.toast.resource_uncertain" or "settings.fx_cache.toast.cleanup_stopped"
+  local message = uncertain
+    and "Scan resource state is uncertain. Save your work and restart REAPER before scanning again."
+    or "Scan cleanup stopped. Check the inspection track in its original project; remove it manually if retained."
+  if UI and UI.t then
+    local translated, text = pcall(UI.t, key, nil, message)
+    if translated and type(text) == "string" then message = text end
+  end
+  if UI and UI.show_float_toast then pcall(UI.show_float_toast, message, "err") end
+end
+
+function CTX.scan_lease_finish(lease)
+  if not lease then
+    if CTX._scan_refresh_uncertain or CTX._scan_undo_uncertain then CTX.scan_cleanup_notice(true) end
+    return true
+  end
+  if lease.finished then return lease.finish_ok, lease.finish_error end
+  local valid, reason = CTX.scan_lease_check(lease)
+  local ok, err = valid, reason
+  if valid and lease.creation_uncertain then
+    ok, err = false, "scan track creation uncertain"
+  elseif valid and (lease.refresh == "unknown" or lease.undo_open == "unknown") then
+    ok, err = false, "scan resource state uncertain"
+  end
+  if ok and lease.track then
+    ok, err = CTX.scan_with_refresh(lease, function() reaper.DeleteTrack(lease.track) end)
+  end
+  lease.finished = true
+  if CTX._scan_pending_cleanup then CTX._scan_pending_cleanup[lease] = nil end
+  lease.finish_ok, lease.finish_error = ok, err
+  CTX.scan_lease_retire(lease, ok and "scan finished" or err)
+  local owner = lease.owner
+  if owner and owner.lease == lease then
+    owner.active, owner.phase = false, "done"
+    owner.track, owner.lease, owner.deep = nil, nil, false
+  end
+  if not ok then
+    if Log and Log.line then
+      pcall(Log.line, "SCAN_CLEANUP", tostring(err) .. "; project=" .. tostring(lease.filename)
+        .. "; track=" .. tostring(lease.track_guid) .. "; generation=" .. tostring(lease.generation))
+    end
+    CTX.scan_cleanup_notice(CTX._scan_refresh_uncertain or CTX._scan_undo_uncertain)
+  end
+  return ok, err
+end
+
+function CTX.scan_cleanup_all()
+  fx_cache_ui.rescan_all.active, fx_cache_ui.rescan_all.queue = false, {}
+  fx_cache_ui.rescan_all.current = nil
+  deep_scan.active, deep_scan.coro = false, nil
+  deep_scan.tr, deep_scan.lease = nil, nil
+  deep_scan.on_cancel, deep_scan.on_complete = nil, nil
+  local leases = {}
+  local seen = {}
+  for _, lease in pairs(CTX._scan_leases or {}) do leases[#leases + 1] = lease; seen[lease] = true end
+  for lease in pairs(CTX._scan_pending_cleanup or {}) do
+    if not seen[lease] then leases[#leases + 1] = lease end
+  end
+  for _, lease in ipairs(leases) do CTX.scan_lease_finish(lease) end
+end
+
+function CTX.scan_fx_params(tr, fx_idx, lease)
+  if lease then assert(CTX.scan_lease_check(lease, fx_idx)) end
   local params = {}
   local param_count = R_TrackFX_GetNumParams(tr, fx_idx)
   -- A stale FX handle (plugin removed mid-scan, track deleted) can make
@@ -6847,7 +7572,8 @@ local function _fx_param_filter_skip(param_nm, disp)
   return false
 end
 
-function CTX.scan_fx_params_deep_body(tr, fx_idx)
+function CTX.scan_fx_params_deep_body(tr, fx_idx, lease)
+  assert(CTX.scan_lease_check(lease, fx_idx))
   local params = {}
   local max_group = 0
   local param_count = R_TrackFX_GetNumParams(tr, fx_idx)
@@ -6859,20 +7585,12 @@ function CTX.scan_fx_params_deep_body(tr, fx_idx)
   end
   Log.line("DEEP_SCAN", "scan_fx_params_deep start: param_count=" .. param_count)
 
-  -- Release the UI-refresh lock that fx_inspect_load held. Holding
-  -- PreventUIRefresh(+1) across many defer cycles can put REAPER into
-  -- a bad internal state and, combined with rapid VST3 param writes,
-  -- has produced hard crashes. The cleanup callbacks will not call
-  -- PreventUIRefresh(-1) again, since we released it here.
-  reaper.PreventUIRefresh(-1)
-  deep_scan._ui_refresh_released = true
-
   -- Helper: confirm the track pointer + plugin slot are still alive.
   -- REAPER invalidates MediaTrack pointers on project reloads, track
   -- deletions, and some undo actions. Touching a dead pointer with
   -- TrackFX_* is a segfault.
   local function _alive()
-    if not reaper.ValidatePtr2(0, tr, "MediaTrack*") then return false end
+    if not CTX.scan_lease_check(lease, fx_idx) then return false end
     if R_TrackFX_GetNumParams(tr, fx_idx) <= 0 then return false end
     return true
   end
@@ -7348,6 +8066,8 @@ function CTX.start_deep_scan(opts)
     Log.line("DEEP_SCAN", "start_deep_scan: missing tr/fx_idx, ignoring")
     return false
   end
+  if not opts.lease or opts.tr ~= opts.lease.track
+      or not CTX.scan_lease_check(opts.lease, opts.fx_idx) then return false end
   -- Build everything as locals first; commit to the deep_scan table only
   -- after every step succeeds. Previously the function set deep_scan.active
   -- early then computed total_probes / built the coroutine -- if any of
@@ -7359,13 +8079,14 @@ function CTX.start_deep_scan(opts)
     return false
   end
   local co = coroutine.create(function()
-    return CTX.scan_fx_params_deep_body(opts.tr, opts.fx_idx)
+    return CTX.scan_fx_params_deep_body(opts.tr, opts.fx_idx, opts.lease)
   end)
   -- Single commit point. Order: clear cancel flag, populate fields, then
   -- flip active=true LAST so pump_deep_scan can never observe a half-built
   -- state (active=true, coro=nil).
   deep_scan.cancel_req   = false
   deep_scan.tr           = opts.tr
+  deep_scan.lease        = opts.lease
   deep_scan.fx_idx       = opts.fx_idx
   deep_scan.identifier   = opts.identifier
   deep_scan.search_names = opts.search_names
@@ -7399,13 +8120,26 @@ end
 function CTX.pump_deep_scan()
   if not deep_scan.active or not deep_scan.coro then return end
   local co = deep_scan.coro
-  local ok, a, b, c = coroutine.resume(co)
+  local lease = deep_scan.lease
+  local valid, reason = CTX.scan_lease_check(lease, deep_scan.fx_idx)
+  local ok, a, b, c
+  if deep_scan.cancel_req or not valid then
+    ok, a = false, reason or "cancelled"
+  else
+    ok, a, b, c = coroutine.resume(co)
+  end
   if not ok then
     Log.line("DEEP_SCAN", "coroutine error: " .. tostring(a))
     local cb = deep_scan.on_cancel
     deep_scan.active = false
     deep_scan.coro   = nil
-    if cb then cb(tostring(a)) end
+    deep_scan.tr, deep_scan.lease = nil, nil
+    deep_scan.on_cancel, deep_scan.on_complete = nil, nil
+    if cb then
+      local cb_ok, cb_err = pcall(cb, tostring(a))
+      if not cb_ok then Log.line("DEEP_SCAN", "cancel callback error: " .. tostring(cb_err)) end
+    end
+    CTX.scan_lease_finish(lease)
     return
   end
   if coroutine.status(co) == "dead" then
@@ -7415,11 +8149,17 @@ function CTX.pump_deep_scan()
     local cb_cancel   = deep_scan.on_cancel
     deep_scan.active = false
     deep_scan.coro   = nil
+    deep_scan.tr, deep_scan.lease = nil, nil
+    deep_scan.on_cancel, deep_scan.on_complete = nil, nil
     if cancelled then
-      if cb_cancel then cb_cancel("cancelled") end
+      if cb_cancel then pcall(cb_cancel, "cancelled") end
     else
-      if cb_complete then cb_complete(a or {}, b or 0, c or 0) end
+      if cb_complete then
+        local cb_ok, cb_err = pcall(cb_complete, a or {}, b or 0, c or 0)
+        if not cb_ok then Log.line("DEEP_SCAN", "complete callback error: " .. tostring(cb_err)) end
+      end
     end
+    CTX.scan_lease_finish(lease)
   end
 end
 
@@ -7705,20 +8445,18 @@ end
 -- point resolve it via table lookup at call time, and so we don't burn new
 -- file-scope local slots.
 function pref_plugins.alias_lookup()
-  -- Memoize on FXCache._mutation_count: the lookup table only depends on
-  -- PREF_PLUGIN_ALIASES (constant) plus cache.preferred_aliases (mutates
-  -- via the mutation-counted FXCache writers). Previously every caller
-  -- did its own FXCache.load + pairs walk + gmatch; with multiple callers
-  -- looping per-row over rows on a Save/Scan, that was 20+ JSON cache
-  -- parses on a 20-row save.
+  -- Save paths replace preferred_aliases without always changing the counter.
+  -- Include the current alias table in the memo key. FXCache.load reuses its
+  -- in-memory cache; unchanged aliases still avoid the merge and token walk.
+  local cache = FXCache.load()
+  local pa = cache.preferred_aliases
   local mc = FXCache._mutation_count or 0
-  if pref_plugins._alias_lookup_mc == mc and pref_plugins._alias_lookup then
+  if pref_plugins._alias_lookup_mc == mc
+      and pref_plugins._alias_lookup_pa == pa and pref_plugins._alias_lookup then
     return pref_plugins._alias_lookup
   end
   local out = {}
   for k, v in pairs(PREF_PLUGIN_ALIASES) do out[k] = v end
-  local cache = FXCache.load()
-  local pa = cache.preferred_aliases
   if type(pa) == "table" then
     for key, aliases_str in pairs(pa) do
       for piece in tostring(aliases_str):gmatch("[^,]+") do
@@ -7729,6 +8467,7 @@ function pref_plugins.alias_lookup()
   end
   pref_plugins._alias_lookup    = out
   pref_plugins._alias_lookup_mc = mc
+  pref_plugins._alias_lookup_pa = pa
   return out
 end
 
@@ -8054,7 +8793,7 @@ function pref_plugins_best_match(search_name, fx_list)
 end
 
 -- Rank installed FX by match score and return the top `limit` canonical
--- names (scored > 0). Same scoring + tie-break as pref_plugins_best_match.
+-- names (scored > 0). Uses the scoring from pref_plugins_best_match.
 function pref_plugins_rank_matches(search_name, fx_list, limit)
   limit = limit or 8
   local search_tokens = pref_plugins_tokenize(search_name)
@@ -8073,10 +8812,11 @@ function pref_plugins_rank_matches(search_name, fx_list, limit)
     end
   end
 
-  -- Sort by score desc; tie-break by (base match -> higher num), then name.
+  -- Sort by score desc, base asc, version desc, then canonical name asc.
   table.sort(scored, function(a, b)
     if a.score ~= b.score then return a.score > b.score end
-    if a.base == b.base and a.num ~= b.num then return a.num > b.num end
+    if a.base ~= b.base then return a.base < b.base end
+    if a.num ~= b.num then return a.num > b.num end
     return a.ident < b.ident
   end)
 
@@ -8106,7 +8846,7 @@ function CTX.pref_plugins_scan_start(force)
   -- Defensive guard: also bail if a single-plugin rescan is in flight.
   -- (The buttons on the page already disable on this condition, but the
   --  guard protects against future callers.)
-  if scan.active or fx_cache_ui.rescan.active then return end
+  if scan.active or fx_cache_ui.rescan.active or fx_cache_ui.rescan_all.active then return end
   local valid, validation_err = CTX.validate_pref_plugin_rows()
   if not valid then
     scan.status = validation_err
@@ -8211,39 +8951,39 @@ function CTX.pref_plugins_scan_start(force)
   end
 
   -- Phase 1: create temp track and add all plugins.
-  reaper.Undo_BeginBlock()
-  scan.undo_open = true
-  reaper.PreventUIRefresh(1)
-  reaper.InsertTrackAtIndex(reaper.CountTracks(0), false)
-  local tr = reaper.GetTrack(0, reaper.CountTracks(0) - 1)
-  if not tr then
-    reaper.PreventUIRefresh(-1)
+  local lease, admission_err = CTX.scan_lease_begin()
+  scan.lease = lease
+  if lease then lease.owner = scan end
+  local setup_ok, setup_err = false, admission_err
+  if lease then
+    setup_ok, setup_err = CTX.scan_setup(lease, "ReaAssist: preferred plugins scan load", function()
+      local tr = CTX.scan_lease_insert(lease)
+      scan.track = tr
+      reaper.SetMediaTrackInfo_Value(tr, "B_SHOWINTCP", 0)
+      reaper.SetMediaTrackInfo_Value(tr, "B_SHOWINMIXER", 0)
+      for _, entry in ipairs(scan.fx_map) do
+        assert(CTX.scan_lease_check(lease))
+        local fx = reaper.TrackFX_AddByName(tr, entry.ident, false, -1)
+        entry.fx_idx = fx
+        if fx >= 0 then
+          CTX.scan_lease_bind_fx(lease, fx)
+          reaper.TrackFX_Show(tr, fx, 2)
+        end
+      end
+      CTX.scan_lease_seal(lease)
+    end)
+  end
+  if not setup_ok then
+    CTX.scan_lease_finish(lease)
+    scan.track, scan.lease = nil, nil
     scan.status = ""
     UI.show_float_toast(pp_t(
-      "settings.pref_plugins.toast.scan_failed_track", nil,
-      "Scan failed: couldn't create temp track"), "err")
-    reaper.Undo_EndBlock("ReaAssist: scan (failed)", 0)
-    scan.undo_open = false
+      "settings.pref_plugins.toast.scan_failed", nil,
+      "Scan failed."), "err")
+    Log.line("PREF_PLUGINS_SCAN", "setup failed: " .. tostring(setup_err))
     scan.cache = nil
     return
   end
-  -- Hide from TCP and mixer so user doesn't see it flash.
-  reaper.SetMediaTrackInfo_Value(tr, "B_SHOWINTCP", 0)
-  reaper.SetMediaTrackInfo_Value(tr, "B_SHOWINMIXER", 0)
-  scan.track = tr
-
-  for _, entry in ipairs(scan.fx_map) do
-    local fx = reaper.TrackFX_AddByName(tr, entry.ident, false, -1)
-    entry.fx_idx = fx
-    -- Hide plugin UI.
-    if fx >= 0 then reaper.TrackFX_Show(tr, fx, 2) end
-  end
-
-  -- Close the setup undo block before returning to the main loop. The read and
-  -- cleanup phase runs on a later frame, so it must not inherit this block.
-  reaper.Undo_EndBlock("ReaAssist: preferred plugins scan load", 0)
-  scan.undo_open = false
-
   scan.active = true
   scan.phase  = "reading"  -- will be processed on the next loop() frame
   scan.status = pp_t("settings.pref_plugins.status.scanning", nil,
@@ -8253,7 +8993,7 @@ end
 -- Phase 2: read parameters from all added plugins using the unified scanner,
 -- cache to JSON, then clean up.
 -- Called from the main loop on the frame AFTER scan_start.
-function CTX.pref_plugins_scan_read()
+function CTX._pref_plugins_scan_read_owned()
   local function pp_t(key, values, fallback)
     if I18N and I18N.t then
       local text = I18N.t(key, values)
@@ -8267,25 +9007,9 @@ function CTX.pref_plugins_scan_read()
   if not scan.active or scan.phase ~= "reading" then return end
 
   local tr = scan.track
-  -- ValidatePtr2 guards against project switches or explicit deletions
-  -- between the scan_start frame and this reader frame. A non-nil but
-  -- stale userdata handle would crash TrackFX_GetNumParams below.
-  if not tr or not reaper.ValidatePtr2(0, tr, "MediaTrack*") then
-    scan.active = false
-    scan.phase  = "done"
-    scan.cache  = nil
-    scan.track  = nil
-    scan.status = ""
-    UI.show_float_toast(pp_t(
-      "settings.pref_plugins.toast.scan_failed_lost", nil,
-      "Scan failed: temp track lost"), "err")
-    reaper.PreventUIRefresh(-1)
-    if scan.undo_open then
-      reaper.Undo_EndBlock("ReaAssist: scan (failed)", 0)
-      scan.undo_open = false
-    end
-    return
-  end
+  local lease = scan.lease
+  assert(CTX.scan_lease_check(lease))
+  assert(tr == lease.track, "scan track alias changed")
 
   -- Read parameters for each successfully added plugin using unified scanner.
   -- Also update the preferred_types mapping in the cache. Reuse the cache
@@ -8293,18 +9017,15 @@ function CTX.pref_plugins_scan_read()
   -- the JSON file (fall back to a fresh load if the stash was cleared,
   -- which shouldn't happen during a normal active scan).
   local cache = scan.cache or FXCache.load()
-  -- Per-entry xpcall: if scan_fx_params throws on one plugin (stale handle,
-  -- REAPER returning nil mid-probe, etc.) we do NOT want to skip the cleanup
-  -- at the end of this function -- that would leave an orphaned hidden temp
-  -- track plus a stuck PreventUIRefresh(-1) imbalance.
-  -- The failed entry is logged and skipped so the remaining plugins still scan.
+  -- Each synchronous scan releases its own refresh hold even on error.
+  -- A failed plugin is logged and skipped; ownership loss aborts publication.
   local scan_failures = {}
   for _, entry in ipairs(scan.fx_map) do
     if entry.fx_idx >= 0 then
       local _ok, params_list, max_group, total_count, needs_deep_scan =
-        xpcall(function()
-          return CTX.scan_fx_params(tr, entry.fx_idx)
-        end, debug.traceback)
+        CTX.scan_with_refresh(lease, function()
+          return CTX.scan_fx_params(tr, entry.fx_idx, lease)
+        end)
       if not _ok then
         Log.line("PREF_PLUGINS_SCAN", string.format(
           "scan_fx_params threw for %s: %s",
@@ -8324,6 +9045,7 @@ function CTX.pref_plugins_scan_read()
       end
     end
   end
+  assert(CTX.scan_lease_check(lease))
 
   -- Wipe-and-rebuild preferred_types from scan.fx_map + scan.skipped_cached,
   -- which together represent the CURRENT row set after any Add/Modify/Delete
@@ -8360,15 +9082,10 @@ function CTX.pref_plugins_scan_read()
   -- invalidate after a scan finishes.
   FXCache._mutation_count = (FXCache._mutation_count or 0) + 1
 
-  -- Clean up: remove temp track.
-  reaper.DeleteTrack(tr)
-  reaper.PreventUIRefresh(-1)
-  if scan.undo_open then
-    -- Legacy guard: the setup block should already be closed before this
-    -- deferred read phase, but never let an unexpected open block leak.
-    reaper.Undo_EndBlock("ReaAssist: preferred plugins scan", 0)
-    scan.undo_open = false
-  end
+  -- Cleanup precedes optional cache/UI work, so their errors cannot strand it.
+  assert(CTX.scan_lease_finish(lease))
+  scan.track, scan.lease = nil, nil
+  scan.active, scan.phase, scan.cache = false, "done", nil
 
   -- Save the unified JSON cache.
   local err = FXCache.save(cache)
@@ -8412,6 +9129,22 @@ function CTX.pref_plugins_scan_read()
   end
 end
 
+function CTX.pref_plugins_scan_read()
+  local scan = pref_plugins.scan
+  if not scan.active or scan.phase ~= "reading" then return end
+  local lease = scan.lease
+  local ok, err = xpcall(CTX._pref_plugins_scan_read_owned, debug.traceback)
+  CTX.scan_lease_finish(lease)
+  if scan.lease == lease then
+    scan.active, scan.phase = false, "done"
+    scan.track, scan.lease, scan.cache = nil, nil, nil
+  end
+  if not ok then
+    Log.line("PREF_PLUGINS_SCAN", tostring(err))
+    scan.status = UI.t("settings.pref_plugins.toast.scan_failed", nil, "Scan failed.")
+    UI.show_float_toast(scan.status, "err")
+  end
+end
 -- =============================================================================
 -- CTX.build_snapshot
 -- =============================================================================
@@ -8757,6 +9490,14 @@ function CTX.chain_keyword_outside_track_names(user_text, keyword)
   return outside == true
 end
 
+-- Supply preferences for this advice request without implying roles to add.
+function CTX.prompt_requests_master_processing_advice(text)
+  if type(text) ~= "string" then return false end
+  local t = CTX.prompt_text_outside_track_names(text)
+  return t:find("^%s*suggest%s+processing%s+for%s+the%s+master%s+track%f[%W]") ~= nil
+    or t:find("^%s*recommend%s+processing%s+for%s+the%s+master%s+track%f[%W]") ~= nil
+end
+
 function CTX.prompt_indicates_chain_context(text)
   if type(text) ~= "string" or text == "" then return false end
   local t = CTX.prompt_text_outside_track_names(text)
@@ -9001,6 +9742,12 @@ end
 -- in the envelopes section. Users saying "automate the volume" or "add
 -- automation" need envelope functions, not item functions.
 local DOCS_PHRASE_HINTS = {
+  -- Theme inspection uses reference-only docs, without the appearance-edit
+  -- instruction used by theme auto-injection.
+  { "%f[%w]enumthemecolors%f[%W]", "theme" },
+  { "%f[%w]theme%s+settings%f[%W]", "theme" },
+  { "%f[%w]theme%s+entries%f[%W]",  "theme" },
+  { "%f[%w]theme%s+keys%f[%W]",     "theme" },
   -- envelopes
   { "envelope",              "envelopes" },
   { "automation",            "envelopes" },
@@ -10999,14 +11746,24 @@ end
 function CTX.plugin_pack_resume_wait(wait, mode)
   if CTX._plugin_pack_wait ~= wait then return end
   CTX._plugin_pack_wait = nil
+  if mode == "generic" then
+    CTX._plugin_profile_last_trace = {
+      profile_mode = "guidance",
+      attempted = false,
+      temporary_instance_created = false,
+      completed = true,
+      completion_reason = "guidance_unavailable",
+      results = {},
+    }
+  end
   CTX._plugin_pack_resume = {
     user_text = wait.user_text,
     mode = mode,
   }
   if wait.callback and reaper and reaper.defer then
-    reaper.defer(wait.callback)
+    reaper.defer(function() wait.callback(mode) end)
   elseif wait.callback then
-    wait.callback()
+    wait.callback(mode)
   end
 end
 
@@ -11026,7 +11783,8 @@ function CTX.plugin_pack_wait_tick()
   end
   if CTX.plugin_pack_now() - wait.started_at
       >= CTX.PLUGIN_PACK_READY_TIMEOUT_SECONDS then
-    CTX.plugin_pack_show_notice("readiness_timeout", "4.0-second ceiling")
+    CTX.plugin_pack_show_notice("readiness_timeout",
+      tostring(CTX.PLUGIN_PACK_READY_TIMEOUT_SECONDS) .. "-second ceiling")
     CTX.plugin_pack_resume_wait(wait, "generic")
     return
   end
@@ -11485,6 +12243,8 @@ function _preempt_buckets_core(user_text)
       "reaper 7.69", "reaper 7.70", "reaper 7.71", "reaper 7.72",
       "reaper 7.73", "reaper 7.74", "reaper 7.75", "reaper 7.76",
       "reaper 7.77", "reaper 7.78", "reaper 7.79", "reaper 7.80",
+      "reaper 7.81", "isdarkmode", "want_all_kb", "i_mixflag",
+      "d_fadeindir2", "d_fadeoutdir2", "playback_stop",
       "left/right to grid", "envelope points",
       "midi choke", "choke group", "track grouping", "grouped razor",
       "multi-mono", "multi-stereo", "fx container", "fxoffline",
@@ -11537,6 +12297,12 @@ function _preempt_buckets_core(user_text)
       or text:find("get_config_var_string", 1, true) ~= nil
       or text:find("trackfx_getnamedconfigparm", 1, true) ~= nil
       or text:find("takefx_getnamedconfigparm", 1, true) ~= nil
+      or text:find("isdarkmode", 1, true) ~= nil
+      or text:find("want_all_kb", 1, true) ~= nil
+      or text:find("i_mixflag", 1, true) ~= nil
+      or text:find("d_fadeindir2", 1, true) ~= nil
+      or text:find("d_fadeoutdir2", 1, true) ~= nil
+      or text:find("playback_stop", 1, true) ~= nil
       or text:find("reascript", 1, true) ~= nil
       or text:find("lua script", 1, true) ~= nil
       or text:find("%f[%w]api%f[%W]") ~= nil
@@ -11626,11 +12392,19 @@ function _preempt_buckets_core(user_text)
            and not S.docs_section_sent[section] then
           local sec_content, sec_err = CTX.docs_section(section)
           if sec_content then
-            Net.sticky_set(sticky_key, sec_content)
-            S.docs_section_sent[section] = true
-            injected[#injected+1] = sticky_key
-            Log.line("PREEMPT",
-              "injected " .. sticky_key .. " (docs phrase: '" .. hint[1] .. "')")
+            local injected_before = #injected
+            if section == "theme" then
+              Net.copin_theme_reference(sec_content, injected)
+            else
+              Net.sticky_set(sticky_key, sec_content)
+              S.docs_section_sent[section] = true
+              injected[#injected+1] = sticky_key
+            end
+            if #injected > injected_before then
+              Log.line("PREEMPT",
+                "injected " .. (section == "theme" and "theme" or sticky_key)
+                  .. " (docs phrase: '" .. hint[1] .. "')")
+            end
           else
             Log.line("PREEMPT",
               "wanted to inject " .. sticky_key
@@ -11740,7 +12514,8 @@ function _preempt_buckets_core(user_text)
   -- every role, and the FX identity/preference validator asks the model once
   -- to use it when the generated chain does not.
   --
-  -- The trigger is CTX.prompt_indicates_chain_context only. It is deliberately
+  -- Master processing advice can also receive this map without implying roles.
+  -- The action trigger is CTX.prompt_indicates_chain_context. It is deliberately
   -- not Code.prompt_has_chain_or_recipe_intent, which also matches "preset",
   -- "tone" and "vibe". An explicit product in the prompt does not suppress the
   -- map: "snare chain with ReaEQ and my preferred compression" still needs the
@@ -11811,7 +12586,8 @@ function _preempt_buckets_core(user_text)
   end
 
   if not jsfx_intent
-      and CTX.prompt_indicates_chain_context(user_text)
+      and (CTX.prompt_indicates_chain_context(user_text)
+        or CTX.prompt_requests_master_processing_advice(user_text))
       and not stock_request then
     local map_lines, map_types = {}, {}
     local map_keys = {}
@@ -11849,8 +12625,8 @@ function _preempt_buckets_core(user_text)
       local content = "SAVED PLUG-IN PREFERENCES FOR GENERIC ROLES:\n"
         .. tbl_concat(map_lines, "\n") .. "\n"
         .. "These are the user's saved preferences for generic roles. Use the "
-        .. "listed identifier for any generic role this chain includes. This "
-        .. "list does not say that every listed role belongs in the chain. A "
+        .. "listed identifier for any generic role this request includes. This "
+        .. "list does not say that every listed role belongs in the request. A "
         .. "product the user named keeps its place. Request "
         .. "<context_needed>resolve:<type></context_needed> only for a role "
         .. "with no listed preference, and "

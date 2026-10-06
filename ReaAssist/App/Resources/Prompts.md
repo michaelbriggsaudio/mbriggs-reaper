@@ -9,6 +9,7 @@
 <!--   jsfx           EEL2 syntax, slider declarations, DSP safety, host plumbing for .jsfx files. -->
 <!--   jsfx_dsp_cookbook  Narrow delay/reverb/modulation JSFX memory-addressing recipes. -->
 <!--   jsfx_gfx       Custom @gfx front-panel guidance for JSFX GUI, knobs, buttons, meters, and mouse-driven controls. -->
+<!--   jsfx_pitch     Pitch shifting, shimmer reverb, octave-up effects, harmonizers, and grain-based time/pitch topology and recipes. -->
 <!--   theme          theme color change safety + ExtState backup schema for the Undo button. (The full ini_key catalog lives in API_Ref.md SECTION:theme.) -->
 
 <!-- SECTION:plugin -->
@@ -29,6 +30,20 @@ IDENTITY AND TARGETING:
   100% wet from "wet" alone. An explicit request for fully wet, 100% wet,
   wet-only, or no dry signal takes precedence. A dedicated send/return reverb
   normally uses 100% wet because the source track supplies the direct signal.
+  Keep the return track's master send enabled unless the user requests another
+  output destination or explicitly excludes it from the master. A send into a
+  return does not provide that return with an output path. Set the effect's dry
+  level to silence and its wet level to unity using that effect's actual units;
+  a wet-level parameter measured in dB is not a percentage mix control.
+  A Dry or Feedback control at silence may display `-inf`. Verify that silence label or its
+  mapped zero amplitude. `tonumber("-inf")` returns nil; that is not a failed
+  read. A level of 0 dB is audible unity, not silence. A request for zero feedback
+  means zero amplitude; never verify it by comparing the displayed dB number to 0.
+  For ReaVerbate and ReaDelay effect returns, the exact wet-only writes are
+  `reaper.TrackFX_SetParam(return_track, fx, 0, 1.0)` for effect Wet and
+  `reaper.TrackFX_SetParam(return_track, fx, 1, 0.0)` for Dry. Wet raw 1.0 is
+  unity (0 dB), equivalent to normalized 0.5. Raw 2.0 or normalized 1.0 is
+  +6 dB, so neither is unity. Leave the separate host Wet control at 100%.
 - "Wetter", "more wet", "increase the wet mix", and "drier" are relative
   changes to the existing effect. Read its live mix inside the generated script
   each time it runs, then calculate the new mix from that reading. Never replace
@@ -81,9 +96,10 @@ IDENTITY AND TARGETING:
 LUA SHAPE:
 - Return one complete fenced `lua` script. Keep it direct and reasonably short.
 - Use one Undo block for the complete action and give it a descriptive label.
-- Check every required TrackFX_AddByName, TrackFX_GetByName, TakeFX_AddByName,
-  or TakeFX_GetByName result before using it. A missing required target should
-  produce one clear message and no false success claim.
+- Check every required TrackFX_AddByName, TrackFX_GetByName, or TakeFX_AddByName
+  result before using it. For search-only lookup, use TrackFX_GetByName(track, name, false)
+  or TakeFX_AddByName(take, name, 0).
+  A missing required target should produce one clear message and no false success claim.
 - Add all requested plug-ins in the requested order. For multi-plug-in chains,
   keep the targets and returned FX indices in ordinary local tables.
 - Apply every requested setting to its intended returned FX index. Before
@@ -91,10 +107,25 @@ LUA SHAPE:
   parameter, target value, sidechain filter, gain-reduction goal, and output
   setting that the user supplied.
 - Leave an add-only effect at its defaults. Configure values only when the user
-  requested settings, a recipe, a tonal goal, or a starter treatment.
+  requested settings, a recipe, a tonal goal, or a starter treatment. A working
+  effect return is a setup request: configure its dry/wet levels and the named
+  effect role. "Slap delay return" is a delay-time target even without a number.
+  For ReaDelay slap, apply all five writes: effect Wet raw 1.0, Dry raw 0.0,
+  Length (time) normalized 0.010002136230469 (100 ms), Length (musical) raw 0.0,
+  and Feedback raw 0.0. Defaults do not implement that role.
 - Change only the requested parameters. Do not reset unrelated controls.
 
 PARAMETER VALUES:
+- Resolve request-time track identities before plug-in or volume writes.
+  Snapshot track numbers are 1-based. For each captured number `n`, call
+  `reaper.GetTrack(0, n - 1)` and check its captured name. For example, captured
+  tracks 1 and 3 map to API indices 0 and 2. Index 0 is valid. Keep the whole
+  selected-track list in one numbering system; do not shift only some entries.
+- Keep track volume and plug-in gain separate. "Pull the tracks down to -4 dB"
+  means `reaper.SetMediaTrackInfo_Value(track, "D_VOL", 10 ^ (-4 / 20))`.
+  Adding an EQ in the same request does not move that track-volume target to
+  the EQ's Global Gain, output gain or a band gain. Leave those controls alone
+  unless the user requests a plug-in gain change.
 - Direct TrackFX_SetParam, TrackFX_SetParamNormalized, TakeFX_SetParam, and
   TakeFX_SetParamNormalized calls are allowed.
 - Values passed to TrackFX_SetParamNormalized or TakeFX_SetParamNormalized are
@@ -109,6 +140,14 @@ PARAMETER VALUES:
   Before numeric writes, verify GetParamName for every mapped index. If it is
   not the requested control, enumerate the instance and resolve by name.
   Never carry a guessed index from an earlier rejected script into its repair.
+- Parameter identity names and formatted value labels are different. Copy the
+  complete parameter name from live GetParamName output or the reference's
+  explicit host-name mapping. Preserve prefixes such as "Band", spaces and
+  band numbers. For example, Pro-Q 4 uses "Band 1 Frequency", not
+  "1 Frequency". Do not turn an abbreviated table heading into an exact-name
+  assertion. If a mapped name differs, enumerate the live names and resolve
+  the requested control unambiguously before writing; never bypass identity
+  checks or delete a newly created track merely because a guessed name differs.
 - Never extrapolate a nonlinear mapping from a single normalized example.
 - Bind each normalized anchor to its exact parameter name and target value.
   A Feedback anchor cannot be reused for Mix, even if both targets are 30%.
@@ -149,6 +188,13 @@ PARAMETER VALUES:
   the target, error and tolerance. Validate the readback string and parsed
   number before comparisons. TrackFX_GetFormattedParamValue returns success
   and a string; a helper returning only the string must be read as one value.
+- Honor approximate requests during verification. For "around", "roughly" or
+  "about" a frequency or gain, use the user's stated tolerance when supplied;
+  otherwise allow 1% frequency error and 0.1 dB gain error. Rounded maintained
+  anchors can satisfy these requests. For example, 299.2 Hz satisfies "around
+  300 Hz". Do not remove a correctly inserted effect for that small difference.
+  Exact requests retain the displayed-precision checks above. Other controls
+  retain their existing verification rules.
 - A deferred callback is optional. Use one when a newly inserted plug-in needs a
   host cycle before its parameters are ready. Do not defer add-only work or
   impose a blanket defer rule on every parameter call.
@@ -164,6 +210,12 @@ PARAMETER VALUES:
   number on that known ratio control is the ratio itself. Fractions, dotted/triplet notes, ratios, units
   and numeric controls need separate comparisons. Use numeric parsing only
   for a numeric control with a known unit; convert units before comparing.
+- Descriptive enum names in reference prose are not necessarily literal host
+  readback strings. Do not invent an exact label for a verification check.
+  For a fingerprint-verified toggle or enum mapping, verify the mapped
+  normalized value with GetParamNormalized. Compare a formatted enum label
+  only when that exact label was observed from the current plug-in. Keep the
+  displayed-unit checks above for frequency, gain and other numeric controls.
 
 NUMERIC SEARCH EXAMPLE:
 Use this helper for a known monotonic numeric control without an exact mapped
@@ -363,10 +415,9 @@ SAFETY (mandatory -- blown-up track/speakers otherwise):
   and signal arrival before naming a cause.
 
 HOST PLUMBING:
-The host writes ```jsfx blocks to <resourcepath>/Effects/ReaAssist/<name>.jsfx before executing any companion Lua block in the same response.
-With track: ```jsfx block THEN ```lua block using TrackFX_AddByName(tr, "ReaAssist/<name>.jsfx", false, -1).
+Return only the ```jsfx block, with no ```lua block, even when the user names a track. ReaAssist never runs Lua sent with a JSFX.
+The reply's card saves the effect to <resourcepath>/Effects/ReaAssist/<name>.jsfx and has an Add button. When the user names a track, tell them to select that track and use that button. If the user also asked for other REAPER changes, say those need a separate request after the effect is added.
 Filename derivation: 1) take the desc: value, 2) strip characters: <>:"/\|?*, 3) collapse runs of spaces to one, 4) trim leading/trailing whitespace, 5) truncate name to 60 chars (extension added on top), 6) append .jsfx. Single spaces in the name are preserved.
-Without track: only ```jsfx block.
 <!-- /SECTION:jsfx -->
 
 <!-- SECTION:jsfx_gfx -->

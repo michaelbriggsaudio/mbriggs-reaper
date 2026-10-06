@@ -1,5 +1,21 @@
 # ReaAssist - Changelog
 
+## v1.6.2 - 2026-10-06
+
+- Added GPT-6 Luna, GPT-6.1 Sol, and GPT-6 Astra, with updated cost estimates.
+
+- Replaced Claude Sonnet 5 with Sonnet 5.5 as the default Claude model, using Low thinking.
+
+- Replaced Claude Opus 5 with Opus 5.5, with updated thinking options and cost estimates.
+
+- Improved effect insertion and replacement checks, including requests involving existing effects. Plug-in parameter checks now handle known mappings and displayed values more accurately.
+
+- Strengthened checks for track routing and folder organization. Failed or partial parameter changes are reported more accurately.
+
+- Improved provider error handling, including clearer API-key errors and recovery from incomplete or incompatible responses.
+
+- Updated network security components on macOS and Linux.
+
 ## v1.6.1 - 2026-09-17
 
 - Added a helper extension for more stable and secure network activity in the standard interface. It installs automatically for your system.

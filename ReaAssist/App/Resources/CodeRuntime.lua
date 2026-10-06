@@ -139,6 +139,81 @@ local FIELDS = {
   },
 }
 
+local BOOLEAN_FIELDS = {
+  ["track.create"] = {"select"},
+  ["track.ensure"] = {"select"},
+  ["track.resolve"] = {"selected"},
+  ["track.set"] = {"mute", "solo", "master_send"},
+  ["send.create"] = {"muted"},
+}
+
+local NULL_FIELDS = {
+  ["track.create"] = {name=true},
+  ["track.resolve"] = {name=true,index=true,selected_index=true},
+  ["track.set"] = {name=true,volume_db=true,pan_pct=true},
+  ["send.create"] = {volume_db=true,pan=true,mode=true},
+}
+
+local function optional_field(action, field)
+  local value = action[field]
+  if NULL_FIELDS[action.op] and NULL_FIELDS[action.op][field]
+      and type(JSON) == "table" and type(JSON.NULL) == "table"
+      and rawequal(value, JSON.NULL) then
+    return nil
+  end
+  return value
+end
+
+local function finite_number(value)
+  if type(value) ~= "number" and type(value) ~= "string" then return nil end
+  local number = tonumber(value)
+  if not number or number ~= number or number == math.huge
+      or number == -math.huge then return nil end
+  return number
+end
+
+local function converted_number(field, value)
+  local number = finite_number(value)
+  if number == nil then return nil end
+  if field == "volume_db" then number = 10 ^ (number / 20)
+  elseif field == "pan_pct" then number = math.max(-100, math.min(100, number)) / 100
+  elseif field == "pan" then number = math.max(-1, math.min(1, number))
+  elseif field == "index" or field == "selected_index" then number = math.floor(number) end
+  return finite_number(number)
+end
+
+local function send_mode(value)
+  if value == "post_fader" then return 0 end
+  if value == "pre_fx" then return 1 end
+  if value == "pre_fader" or value == "post_fx" then return 3 end
+  local number = finite_number(value)
+  if number == 0 or number == 1 or number == 2 or number == 3 or number == 8 then
+    return number
+  end
+  return nil
+end
+
+local function supports_pre_receive()
+  if type(reaper.GetAppVersion) ~= "function" then return false end
+  local ok, version = pcall(reaper.GetAppVersion)
+  if not ok or type(version) ~= "string" then return false end
+  local release, suffix = version:match("^([^/]+)/(.+)$")
+  if release then
+    -- GetAppVersion documents these labels; Windows ARM was measured by the
+    -- Engine platform qualification. Keep release parsing separate below.
+    if suffix ~= "x64" and suffix ~= "win11-arm64ec-beta" and suffix ~= "linux-x86_64"
+        and suffix ~= "linux-i686" and suffix ~= "linux-aarch64"
+        and suffix ~= "linux-armv7l" and suffix ~= "OSX64"
+        and suffix ~= "OSX" and suffix ~= "macOS-arm64" then return false end
+  else release = version end
+  local major, minor = release:match("^(%d+)%.(%d%d?)$")
+  if not major then return false end
+  major = finite_number(major)
+  if not major then return false end
+  if #minor == 1 then minor = minor .. "0" end
+  return major > 7 or (major == 7 and tonumber(minor) >= 78)
+end
+
 local function trim(value)
   return tostring(value or ""):match("^%s*(.-)%s*$") or ""
 end
@@ -545,7 +620,7 @@ function Code._localized_action_intent_text(user_text)
     { "selecionada", "selected" }, { "selecionado", "selected" },
     { "seleccionadas", "selected" }, { "seleccionados", "selected" },
     { "seleccionada", "selected" }, { "seleccionado", "selected" },
-    { "panoramica", "pan" },
+    { "panoramica", "pan" }, { "paniamento", "pan" },
     -- Additive wording, so a localized "in addition to" reaches the mention
     -- parser as the additive form it is.
     { "alem de", "in addition to" }, { "ademas de", "in addition to" },
@@ -1481,6 +1556,120 @@ function Code._typed_action_selected_indexes_from_user_text()
   return {}, false
 end
 
+-- Broad folder organization gets a new parent. Explicit reuse keeps the
+-- requested existing parent; this policy does not infer group membership.
+function Code.folder_default_requires_new_parent(user_text)
+  local text = Code.no_guess_fold(user_text)
+  local folder = text:find("%f[%w]folders?%f[%W]")
+    or text:find("%f[%w]pastas?%f[%W]") or text:find("%f[%w]carpetas?%f[%W]")
+  if not folder then return false end
+  local organize = text:find("organiz") or text:find("group") or text:find("agrup")
+    or text:find("%f[%w]create%f[%W]") or text:find("%f[%w]make%s+a%s+folder")
+    or text:find("%f[%w]make%s+folders%f[%W]")
+    or text:find("%f[%w]put%f[%W]") or text:find("%f[%w]cria")
+    or text:find("%f[%w]crea") or text:find("%f[%w]coloq")
+  if not organize then return false end
+  -- A negation belongs to its reuse verb, not to unrelated sends or effects.
+  local function negated(before)
+    if before:find("%f[%w]do%s+not%s*$") or before:find("%f[%w]don't%s*$")
+        or before:find("%f[%w]never%s*$") or before:find("%f[%w]not%s*$")
+        or before:find("%f[%w]nao%s*$") or before:find("%f[%w]no%s*$") then return true end
+    for _, verb in ipairs({"put", "place", "move"}) do
+      local prefix, objects = before:match("^(.*)%f[%w]" .. verb .. "%s+([^.;!?]*)$")
+      if prefix and not objects:find("%f[%w]then%f[%W]") then
+        local next_placement = false
+        for _, next_verb in ipairs({"put", "place", "move"}) do
+          if objects:find("%f[%w]and%s+" .. next_verb .. "%f[%W]") then
+            next_placement = true
+          end
+        end
+        if not next_placement and negated(prefix) then return true end
+      end
+    end
+    return false
+  end
+  local function affirmative(pattern, named_target)
+    local at = 1
+    while true do
+      local first, last, name = text:find(pattern, at)
+      if not first then return false end
+      local before = text:sub(1, first - 1)
+      if not negated(before)
+          and (not named_target or named_target(name)) then return true end
+      at = last + 1
+    end
+  end
+  local function short_name(name)
+    local count = 0
+    for word in tostring(name or ""):gmatch("%S+") do
+      if ({a=true,an=true,one=true,new=true,separate=true,["in"]=true,into=true,
+          to=true,["and"]=true,["or"]=true,["then"]=true,using=true,existing=true,nova=true,novo=true,nueva=true,nuevo=true,
+          separada=true,separado=true})[word] then return false end
+      count = count + 1
+    end
+    return count >= 1 and count <= 3
+  end
+  -- An explicit new-folder request takes precedence over later references to it.
+  if text:find("%f[%w]new%s+folder%f[%W]")
+      or text:find("%f[%w]separate%s+folder%f[%W]")
+      or text:find("%f[%w]nova%s+pasta%f[%W]")
+      or text:find("%f[%w]nueva%s+carpeta%f[%W]") then return true end
+  for name in text:gmatch("%f[%w]create%s+([^.;!?]-)%s+folder%f[%W]") do
+    name = name:gsub("^a%s+", ""):gsub("^an%s+", ""):gsub("^the%s+", "")
+    if short_name(name) then return true end
+  end
+  for _, pattern in ipairs({
+    "%f[%w]in%s+the%s+([^.;!?]-)%s+folder%f[%W]",
+    "%f[%w]into%s+the%s+([^.;!?]-)%s+folder%f[%W]",
+    "%f[%w]to%s+the%s+([^.;!?]-)%s+folder%f[%W]",
+    "%f[%w]inside%s+the%s+([^.;!?]-)%s+folder%f[%W]",
+    "%f[%w]under%s+the%s+([^.;!?]-)%s+folder%f[%W]",
+    "%f[%w]under%s+the%s+([^.;!?]-)%s+track%f[%W]",
+  }) do
+    if affirmative(pattern, function(name)
+      return short_name((name:gsub("^existing%s+", "")))
+    end) then return false end
+  end
+  -- Parent-role and numbered-track wording names an existing destination.
+  -- Let the model honor it instead of retrying toward a different parent.
+  for _, pattern in ipairs({
+    "%f[%w]under%s+track%s+%d+%f[%W]",
+    "%f[%w]with%s+([^.;!?]-)%s+as%s+parent%f[%W]",
+    "%f[%w]with%s+([^.;!?]-)%s+as%s+the%s+parent%f[%W]",
+    "%f[%w]with%s+([^.;!?]-)%s+as%s+the%s+folder%s+parent%f[%W]",
+  }) do
+    if affirmative(pattern) then return false end
+  end
+  for _, pattern in ipairs({
+    "%f[%w]na%s+pasta%s+([^.;!?]+)",
+    "%f[%w]para%s+a%s+pasta%s+([^.;!?]+)",
+    "%f[%w]en%s+la%s+carpeta%s+([^.;!?]+)",
+    "%f[%w]a%s+la%s+carpeta%s+([^.;!?]+)",
+  }) do
+    if affirmative(pattern, function(name)
+      name = name:match("^[^,]+") or name
+      local words = {}
+      for word in name:gmatch("%S+") do
+        if word == "e" or word == "y" or word == "com" or word == "con" then break end
+        words[#words + 1] = word
+      end
+      return short_name(table.concat(words, " "))
+    end) then return false end
+  end
+  for _, pattern in ipairs({
+    "%f[%w]reuse%f[%W]",
+    "%f[%w]use%s+[^.;!?]-as%s+[^.;!?]-folder%f[%W]",
+    "%f[%w]use%s+[^.;!?]-as%s+[^.;!?]-parent%f[%W]",
+    "%f[%w]use%s+[^.;!?]-como%s+[^.;!?]-pasta%f[%W]",
+    "%f[%w]usa[r]?%s+[^.;!?]-como%s+[^.;!?]-carpeta%f[%W]",
+    "%f[%w]turn%s+[^.;!?]-into%s+[^.;!?]-folder%f[%W]",
+    "%f[%w]make%s+[^.;!?]-the%s+parent%f[%W]",
+    "%f[%w]make%s+[^.;!?]-existing[^.;!?]-folder%f[%W]",
+  }) do
+    if affirmative(pattern) then return false end
+  end
+  return true
+end
 function Code.typed_action_user_requests_folder(user_text)
   return tostring(user_text or ""):lower()
     :find("%f[%w]folder%f[%W]") ~= nil
@@ -1499,15 +1688,32 @@ Use `op` for every operation. Every track.create, track.ensure, and
 track.resolve declares an `id` that later actions reference.
 track.set names its target with `track`, not `id`, and changes only name,
 volume_db, pan_pct, mute, solo, or master_send.
+mute, solo, master_send, select, selected, and send muted must be JSON booleans
+(true or false), never numbers, strings, or null. To disable the master send,
+use {"op":"track.set","track":"cue","master_send":false}.
 Folder nesting uses track.folder with `parent` and `children`. There is no
 folder field on track.set.
-A send uses `from` and `to`, with optional `volume_db`, for example
+Names must be strings. Optional nonboolean fields may be omitted or null:
+create.name; resolve.name/index/selected_index; set.name/volume_db/pan_pct;
+send.volume_db/pan/mode. Required references and booleans cannot be null.
+Numbers and numeric strings cannot be NaN or infinity. Converting volume_db
+to linear gain must not overflow. Pan is clamped; track indexes are floored.
+A send uses `from` and `to`, with optional volume_db (dB), pan (-1 to 1),
+mode and muted (boolean). Mode accepts exact names post_fader, pre_fx,
+pre_fader, post_fx, or integer numbers/numeric strings 0, 1, 2, 3, 8.
+Numeric mode 8 requires REAPER 7.78+. For example:
 {"op":"send.create","from":"vocal","to":"reverb","volume_db":-6}.
-Worked example for an existing track that becomes a folder:
+When the user names an existing folder or track as the destination, resolve that
+exact track and use it as parent. Do not create a duplicate destination track.
+Resolve existing children by name. track.folder moves only the named children
+and their subtrees into the parent, even when other tracks sit between them.
+Leave unmentioned tracks outside the folder and preserve existing folder contents.
+Use a separate new parent only when the user has not specified an existing one.
+Example for moving existing Kick and Snare into existing Drum Bus:
 {"version":1,"actions":[
 {"op":"track.resolve","id":"drums","name":"Drum Bus"},
-{"op":"track.create","id":"kick","name":"Kick"},
-{"op":"track.create","id":"snare","name":"Snare"},
+{"op":"track.resolve","id":"kick","name":"Kick"},
+{"op":"track.resolve","id":"snare","name":"Snare"},
 {"op":"track.folder","parent":"drums","children":["kick","snare"]}]}
 Do not output Lua, prose, plug-in work, parameter work, or another code fence.
 ]]
@@ -1528,19 +1734,72 @@ function Code.typed_actions_openai_response_format_field()
   return ""
 end
 
-function Code.extract_typed_actions(text)
-  local blocks = {}
+function Code.extract_typed_actions(text, allow_equivalent)
+  local blocks, other_fences, alternative = {}, 0, nil
   for label, body in fenced_blocks(text) do
-    if trim(label):lower() == "reaassist-actions" then
+    local clean = trim(label):lower()
+    if clean == "reaassist-actions" then
       blocks[#blocks + 1] = body
+    else
+      other_fences = other_fences + 1
+      if clean == "json" or clean == "" then alternative = body end
     end
   end
-  if #blocks == 1 then return blocks[1] end
-  if #blocks > 1 then
+  -- Models sometimes change only the wrapper. Keep the same schema and
+  -- semantic checks instead of asking them to generate a different plan.
+  local source = tostring(text or "")
+  local xml_count = 0
+  for body in source:gmatch("<reaassist%-actions>%s*(.-)%s*</reaassist%-actions>") do
+    xml_count = xml_count + 1
+    if allow_equivalent then blocks[#blocks + 1] = body end
+  end
+  if (xml_count > 0 or #blocks > 0) and other_fences > 0 then
+    return nil, {err("mixed_action_formats", "$",
+      "The structured edit must not be mixed with another code block.")}
+  end
+  if #blocks > 1 or (not allow_equivalent and #blocks > 0 and xml_count > 0) then
     return nil, {err("multiple_action_blocks", "$",
       "Only one structured edit block is allowed.")}
   end
+  if #blocks == 1 or (allow_equivalent and alternative and other_fences == 1) then
+    local outside = source:gsub("```[^\n]*\n.-\n%s*```", "")
+      :gsub("<reaassist%-actions>%s*.-%s*</reaassist%-actions>", "")
+    -- Scan once, including incomplete corrections. Decoding a document at
+    -- every opening brace makes deeply nested malformed output expensive.
+    -- Adjacent quote pairs overlap so an inch mark in ordinary prose cannot
+    -- change which later quotes are recognized as JSON keys.
+    local quoted, escaped = nil, false
+    for at = 1, #outside do
+      local char = outside:sub(at, at)
+      if char == '"' and not escaped then
+        if quoted and outside:find("^%s*:", at + 1) then
+          local key = JSON.decode(outside:sub(quoted, at))
+          if key == "actions" or key == "op" or key == "action"
+              or key == "version" or key == "reaassist-actions" then
+            return nil, {err("multiple_action_blocks", "$",
+              "A structured correction appears outside the action block.")}
+          end
+        end
+        quoted = at
+      end
+      if char == "\\" then escaped = not escaped else escaped = false end
+    end
+  end
+  if #blocks == 1 then return blocks[1] end
+  if allow_equivalent and other_fences == 0 then alternative = trim(source) end
+  if allow_equivalent and alternative and other_fences <= 1 then
+    local plan = Code.parse_typed_actions_block(alternative)
+    if plan and Code.validate_typed_actions_plan(plan) then return alternative end
+  end
   return nil, {}
+end
+
+function Code.normalize_typed_actions_response(text)
+  local raw = Code.extract_typed_actions(text, true)
+  if not raw then return text end
+  -- One canonical representation reaches history, display and execution.
+  -- Invalid explicitly labelled plans reach the ordinary schema repair too.
+  return "```reaassist-actions\n" .. raw .. "\n```"
 end
 
 function Code.parse_typed_actions_block(raw)
@@ -1549,7 +1808,7 @@ function Code.parse_typed_actions_block(raw)
     return nil, {err("invalid_json_shape", "$",
       "The structured edit must be one JSON object.")}
   end
-  local plan, decode_error = JSON.decode(source)
+  local plan, decode_error = JSON.decode(source, true)
   if type(plan) ~= "table" then
     return nil, {err("invalid_json", "$",
       tostring(decode_error or "Invalid JSON."))}
@@ -1561,7 +1820,7 @@ function Code.parse_typed_actions_block(raw)
 end
 
 function Code.validate_typed_actions_plan(plan)
-  local errors, ids = {}, {}
+  local errors, ids, pre_receive_paths = {}, {}, {}
   if type(plan) ~= "table" then
     return false, {err("invalid_top_level", "$", "Plan must be an object.")}
   end
@@ -1586,6 +1845,35 @@ function Code.validate_typed_actions_plan(plan)
             "Unsupported field for " .. op .. ".")
         end
       end
+      for _, field in ipairs(BOOLEAN_FIELDS[op] or {}) do
+        if action[field] ~= nil and type(action[field]) ~= "boolean" then
+          add_error(errors, "invalid_boolean", path .. "." .. field,
+            field .. " must be true or false.")
+        end
+      end
+      if FIELDS[op].name then
+        local name = optional_field(action, "name")
+        if name ~= nil and type(name) ~= "string" then
+          add_error(errors, "invalid_name", path .. ".name", "name must be a string.")
+        end
+      end
+      for _, field in ipairs({"volume_db", "pan_pct", "pan", "index", "selected_index"}) do
+        local value = optional_field(action, field)
+        if FIELDS[op][field] and value ~= nil and converted_number(field, value) == nil then
+          add_error(errors, "invalid_number", path .. "." .. field,
+            field .. " needs a number or numeric string with finite input and converted output.")
+        end
+      end
+      if op == "send.create" then
+        local value = optional_field(action, "mode")
+        local mode = send_mode(value)
+        if value ~= nil and mode == nil then
+          add_error(errors, "invalid_send_mode", path .. ".mode",
+            "mode must be post_fader, pre_fx, pre_fader, post_fx, or an integer 0, 1, 2, 3, 8; numeric 8 requires REAPER 7.78+.")
+        elseif mode == 8 then
+          pre_receive_paths[#pre_receive_paths + 1] = path .. ".mode"
+        end
+      end
       if op == "track.create" or op == "track.ensure"
           or op == "track.resolve" then
         if not nonempty(action.id) then
@@ -1599,10 +1887,10 @@ function Code.validate_typed_actions_plan(plan)
           add_error(errors, "missing_name", path .. ".name",
             "track.ensure needs an exact name.")
         elseif op == "track.resolve" then
-          local selectors = (nonempty(action.name) and 1 or 0)
+          local selectors = (nonempty(optional_field(action, "name")) and 1 or 0)
             + (action.selected == true and 1 or 0)
-            + (tonumber(action.selected_index) and 1 or 0)
-            + (tonumber(action.index) and 1 or 0)
+            + (converted_number("selected_index", optional_field(action, "selected_index")) and 1 or 0)
+            + (converted_number("index", optional_field(action, "index")) and 1 or 0)
           if selectors ~= 1 then
             add_error(errors, "invalid_selector", path,
               "track.resolve needs exactly one selector.")
@@ -1613,8 +1901,8 @@ function Code.validate_typed_actions_plan(plan)
           add_error(errors, "unknown_track_ref", path .. ".track",
             "track.set must reference an earlier track action.")
         end
-        if action.name == nil and action.volume_db == nil
-            and action.pan_pct == nil and action.mute == nil
+        if optional_field(action, "name") == nil and optional_field(action, "volume_db") == nil
+            and optional_field(action, "pan_pct") == nil and action.mute == nil
             and action.solo == nil and action.master_send == nil then
           add_error(errors, "empty_track_set", path,
             "track.set needs at least one property.")
@@ -1643,6 +1931,11 @@ function Code.validate_typed_actions_plan(plan)
       end
     end
   end
+  if #pre_receive_paths > 0 and not supports_pre_receive() then
+    for _, path in ipairs(pre_receive_paths) do
+      add_error(errors, "unsupported_send_mode", path, "Numeric mode 8 requires a known REAPER release 7.78+.")
+    end
+  end
   return #errors == 0, errors
 end
 
@@ -1663,6 +1956,9 @@ function Code.repair_typed_actions_plan(plan)
         end
         action.source = nil
         action.destination = nil
+      end
+      for field in pairs(NULL_FIELDS[action.op] or {}) do
+        action[field] = optional_field(action, field)
       end
     end
   end
@@ -1692,7 +1988,22 @@ function Code.validate_typed_actions_semantics(plan, opts)
     return false, {err("plugin_work_requires_lua", "$",
       "Plug-in work must use ordinary Lua as one complete request.")}
   end
-  return Code.validate_typed_actions_plan(plan)
+  local valid, plan_errors = Code.validate_typed_actions_plan(plan)
+  if not valid then return valid, plan_errors end
+  if Code.folder_default_requires_new_parent(opts.user_text)
+      and type(plan) == "table" and type(plan.actions) == "table" then
+    local created = {}
+    for _, action in ipairs(plan.actions) do
+      if action.op == "track.create" then created[action.id] = true end
+      if action.op == "track.folder" then
+        if not created[action.parent] then
+          return false, {err("folder_new_parent_required", "$",
+            "Folder organization needs a separate new parent unless reuse was explicitly requested.")}
+        end
+      end
+    end
+  end
+  return valid, plan_errors
 end
 
 function Code.format_typed_action_semantic_errors(errors, limit)
@@ -1805,12 +2116,143 @@ function Code.typed_actions_user_failure_message(exec_result)
   local result = type(exec_result) == "table" and exec_result or {}
   local detail = tostring(result.message or result.code
     or "The edit did not complete.")
-  if type(result.action_results) == "table" and #result.action_results > 0 then
+  if result._typed_action_apply_state == "unknown" then
+    return "The track or routing edit stopped and its changes could not be "
+      .. "confirmed. Do not run this edit again. Review the project and REAPER "
+      .. "history. Undo can also revert changes REAPER did not record before "
+      .. "or after this edit. Details: " .. detail
+  end
+  if result._typed_action_apply_state == "changed" then
     return "The track or routing edit stopped after making part of the change. "
-      .. "Use REAPER Undo, then retry the request. Details: " .. detail
+      .. "Review the project and REAPER history before undoing. Undo can also "
+      .. "revert changes REAPER did not record before or after this edit. "
+      .. "Do not run this edit again. Details: " .. detail
   end
   return "The track or routing edit was not applied. Check the named or selected "
     .. "track, then retry the request. Details: " .. detail
+end
+
+local function typed_finite_count(value)
+  return type(value) == "number" and value >= 0 and value < math.huge
+    and value % 1 == 0
+end
+
+local function typed_guid(value)
+  return type(value) == "string" and value:match(
+    "^%{%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x%}$") ~= nil
+end
+
+local function typed_master_guid(project)
+  local ok, guid = pcall(function()
+    local master = reaper.GetMasterTrack(project)
+    if not master then return nil end
+    return reaper.GetTrackGUID(master)
+  end)
+  return ok and typed_guid(guid) and guid or nil
+end
+
+local function typed_project_membership(project)
+  if type(reaper.EnumProjects) ~= "function" then return nil end
+  local index = 0
+  while true do
+    local ok, candidate = pcall(reaper.EnumProjects, index)
+    if not ok then return nil end
+    if candidate == nil then return false end
+    if type(candidate) ~= "userdata" and type(candidate) ~= "table" then return nil end
+    if candidate == project then return true end
+    index = index + 1
+  end
+end
+
+function Code.retire_typed_action_receipt(receipt, reason)
+  if type(receipt) == "table" then
+    receipt.retired = true
+    receipt.retired_reason = reason or "retired"
+  end
+end
+
+function Code.typed_action_receipt_can_undo(receipt)
+  if type(receipt) ~= "table" or receipt.consumed or receipt.retired
+      or receipt.closure_complete ~= true or receipt.cleanup_complete ~= true
+      or (receipt.mutation_state ~= "changed" and receipt.mutation_state ~= "unknown")
+      or not typed_guid(receipt.token) or not typed_guid(receipt.master_guid)
+      or type(receipt.label) ~= "string"
+      or (receipt.label ~= "ReaAssist: Track and routing edit [edit " .. receipt.token .. "]"
+        and receipt.label ~= "ReaAssist: Track and routing edit stopped [edit " .. receipt.token .. "]")
+      or not typed_finite_count(receipt.count_before)
+      or not typed_finite_count(receipt.count_after)
+      or receipt.count_after <= receipt.count_before then return false, "invalid_receipt" end
+  if receipt.project == nil then return false, "invalid_receipt" end
+  local membership = typed_project_membership(receipt.project)
+  if membership == nil then return false, "identity_unavailable" end
+  if not membership then
+    Code.retire_typed_action_receipt(receipt, "project_closed")
+    return false, "project_closed"
+  end
+  local guid = typed_master_guid(receipt.project)
+  if guid == nil then return false, "identity_unavailable" end
+  if guid ~= receipt.master_guid then
+    Code.retire_typed_action_receipt(receipt, "project_identity_changed")
+    return false, "project_identity_changed"
+  end
+  if not Code.project_is_active(receipt.project) then return false, "project_inactive" end
+  local count = Code.project_change_count(receipt.project)
+  if not typed_finite_count(count) then return false, "count_unavailable" end
+  if count ~= receipt.count_after then return false, "history_changed" end
+  if type(reaper.Undo_CanUndo2) ~= "function" then return false, "history_unavailable" end
+  local label_ok, label = pcall(reaper.Undo_CanUndo2, receipt.project)
+  if not label_ok or (label ~= nil and type(label) ~= "string") then
+    return false, "history_unavailable"
+  end
+  if label ~= receipt.label then
+    return false, "history_changed"
+  end
+  return true
+end
+
+function Code.undo_typed_action_receipt(receipt)
+  if type(reaper.Undo_DoUndo2) ~= "function" then return false, "undo_unavailable" end
+  local eligible, reason = Code.typed_action_receipt_can_undo(receipt)
+  if not eligible then return false, reason end
+  -- This is native history Undo, including unrecorded changes before or after the edit.
+  local ok, result = pcall(reaper.Undo_DoUndo2, receipt.project)
+  if ok and type(result) == "number" and result == result
+      and result > -math.huge and result < math.huge and result % 1 == 0 then
+    if result ~= 0 then
+      receipt.consumed = true
+      return true, "undone"
+    end
+    if Code.typed_action_receipt_can_undo(receipt) then return false, "undo_refused" end
+  end
+  Code.retire_typed_action_receipt(receipt, "undo_uncertain")
+  return false, "undo_uncertain"
+end
+
+local function typed_execution_identity(project)
+  for _, name in ipairs({"Undo_BeginBlock2", "Undo_EndBlock2", "Undo_CanUndo2",
+      "Undo_DoUndo2", "GetProjectStateChangeCount", "GetMasterTrack", "GetTrackGUID",
+      "genGuid", "PreventUIRefresh"}) do
+    if type(reaper[name]) ~= "function" then return nil, "safety_api_unavailable" end
+  end
+  local guid, count = typed_master_guid(project), Code.project_change_count(project)
+  if not guid or not typed_finite_count(count) then return nil, "identity_unavailable" end
+  local top_ok, top = pcall(reaper.Undo_CanUndo2, project)
+  if not top_ok or (top ~= nil and type(top) ~= "string") then
+    return nil, "history_unavailable"
+  end
+  Code._typed_action_reserved_tokens = Code._typed_action_reserved_tokens or {}
+  for _ = 1, 3 do
+    local ok, token = pcall(reaper.genGuid, "")
+    if ok and typed_guid(token) then
+      local key = token:upper()
+      if not Code._typed_action_reserved_tokens[key]
+          and not tostring(top or ""):upper():find(key, 1, true) then
+        Code._typed_action_reserved_tokens[key] = true
+        return {project=project, master_guid=guid, token=token, count_before=count}
+      end
+    end
+  end
+  return nil, "undo_token_unavailable"
 end
 
 local function find_named_track(name)
@@ -1835,14 +2277,14 @@ local function resolve_track(action)
     return reaper.GetSelectedTrack(0, 0)
   end
   if tonumber(action.selected_index) then
-    local index = math.floor(tonumber(action.selected_index))
+    local index = converted_number("selected_index", action.selected_index)
     if index < 1 or index > reaper.CountSelectedTracks(0) then
       return nil, "selected_track_missing"
     end
     return reaper.GetSelectedTrack(0, index - 1)
   end
   if tonumber(action.index) then
-    local index = math.floor(tonumber(action.index))
+    local index = converted_number("index", action.index)
     if index < 1 or index > reaper.CountTracks(0) then
       return nil, "track_index_missing"
     end
@@ -1851,15 +2293,84 @@ local function resolve_track(action)
   return nil, "invalid_selector"
 end
 
-local function db_to_amp(db)
-  return 10 ^ ((tonumber(db) or 0) / 20)
-end
-
-local function send_mode(value)
-  if value == nil or value == "post_fader" then return 0 end
-  if value == "pre_fx" then return 1 end
-  if value == "pre_fader" or value == "post_fx" then return 3 end
-  return tonumber(value) or 0
+function Code.apply_typed_folder(parent, children, project)
+  local order, parents, selected, present = {}, {}, {}, {}
+  for index = 0, reaper.CountTracks(project) - 1 do
+    local track = reaper.GetTrack(project, index)
+    order[#order + 1], present[track] = track, true
+    parents[track] = reaper.GetParentTrack(track)
+    selected[track] = reaper.IsTrackSelected(track)
+  end
+  local function below(track, ancestor)
+    local seen = {}
+    while track and not seen[track] do
+      if track == ancestor then return true end
+      seen[track], track = true, parents[track]
+    end
+    return false
+  end
+  if not present[parent] then error("The requested folder parent is unavailable.") end
+  local requested = {}
+  for _, child in ipairs(children) do
+    if not present[child] then error("A requested folder child is unavailable.") end
+    if below(parent, child) then error("A folder cannot be placed inside itself or its descendants.") end
+    if not below(child, parent) then requested[child] = true end
+  end
+  local roots, moving, expected = {}, {}, {}
+  for _, track in ipairs(order) do
+    expected[track] = parents[track]
+    if requested[track] then
+      local owner = parents[track]
+      while owner and not requested[owner] do owner = parents[owner] end
+      if not owner then roots[#roots + 1] = track; expected[track] = parent end
+    end
+  end
+  if #roots == 0 then return end
+  for _, track in ipairs(order) do
+    for _, root in ipairs(roots) do
+      if below(track, root) then moving[track] = true; break end
+    end
+  end
+  local master = type(reaper.GetMasterTrack) == "function" and reaper.GetMasterTrack(project)
+  local master_selected = master and reaper.IsTrackSelected(master)
+  local ok, message = xpcall(function()
+    -- Reverse insertion preserves the original order of the requested subtrees.
+    for index = #roots, 1, -1 do
+      local root = roots[index]
+      for _, track in ipairs(order) do
+        reaper.SetTrackSelected(track, below(track, root))
+      end
+      if master then reaper.SetTrackSelected(master, false) end
+      local destination
+      for i = 0, reaper.CountTracks(project) - 1 do
+        if reaper.GetTrack(project, i) == parent then destination = i + 1; break end
+      end
+      if not destination or not reaper.ReorderSelectedTracks(destination, 1) then
+        error("REAPER could not move the requested tracks into the folder.")
+      end
+    end
+    local untouched, observed = {}, {}
+    if reaper.CountTracks(project) ~= #order then
+      error("Track inventory changed during the folder edit.")
+    end
+    for _, track in ipairs(order) do
+      if not moving[track] then untouched[#untouched + 1] = track end
+    end
+    for i = 0, reaper.CountTracks(project) - 1 do
+      local track = reaper.GetTrack(project, i)
+      if not present[track] or reaper.GetParentTrack(track) ~= expected[track] then
+        error("The resulting folder membership did not match the requested edit. Use Undo to restore the previous layout.")
+      end
+      if not moving[track] then observed[#observed + 1] = track end
+    end
+    if #observed ~= #untouched then error("Track inventory changed during the folder edit.") end
+    for i, track in ipairs(untouched) do
+      if observed[i] ~= track then error("Unrelated track order changed during the folder edit.") end
+    end
+  end, debug and debug.traceback or tostring)
+  for _, track in ipairs(order) do reaper.SetTrackSelected(track, selected[track]) end
+  if master then reaper.SetTrackSelected(master, master_selected) end
+  if not ok then error(message, 0) end
 end
 
 function Code.execute_typed_actions_from_text(text, opts)
@@ -1870,6 +2381,7 @@ function Code.execute_typed_actions_from_text(text, opts)
       code=first_error(errors) or "invalid_plan",
       message=Code.format_typed_action_semantic_errors(errors, 4),
       action_results={},
+      _typed_action_apply_state="none",
     }
   end
   local semantic_ok, semantic_errors =
@@ -1879,6 +2391,7 @@ function Code.execute_typed_actions_from_text(text, opts)
       code=first_error(semantic_errors) or "semantic_mismatch",
       message=Code.format_typed_action_semantic_errors(semantic_errors, 4),
       action_results={},
+      _typed_action_apply_state="none",
     }
   end
 
@@ -1893,6 +2406,7 @@ function Code.execute_typed_actions_from_text(text, opts)
         .. "apply it deliberately to the current project.",
       action_results = {},
       completed = true,
+      _typed_action_apply_state = "none",
     }
   end
 
@@ -1902,7 +2416,7 @@ function Code.execute_typed_actions_from_text(text, opts)
       local track, reason = resolve_track(action)
       if not track then
         return false, {code=reason, message="Could not resolve the requested track.",
-          action_results={}}
+          action_results={}, _typed_action_apply_state="none"}
       end
       tracks[action.id] = track
     elseif action.op == "track.ensure" then
@@ -1910,21 +2424,78 @@ function Code.execute_typed_actions_from_text(text, opts)
       if reason == "ambiguous_track" then
         return false, {code=reason,
           message="More than one track has the requested name.",
-          action_results={}}
+          action_results={}, _typed_action_apply_state="none"}
       end
       if track then tracks[action.id] = track end
     end
   end
 
+  local identity, identity_error = typed_execution_identity(execution_project)
+  if not identity then
+    return false, {code=identity_error, message="The edit was not run because "
+      .. "project-specific Undo safety is unavailable.", action_results={},
+      completed=true, _typed_action_apply_state="none"}
+  end
   local results, undo_open, refresh_open = {}, false, false
-  local function close_undo(label)
-    if not undo_open then return end
-    if type(reaper.Undo_EndBlock2) == "function" then
-      reaper.Undo_EndBlock2(execution_project, label, -1)
-    else
-      reaper.Undo_EndBlock(label, -1)
+  local mutation_state = "none"
+  local function observe(before, after, known)
+    if not known then mutation_state = "unknown"
+    elseif mutation_state ~= "unknown" then
+      if #before ~= #after then mutation_state = "changed"; return end
+      for i, value in ipairs(before) do
+        if value ~= after[i] then mutation_state = "changed"; return end
+      end
     end
-    undo_open = false
+  end
+  local function mutate(readback, write)
+    local before = readback()
+    local ok, value = pcall(write)
+    local read_ok, after = pcall(readback)
+    observe(before, after, read_ok)
+    if not ok then error(value, 0) end
+    if value == false then error("REAPER refused the requested edit.", 0) end
+    return value
+  end
+  local function number(value)
+    if type(value) ~= "number" or value ~= value
+        or value <= -math.huge or value >= math.huge then
+      error("The requested edit could not be read back.", 0)
+    end
+    return value
+  end
+  local function track_name(track)
+    local ok, value = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
+    if ok ~= true or type(value) ~= "string" then
+      error("The track name could not be read back.", 0)
+    end
+    return {value}
+  end
+  local function selection(track)
+    local value = reaper.IsTrackSelected(track)
+    if type(value) ~= "boolean" then error("Track selection is unavailable.", 0) end
+    return {value}
+  end
+  local function inventory()
+    local count = reaper.CountTracks(execution_project)
+    if not typed_finite_count(count) then error("Track inventory is unavailable.", 0) end
+    local snapshot = {count}
+    for i = 0, count - 1 do
+      local track = reaper.GetTrack(execution_project, i)
+      if not track then error("Track inventory is unavailable.", 0) end
+      snapshot[#snapshot + 1] = track
+      snapshot[#snapshot + 1] = reaper.GetParentTrack(track) or false
+      snapshot[#snapshot + 1] = selection(track)[1]
+    end
+    snapshot[#snapshot + 1] = selection(reaper.GetMasterTrack(execution_project))[1]
+    return snapshot
+  end
+  local function set_track(track, key, value)
+    mutate(function() return {number(reaper.GetMediaTrackInfo_Value(track, key))} end,
+      function() return reaper.SetMediaTrackInfo_Value(track, key, value) end)
+  end
+  local function set_send(track, index, key, value)
+    mutate(function() return {number(reaper.GetTrackSendInfo_Value(track, 0, index, key))} end,
+      function() return reaper.SetTrackSendInfo_Value(track, 0, index, key, value) end)
   end
   local function result(action, status)
     results[#results + 1] = {
@@ -1932,30 +2503,36 @@ function Code.execute_typed_actions_from_text(text, opts)
     }
   end
 
-  if type(reaper.Undo_BeginBlock2) == "function" then
-    reaper.Undo_BeginBlock2(execution_project)
-  else
-    reaper.Undo_BeginBlock()
-  end
-  undo_open = true
-  reaper.PreventUIRefresh(1)
-  refresh_open = true
-
   local ok, run_error = xpcall(function()
+    reaper.Undo_BeginBlock2(execution_project)
+    undo_open = true
+    reaper.PreventUIRefresh(1)
+    refresh_open = true
     for _, action in ipairs(plan.actions) do
+      if not Code.project_is_active(execution_project)
+          or typed_master_guid(execution_project) ~= identity.master_guid then
+        error("The active project changed during the edit.", 0)
+      end
       if action.op == "track.create" or action.op == "track.ensure" then
         local track, created = tracks[action.id], false
         if not track then
           local index = reaper.CountTracks(execution_project)
-          reaper.InsertTrackAtIndex(index, true)
+          mutate(inventory, function() reaper.InsertTrackAtIndex(index, true) end)
+          if reaper.CountTracks(execution_project) ~= index + 1 then
+            error("Could not confirm the requested track insertion.", 0)
+          end
           track, created = reaper.GetTrack(execution_project, index), true
           if not track then error("Could not create the requested track.") end
           tracks[action.id] = track
         end
         if nonempty(action.name) then
-          reaper.GetSetMediaTrackInfo_String(track, "P_NAME", action.name, true)
+          mutate(function() return track_name(track) end,
+            function() return reaper.GetSetMediaTrackInfo_String(track, "P_NAME", action.name, true) end)
         end
-        if action.select == true then reaper.SetTrackSelected(track, true) end
+        if action.select == true then
+          mutate(function() return selection(track) end,
+            function() reaper.SetTrackSelected(track, true) end)
+        end
         result(action, created and "created" or "reused")
       elseif action.op == "track.resolve" then
         result(action, "resolved")
@@ -1963,79 +2540,97 @@ function Code.execute_typed_actions_from_text(text, opts)
         local track = tracks[action.track]
         if not track then error("A track reference became unavailable.") end
         if action.name ~= nil then
-          reaper.GetSetMediaTrackInfo_String(track, "P_NAME",
-            tostring(action.name), true)
+          mutate(function() return track_name(track) end,
+            function() return reaper.GetSetMediaTrackInfo_String(track, "P_NAME",
+              tostring(action.name), true) end)
         end
         if action.volume_db ~= nil then
-          reaper.SetMediaTrackInfo_Value(track, "D_VOL", db_to_amp(action.volume_db))
+          set_track(track, "D_VOL", converted_number("volume_db", action.volume_db))
         end
         if action.pan_pct ~= nil then
-          local pan = math.max(-100, math.min(100, tonumber(action.pan_pct) or 0))
-          reaper.SetMediaTrackInfo_Value(track, "D_PAN", pan / 100)
+          set_track(track, "D_PAN", converted_number("pan_pct", action.pan_pct))
         end
         if action.mute ~= nil then
-          reaper.SetMediaTrackInfo_Value(track, "B_MUTE", action.mute and 1 or 0)
+          set_track(track, "B_MUTE", action.mute and 1 or 0)
         end
         if action.solo ~= nil then
-          reaper.SetMediaTrackInfo_Value(track, "I_SOLO", action.solo and 1 or 0)
+          set_track(track, "I_SOLO", action.solo and 1 or 0)
         end
         if action.master_send ~= nil then
-          reaper.SetMediaTrackInfo_Value(track, "B_MAINSEND",
-            action.master_send and 1 or 0)
+          set_track(track, "B_MAINSEND", action.master_send and 1 or 0)
         end
         result(action)
       elseif action.op == "track.folder" then
         local parent = tracks[action.parent]
-        local last_child = tracks[action.children[#action.children]]
-        if not parent or not last_child then
+        local children = {}
+        for _, id in ipairs(action.children) do
+          if not tracks[id] then error("A folder track reference became unavailable.") end
+          children[#children + 1] = tracks[id]
+        end
+        if not parent then
           error("A folder track reference became unavailable.")
         end
-        reaper.SetMediaTrackInfo_Value(parent, "I_FOLDERDEPTH",
-          reaper.GetMediaTrackInfo_Value(parent, "I_FOLDERDEPTH") + 1)
-        reaper.SetMediaTrackInfo_Value(last_child, "I_FOLDERDEPTH",
-          reaper.GetMediaTrackInfo_Value(last_child, "I_FOLDERDEPTH") - 1)
+        mutate(inventory, function()
+          Code.apply_typed_folder(parent, children, execution_project)
+        end)
         result(action)
       elseif action.op == "send.create" then
         local source, destination = tracks[action["from"]], tracks[action.to]
         if not source or not destination then
           error("A send track reference became unavailable.")
         end
-        local index = reaper.CreateTrackSend(source, destination)
+        local index = mutate(function()
+          local count = reaper.GetTrackNumSends(source, 0)
+          if not typed_finite_count(count) then error("Send inventory is unavailable.", 0) end
+          return {count}
+        end, function() return reaper.CreateTrackSend(source, destination) end)
         if not index or index < 0 then error("REAPER could not create the send.") end
         if action.volume_db ~= nil then
-          reaper.SetTrackSendInfo_Value(source, 0, index, "D_VOL",
-            db_to_amp(action.volume_db))
+          set_send(source, index, "D_VOL", converted_number("volume_db", action.volume_db))
         end
         if action.pan ~= nil then
-          reaper.SetTrackSendInfo_Value(source, 0, index, "D_PAN",
-            math.max(-1, math.min(1, tonumber(action.pan) or 0)))
+          set_send(source, index, "D_PAN", converted_number("pan", action.pan))
         end
         if action.mode ~= nil then
-          reaper.SetTrackSendInfo_Value(source, 0, index, "I_SENDMODE",
-            send_mode(action.mode))
+          set_send(source, index, "I_SENDMODE", send_mode(action.mode))
         end
         if action.muted ~= nil then
-          reaper.SetTrackSendInfo_Value(source, 0, index, "B_MUTE",
-            action.muted and 1 or 0)
+          set_send(source, index, "B_MUTE", action.muted and 1 or 0)
         end
         result(action)
       end
     end
   end, debug and debug.traceback or tostring)
 
-  if refresh_open then reaper.PreventUIRefresh(-1) end
-  reaper.TrackList_AdjustWindows(false)
-  reaper.UpdateArrange()
-  close_undo(ok and "ReaAssist: Track and routing edit"
-    or "ReaAssist: Track and routing edit stopped")
-  if not ok then
-    return false, {code="execution_failed", message=tostring(run_error),
-      action_results=results, completed=true,
-      _execution_project=execution_project}
+  local cleanup_ok, closure_ok = true, false
+  if refresh_open then
+    cleanup_ok = pcall(reaper.PreventUIRefresh, -1)
+    refresh_open = false
   end
-  return true, {code="ok", message="Track and routing edit completed.",
+  identity.label = (ok and "ReaAssist: Track and routing edit"
+    or "ReaAssist: Track and routing edit stopped") .. " [edit " .. identity.token .. "]"
+  if undo_open then
+    closure_ok = pcall(reaper.Undo_EndBlock2, execution_project, identity.label, -1)
+    undo_open = false
+  end
+  identity.count_after = Code.project_change_count(execution_project)
+  identity.closure_complete, identity.cleanup_complete = closure_ok, cleanup_ok
+  identity.mutation_state = mutation_state
+  local receipt
+  if mutation_state ~= "none" and Code.typed_action_receipt_can_undo(identity) then
+    receipt = identity
+  end
+  -- Optional UI updates run only after both owned cleanup attempts and receipt capture.
+  pcall(function() reaper.TrackList_AdjustWindows(false) end)
+  pcall(function() reaper.UpdateArrange() end)
+  local completed = ok and cleanup_ok and closure_ok
+  return completed, {code=completed and "ok" or "execution_failed",
+    message=completed and (mutation_state == "none" and "No track or routing change was needed."
+      or mutation_state == "unknown" and "The edit finished, but its changes could not be confirmed."
+      or "Track and routing edit completed.") or tostring(run_error or "Undo cleanup could not be confirmed."),
     action_results=results, completed=true,
-    _execution_project=execution_project}
+    _execution_project=execution_project, _typed_action_apply_state=mutation_state,
+    _typed_action_undo_receipt=receipt}
 end
 end -- close small structured track-edit scope
 
@@ -2148,8 +2743,9 @@ function Code.find_unknown_reaper_calls(lua_code)
   return unknown, total
 end
 
--- Recognize only an exact positive presence test and its then branch. Scope
--- ends at else/elseif/end; another reference after the block is still checked.
+-- Presence tests are valid even when an extension is absent. Recognize common
+-- equivalent tests and short-circuit AND conditions without letting an OR
+-- alternative certify a call. Proofs end at else/elseif/end.
 function Code._lua_optional_api_references(src)
   local tokens, offset = {}, 1
   for _, token in ipairs(Code.tokenize_lua(src)) do
@@ -2159,26 +2755,123 @@ function Code._lua_optional_api_references(src)
     offset = offset + #token.text
   end
   local safe, stack = {}, {}
+  local code_only = _lua_code_only_preserving_offsets(src)
+  local type_shadowed = code_only:find("%f[%w_]type%s*=[^=]")
+    or code_only:find("%f[%w_]local%s+type%f[^%w_]")
+    or code_only:find("%f[%w_]function%s+type%f[^%w_]")
+  for names in code_only:gmatch("local%s+([%w_,%s]+)=") do
+    if names:find("%f[%w_]type%f[^%w_]") then type_shadowed = true end
+  end
+  for params in code_only:gmatch("function%s*[%w_%.:]*%s*(%b())") do
+    if params:find("%f[%w_]type%f[^%w_]") then type_shadowed = true end
+  end
   local function text_at(i) return tokens[i] and tokens[i].text end
+  local function merge(a, b, intersection)
+    local out = {}
+    for name in pairs(a) do if not intersection or b[name] then out[name] = true end end
+    if not intersection then for name in pairs(b) do out[name] = true end end
+    return out
+  end
+  local function mark(a, b, names)
+    for j = a, b do
+      if text_at(j) == "reaper" and text_at(j + 1) == "." and names[text_at(j + 2)] then
+        safe[tokens[j].pos] = true
+      end
+    end
+  end
+  local function proofs(a, b, inherited)
+    if a > b then return {} end
+    -- Strip only parentheses that enclose the complete expression.
+    while text_at(a) == "(" and text_at(b) == ")" do
+      local depth, closes = 0, nil
+      for j = a, b do
+        if text_at(j) == "(" then depth = depth + 1
+        elseif text_at(j) == ")" then depth = depth - 1; if depth == 0 then closes = j; break end end
+      end
+      if closes ~= b then break end
+      a, b = a + 1, b - 1
+    end
+    -- OR has lower precedence. Both alternatives must prove presence.
+    for _, operator in ipairs({"or", "and"}) do
+      local depth = 0
+      for j = a, b do
+        local word = text_at(j)
+        if word == "(" or word == "[" or word == "{" then depth = depth + 1
+        elseif word == ")" or word == "]" or word == "}" then depth = depth - 1
+        elseif depth == 0 and word == operator then
+          local left = proofs(a, j - 1, inherited)
+          local right = proofs(j + 1, b, operator == "and" and merge(inherited, left) or inherited)
+          return merge(left, right, operator == "or")
+        end
+      end
+    end
+    mark(a, b, inherited)
+    local words = {}
+    for j = a, b do words[#words + 1] = text_at(j) end
+    local expr = table.concat(words):gsub('"function"', "'function'")
+    local id = "([%a_][%w_]*)"
+    local name = expr:match("^reaper%." .. id .. "$")
+      or expr:match("^reaper%." .. id .. "~=nil$")
+      or expr:match("^nil~=reaper%." .. id .. "$")
+      or expr:match("^type%(reaper%." .. id .. "%)=='function'$")
+      or expr:match("^'function'==type%(reaper%." .. id .. "%)$")
+    if name and not (type_shadowed and expr:find("type(", 1, true))
+        and not ((expr:match("~=nil$") or expr:match("^nil~=")) and reaper[name] == false) then
+      mark(a, b, {[name] = true})
+      return {[name] = true}
+    end
+    return {}
+  end
+  local function condition(i)
+    local finish = i + 1
+    while tokens[finish] and text_at(finish) ~= "then" do
+      if text_at(finish) == "function" or text_at(finish) == "end" then return {} end
+      finish = finish + 1
+    end
+    return tokens[finish] and proofs(i + 1, finish - 1, {}) or {}
+  end
+  -- The common optional-call expression is also safe outside an if statement:
+  -- local result = reaper.Optional and reaper.Optional() or fallback.
+  for i, token in ipairs(tokens) do
+    local before = text_at(i - 1)
+    local operand_start = not before or before == "(" or before == "["
+      or before == "," or before == "return" or before == "if"
+      or before == "and" or before == "or"
+      or (before == "=" and not tostring(text_at(i - 2)):match("^[=<>~]$"))
+    if token.text == "reaper" and text_at(i + 1) == "."
+        and operand_start and text_at(i + 3) == "and"
+        and text_at(i + 4) == "reaper" and text_at(i + 5) == "."
+        and text_at(i + 6) == text_at(i + 2) and text_at(i + 7) == "(" then
+      safe[token.pos], safe[tokens[i + 4].pos] = true, true
+    end
+  end
   for i, token in ipairs(tokens) do
     local word = token.text
     if word == "if" then
-      local name = text_at(i + 3)
-      local exact = text_at(i + 1) == "reaper" and text_at(i + 2) == "."
-        and name and name:match("^[%a_][%w_]*$")
-        and text_at(i + 4) == "then"
-      stack[#stack + 1] = {kind = "if", name = exact and name or nil}
+      stack[#stack + 1] = {kind = "if", names = condition(i), active = false}
+    elseif word == "then" then
+      if stack[#stack] and stack[#stack].kind == "if" then stack[#stack].active = true end
     elseif word == "else" or word == "elseif" then
       if stack[#stack] and stack[#stack].kind == "if" then
-        stack[#stack].name = nil
+        stack[#stack].names = word == "elseif" and condition(i) or {}
+        stack[#stack].active = false
       end
     elseif word == "function" or word == "do" or word == "repeat" then
       stack[#stack + 1] = {kind = word}
     elseif word == "end" or word == "until" then
       stack[#stack] = nil
     elseif word == "reaper" and text_at(i + 1) == "." then
+      -- Reading a property for a type/nil test does not invoke the API.
+      local property_end = i + 3
+      local after_op = tostring(text_at(property_end)) .. tostring(text_at(property_end + 1))
+      local before_op = tostring(text_at(i - 2)) .. tostring(text_at(i - 1))
+      if (text_at(i - 2) == "type" and text_at(i - 1) == "(" and text_at(property_end) == ")")
+          or ((after_op == "~=" or after_op == "==") and text_at(property_end + 2) == "nil")
+          or (text_at(i - 3) == "nil" and (before_op == "~=" or before_op == "==")) then
+        safe[token.pos] = true
+      end
       for _, frame in ipairs(stack) do
-        if frame.name == text_at(i + 2) then
+        if frame.active and frame.names and frame.names[text_at(i + 2)] then
           safe[token.pos] = true
           break
         end
@@ -2242,6 +2935,163 @@ function Code.find_unavailable_lua_library_calls(lua_code)
   return findings, total
 end
 
+-- A bounded proof for literal local tables. Unknown syntax keeps the warning.
+-- Compilation checks syntax only; generated code is never executed here.
+function Code._initialized_field_append_positions(src)
+  local proven = {}
+  if src:find("\r[^\n]") then return proven end
+  if type(load) ~= "function" or not load(src, "table append proof", "t", {}) then return proven end
+  local ts, offset = {}, 1
+  for _, token in ipairs(Code.tokenize_lua(src)) do
+    if token.type == "str" and (token.text:sub(1,1) == '"' or token.text:sub(1,1) == "'") then
+      if token.text:sub(-1) ~= token.text:sub(1,1) or token.text:find("\\z",1,true)
+          or token.text:find("\\[\r\n]") then return proven end
+    end
+    if token.type ~= "ws" and token.type ~= "com" then
+      ts[#ts+1] = {text=token.text, type=token.type, pos=offset, last=offset+#token.text-1}
+    end
+    offset = offset + #token.text
+  end
+  local function text(i) return ts[i] and ts[i].text end
+  local function ident(i)
+    return ts[i] and (ts[i].type == "id" or ts[i].type == "api")
+      and ts[i].text:match("^[%a_][%w_]*$") ~= nil
+  end
+  local stack, serial, scopes = {}, 0, {}
+  local function push(kind, i)
+    serial = serial + 1
+    stack[#stack+1] = {id=serial, kind=kind, first=i, pending=kind ~= "do" and kind ~= "repeat"}
+  end
+  for i, token in ipairs(ts) do
+    scopes[i] = {}
+    for _, block in ipairs(stack) do
+      scopes[i][#scopes[i]+1] = {id=block.id, block=block, pending=block.pending}
+    end
+    local t = token.text
+    if token.type == "kw" then
+      if t == "function" or t == "goto" then return proven
+      elseif t == "if" or t == "for" or t == "while" or t == "repeat" then push(t, i)
+      elseif t == "then" then
+        local b = stack[#stack]
+        if not b or b.kind ~= "if" or not b.pending then return proven end
+        b.pending = false
+      elseif t == "elseif" or t == "else" then
+        local b = stack[#stack]
+        if not b or b.kind ~= "if" then return proven end
+        serial = serial + 1; b.id = serial; b.pending = t == "elseif"
+      elseif t == "do" then
+        local b = stack[#stack]
+        if b and b.pending and (b.kind == "for" or b.kind == "while") then b.pending = false
+        else push("do", i) end
+      elseif t == "end" or t == "until" then
+        local b = stack[#stack]
+        if not b or b.pending or ((t == "until") ~= (b.kind == "repeat")) then return proven end
+        -- Include all remaining tokens for repeat conditions, whose end is not
+        -- an explicit token. This may retain a warning but cannot omit a read.
+        b.last = t == "until" and #ts or i
+        stack[#stack] = nil
+      end
+    elseif t == ":" and text(i+1) == ":" then return proven end
+  end
+  if #stack ~= 0 then return proven end
+  local function boundary(i)
+    local t = text(i)
+    return not t or t == ";" or t == "end" or t == "else" or t == "elseif" or t == "until"
+      or t == "local" or t == "if" or t == "for" or t == "while" or t == "repeat"
+      or t == "do" or t == "return" or t == "break" or ident(i)
+  end
+  local literal
+  literal = function(i)
+    local t = text(i)
+    if t == "{" then
+      local fields, seen = {}, {}
+      i = i + 1
+      while text(i) ~= "}" do
+        local key
+        if ident(i) and text(i+1) == "=" then
+          key = text(i)
+          if seen[key] then return nil end
+          seen[key] = true; i = i + 2
+        elseif text(i) == "[" then return nil end
+        local next_i, value = literal(i)
+        if not next_i then return nil end
+        if key then fields[key] = value end
+        i = next_i
+        if text(i) == "," or text(i) == ";" then i = i + 1
+        elseif text(i) ~= "}" then return nil end
+      end
+      return i + 1, fields
+    elseif ts[i] and (ts[i].type == "num" or ts[i].type == "str"
+        or t == "true" or t == "false" or t == "nil") then return i + 1, false
+    elseif t == "-" and ts[i+1] and ts[i+1].type == "num" then return i + 2, false end
+  end
+  local declarations, appends = {}, {}
+  for i in ipairs(ts) do
+    if text(i) == "local" and ident(i+1) and text(i+2) == "=" and text(i+3) == "{" then
+      local next_i, fields = literal(i+3)
+      if next_i and boundary(next_i) then
+        declarations[#declarations+1] = {first=i, last=next_i-1, root=text(i+1), fields=fields}
+      end
+    end
+    if ident(i) and text(i-1) ~= "." and text(i-1) ~= ":" then
+      local path, p = {text(i)}, i + 1
+      while text(p) == "." and ident(p+1) do path[#path+1] = text(p+1); p = p+2 end
+      if #path > 1 and text(p) == "[" and text(p+1) == "#" then
+        local count_root, q, same = p+2, p+2, true
+        for n, name in ipairs(path) do
+          if n > 1 then if text(q) ~= "." then same=false end; q=q+1 end
+          if text(q) ~= name then same=false end; q=q+1
+        end
+        if same and text(q) == "+" and text(q+1) == "1" and text(q+2) == "]" and text(q+3) == "=" then
+          local rhs, last = q+4
+          for j = rhs, #ts do
+            if boundary(j+1) and load("return "..src:sub(ts[rhs].pos, ts[j].last), "append value", "t", {}) then
+              last=j; break
+            end
+          end
+          if last then
+            local clean = true
+            for j=rhs,last do if ident(j) and text(j) == path[1] then clean=false end end
+            if clean then appends[#appends+1] = {first=i, last=last, counted=count_root, path=path, match=p-1} end
+          end
+        end
+      end
+    end
+  end
+  for _, a in ipairs(appends) do
+    for _, d in ipairs(declarations) do
+      if d.root == a.path[1] and d.last < a.first then
+        local valid, value = true, d.fields
+        for n=2,#a.path do value = type(value) == "table" and value[a.path[n]] or nil end
+        if type(value) ~= "table" then valid=false end
+        for n, scope in ipairs(scopes[d.first]) do
+          if scope.pending or not scopes[a.first][n] or scope.id ~= scopes[a.first][n].id then valid=false end
+        end
+        local first, last = d.first, a.last
+        for _, scope in ipairs(scopes[a.first]) do
+          local b = scope.block
+          if scope.pending then valid=false end
+          if b.kind == "for" or b.kind == "while" or b.kind == "repeat" then
+            first=math.min(first,b.first); last=math.max(last,b.last or #ts)
+          end
+        end
+        local allowed = {}
+        for j=d.first,d.last do allowed[j]=true end
+        for _, other in ipairs(appends) do
+          if table.concat(other.path,".") == table.concat(a.path,".") then
+            allowed[other.first]=true; allowed[other.counted]=true
+          end
+        end
+        for j=first,last do
+          if ident(j) and text(j) == d.root and not allowed[j] then valid=false end
+        end
+        if valid then proven[ts[a.match].pos]=true; break end
+      end
+    end
+  end
+  return proven
+end
+
 -- Detect a high-confidence undefined table target before auto-run. Indexing a
 -- nil global on the left side of an assignment compiles successfully but then
 -- crashes at runtime, often after the script has already made partial project
@@ -2253,6 +3103,13 @@ function Code.find_likely_undefined_table_targets(lua_code)
   if not lua_code or lua_code == "" then return nil end
   local stripped = _lua_code_only_preserving_offsets(lua_code)
   local findings, seen = {}, {}
+  local initialized_field_appends
+  local function initialized_field_append(pos)
+    if not initialized_field_appends then
+      initialized_field_appends = Code._initialized_field_append_positions(lua_code)
+    end
+    return initialized_field_appends[pos]
+  end
 
   local function declared_before(name, pos)
     local prefix = stripped:sub(1, math.max(0, (pos or 1) - 1))
@@ -2368,7 +3225,8 @@ function Code.find_likely_undefined_table_targets(lua_code)
     if target ~= counted
        and not declared_before(target, s)
        and declared_before(counted, s)
-       and not seen[target] then
+       and not seen[target]
+       and not initialized_field_append(s) then
       seen[target] = true
       findings[#findings + 1] = {
         global = target,
@@ -2879,6 +3737,27 @@ function Code.find_missing_point_markers_for_region_marker_pairs(lua_code, user_
       or has_named_api_call("AddProjectMarker", is_region, name)
   end
 
+  -- A marker helper or data-driven loop supplies its name at runtime. Absence
+  -- of a literal name cannot establish that the requested marker is missing.
+  local code_only = _lua_code_only_preserving_offsets(lua_code)
+  local dynamic_point = {}
+  for _, api in ipairs({"AddRegionOrMarker", "AddProjectMarker2", "AddProjectMarker"}) do
+    local pos = 1
+    while true do
+      local _, open = code_only:find("reaper%." .. api .. "%s*%(", pos)
+      if not open then break end
+      local args, finish = Code._parse_lua_call_args(lua_code, open)
+      if args and trim(args[2]) == "false" and args[5] then
+        local significant = {}
+        for _, token in ipairs(Code.tokenize_lua(args[5])) do
+          if token.type ~= "ws" and token.type ~= "com" then significant[#significant + 1] = token end
+        end
+        if #significant ~= 1 or significant[1].type ~= "str" then dynamic_point[api] = true end
+      end
+      pos = (finish or open) + 1
+    end
+  end
+
   local findings = {}
   local has_modern_region_api =
        type(reaper) == "table"
@@ -2888,9 +3767,11 @@ function Code.find_missing_point_markers_for_region_marker_pairs(lua_code, user_
     local has_modern_false = has_named_api_call("AddRegionOrMarker", false, name)
     if has_modern_region_api
         and has_modern_true
-        and not has_modern_false then
+        and not has_modern_false and not dynamic_point.AddRegionOrMarker then
       findings[#findings + 1] = { name = name }
-    elseif has_named_call(true, name) and not has_named_call(false, name) then
+    elseif not (has_modern_region_api and has_modern_true)
+        and has_named_call(true, name) and not has_named_call(false, name)
+        and not next(dynamic_point) then
       findings[#findings + 1] = { name = name }
     end
   end
@@ -3604,11 +4485,79 @@ local _REAPER_FIXED_ARITY = {
   TrackList_AdjustWindows         = 1,
 }
 
+-- Prove only top-level local helpers consisting of one scalar return. Unknown
+-- functions keep Lua's normal multiple-return allowance. A second binding or
+-- a non-call use of the name invalidates the proof, including escaped closures.
+function Code._lua_scalar_return_helpers(src)
+  local tokens, offset = {}, 1
+  for _, token in ipairs(Code.tokenize_lua(src)) do
+    if token.type ~= "ws" and token.type ~= "com" then
+      tokens[#tokens + 1] = {text = token.text, pos = offset}
+    end
+    offset = offset + #token.text
+  end
+  local function at(i) return tokens[i] and tokens[i].text end
+  local helpers, depth = {}, 0
+  for i, token in ipairs(tokens) do
+    local word = token.text
+    if word == "function" and depth == 0 and at(i - 1) == "local"
+        and (at(i + 1) or ""):match("^[%a_][%w_]*$")
+        and at(i + 2) == "(" then
+      local name, j = at(i + 1), i + 3
+      while at(j) and at(j) ~= ")" do j = j + 1 end
+      if at(j + 1) == "return" then
+        local first, nesting, scalar, valid = j + 2, 0, false, true
+        j = first
+        while at(j) and at(j) ~= "end" do
+          local t = at(j)
+          if t == "function" or t == "return" or t == "if"
+              or t == "do" or t == "repeat" or t == "=" then
+            valid = false
+          end
+          if nesting == 0 then
+            if t == "," or (t == ";" and at(j + 1) ~= "end") then
+              valid = false
+            end
+            if t == "+" or t == "-" or t == "*" or t == "/"
+                or t == "//" or t == "%" or t == "^" or t == ".."
+                or t == "and" or t == "or" or t == "not"
+                or t == "==" or t == "~=" or t == "<" or t == ">"
+                or t == "<=" or t == ">=" or t == "#" then
+              scalar = true
+            end
+          end
+          if t == "(" or t == "[" or t == "{" then nesting = nesting + 1
+          elseif t == ")" or t == "]" or t == "}" then nesting = nesting - 1 end
+          j = j + 1
+        end
+        if valid and scalar and nesting == 0 and at(j) == "end" then
+          helpers[name] = {definition = i + 1, finish = tokens[j].pos}
+        end
+      end
+    end
+    if word == "function" or word == "if" or word == "do"
+        or word == "repeat" then depth = depth + 1
+    elseif word == "end" or word == "until" then depth = depth - 1 end
+  end
+  for i, token in ipairs(tokens) do
+    local helper = helpers[token.text]
+    if helper and i ~= helper.definition then
+      if at(i + 1) ~= "(" or at(i - 1) == "function"
+          or at(i - 1) == "." or at(i - 1) == ":"
+          or token.pos < helper.finish then
+        helpers[token.text] = nil
+      end
+    end
+  end
+  return helpers
+end
+
 function Code.find_reaper_arity_mismatches(lua_code)
   if not lua_code or lua_code == "" then return nil end
   local stripped, arity_content =
     _lua_code_only_preserving_offsets(lua_code, true)
   local seen, mismatches = {}, {}
+  local scalar_helpers = Code._lua_scalar_return_helpers(lua_code)
   local function is_modern_marker_guarded_legacy_fallback(call_pos)
     if type(reaper) ~= "table"
        or type(reaper.AddRegionOrMarker) ~= "function" then
@@ -3663,6 +4612,9 @@ function Code.find_reaper_arity_mismatches(lua_code)
         -- count is unknown here, but preceding arguments each supply one value.
         local expands = tail == "..."
           or tail:match("^[%a_][%w_%.:]*%s*%b()$") ~= nil
+        local helper_name = tail:match("^([%a_][%w_]*)%s*%b()$")
+        local helper = helper_name and scalar_helpers[helper_name]
+        if helper and call_start > helper.finish then expands = false end
         local proven_mismatch = expands and args > expected
           or (not expands and got ~= expected)
         local skip_guarded_legacy_marker =
@@ -8485,7 +9437,7 @@ end
 -- fallback. The persistent second-strike gate uses only this precise signal;
 -- a residual fallback false positive may request a retry, but cannot hard-block
 -- a correct advanced workflow such as track duplication.
-function Code.prompt_requests_precise_track_creation(user_text)
+function Code.prompt_requests_precise_track_creation(user_text, include_edit_intent)
   local lt = tostring(user_text or ""):lower()
   if lt == "" then return false end
   lt = lt:gsub("%s+", " ")
@@ -8512,6 +9464,50 @@ function Code.prompt_requests_precise_track_creation(user_text)
       end
       if count <= 4 and not blocked then return true end
     end
+    return false
+  end
+  -- Only these finite edit frames can exclude a broad match. Any other
+  -- creation word anywhere in the prompt preserves the incumbent result.
+  local function non_creation_frame(first, last)
+    -- Unknown leading text can contain another creation request without a
+    -- creation verb, such as "I need two vocal tracks". Keep that signal.
+    local prefix = lt:sub(1,first-1):match("^%s*(.-)%s*$")
+    if prefix ~= "" and prefix ~= "please" and prefix ~= "can you"
+        and prefix ~= "could you" and prefix ~= "would you" then return false end
+    local span = lt:sub(first,last)
+    local opening = span:match("^(%a+)")
+    local opening_end = first + #(opening or "") - 1
+    if opening == "set" then
+      local finish = span:match("^set%s+up()")
+      if not finish then return false end
+      opening_end = first + finish - 2
+    end
+    local creation_words = {
+      new=true, another=true, additional=true, extra=true,
+      create=true, creates=true, created=true, creating=true,
+      add=true, adds=true, added=true, adding=true,
+      insert=true, inserts=true, inserted=true, inserting=true,
+      make=true, makes=true, made=true, making=true,
+      build=true, builds=true, built=true, building=true,
+    }
+    for pos, word in lt:gmatch("()(%a+)") do
+      if (pos < first or pos > opening_end) and creation_words[word] then return false end
+      if (pos < first or pos > opening_end) and (word == "set" or word == "sets" or word == "setting")
+          and lt:sub(pos+#word):match("^%s+up%f[%W]") then return false end
+    end
+    local closed_tail = lt:sub(last+1):match("^[%s%p]*$") ~= nil
+    local plugin, target = span:match("^set up a (%a+) on (.+)$")
+    if (plugin == "compressor" or plugin == "limiter" or plugin == "reverb")
+        and target:match("^the [%w ]-track$") and closed_tail then return true end
+    if span:match("^build a send routing for the [%w ]-tracks$") and closed_tail then return true end
+    if span:match("^make sure [%w ]-track[s]? in [%w ]-folder$") then
+      local tail = lt:sub(last+1)
+      if tail:match("^ is named[%s%p]*$") or tail:match("^ are named[%s%p]*$")
+          or tail:match("^ is renamed[%s%p]*$") or tail:match("^ are renamed[%s%p]*$") then return true end
+    end
+    local action = span:match("^create a script that (%a+) items in [%w ]-folder$")
+      or span:match("^create a script that (%a+) each item in [%w ]-folder$")
+    if (action == "colors" or action == "renames") and closed_tail then return true end
     return false
   end
   local patterns = {
@@ -8548,7 +9544,13 @@ function Code.prompt_requests_precise_track_creation(user_text)
     "%f[%w]set%s+up%s+.-%f[%w]folder%f[%W]",
   }
   for _, pat in ipairs(patterns) do
-    if lt:find(pat) then return true end
+    local from = 1
+    while true do
+      local first, last = lt:find(pat, from)
+      if not first then break end
+      if include_edit_intent == true or not non_creation_frame(first, last) then return true end
+      from = first + 1
+    end
   end
   if bounded_make_track("a")
       or bounded_make_track("an")
@@ -8722,9 +9724,9 @@ function Code._prompt_requests_bounded_localized_track_creation(user_text)
   return false
 end
 
-function Code.prompt_requests_track_creation(user_text)
+function Code.prompt_requests_track_creation(user_text, include_edit_intent)
   if Code._prompt_forbids_track_creation(user_text) then return false end
-  if Code.prompt_requests_precise_track_creation(user_text) then return true end
+  if Code.prompt_requests_precise_track_creation(user_text, include_edit_intent) then return true end
   if Code.prompt_requests_track_duplication
       and Code.prompt_requests_track_duplication(user_text) then
     return false
@@ -9608,7 +10610,9 @@ function Code.prompt_likely_needs_lua_action(user_text, opts)
         and lt:find("reaper", 1, true)) then
     return true
   end
-  if Code.prompt_requests_track_creation(user_text)
+  -- Keep the incumbent action signal for edit frames removed only from
+  -- creation validation. Other callers leave include_edit_intent unset.
+  if Code.prompt_requests_track_creation(user_text, true)
       or Code.prompt_requests_inferred_created_track_name(user_text)
       or (Code.prompt_requests_bus_or_return_send_routing
         and Code.prompt_requests_bus_or_return_send_routing(user_text))
@@ -9954,14 +10958,23 @@ end
 
 function Code.lua_creates_requested_region(lua_code)
   if not lua_code or lua_code == "" then return false end
-  local stripped = lua_code
-    :gsub("%-%-%[%[.-%]%]", "")
-    :gsub("%-%-[^\n]*", "")
-  if stripped:find("reaper%.AddProjectMarker2?%s*%([^,]+,%s*true%s*,") then
-    return true
-  end
-  if stripped:find("reaper%.AddRegionOrMarker%s*%([^,]+,%s*true%s*,") then
-    return true
+  -- This is a retry heuristic, not proof of runtime completeness. A helper
+  -- may receive its region flag from a caller. An unknown flag is insufficient
+  -- evidence to discard the reply and force another model request.
+  local code_only = _lua_code_only_preserving_offsets(lua_code)
+  for _, api in ipairs({"AddProjectMarker", "AddProjectMarker2", "AddRegionOrMarker"}) do
+    local pos = 1
+    while true do
+      local _, open = code_only:find("reaper%." .. api .. "%s*%(", pos)
+      if not open then break end
+      local args, finish = Code._parse_lua_call_args(lua_code, open)
+      if args and args[2] then
+        local flag = _lua_code_only_preserving_offsets(args[2]):match("^%s*(.-)%s*$")
+        while flag:match("^%b()$") do flag = flag:sub(2, -2):match("^%s*(.-)%s*$") end
+        if flag ~= "" and flag ~= "false" and flag ~= "nil" then return true end
+      end
+      pos = (finish or open) + 1
+    end
   end
   return false
 end
@@ -10610,6 +11623,26 @@ function Code.repair_repeated_zero_track_insertion_order(lua_code, user_text)
   return lua_code, false, nil
 end
 
+function Code.find_default_folder_parent_misuse(lua_code, user_text)
+  if type(lua_code) ~= "string" or lua_code == "" then return nil end
+  if Code.folder_default_requires_new_parent(user_text) then
+    local code_only, folder_view = _track_state_views(lua_code)
+    local creates_tracks = code_only:find("reaper%.InsertTrackAtIndex%s*%(")
+      or code_only:find("reaper%.InsertTrackInProject%s*%(")
+      or code_only:find("reaper%.Main_OnCommand%s*%(%s*40001%s*,")
+      or code_only:find("reaper%.Main_OnCommandEx%s*%(%s*40001%s*,")
+      or code_only:find("reaper%.Main_OnCommand%s*%(%s*40702%s*,")
+      or code_only:find("reaper%.Main_OnCommandEx%s*%(%s*40702%s*,")
+    if not creates_tracks then
+      for args in folder_view:gmatch("reaper%.SetMediaTrackInfo_Value%s*(%b())") do
+        if args:find("[\"']I_FOLDERDEPTH[\"']%s*,%s*1%s*%)$") then
+          return {{reason = "default_parent_required"}}
+        end
+      end
+    end
+  end
+end
+
 function Code.find_folder_child_boundary_misuse(lua_code, user_text)
   if type(lua_code) ~= "string" or lua_code == "" then return nil end
   if not lua_code:find("I_FOLDERDEPTH", 1, true) then return nil end
@@ -11179,6 +12212,7 @@ end
 
 function Code.repair_folder_child_boundary_misuse(lua_code, user_text)
   local findings = Code.find_folder_child_boundary_misuse(lua_code, user_text)
+    or Code.find_default_folder_parent_misuse(lua_code, user_text)
   if not findings or #findings == 0 then return lua_code, false, nil end
   local f = findings[1]
   if f.reason ~= "outside_track_closes_folder" then
@@ -11465,6 +12499,229 @@ end
 --
 -- Returns a sorted list of `{name, line}` entries (line is approximate),
 -- or nil if every AddByName result is properly checked.
+-- Direct-call order guard. Track pending deletions across sequential blocks,
+-- but keep mutually exclusive branches and separate functions independent.
+-- Aliases and dynamic target expressions are outside this bounded check.
+function Code.find_fx_delete_before_create(lua_code)
+  if type(lua_code) ~= "string" or lua_code == "" then return nil end
+  local source = _lua_code_only_preserving_offsets(lua_code)
+  local tokens = Code.tokenize_lua(source)
+  local group_depth = 0
+  local frames = { { kind = "root", states = {}, depth = 0, terminators = { error = true } } }
+  local findings, pos, previous, statement_start = {}, 1, nil, true
+  local function copy(states)
+    local out = {}
+    for key, state in pairs(states) do
+      out[key] = { deleted = state.deleted, credits = state.credits or 0 }
+    end
+    return out
+  end
+  local function merge(frame, parent)
+    if frame.stopped or frame.kind == "function" then return end
+    for key, state in pairs(frame.states) do
+      if not (frame.bound and frame.bound[key]) and not (frame.locals and frame.locals[key]) then
+      local outer = parent.states[key] or { credits = 0 }
+      parent.states[key] = outer
+      if state.deleted then outer.deleted = state.deleted end
+      -- Conditional creation cannot certify a later deletion. Consumption of
+      -- an earlier creation can occur on this path, so retain the lower credit.
+      if frame.kind ~= "loop" then
+        outer.credits = math.min(outer.credits or 0, state.credits or 0)
+      elseif state.deleted then outer.credits = 0 end
+      end
+    end
+  end
+  for _, token in ipairs(tokens) do
+    local word = token.text or ""
+    local frame = frames[#frames]
+    if token.type == "ws" then
+      if word:find("\n", 1, true) then statement_start = true end
+    else
+      if token.type == "kw" then
+        if word == "for" or word == "while" then
+          frame.loop_header = pos
+        elseif word == "function" or word == "if" or word == "do"
+            or word == "repeat" then
+          local initial = word == "function" and {} or copy(frame.states)
+          local is_loop = word == "repeat" or (word == "do" and frame.loop_header)
+          local bound = {}
+          if is_loop then
+            for _, state in pairs(initial) do state.credits = 0 end
+            if frame.loop_header then
+              local header = source:sub(frame.loop_header, pos - 1)
+              local names = header:match("^for%s+([%w_,%s]+)%s+in%f[^%w_]")
+                or header:match("^for%s+([%a_][%w_]*)%s*=") or ""
+              for name in names:gmatch("[%a_][%w_]*") do
+                for _, family in ipairs({ "Track", "Take" }) do
+                  local key = family .. ":" .. name
+                  bound[key], initial[key] = true, nil
+                end
+              end
+              frame.loop_header = nil
+            end
+          end
+          local terminators = {}
+          for name, value in pairs(frame.terminators) do terminators[name] = value end
+          if word == "function" then
+            local params = source:match("^function%s*[%w_%.:]*%s*(%b())", pos) or ""
+            for name in params:gmatch("[%a_][%w_]*") do terminators[name] = nil end
+          end
+          frames[#frames + 1] = {
+            kind = is_loop and "loop" or word,
+            states = copy(initial), initial = initial, exits = {}, depth = group_depth,
+            bound = bound, adds = {}, terminators = terminators,
+            name = word == "function" and previous == "local"
+              and source:match("^function%s+([%a_][%w_]*)%s*%(", pos) or nil,
+          }
+        elseif word == "else" or word == "elseif" then
+          frame.exits[#frame.exits + 1] = {
+            states = frame.states, stopped = frame.stopped,
+          }
+          frame.states, frame.stopped = copy(frame.initial), false
+        elseif word == "end" or word == "until" then
+          if #frames > 1 then
+            table.remove(frames)
+            local parent = frames[#frames]
+            if frame.kind == "function" and frame.name then
+              parent.terminators[frame.name] = frame.stop_reason == "throw"
+                and not frame.may_return and not frame.has_goto or nil
+            elseif frame.kind == "loop" and not frame.stopped then
+              -- A second iteration can create after an unmatched deletion in
+              -- the first. No inherited credit can cover repeated removals.
+              for key, state in pairs(frame.states) do
+                local add = frame.adds[key]
+                if state.deleted and add and not frame.bound[key]
+                    and not (frame.rebound and frame.rebound[key]) then
+                  findings[#findings + 1] = {
+                    line = state.deleted, target = add.target, family = add.family,
+                    add_line = add.line,
+                  }
+                end
+              end
+            end
+            merge(frame, parent)
+            if frame.kind ~= "function" then
+              for _, branch in ipairs(frame.exits) do merge(branch, parent) end
+            end
+          end
+        elseif word == "return" or word == "goto" then
+          for index = #frames, 1, -1 do
+            if frames[index].kind == "function" then
+              if word == "return" then frames[index].may_return = true
+              else frames[index].has_goto = true end
+              break
+            end
+          end
+          if word == "return" then frame.stopped, frame.stop_reason = true, "return" end
+        end
+      elseif frame.terminators[word] and statement_start and group_depth == frame.depth
+          and source:match("^[%a_][%w_]*%s*%(", pos) then
+        frame.stopped, frame.stop_reason = true, "throw"
+      elseif token.type == "id" or word == "reaper" then
+        -- A field name and a table-constructor key are not target assignments.
+        -- Only direct statement assignments (including local declarations) reset.
+        if (statement_start or previous == "local") and group_depth == frame.depth
+            and previous ~= "." then
+          local assigned = source:match("^([%a_][%w_]*)%s*=[^=]", pos)
+          if assigned then
+            frame.terminators[assigned] = nil
+            if previous ~= "local" then
+              -- A conditional write can replace the same lexical helper.
+              -- Invalidate its proof in the enclosing function as well.
+              for index = #frames - 1, 1, -1 do
+                frames[index].terminators[assigned] = nil
+                if frames[index].kind == "function" then break end
+              end
+            end
+            local assigned_rhs = source:match("^[%a_][%w_]*%s*=%s*([^;\r\n]+)", pos) or ""
+            if previous == "local" and assigned_rhs:match("^%s*(.-)%s*$") ~= assigned then
+              frame.locals = frame.locals or {}
+              frame.locals["Track:" .. assigned] = true
+              frame.locals["Take:" .. assigned] = true
+            end
+            if frame.kind == "loop" then
+              local depends_on_loop = false
+              for key in pairs(frame.bound) do
+                local name = key:match("^[^:]+:(.+)$")
+                local at = assigned_rhs:find("%f[%w_]" .. name .. "%f[^%w_]")
+                if at and not assigned_rhs:sub(1, at - 1):match("[%.:]%s*$") then
+                  depends_on_loop = true
+                  break
+                end
+              end
+              -- Re-fetching a fixed track and self-assignment retain the target.
+              if depends_on_loop and assigned_rhs:match("^%s*(.-)%s*$") ~= assigned then
+                frame.rebound = frame.rebound or {}
+                frame.rebound["Track:" .. assigned] = true
+                frame.rebound["Take:" .. assigned] = true
+              end
+            end
+            if assigned_rhs:match("^%s*(.-)%s*$") ~= assigned then
+              frame.states["Track:" .. assigned] = nil
+              frame.states["Take:" .. assigned] = nil
+            end
+          end
+        end
+        if word == "reaper" then
+          local family, operation, open = source:match(
+            "^reaper%s*%.%s*(%a+)FX_(%a+)%s*()%(", pos)
+          if (family == "Track" or family == "Take")
+              and (operation == "Delete" or operation == "AddByName") then
+            local args = Code._parse_lua_call_args(source, open)
+            local target = args and args[1] and args[1]:gsub("%s+", "")
+            if target and target:match("^[%a_][%w_%.]*$") then
+              local key = family .. ":" .. target
+              local state = frame.states[key] or { credits = 0 }
+              frame.states[key] = state
+              if operation == "Delete" then
+                if state.credits > 0 then
+                  state.credits = state.credits - 1
+                else
+                  state.deleted = Code._lua_line_for_pos(source, pos)
+                end
+              else
+                local expr = args[family == "Track" and 4 or 3] or ""
+                local instantiate = tonumber(expr)
+                if instantiate ~= 0 then
+                  for index = #frames, 1, -1 do
+                    local enclosing = frames[index]
+                    if enclosing.kind == "function" then break end
+                    if enclosing.kind == "loop" then
+                      enclosing.adds[key] = { target = target, family = family,
+                        line = Code._lua_line_for_pos(source, pos) }
+                    end
+                  end
+                end
+                if instantiate ~= 0 and state.deleted then
+                  findings[#findings + 1] = {
+                    line = state.deleted, target = target, family = family,
+                    add_line = Code._lua_line_for_pos(source, pos),
+                  }
+                  state.deleted = nil
+                end
+                -- REAPER's positional insert uses -1000 minus an FX index.
+                -- Arbitrary unary-minus arithmetic is not a creation proof.
+                if (instantiate and instantiate < 0)
+                    or expr:match("^%s*%-1000%s*%-%s*[%a_][%w_]*%s*$") then
+                  state.credits = state.credits + 1
+                end
+              end
+            end
+          end
+        end
+      end
+      if word == "(" or word == "[" or word == "{" then group_depth = group_depth + 1
+      elseif word == ")" or word == "]" or word == "}" then group_depth = group_depth - 1 end
+      statement_start = word == ";" or word == "then" or word == "do"
+        or word == "else" or word == "end"
+        or (word == ")" and group_depth == frames[#frames].depth)
+      previous = word
+    end
+    pos = pos + #word
+  end
+  return #findings > 0 and findings or nil
+end
+
 function Code.find_unchecked_addbyname_results(lua_code)
   if not lua_code or lua_code == "" then return nil end
   local stripped = _lua_code_only_preserving_offsets(lua_code)
@@ -11663,8 +12920,42 @@ function Code.find_unchecked_addbyname_results(lua_code)
     message = (message or ""):gsub("%s+", "")
     if message ~= "" and not message:match("^[%a_][%w_]*$") then return false end
     condition = condition:gsub("%s+", "")
+    while condition:match("^%b()$") do condition = condition:sub(2, -2) end
     return condition == name .. ">=0" or condition == "0<=" .. name
       or condition == name .. ">-1" or condition == "-1<" .. name
+  end
+  local function _immediate_success_branch(call_end, name)
+    local call = stripped:sub(call_end):match("^(%b())")
+    if not call then return false end
+    local tail = stripped:sub(call_end + #call)
+    local condition, body_pos = tail:match("^[%s;]*if%s+(.-)%s+then%s*()")
+    if not condition or not _assert_condition_stops_failure("(" .. condition .. ")", name) then return false end
+    local depth, branch_end, block_end, offset = 1, nil, nil, body_pos
+    for _, token in ipairs(Code.tokenize_lua(tail:sub(body_pos))) do
+      local word = token.text
+      if token.type == "kw" then
+        if word == "if" or word == "function" or word == "do" or word == "repeat" then depth = depth + 1
+        elseif word == "end" or word == "until" then
+          depth = depth - 1
+          if depth == 0 then block_end = offset; break end
+        elseif (word == "else" or word == "elseif") and depth == 1 and not branch_end then
+          branch_end = offset
+        end
+      end
+      offset = offset + #word
+    end
+    if not block_end then return false end
+    branch_end = branch_end or block_end
+    local body = tail:sub(body_pos, branch_end - 1)
+    -- Skipping a failed insertion is allowed. All dependent uses must stay in
+    -- the successful branch, with the result unchanged there.
+    if body:find(_var_pat(name) .. "%s*=[^=]")
+        or body:find(_var_pat(name) .. "%s*,%s*[%w_,%s]+=[^=]")
+        or body:find("local%s+" .. _var_pat(name)) then return false end
+    for names in body:gmatch("for%s+([%w_,%s]+)%s+in%f[^%w_]") do
+      if names:find(_var_pat(name)) then return false end
+    end
+    return not tail:sub(branch_end):find(_var_pat(name))
   end
   local function _immediate_assert_guard(call_end, name)
     -- Only add proofs for a straight-line guard immediately after this call.
@@ -11729,11 +13020,17 @@ function Code.find_unchecked_addbyname_results(lua_code)
           lhs = lhs,
         }
       elseif not name then
-        violations[#violations+1] = {
-          name = "(unassigned result)",
-          line = _line_for_pos(s),
-          unassigned = true,
-        }
+        -- A helper may return the result for its caller to check. The local
+        -- scanner cannot establish whether that caller handles failure.
+        local forwarded = _scope_for_pos(s) > 0
+          and stripped:sub(1, s - 1):match("%f[%w_]return%s*$")
+        if not forwarded then
+          violations[#violations+1] = {
+            name = "(unassigned result)",
+            line = _line_for_pos(s),
+            unassigned = true,
+          }
+        end
       else
         -- Limit each result check to that assignment's lifetime. Reusing the
         -- same variable for a later AddByName call must not inherit an earlier
@@ -11750,7 +13047,11 @@ function Code.find_unchecked_addbyname_results(lua_code)
           or hay:find(nid .. name .. "%s*==%s*%-%s*1" .. end_)  -- NAME == -1
           or hay:find(nid .. name .. "%s*<=%s*%-%s*1" .. end_)  -- NAME <= -1
           or hay:find(nid .. name .. "%s*<%s*%-%s*1"  .. end_)  -- NAME < -1
+          or hay:find("%f[%w_.]0%s*>%s*" .. _var_pat(name))
+          or hay:find("%-%s*1%s*==%s*" .. _var_pat(name))
+          or hay:find("%-%s*1%s*>=%s*" .. _var_pat(name))
         if not checked and not _immediate_assert_guard(e, name)
+           and not _immediate_success_branch(e, name)
            and not _success_guard_has_failure_else(line, name, last_line,
              scan_lines) then
           violations[#violations+1] = { name = name, line = line }
@@ -14966,8 +16267,10 @@ function Code.find_fx_addbyname_instantiate_misuse(lua_code, user_text)
         or Code.prompt_requests_named_param_value(prompt))
       and not Code.prompt_requests_fx_insertion(prompt))
   if edits_existing_fx then
+    local explicit_inserts = Code.prompt_explicit_stock_inserts(prompt)
     for _, call in ipairs(calls) do
-      if call.instantiate < 0 then
+      if call.instantiate < 0
+          and not explicit_inserts[Code.fx_identifier_identity(call.name)] then
         add("existing_fx_forced_new_instance", call,
           call.api .. " used negative instantiate while modifying existing "
             .. call.display_name .. "; negative always creates a duplicate")
@@ -15027,6 +16330,49 @@ function Code.prompt_targets_existing_fx(text)
     or lo:find("%f[%w]dial%f[%W]") ~= nil
     or lo:find("%f[%w]shape%f[%W]") ~= nil
     or lo:find("%f[%w]clean%s+up%f[%W]") ~= nil
+end
+
+-- Explicit stock insertions are scoped by effect identity. A request can add
+-- one effect while editing another, so it cannot exempt every AddByName call.
+function Code.prompt_explicit_stock_inserts(text)
+  local lo = Code._localized_action_intent_text(tostring(text or ""))
+  -- A condition anywhere in the request cannot authorize this unconditional
+  -- forced-insert exception. Do not infer its scope from punctuation.
+  if lo:find("%f[%w]if%f[%W]") or lo:find("%f[%w]unless%f[%W]")
+      or lo:find("%f[%w]when%f[%W]")
+      or lo:find("%f[%w]in%s+case%f[%W]") then return {} end
+  -- Decimal points in audio values do not end a sentence.
+  lo = lo:gsub("%.(%d)", ":%1")
+  local inserts = {}
+  local stock_names = {reaeq=true, reacomp=true, readelay=true, reaverb=true,
+    reaverbate=true, reagate=true, realimit=true, reaxcomp=true, reapitch=true,
+    reatune=true, reafir=true}
+  -- Load and put also describe preset and bypass edits. Only unambiguous
+  -- insertion verbs can relax the existing-instance guard.
+  for _, verb in ipairs({"add", "insert"}) do
+    for position, tail in lo:gmatch("()%f[%w]" .. verb .. "%s+([^%.%!%?%;,\n]+)") do
+      local prefix = lo:sub(1, position - 1):match("[^%.%!%?\n]*$") or ""
+      prefix = prefix:gsub(utf8.char(0x2019), "'")
+      local negated = prefix:find("%f[%w]not%f[%W]")
+        or prefix:find("%f[%w]don'?t%f[%W]")
+        or prefix:find("n't%f[%W]")
+        or prefix:find("%f[%w]cannot%f[%W]")
+        or prefix:find("%f[%w]never%f[%W]")
+        or prefix:find("%f[%w]without%f[%W]")
+        or prefix:find("%f[%w]no%f[%W]")
+        or prefix:find("%f[%w]rather%s+than%f[%W]")
+        or prefix:find("%f[%w]instead%s+of%f[%W]")
+        or prefix:find("%f[%w]avoid%f[%W]")
+        or prefix:find("%f[%w]skip%f[%W]")
+      tail = tail:gsub("^a%s+", ""):gsub("^an%s+", "")
+        :gsub("^the%s+", ""):gsub("^new%s+", ""):gsub("^another%s+", "")
+      local name = tail:match("^['\"]?([%w_]+)")
+      if not negated and stock_names[name] then
+        inserts[name] = true
+      end
+    end
+  end
+  return inserts
 end
 
 -- True when the prompt explicitly requests a new FX insertion. Keep this
@@ -16230,6 +17576,7 @@ function Code.find_missing_fx_display_readback(lua_code, user_text)
       or Code.prompt_has_param_write_intent(prompt)
       or next((Code.plugin_parameter_targets(prompt))) ~= nil) then return nil end
   local code_only = _lua_code_only_preserving_offsets(lua_code)
+  local advisory
   for _, scope in ipairs({"TrackFX", "TakeFX"}) do
     local pos = code_only:find("reaper%." .. scope .. "_SetParamNormalized%s*%(")
       or code_only:find("reaper%." .. scope .. "_SetParam%s*%(")
@@ -16239,16 +17586,17 @@ function Code.find_missing_fx_display_readback(lua_code, user_text)
         detail="Candidate formatting is not verified for this installed plug-in. Use actual GetFormattedParamValue after bounded trial writes, restore originals on failure, and verify every requested display target."}
     end
     if pos and not code_only:find("reaper%." .. scope .. "_GetFormattedParamValue%s*%(") then
-      return {kind="missing_requested_fx_display_readback",
-        line=Code._lua_line_for_pos(code_only, pos), review_only=false,
-        detail="Numeric plug-in settings need GetFormattedParamValue readback. Do not guess normalized values. Use a verified conversion or a bounded setter/readback search while stopped, restore originals on failure, and verify every requested display target."}
+      advisory = advisory or {kind="missing_requested_fx_display_readback",
+        line=Code._lua_line_for_pos(code_only, pos), advisory=true,
+        detail="No displayed-value readback was detected. A verified conversion or pinned parameter value may still be correct; missing verification alone does not block execution."}
     end
     if pos and not code_only:find("%f[%w]tonumber%s*%(") then
-      return {kind="missing_requested_fx_display_readback",
-        line=Code._lua_line_for_pos(code_only, pos), review_only=false,
-        detail="Numeric plug-in readback is present but is not parsed for comparison. Displaying a value is not verification. Parse every requested numeric display, compare it with the target, and restore requested originals on mismatch before reporting success."}
+      advisory = advisory or {kind="missing_requested_fx_display_readback",
+        line=Code._lua_line_for_pos(code_only, pos), advisory=true,
+        detail="Displayed-value readback has no detected numeric parser. Equivalent checks or verified parameter mappings may still be correct; this does not block execution."}
     end
   end
+  return advisory
 end
 
 function Code.find_fx_normalized_literal_out_of_range(lua_code)
@@ -16795,6 +18143,48 @@ function Code.find_unrequested_track_deletion(lua_code, user_text)
     return {{line = 1, reason = "Lua tokenizer unavailable for deletion validation"}}
   end
   statements = normalize_track_api_aliases(statements)
+  do
+    -- A leading local project-zero constant is equivalent to literal zero
+    -- only while every later use is an API argument. Reject all other uses,
+    -- including bindings hidden in helpers that may execute out of order.
+    local project_name = statements[1] and statements[1].text:match(
+      "^local%s+([%a_][%w_]*)%s*=%s*0%s*$")
+    if project_name then
+      local tokens = {}
+      for _, token in ipairs(Code.tokenize_lua(lua_code)) do
+        if token.type ~= "ws" and token.type ~= "com" then
+          tokens[#tokens + 1] = token
+        end
+      end
+      local function token_text(index)
+        return tokens[index] and tokens[index].text
+      end
+      local immutable = token_text(1) == "local" and token_text(2) == project_name
+      for index = 3, #tokens do
+        if tokens[index].type ~= "str" and token_text(index) == project_name then
+          local api = token_text(index - 2)
+          if token_text(index - 1) ~= "(" or not api
+              or not api:match("^[%a_][%w_]*$")
+              or token_text(index - 3) ~= "."
+              or token_text(index - 4) ~= "reaper"
+              or token_text(index - 5) == "function"
+              or (token_text(index + 1) ~= "," and token_text(index + 1) ~= ")") then
+            immutable = false
+            break
+          end
+        end
+      end
+      if immutable then
+        for _, statement in ipairs(statements) do
+          for _, api in ipairs({"CountTracks", "GetTrack", "InsertTrackInProject"}) do
+            statement.text = statement.text:gsub(
+              "(%f[%w_]reaper%." .. api .. "%s*%(%s*)" .. project_name
+                .. "(%s*[,%)])", "%10%2")
+          end
+        end
+      end
+    end
+  end
   local prompt = normalize_deletion_prompt(user_text)
   local requested_track_cut = prompt:find("%f[%w_]cut%s+tracks%f[^%w_]")
     or prompt:find("%f[%w_]cut%s+the%s+tracks%f[^%w_]")
@@ -16986,7 +18376,9 @@ function Code.find_unrequested_track_deletion(lua_code, user_text)
     if empty_collection then created_track_collections[empty_collection] = true end
 
     local counted_index = line:match(
-      "local%s+([%a_][%w_]*)%s*=%s*reaper%.CountTracks%s*%(%s*0%s*%)")
+      "^%s*local%s+([%a_][%w_]*)%s*=%s*reaper%.CountTracks%s*%(%s*0%s*%)%s*$")
+      or line:match(
+        "^%s*([%a_][%w_]*)%s*=%s*reaper%.CountTracks%s*%(%s*0%s*%)%s*$")
     if counted_index then
       pending_new_indices[counted_index] = {
         counted_serial = track_structure_serial,
@@ -17064,6 +18456,23 @@ function Code.find_unrequested_track_deletion(lua_code, user_text)
     -- unknown helper mutation, or an unproven write contaminates the list and
     -- keeps DeleteTrack blocked. Common read-only iteration and storage of a
     -- proven-new track remain allowed.
+    local assignment_lhs
+    local assignment_depth = 0
+    -- String contents were removed by track_deletion_statements. Locate a
+    -- top-level assignment, excluding comparisons and call/index arguments.
+    for pos = 1, #line do
+      local char = line:sub(pos, pos)
+      if char == "(" or char == "[" or char == "{" then
+        assignment_depth = assignment_depth + 1
+      elseif char == ")" or char == "]" or char == "}" then
+        assignment_depth = assignment_depth - 1
+      elseif char == "=" and assignment_depth == 0
+          and not line:sub(pos - 1, pos - 1):find("[=<>~]")
+          and line:sub(pos + 1, pos + 1) ~= "=" then
+        assignment_lhs = line:sub(1, pos - 1)
+        break
+      end
+    end
     for collection in pairs(created_track_collections) do
       if line:match("^%s*local%s+[%a_][%w_]*%s*=%s*" .. collection .. "%s*$")
           or line:match("^%s*[%a_][%w_]*%s*=%s*" .. collection .. "%s*$")
@@ -17078,9 +18487,11 @@ function Code.find_unrequested_track_deletion(lua_code, user_text)
         .. "%s*%[[^%]]+%]%s*=%s*%(*%s*([%a_][%w_]*)%s*%)*%s*$")
         or line:match("^%s*" .. collection
           .. "%s*%.[%a_][%w_]*%s*=%s*%(*%s*([%a_][%w_]*)%s*%)*%s*$")
-      local has_collection_write = line:find(collection
-        .. "%s*%[[^%]]+%]%s*[,=]")
-        or line:find(collection .. "%s*%.[%a_][%w_]*%s*[,=]")
+      -- Any left-hand member can write, including later multi-assignment
+      -- targets. A member passed to a function is only a read of the list.
+      local has_collection_write = assignment_lhs and
+        (assignment_lhs:find("^%s*" .. collection .. "%s*[%.%[]")
+          or assignment_lhs:find(",%s*" .. collection .. "%s*[%.%[]"))
       if has_collection_write and created_track_vars[write_rhs] ~= true then
         created_track_collections[collection] = false
       end
@@ -18267,22 +19678,12 @@ end
 -- Running") that the user must explicitly accept. Auto-run is also blocked.
 -- This is a hard gate, not an advisory label.
 --
--- Patterns are intentionally broad (matching "os.remove" anywhere in the
--- string, including inside comments or strings) to minimize false negatives.
--- A few false positives are acceptable for a safety feature.
--- RISKY_PATTERNS is hoisted out of Code.scan_risky into this do-block so it
--- isn't reallocated on every call. scan_risky runs from the render hot path
--- (once per visible Lua code block per frame), so the table allocation +
--- field assignments were measurable on long conversations.
---
--- Each entry is a list of patterns that all flag the same risk label.
--- Patterns cover both dot-notation (os.remove) and string-indexed access
--- (os["remove"], os['remove'], _G.os.remove) so the model cannot bypass the
--- warning by simply switching syntax. Catches the obvious bypass attempts;
--- determined obfuscation (loadstring with hex-encoded strings, etc.) is
--- still possible but at that point the model is actively trying to evade
--- the user's safety check, which is well outside our threat model -- the
--- user is opting in to running generated code in the first place.
+-- Comments and ordinary string values are inert. Only plain literal keys on
+-- the reaper receiver regain key semantics in the offset-preserving projection.
+-- Unresolved reaper indexes require confirmation. Receiver aliases remain a
+-- lexical detection limit; independent sandbox restrictions still apply.
+-- The pattern table and bounded result cache avoid render-loop allocations.
+
 do
   -- Hoisted into the do-block so the render loop does not allocate this table
   -- every frame for every visible Lua artifact.
@@ -18327,39 +19728,43 @@ do
       -- touching os.execute or io.popen, so they need explicit coverage in
       -- the scanner -- otherwise a malicious or careless plugin call could
       -- run arbitrary commands while the auto-run gate stays silent.
-      "reaper%.ExecProcess",
-      "reaper%.CF_ShellExecute",
-      "reaper%.BR_Win32_ShellExecute",
-      'reaper%s*%[%s*["\']ExecProcess["\']%s*%]',
-      'reaper%s*%[%s*["\']CF_ShellExecute["\']%s*%]',
-      'reaper%s*%[%s*["\']BR_Win32_ShellExecute["\']%s*%]',
+      "%f[%w_]reaper%s*%.%s*ExecProcess",
+      "%f[%w_]reaper%s*%.%s*CF_ShellExecute",
+      "%f[%w_]reaper%s*%.%s*BR_Win32_ShellExecute",
+      '%f[%w_]reaper%s*%[%s*["\']ExecProcess["\']%s*%]',
+      '%f[%w_]reaper%s*%[%s*["\']CF_ShellExecute["\']%s*%]',
+      '%f[%w_]reaper%s*%[%s*["\']BR_Win32_ShellExecute["\']%s*%]',
     }},
     { label = "destructive project/file API (review before running)", patterns = {
-      "reaper%.Main_SaveProject%s*%(",
-      "reaper%.Main_SaveProjectEx%s*%(",
-      "reaper%.Main_openProject%s*%(",
-      'reaper%s*%[%s*["\']Main_SaveProject["\']%s*%]%s*%(',
-      'reaper%s*%[%s*["\']Main_SaveProjectEx["\']%s*%]%s*%(',
-      'reaper%s*%[%s*["\']Main_openProject["\']%s*%]%s*%(',
+      "%f[%w_]reaper%s*%.%s*Main_SaveProject%s*%(",
+      "%f[%w_]reaper%s*%.%s*Main_SaveProjectEx%s*%(",
+      "%f[%w_]reaper%s*%.%s*Main_openProject%s*%(",
+      '%f[%w_]reaper%s*%[%s*["\']Main_SaveProject["\']%s*%]%s*%(',
+      '%f[%w_]reaper%s*%[%s*["\']Main_SaveProjectEx["\']%s*%]%s*%(',
+      '%f[%w_]reaper%s*%[%s*["\']Main_openProject["\']%s*%]%s*%(',
     }},
     { label = "global REAPER config mutation (review before running)", patterns = {
-      "reaper%.SNM_Set%a+ConfigVar%s*%(",
-      'reaper%s*%[%s*["\']SNM_Set%a+ConfigVar["\']%s*%]%s*%(',
+      "%f[%w_]reaper%s*%.%s*set_config_var_string%f[^%w_]",
+      '%f[%w_]reaper%s*%[%s*["\']set_config_var_string["\']%s*%]',
+      "%f[%w_]reaper%s*%.%s*SNM_Set%a+ConfigVarEx%f[^%w_]",
+      '%f[%w_]reaper%s*%[%s*["\']SNM_Set%a+ConfigVarEx["\']%s*%]',
+      "%f[%w_]reaper%s*%.%s*SNM_Set%a+ConfigVar%f[^%w_]",
+      '%f[%w_]reaper%s*%[%s*["\']SNM_Set%a+ConfigVar["\']%s*%]',
     }},
     { label = "high-impact REAPER action (confirm before running)", patterns = {
-      "reaper%.Main_OnCommand[%w_]*%s*%(%s*1013%s*,",
-      "reaper%.Main_OnCommand[%w_]*%s*%(%s*40026%s*,",
-      "reaper%.Main_OnCommand[%w_]*%s*%(%s*40029%s*,",
-      "reaper%.Main_OnCommand[%w_]*%s*%(%s*40030%s*,",
-      "reaper%.Main_OnCommand[%w_]*%s*%(%s*40005%s*,",
-      "reaper%.Main_OnCommand[%w_]*%s*%(%s*40006%s*,",
-      "reaper%.Main_OnCommand[%w_]*%s*%(%s*40337%s*,",
-      "reaper%.Main_OnCommand[%w_]*%s*%(%s*40364%s*,",
-      "reaper%.Main_OnCommand[%w_]*%s*%(%s*40860%s*,",
+      "%f[%w_]reaper%s*%.%s*Main_OnCommand[%w_]*%s*%(%s*1013%s*,",
+      "%f[%w_]reaper%s*%.%s*Main_OnCommand[%w_]*%s*%(%s*40026%s*,",
+      "%f[%w_]reaper%s*%.%s*Main_OnCommand[%w_]*%s*%(%s*40029%s*,",
+      "%f[%w_]reaper%s*%.%s*Main_OnCommand[%w_]*%s*%(%s*40030%s*,",
+      "%f[%w_]reaper%s*%.%s*Main_OnCommand[%w_]*%s*%(%s*40005%s*,",
+      "%f[%w_]reaper%s*%.%s*Main_OnCommand[%w_]*%s*%(%s*40006%s*,",
+      "%f[%w_]reaper%s*%.%s*Main_OnCommand[%w_]*%s*%(%s*40337%s*,",
+      "%f[%w_]reaper%s*%.%s*Main_OnCommand[%w_]*%s*%(%s*40364%s*,",
+      "%f[%w_]reaper%s*%.%s*Main_OnCommand[%w_]*%s*%(%s*40860%s*,",
     }},
     { label = "dynamically resolved REAPER action (confirm exact action)", patterns = {
-      "reaper%.Main_OnCommand[%w_]*%s*%(%s*[%a_][%w_]*%s*,",
-      "reaper%.Main_OnCommand[%w_]*%s*%(%s*[%a_][%w_]*%s*[%[%.]",
+      "%f[%w_]reaper%s*%.%s*Main_OnCommand[%w_]*%s*%(%s*[%a_][%w_]*%s*,",
+      "%f[%w_]reaper%s*%.%s*Main_OnCommand[%w_]*%s*%(%s*[%a_][%w_]*%s*[%[%.]",
     }},
     { label = "extension-state write (review namespace before running)", match = function(code, searchable)
       code = tostring(code or "")
@@ -18375,7 +19780,7 @@ do
           if ch == "\\" then
             j = j + 2
           elseif ch == quote then
-            return code:sub(i + 1, j - 1), true
+            return code:sub(i + 1, j - 1), searchable:match("^%s*,", j + 1) ~= nil
           else
             j = j + 1
           end
@@ -18387,13 +19792,15 @@ do
         while true do
           local _s, e = searchable:find(pattern, pos)
           if not e then return false end
-          local ns, is_literal = literal_arg_after(e)
+          local call_end = searchable:match("^%s*()%(", e + 1)
+          if not call_end then return true end
+          local ns, is_literal = literal_arg_after(call_end)
           if not (is_literal and ns == "ReaAssist") then return true end
           pos = e + 1
         end
       end
-      return scan_call_pattern("reaper%.SetExtState%s*%(")
-        or scan_call_pattern('reaper%s*%[%s*["\']SetExtState["\']%s*%]%s*%(')
+      return scan_call_pattern("%f[%w_]reaper%s*%.%s*SetExtState%f[^%w_]")
+        or scan_call_pattern('%f[%w_]reaper%s*%[%s*["\']SetExtState["\']%s*%]')
     end},
     { label = "require (loads external modules)", patterns = {
       "%f[%w_]require%s*%(",
@@ -18432,11 +19839,80 @@ do
     end
   end
 
+  -- Restore only exact short-string keys. Every replacement has the same byte
+  -- length so namespace reads continue to address the original source.
+  local function risky_search_projection(code)
+    local strings = {}
+    local plain = lua_blank_comments_and_strings(code, function(a, b, short)
+      strings[a] = { finish = b, short = short }
+    end)
+    local lexical = plain:gsub("() ", function(pos)
+      return strings[pos] and "?" or " "
+    end)
+    -- Environment tokens expose the sandbox table even through aliases.
+    local patches, unresolved, pos = {},
+      plain:find("%f[%w_]_ENV%f[^%w_]") ~= nil, 1
+    while true do
+      local a, b = plain:find("%f[%w_]reaper%f[^%w_]", pos)
+      if not a then break end
+      local previous_pos = a - 1
+      while previous_pos > 0 and lexical:sub(previous_pos, previous_pos):match("%s") do
+        previous_pos = previous_pos - 1
+      end
+      local previous = lexical:sub(previous_pos, previous_pos)
+      local member_dot = previous == "." and lexical:sub(previous_pos - 1, previous_pos - 1) ~= "."
+      local env_receiver = false
+      if member_dot then
+        local q = previous_pos - 1
+        while q > 0 and lexical:sub(q, q):match("%s") do q = q - 1 end
+        local last = q
+        while q > 0 and lexical:sub(q, q):match("[%w_]") do q = q - 1 end
+        local qualifier = lexical:sub(q + 1, last)
+        while q > 0 and lexical:sub(q, q):match("%s") do q = q - 1 end
+        local before = lexical:sub(q, q)
+        env_receiver = qualifier == "_ENV" and before ~= ":"
+          and (before ~= "." or lexical:sub(q - 1, q - 1) == ".")
+      end
+      -- A double colon is a label delimiter, not a member receiver.
+      if (member_dot and not env_receiver)
+          or (previous == ":" and lexical:sub(previous_pos - 1, previous_pos - 1) ~= ":") then
+        patches[#patches + 1] = { a, b, string.rep(" ", b - a + 1) }
+      else
+        local index = lexical:match("^%s*()%[", b + 1)
+        if index then
+          local key_start = lexical:match("^%s*()", index + 1)
+          local span = strings[key_start]
+          local literal = span and span.short and code:sub(key_start, span.finish)
+          local key = literal and (literal:match('^"([%a_][%w_]*)"$')
+            or literal:match("^'([%a_][%w_]*)'$"))
+          if key and lexical:match("^%s*%]", span.finish + 1) then
+            patches[#patches + 1] = { key_start, span.finish, literal }
+          else
+            unresolved = true
+          end
+        elseif not lexical:match("^%s*%.%s*[%a_][%w_]*", b + 1) then
+          -- Assignment, argument, grouping, string-call and colon forms can
+          -- expose the receiver. Keep direct dotted/indexed access classified.
+          unresolved = true
+        end
+      end
+      pos = b + 1
+    end
+    local out, cursor = {}, 1
+    for _, patch in ipairs(patches) do
+      out[#out + 1] = plain:sub(cursor, patch[1] - 1)
+      out[#out + 1] = patch[3]
+      cursor = patch[2] + 1
+    end
+    out[#out + 1] = plain:sub(cursor)
+    return table.concat(out), unresolved
+  end
+
   function Code.scan_risky(code)
     if type(code) ~= "string" or code == "" then return nil end
     local cached = RISKY_SCAN_CACHE[code]
     if cached ~= nil then return cached or nil end
-    local searchable = lua_blank_comments_and_strings(code)
+    local searchable, unresolved_api = risky_search_projection(code)
     local native_searchable = searchable
     if code:find("Main_OnCommand", 1, true) then
       local native_lines = {}
@@ -18459,6 +19935,9 @@ do
         .. "\nreaper.Main_OnCommand(__unresolved_action, 0)" end
     end
     local found = {}
+    if unresolved_api then
+      found[#found + 1] = "unresolved REAPER API access (review exact operation before running)"
+    end
     for _, entry in ipairs(RISKY_PATTERNS) do
       if entry.match then
         if entry.match(code, searchable) then
@@ -18482,29 +19961,6 @@ do
     end
     risky_cache_store(code, result)
     return result
-  end
-
-  function Code.prompt_requests_jsfx_track_companion(user_text)
-    local s = tostring(user_text or ""):lower()
-    if s == "" then return false end
-    if not (s:find("jsfx", 1, true)
-        or s:find("reajs", 1, true)
-        or s:find("eel2", 1, true)) then
-      return false
-    end
-    local track_word = "%f[%w]tracks?%f[%W]"
-    if not s:find(track_word) then return false end
-    if s:find("add%s+.-jsfx%s+.-" .. track_word)
-        or s:find("put%s+.-jsfx%s+.-" .. track_word)
-        or s:find("place%s+.-jsfx%s+.-" .. track_word)
-        or s:find("insert%s+.-jsfx%s+.-" .. track_word)
-        or s:find("load%s+.-jsfx%s+.-" .. track_word)
-        or s:find("apply%s+.-jsfx%s+.-" .. track_word)
-        or s:find("create%s+.-" .. track_word .. "%s+.-jsfx")
-        or s:find("create%s+.-jsfx%s+.-" .. track_word) then
-      return true
-    end
-    return false
   end
 
   function Code.find_jsfx_format_issue(response_text, extracted_jsfx)
@@ -18575,218 +20031,7 @@ do
     return nil
   end
 
-  function Code.rewrite_lua_companion_jsfx_refs(lua_code, jsfx_code, fx_name)
-    local code = tostring(lua_code or "")
-    local replacement = tostring(fx_name or "")
-    if code == "" or replacement == "" then return lua_code, false end
-    local changed = false
-    local function esc_pat(s)
-      return tostring(s or ""):gsub("[%(%)%.%%%+%-%*%?%[%]%^%$]", "%%%0")
-    end
-    local function rep()
-      return replacement
-    end
-    local refs = {}
-    if Code.derive_filename_jsfx then
-      local derived = Code.derive_filename_jsfx(jsfx_code or "")
-      if derived and derived ~= "" then
-        refs[#refs + 1] = "ReaAssist/" .. derived
-        local shorter = derived:gsub("^ReaAssist%s+", "")
-        if shorter ~= derived and shorter ~= "" then
-          refs[#refs + 1] = "ReaAssist/" .. shorter
-        end
-      end
-    end
-    for _, ref in ipairs(refs) do
-      local n
-      code, n = code:gsub(esc_pat(ref), rep)
-      if n and n > 0 then changed = true end
-      local without_ext = ref:gsub("%.jsfx$", "")
-      if (not n or n == 0) and without_ext ~= ref then
-        code, n = code:gsub(esc_pat(without_ext), rep)
-        if n and n > 0 then changed = true end
-      end
-    end
-    local out = {}
-    local normalized = code:gsub("\r\n", "\n"):gsub("\r", "\n")
-    local had_trailing_newline = normalized:sub(-1) == "\n"
-    for line in (normalized .. "\n"):gmatch("([^\n]*)\n") do
-      local patched = line
-      if patched:find(".jsfx", 1, true) then
-        local n
-        patched, n = patched:gsub(
-          "(%f[%w_]fx_file%f[^%w_]%s*=%s*)\"[^\"]+%.jsfx\"",
-          function(prefix)
-            return prefix .. "\"" .. replacement .. "\""
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub(
-          "(%f[%w_]fx_file%f[^%w_]%s*=%s*)'[^']+%.jsfx'",
-          function(prefix)
-            return prefix .. "'" .. replacement .. "'"
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub(
-          "(%f[%w_]jsfx_file%f[^%w_]%s*=%s*)\"[^\"]+%.jsfx\"",
-          function(prefix)
-            return prefix .. "\"" .. replacement .. "\""
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub(
-          "(%f[%w_]jsfx_file%f[^%w_]%s*=%s*)'[^']+%.jsfx'",
-          function(prefix)
-            return prefix .. "'" .. replacement .. "'"
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub(
-          "(%f[%w_]fxfile%f[^%w_]%s*=%s*)\"[^\"]+%.jsfx\"",
-          function(prefix)
-            return prefix .. "\"" .. replacement .. "\""
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub(
-          "(%f[%w_]fxfile%f[^%w_]%s*=%s*)'[^']+%.jsfx'",
-          function(prefix)
-            return prefix .. "'" .. replacement .. "'"
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub(
-          "(%f[%w_]jsfxfile%f[^%w_]%s*=%s*)\"[^\"]+%.jsfx\"",
-          function(prefix)
-            return prefix .. "\"" .. replacement .. "\""
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub(
-          "(%f[%w_]jsfxfile%f[^%w_]%s*=%s*)'[^']+%.jsfx'",
-          function(prefix)
-            return prefix .. "'" .. replacement .. "'"
-          end)
-        if n and n > 0 then changed = true end
-      end
-      if patched:find("ReaAssist/", 1, true) then
-        local n
-        patched, n = patched:gsub(
-          "(%f[%w_]fx_path%f[^%w_]%s*=%s*)\"ReaAssist/[^\"\n]+\"",
-          function(prefix)
-            return prefix .. "\"" .. replacement .. "\""
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub(
-          "(%f[%w_]fx_path%f[^%w_]%s*=%s*)'ReaAssist/[^'\n]+'",
-          function(prefix)
-            return prefix .. "'" .. replacement .. "'"
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub(
-          "(%f[%w_]jsfx_path%f[^%w_]%s*=%s*)\"ReaAssist/[^\"\n]+\"",
-          function(prefix)
-            return prefix .. "\"" .. replacement .. "\""
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub(
-          "(%f[%w_]jsfx_path%f[^%w_]%s*=%s*)'ReaAssist/[^'\n]+'",
-          function(prefix)
-            return prefix .. "'" .. replacement .. "'"
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub(
-          "(%f[%w_]fxpath%f[^%w_]%s*=%s*)\"ReaAssist/[^\"\n]+\"",
-          function(prefix)
-            return prefix .. "\"" .. replacement .. "\""
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub(
-          "(%f[%w_]fxpath%f[^%w_]%s*=%s*)'ReaAssist/[^'\n]+'",
-          function(prefix)
-            return prefix .. "'" .. replacement .. "'"
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub(
-          "(%f[%w_]jsfxpath%f[^%w_]%s*=%s*)\"ReaAssist/[^\"\n]+\"",
-          function(prefix)
-            return prefix .. "\"" .. replacement .. "\""
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub(
-          "(%f[%w_]jsfxpath%f[^%w_]%s*=%s*)'ReaAssist/[^'\n]+'",
-          function(prefix)
-            return prefix .. "'" .. replacement .. "'"
-          end)
-        if n and n > 0 then changed = true end
-      end
-      if patched:find("ReaAssist/", 1, true)
-          and patched:find(".jsfx", 1, true) then
-        local n
-        patched, n = patched:gsub('"ReaAssist/"%s*%.%.%s*"[^"]+%.jsfx"',
-          function()
-            return '"' .. replacement .. '"'
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub("'ReaAssist/'%s*%.%.%s*'[^']+%.jsfx'",
-          function()
-            return "'" .. replacement .. "'"
-          end)
-        if n and n > 0 then changed = true end
-      end
-      if patched:find("TrackFX_AddByName", 1, true)
-          and patched:find("ReaAssist/", 1, true)
-          and patched:find("..", 1, true) then
-        local n
-        patched, n = patched:gsub('"ReaAssist/"%s*%.%.%s*[%w_]+',
-          function()
-            return '"' .. replacement .. '"'
-          end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub("'ReaAssist/'%s*%.%.%s*[%w_]+",
-          function()
-            return "'" .. replacement .. "'"
-          end)
-        if n and n > 0 then changed = true end
-      end
-      if patched:find("TrackFX_AddByName", 1, true) then
-        local n
-        patched, n = patched:gsub('"ReaAssist/[^"]+%.jsfx"', function()
-          return '"' .. replacement .. '"'
-        end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub("'ReaAssist/[^']+%.jsfx'", function()
-          return "'" .. replacement .. "'"
-        end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub('"ReaAssist/[^"]+"', function()
-          return '"' .. replacement .. '"'
-        end)
-        if n and n > 0 then changed = true end
-        patched, n = patched:gsub("'ReaAssist/[^']+'", function()
-          return "'" .. replacement .. "'"
-        end)
-        if n and n > 0 then changed = true end
-      end
-      out[#out + 1] = patched
-    end
-    if #out > 0 and out[#out] == "" and not had_trailing_newline then
-      out[#out] = nil
-    end
-    local joined = table.concat(out, "\n")
-    if joined:find("%f[%w_]fxFile%f[^%w_]")
-        and joined:find("%f[%w_]jsfxFile%f[^%w_]")
-        and not joined:find("local%s+jsfxFile%s*=") then
-      local n
-      joined, n = joined:gsub("%f[%w_]jsfxFile%f[^%w_]", "fxFile")
-      if n and n > 0 then changed = true end
-    end
-    if joined:find("%f[%w_]fx_fullname%f[^%w_]")
-        and joined:find("%f[%w_]jsfx_fullname%f[^%w_]")
-        and not joined:find("local%s+jsfx_fullname%s*=") then
-      local n
-      joined, n = joined:gsub("%f[%w_]jsfx_fullname%f[^%w_]",
-        "fx_fullname")
-      if n and n > 0 then changed = true end
-    end
-    return joined, changed
-  end
-
-  function lua_blank_comments_and_strings(src)
+  function lua_blank_comments_and_strings(src, on_string)
     src = tostring(src or "")
     local n = #src
     if n == 0 then return "" end
@@ -18845,6 +20090,7 @@ do
             j = j + 1
           end
         end
+        if on_string then on_string(i, end_pos, true) end
         append_blank(i, end_pos)
         i = end_pos + 1
       elseif c == "[" then
@@ -18853,6 +20099,7 @@ do
           local close = "]" .. lb_eq .. "]"
           local close_pos = src:find(close, lb_start, true)
           local end_pos = close_pos and (close_pos + #close - 1) or n
+          if on_string then on_string(i, end_pos, false) end
           append_blank(i, end_pos)
           i = end_pos + 1
         else
@@ -19461,15 +20708,17 @@ end
 -- =============================================================================
 -- Code.safety_backup
 -- =============================================================================
--- Copies the current project file to a timestamped .rpp-bak file in the same
--- directory. Returns true on success, or false plus an error key on failure:
+-- Saves the captured project through Main_SaveProjectEx to a timestamped
+-- .rpp-bak file in the same directory. Returns true on success, or false plus
+-- an error key on failure:
 --   "unsaved"    - project has never been saved (no file on disk)
---   "read_error" - could not open the source file
+--   "read_error" - captured project or state counter is unavailable or unusable
 --   "write_error"- could not write the backup file
 --
 -- Every caller must use Code.safety_backup_can_proceed() below rather than
 -- maintaining its own error allowlist. A missing error means the backup was
--- created; "unchanged" means the existing diff-aware backup is still current.
+-- created; "unchanged" means the cached backup passed the same-project,
+-- filename, recorded-counter and readable nonempty file checks.
 -- Every named or future/unknown error is fail-closed.
 function Code.safety_backup_can_proceed(err)
   return err == nil or err == "unchanged"
@@ -19477,7 +20726,7 @@ end
 
 function Code.safety_backup()
   local BACKUP_MAX = 10  -- maximum safety backups to keep per project
-  local _, proj_path = reaper.EnumProjects(-1)
+  local project, proj_path = reaper.EnumProjects(-1)
   if not proj_path or proj_path == "" then
     return false, "unsaved"
   end
@@ -19491,12 +20740,32 @@ function Code.safety_backup()
     return false, "unsaved"
   end
 
-  -- Diff-aware: skip if the project state hasn't changed since our last backup.
-  -- GetProjectStateChangeCount increments on every change (fader moves, edits,
-  -- FX adds, etc.) regardless of whether the user has saved.
-  local cur_state = reaper.GetProjectStateChangeCount(0)
-  if S.last_backup_path and S.last_backup_state == cur_state then
-    return false, "unchanged"
+  if not project then return false, "read_error" end
+  -- Counter equality can miss unrecorded edits. It does not establish complete
+  -- current-state equality or qualify restoration of the saved project.
+  local cur_state = reaper.GetProjectStateChangeCount(project)
+  if type(cur_state) ~= "number" or cur_state ~= cur_state
+      or cur_state == math.huge or cur_state == -math.huge
+      or cur_state ~= math.floor(cur_state) then
+    return false, "read_error"
+  end
+  if type(S.last_backup_path) == "string" and S.last_backup_path ~= ""
+      and S.last_backup_project == project
+      and S.last_backup_project_path == proj_path
+      and S.last_backup_state == cur_state then
+    local probe, readable
+    local checked = pcall(function()
+      if not reaper.file_exists(S.last_backup_path) then return end
+      probe = io.open(S.last_backup_path, "rb")
+      if not probe then return end
+      local first = probe:read(1)
+      readable = type(first) == "string" and #first > 0
+    end)
+    if probe then
+      local closed, close_result = pcall(function() return probe:close() end)
+      if not closed or close_result ~= true then checked = false end
+    end
+    if checked and readable then return false, "unchanged" end
   end
 
   -- A wall-clock second alone can collide when two changed states are backed
@@ -19530,7 +20799,7 @@ function Code.safety_backup()
   -- Save current project state (including unsaved changes) directly to the
   -- backup path without touching the main .rpp. Options=0 means no template
   -- flags and no project-path reassignment.
-  reaper.Main_SaveProjectEx(0, backup_path, 0)
+  reaper.Main_SaveProjectEx(project, backup_path, 0)
 
   -- Main_SaveProjectEx returns nothing, so verify the backup landed on disk
   -- before claiming success. Without this, a permission error or full-disk
@@ -19545,9 +20814,11 @@ function Code.safety_backup()
   probe:close()
   if not first then return false, "write_error" end
 
-  -- Track last backup state for diff-aware skipping.
-  S.last_backup_path  = backup_path
-  S.last_backup_state = cur_state
+  -- Publish the verified path and captured identity with the PRE-SAVE counter.
+  -- If native save changes that counter, the next call naturally misses reuse.
+  S.last_backup_path, S.last_backup_project,
+    S.last_backup_project_path, S.last_backup_state =
+    backup_path, project, proj_path, cur_state
 
   -- Enforce backup cap: collect all SafetyBackup files, delete oldest if over limit.
   -- Escape Lua magic characters in the project name so names like "Mix-v1.2"
@@ -19748,6 +21019,7 @@ Code.AUTO_RUN_MANUAL_LUA_BLOCK_REASONS = {
 }
 
 Code.AUTO_RUN_MANUAL_LUA_REVIEW_REASONS = {
+  confirmation_pending = true,
   action_relevance_review = true,
   auto_run_disabled = true,
   backup_failed = true,
@@ -19881,6 +21153,30 @@ function Code.run_result_can_undo(run_result, project)
     and project_shape.status == "changed"
   local ordinary_change = run_result.observable_change_status == "changed"
     and not structural_only_change
+  local parameters = run_result.parameter_change_evidence
+  local changed_targets = type(parameters) == "table"
+    and parameters.changed_target_count or nil
+  local parameter_status = type(parameters) == "table" and parameters.status or nil
+  local parameter_signal = (tonumber(changed_targets) or 0) > 0
+    or run_result.parameter_change_status == "changed"
+    or run_result.parameter_change_status == "partially_changed"
+    or parameter_status == "changed" or parameter_status == "partially_changed"
+  local attributed_delta = tonumber(run_result.project_state_change_delta)
+  local independent_delta = attributed_delta ~= nil
+    and attributed_delta == attributed_delta
+    and math.abs(attributed_delta) < math.huge and attributed_delta ~= 0
+  local insert_evidence = run_result.fx_insert_failure_evidence
+  local independent_fx_shape = type(insert_evidence) == "table"
+    and insert_evidence.other_project_change_detected == true
+    and project_shape ~= nil and project_shape.status == "changed"
+  -- Failed parameter readbacks do not establish native Undo ownership.
+  -- Apply this restriction to old stored results as well as new producer output.
+  -- fx_insert_failure_evidence.other_project_change_detected can derive from
+  -- those readbacks. An accepted FX index can be reuse.
+  if run_result.run_status == "errored" and parameter_signal
+      and not independent_delta and not independent_fx_shape then
+    ordinary_change = false
+  end
   local flags_value = run_result.undo_target_flags
   local undo_flags = (type(flags_value) == "number"
       or type(flags_value) == "string")
@@ -19908,9 +21204,6 @@ function Code.run_result_can_undo(run_result, project)
     and undo_end_delta ~= nil
     and undo_end_delta > 0
     and undo_flags == -1
-  local parameters = run_result.parameter_change_evidence
-  local changed_targets = type(parameters) == "table"
-    and parameters.changed_target_count or nil
   -- Parameter readbacks can change before REAPER advances its project counter
   -- at Undo_EndBlock. Admit that evidence only with a completed full Undo block;
   -- the project, counter and label checks below still establish ownership.
@@ -20265,6 +21558,7 @@ function Code.parameter_change_evidence(writes)
     unchanged_target_count = 0,
     returned_to_initial_count = 0,
     unknown_target_count = 0,
+    unknown_write_target_count = 0,
     requested_value_match_count = 0,
     requested_value_mismatch_count = 0,
     requested_value_confirmed_mismatch_count = 0,
@@ -20296,87 +21590,108 @@ function Code.parameter_change_evidence(writes)
     if type(entry) == "table" then
       out.target_count = out.target_count + 1
       out.write_count = out.write_count + (tonumber(entry.write_count) or 0)
-      if entry.user_display_target then
-        if entry.user_display_match == true then
-          out.user_target_match_count = out.user_target_match_count + 1
-        elseif entry.user_display_match == false then
-          out.user_target_mismatch_count = out.user_target_mismatch_count + 1
-        else
+      if entry.pending_write then
+        -- The setter may have been issued, but its effect is unverified.
+        -- Ignore every derived value from this interrupted attempt.
+        out.unknown_target_count = out.unknown_target_count + 1
+        out.unknown_write_target_count = out.unknown_write_target_count + 1
+        if entry.user_display_target then
           out.user_target_unknown_count = out.user_target_unknown_count + 1
         end
-      end
-      local target_changed = false
-      if entry.value_domain == "preset" then
-        local initial_preset = preset_name(entry.initial_preset)
-        local final_preset = preset_name(entry.final_preset)
-        if final_preset == nil then
-          out.unknown_target_count = out.unknown_target_count + 1
-        elseif initial_preset ~= final_preset then
-          target_changed = true
-          out.changed_target_count = out.changed_target_count + 1
-        elseif entry.changed_during == true then
-          out.returned_to_initial_count = out.returned_to_initial_count + 1
-        else
-          out.unchanged_target_count = out.unchanged_target_count + 1
-        end
-        local requested_preset = preset_name(entry.requested_preset)
-        if requested_preset and final_preset then
-          if requested_preset == final_preset then
-            out.requested_value_match_count =
-              out.requested_value_match_count + 1
-          else
-            out.requested_value_mismatch_count =
-              out.requested_value_mismatch_count + 1
-            out.requested_value_confirmed_mismatch_count =
-              out.requested_value_confirmed_mismatch_count + 1
-          end
-        elseif entry.requested_preset_captured == true then
+        if entry.requested_preset_captured == true
+            or entry.requested_value_captured == true then
           out.requested_value_unknown_count =
             out.requested_value_unknown_count + 1
         end
       else
-        local initial = tonumber(entry.initial_value)
-          or tonumber(entry.initial_normalized)
-        local final = tonumber(entry.final_value)
-          or tonumber(entry.final_normalized)
-        local tolerance = value_tolerance(entry)
-        if initial == nil or final == nil then
-          out.unknown_target_count = out.unknown_target_count + 1
-        elseif math.abs(final - initial) > tolerance then
-          target_changed = true
-          out.changed_target_count = out.changed_target_count + 1
-        elseif entry.changed_during == true then
-          out.returned_to_initial_count = out.returned_to_initial_count + 1
-        else
-          out.unchanged_target_count = out.unchanged_target_count + 1
-        end
-        local requested = tonumber(entry.requested_value)
-        if requested ~= nil and final ~= nil then
-          local numeric_match = math.abs(final - requested) <= tolerance
-          if numeric_match or entry.requested_display_match == true then
-            out.requested_value_match_count =
-              out.requested_value_match_count + 1
-            if not numeric_match and entry.requested_display_match == true then
-              out.requested_value_quantized_match_count =
-                out.requested_value_quantized_match_count + 1
-            end
+        if entry.user_display_target then
+          if entry.user_display_match == true then
+            out.user_target_match_count = out.user_target_match_count + 1
+          elseif entry.user_display_match == false then
+            out.user_target_mismatch_count = out.user_target_mismatch_count + 1
           else
-            out.requested_value_mismatch_count =
-              out.requested_value_mismatch_count + 1
-            if entry.requested_display_match == false
-                or entry.setter_result == false or not target_changed then
+            out.user_target_unknown_count = out.user_target_unknown_count + 1
+          end
+        end
+        local target_changed = false
+        if entry.value_domain == "preset" then
+          local initial_preset = preset_name(entry.initial_preset)
+          local final_preset = preset_name(entry.final_preset)
+          if final_preset == nil then
+            out.unknown_target_count = out.unknown_target_count + 1
+            if (tonumber(entry.write_count) or 0) > 0 then
+              out.unknown_write_target_count = out.unknown_write_target_count + 1
+            end
+          elseif initial_preset ~= final_preset then
+            target_changed = true
+            out.changed_target_count = out.changed_target_count + 1
+          elseif entry.changed_during == true then
+            out.returned_to_initial_count = out.returned_to_initial_count + 1
+          else
+            out.unchanged_target_count = out.unchanged_target_count + 1
+          end
+          local requested_preset = preset_name(entry.requested_preset)
+          if requested_preset and final_preset then
+            if requested_preset == final_preset then
+              out.requested_value_match_count =
+                out.requested_value_match_count + 1
+            else
+              out.requested_value_mismatch_count =
+                out.requested_value_mismatch_count + 1
               out.requested_value_confirmed_mismatch_count =
                 out.requested_value_confirmed_mismatch_count + 1
             end
+          elseif entry.requested_preset_captured == true then
+            out.requested_value_unknown_count =
+              out.requested_value_unknown_count + 1
           end
-        elseif entry.requested_value_captured == true then
-          out.requested_value_unknown_count =
-            out.requested_value_unknown_count + 1
+        else
+          local initial = tonumber(entry.initial_value)
+            or tonumber(entry.initial_normalized)
+          local final = tonumber(entry.final_value)
+            or tonumber(entry.final_normalized)
+          local tolerance = value_tolerance(entry)
+          if initial == nil or final == nil then
+            out.unknown_target_count = out.unknown_target_count + 1
+            if (tonumber(entry.write_count) or 0) > 0 then
+              out.unknown_write_target_count = out.unknown_write_target_count + 1
+            end
+          elseif math.abs(final - initial) > tolerance then
+            target_changed = true
+            out.changed_target_count = out.changed_target_count + 1
+          elseif entry.changed_during == true then
+            out.returned_to_initial_count = out.returned_to_initial_count + 1
+          else
+            out.unchanged_target_count = out.unchanged_target_count + 1
+          end
+          local requested = tonumber(entry.requested_value)
+          if requested ~= nil and final ~= nil then
+            local numeric_match = math.abs(final - requested) <= tolerance
+            if numeric_match or entry.requested_display_match == true then
+              out.requested_value_match_count =
+                out.requested_value_match_count + 1
+              if not numeric_match and entry.requested_display_match == true then
+                out.requested_value_quantized_match_count =
+                  out.requested_value_quantized_match_count + 1
+              end
+            else
+              out.requested_value_mismatch_count =
+                out.requested_value_mismatch_count + 1
+              if entry.requested_display_match == false
+                  or entry.setter_result == false or not target_changed then
+                out.requested_value_confirmed_mismatch_count =
+                  out.requested_value_confirmed_mismatch_count + 1
+              end
+            end
+          elseif entry.requested_value_captured == true then
+            out.requested_value_unknown_count =
+              out.requested_value_unknown_count + 1
+          end
         end
-      end
-      if entry.setter_result == false then
-        out.setter_rejected_target_count =
-          out.setter_rejected_target_count + 1
+        if entry.setter_result == false then
+          out.setter_rejected_target_count =
+            out.setter_rejected_target_count + 1
+        end
       end
       if entry.plugin_profile_guard == "validated" then
         out.profile_guarded_target_count =
@@ -20436,6 +21751,7 @@ function Code.host_value_change_evidence(writes, overflowed)
     unchanged_target_count = 0,
     returned_to_initial_count = 0,
     unknown_target_count = 0,
+    unknown_write_target_count = 0,
     truncated = overflowed == true,
   }
   local function values_differ(a, b)
@@ -20450,8 +21766,11 @@ function Code.host_value_change_evidence(writes, overflowed)
       out.target_count = out.target_count + 1
       out.write_count = out.write_count + (tonumber(entry.write_count) or 0)
       local differs = values_differ(entry.initial_value, entry.final_value)
-      if differs == nil then
+      if entry.pending_write or differs == nil then
         out.unknown_target_count = out.unknown_target_count + 1
+        if entry.pending_write or (tonumber(entry.write_count) or 0) > 0 then
+          out.unknown_write_target_count = out.unknown_write_target_count + 1
+        end
       elseif differs then
         out.changed_target_count = out.changed_target_count + 1
       elseif entry.changed_during == true then
@@ -21739,6 +23058,9 @@ local function lua_runtime_error_strings(run_err, instruction_timeout)
       .. "budget. The script may contain an infinite loop or runaway "
       .. "iteration.")
     or tostring(run_err)
+  if instruction_timeout and run_err ~= CODE_RUN_BUDGET_TOKEN then
+    err_str = err_str .. "\nHook cleanup failed: " .. tostring(run_err)
+  end
   local short = short_error_excerpt(err_str, 6)
   local fallback = instruction_timeout
     and ("Generated Lua was stopped because it exceeded ReaAssist's "
@@ -21752,7 +23074,11 @@ local function lua_runtime_error_strings(run_err, instruction_timeout)
   return err_str, short, msg
 end
 
-local function run_lua_chunk_with_instruction_guard(fn)
+local function run_lua_chunk_with_instruction_guard(fn, budget_state, source)
+  budget_state = budget_state or {}
+  if budget_state.exhausted then
+    return false, CODE_RUN_BUDGET_TOKEN, true, budget_state.instruction_count
+  end
   local traceback = debug and debug.traceback or tostring
   if not (debug and debug.sethook and coroutine and coroutine.create
       and coroutine.resume) then
@@ -21764,22 +23090,39 @@ local function run_lua_chunk_with_instruction_guard(fn)
   local function hook()
     count = count + CODE_RUN_HOOK_COUNT
     if count >= CODE_RUN_INSTRUCTION_BUDGET then
+      if not budget_state.exhausted then
+        budget_state.exhausted = true
+        budget_state.instruction_count = count
+        budget_state.source = source
+      end
       error(CODE_RUN_BUDGET_TOKEN, 0)
     end
   end
 
-  local co = coroutine.create(function()
+  local created, co = pcall(coroutine.create, function()
     return xpcall(fn, traceback)
   end)
-  debug.sethook(co, hook, "", CODE_RUN_HOOK_COUNT)
-  local resume_ok, ok, err = coroutine.resume(co)
-  debug.sethook(co)
-  if not resume_ok then
-    return false, ok, tostring(ok):find(CODE_RUN_BUDGET_TOKEN, 1, true) ~= nil,
-      count
+  if not created then return false, co, false, count end
+  local installed, install_err = pcall(debug.sethook, co, hook, "", CODE_RUN_HOOK_COUNT)
+  if not installed then
+    local cleared, clear_err = pcall(debug.sethook, co)
+    return false, cleared and install_err or clear_err, false, count
   end
-  local timed_out = tostring(err or ""):find(CODE_RUN_BUDGET_TOKEN, 1, true) ~= nil
-  return ok, err, timed_out, count
+  local resumed, resume_ok, ok, err = pcall(coroutine.resume, co)
+  local cleared, clear_err = pcall(debug.sethook, co)
+  if not cleared then
+    -- Keep the cleanup error and the independently known budget exhaustion.
+    return false, clear_err, budget_state.exhausted == true,
+      budget_state.instruction_count or count
+  end
+  if budget_state.exhausted then
+    return false, CODE_RUN_BUDGET_TOKEN, true, budget_state.instruction_count
+  end
+  if not resumed then return false, resume_ok, false, count end
+  if not resume_ok then
+    return false, ok, false, count
+  end
+  return ok, err, false, count
 end
 
 -- Capture identities only from the synchronous action's own execution interval.
@@ -22060,6 +23403,16 @@ function Code.no_code_reply_is_choice_clarification(reply)
   local folded = Code.no_guess_fold(text)
   local _, questions = folded:gsub("%?", "")
   if questions == 1 then
+    -- Admit the bounded Portuguese pan choice, never a process-only offer or
+    -- a completion preface followed by a question.
+    local pan_choice = folded:match("^voce prefere (.-)%?$")
+    if pan_choice and pan_choice:find(" ou ", 1, true)
+        and not pan_choice:find("[.!]")
+        and pan_choice:find("estereo", 1, true)
+        and (pan_choice:find("espalhar", 1, true)
+          or pan_choice:find("distribuir", 1, true))
+        and (pan_choice:find("esquerda", 1, true)
+          or pan_choice:find("direita", 1, true)) then return true end
     local question = folded:match("^(.-%?)")
     if question and Code.reply_requests_missing_parameters(question) then return true end
     local choice = folded:match("([^\n.!?]+)%?") or ""
@@ -22444,6 +23797,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
     parameter_context = type(run_context) == "table" and run_context.parameter_context,
     pending = 0,
     failed = false,
+    instruction_budget = { exhausted = false },
     in_callback = false,
     bound = false,
     message_ref = nil,
@@ -22520,12 +23874,23 @@ function Code.run(code, expected_project, conversation_delete, run_context)
     }
   end
   code_env.pcall = function(fn, ...)
+    if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
     local result = table.pack(pcall(fn, ...))
+    if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
     record_protected_call_result("pcall", result[1])
     return table.unpack(result, 1, result.n)
   end
   code_env.xpcall = function(fn, msgh, ...)
-    local result = table.pack(xpcall(fn, msgh, ...))
+    if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
+    local handler = msgh
+    if type(msgh) == "function" then
+      handler = function(err)
+        if defer_state.instruction_budget.exhausted then return CODE_RUN_BUDGET_TOKEN end
+        return msgh(err)
+      end
+    end
+    local result = table.pack(xpcall(fn, handler, ...))
+    if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
     record_protected_call_result("xpcall", result[1])
     return table.unpack(result, 1, result.n)
   end
@@ -22569,8 +23934,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
         end
       end
     end
-    entry.requested_value_captured = true
-    entry.requested_value = tonumber(value)
+    local requested_value = tonumber(value)
     local name_getter = kind == "track" and reaper.TrackFX_GetParamName
       or reaper.TakeFX_GetParamName
     if type(name_getter) == "function" then
@@ -22589,7 +23953,8 @@ function Code.run(code, expected_project, conversation_delete, run_context)
     -- Raw-to-normalized mappings can be nonlinear. Formatted comparison is
     -- reliable only when the generated setter itself used normalized values.
     local requested_normalized = entry.value_domain == "normalized"
-      and entry.requested_value or nil
+      and requested_value or nil
+    local requested_display
     local function formatted_text(packed)
       if not packed[1] then return nil end
       local value_text = type(packed[3]) == "string" and packed[3]
@@ -22599,16 +23964,25 @@ function Code.run(code, expected_project, conversation_delete, run_context)
       return value_text ~= "" and value_text or nil
     end
     if type(formatter) == "function" and requested_normalized ~= nil then
-      entry.requested_display = formatted_text(table.pack(
+      requested_display = formatted_text(table.pack(
         pcall(Code.format_parameter_candidate, formatter, target_ref, fx, pidx, requested_normalized)))
-    else
-      entry.requested_display = nil
+      -- A protected trusted Lua helper can catch the count-hook error too.
+      if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
     end
+    if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
+    -- The call may be interrupted before dispatch or before its final readback.
+    entry.pending_write = true
+    entry.requested_value_captured = true
+    entry.requested_value = requested_value
+    entry.requested_display = requested_display
+    entry.final_value, entry.final_normalized, entry.final_display = nil, nil, nil
+    entry.user_display_match, entry.requested_display_match, entry.setter_result = nil, nil, nil
     local packed = table.pack(setter(target_ref, fx, pidx, value))
     entry.write_count = entry.write_count + 1
     if type(packed[1]) == "boolean" then entry.setter_result = packed[1] end
     if type(getter) == "function" then
       local after = table.pack(pcall(getter, target_ref, fx, pidx))
+      if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
       if after[1] then
         entry.final_value = tonumber(after[2])
         if entry.value_domain == "raw" then
@@ -22621,6 +23995,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
         if type(formatted_getter) == "function" then
           entry.final_display = formatted_text(table.pack(
             pcall(formatted_getter, target_ref, fx, pidx, "")))
+          if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
           entry.user_display_match = Code.parameter_display_matches(
             entry.user_display_target, entry.final_display)
           if entry.requested_display and entry.final_display then
@@ -22643,6 +24018,8 @@ function Code.run(code, expected_project, conversation_delete, run_context)
         end
       end
     end
+    entry.pending_write = false
+    if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
     return table.unpack(packed, 1, packed.n)
   end
 
@@ -22652,6 +24029,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
     if not entry then
       if defer_state.host_value_target_count
           >= HOST_VALUE_EVIDENCE_TARGET_LIMIT then
+        if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
         defer_state.host_value_evidence_overflow = true
         return reaper.SetMediaTrackInfo_Value(target_ref, parmname, value)
       end
@@ -22673,6 +24051,9 @@ function Code.run(code, expected_project, conversation_delete, run_context)
         if before[1] then entry.initial_value = tonumber(before[2]) end
       end
     end
+    if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
+    entry.pending_write = true
+    entry.final_value = nil
     entry.write_count = entry.write_count + 1
     local packed = table.pack(
       reaper.SetMediaTrackInfo_Value(target_ref, parmname, value))
@@ -22680,6 +24061,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
         and type(reaper.GetMediaTrackInfo_Value) == "function" then
       local after = table.pack(pcall(
         reaper.GetMediaTrackInfo_Value, target_ref, parmname))
+      if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
       if after[1] then
         entry.final_value = tonumber(after[2])
         if entry.initial_value ~= nil and entry.final_value ~= nil then
@@ -22694,6 +24076,8 @@ function Code.run(code, expected_project, conversation_delete, run_context)
         entry.final_value = nil
       end
     end
+    entry.pending_write = false
+    if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
     return table.unpack(packed, 1, packed.n)
   end
 
@@ -22716,13 +24100,18 @@ function Code.run(code, expected_project, conversation_delete, run_context)
         end
       end
     end
+    local requested_preset = tostring(preset_name or "")
+    if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
+    entry.pending_write = true
     entry.requested_preset_captured = true
-    entry.requested_preset = tostring(preset_name or "")
+    entry.requested_preset = requested_preset
+    entry.final_preset, entry.setter_result = nil, nil
     local packed = table.pack(setter(target_ref, fx, preset_name))
     entry.write_count = entry.write_count + 1
     if type(packed[1]) == "boolean" then entry.setter_result = packed[1] end
     if type(getter) == "function" then
       local after = table.pack(pcall(getter, target_ref, fx, ""))
+      if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
       if after[1] and after[2] ~= false and type(after[3]) == "string" then
         entry.final_preset = after[3]
         if entry.initial_preset ~= nil
@@ -22731,6 +24120,8 @@ function Code.run(code, expected_project, conversation_delete, run_context)
         end
       end
     end
+    entry.pending_write = false
+    if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
     return table.unpack(packed, 1, packed.n)
   end
 
@@ -22838,8 +24229,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
     local parameter_evidence =
       Code.parameter_change_evidence(defer_state.parameter_writes)
     local parameter_changed = parameter_evidence
-      and (parameter_evidence.status == "changed"
-        or parameter_evidence.status == "partially_changed") or false
+      and (parameter_evidence.changed_target_count or 0) > 0 or false
     return {
       failure_count = failed_target_count,
       failed_target_count = failed_target_count,
@@ -23015,7 +24405,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
       defer_state.host_value_writes,
       defer_state.host_value_evidence_overflow)
     local host_value_changed = host_value_evidence
-      and host_value_evidence.status == "changed"
+      and (host_value_evidence.changed_target_count or 0) > 0
     local project_shape_evidence =
       defer_state.project_shape_change_evidence
     local project_shape_changed = project_shape_evidence
@@ -23023,6 +24413,10 @@ function Code.run(code, expected_project, conversation_delete, run_context)
     local detached = defer_state.bound
       and (type(S) ~= "table" or S.lua_defer_run ~= defer_state)
     local attributed_delta = tonumber(defer_state.attributed_change_delta)
+    local parameter_evidence =
+      Code.parameter_change_evidence(defer_state.parameter_writes)
+    local parameter_changed = parameter_evidence
+      and (parameter_evidence.changed_target_count or 0) > 0
     local evidence_changed = error_fx_insert_evidence
       and error_fx_insert_evidence.other_project_change_detected == true
       and not defer_state.change_interval_contaminated
@@ -23030,29 +24424,50 @@ function Code.run(code, expected_project, conversation_delete, run_context)
       or (attributed_delta ~= 0 or evidence_changed) and "changed"
       or "unchanged"
     local midi_evidence = defer_state.midi_note_receipt.evidence()
+    local midi_changed = midi_evidence
+      and midi_evidence.unique_target_status == "stable"
+      and (midi_evidence.changed_target_count or 0) > 0
     if midi_evidence and observable_status == "unchanged" then
-      if midi_evidence.unique_target_status == "stable"
-          and (midi_evidence.changed_target_count or 0) > 0 then
+      if midi_changed then
         observable_status = "changed"
-      elseif midi_evidence.status == "unknown" then
-        observable_status = "unknown"
       end
     end
+    -- Measured change takes precedence over incomplete write evidence.
+    -- Pending attempts never prove either a change or an unchanged project.
+    if observable_status ~= "changed" and (
+        parameter_evidence and (parameter_evidence.unknown_write_target_count or 0) > 0
+        or host_value_evidence and ((host_value_evidence.unknown_write_target_count or 0) > 0
+          or host_value_evidence.truncated)
+        or project_shape_evidence and project_shape_evidence.status == "unknown"
+        or midi_evidence and midi_evidence.status == "unknown") then
+      observable_status = "unknown"
+    end
+    -- Measured parameter/host/shape change informs the notice, not Undo admission.
+    -- Preserve the existing observable-status attribution and authority gates.
+    local outcome_status = (observable_status == "changed" or evidence_changed
+      or parameter_changed and not defer_state.change_interval_contaminated
+      or host_value_changed or project_shape_changed or midi_changed)
+      and "changed" or defer_state.instruction_budget.exhausted and "unknown"
+      or observable_status
     local undo_label = defer_state.last_undo_label
     local undo_status = undo_label
       and Code.current_undo_target_status(undo_label, execution_project)
         or "unknown"
     defer_state.last_undo_status = undo_status
     local outcome_key, outcome_fallback
-    if observable_status == "unknown" then
+    if detached and outcome_status == "unknown" then
+      outcome_key = "code.runtime_error_outcome.detached_unknown"
+      outcome_fallback = "This older generated action may have changed its "
+        .. "project before it failed, and a newer action has run since. The "
+        .. "result is Unknown. Review that project and its REAPER Undo history "
+        .. "before deciding what to do."
+    elseif outcome_status == "unknown" then
       outcome_key = "code.runtime_error_outcome.unknown"
       outcome_fallback = "ReaAssist could not measure whether the generated "
         .. "action changed the project. The result is Unknown. Check the "
         .. "project and current REAPER Undo entry before undoing anything, "
         .. "then ask ReaAssist to fix and retry it."
-    elseif detached
-        and (observable_status == "changed" or host_value_changed
-          or project_shape_changed) then
+    elseif detached and outcome_status == "changed" then
       outcome_key = "code.runtime_error_outcome.detached_changed"
       outcome_fallback = "This older generated action changed the project "
         .. "before it failed, and a newer action has run since. Review the "
@@ -23063,8 +24478,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
       outcome_fallback = "This older generated action failed without a "
         .. "detected project change, and a newer action has run since. Do not "
         .. "use Undo for the older action. Ask ReaAssist to fix and retry it."
-    elseif observable_status == "changed" or host_value_changed
-        or project_shape_changed then
+    elseif outcome_status == "changed" then
       outcome_key = "code.runtime_error_outcome.changed"
       outcome_fallback = "The generated action changed the project before "
         .. "the error, so the result is partial. Review the project and "
@@ -23092,6 +24506,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
       project_state_change_count_after = change_count_after,
       attributed_project_state_change_delta = attributed_delta,
       observable_change_status = observable_status,
+      outcome_change_status = outcome_status,
       change_segment_count = defer_state.change_segment_count,
       changed_segment_count = defer_state.changed_segment_count,
       undo_target_label = undo_label,
@@ -23235,6 +24650,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
   -- code aliases `reaper` or builds a function name dynamically.
   local reaper_shim = sandbox_api_proxy(reaper, {
     defer = function(fn)
+      if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
       if type(fn) ~= "function" or type(reaper.defer) ~= "function" then
         return reaper.defer(fn)
       end
@@ -23250,7 +24666,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
             and (type(S) ~= "table" or S.lua_defer_run ~= defer_state) then
           defer_state.change_interval_contaminated = true
         end
-        if defer_state.failed then
+        if defer_state.failed or defer_state.instruction_budget.exhausted then
           defer_state.pending = math.max(0, defer_state.pending - 1)
           if type(S) == "table"
               and (S.lua_defer_run == defer_state
@@ -23285,7 +24701,8 @@ function Code.run(code, expected_project, conversation_delete, run_context)
         local protected_failures_before =
           defer_state.protected_call_failures.failure_count
         local ok, run_err, instruction_timeout, instruction_count =
-          run_lua_chunk_with_instruction_guard(fn)
+          run_lua_chunk_with_instruction_guard(fn, defer_state.instruction_budget,
+            "generated_lua_defer_callback")
         defer_state.in_callback = false
         local callback_change_count_after =
           Code.project_change_count(execution_project)
@@ -23493,16 +24910,20 @@ function Code.run(code, expected_project, conversation_delete, run_context)
     Undo_BeginBlock  = function() end,
     Undo_BeginBlock2 = function(_proj) end,
     Undo_EndBlock = function(label, flags)
-      if label and label ~= "" then
-        inner_undo_label = label
-        inner_undo_flags = flags or -1
+      if (type(label) == "string" or type(label) == "number")
+          and label ~= "" then
+        inner_undo_label = tostring(label)
+        inner_undo_flags = (type(flags) == "number" or type(flags) == "string")
+          and math.tointeger(tonumber(flags)) or -1
       end
       return 0
     end,
     Undo_EndBlock2 = function(_proj, label, flags)
-      if label and label ~= "" then
-        inner_undo_label = label
-        inner_undo_flags = flags or -1
+      if (type(label) == "string" or type(label) == "number")
+          and label ~= "" then
+        inner_undo_label = tostring(label)
+        inner_undo_flags = (type(flags) == "number" or type(flags) == "string")
+          and math.tointeger(tonumber(flags)) or -1
       end
       return 0
     end,
@@ -23596,7 +25017,8 @@ function Code.run(code, expected_project, conversation_delete, run_context)
   reaper.Undo_BeginBlock()
   local action_change_count_before = Code.project_change_count(execution_project)
   local ok, run_err, instruction_timeout, instruction_count =
-    run_lua_chunk_with_instruction_guard(fn)
+    run_lua_chunk_with_instruction_guard(fn, defer_state.instruction_budget,
+      "generated_lua_runtime")
   local action_change_count_after = Code.project_change_count(execution_project)
   record_change_segment(action_change_count_before, action_change_count_after)
   local action_project_shape_after = project_shape_snapshot()

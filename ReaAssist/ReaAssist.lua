@@ -2870,7 +2870,7 @@ function H.build_exec_job(cmd, base, os_name, ident)
     job.script = base .. ".bat"
     local out, code, done =
       H.bat_escape(job.out), H.bat_escape(job.code), H.bat_escape(job.done)
-    job.script_text = table.concat({
+    local script_lines = {
       "@echo off",
       "setlocal",
       -- The command's own output, both streams, into one file.
@@ -2884,7 +2884,12 @@ function H.build_exec_job(cmd, base, os_name, ident)
       -- this one's.
       '>"' .. done .. '" echo ' .. H.bat_escape(job.marker),
       "",
-    }, "\r\n")
+    }
+    if table.concat(script_lines):find("[\128-\255]") then
+      table.insert(script_lines, 3,
+        '"%SystemRoot%\\System32\\chcp.com" 65001 >nul || exit /b 1')
+    end
+    job.script_text = table.concat(script_lines, "\r\n")
     -- The shape ReaAssist.lua already ships: a short hidden PowerShell that
     -- does nothing but Start-Process, so the ExecProcess that runs it returns
     -- while the real work continues behind it.

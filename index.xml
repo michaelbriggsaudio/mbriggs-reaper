@@ -56,29 +56,23 @@ After installing, run the action "Script: ReaAssist.lua" from REAPER's Action Li
         <link rel="website" href="https://github.com/michaelbriggsaudio/mbriggs-reaper">GitHub Repository</link>
         <link rel="website" href="https://reaassist.app">ReaAssist Website</link>
       </metadata>
-      <version name="1.6.1" author="Michael Briggs" time="2026-09-17T19:41:59Z">
+      <version name="1.6.2" author="Michael Briggs" time="2026-10-06T15:45:54Z">
         <changelog><![CDATA[
-- Added a helper extension for more stable and secure network activity in the standard interface. It installs automatically for your system.
+- Added GPT-6 Luna, GPT-6.1 Sol, and GPT-6 Astra, with updated cost estimates.
 
-- Added streaming responses so you can read replies as they arrive in the standard interface.
+- Replaced Claude Sonnet 5 with Sonnet 5.5 as the default Claude model, using Low thinking.
 
-- Added OpenAI Responses and Google Interactions support, plus updated Anthropic Messages and DeepSeek Responses integrations. These improve handling of images, model reasoning and caching where supported.
+- Replaced Claude Opus 5 with Opus 5.5, with updated thinking options and cost estimates.
 
-- Expanded compatibility with custom and local providers that use the Responses API.
+- Improved effect insertion and replacement checks, including requests involving existing effects. Plug-in parameter checks now handle known mappings and displayed values more accurately.
 
-- Gemini Flash 3.8 matched Flash 3.7’s success rate in our tests while using fewer tokens and costing less, with similar response times.
+- Strengthened checks for track routing and folder organization. Failed or partial parameter changes are reported more accurately.
 
-- DeepSeek Flash 4.1 adds image support and lower pricing, with another 50% discount during off-peak hours.
+- Improved provider error handling, including clearer API-key errors and recovery from incomplete or incompatible responses.
 
-- Improved cost reporting, including cached usage and corrected Sonnet 5 estimates.
-
-- Reduced download size and improved updates from v1.4.x and v1.5 while preserving settings and API keys.
-
-- Updated all 19 language packs and REAPER guidance through v7.80.
-
-- Minor bug fixes.
+- Updated network security components on macOS and Linux.
         ]]></changelog>
-        <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.6.0</source>
+        <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.6.2</source>
         <source main="main" file="ReaAssist_Screen_Reader_Mode.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist_Screen_Reader_Mode.lua?v=1.5.0</source>
       </version>
     </reapack>

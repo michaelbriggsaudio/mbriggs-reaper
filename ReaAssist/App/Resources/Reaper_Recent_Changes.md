@@ -7,6 +7,33 @@ model training cutoffs. This is not the full changelog.
 If a user asks outside this slice, do not invent details. Say the installed
 REAPER changelog is authoritative, or ask for the relevant changelog lines.
 
+## REAPER 7.82 - October 4, 2026
+
+- Theme scripts can enumerate available theme entries and distinguish colors
+  from blend modes and boolean settings. The API reference covers the new
+  function, type checks and older-version guard.
+- Legacy fade-shape and curvature script keys return to their 7.80 behavior.
+  Scripts for the newer two-parameter fades should use the current API
+  reference's version-specific keys instead of assuming the 7.81 behavior.
+
+## REAPER 7.81 - September 28, 2026
+
+- The color selector can stay open while colors are previewed. It supports
+  built-in, project and user palettes.
+- Fades have separate curvature and S-curve controls. Optional item fade
+  handles and crossfade-editor actions help adjust shape, width and boundaries.
+  When editing an S-shaped curve with the mouse, the upper half controls
+  curvature and the lower half controls its S parameter.
+- Windows has experimental dark mode under Preferences > General > Advanced.
+  ReaScript can detect dark mode on supporting installations. See the API
+  reference for IsDarkMode and its older-version guard.
+- ReaScript adds FX keyboard-input control, an item mixing-mode override and
+  an exact playback stop position. These new keys require REAPER 7.81 or newer;
+  the API reference gives their values and return-value checks.
+- MIDI inputs can force a channel when routed to All MIDI Inputs. On macOS,
+  improved F17-F20 handling breaks existing assignments for those keys;
+  reassign them if they stop working after the update.
+
 ## REAPER 7.80 - September 2026
 
 - `Edit > Repair Pops/Clicks` finds pops and clicks and applies sample-edit

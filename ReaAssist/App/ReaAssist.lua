@@ -2752,9 +2752,17 @@ function InstallerGfx.tick()
       InstallerGfx.status = InstallerGfx.t("status.done", nil, "Done.")
     elseif not ok or state == "failed"
         or reaper.time_precise() - InstallerGfx.support_started > 240 then
+      local detail
+      if not ok then
+        detail = state or "timeout"
+      elseif state == "failed" then
+        detail = reason or state
+      else
+        detail = "timeout"
+      end
       InstallerGfx.fail("install", InstallerGfx.t("error.install", {
-        detail = tostring(ok and reason or state or "timeout"),
-      }, "Install failed: " .. tostring(ok and reason or state or "timeout")))
+        detail = tostring(detail),
+      }, "Install failed: " .. tostring(detail)))
     else
       InstallerGfx.status = InstallerGfx.t("status.downloading_installing",
         {name = "ReaAssist"}, "Downloading & installing ReaAssist...")
@@ -3048,6 +3056,42 @@ function InstallerGfx.render_done()
   end
 end
 
+function InstallerGfx.wrap_error_line(line, width, row_limit)
+  local rows = {}
+  local first = 1
+  width = math.max(0, width)
+  row_limit = row_limit and math.max(0, math.floor(row_limit)) or math.huge
+  while first <= #line and #rows < row_limit do
+    local last, space = first - 1, nil
+    local pos = first
+    while pos <= #line do
+      local ok, next_pos = pcall(utf8.offset, line, 2, pos)
+      next_pos = (ok and next_pos) or (pos + 1)
+      local edge = next_pos - 1
+      if gfx.measurestr(line:sub(first, edge)) > width then
+        -- Generated rows trim their edges before drawing. Keep an overflowing
+        -- separator on the preceding row so it cannot spend the next row.
+        if last >= first and line:sub(pos, edge):match("^%s$") then
+          last, space = edge, edge
+          while line:sub(last + 1, last + 1):match("^%s$") do last = last + 1 end
+          space = last
+        elseif last < first then
+          last = edge
+        end
+        break
+      end
+      last = edge
+      if line:sub(pos, edge):match("^%s$") then space = edge end
+      pos = next_pos
+    end
+    if last < #line and space
+        and line:sub(first, space):find("%S") then last = space end
+    rows[#rows + 1] = line:sub(first, last)
+    first = last + 1
+  end
+  return rows, first
+end
+
 function InstallerGfx.render_error()
   local item = InstallerGfx.current()
   local dep_name = item and item.dep.name
@@ -3066,8 +3110,23 @@ function InstallerGfx.render_error()
   local y = 125
   for line in (InstallerGfx.error_msg or ""):gmatch("([^\n]*)\n?") do
     if line ~= "" then
-      InstallerGfx.draw_text_center(line, y, InstallerGfx.C_TEXT, 3)
-      y = y + 18
+      gfx.setfont(3)
+      local width = math.max(0, gfx.w - 40)
+      if line:match("^%s*$") or gfx.measurestr(line) <= width then
+        InstallerGfx.draw_text_center(line, y, InstallerGfx.C_TEXT, 3)
+        y = y + 18
+      else
+        local row_limit = math.max(1, math.floor((gfx.h - 90 - y) / 18) + 1)
+        local rows, next_byte = InstallerGfx.wrap_error_line(line, width, row_limit)
+        for _, row in ipairs(rows) do
+          local display = row:match("^%s*(.-)%s*$")
+          if display ~= "" then
+            InstallerGfx.draw_text_center(display, y, InstallerGfx.C_TEXT, 3)
+            y = y + 18
+          end
+        end
+        if next_byte <= #line then break end
+      end
     end
     if y > gfx.h - 90 then break end
   end
@@ -4397,7 +4456,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.6.1", -- public release version
+  VERSION           = "1.6.2", -- public release version
   -- OpenRouter ships as dormant, tested plumbing in 1.6.0. The redesigned
   -- webview release enables its advanced-user UI in 2.0.0. Keep this false
   -- until that release so saved development keys or selections cannot expose
@@ -5228,8 +5287,6 @@ S._turn_retry_keys = {
   parse_retry_used = true,
   jsfx_validator_retries = true,
   jsfx_wrong_artifact_retry_used = true,
-  jsfx_companion_validator_retries = true,
-  jsfx_companion_retry_used = true,
   length_retry_used = true,
   empty_retry_used = true,
   thinking_override_idx = true,
@@ -5355,8 +5412,6 @@ S._turn_retry_defaults = {
   parse_retry_used = false,
   jsfx_validator_retries = 0,
   jsfx_wrong_artifact_retry_used = false,
-  jsfx_companion_validator_retries = 0,
-  jsfx_companion_retry_used = false,
   length_retry_used = false,
   empty_retry_used = false,
 }
@@ -5461,9 +5516,21 @@ function RA.write_temp_live_marker(now)
   local ok_f, f = pcall(io.open, path, "w")
   if not ok_f or not f then return false end
   local stamp = tostring(now or time_precise())
-  local ok_w = pcall(function() f:write(stamp) end)
-  local ok_c = pcall(function() f:close() end)
-  return ok_w and ok_c
+  local ok_w, wrote = pcall(function() return f:write(stamp) end)
+  local ok_c, closed = pcall(function() return f:close() end)
+  return ok_w and not not wrote and ok_c and not not closed
+end
+
+-- Marker reads are hints or ownership evidence. Failed or incomplete reads
+-- cannot authorize cleanup; always close the handle, including raised reads.
+function RA.read_instance_marker(path, limit)
+  local ok_f, f = pcall(io.open, path, "rb")
+  if not ok_f or not f then return nil end
+  local ok_r, raw = pcall(function() return f:read(limit + 1) end)
+  local ok_c, closed = pcall(function() return f:close() end)
+  if not ok_r or not ok_c or not closed or type(raw) ~= "string"
+      or #raw > limit then return nil end
+  return raw
 end
 
 function RA.temp_instance_suffix_from_name(filename)
@@ -5483,10 +5550,7 @@ end
 function RA.temp_instance_is_live(instance_suffix, now)
   if not instance_suffix or instance_suffix == "" then return false end
   local path = RA.temp_live_marker_path(instance_suffix)
-  local ok_f, f = pcall(io.open, path, "r")
-  if not ok_f or not f then return false end
-  local raw = f:read("*a")
-  f:close()
+  local raw = RA.read_instance_marker(path, 128)
   local stamp = tonumber(raw)
   if not stamp then return false end
   -- reaper.time_precise() is process-local but boot-anchored on supported
@@ -5578,25 +5642,165 @@ function RA.process_exec(cmd)
   return result
 end
 
--- What this process IS, on a host where a held handle proves nothing. One
--- shell, once per process: POSIX system() forks /bin/sh as a direct child of
--- REAPER, so $PPID inside it is this REAPER process. The start time rides along
--- because a pid on its own can be recycled, and an instance that died must not
--- be able to borrow the liveness of whatever process inherited its number.
+-- Startup ownership needs the same SHA implementation as the later consumers.
+function RA.init_shared_sha_helpers()
+  if RA._shared_sha_initialized then return end
+local sha256_hash
+local _SHA = {}
+do
+  local band   = load("return function(a,b) return a & b end")()
+  local rshift = load("return function(a,n) return (a >> n) & 0xFFFFFFFF end")()
+
+  local K = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  }
+
+  -- Build incremental state from a plain content string. Pre-pads the
+  -- message to a 64-byte boundary so subsequent step() calls only need
+  -- to compress complete 64-byte blocks (no partial-block bookkeeping
+  -- across calls). Pre-padding cost is O(n) memcpy, negligible vs the
+  -- compression work that follows.
+  function _SHA.create(content)
+    local len = #content
+    local extra = 64 - ((len + 9) % 64)
+    if extra == 64 then extra = 0 end
+    local msg = content .. "\128" .. ("\0"):rep(extra + 4)
+       .. string.char(
+            band(rshift(len * 8, 24), 0xFF),
+            band(rshift(len * 8, 16), 0xFF),
+            band(rshift(len * 8, 8), 0xFF),
+            band(len * 8, 0xFF))
+    return {
+      msg = msg,
+      pos = 1,                        -- next byte (1-indexed) to compress
+      h0  = 0x6a09e667, h1 = 0xbb67ae85,
+      h2  = 0x3c6ef372, h3 = 0xa54ff53a,
+      h4  = 0x510e527f, h5 = 0x9b05688c,
+      h6  = 0x1f83d9ab, h7 = 0x5be0cd19,
+    }
+  end
+
+  -- Process up to max_blocks complete 64-byte chunks starting at
+  -- state.pos. Updates state.h0..h7 and advances state.pos. Returns
+  -- true when all blocks have been compressed (state ready for
+  -- finalize), false when more remain. Pass math.huge to drain all
+  -- remaining blocks in one call (single-shot mode).
+  function _SHA.step(state, max_blocks)
+    local msg = state.msg
+    local total = #msg
+    local h0, h1, h2, h3 = state.h0, state.h1, state.h2, state.h3
+    local h4, h5, h6, h7 = state.h4, state.h5, state.h6, state.h7
+    local pos = state.pos
+    local processed = 0
+    while pos <= total and processed < max_blocks do
+      local W = {}
+      for t = 1, 16 do
+        local b = pos + (t - 1) * 4
+        W[t] = (string.byte(msg, b) << 24)
+             + (string.byte(msg, b + 1) << 16)
+             + (string.byte(msg, b + 2) << 8)
+             + string.byte(msg, b + 3)
+      end
+      for t = 17, 64 do
+        local x, y = W[t-15], W[t-2]
+        local s0 = (((x >> 7) | (x << 25)) ~ ((x >> 18) | (x << 14)) ~ (x >> 3)) & 0xFFFFFFFF
+        local s1 = (((y >> 17) | (y << 15)) ~ ((y >> 19) | (y << 13)) ~ (y >> 10)) & 0xFFFFFFFF
+        W[t] = (W[t-16] + s0 + W[t-7] + s1) & 0xFFFFFFFF
+      end
+      local a, b, c, d, e, f, g, h = h0, h1, h2, h3, h4, h5, h6, h7
+      for t = 1, 64 do
+        local S1 = (((e >> 6) | (e << 26)) ~ ((e >> 11) | (e << 21)) ~ ((e >> 25) | (e << 7))) & 0xFFFFFFFF
+        local ch = (e & f) ~ ((~e) & g)
+        local temp1 = (h + S1 + ch + K[t] + W[t]) & 0xFFFFFFFF
+        local S0 = (((a >> 2) | (a << 30)) ~ ((a >> 13) | (a << 19)) ~ ((a >> 22) | (a << 10))) & 0xFFFFFFFF
+        local maj = (a & b) ~ (a & c) ~ (b & c)
+        local temp2 = (S0 + maj) & 0xFFFFFFFF
+        h = g; g = f; f = e; e = (d + temp1) & 0xFFFFFFFF
+        d = c; c = b; b = a; a = (temp1 + temp2) & 0xFFFFFFFF
+      end
+      h0 = (h0 + a) & 0xFFFFFFFF; h1 = (h1 + b) & 0xFFFFFFFF
+      h2 = (h2 + c) & 0xFFFFFFFF; h3 = (h3 + d) & 0xFFFFFFFF
+      h4 = (h4 + e) & 0xFFFFFFFF; h5 = (h5 + f) & 0xFFFFFFFF
+      h6 = (h6 + g) & 0xFFFFFFFF; h7 = (h7 + h) & 0xFFFFFFFF
+      pos = pos + 64
+      processed = processed + 1
+    end
+    state.h0, state.h1, state.h2, state.h3 = h0, h1, h2, h3
+    state.h4, state.h5, state.h6, state.h7 = h4, h5, h6, h7
+    state.pos = pos
+    return pos > total
+  end
+
+  function _SHA.finalize(state)
+    return string.format("%08x%08x%08x%08x%08x%08x%08x%08x",
+      state.h0, state.h1, state.h2, state.h3,
+      state.h4, state.h5, state.h6, state.h7)
+  end
+
+  sha256_hash = function(msg)
+    local s = _SHA.create(msg)
+    _SHA.step(s, math.huge)
+    return _SHA.finalize(s)
+  end
+end
+
+-- Expose the updater's SHA helpers to sidecars. Diag.lua uses them when
+-- available for feedback-upload integrity, and falls back internally if absent.
+RA.sha256_hex = sha256_hash
+RA.sha256_create = function(content) return _SHA.create(content) end
+RA.sha256_step = function(state, max_blocks) return _SHA.step(state, max_blocks) end
+RA.sha256_finalize = function(state) return _SHA.finalize(state) end
+  RA._shared_sha_initialized = true
+end
+RA.init_shared_sha_helpers()
+
+-- POSIX system() forks a shell directly from REAPER, so $PPID identifies this
+-- process. Linux records raw start ticks with qualified host, boot and namespace
+-- evidence. macOS records its birth label and preserves ambiguous PID reuse.
 function RA.posix_process_descriptor()
   if RA.IS_WINDOWS then return nil end
   local out = RA.TEMP_DIR .. "reaassist_proc_" .. RA.instance_file_suffix()
     .. ".txt"
   os.remove(out)
-  pcall(os.execute, "p=$PPID; { echo \"pid $p\"; "
-    .. "echo \"start $(ps -o lstart= -p $p 2>/dev/null)\"; } > "
-    .. Shell.sh_quote(out) .. " 2>/dev/null")
-  local f = io.open(out, "rb")
-  if not f then return nil end
-  local raw = f:read("*a"); f:close()
+  pcall(os.execute, "echo \"pid $PPID\" > " .. Shell.sh_quote(out) .. " 2>&1")
+  local raw = RA.read_instance_marker(out, 4096)
   os.remove(out)
-  if type(raw) ~= "string" or not raw:match("pid%s+%d+") then return nil end
-  return (raw:gsub("%s+$", ""))
+  local pid = raw and raw:match("^pid (%d+)\n$")
+  if not RA.valid_process_pid(pid) then return nil, { reason = "pid_unavailable" } end
+  if RA.IS_LINUX then
+    local context = RA.linux_process_context(pid)
+    local ticks = RA.linux_process_start(pid)
+    if not context then return nil, { pid = pid, reason = "linux_context" } end
+    if not ticks then return nil, { pid = pid, reason = "linux_start" } end
+    return "pid " .. pid .. "\nidentity linux_proc_1\nhost " .. context.host
+      .. "\nboot " .. context.boot .. "\nnamespace " .. context.namespace .. "\nstart " .. ticks
+  end
+  if RA.IS_MACOS then
+    local context = RA.mac_process_context()
+    local code, start = RA.process_answer("/bin/sh -c " .. Shell.sh_quote(
+      "LC_ALL=C TZ=UTC /bin/ps -o lstart= -p " .. pid .. " 2>&1"), 4096)
+    start = code == 0 and RA.posix_start_identity(start) or nil
+    if not context then return nil, { pid = pid, reason = "mac_context" } end
+    if not start then return nil, { pid = pid, reason = "mac_start" } end
+    return "pid " .. pid .. "\nidentity mac_lstart_host_boot_1\nhost " .. context.host
+      .. "\nboot " .. context.boot .. "\nstart " .. start
+  end
+  return nil, { pid = pid, reason = "unsupported_platform" }
 end
 
 -- Open this process's life file and KEEP IT OPEN. The handle is the evidence,
@@ -5607,8 +5811,13 @@ function RA.life_open()
   if RA._life_handle then return true end
   local path = RA.temp_life_path()
   local descriptor = "reaassist life " .. RA.instance_file_suffix()
-  local posix = RA.posix_process_descriptor()
-  if posix then descriptor = descriptor .. "\n" .. posix end
+  local posix, unavailable = RA.posix_process_descriptor()
+  if posix then descriptor = descriptor .. "\n" .. posix
+  elseif not RA.IS_WINDOWS then
+    descriptor = descriptor .. "\npid " .. tostring(unavailable and unavailable.pid or "unavailable")
+      .. "\nidentity unavailable_1\nreason " .. tostring(unavailable and unavailable.reason or "unsupported_platform")
+    RA._life_unavailable_record = descriptor .. "\n"
+  end
   local ok_f, f = pcall(io.open, path, "wb")
   if not ok_f or not f then return false end
   local ok_w = pcall(function()
@@ -5626,27 +5835,192 @@ end
 -- The POSIX half: is the recorded pid still the process that recorded it?
 -- `ps` is asked rather than `kill -0`, because kill refuses a process owned by
 -- another user and a refusal is not a death.
-function RA.posix_process_liveness(raw)
-  local pid = tostring(raw):match("pid%s+(%d+)")
-  local recorded = tostring(raw):match("start%s+([^\n]*)")
-  if not pid then return "unknown" end
-  local answer = RA.process_exec("/bin/sh -c "
-    .. Shell.sh_quote("ps -o lstart= -p " .. pid .. " 2>/dev/null"))
-  if type(answer) ~= "string" then return "unknown" end
-  local code = tonumber(answer:match("^%s*(%-?%d+)"))
-  local body = answer:gsub("^%s*%-?%d+[^\n]*\n?", ""):gsub("^%s+", "")
-    :gsub("%s+$", "")
-  if code == 0 and body ~= "" then
-    if recorded == nil then return "unknown" end
-    recorded = recorded:gsub("^%s+", ""):gsub("%s+$", "")
-    if recorded == "" then return "unknown" end
-    if body == recorded then return "alive" end
-    -- Same number, different process: the instance that recorded it is gone.
-    return "dead"
+function RA.posix_start_identity(value)
+  if type(value) ~= "string" then return nil end
+  value = value:gsub("^%s+", ""):gsub("%s+$", "")
+  local weekday, month, day, hour, minute, second, year = value:match(
+    "^(%a%a%a) (%a%a%a) +(%d%d?) (%d%d):(%d%d):(%d%d) (%d%d%d%d)$")
+  if not weekday or not (" Sun Mon Tue Wed Thu Fri Sat "):find(" " .. weekday .. " ", 1, true)
+      or not (" Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec "):find(" " .. month .. " ", 1, true)
+      or tonumber(day) < 1 or tonumber(day) > 31 or tonumber(hour) > 23
+      or tonumber(minute) > 59 or tonumber(second) > 59 or tonumber(year) < 1 then
+    return nil
   end
-  -- `ps` says no such process (exit 1, nothing printed). Anything else, a
-  -- shell that could not run it included, is not an answer.
-  if code == 1 and body == "" then return "dead" end
+  return value
+end
+
+function RA.valid_process_pid(pid)
+  return type(pid) == "string" and pid:match("^[1-9]%d*$") ~= nil
+    and #pid <= 10 and tonumber(pid) <= 2147483647
+end
+
+function RA.identity_uuid(value)
+  if type(value) ~= "string" then return nil end
+  value = value:gsub("%s+$", ""):lower()
+  if value:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$")
+      and value ~= "00000000-0000-0000-0000-000000000000" then return value end
+end
+
+function RA.ownership_host_hash(value)
+  -- App-specific HMAC prevents the OS host identifier from entering life files.
+  -- The shared pure-Lua SHA implementation is initialized before ownership.
+  if type(value) ~= "string" then return nil end
+  RA.init_shared_sha_helpers()
+  local key, inner, outer = "ReaAssist ownership host v1", {}, {}
+  for i = 1, 64 do
+    local byte = key:byte(i) or 0
+    inner[i], outer[i] = string.char(byte ~ 0x36), string.char(byte ~ 0x5c)
+  end
+  local ok, digest = pcall(function()
+    local hex = RA.sha256_hex(table.concat(inner) .. value)
+    local bytes = hex:gsub("%x%x", function(pair) return string.char(tonumber(pair, 16)) end)
+    return RA.sha256_hex(table.concat(outer) .. bytes)
+  end)
+  if ok and type(digest) == "string" and #digest == 64 and digest:match("^[a-f0-9]+$") then return digest end
+end
+
+function RA.process_answer(cmd, limit)
+  local raw = RA.process_exec(cmd)
+  if type(raw) ~= "string" or #raw > limit then return nil end
+  local code, body = raw:match("^(%-?%d+)\n(.*)$")
+  if not code then return nil end
+  return tonumber(code), body:gsub("%s+$", "")
+end
+
+function RA.linux_process_start(pid)
+  if not RA.valid_process_pid(pid) then return nil end
+  local raw = RA.read_instance_marker("/proc/" .. pid .. "/stat", 8192)
+  -- comm can contain spaces, parentheses and newlines. Its final ')' precedes
+  -- the state plus numeric fields. Field 22 is raw ticks, never wall time.
+  if not raw then return nil end
+  local actual, rest = raw:match("^(%d+) %(.+%) %a ([^\n]+)\n$")
+  if actual ~= pid or not rest then return nil end
+  local fields = {}
+  for value in rest:gmatch("%S+") do fields[#fields + 1] = value end
+  if #fields < 19 then return nil end
+  for i = 1, 19 do if not fields[i]:match("^%-?%d+$") then return nil end end
+  if not fields[19]:match("^%d+$") then return nil end
+  return fields[19]
+end
+
+function RA.linux_process_context(pid)
+  if not RA.valid_process_pid(pid) then return nil end
+  -- NSpid lists IDs from the procfs mount's namespace inward. One ID proves
+  -- this process occupies that same namespace without inspecting root's PID 1.
+  local status = RA.read_instance_marker("/proc/self/status", 65536)
+  if not status or not status:match("\n$") then return nil end
+  local self_pid, namespace_pid, pid_count, namespace_count = nil, nil, 0, 0
+  for line in status:gmatch("[^\n]+") do
+    if line:match("^Pid:") then
+      pid_count = pid_count + 1
+      self_pid = line:match("^Pid:%s+(%d+)%s*$")
+    elseif line:match("^NSpid:") then
+      namespace_count = namespace_count + 1
+      namespace_pid = line:match("^NSpid:%s+(%d+)%s*$")
+    end
+  end
+  if pid_count ~= 1 or namespace_count ~= 1 or not RA.valid_process_pid(self_pid)
+      or self_pid ~= namespace_pid then return nil end
+  local host = RA.read_instance_marker("/etc/machine-id", 64)
+  host = host and host:match("^(%x+)\n$")
+  if not host or #host ~= 32 or host:match("^0+$") then return nil end
+  host = RA.ownership_host_hash(host:lower())
+  if not host then return nil end
+  local boot = RA.identity_uuid(RA.read_instance_marker("/proc/sys/kernel/random/boot_id", 64))
+  local mounts = RA.read_instance_marker("/proc/self/mountinfo", 65536)
+  if not boot or not mounts or not mounts:match("\n$") then return nil end
+  local proc_found = false
+  for line in mounts:gmatch("[^\n]+") do
+    local root, path, opts, fs, super = line:match(
+      "^%d+ %d+ %d+:%d+ (%S+) (%S+) (%S+).* %- (%S+) %S+ (%S+)$")
+    if not path then return nil end
+    if path == "/proc" then
+      if proc_found or root ~= "/" or fs ~= "proc" then return nil end
+      proc_found = true
+      for option in (opts .. "," .. super):gmatch("[^,]+") do
+        if option:match("^hidepid=") and option ~= "hidepid=0" then return nil end
+      end
+    elseif path:match("^/proc/") then
+      for _, target in ipairs({ "/proc/" .. pid, "/proc/" .. pid .. "/stat", "/proc/self",
+        "/proc/self/ns/pid", "/proc/self/status", "/proc/self/mountinfo",
+        "/proc/" .. self_pid .. "/status", "/proc/" .. self_pid .. "/ns/pid",
+        "/proc/sys/kernel/random/boot_id" }) do
+        if target == path or target:sub(1, #path + 1) == path .. "/" then return nil end
+      end
+    end
+  end
+  if not proc_found then return nil end
+  -- The mounted process table must describe this PID namespace, not a parent
+  -- namespace or filtered proc view. Diagnostics are captured, never discarded.
+  local code, body = RA.process_answer("/bin/sh -c " .. Shell.sh_quote(
+    "readlink /proc/self/ns/pid 2>&1"), 4096)
+  if not body then return nil end
+  local mine = body:match("^pid:%[([1-9]%d*)%]$")
+  if code ~= 0 or not mine then return nil end
+  return { host = host:lower(), boot = boot, namespace = mine, mounts = mounts }
+end
+
+function RA.mac_process_context()
+  local code, body = RA.process_answer("/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice 2>&1", 65536)
+  local host = code == 0 and body:match('"IOPlatformUUID"%s*=%s*"([%x%-]+)"') or nil
+  host = RA.identity_uuid(host)
+  host = host and RA.ownership_host_hash(host)
+  local status, boot = RA.process_answer("/usr/sbin/sysctl -n kern.bootsessionuuid 2>&1", 4096)
+  boot = status == 0 and RA.identity_uuid(boot) or nil
+  if not host or not boot then return nil end
+  return { host = host, boot = boot }
+end
+
+function RA.posix_process_liveness(raw)
+  raw = tostring(raw)
+  local pid, host, boot, namespace, ticks = raw:match(
+    "\npid (%d+)\nidentity linux_proc_1\nhost (%x+)\nboot ([%x%-]+)\nnamespace (%d+)\nstart (%d+)\n$")
+  if pid then
+    if not RA.IS_LINUX or not RA.valid_process_pid(pid) or #host ~= 64
+        or not host:match("^[a-f0-9]+$") or host:match("^0+$") or RA.identity_uuid(boot) ~= boot
+        or not namespace:match("^[1-9]%d*$") or #namespace > 20 or #ticks > 20
+        or not (ticks == "0" or ticks:match("^[1-9]%d*$")) then return "unknown" end
+    local context = RA.linux_process_context(pid)
+    if not context or context.host ~= host then return "unknown" end
+    if context.boot ~= boot then return "dead" end -- same host, previous boot
+    if context.namespace ~= namespace then return "unknown" end
+    local current = RA.linux_process_start(pid)
+    if current then return current == ticks and "alive" or "dead" end
+    -- A failed read is not absence. A qualified, unrestricted local proc view
+    -- plus a directory-absence probe can prove it; otherwise preserve Unknown.
+    local code, body = RA.process_answer("/bin/sh -c " .. Shell.sh_quote(
+      "if [ -d /proc/" .. pid .. " ]; then printf present; else printf absent; fi 2>&1"), 4096)
+    local after = RA.linux_process_context(pid)
+    if code == 0 and body == "absent" and after and after.host == context.host
+        and after.boot == context.boot and after.namespace == context.namespace
+        and after.mounts == context.mounts then return "dead" end
+    return "unknown"
+  end
+  local recorded
+  pid, host, boot, recorded = raw:match(
+    "\npid (%d+)\nidentity mac_lstart_host_boot_1\nhost (%x+)\nboot ([%x%-]+)\nstart ([^\n]+)\n$")
+  local context
+  if pid then
+    if not RA.IS_MACOS or #host ~= 64 or not host:match("^[a-f0-9]+$")
+        or host:match("^0+$") or RA.identity_uuid(boot) ~= boot then return "unknown" end
+    context = RA.mac_process_context()
+    if not context or context.host ~= host then return "unknown" end
+    if context.boot ~= boot then return "dead" end
+  else
+    -- Historical records have no host/namespace binding. They may establish
+    -- positive life, but neither wall-clock mismatch nor local absence is death.
+    pid, recorded = raw:match("\npid (%d+)\nidentity lstart_c_utc_1\nstart ([^\n]+)\n$")
+    if not pid then pid, recorded = raw:match("\npid (%d+)\nstart ([^\n]+)\n$") end
+  end
+  recorded = RA.posix_start_identity(recorded)
+  if not RA.valid_process_pid(pid) or not recorded then return "unknown" end
+  local code, body = RA.process_answer("/bin/sh -c " .. Shell.sh_quote(
+    "LC_ALL=C TZ=UTC /bin/ps -o lstart= -p " .. pid .. " 2>&1"), 4096)
+  if code == 0 and RA.posix_start_identity(body) == recorded then return "alive" end
+  if context and code == 1 and body == "" then
+    local after = RA.mac_process_context()
+    if after and after.host == context.host and after.boot == context.boot then return "dead" end
+  end
   return "unknown"
 end
 
@@ -5658,13 +6032,11 @@ function RA.process_liveness(instance_suffix)
   if suffix == "" then return "unknown" end
   if suffix == RA.instance_file_suffix() then return "alive" end
   local path = RA.temp_life_path(suffix)
-  local f = io.open(path, "rb")
-  if not f then return "unknown" end
-  local raw = f:read("*a") or ""
-  f:close()
+  local raw = RA.read_instance_marker(path, 4096)
+  if not raw then return "unknown" end
   -- It has to be THAT instance's life file. A stray file at the name proves
   -- nothing about anybody, and a reclaim is too expensive to spend on one.
-  if not tostring(raw):find("reaassist life " .. suffix, 1, true) then
+  if raw:match("^([^\n]+)\n") ~= "reaassist life " .. suffix then
     return "unknown"
   end
   if RA.IS_WINDOWS then
@@ -5683,6 +6055,288 @@ function RA.instance_liveness(instance_suffix, now)
   if suffix == RA.instance_file_suffix() then return "alive" end
   if RA.temp_instance_is_live(suffix, now) then return "alive" end
   return RA.process_liveness(suffix)
+end
+
+-- Enumerate before removing anything. Failed removals and cached listings must
+-- not retry an index forever. Skip inadmissible names, but stop repeated names.
+-- The second result is false if the listing cannot prove absence of references.
+function RA.cleanup_file_snapshot(dir, irrelevant_colon)
+  local files, seen, complete = {}, {}, true
+  if not (reaper and type(reaper.EnumerateFiles) == "function") then return files, false end
+  if not pcall(reaper.EnumerateFiles, dir, -1) then return files, false end
+  for idx = 0, 65535 do
+    local ok, name = pcall(reaper.EnumerateFiles, dir, idx)
+    if not ok then return files, false end
+    if name == nil then return files, complete end
+    if type(name) == "string" then
+      if seen[name] then return files, false end
+      seen[name] = true
+    end
+    if type(name) ~= "string" or name == "" or name == "." or name == ".."
+        or name:find("[/\\:%z]") then
+      if not (irrelevant_colon and type(name) == "string" and name:find(":", 1, true)
+          and not name:find("[/\\%z]")) then complete = false end
+    else
+      files[#files + 1] = name
+    end
+  end
+  return files, false
+end
+
+-- One bounded inventory per pass covers maintained ownership readers and the
+-- existing package recovery safeguards. Independent generated-file backups are
+-- preserved by their writers; retiring LIFE never removes those bytes.
+function RA.instance_dependencies(suffix)
+  return RA.instance_inventory_dependencies(suffix, RA.instance_dependency_inventory())
+end
+
+do
+  -- Tokens expose no mutable completeness or path authority to a caller.
+  local issued = setmetatable({}, { __mode = "k" })
+  local function locations()
+    local ok, resource = pcall(function() return reaper.GetResourcePath() end)
+    local engine = ok and type(resource) == "string" and resource ~= "" and not resource:find("%z")
+      and (resource:gsub("[/\\]+$", "") .. RA.SEP .. "Data" .. RA.SEP .. "mbriggs_helper" .. RA.SEP) or ""
+    local lang = RA.LANG_DIR or (RA.DATA_DIR .. "Lang" .. RA.SEP)
+    return { RA.TEMP_DIR, RA.LANG_TMP_DIR or "", RA.DATA_DIR, lang,
+      RA.LANG_UI_DIR or (lang .. "ui" .. RA.SEP), RA.LANG_FONT_DIR or (lang .. "fonts" .. RA.SEP), engine }
+  end
+  local function walk(dir, method, visit)
+    local enum = reaper and reaper[method]
+    if type(dir) ~= "string" or dir == "" or type(enum) ~= "function"
+        or not pcall(enum, dir, -1) then return false end
+    local seen = {}
+    for i = 0, 65535 do
+      local ok, name = pcall(enum, dir, i)
+      if not ok then return false end
+      if name == nil then return true end
+      if type(name) ~= "string" or name == "" or seen[name] then return false end
+      seen[name] = true
+      visit(name)
+      if name == "." or name == ".." or name:find("[/\\%z]") then return false end
+    end
+    return false
+  end
+  local function add(list, seen, path)
+    if not seen[path] then list[#list+1], seen[path] = path, true end
+  end
+  -- Return the actual reader's owner, false for an unreadable/malformed real
+  -- lock, or nil for a name that no maintained lock reader consumes. Private
+  -- claim/probe/graveyard bytes stay untouched and carry no LIFE authority.
+  local function lock_reader_owner(index, dir, method, name)
+    local base = index == 1 and "update_apply.lock" or "install.lock"
+    if name == base or name == base .. ".d" then
+      local raw
+      if name == base and method == "EnumerateFiles" then
+        raw = RA.read_instance_marker(dir .. name, 4096)
+      elseif name == base .. ".d" and method == "EnumerateSubdirectories" then
+        raw = RA.read_instance_marker(dir .. name .. RA.SEP .. "owner", 4096)
+      end
+      -- Match the consumer parsers: App _lock_owner and Runtime _acquire.
+      raw = raw and raw:match("^%s*(.-)%s*$")
+      return raw and (index == 1 and raw:match("inst_[%w%-_]+")
+        or index == 7 and raw:match("^(inst_[A-Za-z0-9_%-]+)#")) or false
+    end
+    if index == 7 and method == "EnumerateFiles" then
+      return name:match("^install%.lock%.reclaim%.(inst_[A-Za-z0-9_%-]+)$")
+    end
+  end
+  local function add_owner(model, owner, path)
+    local data = model.owners[owner]
+    if not data then data={paths={},seen={}}; model.owners[owner]=data end
+    add(data.paths, data.seen, path)
+  end
+  -- Pair the read-open and rename probes as RA.path_present does, with checked
+  -- handles and errors. Only two explicit ENOENT results prove sampled absence.
+  local function checked_present(path)
+    local opened, f, _, open_code = pcall(io.open, path, "rb")
+    if not opened then return nil end
+    if f then
+      local closed, result = pcall(function() return f:close() end)
+      if not closed or not result then return nil end
+      return true
+    end
+    local ok, renamed, _, code = pcall(os.rename, path, path)
+    if not ok then return nil end
+    if renamed then return true end
+    if tonumber(open_code) == 2 and tonumber(code) == 2 then return false end
+    return nil
+  end
+  function RA.instance_dependency_inventory()
+    local model = { dirs=locations(), owners={}, shared={}, shared_seen={}, complete=true }
+    for index, dir in ipairs(model.dirs) do
+      for _, method in ipairs({ "EnumerateFiles", "EnumerateSubdirectories" }) do
+        local done = walk(dir, method, function(name)
+          local path, attributed = dir .. name, false
+          if (index == 1 and name:match("^update_apply%.lock"))
+              or (index == 7 and name:match("^install%.lock")) then
+            local owner = lock_reader_owner(index, dir, method, name)
+            if owner == false then add(model.shared, model.shared_seen, path)
+            elseif owner then add_owner(model, owner, path) end
+            return
+          end
+          for at, owner in name:gmatch("()(inst_[%w%-_]+)") do
+            local before = name:sub(at-1, at-1)
+            if at == 1 or before == "_" or before == "." then
+              attributed = true
+              local evidence = method == "EnumerateFiles" and
+                (path == RA.temp_life_path(owner) or path == RA.temp_live_marker_path(owner))
+              if not evidence then add_owner(model, owner, path) end
+            end
+          end
+          if index == 1 and name:match("^update_journal%.json") then
+            add(model.shared, model.shared_seen, path)
+          end
+          if method == "EnumerateFiles" and not attributed then
+            if (index == 1 and name:match("^reaassist_") and not name:match("^reaassist_life_")
+                  and not name:match("^reaassist_live_"))
+                or (index == 2 and (name:match("^lang_") or name:match("^font_")))
+                or (index >= 3 and index <= 6 and (name:match("%.tmp$") or name:match("%.bak$"))) then
+              add(model.shared, model.shared_seen, path)
+            end
+          end
+        end)
+        if not done then model.complete = false end
+      end
+    end
+    local token = {}; issued[token] = model
+    return token
+  end
+  function RA.instance_inventory_dependencies(suffix, token)
+    local model = type(token) == "table" and getmetatable(token) == nil and next(token) == nil and issued[token]
+    if not model or type(suffix) ~= "string" or not suffix:match("^inst_[%w%-_]+$") then
+      return {}, false, "incomplete"
+    end
+    local out, seen = {}, {}
+    for _, path in ipairs(model.shared) do add(out, seen, path) end
+    for _, path in ipairs(model.owners[suffix] and model.owners[suffix].paths or {}) do add(out, seen, path) end
+    table.sort(out)
+    return out, model.complete, model.complete and (#out > 0 and "dependencies" or "ready") or "incomplete"
+  end
+  function RA.instance_dependency_boundary(suffix, token)
+    local model = type(token) == "table" and getmetatable(token) == nil and next(token) == nil and issued[token]
+    local deps, complete = RA.instance_inventory_dependencies(suffix, token)
+    if not complete or #deps > 0 then return false end
+    local current = locations()
+    for i, dir in ipairs(model.dirs) do if current[i] ~= dir then return false end end
+    -- A dead producer cannot publish a new claim of its identity. A confirmed
+    -- manual close has the same precondition. Fresh lock checks protect shared
+    -- protocol transitions; this check/unlink sequence is not atomic.
+    for _, name in ipairs({ "update_apply.lock", "update_apply.lock.d", "update_journal.json",
+        "update_journal.json.tmp" }) do
+      local path = model.dirs[1] .. name
+      local present = checked_present(path)
+      if present == nil then return false end
+      if present then
+        if name:match("^update_journal%.json") then return false end
+        local owner = lock_reader_owner(1, model.dirs[1], name == "update_apply.lock"
+          and "EnumerateFiles" or "EnumerateSubdirectories", name)
+        if owner == false or owner == suffix then return false end
+      end
+    end
+    -- Reclaim markers fence Engine rename transitions. Never reuse a cached
+    -- Engine absence at the removal boundary. This small directory can be
+    -- rechecked without walking the growing TEMP record set again.
+    local clear = true
+    for _, method in ipairs({ "EnumerateFiles", "EnumerateSubdirectories" }) do
+      if not walk(model.dirs[7], method, function(name)
+        local owner = lock_reader_owner(7, model.dirs[7], method, name)
+        if owner == false or owner == suffix then clear = false end
+      end) then return false end
+    end
+    return clear
+  end
+end
+
+function RA.recoverable_instance_kind(raw, suffix)
+  if type(raw) ~= "string" or raw:match("^([^\n]+)\n") ~= "reaassist life " .. suffix then return nil end
+  local body = raw:sub(#("reaassist life " .. suffix) + 2)
+  local pid, reason = body:match("^pid ([^\n]+)\nidentity unavailable_1\nreason ([%w_]+)\n$")
+  if pid then
+    local reasons = { pid_unavailable=true, linux_context=true, linux_start=true,
+      mac_context=true, mac_start=true, unsupported_platform=true }
+    if reasons[reason] and ((reason == "pid_unavailable" and pid == "unavailable")
+        or (reason ~= "pid_unavailable" and RA.valid_process_pid(pid))) then return "unavailable", pid end
+    return nil
+  end
+  local start
+  pid, start = body:match("^pid (%d+)\nidentity lstart_c_utc_1\nstart ([^\n]+)\n$")
+  if not pid then pid, start = body:match("^pid (%d+)\nstart ([^\n]+)\n$") end
+  if not RA.valid_process_pid(pid) or not start or #start > 128 then return nil end
+  -- Historical ps output may use a non-C locale. Admit the complete bounded
+  -- weekday/month/day/time/year shape, without treating it as death proof.
+  local day, h, m, s, year = start:match("^%S+ +%S+ +(%d%d?) +(%d%d):(%d%d):(%d%d) +(%d%d%d%d)$")
+  if day and tonumber(day) >= 1 and tonumber(day) <= 31 and tonumber(h) <= 23
+      and tonumber(m) <= 59 and tonumber(s) <= 59 and tonumber(year) > 0 then return "legacy", pid end
+end
+
+function RA.recoverable_instance_status(suffix, raw, inventory)
+  local kind, pid = RA.recoverable_instance_kind(raw, suffix)
+  if not kind or suffix == RA.instance_file_suffix() then return false, "ineligible", {} end
+  if RA.temp_instance_is_live(suffix) or RA.process_liveness(suffix) == "alive" then return false, "live", {} end
+  -- Even a reused or foreign visible PID is positive evidence for refusing an
+  -- owner override. Absence here does not automatically authorize removal.
+  if RA.valid_process_pid(pid) then
+    local code, body = RA.process_answer("/bin/sh -c " .. Shell.sh_quote(
+      "LC_ALL=C TZ=UTC /bin/ps -o lstart= -p " .. pid .. " 2>&1"), 4096)
+    if code == 0 and RA.posix_start_identity(body) then return false, "live", {} end
+  end
+  local deps, complete = RA.instance_inventory_dependencies(suffix, inventory or RA.instance_dependency_inventory())
+  if not complete then return false, "incomplete", deps end
+  if #deps > 0 then return false, "dependencies", deps end
+  return true, "ready", deps
+end
+
+function RA.retire_dead_instance_records()
+  local files, complete = RA.cleanup_file_snapshot(RA.TEMP_DIR, true)
+  if not complete then return end
+  local inventory = RA.instance_dependency_inventory()
+  local _, done = RA.instance_inventory_dependencies(RA.instance_file_suffix(), inventory)
+  if not done then return end
+  local candidates = {}
+  for _, name in ipairs(files) do
+    local suffix = name:match("^reaassist_life_(inst_[%w%-_]+)%.lock$")
+    if suffix and suffix ~= RA.instance_file_suffix() and RA.instance_liveness(suffix) == "dead" then
+      local path, raw = RA.temp_life_path(suffix), RA.read_instance_marker(RA.temp_life_path(suffix), 4096)
+      local deps, done = RA.instance_inventory_dependencies(suffix, inventory)
+      if raw and done and #deps == 0 then candidates[#candidates+1] = {suffix=suffix, path=path, raw=raw} end
+    end
+  end
+  if #candidates == 0 then return end
+  -- Refresh once after preflight. The pass never rescans the growing TEMP
+  -- listing per owner. Retained owner dependencies stay retained this pass.
+  inventory = RA.instance_dependency_inventory()
+  for _, rec in ipairs(candidates) do
+    local deps, done = RA.instance_inventory_dependencies(rec.suffix, inventory)
+    if done and #deps == 0 and RA.read_instance_marker(rec.path, 4096) == rec.raw
+        and RA.instance_liveness(rec.suffix) == "dead" then
+      if not RA.instance_dependency_boundary(rec.suffix, inventory) then return end
+      if RA.read_instance_marker(rec.path, 4096) == rec.raw and RA.instance_liveness(rec.suffix) == "dead" then
+        pcall(os.remove, rec.path)
+      end
+    end
+  end
+end
+
+function RA.retire_owned_unavailable_record()
+  local raw, path = RA._life_unavailable_record, RA.temp_life_path()
+  if not raw or RA.read_instance_marker(path, 4096) ~= raw then return false end
+  local inventory = RA.instance_dependency_inventory()
+  local deps, complete = RA.instance_inventory_dependencies(RA.instance_file_suffix(), inventory)
+  if not complete or #deps > 0 or RA.read_instance_marker(path, 4096) ~= raw
+      or not RA.instance_dependency_boundary(RA.instance_file_suffix(), inventory) then return false end
+  if RA._life_handle then
+    local ok, closed = pcall(function() return RA._life_handle:close() end)
+    if not ok or not closed then return false end
+    RA._life_handle = nil
+  end
+  inventory = RA.instance_dependency_inventory()
+  deps, complete = RA.instance_inventory_dependencies(RA.instance_file_suffix(), inventory)
+  if not complete or #deps > 0 then return false end
+  if RA.read_instance_marker(path, 4096) ~= raw
+      or not RA.instance_dependency_boundary(RA.instance_file_suffix(), inventory) then return false end
+  local ok, removed = pcall(os.remove, path)
+  return ok and not not removed
 end
 
 do
@@ -5888,6 +6542,7 @@ end
 -- buffers/validation, and the custom LLM section state. Kept in one table
 -- to stay under Lua's per-function 200-local limit.
 api_keys = {
+  visual_home_entered = false, -- Session fact; key recovery is not new onboarding.
   -- Current screen: "tos" / "first_run" / "settings" / subpage / nil.
   screen         = nil,
   -- Per-screen state for the API key entry screen.
@@ -6439,8 +7094,10 @@ RA.write_temp_live_marker()
 
 -- Startup cleanup: wipe any temp files left behind by a prior hard crash (BSOD,
 -- power loss, OOM kill). atexit handles graceful shutdown but cannot run on
--- crash, so temp files (including plaintext auth headers) could otherwise
--- persist on disk. The broad sweep below respects other live process markers.
+-- crash. Remove this instance's disposable files and proven dead owners' scratch.
+-- Plaintext auth headers persist when ownership is Unknown, including suffixed
+-- files with unreadable or ambiguous life evidence. Age does not authorize their
+-- deletion. Recovery copies remain until an explicit recovery decision.
 os.remove(tmp.auth)
 os.remove(tmp.gemini_auth)
 os.remove(tmp.cache_auth)
@@ -6479,12 +7136,12 @@ os.remove(tmp.screenshot)
 os.remove(tmp.clipboard)
 
 -- Stranded temp sweep: remove crash leftovers from prior instance-suffixed
--- launches, but keep files whose live marker is still fresh. Legacy
--- CMD_ID-only non-auth files cannot be safely attributed across REAPER
+-- launches, but remove only a proven dead owner's disposable files. Legacy
+-- CMD_ID-only files cannot be safely attributed across REAPER
 -- processes, so leave them rather than risking deletion of another live
--- process's request. Auth-header files are the exception: older builds used
--- CMD_ID-only plaintext auth temp names, and a post-update crash should not
--- leave API-key headers sitting on disk forever.
+-- process's request. Both these files and instance-suffixed plaintext auth
+-- headers whose owner is Unknown require an explicit cleanup decision. This
+-- sweep does not guarantee credential scratch is removed after a crash.
 -- Pattern is anchored to known temp extensions so we never touch user-authored
 -- files that happen to start with "reaassist_".
 do
@@ -6496,10 +7153,7 @@ do
   -- os.remove mid-iteration would shift later entries down by one and
   -- we would skip every other match.
   local victims = {}
-  local idx     = 0
-  while true do
-    local fn = reaper.EnumerateFiles(sweep_dir, idx)
-    if not fn then break end
+  for _, fn in ipairs(RA.cleanup_file_snapshot(sweep_dir)) do
     local tracked = fn:match("^reaassist_.+%.txt$")
         or fn:match("^reaassist_.+%.json$")
         or fn:match("^reaassist_.+%.ps1$")
@@ -6508,73 +7162,26 @@ do
         or fn:match("^font_.+%.exit$")
         or fn:match("^support_%d+_inst_.+%.part$")
         or fn:match("^support_%d+_inst_.+%.exit$")
-    local legacy_auth = fn:match("^reaassist_auth_%-?%d+%.txt$")
-        or fn:match("^reaassist_gauth_%-?%d+%.txt$")
-        or fn:match("^reaassist_cauth_%-?%d+%.txt$")
-        or fn:match("^reaassist_cdelauth_%-?%d+%.txt$")
-        or fn:match("^reaassist_crenewauth_%-?%d+%.txt$")
-        or fn:match("^reaassist_auth%.txt$")
-        or fn:match("^reaassist_gauth%.txt$")
-        or fn:match("^reaassist_cauth%.txt$")
-        or fn:match("^reaassist_cdelauth%.txt$")
-        or fn:match("^reaassist_crenewauth%.txt$")
     local inst_suffix = tracked and RA.temp_instance_suffix_from_name(fn) or nil
-    -- Life files are swept under the DEATH rule, not the marker rule (Codex
-    -- round 42, B2.3s). A life file is the evidence a stranger reads to decide
-    -- whether this instance may be deposed, so removing one because its marker
-    -- went stale would destroy the proof that a sleeping process is still
-    -- there, and turn a lawful "leave it alone" into an undecidable stop. Only
-    -- a life file whose own probe says its owner is gone may go. On Windows a
-    -- living owner's file refuses removal anyway, which is the same fact from
-    -- the other side.
-    local life_suffix = fn:match("^reaassist_life_(inst_[%w%-_]+)%.lock$")
-    if legacy_auth then
-      victims[#victims + 1] = fn
-    elseif life_suffix then
-      if RA.instance_liveness(life_suffix, now) == "dead" then
-        victims[#victims + 1] = fn
-      end
-    elseif tracked and inst_suffix
-        and not RA.temp_instance_is_live(inst_suffix, now) then
+    -- Keep life files as ownership evidence. Language cleanup runs later and
+    -- failed removals need the same proof on retry. Store recovery copies may
+    -- also still depend on it; death alone does not resolve those references.
+    if tracked and inst_suffix
+        and RA.instance_liveness(inst_suffix, now) == "dead" then
       victims[#victims + 1] = fn
     end
-    idx = idx + 1
   end
   for _, fn in ipairs(victims) do
-    os.remove(sweep_dir .. sweep_sep .. fn)
+    pcall(os.remove, sweep_dir .. sweep_sep .. fn)
   end
 end
 
 -- Stranded atomic store sweep: Config/State/Providers writes use
 -- `<file>.tmp.inst_*` + `<file>.bak.inst_*` so two REAPER processes sharing one
--- install no longer collide. If a process crashes mid-write, its orphaned temp
--- or backup file is safe to remove after its live marker goes stale.
-do
-  local store_bases = {
-    ["Config.json"]            = true,
-    ["Providers.json"]         = true,
-    ["State.json"]             = true,
-    ["Custom_Instructions.md"] = true,
-  }
-  local victims = {}
-  local idx = 0
-  local now = time_precise()
-  while true do
-    local fn = reaper.EnumerateFiles(RA.DATA_DIR, idx)
-    if not fn then break end
-    local base = fn:match("^(.+)%.tmp%.inst_[%w%-_]+$")
-        or fn:match("^(.+)%.bak%.inst_[%w%-_]+$")
-    local inst_suffix = base and store_bases[base]
-      and RA.temp_instance_suffix_from_name(fn) or nil
-    if inst_suffix and not RA.temp_instance_is_live(inst_suffix, now) then
-      victims[#victims + 1] = fn
-    end
-    idx = idx + 1
-  end
-  for _, fn in ipairs(victims) do
-    os.remove(RA.DATA_DIR .. fn)
-  end
-end
+-- install no longer collide. Retain these copies: an interrupted replacement
+-- can leave the canonical path missing or incomplete, and either sidecar may
+-- be its only complete version. Even proven owner death does not resolve that
+-- recovery role. Only the owning write transaction may retire its copies.
 
 -- Does something exist at this path, answered so that "cannot tell" is
 -- "yes"?
@@ -6849,52 +7456,26 @@ reaper.atexit(function()
   if CTX and CTX.cancel_plugin_profile_preparation then
     pcall(CTX.cancel_plugin_profile_preparation)
   end
-  -- Remove any hidden temp tracks owned by an in-flight scan. Without this,
-  -- closing mid-scan (or being displaced by a second instance) would leave
-  -- the user's project with a stray hidden track in the TCP/mixer-invisible
-  -- state - surprising if they later look at the track list directly.
-  local _inflight = {}
-  if pref_plugins.scan  and pref_plugins.scan.track  then _inflight[#_inflight+1] = pref_plugins.scan.track  end
-  if fx_cache_ui.rescan and fx_cache_ui.rescan.track then _inflight[#_inflight+1] = fx_cache_ui.rescan.track end
-  if S._fx_inspect_tmp  and S._fx_inspect_tmp.tr     then _inflight[#_inflight+1] = S._fx_inspect_tmp.tr     end
-  if deep_scan.tr                                    then _inflight[#_inflight+1] = deep_scan.tr             end
-  for _, _tr in ipairs(_inflight) do
-    if reaper.ValidatePtr2(0, _tr, "MediaTrack*") then
-      pcall(reaper.DeleteTrack, _tr)
-    end
+  if CTX and CTX.scan_cleanup_all then pcall(CTX.scan_cleanup_all) end
+  -- Clear aliases only. The lease registry owns track deletion and refresh release.
+  if pref_plugins.scan then
+    pref_plugins.scan.track, pref_plugins.scan.lease = nil, nil
+    pref_plugins.scan.active, pref_plugins.scan.phase = false, "idle"
   end
-  -- Release scan cleanup scopes without assuming every temp-track owner still
-  -- has an Undo block open. Refresh suppression can span the deferred read, but
-  -- Undo blocks are closed before returning to REAPER and tracked explicitly.
-  local _refresh_owners = 0
-  if pref_plugins.scan  and pref_plugins.scan.track  then _refresh_owners = _refresh_owners + 1 end
-  if fx_cache_ui.rescan and fx_cache_ui.rescan.track then _refresh_owners = _refresh_owners + 1 end
-  if S._fx_inspect_tmp                               then _refresh_owners = _refresh_owners + 1 end
-  local _undo_owners = 0
-  if pref_plugins.scan and pref_plugins.scan.undo_open then
-    _undo_owners = _undo_owners + 1
-    pref_plugins.scan.undo_open = false
+  if fx_cache_ui.rescan then
+    fx_cache_ui.rescan.track, fx_cache_ui.rescan.lease = nil, nil
+    fx_cache_ui.rescan.active, fx_cache_ui.rescan.phase = false, "idle"
   end
-  if fx_cache_ui.rescan and fx_cache_ui.rescan.undo_open then
-    _undo_owners = _undo_owners + 1
-    fx_cache_ui.rescan.undo_open = false
-  end
-  if S._fx_inspect_tmp and S._fx_inspect_tmp.undo_open then
-    _undo_owners = _undo_owners + 1
-    S._fx_inspect_tmp.undo_open = false
-  end
-  local _refreshes = _refresh_owners
-  if deep_scan._ui_refresh_released then _refreshes = _refreshes - 1 end
-  if _refreshes < 0 then _refreshes = 0 end
-  for _ = 1, _refreshes do pcall(reaper.PreventUIRefresh, -1) end
-  for _ = 1, _undo_owners do
-    pcall(reaper.Undo_EndBlock, "ReaAssist: scan (closed at exit)", 0)
-  end
+  if fx_cache_ui.rescan_all then fx_cache_ui.rescan_all.active = false end
+  S._fx_inspect_tmp = nil
+  deep_scan.tr, deep_scan.lease, deep_scan.coro = nil, nil, nil
+  deep_scan.active, deep_scan.on_complete, deep_scan.on_cancel = false, nil, nil
   if reaper.ImGui_DestroyContext and RA.ctx then
     pcall(reaper.ImGui_DestroyContext, RA.ctx)
   end
-  -- Remove all temp files so nothing persists on disk after exit. Every
-  -- tmp.* field is unconditionally assigned in the do-block above, so
+  -- Remove this instance's disposable temp files on graceful exit. Foreign
+  -- Unknown-owner scratch and unresolved recovery copies can still persist.
+  -- Every tmp.* field is unconditionally assigned in the do-block above, so
   -- the previous `if tmp.X then` guards on each line were dead. The
   -- auth file should already be removed after each curl call, but
   -- os.remove silently no-ops on missing files so cleaning up
@@ -6937,6 +7518,7 @@ reaper.atexit(function()
   os.remove(tmp.screenshot)
   os.remove(tmp.clipboard)
   os.remove(tmp.live)
+  RA.retire_owned_unavailable_record()
 end)
 
 -- =============================================================================
@@ -7292,9 +7874,10 @@ local function _render_block(block, pad)
     return pad .. "[text]\n" .. _indent(_trim_base64(block.text or ""), pad .. "  ")
   elseif bt == "image" or bt == "image_url" then
     local sz = 0
-    if block.source and block.source.data then sz = #block.source.data end
-    if block.image_url and block.image_url.url then sz = #block.image_url.url end
-    local mt = (block.source and block.source.media_type) or "image"
+    if type(block.source) == "table" and type(block.source.data) == "string" then sz = #block.source.data end
+    if type(block.image_url) == "table" and type(block.image_url.url) == "string" then sz = #block.image_url.url end
+    local mt = (type(block.source) == "table" and block.source.media_type) or "image"
+    if type(mt) ~= "string" and type(mt) ~= "number" then mt = "image" end
     return pad .. "[image] " .. mt .. " (" .. sz .. " bytes)"
   elseif bt == "tool_use" then
     local head = pad .. "[tool_use] name=" .. tostring(block.name)
@@ -7311,7 +7894,15 @@ local function _render_block(block, pad)
     -- shared without publishing private reasoning or large signed blobs.
     return _render_private_reasoning_block(block, pad, bt)
   else
-    return pad .. "[" .. bt .. "]\n" .. _indent(JSON.encode(block), pad .. "  ")
+    if type(bt) ~= "string" and type(bt) ~= "number" then
+      return pad .. "[unsupported content block omitted]"
+    end
+    local encoded = JSON.encode(block)
+    local marker = _response_has_private_reasoning_marker(encoded)
+    if marker then
+      return pad .. _private_response_omission(encoded, "unsupported content block", marker)
+    end
+    return pad .. "[" .. bt .. "]\n" .. _indent(encoded, pad .. "  ")
   end
 end
 
@@ -7493,10 +8084,10 @@ local function _render_response(body)
     if resp.stop_reason then out[#out+1] = "Stop reason: " .. tostring(resp.stop_reason) end
     if type(resp.usage) == "table" then
       local u, parts = resp.usage, {}
-      if u.input_tokens              then parts[#parts+1] = "input="       .. u.input_tokens end
-      if u.output_tokens             then parts[#parts+1] = "output="      .. u.output_tokens end
-      if u.cache_read_input_tokens   then parts[#parts+1] = "cache_read="  .. u.cache_read_input_tokens end
-      if u.cache_creation_input_tokens then parts[#parts+1] = "cache_write=" .. u.cache_creation_input_tokens end
+      if type(u.input_tokens) == "number" or type(u.input_tokens) == "string" then parts[#parts+1] = "input="       .. u.input_tokens end
+      if type(u.output_tokens) == "number" or type(u.output_tokens) == "string" then parts[#parts+1] = "output="      .. u.output_tokens end
+      if type(u.cache_read_input_tokens) == "number" or type(u.cache_read_input_tokens) == "string" then parts[#parts+1] = "cache_read="  .. u.cache_read_input_tokens end
+      if type(u.cache_creation_input_tokens) == "number" or type(u.cache_creation_input_tokens) == "string" then parts[#parts+1] = "cache_write=" .. u.cache_creation_input_tokens end
       out[#out+1] = "Usage: " .. table.concat(parts, ", ")
     end
     if resp.content then
@@ -8048,12 +8639,10 @@ PROVIDERS = {
     -- thinking API across the current Claude lineup:
     --   * Haiku 4.5 (and other "Claude 4" models without adaptive
     --     support): manual budget_tokens only.
-    --   * Sonnet 5 / Opus 5: adaptive + effort. Sending the manual
+    --   * Sonnet 5.5 / Opus 5.5: adaptive + effort. Sending the manual
     --     shape to either model returns a 400.
-    -- "None" is the explicit off switch: ReaAssist sends
-    -- {"thinking":{"type":"disabled"}} so Claude cannot inherit a future
-    -- adaptive-thinking default. (Mythos Preview rejects disabled thinking,
-    -- but we don't ship it.)
+    -- "None" is the explicit off switch for Haiku. Opus 5.5
+    -- uses Low through High. Sonnet 5.5 exposes Low through Max.
     -- Default idx is None to match pre-existing ReaAssist behavior. The
     -- budget_tokens stay under each model's max_output. This limit is
     -- separate from the request-level max_tokens below: max_tokens is the
@@ -8064,6 +8653,8 @@ PROVIDERS = {
       { label = "Low",    value = "low",    budget_tokens = 2048,  effort = "low"    },
       { label = "Medium", value = "medium", budget_tokens = 8192,  effort = "medium" },
       { label = "High",   value = "high",   budget_tokens = 16384, effort = "high"   },
+      { label = "Xhigh",  value = "xhigh",  effort = "xhigh", model_id = "claude-sonnet-5-5" },
+      { label = "Max",    value = "max",    effort = "max", model_id = "claude-sonnet-5-5" },
     },
     default_thinking_idx = 1,  -- None (matches pre-thinking-support behavior)
     -- price_cache_w reflects the 5-minute cache write rate (1.25x input).
@@ -8072,35 +8663,42 @@ PROVIDERS = {
     -- was dropped). 1h writes would be 2x but we never use them.
     -- max_output: per-model output-token ceiling (Anthropic Messages API
     -- enforces server-side; we send this as max_tokens). Sourced from
-    -- Anthropic's published model docs as of Jun 2026. Update when
+    -- Anthropic's published model docs as of Sep 2026. Update when
     -- ceilings change.
     -- context_window: per-model context size used by the preflight token
-    -- gate. Haiku 4.5 stays at the 200K default (no field); Sonnet 5
-    -- and Opus 5 advertise 1M-token windows.
+    -- gate. Haiku 4.5 stays at the 200K default (no field); Sonnet 5.5
+    -- and Opus 5.5 advertise 1M-token windows.
     -- thinking_style: which wire-format shape this model accepts.
     --   "claude_manual"   = {"thinking":{"type":"enabled","budget_tokens":N}}
     --   "claude_adaptive" = {"thinking":{"type":"adaptive"},
     --                        "output_config":{"effort":"<level>"}}
-    -- Haiku 4.5 accepts manual; Sonnet 5 / Opus 5 use adaptive
+    -- Haiku 4.5 accepts manual; Sonnet 5.5 / Opus 5.5 use adaptive
     -- and reject manual budget_tokens.
     --
     -- default_thinking_idx (per-model override): Haiku at None/Low
     -- struggles on multi-step REAPER scripting and Medium needs a
     -- retry on complex prompts, so Haiku defaults to High (4, 16K
     -- budget) -- the only Haiku combo that handles complex routing/
-    -- FX work reliably at moderate latency. Sonnet inherits the provider
-    -- default of None. Opus 5 pins None explicitly because it had the best
-    -- tested balance of quality, latency, and cost. Both send disabled
-    -- thinking on the wire. Users can still pick a higher level via the chip
-    -- if a particular prompt needs it.
+    -- FX work reliably at moderate latency. Sonnet 5.5 defaults to Low.
+    -- Opus 5.5 defaults to Medium, Anthropic's published
+    -- default; Low is the nearest supported choice for saved Opus 5 None.
+    -- ReaAssist has not yet measured the Opus 5.5 effort levels.
     models = {
       { label = "Haiku 4.5",  chip_label = "HAIKU",  id = "claude-haiku-4-5",
         price_in = 1.00,  price_out = 5.00,  price_cache_r = 0.10, price_cache_w = 1.25, max_output = 64000,  thinking_style = "claude_manual",   default_thinking_idx = 4 },
-      { label = "Sonnet 5",   chip_label = "SONNET", id = "claude-sonnet-5",
+      -- Sonnet 5.5 rejects disabled thinking. Its between_tools mode needs
+      -- Engine support, so this app exposes the five adaptive effort levels.
+      { label = "Sonnet 5.5", chip_label = "SONNET 5.5", id = "claude-sonnet-5-5",
+        legacy_ids = { ["claude-sonnet-5"] = true, ["claude-sonnet-4-6"] = true },
+        price_tier = 2, descriptor = "balanced",
         price_in = 2.00,  price_out = 10.00, price_cache_r = 0.20, price_cache_w = 2.50,
-        max_output = 128000, context_window = 1000000, thinking_style = "claude_adaptive" },
-      { label = "Opus 5",     chip_label = "OPUS",   id = "claude-opus-5",
-        price_in = 5.00,  price_out = 25.00, price_cache_r = 0.50, price_cache_w = 6.25, max_output = 128000, context_window = 1000000, thinking_style = "claude_adaptive", default_thinking_idx = 1 },
+        max_output = 128000, context_window = 1000000, thinking_style = "claude_adaptive",
+        min_thinking_idx = 2, default_thinking_idx = 2 },
+      { label = "Opus 5.5",   chip_label = "OPUS",   id = "claude-opus-5-5",
+        price_tier = 3, descriptor = "smart",
+        price_in = 4.00,  price_out = 20.00, price_cache_r = 0.20, price_cache_w = 5.00,
+        max_output = 128000, context_window = 1000000, thinking_style = "claude_adaptive",
+        min_thinking_idx = 2, default_thinking_idx = 3 },
     },
   },
   {
@@ -8121,7 +8719,7 @@ PROVIDERS = {
     console_label = "platform.openai.com/api-keys",
     billing_url   = "https://platform.openai.com/settings/organization/billing",
     billing_label = "platform.openai.com/settings/organization/billing",
-    default_model_idx = 1,  -- GPT-5.6 Luna -- best tested balance
+    default_model_idx = 1,  -- GPT-6 Luna
     -- If the default model family changes, update the reasoning gate in
     -- Net.build_openai_key_test_body and its direct body test.
     thinking_levels = {
@@ -8129,34 +8727,37 @@ PROVIDERS = {
       { label = "Low",    value = "low"    },
       { label = "Medium", value = "medium" },
       { label = "High",   value = "high"   },
+      { label = "Xhigh",  value = "xhigh"  },
+      { label = "Max",    value = "max"    },
     },
-    default_thinking_idx = 1,  -- None (all GPT-5.6 rows inherit this)
+    default_thinking_idx = 2,  -- Low
     -- max_output: per-model output-token ceiling. OpenAI accepts but does
     -- not require max_tokens / max_completion_tokens; we omit it from the
     -- request so the server applies its own default (= the ceiling). The
     -- value here is used for the preflight context-budget reserve only.
-    -- All current GPT-5.x models share the same 128K ceiling.
+    -- These GPT-6 models share the same 128K ceiling.
     -- context_window: per-model context size used by the preflight token
-    -- gate. GPT-5.6 accepts a 922K maximum input inside its
+    -- gate. GPT-6 accepts a 922K maximum input inside its
     -- 1,050,000-token context window.
-    -- Surcharge tier on GPT-5.6: prompts above 272K input tokens are
+    -- Surcharge tier on GPT-6: prompts above 272K input tokens are
     -- billed at 2x input and 1.5x output for the full request. The shared
     -- long_context_* metadata makes live totals and spend preflight apply
     -- that tier to uncached, cache-read, cache-write, and output tokens.
-    -- GPT-5.6 cache writes are billed at 1.25x uncached input; cache reads
-    -- remain at the 90%-discounted rate. price_cache_w carries that write
+    -- GPT-6 cache writes are billed at 1.25x uncached input; cache reads
+    -- use each model's published rate. price_cache_w carries that write
     -- rate into live usage, session totals, budget checks, and Bench.
-    -- Luna, Terra, and Sol use None (1): the launch probe passed every None
-    -- cell, while the only two runtime failures occurred at Medium. Luna is
-    -- the default because it matched Mini's tested pass rate with lower
-    -- latency and cost.
+    -- Luna offers None. Sol 6.1 and Astra require at least Low.
     models = {
-      { label = "GPT-5.6 Luna",  chip_label = "LUNA",  id = "gpt-5.6-luna",
-        protocol = "openai_responses", price_in = 0.20,  price_out = 1.20,  price_cache_r = 0.02, price_cache_w = 0.25,  max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 1, descriptor = "fast" },
-      { label = "GPT-5.6 Terra", chip_label = "TERRA", id = "gpt-5.6-terra",
-        protocol = "openai_responses", price_in = 2.00,  price_out = 12.00, price_cache_r = 0.20, price_cache_w = 2.50,  max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 2, descriptor = "balanced" },
-      { label = "GPT-5.6 Sol",   chip_label = "SOL",   id = "gpt-5.6-sol",
-        protocol = "openai_responses", price_in = 5.00,  price_out = 30.00, price_cache_r = 0.50, price_cache_w = 6.25,  max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 3, descriptor = "smart" },
+      { label = "GPT-6 Luna", chip_label = "LUNA", id = "gpt-6-luna",
+        max_thinking_idx = 4,
+        protocol = "openai_responses", price_in = 0.10, price_out = 0.50, price_cache_r = 0.01, price_cache_w = 0.125, max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 1, descriptor = "fast" },
+      { label = "GPT-6.1 Sol", chip_label = "SOL 6.1", id = "gpt-6.1-sol",
+        min_thinking_idx = 2, default_thinking_idx = 2,
+        legacy_ids = { ["gpt-6-sol"] = true },
+        protocol = "openai_responses", price_in = 2.00, price_out = 10.00, price_cache_r = 0.10, price_cache_w = 2.50, max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 2, descriptor = "balanced" },
+      { label = "GPT-6 Astra", chip_label = "ASTRA", id = "gpt-6-astra",
+        min_thinking_idx = 2, default_thinking_idx = 2,
+        protocol = "openai_responses", price_in = 10.00, price_out = 50.00, price_cache_r = 1.00, price_cache_w = 12.50, max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 4, descriptor = "smart" },
     },
   },
   {
@@ -8499,8 +9100,10 @@ function PROVIDERS.thinking_idx_allowed(p, m, idx)
   idx = tonumber(idx)
   if not idx or idx < 1 or idx > #p.thinking_levels then return false end
   local level = p.thinking_levels[idx]
+  if level.model_id and not (m and m.id == level.model_id) then return false end
   if level.flash_only and not (m and m.is_flash) then return false end
   if m and m.min_thinking_idx and idx < m.min_thinking_idx then return false end
+  if m and m.max_thinking_idx and idx > m.max_thinking_idx then return false end
   return true
 end
 
@@ -8520,6 +9123,20 @@ function PROVIDERS.normalize_thinking_idx(p, m, idx)
     if PROVIDERS.thinking_idx_allowed(p, m, fallback_idx) then
       return fallback_idx
     end
+  end
+  return 0
+end
+
+function PROVIDERS.retry_thinking_idx(p, m)
+  if not p or not p.thinking_levels then return 0 end
+  for idx, level in ipairs(p.thinking_levels) do
+    if (level.value == "none" or level.value == "disabled")
+       and PROVIDERS.thinking_idx_allowed(p, m, idx) then
+      return idx
+    end
+  end
+  if (p.id == "anthropic" or p.id == "openai") and m and m.min_thinking_idx then
+    return PROVIDERS.normalize_thinking_idx(p, m, m.min_thinking_idx)
   end
   return 0
 end
@@ -8578,7 +9195,7 @@ function Store._notify_user_once(key, text, kind, sticky)
       local max_chars = 1800
       if #combined > max_chars then
         Store._log("STORE", "additional startup notice: " .. tostring(text or ""))
-        combined = sanitize_utf8(combined:sub(1, max_chars))
+        combined = JSON.sanitize_utf8(combined:sub(1, max_chars))
           .. "\n\nAdditional warnings were written to Debug.log."
       end
       pending.text = combined
@@ -8610,28 +9227,28 @@ function Store._notify_write_failure(label, err)
   -- permissions that are not the reason.
   if DeployLock and DeployLock.REFUSAL
       and detail:find(DeployLock.REFUSAL, 1, true) then
-    Store._notify_user_once(DeployLock.NOTICE_KEY,
-      DeployLock.notice_text(DeployLock._last_block), "warn", false)
-    return
+    local notice = DeployLock.notice_text(DeployLock._last_block)
+    Store._notify_user_once(DeployLock.NOTICE_KEY, notice, "warn", false)
+    return notice
   end
   if detail:find("future schema", 1, true) then
+    local notice = tostring(label or "ReaAssist data")
+      .. " was saved by a newer ReaAssist version and remains read-only. "
+      .. "Update ReaAssist before changing it."
     Store._notify_user_once("future_schema_write_refused_" .. tostring(label),
-      tostring(label or "ReaAssist data")
-        .. " was saved by a newer ReaAssist version and remains read-only. "
-        .. "Update ReaAssist before changing it.",
-      "warn", true)
-    return
+      notice, "warn", true)
+    return notice
   end
   if detail:find("backup", 1, true) then
+    local notice = tostring(label or "ReaAssist data")
+      .. " was not saved because recovery evidence still needs attention."
     Store._notify_user_once("backup_write_refused_" .. tostring(label),
-      tostring(label or "ReaAssist data")
-        .. " was not saved because recovery evidence still needs attention.",
-      "warn", true)
-    return
+      notice, "warn", true)
+    return notice
   end
-  Store._notify_user_once("write_failure",
-    "Could not save ReaAssist data. Check Data folder permissions.",
-    "err", true)
+  local notice = "Could not save ReaAssist data. Check Data folder permissions."
+  Store._notify_user_once("write_failure", notice, "err", true)
+  return notice
 end
 
 function Store._atomic_write_suffix()
@@ -8857,7 +9474,7 @@ function Store.atomic_write_file(path, data, opts)
   return nil
 end
 
-function Store.read_json(path, default_value, schema_version)
+function Store.read_json(path, default_value, schema_version, preserve_empty_arrays)
   local raw, read_err, read_detail = Store._read_text_file(path)
   if raw == nil and read_err == "read_failed" then
     raw, read_err, read_detail = Store._read_text_file(path)
@@ -8883,7 +9500,7 @@ function Store.read_json(path, default_value, schema_version)
   end
   Store._clear_read_failed(path)
   if raw == "" then return default_value, "empty" end
-  local data, err = JSON.decode(raw)
+  local data, err = JSON.decode(raw, nil, preserve_empty_arrays)
   if not data then
     Store._log("STORE", "JSON decode failed for " .. tostring(path)
       .. ": " .. tostring(err))
@@ -8949,6 +9566,10 @@ function Store._copy_json_value(value, seen)
   if seen[value] then return seen[value] end
   local out = {}
   seen[value] = out
+  if JSON._EMPTY_ARRAY_TAG ~= nil
+      and getmetatable(value) == JSON._EMPTY_ARRAY_TAG then
+    setmetatable(out, JSON._EMPTY_ARRAY_TAG)
+  end
   for key, child in pairs(value) do
     out[Store._copy_json_value(key, seen)] = Store._copy_json_value(child, seen)
   end
@@ -9393,6 +10014,7 @@ function Store.cleanup_config_extstate(doc)
     "model_picker_reset_v2",
     "anthropic_opus_48_model_v1",
     "anthropic_opus_5_model_v1",
+    "anthropic_opus_55_model_v1",
     "google_flash_35_model_v1",
     "google_flash_35_minimal_default_v1",
     "google_flash_36_model_v1",
@@ -9536,7 +10158,7 @@ end
 
 function Store.config_doc()
   if Store._config_doc then return Store._config_doc end
-  local doc, err = Store.read_json(RA.CONFIG_PATH, nil, 1)
+  local doc, err = Store.read_json(RA.CONFIG_PATH, nil, 1, true)
   if doc and err ~= "future_schema" then
     Store._config_doc = Store.seed_config_from_extstate(doc)
     return Store._config_doc
@@ -9910,11 +10532,58 @@ function Store.remember_temporary_thinking_selection(provider, model, idx)
   return true
 end
 
+function Store.begin_key_test_selection(owner)
+  Store._key_test_selection = nil
+  local current = PROVIDERS.active()
+  local model = MODELS[prefs.model_idx] or MODELS[1]
+  Store._key_test_selection = {
+    owner = owner,
+    selection = Store._copy_json_value(Store.current_selection()),
+    provider_id = current and current.id,
+    model_id = model and model.id,
+    thinking_idx = prefs.thinking_idx,
+    test_provider_id = current and current.id,
+  }
+end
+
+function Store.end_key_test_selection(owner, restore)
+  local saved = Store._key_test_selection
+  if not saved then return false end
+  if saved.owner ~= owner then return true end
+  Store._key_test_selection = nil
+  local current = PROVIDERS.active()
+  if not restore or (current and current.id ~= saved.test_provider_id) then
+    return true
+  end
+  prefs.provider_idx = PROVIDERS._by_id[saved.provider_id] or 1
+  MODELS.refresh()
+  local provider = PROVIDERS.active()
+  if provider and provider.id == saved.provider_id then
+    local model_idx = Store._model_index_by_id(MODELS, saved.model_id)
+    if model_idx then
+      prefs.model_idx = model_idx
+      prefs.thinking_idx = PROVIDERS.normalize_thinking_idx(
+        provider, MODELS[model_idx], saved.thinking_idx)
+    end
+  end
+  return true
+end
+
 function Store.current_selection()
   if S and S.screen_reader_mode and ScreenReaderLegacy
       and ScreenReaderLegacy.selection_for_save then
     local preserved = ScreenReaderLegacy.selection_for_save()
     if preserved then return Store._copy_json_value(preserved) end
+  end
+  local test = Store._key_test_selection
+  local active = PROVIDERS and PROVIDERS.active and PROVIDERS.active()
+  local custom = api_keys and api_keys.custom_conn_test
+  local owned = test and ((test.owner == custom and custom.active)
+    or (test.owner == api_keys and api_keys._test_orig_provider_idx ~= nil
+      and (api_keys.key_test_origin == "visual_manual"
+        or api_keys.key_test_origin == "visual_save")))
+  if owned and active and active.id == test.test_provider_id then
+    return Store._copy_json_value(test.selection)
   end
   local temporary = type(S) == "table"
     and S.temporary_provider_selection_guard or nil
@@ -9936,6 +10605,7 @@ function Store.current_selection()
     thinking_idx_by_provider_model = {},
   }
   local function provider_known(id)
+    if id == CUSTOM_CONN_TEST_ID then return false end
     return not (PROVIDERS and PROVIDERS._by_id) or PROVIDERS._by_id[id]
   end
   for k, v in pairs(prev_model_map) do
@@ -9952,32 +10622,34 @@ function Store.current_selection()
 
   if PROVIDERS then
     for _, p in ipairs(PROVIDERS) do
-      local models = (active_provider and p.id == active_provider.id)
-        and MODELS or p.models
-      local idx
-      if active_provider and p.id == active_provider.id then
-        idx = prefs.model_idx
-      else
-        idx = Store._model_index_by_id(models, selection.model_id_by_provider[p.id])
-          or tonumber(reaper.GetExtState(CFG.EXT_NS, "model_idx_" .. p.id))
-      end
-      local m = models and idx and models[idx] or nil
-      if m and m.id then selection.model_id_by_provider[p.id] = m.id end
+      if provider_known(p.id) then
+        local models = (active_provider and p.id == active_provider.id)
+          and MODELS or p.models
+        local idx
+        if active_provider and p.id == active_provider.id then
+          idx = prefs.model_idx
+        else
+          idx = Store._model_index_by_id(models, selection.model_id_by_provider[p.id])
+            or tonumber(reaper.GetExtState(CFG.EXT_NS, "model_idx_" .. p.id))
+        end
+        local m = models and idx and models[idx] or nil
+        if m and m.id then selection.model_id_by_provider[p.id] = m.id end
 
-      if p.thinking_levels and p.models then
-        for _, tm in ipairs(p.models) do
-          if tm.id then
-            local key = p.id .. "/" .. tm.id
-            local saved = tonumber(selection.thinking_idx_by_provider_model[key])
-              or tonumber(reaper.GetExtState(
-                CFG.EXT_NS, "thinking_idx_" .. p.id .. "_" .. tm.id))
-            if active_provider and p.id == active_provider.id
-               and models and models[prefs.model_idx]
-               and models[prefs.model_idx].id == tm.id
-               and prefs.thinking_idx and prefs.thinking_idx > 0 then
-              saved = prefs.thinking_idx
+        if p.thinking_levels and p.models then
+          for _, tm in ipairs(p.models) do
+            if tm.id then
+              local key = p.id .. "/" .. tm.id
+              local saved = tonumber(selection.thinking_idx_by_provider_model[key])
+                or tonumber(reaper.GetExtState(
+                  CFG.EXT_NS, "thinking_idx_" .. p.id .. "_" .. tm.id))
+              if active_provider and p.id == active_provider.id
+                 and models and models[prefs.model_idx]
+                 and models[prefs.model_idx].id == tm.id
+                 and prefs.thinking_idx and prefs.thinking_idx > 0 then
+                saved = prefs.thinking_idx
+              end
+              if saved then selection.thinking_idx_by_provider_model[key] = saved end
             end
-            if saved then selection.thinking_idx_by_provider_model[key] = saved end
           end
         end
       end
@@ -10148,9 +10820,18 @@ function Store.save_config()
   if not Store._config_initializing then
     Store._config_snapshot_persisted = not err
   end
-  if err then Store._notify_write_failure("Config.json", err) end
-  if not err then Store.cleanup_config_extstate(doc) end
-  return err
+  local write_notice
+  if err then write_notice = Store._notify_write_failure("Config.json", err) end
+  local cleanup_warning
+  if not err then
+    local cleanup_ok = pcall(Store.cleanup_config_extstate, doc)
+    if not cleanup_ok then
+      cleanup_warning = "legacy_cleanup_incomplete"
+      pcall(Store._log, "STORE",
+        "Config saved; legacy settings cleanup is incomplete. Next Save retries cleanup.")
+    end
+  end
+  return err, cleanup_warning, write_notice
 end
 
 if OpenRouter then
@@ -11040,7 +11721,7 @@ function Store.custom_instructions_prompt_block()
   if #trimmed > limit then
     trimmed = str_sub(trimmed, 1, limit)
       .. "\n\n[Truncated by ReaAssist: Custom Instructions exceeded "
-      .. tostring(limit) .. " characters.]"
+      .. tostring(limit) .. " bytes.]"
   end
 
   return tbl_concat({
@@ -11644,6 +12325,8 @@ JSON._ESCAPE_MAP = JSON._ESCAPE_MAP or {
   ['\r'] = '\\r',
   ['\t'] = '\\t',
 }
+-- Config reads preserve empty lists without sharing mutable sentinel data.
+JSON._EMPTY_ARRAY_TAG = JSON._EMPTY_ARRAY_TAG or {}
 
 -- Escapes a Lua string for safe embedding inside a JSON string value.
 -- Also escapes control characters below 0x20 (backspace, form feed,
@@ -11774,7 +12457,7 @@ do
   end
 
   -- Decode a JSON object. Returns (table, next_position).
-  decode_object = function(s, pos)
+  decode_object = function(s, pos, preserve_empty_arrays)
     pos = pos + 1  -- skip '{'
     local obj = {}
     pos = skip_ws(s, pos)
@@ -11788,7 +12471,7 @@ do
       if str_sub(s, pos, pos) ~= ':' then return nil, "expected ':'" end
       pos = skip_ws(s, pos + 1)
       local val
-      val, pos = decode_value(s, pos)
+      val, pos = decode_value(s, pos, preserve_empty_arrays)
       if val == nil and type(pos) == "string" then return nil, pos end
       obj[key] = val
       pos = skip_ws(s, pos)
@@ -11800,15 +12483,18 @@ do
   end
 
   -- Decode a JSON array. Returns (table, next_position).
-  decode_array = function(s, pos)
+  decode_array = function(s, pos, preserve_empty_arrays)
     pos = pos + 1  -- skip '['
     local arr = {}
     pos = skip_ws(s, pos)
-    if str_sub(s, pos, pos) == ']' then return arr, pos + 1 end
+    if str_sub(s, pos, pos) == ']' then
+      if preserve_empty_arrays then setmetatable(arr, JSON._EMPTY_ARRAY_TAG) end
+      return arr, pos + 1
+    end
     while true do
       pos = skip_ws(s, pos)
       local val
-      val, pos = decode_value(s, pos)
+      val, pos = decode_value(s, pos, preserve_empty_arrays)
       if val == nil and type(pos) == "string" then return nil, pos end
       arr[#arr+1] = val
       pos = skip_ws(s, pos)
@@ -11820,12 +12506,12 @@ do
   end
 
   -- Decode any JSON value. Top-level dispatch.
-  decode_value = function(s, pos)
+  decode_value = function(s, pos, preserve_empty_arrays)
     pos = skip_ws(s, pos)
     local ch = str_sub(s, pos, pos)
     if ch == '"' then return decode_string(s, pos)
-    elseif ch == '{' then return decode_object(s, pos)
-    elseif ch == '[' then return decode_array(s, pos)
+    elseif ch == '{' then return decode_object(s, pos, preserve_empty_arrays)
+    elseif ch == '[' then return decode_array(s, pos, preserve_empty_arrays)
     elseif ch == 't' then
       if str_sub(s, pos, pos + 3) == "true" then return true, pos + 4 end
       return nil, "invalid value"
@@ -11845,14 +12531,18 @@ do
   -- Public API: decode a JSON string into a Lua value.
   -- Returns (value, nil) on success, or (nil, error_string) on failure.
   -- Wrapped in pcall as a final safety net against any unforeseen edge case.
-  JSON.decode = function(s)
+  JSON.decode = function(s, require_complete, preserve_empty_arrays)
     if type(s) ~= "string" or #s == 0 then
       return nil, "empty or non-string input"
     end
-    local ok, result, next_pos = pcall(decode_value, s, 1)
+    local ok, result, next_pos = pcall(decode_value, s, 1, preserve_empty_arrays)
     if not ok then return nil, tostring(result) end
     if result == nil and type(next_pos) == "string" then
       return nil, next_pos
+    end
+    if require_complete and (type(next_pos) ~= "number"
+        or skip_ws(s, next_pos) <= #s) then
+      return nil, "trailing input after the JSON document"
     end
     return result, nil
   end
@@ -11868,8 +12558,7 @@ do
   local function is_array(t)
     local n = #t
     if n == 0 then
-      -- Empty table: always encode as {} (object), never [].
-      -- In this codebase empty tables are dictionaries, not empty arrays.
+      -- Plain empty tables are dictionaries. Config list tags are handled below.
       return false
     end
     local count = 0
@@ -11944,6 +12633,10 @@ do
     if tv == "number"  then return encode_number(v) end
     if tv == "boolean" then return v and "true" or "false" end
     if tv == "table"   then
+      if JSON._EMPTY_ARRAY_TAG ~= nil
+          and getmetatable(v) == JSON._EMPTY_ARRAY_TAG and next(v) == nil then
+        return "[]"
+      end
       if is_array(v) then
         return encode_array(v, indent, depth + 1)
       else
@@ -12472,16 +13165,11 @@ function Custom.native_endpoint_error(reason)
   return Custom.t(selected[1], nil, selected[2])
 end
 
--- Return true if s is safe to drop into an HTTP-header slot on the curl
--- command line across both shells we target. Rejects newlines (which would
--- split the argument), null bytes, and the triple-quote boundary that our
--- Windows PowerShell launcher uses to terminate each -H argument. Everything
--- else (Unicode, spaces, dollar signs, backticks, single/double quotes) is
--- fine because the POSIX branch wraps each header in sq() (POSIX single-
--- quote escape) and the Windows branch wraps each header in triple double
--- quotes for cmd.exe; neither shell interpolates inside those contexts.
+-- Reject NUL, line breaks, legacy triple quotes and curl file references.
+-- POSIX quotes literal values; Windows sends them in a configuration file.
 function Custom.header_is_safe(s)
   if type(s) ~= "string" then return false end
+  if s:match("^%s*@") then return false end
   if s:find("[%z\n\r]") then return false end
   if s:find('"""', 1, true) then return false end
   return true
@@ -12498,20 +13186,20 @@ function Custom.parse_headers_text(text)
     lineno = lineno + 1
     local trimmed = line:match("^%s*(.-)%s*$") or ""
     if trimmed ~= "" then
+      local name, rest = trimmed:match("^([^:]+):%s*(.*)$")
+      if not name or name:match("^%s*$") or name:sub(1, 1) == "@" then
+        return nil, Custom.t("settings.custom.error.header_format",
+          { line = lineno },
+          str_format(
+            "Line %d is not in \"Name: value\" format. Each header must "
+            .. "have a name, a colon, and a value.", lineno))
+      end
       if not Custom.header_is_safe(trimmed) then
         return nil, Custom.t("settings.custom.error.header_unsafe",
           { line = lineno },
           str_format(
             "Line %d contains a newline, null byte, or triple-quote that "
             .. "can't be sent safely. Remove those characters.", lineno))
-      end
-      local name, rest = trimmed:match("^([^:]+):%s*(.*)$")
-      if not name or name:match("^%s*$") then
-        return nil, Custom.t("settings.custom.error.header_format",
-          { line = lineno },
-          str_format(
-            "Line %d is not in \"Name: value\" format. Each header must "
-            .. "have a name, a colon, and a value.", lineno))
       end
       -- Reject Authorization collision: users should use the API Key
       -- field for bearer tokens, not here. Also blocks accidental
@@ -12584,6 +13272,10 @@ end
 -- success or (nil, error_string) on failure.
 function Custom.validate_notes(text)
   if not text then return "", nil end
+  if type(text) ~= "string" then
+    return nil, Custom.t("settings.custom.error.notes_type", nil,
+      "Notes must be text.")
+  end
   local trimmed = text:match("^%s*(.-)%s*$") or ""
   if trimmed == "" then return "", nil end
   if #trimmed > Custom.MAX_NOTES_LEN then
@@ -13661,9 +14353,10 @@ end
 
 -- Full refresh: clear every custom entry, then re-register each persisted
 -- record in the saved order. Safe to call multiple times.
-function Custom.register_all()
+Custom.REGISTER_ALL_RECORDS_REVISION = 1
+function Custom.register_all(records)
   Custom.unregister_all()
-  for _, rec in ipairs(Custom.load_all()) do
+  for _, rec in ipairs(records or Custom.load_all()) do
     if rec._provider_opaque ~= true then Custom.register_one(rec) end
   end
   for _, rec in ipairs(CustomNative.load_all()) do
@@ -13776,7 +14469,9 @@ do
   if not (S and S._factory_reset_clean_boot)
      and not Store.migration_fired("anthropic_opus_48_model_v1") then
     local doc = Store.config_doc()
-    doc.selection = type(doc.selection) == "table" and doc.selection or {}
+    local old_selection, old_migrations = doc.selection, doc.migrations
+    doc.selection = Store._copy_json_value(
+      type(old_selection) == "table" and old_selection or {})
     doc.selection.model_id_by_provider =
       type(doc.selection.model_id_by_provider) == "table"
       and doc.selection.model_id_by_provider or {}
@@ -13797,19 +14492,22 @@ do
     doc.selection.thinking_idx_by_provider_model[old_key] = nil
     local old_ext = reaper.GetExtState(
       CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-4-7")
-    if old_ext ~= ""
-       and reaper.GetExtState(
-         CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-4-8") == "" then
-      reaper.SetExtState(
-        CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-4-8", old_ext, true)
-    end
-    reaper.DeleteExtState(
-      CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-4-7", true)
-    doc.migrations = type(doc.migrations) == "table" and doc.migrations or {}
+    doc.migrations = Store._copy_json_value(
+      type(old_migrations) == "table" and old_migrations or {})
     doc.migrations.anthropic_opus_48_model_v1 = true
     local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
     if err then
+      doc.selection, doc.migrations = old_selection, old_migrations
       Store._notify_write_failure("Config.json", err)
+    else
+      if old_ext ~= ""
+         and reaper.GetExtState(
+           CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-4-8") == "" then
+        reaper.SetExtState(
+          CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-4-8", old_ext, true)
+      end
+      reaper.DeleteExtState(
+        CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-4-7", true)
     end
   end
 end
@@ -13821,7 +14519,9 @@ do
   if not (S and S._factory_reset_clean_boot)
      and not Store.migration_fired("anthropic_opus_5_model_v1") then
     local doc = Store.config_doc()
-    doc.selection = type(doc.selection) == "table" and doc.selection or {}
+    local old_selection, old_migrations = doc.selection, doc.migrations
+    doc.selection = Store._copy_json_value(
+      type(old_selection) == "table" and old_selection or {})
     doc.selection.model_id_by_provider =
       type(doc.selection.model_id_by_provider) == "table"
       and doc.selection.model_id_by_provider or {}
@@ -13842,19 +14542,84 @@ do
     doc.selection.thinking_idx_by_provider_model[old_key] = nil
     local old_ext = reaper.GetExtState(
       CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-4-8")
-    if old_ext ~= ""
-       and reaper.GetExtState(
-         CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-5") == "" then
-      reaper.SetExtState(
-        CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-5", old_ext, true)
-    end
-    reaper.DeleteExtState(
-      CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-4-8", true)
-    doc.migrations = type(doc.migrations) == "table" and doc.migrations or {}
+    doc.migrations = Store._copy_json_value(
+      type(old_migrations) == "table" and old_migrations or {})
     doc.migrations.anthropic_opus_5_model_v1 = true
     local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
     if err then
+      doc.selection, doc.migrations = old_selection, old_migrations
       Store._notify_write_failure("Config.json", err)
+    else
+      if old_ext ~= ""
+         and reaper.GetExtState(
+           CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-5") == "" then
+        reaper.SetExtState(
+          CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-5", old_ext, true)
+      end
+      reaper.DeleteExtState(
+        CFG.EXT_NS, "thinking_idx_anthropic_claude-opus-4-8", true)
+    end
+  end
+end
+
+-- Move saved Opus choices to 5.5. Keep the old thinking slot for a possible
+-- 1.6.1 rollback, but never send its unsupported None level to Opus 5.5.
+-- Persist Config.json before touching legacy ExtState so a refused write can
+-- retry the migration on the next launch without losing a saved preference.
+do
+  if not (S and S._factory_reset_clean_boot)
+     and not Store.migration_fired("anthropic_opus_55_model_v1") then
+    local doc = Store.config_doc()
+    local old_selection, old_migrations = doc.selection, doc.migrations
+    doc.selection = Store._copy_json_value(
+      type(old_selection) == "table" and old_selection or {})
+    doc.selection.model_id_by_provider =
+      type(doc.selection.model_id_by_provider) == "table"
+      and doc.selection.model_id_by_provider or {}
+    doc.selection.thinking_idx_by_provider_model =
+      type(doc.selection.thinking_idx_by_provider_model) == "table"
+      and doc.selection.thinking_idx_by_provider_model or {}
+    local model_map = doc.selection.model_id_by_provider
+    local thinking_map = doc.selection.thinking_idx_by_provider_model
+    local old_model = model_map.anthropic
+    local old_idx = tonumber(reaper.GetExtState(CFG.EXT_NS,
+      "model_idx_anthropic"))
+    local new_model
+    if old_model == "claude-opus-5"
+       or old_model == "claude-opus-4-8"
+       or old_model == "claude-opus-4-7"
+       or (old_model == nil and old_idx == 3) then
+      new_model = "claude-opus-5-5"
+      model_map.anthropic = new_model
+    elseif old_model == "claude-opus-5-5" then
+      new_model = old_model
+    end
+
+    local target_key = "anthropic/claude-opus-5-5"
+    local saved_idx = tonumber(thinking_map[target_key])
+      or tonumber(reaper.GetExtState(CFG.EXT_NS,
+        "thinking_idx_anthropic_claude-opus-5-5"))
+    if not saved_idx then
+      for _, source_id in ipairs({"claude-opus-5", "claude-opus-4-8",
+                                   "claude-opus-4-7"}) do
+        saved_idx = tonumber(thinking_map["anthropic/" .. source_id])
+          or tonumber(reaper.GetExtState(CFG.EXT_NS,
+            "thinking_idx_anthropic_" .. source_id))
+        if saved_idx then break end
+      end
+    end
+    if saved_idx and saved_idx >= 1 and saved_idx <= 4 then
+      thinking_map[target_key] = saved_idx == 1 and 2 or saved_idx
+    end
+    doc.migrations = Store._copy_json_value(
+      type(old_migrations) == "table" and old_migrations or {})
+    doc.migrations.anthropic_opus_55_model_v1 = true
+    local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
+    if err then
+      doc.selection, doc.migrations = old_selection, old_migrations
+      Store._notify_write_failure("Config.json", err)
+    elseif new_model then
+      reaper.SetExtState(CFG.EXT_NS, "model_idx_anthropic", "3", true)
     end
   end
 end
@@ -13900,6 +14665,68 @@ do
     local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
     if err then
       Store._notify_write_failure("Config.json", err)
+    end
+  end
+end
+
+-- Move saved Sonnet choices to 5.5 and restore its middle picker slot.
+-- Keep prior effort keys for rollback. Save the document before mirroring the
+-- legacy index so a refused write preserves state and retries next launch.
+do
+  if not (S and S._factory_reset_clean_boot)
+     and not Store.migration_fired("anthropic_sonnet_55_model_v1") then
+    local doc = Store.config_doc()
+    local old_selection, old_migrations = doc.selection, doc.migrations
+    doc.selection = Store._copy_json_value(
+      type(old_selection) == "table" and old_selection or {})
+    doc.selection.model_id_by_provider =
+      type(doc.selection.model_id_by_provider) == "table"
+      and doc.selection.model_id_by_provider or {}
+    doc.selection.thinking_idx_by_provider_model =
+      type(doc.selection.thinking_idx_by_provider_model) == "table"
+      and doc.selection.thinking_idx_by_provider_model or {}
+    local model_map = doc.selection.model_id_by_provider
+    local thinking_map = doc.selection.thinking_idx_by_provider_model
+    local old_model = model_map.anthropic
+    local old_idx = tonumber(reaper.GetExtState(CFG.EXT_NS, "model_idx_anthropic"))
+    local selected = old_model == "claude-sonnet-5"
+      or old_model == "claude-sonnet-4-6"
+      or old_model == "claude-sonnet-5-5"
+      or ((old_model == nil or old_model == "") and (old_idx == 2 or old_idx == 4))
+    if selected then model_map.anthropic = "claude-sonnet-5-5" end
+
+    local target_key = "anthropic/claude-sonnet-5-5"
+    local saved = thinking_map[target_key]
+    if saved == nil then
+      local raw = reaper.GetExtState(CFG.EXT_NS, "thinking_idx_anthropic_claude-sonnet-5-5")
+      if raw ~= "" then saved = raw end
+    end
+    local max_idx = 6
+    if saved == nil then
+      max_idx = 4
+      for _, source_id in ipairs({"claude-sonnet-5", "claude-sonnet-4-6"}) do
+        saved = thinking_map["anthropic/" .. source_id]
+        if saved == nil then
+          local raw = reaper.GetExtState(CFG.EXT_NS, "thinking_idx_anthropic_" .. source_id)
+          if raw ~= "" then saved = raw end
+        end
+        if saved ~= nil then break end
+      end
+    end
+    if saved ~= nil then
+      local idx = tonumber(saved)
+      thinking_map[target_key] = idx and idx % 1 == 0 and idx >= 2
+        and idx <= max_idx and idx or 2
+    end
+    doc.migrations = Store._copy_json_value(
+      type(old_migrations) == "table" and old_migrations or {})
+    doc.migrations.anthropic_sonnet_55_model_v1 = true
+    local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
+    if err then
+      doc.selection, doc.migrations = old_selection, old_migrations
+      Store._notify_write_failure("Config.json", err)
+    elseif selected then
+      reaper.SetExtState(CFG.EXT_NS, "model_idx_anthropic", "2", true)
     end
   end
 end
@@ -14015,6 +14842,60 @@ do
     local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
     if err then
       Store._notify_write_failure("Config.json", err)
+    end
+  end
+end
+
+-- GPT-6 replaces the hosted GPT-5.6 picker. Preserve a saved thinking level
+-- when its model moves, and write Config.json before changing legacy ExtState.
+do
+  if not (S and S._factory_reset_clean_boot)
+     and not Store.migration_fired("openai_gpt_6_model_v1") then
+    local doc = Store.config_doc()
+    local old_selection, old_migrations = doc.selection, doc.migrations
+    doc.selection = Store._copy_json_value(
+      type(old_selection) == "table" and old_selection or {})
+    doc.selection.model_id_by_provider =
+      type(doc.selection.model_id_by_provider) == "table"
+      and doc.selection.model_id_by_provider or {}
+    doc.selection.thinking_idx_by_provider_model =
+      type(doc.selection.thinking_idx_by_provider_model) == "table"
+      and doc.selection.thinking_idx_by_provider_model or {}
+    local model_map = doc.selection.model_id_by_provider
+    local thinking_map = doc.selection.thinking_idx_by_provider_model
+    local old_model = model_map.openai
+    local old_idx = tonumber(reaper.GetExtState(CFG.EXT_NS, "model_idx_openai"))
+    local new_model
+    if old_model == "gpt-5.6-luna" then
+      new_model = "gpt-6-luna"
+    elseif old_model == "gpt-5.6-terra" or old_model == "gpt-5.6-sol" then
+      new_model = "gpt-6-sol"
+    elseif old_model == "gpt-6-luna" or old_model == "gpt-6-sol" then
+      new_model = old_model
+    elseif old_model == nil and old_idx then
+      new_model = old_idx == 1 and "gpt-6-luna"
+        or (old_idx == 2 or old_idx == 3) and "gpt-6-sol" or nil
+    end
+    if new_model then
+      model_map.openai = new_model
+      local source_key = old_model and "openai/" .. old_model or nil
+      local target_key = "openai/" .. new_model
+      if source_key and thinking_map[target_key] == nil then
+        thinking_map[target_key] = thinking_map[source_key]
+          or tonumber(reaper.GetExtState(
+            CFG.EXT_NS, "thinking_idx_openai_" .. old_model))
+      end
+    end
+    doc.migrations = Store._copy_json_value(
+      type(old_migrations) == "table" and old_migrations or {})
+    doc.migrations.openai_gpt_6_model_v1 = true
+    local err = Store.write_json_atomic(RA.CONFIG_PATH, doc, true)
+    if err then
+      doc.selection, doc.migrations = old_selection, old_migrations
+      Store._notify_write_failure("Config.json", err)
+    elseif new_model then
+      reaper.SetExtState(CFG.EXT_NS, "model_idx_openai",
+        new_model == "gpt-6-luna" and "1" or "2", true)
     end
   end
 end
@@ -16332,17 +17213,22 @@ local function detect_os_theme()
     _os_theme_cache = cached
     return cached
   end
-  -- Cache miss / stale / corrupted: re-detect below and persist the result.
+  -- Cache miss / stale / corrupted: re-detect below; persist confirmed results.
   -- Skip persistence when Factory Reset has set the suppress flag, so the
   -- freshly-cleared state doesn't reappear within seconds of reset. The
-  -- in-memory cache still updates so detection isn't repeated until the
-  -- next OS_THEME_TTL window.
-  local function _store(theme)
+  -- in-memory cache still updates so detection is not repeated this session.
+  local function _store(theme, persist)
     _os_theme_cache = theme
-    if not (S and S._suppress_os_theme_cache) then
+    if persist ~= false and not (S and S._suppress_os_theme_cache) then
       Store.set_os_theme_cache(theme, now)
     end
     return theme
+  end
+  local function _confirmed_output(result)
+    if type(result) ~= "string" then return nil end
+    local status, output = result:match("^([%+%-]?%d+)\r?\n(.*)$")
+    if tonumber(status) ~= 0 or not output:match("%S") then return nil end
+    return output
   end
   if RA.IS_WINDOWS then
     local cmd = 'powershell -NoProfile -WindowStyle Hidden -Command "'
@@ -16350,9 +17236,8 @@ local function detect_os_theme()
       .. "'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize' "
       .. '-Name AppsUseLightTheme -ErrorAction SilentlyContinue).AppsUseLightTheme"'
     local result = reaper.ExecProcess(cmd, 3000)
-    if result then
-      -- ExecProcess returns "exitcode\nstdout..." - skip exit code line
-      local output = result:match("^[^\n]*\n(.*)") or ""
+    local output = _confirmed_output(result)
+    if output then
       local val = output:match("%d+")
       if val == "0" then return _store("dark") end
       if val == "1" then return _store("light") end
@@ -16360,29 +17245,30 @@ local function detect_os_theme()
   elseif RA.IS_MACOS then
     local cmd = '/bin/sh -c "defaults read -g AppleInterfaceStyle 2>/dev/null"'
     local result = reaper.ExecProcess(cmd, 2000)
-    if result then
-      local output = result:match("^[^\n]*\n(.*)") or ""
+    local output = _confirmed_output(result)
+    if output then
       if output:match("Dark") then return _store("dark") end
+      return _store("light")
     end
-    return _store("light")
+    return _store("light", false)
   else
     -- Linux: check common desktop environment settings.
     local cmd = '/bin/sh -c "gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null"'
     local result = reaper.ExecProcess(cmd, 2000)
-    if result then
-      local output = result:match("^[^\n]*\n(.*)") or ""
+    local output = _confirmed_output(result)
+    if output then
       if output:match("dark") then return _store("dark") end
       if output:match("light") then return _store("light") end
     end
     -- Fallback: check gtk-theme name for "dark" substring.
     cmd = '/bin/sh -c "gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null"'
     result = reaper.ExecProcess(cmd, 2000)
-    if result then
-      local output = result:match("^[^\n]*\n(.*)") or ""
+    output = _confirmed_output(result)
+    if output then
       if output:lower():match("dark") then return _store("dark") end
     end
   end
-  return _store("dark")  -- fallback
+  return _store("dark", false)  -- fallback
 end
 -- Resolve the effective palette name for a theme preference.
 function resolve_theme(theme)
@@ -16522,12 +17408,12 @@ UI = {}
 -- already includes the word "thinking" so the suffix is dropped); the note
 -- redirects weak combos or calls out a quality property of strong ones.
 UI.MODEL_TIPS = {
-  ["claude-haiku-4-5"]               = "Lowest-cost Claude. Use High thinking. Choose Sonnet None for complex work.",
-  ["claude-sonnet-5"]                = "Default Claude for this app. Use None thinking. Raise the level only if a request struggles.",
-  ["claude-opus-5"]                  = "Premium Claude. Use None thinking. Best tested Opus balance of quality, speed, and cost.",
-  ["gpt-5.6-luna"]                   = "Default GPT for this app. Use None thinking. Fastest and lowest-cost GPT-5.6 tested.",
-  ["gpt-5.6-terra"]                  = "Balanced GPT-5.6. Use None thinking. Choose it when Luna struggles.",
-  ["gpt-5.6-sol"]                    = "Premium GPT-5.6. Use None thinking. Choose it for difficult work when capability matters more than cost.",
+  ["claude-haiku-4-5"]               = "Lowest-cost Claude. Use High thinking. Choose Sonnet 5.5 Low for complex work.",
+  ["claude-sonnet-5-5"]              = "Default Claude for this app. Use Low thinking. Higher levels have not been bench tested.",
+  ["claude-opus-5-5"]                = "Premium Claude. Medium thinking is the default. Low is the lowest supported level.",
+  ["gpt-6-luna"]                     = "Default GPT for this app. Use Low thinking. Lowest-cost GPT-6; ReaAssist testing is pending.",
+  ["gpt-6.1-sol"]                    = "Updated Sol model. Low thinking is the starting setting. ReaAssist testing is pending.",
+  ["gpt-6-astra"]                    = "Premium GPT model. Low thinking is the starting setting. ReaAssist testing is pending.",
   ["gemini-3.5-flash-lite"]          = "Lowest-cost Gemini. Use Low thinking. Choose it for budget-sensitive work; Flash 3.6 Minimal is stronger overall.",
   ["gemini-3.6-flash"]               = "Default Gemini for this app. Use Minimal thinking. Best tested balance of quality, speed, and cost.",
   ["gemini-3.8-flash"]               = "Optional Gemini model. Use Low thinking. It matched Flash 3.7 while using fewer tokens and costing less in testing.",
@@ -16575,39 +17461,41 @@ UI.COMBO_HINTS = {
       none   = "Simple requests | Lowest Claude cost | Very fast | Use Sonnet for complex work",
       low    = "Simple requests needing more reasoning | Lowest Claude cost | Very fast | Use Sonnet for complex work",
       medium = "General work with caveats | Lowest Claude cost | Slow with retries | Use Sonnet for complex work",
-      high   = "Recommended level | General work with caveats | Lowest Claude cost | Moderate speed | Sonnet None is stronger for complex work",
+      high   = "Recommended level | General work with caveats | Lowest Claude cost | Moderate speed | Use Sonnet 5.5 Low for complex work",
     },
-    ["claude-sonnet-5"] = {
-      none   = "Recommended level | General and complex work | Balanced Claude cost | Fast",
-      low    = "General and complex work | Balanced Claude cost | Slower | Use only if None struggles",
-      medium = "General and complex work | Balanced Claude cost | Very slow | Use only if None struggles",
-      high   = "Avoid long requests | Balanced Claude cost | Very slow; timeouts seen | Use None or Opus None",
+    ["claude-opus-5-5"] = {
+      low    = "Lowest supported effort | Premium Claude cost | Bench tested on REAPER tasks",
+      medium = "Default effort | General and complex work | Premium Claude cost | Bench data unavailable",
+      high   = "Higher effort | Difficult work | Higher token use possible | Bench data unavailable",
     },
-    ["claude-opus-5"] = {
-      none   = "Recommended level | General and complex work | Highest Claude cost | Fastest tested Opus setting",
-      low    = "General and complex work | Highest Claude cost | Slower | One runtime failure in testing; use None",
-      medium = "General and complex work | Highest Claude cost | Slowest tested | No quality gain over None",
-      high   = "Bench data unavailable | Highest Claude cost | Speed unknown | Use None unless you measure a benefit",
+    ["claude-sonnet-5-5"] = {
+      low    = "Default effort in ReaAssist | Bench tested on REAPER tasks",
+      medium = "Higher effort | Bench data unavailable",
+      high   = "Higher effort | Higher token use possible | Bench data unavailable",
+      xhigh  = "Very high effort | Higher token use possible | Bench data unavailable",
+      max    = "Maximum effort | Higher token use possible | Bench data unavailable",
     },
   },
   openai = {
-    ["gpt-5.6-luna"] = {
-      none   = "Recommended level | General and complex work | Lowest GPT-5.6 cost | Fastest tested",
-      low    = "General and complex work | Lowest GPT-5.6 cost | Slower than None | No measured gain",
-      medium = "Avoid routine use | Lowest GPT-5.6 base price | Very slow on large code | One runtime failure in testing",
-      high   = "Bench data unavailable | Higher reasoning cost | Speed unknown | Use None, or Terra None if Luna struggles",
+    ["gpt-6.1-sol"] = {
+      low = "Starting level | ReaAssist testing pending",
+      medium = "More reasoning | ReaAssist testing pending",
+      high = "High reasoning | ReaAssist testing pending",
+      xhigh = "Extra-high reasoning | Higher token use possible | ReaAssist testing pending",
+      max = "Maximum reasoning | Higher token use possible | ReaAssist testing pending",
     },
-    ["gpt-5.6-terra"] = {
-      none   = "Recommended level | General and complex work | Balanced GPT-5.6 cost | Fastest tested Terra setting",
-      low    = "General and complex work | Balanced GPT-5.6 cost | Slower than None | No measured gain",
-      medium = "General and complex work | Balanced GPT-5.6 cost | Slower | Passed testing, with no gain over None",
-      high   = "Bench data unavailable | Higher reasoning cost | Speed unknown | Use None unless testing shows a benefit",
+    ["gpt-6-astra"] = {
+      low = "Starting level | Premium cost | ReaAssist testing pending",
+      medium = "More reasoning | Premium cost | ReaAssist testing pending",
+      high = "High reasoning | Premium cost | ReaAssist testing pending",
+      xhigh = "Extra-high reasoning | Premium cost | ReaAssist testing pending",
+      max = "Maximum reasoning | Premium cost | ReaAssist testing pending",
     },
-    ["gpt-5.6-sol"] = {
-      none   = "Recommended level | General and complex work | Highest GPT-5.6 cost | Fastest tested Sol setting",
-      low    = "General and complex work | Highest GPT-5.6 cost | Slower than None | No measured gain",
-      medium = "Avoid routine use | Highest GPT-5.6 cost | Higher latency | One runtime failure in testing",
-      high   = "Bench data unavailable | Highest reasoning cost | Speed unknown | Use None unless quality justifies the cost",
+    ["gpt-6-luna"] = {
+      none   = "No reasoning | General work | Lowest GPT-6 cost | ReaAssist testing pending",
+      low    = "Default level | Lowest GPT-6 cost | ReaAssist testing pending",
+      medium = "More reasoning | Higher token use possible | ReaAssist testing pending",
+      high   = "High reasoning | Higher token use possible | ReaAssist testing pending",
     },
   },
   google = {
@@ -16647,11 +17535,7 @@ UI.COMBO_HINTS = {
 -- UI.COMBO_HINTS so the row tooltip and the active-combo hint remain the
 -- source of the explanatory copy.
 UI.COMBO_TONES = {
-  anthropic = {
-    ["claude-sonnet-5"] = {
-      high = "warn",
-    },
-  },
+  anthropic = {},
   google = {
     ["gemini-3.1-pro-preview"] = {
       LOW = "warn",
@@ -16883,10 +17767,19 @@ local B64_CHUNK_BYTES = math_floor(256 * 1024 / 3) * 3  -- ~256KB, 3-aligned
 -- Attach.pump_encoding() -- called once per main-loop frame.
 -- Encodes one chunk for the first attachment that still needs encoding.
 -- Returns true while any work remains, false when all attachments are done.
+Attach._encoding_failed = function(att)
+  att.image_encoding_error = "image_encoding_failed"
+  att.b64_parts, att.b64_pos = nil, nil
+  S.attach_error = RA.t("attach.error.encoding_failed", nil,
+    "This attachment could not be prepared. Remove it before sending.")
+  S.attach_error_time = time_precise()
+end
+
 Attach.pump_encoding = function()
   if Attach.pump_native_media then Attach.pump_native_media() end
   for _, att in ipairs(S.attachments) do
-    if att.kind ~= "text" and not att.b64
+    if att.image_encoding_error then att.b64_parts, att.b64_pos = nil, nil end
+    if att.kind ~= "text" and not att.b64 and not att.image_encoding_error
         and type(att.data) == "string"
         and att.native_media_state ~= "loading"
         and att.native_media_state ~= "ready"
@@ -16898,12 +17791,25 @@ Attach.pump_encoding = function()
       local len       = #att.data
       local remaining = len - att.b64_pos + 1
       local take      = (remaining <= B64_CHUNK_BYTES) and remaining or B64_CHUNK_BYTES
-      att.b64_parts[#att.b64_parts+1] = Attach.base64_encode(att.data, att.b64_pos, att.b64_pos + take - 1)
+      local ok_encoded, part = pcall(Attach.base64_encode, att.data,
+        att.b64_pos, att.b64_pos + take - 1)
+      if not ok_encoded or type(part) ~= "string" then
+        Attach._encoding_failed(att)
+        return false
+      end
+      att.b64_parts[#att.b64_parts+1] = part
       att.b64_pos = att.b64_pos + take
       if att.b64_pos > len then
+        local ok_flat, flat = pcall(tbl_concat, att.b64_parts)
+        if not ok_flat or type(flat) ~= "string"
+            or (att.kind == "image" and att.image_original_revision == 1
+              and #flat ~= att.image_encoded_bytes) then
+          Attach._encoding_failed(att)
+          return false
+        end
         -- Encoding complete: flatten to a single string and free the source
         -- bytes so we don't carry around two copies of a 10MB file in memory.
-        att.b64       = tbl_concat(att.b64_parts)
+        att.b64       = flat
         att.b64_parts = nil
         att.b64_pos   = nil
         att.data      = nil
@@ -16936,7 +17842,7 @@ Attach.encoding_progress = function()
   local done, total = 0, 0
   local any_pending = false
   for _, att in ipairs(S.attachments) do
-    if att.kind ~= "text" then
+    if att.kind ~= "text" and not att.image_encoding_error then
       if att.native_media_state == "loading"
           or att.native_media_state == "ready"
           or att.native_media_state == "consumed" then
@@ -17190,10 +18096,10 @@ local ATTACH_WARN_BYTES  = 5 * 1024 * 1024
 local ATTACH_MAX_BYTES   = 10 * 1024 * 1024
 local ATTACH_MAX_COUNT   = 10  -- max attachments per message
 
--- Native image imports are capability-owned Engine resources. Successfully
--- admitted images remain path and metadata only in Lua and use an Engine-only
--- dispatch. A terminal import failure may deliberately read a fresh legacy
--- copy before send. Consumed resources never enter curl replay.
+-- Retained native imports are capability-owned Engine resources. Ordinary new
+-- images retain bounded originals and use inline provider routing. Failed native
+-- records are closed without rereading their paths for replacement bytes.
+-- Consumed native resources never enter curl replay.
 local native_media_records = {}
 local native_media_temp_serial = 0
 
@@ -17340,15 +18246,11 @@ Attach.pump_native_media = function()
         native_media_remove_temp(record)
       elseif not ok or type(status) ~= "table" or status.state == "failed"
           or status.state == "closed" then
-        local data = read_file_binary(record.source_path)
-        attachment.native_media_state = type(data) == "string"
-          and #data > 0 and "legacy" or "failed"
+        attachment.native_media_state = "failed"
         attachment.native_media_error = type(status) == "table"
           and tostring(status.error or status.state or "import_failed")
           or "import_failed"
-        if attachment.native_media_state == "legacy" then
-          attachment.data = data
-        else
+        do
           S.attach_error = RA.t("attach.error.import_failed", nil,
             "ReaAssist could not import this image. Remove it and attach it again.")
           S.attach_error_time = time_precise()
@@ -17467,43 +18369,10 @@ end
 
 
 Attach.prepare_native_media_for_provider = function(attachments)
-  local has_native = false
-  for _, attachment in ipairs(attachments or {}) do
-    if attachment.kind == "image"
-        and (attachment.native_media_state == "loading"
-          or attachment.native_media_state == "ready") then
-      has_native = true
-      break
-    end
-  end
-  if not has_native then return true end
-  if native_media_provider_supported() then return true end
-  local transitioned = false
-  for _, attachment in ipairs(attachments or {}) do
-    if attachment.kind == "image"
-        and (attachment.native_media_state == "loading"
-          or attachment.native_media_state == "ready") then
-      local record = attachment.native_media_record
-      local data = type(record) == "table"
-        and read_file_binary(record.source_path) or nil
-      if type(data) == "string" and #data > 0 then
-        attachment.data = data
-        attachment.native_media_state = "legacy"
-        transitioned = true
-      else
-        attachment.native_media_state = "failed"
-        S.attach_error = "This native image cannot be sent through the selected Custom or Local provider. Remove it and attach it again."
-        S.attach_error_time = time_precise()
-      end
-      if type(record) == "table" then native_media_close_record(record) end
-    end
-  end
-  if transitioned then
-    S.attach_error = "Provider changed. ReaAssist is preparing a fresh legacy image copy. Send again when encoding finishes."
-    S.attach_error_time = time_precise()
-  end
-  return false, transitioned and "input_media_legacy_preparing"
-    or "input_media_provider_unsupported"
+  if S.screen_reader_mode then return true end
+  -- Refuse before native preparation or any shared entry mutation. Originals
+  -- are captured once; changing provider cannot reopen a saved image path.
+  return Attach.image_originals_ready(attachments, true)
 end
 
 Attach.aggregate_limit_bytes = function()
@@ -17552,6 +18421,224 @@ Attach.set_aggregate_error = function()
 end
 
 -- =============================================================================
+-- Saved image originals: census live owners, then reserve before a bounded read.
+Attach.SAVED_IMAGE_ORIGINAL_LIMIT_BYTES = 134217728
+Attach.SAVED_IMAGE_ENCODED_LIMIT_BYTES = 179306496
+function Attach._image_encoded_bytes(bytes)
+  return 4 * math.floor((bytes + 2) / 3)
+end
+
+function Attach.saved_image_budget_snapshot()
+  local seen, messages = {}, {}
+  local original, encoded, count = 0, 0, 0
+  local function list(items)
+    for _, att in ipairs(type(items) == "table" and items or {}) do
+      if type(att) == "table" and att.kind == "image" and not seen[att] then
+        seen[att] = true
+        local bytes
+        if att.image_original_revision == 1 then
+          bytes = tonumber(att.image_original_bytes)
+        elseif type(att.data) == "string" and #att.data > 0 then
+          bytes = #att.data
+        elseif type(att.b64) == "string" and #att.b64 > 0 then
+          bytes = math.floor(#att.b64 * 3 / 4)
+        end
+        if bytes and bytes > 0 then
+          original = original + bytes
+          encoded = encoded + Attach._image_encoded_bytes(bytes)
+          count = count + 1
+        end
+      end
+    end
+  end
+  local function message(msg)
+    if type(msg) ~= "table" or messages[msg] then return end
+    messages[msg] = true
+    list(msg.recovery_attachments)
+    message(msg._local_escalation_source)
+  end
+  list(S.attachments)
+  list(S.pending_attachments)
+  for _, msg in ipairs(S.display_messages or {}) do message(msg) end
+  message(type(S.pending_local_escalation) == "table"
+    and S.pending_local_escalation.msg or nil)
+  for _, holder in pairs(S.image_preparation_holders or {}) do
+    list(type(holder.opts) == "table" and holder.opts.attachments or nil)
+  end
+  for _, owner in pairs(S.image_send_owners or {}) do list(owner.attachments) end
+  for _, attempt in pairs(S.image_recovery_attempts or {}) do
+    list(attempt.attachments)
+    message(attempt.msg)
+    if type(attempt.local_escalation_binding) == "table" then
+      message(attempt.local_escalation_binding.msg)
+    end
+  end
+  local confirmation = S.image_release_confirmation
+  if type(confirmation) == "table" then
+    list(confirmation.attachments)
+    list(confirmation.entries)
+    message(confirmation.msg)
+  end
+  for _, record in ipairs(native_media_records) do
+    list({record.attachment})
+  end
+  local reserved, reserved_encoded, tickets = 0, 0, 0
+  for _, ticket in pairs(Attach._image_read_tickets or {}) do
+    reserved = reserved + ticket.cap
+    reserved_encoded = reserved_encoded + Attach._image_encoded_bytes(ticket.cap)
+    tickets = tickets + 1
+  end
+  return {
+    original_bytes = original + reserved, encoded_bytes = encoded + reserved_encoded,
+    retained_original_bytes = original, retained_encoded_bytes = encoded,
+    reserved_original_bytes = reserved, reserved_encoded_bytes = reserved_encoded,
+    original_limit_bytes = Attach.SAVED_IMAGE_ORIGINAL_LIMIT_BYTES,
+    encoded_limit_bytes = Attach.SAVED_IMAGE_ENCODED_LIMIT_BYTES,
+    original_count = count, ticket_count = tickets,
+  }
+end
+
+function Attach._drop_image_ticket(ticket)
+  if type(ticket) == "table" and Attach._image_read_tickets
+      and rawequal(Attach._image_read_tickets[ticket.id], ticket) then
+    Attach._image_read_tickets[ticket.id] = nil
+  end
+end
+
+function Attach.read_image_original(path)
+  local budget = Attach.saved_image_budget_snapshot()
+  local current = Attach.aggregate_source_bytes()
+  local image_bytes = 0
+  for _, att in ipairs(S.attachments or {}) do
+    if att.kind == "image" then
+      image_bytes = image_bytes + (tonumber(att.image_original_bytes)
+        or tonumber(att.size_bytes) or (type(att.data) == "string" and #att.data)
+        or (type(att.b64) == "string" and math.floor(#att.b64 * 3 / 4)) or 0)
+    end
+  end
+  local aggregate_remaining = Attach.aggregate_limit_bytes() - current - budget.reserved_original_bytes
+  local image_remaining = 16777216 - image_bytes - budget.reserved_original_bytes
+  local cap = math.floor(math.min(ATTACH_MAX_BYTES,
+    aggregate_remaining, image_remaining,
+    budget.original_limit_bytes - budget.original_bytes,
+    3 * math.floor((budget.encoded_limit_bytes - budget.encoded_bytes) / 4)))
+  if cap < 1 then
+    return nil, (aggregate_remaining < 1 or image_remaining < 1)
+      and "image_request_limit" or "saved_image_limit"
+  end
+  Attach._image_read_ticket_id = (Attach._image_read_ticket_id or 0) + 1
+  local ticket = {id = Attach._image_read_ticket_id, cap = cap}
+  Attach._image_read_tickets = Attach._image_read_tickets or {}
+  Attach._image_read_tickets[ticket.id] = ticket
+  local file
+  local ok, data, err, detail = pcall(function()
+    local open_error
+    file, open_error = io.open(path, "rb")
+    if not file then return nil, open_error or "image_open_failed" end
+    local size = file:seek("end")
+    if type(size) ~= "number" or size < 1 then return nil, "image_size_unavailable" end
+    if size > cap then
+      if size > ATTACH_MAX_BYTES then return nil, "image_item_limit", {size_bytes = size} end
+      if size > aggregate_remaining or size > image_remaining then
+        return nil, "image_request_limit"
+      end
+      return nil, "saved_image_limit"
+    end
+    if file:seek("set", 0) ~= 0 then return nil, "image_seek_failed" end
+    local bytes = file:read(math.min(cap, size) + 1)
+    if type(bytes) ~= "string" or #bytes == 0 then return nil, "image_read_failed" end
+    if #bytes > math.min(cap, size) then return nil, "image_changed_during_read" end
+    return bytes
+  end)
+  local closed = true
+  if file then
+    local close_ok, result = pcall(file.close, file)
+    closed = close_ok and result ~= nil and result ~= false
+  end
+  if not ok or not data or not closed then
+    Attach._drop_image_ticket(ticket)
+    return nil, not closed and "image_close_failed" or (ok and err or "image_read_failed"), nil, detail
+  end
+  return data, nil, ticket
+end
+
+function Attach.set_image_read_error(reason, detail, fallback)
+  if reason == "saved_image_limit" then
+    S.attach_error = RA.t("attach.error.saved_image_limit", nil,
+      "Saved images reached this ReaAssist session's limit. Remove a draft image or release saved images from an error card before attaching another.")
+  elseif reason == "image_item_limit" then
+    local size = type(detail) == "table" and tonumber(detail.size_bytes) or ATTACH_MAX_BYTES
+    S.attach_error = RA.t("attach.error.file_too_large",
+      {size = str_format("%.1f", size / 1048576), max = str_format("%d", ATTACH_MAX_BYTES / 1048576)},
+      str_format("File too large (%.1f MB, max %d MB).", size / 1048576, ATTACH_MAX_BYTES / 1048576))
+  elseif reason == "image_request_limit" then
+    local limit = str_format("%.0f", math.min(Attach.aggregate_limit_bytes(), 16777216) / 1048576)
+    S.attach_error = RA.t("attach.error.aggregate_too_large", {limit = limit},
+      "Attachments are too large together (max " .. limit .. " MB per message). Remove an attachment and try again.")
+  else
+    S.attach_error = fallback or RA.t("attach.error.read_failed", {error = tostring(reason)},
+      "Could not read file: " .. tostring(reason))
+  end
+  S.attach_error_time = time_precise()
+end
+
+function Attach.set_image_prepare_error(reason)
+  if reason == "image_count_limit" then
+    S.attach_error = RA.t("attach.error.max_count", {count = ATTACH_MAX_COUNT},
+      str_format("Maximum %d attachments per message.", ATTACH_MAX_COUNT))
+  else
+    S.attach_error = RA.t("attach.error.image_prepare_failed", nil,
+      "This image could not be attached. Try again.")
+  end
+  S.attach_error_time = time_precise()
+end
+
+function Attach.publish_image_entry(entry, ticket)
+  if type(entry) ~= "table" or type(ticket) ~= "table"
+      or not Attach._image_read_tickets
+      or not rawequal(Attach._image_read_tickets[ticket.id], ticket)
+      or type(entry.data) ~= "string" or #entry.data < 1
+      or #entry.data > ticket.cap then
+    Attach._drop_image_ticket(ticket)
+    Attach.set_image_prepare_error("image_publish_failed")
+    return false, "image_publish_failed"
+  end
+  if #S.attachments >= ATTACH_MAX_COUNT then
+    Attach._drop_image_ticket(ticket)
+    Attach.set_image_prepare_error("image_count_limit")
+    return false, "image_count_limit"
+  end
+  -- No callback or yield between ticket removal and publication.
+  entry.image_original_revision = 1
+  entry.image_original_bytes = #entry.data
+  entry.image_encoded_bytes = Attach._image_encoded_bytes(#entry.data)
+  Attach._drop_image_ticket(ticket)
+  S.attachments[#S.attachments + 1] = entry
+  return true
+end
+
+function Attach.image_originals_ready(attachments, require_encoded)
+  for _, att in ipairs(type(attachments) == "table" and attachments or {}) do
+    if att.kind == "image" then
+      if att.image_original_revision ~= 1 or att.native_media_state ~= nil
+          or att.image_encoding_error ~= nil
+          or type(att.image_original_bytes) ~= "number" or att.image_original_bytes < 1
+          or att.image_encoded_bytes ~= Attach._image_encoded_bytes(att.image_original_bytes) then
+        return false, "saved_image_original_unavailable"
+      end
+      if type(att.b64) == "string" and #att.b64 == att.image_encoded_bytes then
+        -- Final encoded original is retained.
+      elseif not require_encoded and type(att.data) == "string"
+          and #att.data == att.image_original_bytes then
+        -- Encoder owns the admitted raw original.
+      else
+        return false, "saved_image_encoding_incomplete"
+      end
+    end
+  end
+  return true
+end
+
 -- Screenshot capture
 -- =============================================================================
 -- Captures the screen to a temporary PNG file for use as an attachment.
@@ -17793,7 +18880,7 @@ end
 
 -- Attach.file(path) -> true on success, false + sets S.attach_error on failure.
 -- Reads the file, classifies it, estimates cost, and adds to the queue.
-Attach.file = function(path)
+Attach._file_image_inner = function(path, ticket_owner)
   if #S.attachments >= ATTACH_MAX_COUNT then
     S.attach_error = (RA and RA.t and RA.t("attach.error.max_count",
       { count = ATTACH_MAX_COUNT },
@@ -17818,45 +18905,22 @@ Attach.file = function(path)
     return false
   end
 
-  -- A visual Engine image stays path and metadata only in Lua. The Engine
-  -- validates and reads it on its worker. Read bytes here only when native
-  -- admission is unavailable or synchronously refused.
-  if kind == "image" and native_media_engine_usable() then
-    local native_size = file_size_bytes(path)
-    if not native_size or native_size < 1 then
-      S.attach_error = "Could not read image metadata."
-      S.attach_error_time = time_precise()
-      return false
-    end
-    if native_size > ATTACH_MAX_BYTES then
-      S.attach_error = str_format("File too large (%.1f MB, max %d MB).",
-        native_size / 1048576, ATTACH_MAX_BYTES / 1048576)
-      S.attach_error_time = time_precise()
-      return false
-    end
-    if not Attach.aggregate_admitted(native_size) then
-      Attach.set_aggregate_error()
-      return false
-    end
-    local native_entry = {
-      kind = kind, name = get_filename(path), media_type = media_type,
-      path = path, size_bytes = native_size,
-    }
-    native_entry.tokens = estimate_attachment_tokens(native_entry)
-    native_entry.cost = estimate_attachment_cost(native_entry.tokens)
-    S.attachments[#S.attachments + 1] = native_entry
-    if Attach.begin_native_media(native_entry, path, nil) then return true end
-    tbl_remove(S.attachments, #S.attachments)
-  end
-
-  local data, err
-  if kind == "text" then
+  local data, err, image_ticket, image_detail
+  ticket_owner.image = kind == "image"
+  if kind == "image" then
+    data, err, image_ticket, image_detail = Attach.read_image_original(path)
+    ticket_owner.ticket = image_ticket
+  elseif kind == "text" then
     data, err = read_file_text(path)
   else
     data, err = read_file_binary(path)
   end
 
   if not data then
+    if kind == "image" then
+      Attach.set_image_read_error(err, image_detail)
+      return false
+    end
     S.attach_error = (RA and RA.t and RA.t("attach.error.read_failed",
       { error = tostring(err) }, "Could not read file: " .. tostring(err)))
       or ("Could not read file: " .. tostring(err))
@@ -17900,6 +18964,7 @@ Attach.file = function(path)
   end
 
   if not Attach.aggregate_admitted(#data) then
+    Attach._drop_image_ticket(image_ticket)
     Attach.set_aggregate_error()
     return false
   end
@@ -17912,10 +18977,27 @@ Attach.file = function(path)
     path       = path,
     size_bytes = #data,
   }
-  entry.tokens = estimate_attachment_tokens(entry)
-  entry.cost   = estimate_attachment_cost(entry.tokens)
-
-  S.attachments[#S.attachments+1] = entry
+  if kind == "image" then
+    local estimated, estimate_error = pcall(function()
+      entry.tokens = estimate_attachment_tokens(entry)
+      entry.cost = estimate_attachment_cost(entry.tokens)
+    end)
+    if not estimated then
+      Attach._drop_image_ticket(image_ticket)
+      Attach.set_image_prepare_error(estimate_error)
+      return false, estimate_error
+    end
+  else
+    entry.tokens = estimate_attachment_tokens(entry)
+    entry.cost = estimate_attachment_cost(entry.tokens)
+  end
+  if kind == "image" then
+    local published, publish_error = Attach.publish_image_entry(entry, image_ticket)
+    if not published then return false, publish_error end
+    ticket_owner.published = true
+  else
+    S.attachments[#S.attachments+1] = entry
+  end
 
   if #data > ATTACH_WARN_BYTES then
     local size_mb = str_format("%.1f", #data / 1048576)
@@ -17932,56 +19014,48 @@ Attach.file = function(path)
   return true
 end
 
+Attach.file = function(path)
+  local ticket_owner = {}
+  local results = table.pack(pcall(Attach._file_image_inner, path, ticket_owner))
+  Attach._drop_image_ticket(ticket_owner.ticket)
+  if not results[1] then
+    if not ticket_owner.image then error(results[2], 0) end
+    if ticket_owner.published == true then return true end
+    Attach.set_image_prepare_error(results[2])
+    return false, results[2]
+  end
+  return table.unpack(results, 2, results.n)
+end
+
 local function attach_captured_png(png_path, name, empty_error)
-  local size = file_size_bytes(png_path)
-  if not size or size < 1 then
-    os.remove(png_path)
-    S.attach_error = empty_error
-    S.attach_error_time = time_precise()
+  local owned_ticket
+  local ok, result, result_error = pcall(function()
+  local data, err, ticket, detail = Attach.read_image_original(png_path)
+  owned_ticket = ticket
+  if not data then
+    Attach.set_image_read_error(err, detail, empty_error)
     return false
   end
-  if size > ATTACH_MAX_BYTES then
-    os.remove(png_path)
-    S.attach_error = str_format("Image too large (%.1f MB, max %d MB).",
-      size / 1048576, ATTACH_MAX_BYTES / 1048576)
-    S.attach_error_time = time_precise()
-    return false
+  local entry = {kind = "image", name = name, data = data,
+    media_type = "image/png", path = nil, size_bytes = #data}
+  local estimated, estimate_error = pcall(function()
+    entry.tokens = estimate_attachment_tokens(entry)
+    entry.cost = estimate_attachment_cost(entry.tokens)
+  end)
+  if not estimated then
+    Attach._drop_image_ticket(ticket)
+    Attach.set_image_prepare_error(estimate_error)
+    return false, estimate_error
   end
-  if not Attach.aggregate_admitted(size) then
-    os.remove(png_path)
-    Attach.set_aggregate_error()
-    return false
+  return Attach.publish_image_entry(entry, ticket)
+  end)
+  pcall(os.remove, png_path)
+  Attach._drop_image_ticket(owned_ticket)
+  if not ok then
+    Attach.set_image_prepare_error(result)
+    return false, result
   end
-  if native_media_engine_usable() then
-    local retained = native_media_preserve_capture(png_path)
-    if retained then
-      local entry = {
-        kind = "image", name = name, media_type = "image/png",
-        path = nil, size_bytes = size,
-      }
-      entry.tokens = estimate_attachment_tokens(entry)
-      entry.cost = estimate_attachment_cost(entry.tokens)
-      S.attachments[#S.attachments + 1] = entry
-      if Attach.begin_native_media(entry, retained, retained) then return true end
-      tbl_remove(S.attachments, #S.attachments)
-      png_path = retained
-    end
-  end
-  local data = read_file_binary(png_path)
-  os.remove(png_path)
-  if not data or #data == 0 then
-    S.attach_error = empty_error
-    S.attach_error_time = time_precise()
-    return false
-  end
-  local entry = {
-    kind = "image", name = name, data = data, media_type = "image/png",
-    path = nil, size_bytes = #data,
-  }
-  entry.tokens = estimate_attachment_tokens(entry)
-  entry.cost = estimate_attachment_cost(entry.tokens)
-  S.attachments[#S.attachments + 1] = entry
-  return true
+  return result, result_error
 end
 
 Attach.screenshot = function()
@@ -18179,16 +19253,15 @@ local _is_fabfilter_ident
 -- =============================================================================
 -- Utility: Code.safe_write / Code.quiet_write
 -- =============================================================================
--- Writes content to a file path with crash- and failure-safe semantics:
---   1. Write to <path>.tmp.<instance>, checking both f:write and f:close
---      for nil+err
---      returns (not just thrown errors -- short writes/disk full/permission
---      failures come back that way in Lua, not as exceptions).
---   2. Rename any existing <path> to <path>.bak.<instance> so the original
---      is preserved.
---   3. Rename <path>.tmp.<instance> -> <path>. If that fails, restore from .bak.
---   4. On success, remove the instance-scoped .bak.
--- The original file is never destroyed unless the replacement is in place.
+-- Writes content through an instance-scoped temporary file:
+--   1. Check both f:write and f:close, including nil+err returns.
+--   2. Remove a stale .bak and attempt to park the existing file there.
+--   3. Publish the temporary file; on failure, attempt restoration if parked.
+--   4. Remove the backup after successful publication.
+-- Parking and restoration failures are not fully checked. Interruption or
+-- failed restoration may leave the original only in .bak; a later attempt
+-- can discard that backup. Manual recovery may be needed. These steps do not
+-- guarantee crash recovery or protect against competing writers.
 -- Code.safe_write returns true on success, and shows a message box and returns
 -- false on failure. Code.quiet_write performs the identical write and returns
 -- false plus the error text instead of showing anything, for a write whose
@@ -18239,11 +19312,10 @@ function Code._write_atomically(path, content, quiet)
     }, "Failed writing temp file:\n" .. tmp_path .. "\n\n"
       .. tostring(w_err or c_err))
   end
-  -- Preserve the original until the new file is definitely in place. Windows
-  -- os.rename fails when the destination exists, so move the original out of
-  -- the way first. os.rename returns nil when the source does not exist (a
-  -- fresh write); had_original tracks that so restoration is only attempted
-  -- when there was actually something to restore.
+  -- Windows os.rename may refuse an existing destination, so attempt to park
+  -- the current file first. Successful parking enables a restoration attempt
+  -- after publication failure, but the restore result is unchecked. Removing
+  -- a stale backup first leaves interruption recovery unverified.
   os.remove(bak_path)
   local had_original = os.rename(path, bak_path)
   local ok_r, ren_err = os.rename(tmp_path, path)
@@ -19022,6 +20094,25 @@ end
 
 end  -- close ceiling-injection scope
 
+-- Return an open reader for an occupied name, or admit a verified missing name.
+-- Lookup errors must not let automatic saving replace an unreadable file.
+function Code._open_auto_save_destination(path)
+  local f, err, code = io.open(path, "r")
+  if f then return f, true end
+  if tonumber(code) == 2 then
+    local ok, present = pcall(RA.path_present, path)
+    if ok and present == false then
+      local checked, exists = pcall(reaper.file_exists, path)
+      if checked and exists == false then return nil, true end
+    end
+  end
+  reaper.ShowMessageBox(RA.t("file_error.write", {
+    path = path, error = tostring(err),
+  }, "Could not write file:\n" .. path .. "\n\n" .. tostring(err)),
+    RA.t("file_error.title", nil, "ReaAssist - File Error"), 0)
+  return nil, false
+end
+
 -- =============================================================================
 -- Utility: Code.auto_save_jsfx
 -- =============================================================================
@@ -19048,7 +20139,8 @@ function Code.auto_save_jsfx(code)
   -- Check existing files: if one has identical content, return it (no duplicate).
   -- If content differs, skip past it and try the next numeric suffix.
   local n = 1
-  local f = io.open(dest, "r")
+  local f, admitted = Code._open_auto_save_destination(dest)
+  if not admitted then return nil end
   while f do
     local existing = f:read("*a")
     f:close()
@@ -19059,7 +20151,8 @@ function Code.auto_save_jsfx(code)
     n = n + 1
     name = stem .. "_" .. n .. ".jsfx"
     dest = JSFX_DIR .. RA.SEP .. name
-    f = io.open(dest, "r")
+    f, admitted = Code._open_auto_save_destination(dest)
+    if not admitted then return nil end
   end
   local ok = Code.safe_write(dest, code)
   if ok then
@@ -19088,7 +20181,8 @@ function Code.auto_save_lua(code, request_text)
   local stem = base_name:match("^(.+)%.lua$") or base_name
   local dest = RA.SCRIPT_SAVE_DIR .. RA.SEP .. name
   local n = 1
-  local f = io.open(dest, "r")
+  local f, admitted = Code._open_auto_save_destination(dest)
+  if not admitted then return nil end
   while f do
     f:close()
     n = n + 1
@@ -19101,7 +20195,8 @@ function Code.auto_save_lua(code, request_text)
     end
     name = numbered_stem .. suffix .. ".lua"
     dest = RA.SCRIPT_SAVE_DIR .. RA.SEP .. name
-    f = io.open(dest, "r")
+    f, admitted = Code._open_auto_save_destination(dest)
+    if not admitted then return nil end
   end
 
   if Code.safe_write(dest, code) then
@@ -19898,6 +20993,17 @@ function Code._save_generated(code, suggested_name, opts)
     if not name:lower():match(opts.ext_pattern) then name = name .. opts.ext end
     name = name:match("[^\\/]+$") or name
     dest_path = opts.base_dir .. RA.SEP .. name
+    if not (S and S.screen_reader_mode) then
+      -- The filename fallback has no native overwrite confirmation or
+      -- reliable absence proof. Confirm the exact path before any write.
+      if reaper.ShowMessageBox(
+          RA.t("code.save.confirm_destination", { path = dest_path },
+            "Save this file?\n\n" .. dest_path
+              .. "\n\nIf a file already exists, its contents will be replaced."),
+          opts.dialog_title, 4) ~= 6 then
+        return nil, "cancelled"
+      end
+    end
   end
   if Code.safe_write(dest_path, code) then return dest_path end
   return nil, "write_failed"
@@ -19974,6 +21080,24 @@ end
 -- Optional `recovery` renders inline recovery buttons scoped by provider/model
 -- metadata on the message. `extra` can stamp recovery-specific payload such as
 -- a saved prompt or fallback model id.
+function Log.take_pending_transport_events(prefer_final)
+  local pending = S.pending_display_idx and S.display_messages[S.pending_display_idx]
+  if not pending or type(pending.transport_events) ~= "table"
+     or #pending.transport_events == 0 then
+    return nil
+  end
+  if pending.transport_events_owner_idx then
+    if not prefer_final then return nil end
+    local previous = S.display_messages[pending.transport_events_owner_idx]
+    if previous and previous.transport_events == pending.transport_events then
+      previous.transport_events = nil
+    end
+  end
+  -- Keep one owner, preferring the final reply when an error precedes it.
+  pending.transport_events_owner_idx = #S.display_messages + 1
+  return pending.transport_events
+end
+
 function Log.add_error(msg, link_url, link_label, recovery, extra)
   S.status             = "error"
   S.send_time          = nil
@@ -19993,6 +21117,7 @@ function Log.add_error(msg, link_url, link_label, recovery, extra)
     link_url   = link_url,
     link_label = link_label,
     recovery   = recovery,
+    transport_events = Log.take_pending_transport_events(),
     request_status = pending_request
       and type(pending_request.request_status) == "table"
       and type(Diag) == "table"
@@ -21061,6 +22186,7 @@ function RA.fail_context_unavailable(action, status)
 end
 
 function RA.install_context_fallbacks(reason)
+  if CTX and CTX.scan_cleanup_all then pcall(CTX.scan_cleanup_all) end
   RA.Context = RA.Context or {}
   RA.Context.loaded = false
   RA.Context.error = tostring(reason or "unknown error")
@@ -21368,126 +22494,8 @@ end
 -- Updater.tick_sha_diff process work for a per-frame time budget
 -- (CFG.UPDATE_SHA_TIME_BUDGET), spreading the same total work across
 -- many frames so each frame stays inside the budget regardless of CPU.
-local sha256_hash
-local _SHA = {}
-do
-  local band   = load("return function(a,b) return a & b end")()
-  local rshift = load("return function(a,n) return (a >> n) & 0xFFFFFFFF end")()
-
-  local K = {
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-  }
-
-  -- Build incremental state from a plain content string. Pre-pads the
-  -- message to a 64-byte boundary so subsequent step() calls only need
-  -- to compress complete 64-byte blocks (no partial-block bookkeeping
-  -- across calls). Pre-padding cost is O(n) memcpy, negligible vs the
-  -- compression work that follows.
-  function _SHA.create(content)
-    local len = #content
-    local extra = 64 - ((len + 9) % 64)
-    if extra == 64 then extra = 0 end
-    local msg = content .. "\128" .. ("\0"):rep(extra + 4)
-       .. string.char(
-            band(rshift(len * 8, 24), 0xFF),
-            band(rshift(len * 8, 16), 0xFF),
-            band(rshift(len * 8, 8), 0xFF),
-            band(len * 8, 0xFF))
-    return {
-      msg = msg,
-      pos = 1,                        -- next byte (1-indexed) to compress
-      h0  = 0x6a09e667, h1 = 0xbb67ae85,
-      h2  = 0x3c6ef372, h3 = 0xa54ff53a,
-      h4  = 0x510e527f, h5 = 0x9b05688c,
-      h6  = 0x1f83d9ab, h7 = 0x5be0cd19,
-    }
-  end
-
-  -- Process up to max_blocks complete 64-byte chunks starting at
-  -- state.pos. Updates state.h0..h7 and advances state.pos. Returns
-  -- true when all blocks have been compressed (state ready for
-  -- finalize), false when more remain. Pass math.huge to drain all
-  -- remaining blocks in one call (single-shot mode).
-  function _SHA.step(state, max_blocks)
-    local msg = state.msg
-    local total = #msg
-    local h0, h1, h2, h3 = state.h0, state.h1, state.h2, state.h3
-    local h4, h5, h6, h7 = state.h4, state.h5, state.h6, state.h7
-    local pos = state.pos
-    local processed = 0
-    while pos <= total and processed < max_blocks do
-      local W = {}
-      for t = 1, 16 do
-        local b = pos + (t - 1) * 4
-        W[t] = (string.byte(msg, b) << 24)
-             + (string.byte(msg, b + 1) << 16)
-             + (string.byte(msg, b + 2) << 8)
-             + string.byte(msg, b + 3)
-      end
-      for t = 17, 64 do
-        local x, y = W[t-15], W[t-2]
-        local s0 = (((x >> 7) | (x << 25)) ~ ((x >> 18) | (x << 14)) ~ (x >> 3)) & 0xFFFFFFFF
-        local s1 = (((y >> 17) | (y << 15)) ~ ((y >> 19) | (y << 13)) ~ (y >> 10)) & 0xFFFFFFFF
-        W[t] = (W[t-16] + s0 + W[t-7] + s1) & 0xFFFFFFFF
-      end
-      local a, b, c, d, e, f, g, h = h0, h1, h2, h3, h4, h5, h6, h7
-      for t = 1, 64 do
-        local S1 = (((e >> 6) | (e << 26)) ~ ((e >> 11) | (e << 21)) ~ ((e >> 25) | (e << 7))) & 0xFFFFFFFF
-        local ch = (e & f) ~ ((~e) & g)
-        local temp1 = (h + S1 + ch + K[t] + W[t]) & 0xFFFFFFFF
-        local S0 = (((a >> 2) | (a << 30)) ~ ((a >> 13) | (a << 19)) ~ ((a >> 22) | (a << 10))) & 0xFFFFFFFF
-        local maj = (a & b) ~ (a & c) ~ (b & c)
-        local temp2 = (S0 + maj) & 0xFFFFFFFF
-        h = g; g = f; f = e; e = (d + temp1) & 0xFFFFFFFF
-        d = c; c = b; b = a; a = (temp1 + temp2) & 0xFFFFFFFF
-      end
-      h0 = (h0 + a) & 0xFFFFFFFF; h1 = (h1 + b) & 0xFFFFFFFF
-      h2 = (h2 + c) & 0xFFFFFFFF; h3 = (h3 + d) & 0xFFFFFFFF
-      h4 = (h4 + e) & 0xFFFFFFFF; h5 = (h5 + f) & 0xFFFFFFFF
-      h6 = (h6 + g) & 0xFFFFFFFF; h7 = (h7 + h) & 0xFFFFFFFF
-      pos = pos + 64
-      processed = processed + 1
-    end
-    state.h0, state.h1, state.h2, state.h3 = h0, h1, h2, h3
-    state.h4, state.h5, state.h6, state.h7 = h4, h5, h6, h7
-    state.pos = pos
-    return pos > total
-  end
-
-  function _SHA.finalize(state)
-    return string.format("%08x%08x%08x%08x%08x%08x%08x%08x",
-      state.h0, state.h1, state.h2, state.h3,
-      state.h4, state.h5, state.h6, state.h7)
-  end
-
-  sha256_hash = function(msg)
-    local s = _SHA.create(msg)
-    _SHA.step(s, math.huge)
-    return _SHA.finalize(s)
-  end
-end
-
--- Expose the updater's SHA helpers to sidecars. Diag.lua uses them when
--- available for feedback-upload integrity, and falls back internally if absent.
-RA.sha256_hex = sha256_hash
-RA.sha256_create = function(content) return _SHA.create(content) end
-RA.sha256_step = function(state, max_blocks) return _SHA.step(state, max_blocks) end
-RA.sha256_finalize = function(state) return _SHA.finalize(state) end
+local sha256_hash = RA.sha256_hex
+local _SHA = { create = RA.sha256_create, step = RA.sha256_step, finalize = RA.sha256_finalize }
 
 -- =============================================================================
 -- Local deterministic action modules
@@ -21628,6 +22636,13 @@ function Updater.is_newer(remote_ver, local_ver)
     if rv < lv then return false end
   end
   return false
+end
+
+-- Public update manifests use three numeric version components. Keep the
+-- version-2 notice tied to that major version, including later 2.x releases.
+function Updater.is_v2_release(version)
+  return type(version) == "string"
+    and version:match("^2%.%d+%.%d+$") ~= nil
 end
 
 -- Fire an async curl GET. Writes response to out_path, exit code to exit_path.
@@ -21830,19 +22845,14 @@ function LangPacks.cleanup_stale_tmp()
   local sep = dir:sub(-1) == "/" or dir:sub(-1) == "\\"
   sep = sep and "" or (RA and RA.SEP or package.config:sub(1, 1))
   local now = time_precise()
-  local idx = 0
-  while true do
-    local name = reaper.EnumerateFiles(dir, idx)
-    if not name then break end
+  for _, name in ipairs(RA.cleanup_file_snapshot(dir)) do
     local tracked = tostring(name):match("^lang_")
       or tostring(name):match("^font_")
     local inst_suffix = tracked and RA.temp_instance_suffix_from_name(name)
       or nil
     if tracked and inst_suffix
-        and not RA.temp_instance_is_live(inst_suffix, now) then
+        and RA.instance_liveness(inst_suffix, now) == "dead" then
       pcall(os.remove, dir .. sep .. name)
-    else
-      idx = idx + 1
     end
   end
 end
@@ -21911,6 +22921,7 @@ end
 
 if LangPacks and LangPacks.cleanup_stale_tmp then
   LangPacks.cleanup_stale_tmp()
+  RA.retire_dead_instance_records()
 end
 if LangPacks and LangPacks.cleanup_legacy_help_dir_once then
   LangPacks.cleanup_legacy_help_dir_once()
@@ -22524,6 +23535,7 @@ function LangPacks._finish_ui_download()
     return
   end
   I18N.catalogs[d.code] = catalog
+  I18N._runtime_cache = {}
   if I18N._cached_pack_miss then I18N._cached_pack_miss[d.code] = nil end
   if LangPacks._ui_match_cache then LangPacks._ui_match_cache[d.code] = nil end
   LangPacks._activate_language(d.code)
@@ -32936,6 +33948,27 @@ function Net._finish_openrouter_catalog_operation(operation)
   return true, clean
 end
 
+function Net._log_openrouter_catalog_status(operation, status)
+  if type(Log) ~= "table" or type(Log.line) ~= "function" then return end
+  operation.logged_diagnostics = operation.logged_diagnostics or {}
+  local codes = {
+    openrouter_catalog_endpoint_shape = true,
+    openrouter_catalog_endpoint_conflict = true,
+    openrouter_catalog_duplicate_endpoint = true,
+    openrouter_catalog_metrics_omitted = true,
+  }
+  local function record(code)
+    if type(code) == "string" and codes[code] and not operation.logged_diagnostics[code] then
+      operation.logged_diagnostics[code] = true
+      Log.line("ENGINE", "OpenRouter catalog: " .. code)
+    end
+  end
+  record(status.diagnostic)
+  if type(status.warnings) == "table" then
+    for index = 1, math.min(#status.warnings, 2) do record(status.warnings[index]) end
+  end
+end
+
 function Net.poll_openrouter_catalog()
   local operation = S.openrouter_catalog_operation
   if type(operation) ~= "table" then return false end
@@ -32959,6 +33992,7 @@ function Net.poll_openrouter_catalog()
             }, "OpenRouter catalog refresh failed: " .. reason))
         return false
       end
+      Net._log_openrouter_catalog_status(operation, status)
       if status.state == "failed" or status.state == "cancelled"
           or status.state == "closed" or status.state == "consumed" then
         Net._close_openrouter_catalog_operation(operation, true)
@@ -33396,6 +34430,7 @@ local function custom_conn_test_register(cfg_base)
     end
     prefs.provider_idx = cust_idx
     MODELS.refresh()
+    Store._key_test_selection.test_provider_id = PROVIDERS.active().id
   end
   return cust_idx
 end
@@ -33406,6 +34441,9 @@ end
 -- otherwise. Reads from api_keys.custom_edit, which is populated when the
 -- user navigates into the edit screen (new record or existing record).
 function CTX.custom_llm_start_conn_test()
+  if S.turn_budget_confirmation ~= nil then
+    return false, "turn_budget_confirmation_pending"
+  end
   local edit = api_keys.custom_edit
   if not edit then return false end
   edit.errors = {}
@@ -33588,6 +34626,8 @@ end
 -- the active provider's index so finish() can restore it.
 function CTX.custom_conn_test_start(cfg_base, api_key)
   local state = api_keys.custom_conn_test
+  if state.active then return false end
+  Store.begin_key_test_selection(state)
   state.active            = true
   state.started           = reaper.time_precise()
   state.timeout           = CUSTOM_DEFAULT_TEST_TIMEOUT
@@ -33655,13 +34695,16 @@ function CTX.custom_conn_test_finish()
   -- Remove the throwaway provider and its in-memory key. The sentinel id is
   -- reserved, so wiping the key unconditionally is safe -- nothing else
   -- ever writes to S.api_key_map[CUSTOM_CONN_TEST_ID].
+  local restored_selection = Store.end_key_test_selection(state, true)
   Custom.unregister_id(CUSTOM_CONN_TEST_ID)
   S.api_key_map[CUSTOM_CONN_TEST_ID] = nil
   -- Restore active provider index (clamp if out of range).
   local orig_idx = state.orig_provider_idx or 1
   if orig_idx < 1 or orig_idx > #PROVIDERS then orig_idx = 1 end
-  prefs.provider_idx = orig_idx
-  MODELS.refresh()
+  if not restored_selection then
+    prefs.provider_idx = orig_idx
+    MODELS.refresh()
+  end
   S.api_key = S.api_key_map[PROVIDERS.active().id]
   -- Clear transient flags.
   api_keys.key_validating     = false
@@ -33693,7 +34736,7 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
         sidechain_ducking_requires_send = true,
       },
     },
-    ["gpt-5.6-luna"] = {
+    ["gpt-6-luna"] = {
       key = "luna_practical_track_routing",
       prompt = [[
 - For simple track/routing setup, create only the requested or named tracks. Do not add helper, folder, parent, or container tracks unless the user explicitly asks for them.
@@ -33754,7 +34797,7 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
       validators = {
       },
     },
-    ["claude-sonnet-5"] = {
+    ["claude-sonnet-5-5"] = {
       key = "sonnet5_explicit_bus_sends",
       prompt = [[
 - When the user asks for tracks going into a bus or return, create explicit sends with `reaper.CreateTrackSend(source_track, bus_or_return_track)`. Folder depth alone is not bus routing and should not be used as a substitute unless the user explicitly asks for folders.
@@ -33765,7 +34808,7 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
         bus_routing_requires_sends = true,
       },
     },
-    ["claude-opus-5"] = {
+    ["claude-opus-5-5"] = {
       key = "opus_practical_setup_defaults",
       prompt = [[
 - For folder setup such as "put drums, bass, and guitar inside a band folder", create the folder/category track plus the named child tracks. Close the folder on the last child track, not on the following outside track.
@@ -33802,7 +34845,7 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
 - For cue/headphone/monitor buses that should be separate from the main mix, set the cue bus track's own `B_MAINSEND` to `0` with `reaper.SetMediaTrackInfo_Value(cue_bus_track, "B_MAINSEND", 0)`. Disabling master send only on the source tracks is incomplete; the cue bus itself must not feed the master.
 - When the user asks for tracks going into a bus or return, create explicit sends with `reaper.CreateTrackSend(source_track, bus_or_return_track)`. Folder depth alone is not bus routing.
 - Keep plug-in Lua direct. Use maintained mappings as guidance when they fit, or resolve requested controls by live parameter name and standard REAPER APIs. Configure only what the user requested.
-- For a request to modify an existing effect, when you use `TrackFX_GetByName` or `TakeFX_GetByName` to resolve that required effect, check `if fx < 0 then` and show a clear error plus `return` before any writes. Never use only `if fx >= 0 then ... end`, and do not put the missing-effect message in an `else` branch that continues to a success receipt. For add-and-configure requests, follow the ADD named plugin rule from `prompt_bundle:plugin` instead: add or upsert the requested effect and fail only if the required add also fails.
+- For a request to modify an existing effect, when you use `TrackFX_GetByName(track, name, false)` or search-only `TakeFX_AddByName(take, name, 0)` to resolve that required effect, check `if fx < 0 then` and show a clear error plus `return` before any writes. Never use only `if fx >= 0 then ... end`, and do not put the missing-effect message in an `else` branch that continues to a success receipt. For add-and-configure requests, follow the ADD named plugin rule from `prompt_bundle:plugin` instead: add or upsert the requested effect and fail only if the required add also fails.
 ]],
       validators = {
         bus_routing_requires_sends = true,
@@ -34609,6 +35652,17 @@ end
 -- Pin prompt_bundle:theme next to the theme color reference. The theme bucket
 -- lists the color keys; this bundle carries the backup/restore safety rule
 -- required before any SetThemeColor code.
+function Net.copin_theme_reference(content, out_list)
+  if not S.theme_ref_message then
+    S.theme_ref_message = content
+    if out_list then out_list[#out_list+1] = "theme" end
+  end
+  S.theme_already_sent = true
+  S.docs_section_sent = S.docs_section_sent or {}
+  S.docs_section_sent.theme = true
+  Net.copin_theme_bundle(out_list)
+end
+
 function Net.copin_theme_bundle(out_list)
   local pb_key = "prompt_bundle:theme"
   if S.sticky_context[pb_key] then
@@ -35036,6 +36090,53 @@ end
 -- builder based on the active provider. Each builder handles system prompt
 -- packaging, message formatting, attachment encoding, and any provider-specific
 -- features (e.g. Anthropic prompt caching).
+function Net._image_inline_receipt(input_json, attachments, allow_image)
+  if allow_image ~= true then return nil end
+  local images = {}
+  for _, att in ipairs(attachments or {}) do
+    if att.kind == "image" then
+      local ready, reason = Attach.image_originals_ready({att}, true)
+      if not ready then return nil, reason end
+      images[#images + 1] = {order = #images + 1, mime = att.media_type,
+        original_bytes = att.image_original_bytes, encoded_bytes = #att.b64}
+    end
+  end
+  if #images == 0 then return nil end
+  -- The private producer binding retains canonical strings, never originals.
+  -- It is weak-keyed so an expired seed does not retain a body or receipt.
+  Net._image_inline_receipts = Net._image_inline_receipts
+    or setmetatable({}, {__mode = "k"})
+  local function freeze(values)
+    return setmetatable({}, {__index = values,
+      __newindex = function() error("inline image receipt is immutable", 2) end,
+      __len = function() return #values end,
+      __pairs = function() return next, values, nil end, __metatable = false})
+  end
+  local published_images = {}
+  for index, image in ipairs(images) do published_images[index] = freeze(image) end
+  local receipt = freeze({revision = 1, count = #images, images = freeze(published_images)})
+  Net._image_inline_receipts[receipt] = {input_json = input_json, count = #images,
+    images = images}
+  return receipt
+end
+
+function Net._image_inline_receipt_valid(receipt, input_json)
+  local binding = type(receipt) == "table" and Net._image_inline_receipts
+    and Net._image_inline_receipts[receipt] or nil
+  if not binding or binding.input_json ~= input_json or receipt.revision ~= 1
+      or receipt.count ~= binding.count or type(receipt.images) ~= "table"
+      or #receipt.images ~= binding.count then return false end
+  for index, image in ipairs(receipt.images) do
+    local expected = binding.images[index]
+    if type(image) ~= "table" or image.order ~= expected.order
+        or image.mime ~= expected.mime or image.original_bytes ~= expected.original_bytes
+        or image.encoded_bytes ~= expected.encoded_bytes then
+      return false
+    end
+  end
+  return true
+end
+
 function Net._new_native_seed(provider_id, model_id, protocol, input_json,
                               msg_attachments, allow_image, allow_document,
                               reasoning_display_mode, conversation,
@@ -35059,9 +36160,15 @@ function Net._new_native_seed(provider_id, model_id, protocol, input_json,
   if found_document then required_inputs[#required_inputs + 1] = "document" end
   if found_image then required_inputs[#required_inputs + 1] = "image" end
   local native_input_json = input_json
+  local image_inline_receipt, image_inline_error
+  if not S.screen_reader_mode then
+    image_inline_receipt, image_inline_error = Net._image_inline_receipt(
+      input_json, msg_attachments, allow_image)
+  end
   local input_media_handles
   local input_media_error
-  if found_image and not S.screen_reader_mode
+  if found_image and not image_inline_receipt and not image_inline_error
+      and not S.screen_reader_mode
       and type(Attach) == "table"
       and type(Attach.native_input_plan) == "function" then
     native_input_json, input_media_handles, input_media_error =
@@ -35074,7 +36181,8 @@ function Net._new_native_seed(provider_id, model_id, protocol, input_json,
     protocol = protocol,
     input_json = native_input_json or input_json,
     input_media_handles = input_media_handles,
-    input_media_error = input_media_error,
+    input_media_error = input_media_error or image_inline_error,
+    image_inline_receipt = image_inline_receipt,
     input_media_requires_engine = type(input_media_handles) == "table"
       and #input_media_handles > 0 or nil,
     required_input_modalities = Net._freeze_string_list(required_inputs),
@@ -35308,6 +36416,10 @@ function Net._responses_text_format_field(response_format)
 end
 
 function Net.build_body(msgs, snapshot, msg_attachments)
+  if not S.screen_reader_mode then
+    local images_ready, image_error = Attach.image_originals_ready(msg_attachments, true)
+    if not images_ready then error(image_error, 2) end
+  end
   -- Probe timing: time spent assembling the request body.
   -- Wraps the dispatcher rather than each provider variant so all
   -- callers (send_to_api initial build + retries / context-needed
@@ -35664,18 +36776,20 @@ function Net.build_body_anthropic(msgs, snapshot, msg_attachments)
   local active_m = MODELS[prefs.model_idx] or MODELS[1]
   local max_out  = (active_m and active_m.max_output) or 64000
 
-  -- Extended thinking. Anthropic's API treats `thinking` as opt-in for
-  -- every Claude model: when the field is absent, the model runs in
-  -- non-thinking mode regardless of which 4.x variant is active. The
-  -- "None" dropdown entry maps to an explicit disabled-thinking request.
+  -- Extended thinking. Earlier Claude models can run without thinking.
+  -- Opus 5.5 and Sonnet 5.5 use an adaptive-thinking floor in this app.
+  -- "None" maps to disabled thinking only on models that support it.
   -- When a non-None level is picked, the wire shape depends on the active model's
-  -- thinking_style: Haiku 4.5 takes manual budget_tokens; Sonnet 5 and
-  -- Opus 5 use adaptive + an effort knob and reject manual budgets.
-  -- S.thinking_override_idx (when
-  -- set) wins over prefs.thinking_idx so the length-retry path can force
-  -- "None" for one round-trip.
+  -- thinking_style: Haiku 4.5 takes manual budget_tokens; Sonnet 5.5 and
+  -- Opus 5.5 use adaptive + an effort knob and reject manual budgets.
+  -- S.thinking_override_idx (when set) wins over prefs.thinking_idx so the
+  -- length-retry path can lower effort for one round-trip.
   local p_active = PROVIDERS.active()
   local effective_thinking_idx = S.thinking_override_idx or prefs.thinking_idx
+  if active_m and active_m.min_thinking_idx then
+    effective_thinking_idx = PROVIDERS.normalize_thinking_idx(
+      p_active, active_m, effective_thinking_idx)
+  end
   local thinking_field = ""
   local summary_display = prefs.show_reasoning_summaries == true
     and not S.screen_reader_mode
@@ -35823,15 +36937,17 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
   if p.is_custom and p.model_prefix and p.model_prefix ~= "" then
     model_id = p.model_prefix .. model_id
   end
-  local is_openai_56 = p.id == "openai"
+  local is_openai_modern = p.id == "openai"
     and type(model_id) == "string"
-    and model_id:match("^gpt%-5%.6") ~= nil
+    and (model_id:match("^gpt%-5%.6") ~= nil
+      or model_id:match("^gpt%-6%-") ~= nil
+      or model_id:match("^gpt%-6%.1%-") ~= nil)
 
-  -- GPT-5.6 explicit caching: mark the stable core system prompt and disable
+  -- GPT-5.6 and GPT-6 explicit caching: mark the stable core system prompt and disable
   -- the implicit latest-message breakpoint. This avoids paying a 1.25x write
   -- premium on the changing user prompt, snapshot, and attachments. Older
   -- models reject the new fields, so they retain automatic implicit caching.
-  if is_openai_56 then
+  if is_openai_modern then
     local message = str_format(
       '{"role":"system","content":[{"type":"text","text":"%s","prompt_cache_breakpoint":{"mode":"explicit"}}]}',
       JSON.escape(Net.system_prompt_text()))
@@ -35849,7 +36965,7 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
   -- cleaner, more stable prefix. See Net.bundled_static_refs().
   local static_blob = Net.bundled_static_refs_for_request()
   if static_blob then
-    if is_openai_56 then
+    if is_openai_modern then
       -- The bundled API/MIDI/theme references are the second reusable prefix.
       -- Prompt-specific sticky plugin/context material remains after this
       -- breakpoint so one-off context does not create avoidable cache writes.
@@ -35948,11 +37064,11 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
                 .. tostring(att.data or "")
             elseif att.kind == "pdf" then
               blocks[#blocks+1] = str_format(
-                '{"type":"text","text":"[Attached PDF: %s] (PDF content attached as document)"}',
+                '{"type":"text","text":"[Attached PDF: %s] (PDF content was not sent.)"}',
                 JSON.escape(att.name))
               deepseek_text_parts[#deepseek_text_parts+1] =
                 "[Attached PDF: " .. tostring(att.name or "")
-                .. "] (PDF content attached as document)"
+                .. "] (PDF content was not sent.)"
             end
           end
         end
@@ -36012,6 +37128,11 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
   -- if the resolved idx is somehow out-of-range or carries an unexpected
   -- value, default to "disabled" (safer -- no surprise reasoning cost).
   local effective_thinking_idx = S.thinking_override_idx or prefs.thinking_idx
+  if p.id == "openai" and MODELS[prefs.model_idx]
+      and MODELS[prefs.model_idx].min_thinking_idx then
+    effective_thinking_idx = PROVIDERS.normalize_thinking_idx(
+      p, MODELS[prefs.model_idx], effective_thinking_idx)
+  end
   local reasoning = ""
   local reasoning_effort_value
   local deepseek_thinking_value
@@ -36025,7 +37146,7 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
      and p.thinking_levels
      and p.thinking_levels[effective_thinking_idx] then
     local val = p.thinking_levels[effective_thinking_idx].value
-    if val and (val ~= "none" or is_openai_56) then
+    if val and (val ~= "none" or is_openai_modern) then
       reasoning_effort_value = val
       reasoning = str_format(',"reasoning_effort":"%s"', val)
     end
@@ -36040,7 +37161,7 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
   -- often require a prefix ("openrouter/anthropic/...", "ollama/...") on the
   -- model id. Stored per-provider so users don't have to type it into every
   -- model row. Empty string = no-op, matching hosted OpenAI's behaviour.
-  local cache_options_field = is_openai_56
+  local cache_options_field = is_openai_modern
     and ',"prompt_cache_options":{"mode":"explicit","ttl":"30m"}' or ""
   local prompt_cache_key_field = ""
   if p.id == "openai" then
@@ -36126,11 +37247,11 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
   if p.id == "deepseek" then
     body = str_format(
       '{"model":"%s","messages":[%s]%s%s}',
-      model_id, messages_json, reasoning, extra_suffix)
+      JSON.escape(model_id), messages_json, reasoning, extra_suffix)
   else
     body = str_format(
       '{"model":"%s"%s%s%s%s,"messages":[%s]%s%s%s}',
-      model_id, max_tokens_field, prompt_cache_key_field, cache_options_field,
+      JSON.escape(model_id), max_tokens_field, prompt_cache_key_field, cache_options_field,
       safety_identifier_field, messages_json, reasoning,
       response_format, extra_suffix)
   end
@@ -37343,7 +38464,7 @@ function Net._call_cap_message()
   local hint
   if pid == "anthropic" and tag("haiku") then
     hint = RA.t("net.cap.call.hint_haiku", nil,
-      "Try Sonnet 5 or Opus 5 for this request.")
+      "Try Sonnet 5.5 or Opus 5.5 for this request.")
   elseif pid == "google" and (tag("flash") or tag("nano")) then
     hint = RA.t("net.cap.call.hint_gemini", nil,
       "Try Gemini 3.1 Pro for this request.")
@@ -37951,6 +39072,21 @@ function Net._rebase_display_message_refs(pruned_count)
     S.backup_warn_typed_idx, pruned_count)
   S.risky_warn_idx = Net._rebase_display_message_index(
     S.risky_warn_idx, pruned_count)
+  local seen_bindings = {}
+  for _, opts in pairs({backup = S.backup_warn_opts, risky = S.risky_warn_opts,
+      typed = S.backup_warn_typed_opts,
+      screen_reader = S._screen_reader_run_confirm and S._screen_reader_run_confirm.opts}) do
+    local binding = type(opts) == "table" and opts.binding
+    if type(binding) == "table" and not seen_bindings[binding] then
+      seen_bindings[binding] = true
+      local idx = Net._rebase_display_message_index(binding.message_idx, pruned_count)
+      if idx and S.display_messages[idx] == binding.message then
+        binding.message_idx = idx
+      else
+        binding.consumed = true
+      end
+    end
+  end
   S.jsfx_save_warn_idx = Net._rebase_display_message_index(
     S.jsfx_save_warn_idx, pruned_count)
   S.scroll_to_msg = Net._rebase_display_message_index(
@@ -38039,6 +39175,7 @@ function Net._emit_local_answer(user_text, answer, probe_turn, opts)
   S.pending_display_idx = nil
   S.pending_no_guess_seed = nil
   S.pending_orig_prompt = nil
+  S.pending_recovery_original_prompt = nil
   S.pending_typed_action_expected = false
   S.pending_typed_action_response_format = false
   S.pending_typed_action_profile = nil
@@ -38325,6 +39462,7 @@ function Net._resolve_local_escalation(outcome, error_entry)
   end
   if (outcome == "failed" or outcome == "admission_failed"
       or outcome == "stale_failed")
+      and binding.image_recovery_provisional ~= true
       and type(error_entry) == "table" then
     error_entry.local_escalation_retry = true
     error_entry.recovery = error_entry.recovery or "local_answer_provider"
@@ -38365,17 +39503,35 @@ function Net._sweep_stale_local_escalation(error_entry)
     is_error_entry and error_entry or nil)
 end
 
-function Net.ask_model_instead(user_text, source_msg, allow_missing_source)
+function Net.ask_model_instead(user_text, source_msg, allow_missing_source, recovery_opts)
+  local recovery_attempt = type(recovery_opts) == "table"
+    and recovery_opts._image_recovery_attempt or nil
+  local recovery_origin_valid = recovery_attempt
+    and Net._image_recovery_attempt_current(recovery_attempt)
+  if recovery_attempt and not recovery_origin_valid then
+    return false, "recovery_attempt_stale", "boundary"
+  end
   local binding, bind_reason = Net._arm_local_escalation(source_msg, user_text,
     allow_missing_source)
   if not binding then return false, bind_reason, "boundary" end
+  if recovery_origin_valid then
+    recovery_attempt.local_escalation_binding = binding
+    binding.image_recovery_attempt_id = recovery_attempt.id
+    binding.image_recovery_provisional = true
+  end
   S.skip_local_answer_once = true
   -- Escalation keeps request bookkeeping, but reuses the original visible turn.
   S.suppress_user_display_once = true
   local display_count_before = type(S.display_messages) == "table"
     and #S.display_messages or 0
+  local send_opts = {force_provider = true}
+  if type(recovery_opts) == "table" then
+    send_opts.attachments = recovery_opts.attachments
+    send_opts.recovery_original_prompt = recovery_opts.recovery_original_prompt
+    send_opts._image_recovery_attempt = recovery_opts._image_recovery_attempt
+  end
   local call_ok, sent, reason, handling =
-    pcall(Net.send_to_api, user_text, { force_provider = true })
+    pcall(Net.send_to_api, user_text, send_opts)
   if not call_ok then
     S.skip_local_answer_once = nil
     S.suppress_user_display_once = nil
@@ -38400,6 +39556,62 @@ function Net.ask_model_instead(user_text, source_msg, allow_missing_source)
     end
   end
   return sent, reason, handling
+end
+
+-- A hidden retry owns only its replacement tail in this history root.
+-- Keep row references until admission is definitive, including confirmation.
+function Net._capture_retry_history()
+  local owner = { history = S.history, rows = {}, prompt = S.pending_orig_prompt }
+  for index, row in ipairs(S.history) do owner.rows[index] = row end
+  local prefix = #owner.rows
+  if prefix > 0 and owner.rows[prefix].role == "assistant" then
+    prefix = prefix - 1
+  end
+  if prefix > 0 and owner.rows[prefix].role == "user" then
+    owner.user = owner.rows[prefix]
+    owner.user_content = owner.user.content
+    prefix = prefix - 1
+  end
+  owner.prefix = prefix
+  return owner
+end
+
+function Net._replace_retry_history(owner, content)
+  for index = #S.history, owner.prefix + 1, -1 do S.history[index] = nil end
+  owner.entry = { role = "user", content = content }
+  S.history[#S.history + 1] = owner.entry
+end
+
+function Net._settle_retry_history(owner, fired, reason, normalize_user)
+  if type(owner) ~= "table" or owner.settled then return false end
+  if S.active_retry_history_owner == owner then
+    S.active_retry_history_owner = nil
+  end
+  if fired and reason == "turn_budget_confirmation" then
+    local pending = S.turn_budget_confirmation
+    return type(pending) == "table" and pending.retry_history_owner == owner
+  end
+  owner.settled = true
+  if fired or not owner.entry or S.history ~= owner.history
+      or #S.history ~= owner.prefix + 1
+      or S.history[#S.history] ~= owner.entry then return false end
+  for index = 1, owner.prefix do
+    if S.history[index] ~= owner.rows[index] then return false end
+  end
+  S.history[#S.history] = nil
+  for index = owner.prefix + 1, #owner.rows do
+    S.history[#S.history + 1] = owner.rows[index]
+  end
+  if owner.user then
+    owner.user.content = normalize_user and type(owner.prompt) == "string"
+      and ("USER REQUEST:\n" .. owner.prompt) or owner.user_content
+  end
+  return true
+end
+
+function Net._typed_retry_stops_response(fired, reason)
+  return fired == true or reason == "call_cap_exceeded"
+    or reason == "kill_pending" or reason == "preparation_failed"
 end
 
 function Net._try_escalate_typed_actions(reason_code, detail)
@@ -38501,38 +39713,43 @@ function Net._try_escalate_typed_actions(reason_code, detail)
     .. "omit any actions.)\n\n"
     .. (retry_contract ~= "" and (retry_contract .. "\n\n") or "")
     .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-  history_content = Net._append_persistent_validator_constraints(
-    history_content, { kind = "typed_action_escalation" })
-  if #S.history > 0 and S.history[#S.history].role == "assistant" then
-    S.history[#S.history] = nil
-  end
-  if #S.history > 0 and S.history[#S.history].role == "user" then
-    S.history[#S.history] = nil
-  end
-  S.history[#S.history + 1] = { role = "user", content = history_content }
+  local history_owner = Net._capture_retry_history()
+  local prepared, body, native_seed = pcall(function()
+    history_content = Net._append_persistent_validator_constraints(
+      history_content, { kind = "typed_action_escalation" })
+    Net._replace_retry_history(history_owner, history_content)
 
-  if S.pending_display_idx
-     and S.display_messages[S.pending_display_idx] then
-    local dmsg = S.display_messages[S.pending_display_idx]
-    local existing = dmsg.ctx_label or ""
-    if not existing:find("typed_action_escalated", 1, true) then
-      dmsg.ctx_label = existing ~= ""
-        and (existing .. " + typed_action_escalated")
-        or "typed_action_escalated"
+    if S.pending_display_idx
+       and S.display_messages[S.pending_display_idx] then
+      local dmsg = S.display_messages[S.pending_display_idx]
+      local existing = dmsg.ctx_label or ""
+      if not existing:find("typed_action_escalated", 1, true) then
+        dmsg.ctx_label = existing ~= ""
+          and (existing .. " + typed_action_escalated")
+          or "typed_action_escalated"
+      end
     end
-  end
 
-  if prefs.include_snapshot and not S.pending_answer_only_followup then
-    S.pending_project  = CTX.resolve_pending_project()
-    S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-      S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+    if prefs.include_snapshot and not S.pending_answer_only_followup then
+      S.pending_project  = CTX.resolve_pending_project()
+      S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+        S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+    end
+    S.status = "waiting"
+    Net._ensure_request_start_time()
+    Code.safe_write(tmp.out, "")
+    return Net.build_body(Net.trimmed_history(),
+      S.pending_snapshot, S.pending_attachments)
+  end)
+  local preparation_error = not prepared and body or nil
+  local fired, fire_reason
+  if prepared then
+    S.active_retry_history_owner = history_owner
+    fired, fire_reason = Net.fire_curl(body, {native_seed = native_seed})
+  else
+    fired, fire_reason = false, "preparation_failed"
   end
-  S.status = "waiting"
-  Net._ensure_request_start_time()
-  Code.safe_write(tmp.out, "")
-  local body, native_seed = Net.build_body(Net.trimmed_history(),
-    S.pending_snapshot, S.pending_attachments)
-  local fired, fire_reason = Net.fire_curl(body, {native_seed = native_seed})
+  Net._settle_retry_history(history_owner, fired, fire_reason, true)
   if not fired then
     Net._restore_typed_action_escalation_model()
     S.status = "idle"
@@ -38542,9 +39759,10 @@ function Net._try_escalate_typed_actions(reason_code, detail)
         .. "Please resend the last message."
       Log.add_error((RA and RA.t and RA.t(
         "typed_actions.error.fallback_request_failed", nil, fallback))
-          or fallback)
+          or fallback, nil, nil, nil, preparation_error
+          and Net._send_exception_extra("typed_action_escalation", preparation_error) or nil)
     end
-    return false
+    return false, fire_reason
   end
   S.scroll_to_bottom = true
   return true
@@ -38577,40 +39795,45 @@ function Net._try_typed_action_lua_fallback(reason_code, detail)
     .. "copy any prior bad JSON. Respond as if this is your FIRST reply -- "
     .. "do NOT apologize, do NOT mention a retry.)\n\n"
     .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-  history_content = Net._append_persistent_validator_constraints(
-    history_content, { kind = "typed_action_lua_fallback" })
+  local history_owner = Net._capture_retry_history()
+  local prepared, body, native_seed = pcall(function()
+    history_content = Net._append_persistent_validator_constraints(
+      history_content, { kind = "typed_action_lua_fallback" })
 
-  if #S.history > 0 and S.history[#S.history].role == "assistant" then
-    S.history[#S.history] = nil
-  end
-  if #S.history > 0 and S.history[#S.history].role == "user" then
-    S.history[#S.history] = nil
-  end
-  S.history[#S.history + 1] = { role = "user", content = history_content }
+    Net._replace_retry_history(history_owner, history_content)
 
-  if S.pending_display_idx
-     and S.display_messages[S.pending_display_idx] then
-    local dmsg = S.display_messages[S.pending_display_idx]
-    local existing = dmsg.ctx_label or ""
-    if not existing:find("typed_action_lua_fallback", 1, true) then
-      dmsg.ctx_label = existing ~= ""
-        and (existing .. " + typed_action_lua_fallback")
-        or "typed_action_lua_fallback"
+    if S.pending_display_idx
+       and S.display_messages[S.pending_display_idx] then
+      local dmsg = S.display_messages[S.pending_display_idx]
+      local existing = dmsg.ctx_label or ""
+      if not existing:find("typed_action_lua_fallback", 1, true) then
+        dmsg.ctx_label = existing ~= ""
+          and (existing .. " + typed_action_lua_fallback")
+          or "typed_action_lua_fallback"
+      end
     end
-  end
 
-  if prefs.include_snapshot and not S.pending_answer_only_followup then
-    S.pending_project  = CTX.resolve_pending_project()
-    S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-      S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-  end
+    if prefs.include_snapshot and not S.pending_answer_only_followup then
+      S.pending_project  = CTX.resolve_pending_project()
+      S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+        S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+    end
 
-  S.status = "waiting"
-  Net._ensure_request_start_time()
-  Code.safe_write(tmp.out, "")
-  local body, native_seed = Net.build_body(Net.trimmed_history(),
-    S.pending_snapshot, S.pending_attachments)
-  local fired, fire_reason = Net.fire_curl(body, {native_seed = native_seed})
+    S.status = "waiting"
+    Net._ensure_request_start_time()
+    Code.safe_write(tmp.out, "")
+    return Net.build_body(Net.trimmed_history(),
+      S.pending_snapshot, S.pending_attachments)
+  end)
+  local preparation_error = not prepared and body or nil
+  local fired, fire_reason
+  if prepared then
+    S.active_retry_history_owner = history_owner
+    fired, fire_reason = Net.fire_curl(body, {native_seed = native_seed})
+  else
+    fired, fire_reason = false, "preparation_failed"
+  end
+  Net._settle_retry_history(history_owner, fired, fire_reason, true)
   if not fired then
     S.status = "idle"
     S.request_start_time = nil
@@ -38618,9 +39841,11 @@ function Net._try_typed_action_lua_fallback(reason_code, detail)
       Log.add_error((RA and RA.retry_failed and RA.retry_failed(
         "retry.reason.for_typed_action_lua_fallback",
         "for typed-action Lua fallback"))
-        or "Auto-retry for typed-action Lua fallback did not go through. Please resend the last message.")
+        or "Auto-retry for typed-action Lua fallback did not go through. Please resend the last message.",
+        nil, nil, nil, preparation_error
+        and Net._send_exception_extra("typed_action_lua_fallback", preparation_error) or nil)
     end
-    return false
+    return false, fire_reason
   end
   S.scroll_to_bottom = true
   return true
@@ -38723,6 +39948,7 @@ function Net._drop_pending_history_rows()
 end
 
 function Net.cancel_active_request(probe_reason)
+  Net._image_prepare_invalidate_all("cancelled")
   if S.turn_budget_confirmation and Net.cancel_turn_budget_confirmation then
     local cancelled, reason = Net.cancel_turn_budget_confirmation()
     if cancelled == true then
@@ -38769,6 +39995,7 @@ function Net.cancel_active_request(probe_reason)
   S.pending_no_guess_seed = nil
   S.pending_code        = nil
   S.pending_orig_prompt = nil
+  S.pending_recovery_original_prompt = nil
   S.pending_typed_action_expected = false
   S.pending_typed_action_response_format = false
   S.pending_typed_action_profile = nil
@@ -38808,6 +40035,8 @@ function Net.cancel_active_request(probe_reason)
 end
 
 function Net._abort_runaway_turn(probe_reason)
+  Net._image_prepare_invalidate_all("aborted")
+  S.pending_attachments = nil
   Net._resolve_local_escalation("cancelled")
   Net._clear_pending_typed_action_lua_generation()
   Net._restore_pending_user_history()
@@ -38819,6 +40048,7 @@ function Net._abort_runaway_turn(probe_reason)
   S.pending_display_idx = nil
   S.pending_no_guess_seed = nil
   S.pending_orig_prompt  = nil
+  S.pending_recovery_original_prompt = nil
   S.pending_typed_action_expected = false
   S.pending_typed_action_response_format = false
   S.pending_typed_action_profile = nil
@@ -39033,11 +40263,19 @@ function Net._curl_failure_debug(exit_code, detail, failure_kind,
     dbg.exit_code = exit_code
     if failure_kind == "engine_stream_incomplete" then
       dbg.exit_meaning = "Engine stream incomplete"
+    elseif failure_kind == "engine_response_processing" then
+      dbg.exit_meaning = "Engine response processing failed"
+    elseif failure_kind == "engine_provider_error" then
+      dbg.exit_meaning = "Engine provider error"
+    elseif failure_kind == "engine_failure" then
+      dbg.exit_meaning = "Engine request failed"
+    elseif failure_kind == "engine_cancelled" then
+      dbg.exit_meaning = "Engine request cancelled"
     else
       dbg.exit_meaning = Net._curl_exit_meaning(exit_code)
     end
   end
-  if include_user_message ~= false then dbg.user_message = detail end
+  dbg.user_message = include_user_message ~= false and detail or nil
   dbg.failed_at_utc = os.date("!%Y-%m-%dT%H:%M:%SZ")
   dbg.api_calls_this_turn = S.api_calls_this_turn
   dbg.retry_count = S.retry_count
@@ -40138,34 +41376,34 @@ function Net._turn_budget_condition_fingerprint(budget)
   return #ordered == #conditions and tbl_concat(ordered, "\31") or nil
 end
 
-function Net._turn_budget_options_fingerprint(opts)
-  if opts == nil then return "null" end
-  if type(opts) ~= "table" or type(JSON) ~= "table"
-      or type(JSON.encode) ~= "function" then return nil end
-  local fingerprint_opts = {}
-  for key, value in pairs(opts) do
-    if key ~= "api_key_override" then fingerprint_opts[key] = value end
+function Net._turn_budget_options_match(approval, opts)
+  if type(approval) ~= "table" or type(opts) ~= "table"
+      or not rawequal(approval.options_ref, opts)
+      or type(approval.options_snapshot) ~= "table" then return false end
+  local snapshot = approval.options_snapshot
+  for key, value in next, snapshot do
+    if not rawequal(rawget(opts, key), value) then return false end
   end
-  local ok, encoded = pcall(JSON.encode, fingerprint_opts)
-  if not ok or type(encoded) ~= "string" or #encoded > 262144 then return nil end
-  return encoded
+  for key, value in next, opts do
+    if not rawequal(rawget(snapshot, key), value) then return false end
+  end
+  return true
 end
 
 function Net._turn_budget_override_matches(approval, body, opts,
                                             provider_idx, model_idx, budget)
   if type(approval) ~= "table" or type(body) ~= "string" then return false end
   local conditions = Net._turn_budget_condition_fingerprint(budget)
-  local options = Net._turn_budget_options_fingerprint(opts)
-  return conditions ~= nil and options ~= nil
+  return conditions ~= nil and Net._turn_budget_options_match(approval, opts)
     and approval.body == body
     and approval.provider_idx == provider_idx
     and approval.model_idx == model_idx
     and approval.condition_fingerprint == conditions
-    and approval.options_fingerprint == options
 end
 
 function Net._clear_turn_budget_confirmation()
   S.turn_budget_confirmation = nil
+  S.active_retry_history_owner = nil
   S.open_turn_budget_confirmation = false
   S.turn_budget_confirm_focus_cancel = false
   S.turn_budget_override_once = false
@@ -40186,14 +41424,15 @@ function Net._queue_turn_budget_confirmation(body, opts, budget,
   S.turn_budget_confirmation = {
     body = body,
     opts = saved_opts,
+    retry_history_owner = S.active_retry_history_owner,
     budget = budget,
     matched_condition = matched_condition,
     provider_idx = provider_idx,
     model_idx = model_idx,
     provider_id = provider and provider.id or nil,
     model_id = model and model.id or nil,
-    options_fingerprint = Net._turn_budget_options_fingerprint(saved_opts),
   }
+  S.active_retry_history_owner = nil
   S.open_turn_budget_confirmation = true
   S.turn_budget_confirm_focus_cancel = true
   S.status = "awaiting_confirmation"
@@ -40207,6 +41446,7 @@ function Net.continue_turn_budget_confirmation()
     Net._clear_turn_budget_confirmation()
     return false, "no_turn_budget_confirmation"
   end
+  local history_owner = pending.retry_history_owner
   S.turn_budget_confirmation = nil
   S.open_turn_budget_confirmation = false
   S.turn_budget_confirm_focus_cancel = false
@@ -40227,6 +41467,7 @@ function Net.continue_turn_budget_confirmation()
     Log.add_error(RA.t("net.turn_budget.continue_failed", nil,
       "The approved model request could not be started. Please try again."))
     Net._abort_runaway_turn("turn_budget_continue_provider_changed")
+    Net._settle_retry_history(history_owner, false, "turn_budget_provider_changed", true)
     return false, "turn_budget_provider_changed"
   end
   local model_idx = pending.model_idx
@@ -40246,6 +41487,7 @@ function Net.continue_turn_budget_confirmation()
     Log.add_error(RA.t("net.turn_budget.continue_failed", nil,
       "The approved model request could not be started. Please try again."))
     Net._abort_runaway_turn("turn_budget_continue_model_changed")
+    Net._settle_retry_history(history_owner, false, "turn_budget_model_changed", true)
     return false, "turn_budget_model_changed"
   end
   pending.provider_idx = provider_idx
@@ -40254,17 +41496,21 @@ function Net.continue_turn_budget_confirmation()
   pending.opts.provider_idx = provider_idx
   pending.opts.model_idx = model_idx
   pending.opts.api_key_override = nil
-  pending.options_fingerprint =
-    Net._turn_budget_options_fingerprint(pending.opts)
+  -- Snapshot after trusted remap; fire consumes it synchronously before dispatch.
+  -- Reevaluate this binding if a future path defers or writes options before consume.
+  local options_snapshot = {}
+  for key, value in next, pending.opts do options_snapshot[key] = value end
   S.turn_budget_override_once = {
     body = pending.body,
     provider_idx = pending.provider_idx,
     model_idx = pending.model_idx,
     condition_fingerprint =
       Net._turn_budget_condition_fingerprint(pending.budget),
-    options_fingerprint = pending.options_fingerprint,
+    options_ref = pending.opts,
+    options_snapshot = options_snapshot,
   }
   S.status = "waiting"
+  S.active_retry_history_owner = history_owner
   local fired, reason = Net.fire_curl(pending.body, pending.opts)
   if not fired then
     S.turn_budget_override_once = false
@@ -40274,6 +41520,7 @@ function Net.continue_turn_budget_confirmation()
       Net._abort_runaway_turn("turn_budget_continue_failed")
     end
   end
+  Net._settle_retry_history(history_owner, fired, reason, true)
   return fired, reason
 end
 
@@ -40289,6 +41536,8 @@ function Net.cancel_turn_budget_confirmation()
   -- accessibility action can accidentally resume a cancelled request.
   Net._clear_turn_budget_confirmation()
   Net._turn_budget_stop(budget, matched)
+  Net._settle_retry_history(pending.retry_history_owner, false,
+    "turn_budget_cancelled", true)
   return true, "turn_budget_cancelled"
 end
 
@@ -41246,6 +42495,7 @@ function Net._map_engine_inference_seed(seed, p, active_model, protocol,
     protocol = true,
     input_json = true,
     input_media_handles = true,
+    image_inline_receipt = true,
     input_media_error = true,
     input_media_requires_engine = true,
     required_input_modalities = true,
@@ -41319,6 +42569,7 @@ function Net._map_engine_inference_seed(seed, p, active_model, protocol,
         or type(explicit_cache.binding) ~= "table"
         or type(explicit_binding) ~= "table"
         or seed.input_media_handles ~= nil
+        or seed.image_inline_receipt ~= nil
         or seed.conversation_context_revision ~= nil
         or seed.conversation_history_revision ~= nil
         or seed.conversation_initial ~= nil then
@@ -41379,7 +42630,12 @@ function Net._map_engine_inference_seed(seed, p, active_model, protocol,
   local image_required = Net._list_contains(required_inputs, "image")
   local media_present = type(seed.input_media_handles) == "table"
     and #seed.input_media_handles > 0
-  if image_required ~= media_present then
+  local inline_present = seed.image_inline_receipt ~= nil
+  if inline_present and (media_present
+      or not Net._image_inline_receipt_valid(seed.image_inline_receipt, seed.input_json)) then
+    return nil, nil, nil, "native_seed_inline_image_binding_invalid"
+  end
+  if image_required ~= (media_present or inline_present) then
     return nil, nil, nil, "native_seed_input_media_binding_mismatch"
   end
   if native_custom and (#required_outputs ~= 1
@@ -41650,6 +42906,11 @@ function Net._append_transport_event(event)
       and time_precise() or os.clock()
   end
   dmsg.transport_events[#dmsg.transport_events + 1] = event
+  if type(Diag) == "table"
+      and type(Diag.note_fallback_feedback) == "function" then
+    -- Reporting must never interrupt transport or authorize another request.
+    pcall(Diag.note_fallback_feedback, event, dmsg)
+  end
   if event._log_when_terminal ~= true
       and type(Log) == "table" and type(Log.transport_event) == "function" then
     pcall(Log.transport_event, event)
@@ -41910,11 +43171,16 @@ function Net._clear_engine_request_state(keep_wire)
   S.engine_transport_event = nil
   S.engine_dispatch_snapshot = nil
   S.engine_had_canonical_delta = false
+  S.engine_had_canonical_content = false
   S.engine_cancel_requested = false
   S.engine_last_status = nil
   S.engine_status_retry_used = false
   S.engine_input_media_consumed = false
   S.engine_provider_error_message = nil
+  S.engine_terminal_http_status = nil
+  S.engine_terminal_provider_failure = nil
+  S.engine_terminal_capacity_retry_safe = nil
+  S.engine_terminal_response_processing = nil
   if not keep_wire and tmp and tmp.engine_wire then
     os.remove(tmp.engine_wire)
   end
@@ -42278,7 +43544,7 @@ function Net._canonical_result_to_current_response(result, p,
   dispatched_model_id = type(dispatched_model_id) == "string"
       and #dispatched_model_id >= 1 and #dispatched_model_id <= 256
       and dispatched_model_id or nil
-  if p.id == "openai" or p.id == "openrouter" then
+  if p.id == "openai" or p.id == "openrouter" or p.is_native_custom == true then
     return {
       model = dispatched_model_id,
       choices = {{
@@ -42481,15 +43747,36 @@ function Net._write_curl_body_for_launch(is_get, engine_started, body, optional)
 end
 
 function Net._write_curl_auth_for_launch(engine_started, use_auth_file,
-                                         auth_header, auth_value, optional)
+                                         auth_header, auth_value, optional,
+                                         extra_headers, include_content_type)
   os.remove(tmp.auth)
-  if engine_started or not use_auth_file then return true end
+  if engine_started then return true end
+  local headers = {}
+  if use_auth_file then headers[#headers + 1] = auth_header .. ": " .. auth_value end
+  if type(extra_headers) == "table" then
+    for _, header in ipairs(extra_headers) do
+      if not Custom.header_is_safe(header) then return false, "invalid_header" end
+      headers[#headers + 1] = header
+    end
+    if include_content_type then headers[#headers + 1] = "content-type: application/json" end
+  end
+  if #headers == 0 then return true end
+  if type(extra_headers) == "table" then
+    for index, header in ipairs(headers) do
+      if header:find("%z") or header:match("^%s*@") then
+        return false, "invalid_header"
+      end
+      headers[index] = 'header = "' .. header:gsub("\\", "\\\\")
+        :gsub('"', '\\"'):gsub("\r", "\\r"):gsub("\n", "\\n")
+        :gsub("\t", "\\t"):gsub("\v", "\\v") .. '"'
+    end
+  end
+  local content = table.concat(headers, "\n")
   local written, write_error
   if optional == true then
-    written, write_error = Code.quiet_write(tmp.auth,
-      auth_header .. ": " .. auth_value)
+    written, write_error = Code.quiet_write(tmp.auth, content)
   else
-    written = Code.safe_write(tmp.auth, auth_header .. ": " .. auth_value)
+    written = Code.safe_write(tmp.auth, content)
   end
   if written == true then return true end
   os.remove(tmp.auth)
@@ -42511,6 +43798,14 @@ function Net.fire_curl(body, opts)
   -- TCP/TLS handshake timeout (seconds). Default 10 for cloud providers;
   -- per-record override for customs set below.
   local connect_timeout = 10
+  local function curl_timeout_arg(seconds)
+    local value = str_format("%.17g", seconds)
+    local decimal_mark = str_format("%.1f", 1.5):match("^1(.-)5$") or "."
+    if decimal_mark ~= "." then
+      value = value:gsub(decimal_mark:gsub("(%W)", "%%%1"), ".")
+    end
+    return value
+  end
   -- Guard against double-send. Return a reason so callers can distinguish
   -- "another request in flight" (transient, deferrable) from genuine
   -- failures like disk/IO errors. Plain `if not fire_curl()` callers stay
@@ -42968,11 +44263,15 @@ function Net.fire_curl(body, opts)
       recovery_blocked = attempt.recovery_blocked,
       recovery_reasons = attempt.recovery_reasons,
       outcome = engine_start_failure and "failed" or nil,
+      start_outcome = not engine_start_failure and "started" or nil,
       terminal = engine_start_failure ~= nil,
       error_code = engine_start_failure and engine_start_failure.error_code or nil,
       defer_append = true,
     })
     if engine_start_recovered then
+      Net._classify_engine_terminal_event(engine_attempt_event, engine_attempt,
+        engine_start_failure, Net._bounded_http_status(
+          engine_start_failure and engine_start_failure.http_status))
       -- Revision 11 aggregation relies on recording attempt one before the
       -- same-call curl recovery. Keep this append ahead of curl launch.
       Net._append_transport_event(engine_attempt_event)
@@ -43015,7 +44314,8 @@ function Net.fire_curl(body, opts)
   end
   local auth_written, auth_write_error = Net._write_curl_auth_for_launch(
     engine_started, use_auth_file, p.auth_header, auth_value,
-    optional_dispatch)
+    optional_dispatch, RA.IS_WINDOWS and extra_h_parts or nil,
+    RA.IS_WINDOWS and not is_get)
   if not auth_written then
     if optional_dispatch then
       Log.line(optional_log_tag, "the retry auth header could not be written: "
@@ -43032,26 +44332,16 @@ function Net.fire_curl(body, opts)
     -- Escape paths for embedding inside PowerShell single-quoted strings.
     local function ps_escape(path) return path:gsub("'", "''") end
 
-    -- Build header flags for cmd.exe (triple-quoted for PowerShell).
-    local h_flags = ""
-    if use_auth_file then
-      h_flags = h_flags .. ' -H @"""' .. tmp.auth .. '"""'
-    end
-    for _, h in ipairs(extra_h_parts) do
-      h_flags = h_flags .. ' -H """' .. h .. '"""'
-    end
-    if not is_get then
-      h_flags = h_flags .. ' -H """content-type: application/json"""'
-    end
-
-    -- Cleanup: delete auth file only if we wrote one.
-    local cleanup = use_auth_file
+    -- Header values stay in a file so cmd cannot expand or unquote them.
+    local use_header_file = use_auth_file or #extra_h_parts > 0 or not is_get
+    local h_flags = use_header_file and (' --config """' .. tmp.auth .. '"""') or ""
+    local cleanup = use_header_file
       and (' & del """' .. tmp.auth .. '"""') or ""
 
     local body_flags = is_get and ""
       or (' -d @"""' .. tmp.body .. '"""')
     local cmd_line = str_format(
-      'curl -sS%s%s --connect-timeout %d --max-time %d -D """%s"""'
+      'curl -sS%s%s --connect-timeout %s --max-time %s -D """%s"""'
       .. ' -X %s """%s"""'
       .. '%s'
       .. '%s -o """%s""" 2> """%s"""'
@@ -43059,7 +44349,7 @@ function Net.fire_curl(body, opts)
       .. '%s',
       insecure_flag,
       ssl_revoke_best_effort_flag,
-      connect_timeout, curl_timeout,
+      curl_timeout_arg(connect_timeout), curl_timeout_arg(curl_timeout),
       tmp.headers,
       method, endpoint,
       h_flags,
@@ -43115,12 +44405,12 @@ function Net.fire_curl(body, opts)
     -- write it to tmp.pid (so Net.kill_curl can `kill -9 <pid>` on Cancel),
     -- then `wait` for curl and record its real exit code in tmp.exit.
     local unix_curl = str_format(
-      '(curl -sS%s --connect-timeout %d --max-time %d -D %s'
+      '(curl -sS%s --connect-timeout %s --max-time %s -D %s'
       .. ' -X %s %s'
       .. '%s'
       .. '%s -o %s 2> %s & CURL_PID=$! ; echo $CURL_PID > %s ; wait $CURL_PID ; echo $? > %s%s) &',
       insecure_flag,
-      connect_timeout, curl_timeout,
+      curl_timeout_arg(connect_timeout), curl_timeout_arg(curl_timeout),
       sq(tmp.headers),
       method, sq(endpoint),
       h_flags,
@@ -43183,6 +44473,7 @@ function Net.fire_curl(body, opts)
     S.engine_raw_parts = nil
     S.engine_had_payload = false
     S.engine_had_canonical_delta = false
+    S.engine_had_canonical_content = false
     S.engine_cancel_requested = false
     S.engine_status_retry_used = false
     S.engine_request_body = body
@@ -43290,16 +44581,23 @@ end
 -- body builder: today that is the optional-dispatch marker and the tag its
 -- failures are logged under. They are merged over the launch options so the
 -- one signal reaches Net.fire_curl through the same table it already reads.
-function Net.fire_pending_retry(msgs, snapshot, msg_attachments, dispatch_opts)
+function Net.build_pending_retry(msgs, snapshot, msg_attachments, dispatch_opts)
   local provider_idx = S.pending_provider_idx or prefs.provider_idx
   local model_idx    = S.pending_model_idx or prefs.model_idx
   local thinking_idx = S.pending_thinking_idx or prefs.thinking_idx
   local body, opts, reason = Net.build_body_for_launch(msgs, snapshot,
     msg_attachments, provider_idx, model_idx, thinking_idx)
-  if not body then return false, reason or "body_build_failed" end
+  if not body then return nil, nil, reason or "body_build_failed" end
   if type(dispatch_opts) == "table" and type(opts) == "table" then
     for key, value in pairs(dispatch_opts) do opts[key] = value end
   end
+  return body, opts
+end
+
+function Net.fire_pending_retry(msgs, snapshot, msg_attachments, dispatch_opts)
+  local body, opts, reason = Net.build_pending_retry(msgs, snapshot,
+    msg_attachments, dispatch_opts)
+  if not body then return false, reason end
   return Net.fire_curl(body, opts)
 end
 
@@ -43552,6 +44850,7 @@ function Net.fire_validator_retry(opts)
   -- rebuild below re-reads the ACTIVE project, and the auto-run path compares
   -- the pending project against the active one before it runs anything, so
   -- the pre-dispatch values are kept here and put back with the history.
+  local history_owner = Net._capture_retry_history()
   local status_restore = S.status
   local revising_restore = S.engine_revising
   local project_restore = S.pending_project
@@ -43572,75 +44871,61 @@ function Net.fire_validator_retry(opts)
          > (CFG.MAX_CONTEXT_FETCHES_PER_TURN or 3) then
     Log.add_error(Net._context_fetch_cap_message(), nil, nil, nil,
       Net._context_fetch_cap_error_extra())
-    return Net._abort_runaway_turn("context_fetch_cap")
+    local fired, reason = Net._abort_runaway_turn("context_fetch_cap")
+    Net._settle_retry_history(history_owner, fired, reason, true)
+    return fired, reason
   end
   if opts.log_tag and opts.log_message then
     Log.line(opts.log_tag, opts.log_message)
   end
-  -- A FAILED DISPATCH MUST PRESERVE THE ORIGINAL CANDIDATE. History is
-  -- replaced here, before the request goes out, so a dispatch that never left
-  -- the machine used to take the assistant turn that carried the generated
-  -- script with it: the user was told to resend, and the candidate they would
-  -- have resent was gone. The removed tail is kept and put back below when
-  -- Net.fire_pending_retry reports that nothing was sent. This holds for every
-  -- validator kind, not only `fxident`.
-  local history_restore = {}
-  if #S.history > 0 and S.history[#S.history].role == "assistant" then
-    history_restore[#history_restore + 1] = S.history[#S.history]
-    S.history[#S.history] = nil
-  end
-  if #S.history > 0 and S.history[#S.history].role == "user" then
-    history_restore[#history_restore + 1] = S.history[#S.history]
-    S.history[#S.history] = nil
-  end
-  local repair_entry = {
-    role = "user",
-    content = Net._append_persistent_validator_constraints(
-      opts.history_content, opts),
-  }
-  S.history[#S.history + 1] = repair_entry
-  local label = tostring(opts.ctx_label or "")
-  if label ~= "" and S.pending_display_idx
-     and S.display_messages[S.pending_display_idx] then
-    local dmsg = S.display_messages[S.pending_display_idx]
-    local existing = dmsg.ctx_label or ""
-    if not existing:find(label, 1, true) then
-      dmsg.ctx_label = existing ~= "" and (existing .. " + " .. label) or label
+  local prepared, body, launch_opts, reason = pcall(function()
+    local content = Net._append_persistent_validator_constraints(
+      opts.history_content, opts)
+    Net._replace_retry_history(history_owner, content)
+    local label = tostring(opts.ctx_label or "")
+    if label ~= "" and S.pending_display_idx
+       and S.display_messages[S.pending_display_idx] then
+      local dmsg = S.display_messages[S.pending_display_idx]
+      local existing = dmsg.ctx_label or ""
+      if not existing:find(label, 1, true) then
+        dmsg.ctx_label = existing ~= "" and (existing .. " + " .. label) or label
+      end
     end
-  end
-  if opts.rebuild_snapshot ~= false
-     and prefs.include_snapshot
-     and not S.pending_answer_only_followup then
-    S.pending_project  = CTX.resolve_pending_project()
-    S.pending_snapshot = CTX.build_snapshot(S.pending_project,
-      S.pending_jsfx_intent and { minimal_tracks = true } or nil)
-  end
-  S.status = "waiting"
-  Net._ensure_request_start_time()
-  if optional_dispatch then
-    Code.quiet_write(tmp.out, "")
+    if opts.rebuild_snapshot ~= false
+       and prefs.include_snapshot
+       and not S.pending_answer_only_followup then
+      S.pending_project  = CTX.resolve_pending_project()
+      S.pending_snapshot = CTX.build_snapshot(S.pending_project,
+        S.pending_jsfx_intent and { minimal_tracks = true } or nil)
+    end
+    S.status = "waiting"
+    Net._ensure_request_start_time()
+    if optional_dispatch then
+      Code.quiet_write(tmp.out, "")
+    else
+      Code.safe_write(tmp.out, "")
+    end
+    return Net.build_pending_retry(Net.trimmed_history(),
+      S.pending_snapshot, S.pending_attachments,
+      optional_dispatch and {
+        optional_dispatch = true,
+        optional_log_tag = opts.log_tag or opts.ctx_label or opts.kind,
+      } or nil)
+  end)
+  local preparation_error = not prepared and body or nil
+  local ok = false
+  if prepared and body then
+    S.active_retry_history_owner = history_owner
+    ok, reason = Net.fire_curl(body, launch_opts)
   else
-    Code.safe_write(tmp.out, "")
+    reason = reason or "body_build_failed"
   end
-  local ok, reason = Net.fire_pending_retry(Net.trimmed_history(),
-    S.pending_snapshot, S.pending_attachments,
-    optional_dispatch and {
-      optional_dispatch = true,
-      optional_log_tag = opts.log_tag or opts.ctx_label or opts.kind,
-    } or nil)
+  Net._settle_retry_history(history_owner, ok, reason,
+    not optional_dispatch or reason == "call_cap_exceeded" or reason == "kill_pending")
   if type(retry_event) == "table" then
     retry_event.repair_request_fired = ok == true
   end
   if not ok then
-    -- Nothing was sent, so the turn is exactly where it was. Drop the hidden
-    -- repair message and put the original user turn and its assistant
-    -- candidate back, in the order they were removed.
-    if #S.history > 0 and S.history[#S.history] == repair_entry then
-      S.history[#S.history] = nil
-    end
-    for index = #history_restore, 1, -1 do
-      S.history[#S.history + 1] = history_restore[index]
-    end
     if optional_dispatch then
       -- The caller runs the original candidate from here, so the turn goes
       -- back to the state it was validated in. This covers every reported
@@ -43661,7 +44946,9 @@ function Net.fire_validator_retry(opts)
         opts.retry_failed_label or opts.ctx_label or opts.kind or "validator retry")
     end
     Log.add_error(msg or opts.failure_message
-      or "Auto-retry did not go through. Please resend the last message.")
+      or "Auto-retry did not go through. Please resend the last message.",
+      nil, nil, nil, preparation_error
+      and Net._send_exception_extra("validator_retry", preparation_error) or nil)
   end
   S.scroll_to_bottom = true
   return ok, reason
@@ -43888,9 +45175,54 @@ function Net.try_finish_kill_pending()
   Net.kill_curl(true)
 end
 
+api_keys.SR_SAVE_REVISION = 1
+
+function api_keys.screen_reader_key_save_busy()
+  return S.status == "waiting" or S.status == "awaiting_confirmation"
+    or S.curl_pid ~= nil or S.retry_scheduled == true or S.kill_pending
+    or S.turn_budget_confirmation ~= nil or S.key_test_pending
+    or S.key_test_armed ~= nil or S.gemini_tier_pending
+    or S._screen_reader_key_test_active or api_keys._test_orig_provider_idx
+    or Store._key_test_selection
+    or (api_keys.custom_conn_test and api_keys.custom_conn_test.active)
+end
+
+function api_keys.start_screen_reader_key_save(provider, value)
+  if api_keys.screen_reader_key_save_busy() then return false end
+  if not (provider and type(provider.id) == "string"
+      and type(provider.key_extstate) == "string" and provider.key_extstate ~= "") then
+    return false
+  end
+  local generation = api_keys.start_key_test("screen_reader_save")
+  local context = {
+    provider = provider, provider_id = provider.id,
+    endpoint = provider.endpoint, key_extstate = provider.key_extstate,
+    allow_insecure = provider.allow_insecure,
+  }
+  api_keys.key_test_screen_context = context
+  api_keys.stage_key_candidate(provider, nil, value)
+  local fired = pcall(Net.fire_key_test, provider)
+  local pending = S.key_test_pending == true
+    and S.key_test_generation == generation
+    and api_keys.key_test_generation == generation
+  if pending and S.key_test_armed == nil and (fired or S.curl_pid ~= nil) then
+    if not fired then context.invalidated = true end
+    return true, generation
+  end
+  if api_keys.key_test_generation == generation then
+    if not fired and not S.curl_pid and Net._clear_curl_auth_scratch then
+      pcall(Net._clear_curl_auth_scratch)
+    end
+    api_keys.finish_key_test_session()
+    if not S.curl_pid then S.status = "error" end
+  end
+  return false
+end
+
 function api_keys.start_key_test(origin)
   api_keys.key_test_generation = (api_keys.key_test_generation or 0) + 1
   api_keys.key_test_recovery = nil
+  api_keys.screen_reader_save_result = nil
   api_keys.key_test_origin = origin or "direct"
   api_keys.key_test_screen = api_keys.screen
   api_keys.key_test_screen_context = api_keys.key_bufs
@@ -43950,6 +45282,17 @@ function api_keys.commit_key_candidate(provider)
 end
 
 function api_keys.key_test_context_current(origin, generation, screen_context)
+  if origin == "screen_reader_save" then
+    local context = api_keys.key_test_screen_context
+    local p = context and context.provider
+    return generation ~= nil and generation == api_keys.key_test_generation
+      and context ~= nil and context == screen_context
+      and context.invalidated ~= true and S.script_open == true
+      and p ~= nil and PROVIDERS.get(context.provider_id) == p
+      and PROVIDERS.active() == p and p.id == context.provider_id
+      and p.endpoint == context.endpoint and p.key_extstate == context.key_extstate
+      and p.allow_insecure == context.allow_insecure
+  end
   if origin == "visual_save" or origin == "visual_manual" then
     return generation ~= nil
       and generation == api_keys.key_test_generation
@@ -43978,12 +45321,22 @@ function api_keys.restore_key_test_provider()
   if not api_keys._test_orig_provider_idx then return end
   local saved_idx = api_keys._test_orig_provider_idx
   api_keys._test_orig_provider_idx = nil
-  local saved_provider = PROVIDERS[saved_idx]
+  local preserved = Store._key_test_selection
+  local saved_id = preserved and preserved.owner == api_keys
+    and preserved.provider_id or nil
+  local saved_provider = saved_id and PROVIDERS.get(saved_id)
+    or (not saved_id and PROVIDERS[saved_idx])
   if saved_provider and Store.provider_has_usable_credentials(saved_provider) then
-    prefs.provider_idx = saved_idx
-    MODELS.refresh()
-    S.api_key = S.api_key_map and S.api_key_map[saved_provider.id] or nil
+    if not Store.end_key_test_selection(api_keys, true) then
+      prefs.provider_idx = saved_idx
+      MODELS.refresh()
+    end
+    local selected = PROVIDERS.active()
+    S.api_key = selected and S.api_key_map
+      and S.api_key_map[selected.id] or nil
     if Store and Store.save_config then Store.save_config() end
+  else
+    Store.end_key_test_selection(api_keys, false)
   end
 end
 
@@ -44095,7 +45448,8 @@ function Net.build_openai_key_test_body(p)
     return nil, "openai_default_model_missing"
   end
   local reasoning_field = ""
-  if model_id:match("^gpt%-5%.6") ~= nil then
+  if model_id:match("^gpt%-5%.6") ~= nil
+     or model_id:match("^gpt%-6%-") ~= nil then
     reasoning_field = ',"reasoning_effort":"none"'
   end
   return str_format(
@@ -44137,6 +45491,9 @@ end
 -- Net.handle_key_test instead of the normal response flow.
 -- provider_override: optional provider table to test (for multi-key intro screen).
 function Net.fire_key_test(provider_override, key_test_opts)
+  if S.turn_budget_confirmation ~= nil then
+    return false, "turn_budget_confirmation_pending"
+  end
   local p = provider_override or PROVIDERS.active()
   key_test_opts = type(key_test_opts) == "table" and key_test_opts or {}
   if not api_keys.key_test_origin then
@@ -44202,22 +45559,15 @@ function Net.fire_key_test(provider_override, key_test_opts)
         p.models and p.models[1] or nil)
       body = str_format(
         '{"model":"%s","max_completion_tokens":1,"messages":[{"role":"user","content":"hi"}]%s}',
-        model_id, extra_suffix)
+        JSON.escape(model_id), extra_suffix)
       -- curl_opts stays nil -> default POST to p.endpoint.
     else
       -- Default safe path: GET /v1/models. No inference, no cost,
       -- instant response.
       local url = Net.custom_models_url(p.endpoint)
       if not url then
-        api_keys.clear_key_test_request_state()
-        S.status            = "error"
-        if api_keys.custom_conn_test and api_keys.custom_conn_test.active
-           and api_keys.screen == "custom_llm" then
-          CTX.custom_conn_test_advance(false,
-            "Could not derive a /v1/models URL from the endpoint.")
-          api_keys.finish_key_test_session()
-          return
-        end
+        api_keys.finish_key_test_failure(p.id,
+          "Could not derive a /v1/models URL from the endpoint.")
         return
       end
       body      = nil
@@ -44433,10 +45783,7 @@ function Net.is_auth_error(resp, prov)
     -- Custom OpenAI-compatible servers usually pass errors through unchanged.
     -- DeepSeek follows the same envelope conventions.
     return type(resp.error) == "table" and resp.error ~= JSON.NULL
-      and (resp.error.code == "invalid_api_key"
-        or resp.error.type == "invalid_request_error"
-           and type(resp.error.message) == "string"
-           and resp.error.message:lower():find("api key"))
+      and Net._credential_error_is_auth(resp.error, resp.error.code)
   elseif prov.id == "google" then
     return Net.google_error_is_auth(resp.error)
   end
@@ -44478,6 +45825,19 @@ end
 
 function Net.key_test_recovery(resp, provider)
   local err = type(resp) == "table" and resp.error or nil
+  if provider and provider.id == "openai" and not provider.is_custom
+      and type(err) == "table" and err ~= JSON.NULL
+      and (err.code == "insufficient_quota" or err.type == "insufficient_quota") then
+    local short = RA.t("settings.api_key.error.openai_quota_short", nil,
+      "OpenAI reported insufficient API quota.")
+    local detail = RA.t("settings.api_key.error.openai_quota_detail", nil,
+      "The key test could not complete because OpenAI reported insufficient API quota.")
+    local hint = RA.t("settings.api_key.error.openai_quota_hint", nil,
+      "Check your OpenAI API balance and usage limits. API billing is separate from a ChatGPT subscription. Add funds or adjust limits if needed, then test again.")
+    return {kind = "openai_quota", short = short, detail = detail, hint = hint,
+      announcement = detail .. " " .. hint, url = provider.billing_url,
+      url_label = provider.billing_label}
+  end
   if not (provider and provider.id == "anthropic")
       or type(err) ~= "table" or err == JSON.NULL
       or err.type ~= "invalid_request_error"
@@ -44558,6 +45918,7 @@ function api_keys.finish_key_test_session()
 end
 
 function api_keys.finish_visual_key_save()
+  api_keys.staged_reasoning_display_mode = nil
   local was_reentry = api_keys.is_reentry
   local first_proved_id = api_keys.key_test_first_proved_id
   api_keys.screen = nil
@@ -44575,6 +45936,7 @@ function api_keys.finish_visual_key_save()
     or RA.t("settings.api_key.toast.validated", nil,
       "API key validated"), "ok")
   if not was_reentry then
+    Store.end_key_test_selection(api_keys, false)
     api_keys._test_orig_provider_idx = nil
     local proved_idx = first_proved_id and PROVIDERS._by_id[first_proved_id]
     if proved_idx then
@@ -44587,13 +45949,15 @@ function api_keys.finish_visual_key_save()
   end
   S.api_key = S.api_key_map[PROVIDERS.active().id]
   S.refocus_prompt = true
-  if Diag.uploader_enabled and Diag.capture_current_chat then
-    Diag.capture_current_chat()
+  if api_keys.visual_home_entered ~= true then
+    if Diag.uploader_enabled and Diag.capture_current_chat then
+      Diag.capture_current_chat()
+    end
+    S.display_messages = {}
+    S.history = {}
+    S.scroll_to_bottom = true
+    if Diag.uploader_enabled then Diag.rotate_chat_id() end
   end
-  S.display_messages = {}
-  S.history = {}
-  S.scroll_to_bottom = true
-  if Diag.uploader_enabled then Diag.rotate_chat_id() end
   S.status = "idle"
   Code.safe_write(tmp.out, "")
   local has_google = S.api_key_map.google ~= nil
@@ -44618,8 +45982,8 @@ function Net.advance_key_test_queue(prov_id, ok, error_msg, recovery)
     label     = p and p.label or prov_id,
     error     = error_msg,
     hint      = recovery and recovery.hint or nil,
-    url       = p and p.console_url or nil,
-    url_label = p and p.console_label or nil,
+    url       = recovery and recovery.url or (p and p.console_url or nil),
+    url_label = recovery and recovery.url_label or (p and p.console_label or nil),
   }
   if api_keys.key_warnings then
     local idx = PROVIDERS._by_id and PROVIDERS._by_id[prov_id]
@@ -44636,6 +46000,10 @@ function Net.advance_key_test_queue(prov_id, ok, error_msg, recovery)
     S.api_key = api_keys.key_for_test(nxt.prov)
     prefs.provider_idx = nxt.idx
     MODELS.refresh()
+    if Store._key_test_selection
+        and Store._key_test_selection.owner == api_keys then
+      Store._key_test_selection.test_provider_id = PROVIDERS.active().id
+    end
     Code.safe_write(tmp.out, "")
     Net.fire_key_test(nxt.prov)
     return true
@@ -44668,9 +46036,12 @@ function Net.advance_key_test_queue(prov_id, ok, error_msg, recovery)
   -- selected before clicking Test, instead of leaving them parked on
   -- the last queue entry.
   if api_keys._test_orig_provider_idx then
-    prefs.provider_idx = api_keys._test_orig_provider_idx
+    local orig_idx = api_keys._test_orig_provider_idx
     api_keys._test_orig_provider_idx = nil
-    MODELS.refresh()
+    if not Store.end_key_test_selection(api_keys, true) then
+      prefs.provider_idx = orig_idx
+      MODELS.refresh()
+    end
   end
   -- Restore active provider key.
   S.api_key = S.api_key_map[PROVIDERS.active().id]
@@ -44699,11 +46070,20 @@ end
 -- appropriate message. Provider-aware: uses S.key_test_provider to identify
 -- the provider being tested and its console URL.
 function Net.handle_key_test(raw)
+  if not S.key_test_pending then return end
   local prov_id = S.key_test_provider or PROVIDERS.active().id
   local p       = PROVIDERS.get(prov_id) or PROVIDERS.active()
   local origin = S.key_test_origin or api_keys.key_test_origin or "direct"
   local generation = S.key_test_generation
   local screen_context = S.key_test_screen_context
+  if origin == "screen_reader_save"
+      and generation ~= api_keys.key_test_generation then
+    api_keys.clear_key_test_request_state()
+    if not S.curl_pid and not S.key_test_armed and S.status == "waiting" then
+      S.status = "idle"
+    end
+    return
+  end
   api_keys.clear_key_test_request_state()
   if not api_keys.key_test_context_current(origin, generation,
       screen_context) then
@@ -44910,8 +46290,7 @@ function Net.handle_key_test(raw)
       else
         api_keys.key_error_detail = Net.key_test_error_detail(resp, RA.t(
           "settings.api_key.error.unexpected_detail", { provider = p.label },
-          "The " .. p.label .. " response did not prove that this key works. "
-            .. "The saved key was left unchanged."))
+          "The " .. p.label .. " response did not prove that this key works."))
         api_keys.key_error_hint = RA.t(
           "settings.api_key.error.unexpected_hint", nil,
           "Try again. If the provider is reporting an outage or capacity limit, wait and retest later.")
@@ -44933,7 +46312,32 @@ function Net.handle_key_test(raw)
 
   -- Provider-specific success proof is the only path that can commit a staged
   -- candidate. Saved-only tests make no persistence write.
-  api_keys.commit_key_candidate(p)
+  if origin == "screen_reader_save" then
+    local committed, saved, value = pcall(api_keys.commit_key_candidate, p)
+    local confirmed, matches = false, false
+    if committed and saved == true and p.key_extstate then
+      confirmed, matches = pcall(function()
+        return reaper.GetExtState(CFG.EXT_NS, p.key_extstate) == Key.encode(value)
+      end)
+    end
+    if not (committed and saved == true and confirmed and matches) then
+      S.status = "error"
+      api_keys.key_test_recovery = {
+        save_uncertain = true,
+        announcement = RA.t("a11y.sr.api_key_save_uncertain", nil,
+          "API key save could not be confirmed. Check the key before retrying."),
+      }
+      Code.safe_write(tmp.out, "")
+      api_keys.finish_key_test_session()
+      return
+    end
+    api_keys.screen_reader_save_result = {
+      generation = generation, provider_id = p.id, saved = true,
+    }
+    S.api_key = value
+  else
+    api_keys.commit_key_candidate(p)
+  end
   S.status = "idle"
   if origin == "visual_save" then
     api_keys.finish_visual_key_save()
@@ -45000,6 +46404,9 @@ function Net._gemini_error_has_free_tier_signal(err)
 end
 
 function Net.fire_gemini_tier_test()
+  if S.turn_budget_confirmation ~= nil then
+    return false, "turn_budget_confirmation_pending"
+  end
   -- Don't fire while another request is in-flight.
   if S.curl_pid then return end
   local google_key = S.api_key_map.google
@@ -46429,8 +47836,315 @@ end
   --   5. Preflight token estimation: abort with a friendly error if the request
   --      would exceed the model's context window (UTF-8-aware rough heuristic).
 --   6. Fire curl. The snapshot is injected by Net.build_body(), not stored in S.history.
-function Net.send_to_api(user_text, opts)
+-- A recovery card keeps its originals until its Send is actually accepted.
+-- The same identity-bound attempt follows every preparation successor.
+function Net._image_recovery_attempt_current(attempt)
+  return type(attempt) == "table" and attempt.phase == "provisional"
+    and type(S.image_recovery_attempts) == "table"
+    and rawequal(S.image_recovery_attempts[attempt.id], attempt)
+    and type(attempt.msg) == "table"
+    and attempt.msg.image_recovery_attempt_id == attempt.id
+    and attempt.msg.recovery_consumed ~= true
+    and attempt.msg.recovery_images_released ~= true
+    and rawequal(attempt.msg.recovery_attachments, attempt.attachments)
+    and Net._display_message_present(attempt.msg)
+end
+
+function Net._image_recovery_attempt_finish(attempt, outcome)
+  if type(attempt) ~= "table" then return end
+  local binding = attempt.local_escalation_binding
+  if outcome ~= "accepted" and type(binding) == "table"
+      and rawequal(S.pending_local_escalation, binding)
+      and binding.image_recovery_attempt_id == attempt.id
+      and binding.image_recovery_provisional == true then
+    Net._resolve_local_escalation("admission_failed", nil)
+  end
+  if S.image_recovery_attempts
+      and rawequal(S.image_recovery_attempts[attempt.id], attempt) then
+    local msg = attempt.msg
+    if type(msg) == "table" and msg.image_recovery_attempt_id == attempt.id then
+      msg.image_recovery_attempt_id = nil
+      if outcome ~= "accepted" and msg.recovery_consumed ~= true
+          and msg.recovery_images_released ~= true
+          and rawequal(msg.recovery_attachments, attempt.attachments)
+          and Net._display_message_present(msg) then
+        msg.recovery_dispatch = "send_failed"
+      end
+    end
+    S.image_recovery_attempts[attempt.id] = nil
+  end
+  attempt.phase = outcome or "failed"
+  attempt.msg, attempt.attachments, attempt.model_label = nil, nil, nil
+  attempt.local_escalation_binding = nil
+end
+
+function Net._image_recovery_attempt_begin(msg, model_label)
+  if type(msg) ~= "table" or msg.recovery_consumed == true
+      or msg.recovery_images_released == true
+      or not Net._display_message_present(msg) then
+    return nil, "recovery_attempt_stale"
+  end
+  local existing = S.image_recovery_attempts
+    and S.image_recovery_attempts[msg.image_recovery_attempt_id]
+  if type(existing) == "table" then
+    return nil, "recovery_attempt_busy"
+  end
+  S.image_recovery_attempt_id = (S.image_recovery_attempt_id or 0) + 1
+  local attempt = {id = S.image_recovery_attempt_id, phase = "provisional",
+    msg = msg, attachments = msg.recovery_attachments,
+    model_label = tostring(model_label or "the selected model")}
+  S.image_recovery_attempts = S.image_recovery_attempts or {}
+  S.image_recovery_attempts[attempt.id] = attempt
+  msg.image_recovery_attempt_id = attempt.id
+  return attempt
+end
+
+function Net._image_recovery_attempt_accept(attempt)
+  if not Net._image_recovery_attempt_current(attempt) then
+    Net._image_recovery_attempt_finish(attempt, "stale")
+    return false
+  end
+  if type(attempt.attachments) == "table" and #attempt.attachments > 0
+      and not rawequal(S.pending_attachments, attempt.attachments) then
+    Net._image_recovery_attempt_finish(attempt, "ownership_refused")
+    return false
+  end
+  local msg, label = attempt.msg, attempt.model_label
+  local binding = attempt.local_escalation_binding
+  if type(binding) == "table" and rawequal(S.pending_local_escalation, binding)
+      and binding.image_recovery_attempt_id == attempt.id then
+    binding.image_recovery_provisional = nil
+    binding.image_recovery_attempt_id = nil
+  end
+  msg.recovery_dispatch = "sent"
+  msg.recovery_consumed = true
+  msg.recovery_attachments = nil
+  if msg.recovery == "google_model_capacity" then msg.recovery_used = true end
+  msg.recovery_note = RA.t("message.recovery.sent_with_model", {label = label},
+    "Message resent with " .. label .. ". " .. label
+      .. " is now selected for future messages.")
+  Net._image_recovery_attempt_finish(attempt, "accepted")
+  return true
+end
+
+function Net.saved_images_copy_prompt(msg)
+  if type(msg) ~= "table" then return nil end
+  if type(msg.recovery_original_prompt) == "string" and msg.recovery_original_prompt ~= "" then
+    return msg.recovery_original_prompt, "original"
+  end
+  if type(msg.recovery_prompt) == "string" and msg.recovery_prompt ~= "" then
+    return msg.recovery_prompt, "saved_request"
+  end
+end
+
+function Net._saved_images_settled()
+  return (S.status == "idle" or S.status == "error")
+    and S.curl_pid == nil and S.retry_scheduled ~= true
+    and S.turn_budget_confirmation == nil and S.gemini_tier_pending ~= true
+    and S.pending_local_escalation == nil
+    and next(S.image_preparation_holders or {}) == nil
+    and next(S.image_send_owners or {}) == nil
+    and next(S.image_recovery_attempts or {}) == nil
+end
+
+function Net.saved_images_release_available(msg)
+  if type(msg) ~= "table" or msg.recovery_consumed == true
+      or msg.recovery_images_released == true then return false, "saved_images_unavailable" end
+  local has_image = false
+  for _, att in ipairs(type(msg.recovery_attachments) == "table" and msg.recovery_attachments or {}) do
+    if att.kind == "image" and (type(att.data) == "string" or type(att.b64) == "string"
+        or type(att.b64_parts) == "table") then has_image = true; break end
+  end
+  if not has_image then return false, "saved_images_unavailable" end
+  local present = false
+  for _, current in ipairs(S.display_messages or {}) do
+    if rawequal(current, msg) then present = true; break end
+  end
+  if not present or not Net._saved_images_settled() then return false, "saved_images_busy_or_stale" end
+  return true
+end
+
+function Net.cancel_saved_images_release(holder, reason)
+  if type(holder) ~= "table" then return end
+  holder.invalidated = true
+  holder.reason = reason
+  holder.msg, holder.attachments, holder.entries = nil, nil, nil
+  if rawequal(S.image_release_confirmation, holder) then S.image_release_confirmation = nil end
+end
+
+function Net.request_saved_images_release(msg)
+  local available, reason = Net.saved_images_release_available(msg)
+  if not available then return nil, reason end
+  if S.image_release_confirmation then
+    Net.cancel_saved_images_release(S.image_release_confirmation, "replaced")
+  end
+  S.image_release_id = (S.image_release_id or 0) + 1
+  local entries = {}
+  for index, att in ipairs(msg.recovery_attachments) do entries[index] = att end
+  local holder = {id = S.image_release_id, msg = msg,
+    attachments = msg.recovery_attachments, entries = entries, count = #entries}
+  S.image_release_confirmation = holder
+  return holder
+end
+
+function Net.saved_images_release_valid(holder)
+  if type(holder) ~= "table" or holder.invalidated
+      or not rawequal(S.image_release_confirmation, holder) then return false, "saved_images_stale" end
+  local available, reason = Net.saved_images_release_available(holder.msg)
+  if not available then return false, reason end
+  if not rawequal(holder.msg.recovery_attachments, holder.attachments)
+      or #holder.attachments ~= holder.count then return false, "saved_images_stale" end
+  for index = 1, holder.count do
+    if not rawequal(rawget(holder.attachments, index), holder.entries[index]) then
+      return false, "saved_images_stale"
+    end
+  end
+  return true
+end
+
+function Net.confirm_saved_images_release(holder)
+  local valid, reason = Net.saved_images_release_valid(holder)
+  if not valid then
+    Net.cancel_saved_images_release(holder, reason)
+    return false, reason
+  end
+  local replacement = {}
+  for index, att in ipairs(holder.attachments) do
+    if att.kind == "image" then
+      replacement[index] = {kind = "image", name = att.name,
+        media_type = att.media_type, size_bytes = att.size_bytes,
+        saved_image_released = true}
+    else
+      replacement[index] = att
+    end
+  end
+  holder.msg.recovery_attachments = replacement
+  holder.msg.recovery_images_released = true
+  Net.cancel_saved_images_release(holder, "released")
+  return true, nil, Attach.saved_image_budget_snapshot()
+end
+
+-- App-side callback holders own only their copied options and scalar prompts.
+function Net._image_prepare_holder_invalidate(holder, reason)
+  if type(holder) ~= "table" then return end
+  holder.phase = "invalidated"
+  holder.reason = reason
+  holder.opts = nil
+  holder.lua_generation = nil
+  if S.image_preparation_holders
+      and rawequal(S.image_preparation_holders[holder.id], holder) then
+    S.image_preparation_holders[holder.id] = nil
+  end
+  if rawequal(S.image_preparation_holder, holder) then
+    S.image_preparation_holder = nil
+    local predecessor = S.image_preparation_holders
+      and S.image_preparation_holders[holder.predecessor_id]
+    if type(predecessor) == "table" and predecessor.phase == "resuming" then
+      S.image_preparation_holder = predecessor
+    end
+  end
+end
+
+function Net._image_prepare_invalidate_all(reason, except_holder, except_attempt)
+  local holders = {}
+  for _, holder in pairs(S.image_preparation_holders or {}) do
+    if not rawequal(holder, except_holder) then holders[#holders + 1] = holder end
+  end
+  for _, holder in ipairs(holders) do
+    Net._image_prepare_holder_invalidate(holder, reason)
+  end
+  local attempts = {}
+  for _, attempt in pairs(S.image_recovery_attempts or {}) do
+    if not rawequal(attempt, except_attempt) then attempts[#attempts+1] = attempt end
+  end
+  for _, attempt in ipairs(attempts) do
+    Net._image_recovery_attempt_finish(attempt, reason)
+  end
+end
+
+function Net._image_prepare_holder_new(resume_input, copy_original, opts, lua_generation)
+  S.image_preparation_id = (S.image_preparation_id or 0) + 1
+  local copied = {}
+  for key, value in pairs(opts) do copied[key] = value end
+  copied.recovery_original_prompt = copy_original
+  local holder = {
+    id = S.image_preparation_id, phase = "waiting", opts = copied,
+    resume_input = resume_input, copy_original = copy_original,
+    lua_generation = lua_generation,
+    predecessor_id = type(S.image_preparation_holder) == "table"
+      and S.image_preparation_holder.id or nil,
+  }
+  copied._image_preparation_id = holder.id
+  S.image_preparation_holders = S.image_preparation_holders or {}
+  S.image_preparation_holders[holder.id] = holder
+  S.image_preparation_holder = holder
+  return holder
+end
+
+function Net._image_prepare_holder_resume(holder, preparation_mode)
+  if type(holder) ~= "table" or holder.phase ~= "waiting"
+      or not rawequal(S.image_preparation_holder, holder)
+      or not S.image_preparation_holders
+      or not rawequal(S.image_preparation_holders[holder.id], holder) then return end
+  local attempt = holder.opts and holder.opts._image_recovery_attempt
+  if attempt and not Net._image_recovery_attempt_current(attempt) then
+    Net._image_recovery_attempt_finish(attempt, "stale")
+    Net._image_prepare_holder_invalidate(holder, "stale_recovery")
+    return
+  end
+  holder.phase = "resuming"
+  holder.skip_plugin_profile_preparation = preparation_mode == "generic"
+  holder.callback_entered = true
+  local lua_generation = holder.lua_generation
+  local ok, sent, send_err, send_handling = pcall(Net.send_to_api,
+    holder.resume_input, holder.opts)
+  holder.callback_result = ok and sent == true
+  if ok then
+    holder.callback_error = send_err
+    holder.callback_handling = send_handling
+  else
+    holder.callback_error = "send_exception"
+    holder.callback_handling = "surfaced"
+  end
+  -- The resumed Send owns its list until return; a successor or pending request
+  -- is established before this completing holder drops its own references.
+  local owns_state = rawequal(S.image_preparation_holder, holder)
+  Net._image_prepare_holder_invalidate(holder, "completed")
+  if not owns_state then return end
+  if not ok then
+    Net._clear_pending_typed_action_lua_generation(lua_generation)
+    S.status = "idle"
+    Log.line("PLUGIN_PROFILE", "request resume raised an error: "
+      .. tostring(Net._debug_scrub(tostring(sent))))
+    Log.add_error(RA.t("response.preparation_resume_failed", nil,
+      "Couldn't resume the request after preparation. Please try sending the message again."),
+      nil, nil, nil, Net._send_exception_extra("plugin_profile_resume", sent))
+  elseif sent ~= true then
+    Net._clear_pending_typed_action_lua_generation(lua_generation)
+    if send_handling ~= "surfaced" then
+      S.status = "idle"
+      Log.add_error(RA.t("response.preparation_resume_failed", nil,
+        "Couldn't resume the request after preparation. Please try sending the message again."))
+    end
+  end
+end
+
+function Net._image_send_owner_new(opts)
+  S.image_send_owner_id = (S.image_send_owner_id or 0) + 1
+  local owner = {id = S.image_send_owner_id,
+    attachments = type(opts) == "table" and opts.attachments ~= nil
+      and opts.attachments or S.attachments}
+  S.image_send_owners = S.image_send_owners or {}
+  S.image_send_owners[owner.id] = owner
+  return owner
+end
+
+function Net._send_to_api_image_inner(user_text, opts)
   opts = type(opts) == "table" and opts or {}
+  if opts._image_recovery_attempt
+      and not Net._image_recovery_attempt_current(opts._image_recovery_attempt) then
+    return false, "recovery_attempt_stale", "boundary"
+  end
   if S.screen_reader_mode and ScreenReaderLegacy
       and ScreenReaderLegacy.send_admission then
     local admitted, refusal = ScreenReaderLegacy.send_admission(
@@ -46458,6 +48172,16 @@ function Net.send_to_api(user_text, opts)
     return false, "context_unavailable", "surfaced"
   end
   local display_user_text = user_text
+  local copy_original = type(opts.recovery_original_prompt) == "string"
+    and opts.recovery_original_prompt or display_user_text
+  local resuming = S.image_preparation_holder
+  if not (type(resuming) == "table" and resuming.phase == "resuming"
+      and opts._image_preparation_id == resuming.id) then resuming = nil end
+  if opts._image_recovery_attempt
+      and not Net._image_recovery_attempt_current(opts._image_recovery_attempt) then
+    return false, "recovery_attempt_stale", "boundary"
+  end
+  Net._image_prepare_invalidate_all("replaced", resuming, opts._image_recovery_attempt)
   user_text = Net.resolve_local_plugin_choice(user_text) or user_text
   local plugin_clarification = Code.plugin_clarification_context(user_text, S.history)
   if plugin_clarification then
@@ -46477,39 +48201,37 @@ function Net.send_to_api(user_text, opts)
   end
   local starter_card_key =
     Net.informational_starter_key(user_text, send_attachments)
-  if not starter_card_key and CTX.prepare_plugin_profiles_for_prompt then
+  local skip_plugin_profiles = resuming and rawequal(opts, resuming.opts)
+    and resuming.skip_plugin_profile_preparation
+  if skip_plugin_profiles then CTX.refresh_session_track_names() end
+  if not starter_card_key and CTX.prepare_plugin_profiles_for_prompt
+      and not skip_plugin_profiles then
     local lua_generation = type(opts.typed_action_lua_generation) == "table"
       and opts.typed_action_lua_generation or nil
-    local preparation_started =
-      CTX.prepare_plugin_profiles_for_prompt(user_text, function()
-        local ok_resume, resumed, _, resume_handling =
-          pcall(Net.send_to_api, display_user_text, opts)
-        if not ok_resume then
-          Net._clear_pending_typed_action_lua_generation(lua_generation)
-          S.status = "idle"
-          Log.line("PLUGIN_PROFILE", "request resume raised an error: "
-            .. tostring(Net._debug_scrub(tostring(resumed))))
-          Log.add_error(RA.t("response.preparation_resume_failed", nil,
-            "Couldn't resume the request after preparation. Please try sending the message again."),
-            nil, nil, nil,
-            Net._send_exception_extra("plugin_profile_resume", resumed))
-        elseif resumed ~= true then
-          Net._clear_pending_typed_action_lua_generation(lua_generation)
-          if resume_handling ~= "surfaced" then
-            S.status = "idle"
-            Log.add_error(RA.t("response.preparation_resume_failed", nil,
-              "Couldn't resume the request after preparation. Please try sending the message again."))
-          end
-        end
-      end)
+    local holder = Net._image_prepare_holder_new(display_user_text, copy_original,
+      opts, lua_generation)
+    local prepare_ok, preparation_started = pcall(CTX.prepare_plugin_profiles_for_prompt,
+      user_text, function(mode) Net._image_prepare_holder_resume(holder, mode) end)
+    if not prepare_ok then
+      Net._image_prepare_holder_invalidate(holder, "prepare_exception")
+      error(preparation_started, 0)
+    end
+    if holder.callback_entered then
+      return holder.callback_result, holder.callback_error, holder.callback_handling
+    end
+    if not rawequal(S.image_preparation_holder, holder) or holder.phase ~= "waiting" then
+      Net._image_prepare_holder_invalidate(holder, "preparation_invalidated")
+      return false, "preparation_invalidated", "boundary"
+    end
     if preparation_started then
       S.status = "waiting"
       S.request_start_time = S.request_start_time or reaper.time_precise()
       S.pending_orig_prompt = user_text
-      Log.line("PLUGIN_PROFILE",
-        "model request paused for read-only profile preparation")
+      S.pending_recovery_original_prompt = copy_original
+      Log.line("PLUGIN_PROFILE", "model request paused for read-only profile preparation")
       return true
     end
+    Net._image_prepare_holder_invalidate(holder, "not_deferred")
   end
 
   -- Probe compatibility: open a turn handle at the outermost boundary.
@@ -46588,6 +48310,7 @@ function Net.send_to_api(user_text, opts)
   -- prior turn so this turn is not poisoned.
   S._fx_params_pending_assemble  = nil
   S.pending_orig_prompt   = user_text
+  S.pending_recovery_original_prompt = copy_original
   S.pending_conversation_delete = Code.conversation_delete_binding(
     user_text, S.display_messages)
   Code.maybe_update_latest_from_user(user_text)
@@ -47353,22 +49076,23 @@ function Net.send_to_api(user_text, opts)
         .. "literals aligned with the pinned mapping. An anchor belongs only "
         .. "to its named control and target: a Feedback percentage anchor is "
         .. "never a Mix anchor. If no anchor matches BOTH control and value, "
-        .. "use the numeric search for safe controls. For every requested "
-        .. "numeric plug-in setting, read the displayed value from "
+        .. "use the numeric search for safe controls. For unmapped requested "
+        .. "numeric plug-in settings, read the displayed value from "
         .. "GetFormattedParamValue on that same parameter index after its "
-        .. "final write and verify the requested target. Use an exact mapped "
-        .. "conversion or anchor when one is pinned. Otherwise use a bounded "
+        .. "final write and verify the requested target. For exact mapped "
+        .. "settings, compare raw or normalized readback in the mapping's units; "
+        .. "formatted-display verification is optional. Otherwise use a bounded "
         .. "binary setter/readback search while stopped, saving originals and "
         .. "restoring them on failure. A helper that accepts a parameter "
         .. "index must operate on that index directly; do not rescan for a "
         .. "different parameter or let repeated helper calls write the same "
         .. "control. Reading or displaying a value is not verification. "
-        .. "Parse and compare every final numeric display in Lua. If the "
+        .. "For display conversions, parse and compare the numeric value. If the "
         .. "initial numeric write misses its target, use the safe bounded "
         .. "search below to correct it. Only if correction fails, restore "
         .. "the saved values and take the failure path before success. Never "
-        .. "skip nonnumeric settings: read and compare every requested enum "
-        .. "or text label on its own parameter index too. Note divisions "
+        .. "skip nonnumeric settings: compare a mapped enum's normalized value "
+        .. "or its whole text label on its own parameter index. Note divisions "
         .. "such as 1/4 are whole text labels, never the numeric value 1 or 0.25. "
         .. "Ratios may display as 4, 4.00, or 4:1; compare their ratio value. "
         .. "For unmapped monotonic numeric controls, bisect normalized bounds "
@@ -47400,8 +49124,9 @@ function Net.send_to_api(user_text, opts)
         .. "For existing FX restore requested originals and verify restoration. "
         .. "Then balance PreventUIRefresh, close the Undo block and call "
         .. "error(message, 0). Never report failure with only a dialog and return. "
-        .. "REQUIRED BEFORE SUCCESS: include actual GetFormattedParamValue "
-        .. "calls and comparisons in this first script, even with exact mappings. "
+        .. "Known mapped values can be checked with GetParam or GetParamNormalized. "
+        .. "Compare the same units used by the setter. Raw zero amplitude means "
+        .. "silence and may display -inf dB; never compare that label to numeric zero. "
         .. "Example numeric readback: local ok,s = reaper.TrackFX_GetFormattedParamValue(tr,fx,p,\"\"); "
         .. "local v = ok and tonumber(s:match(\"[-+]?%d+%.?%d*\")); "
         .. "then compare v with the requested value using display precision. "
@@ -47409,7 +49134,7 @@ function Net.send_to_api(user_text, opts)
         .. "GetFormattedParamValue returns boolean, string: never use select(1,...) "
         .. "as the label. Use local ok,s and test ok before comparing s. "
         .. "Verify dependency selectors such as Note mode as well as note labels. "
-        .. "A script that only writes parameters is incomplete."
+        .. "Do not abort a valid mapped write solely because its display formatting differs."
     end
     if proq4_ref_pinned then
       plugin_note = plugin_note
@@ -47893,7 +49618,7 @@ function Net.send_to_api(user_text, opts)
     -- The prompt the USER typed, not the notes this function prepended to
     -- it. Restoring the built text would put an INTERNAL CONTEXT NOTE in
     -- the input box for the user to re-send.
-    S.input_buf = S.pending_orig_prompt or user_text
+    if not attachment_override then S.input_buf = S.pending_orig_prompt or user_text end
     if msg_attachments and not attachment_override then
       S.attachments = msg_attachments
     end
@@ -47904,6 +49629,7 @@ function Net.send_to_api(user_text, opts)
     -- intentionally left applied; the next attempt should re-run those
     -- buckets fresh.
     S.pending_orig_prompt  = nil
+    S.pending_recovery_original_prompt = nil
     S.pending_typed_action_expected = false
     S.pending_typed_action_response_format = false
     S.pending_typed_action_profile = nil
@@ -47916,6 +49642,13 @@ function Net.send_to_api(user_text, opts)
     -- Restore last_run_error so a "fix that" retry still has the prior-run
     -- error context.
     S.last_run_error       = _saved_last_run_error
+    if attachment_override and Net._image_recovery_attempt_current(opts._image_recovery_attempt) then
+      Log.add_error(RA.t("message.saved_retry_too_large", nil,
+        "This saved message is too large to send with the selected model. It remains on its original error card. Your current draft is unchanged."))
+    elseif attachment_override then
+      Log.add_error(str_format("This saved message is too large to send (about %dk tokens, limit is ~%dk). Your current draft is unchanged.",
+        math_floor(estimated_tokens / 1000), math_floor(token_budget / 1000)))
+    else
     Log.add_error(str_format(
       "Your message is too large to send (about %dk tokens, limit is ~%dk)."
       .. "\n\nYour message and attachments have been restored to the input box. "
@@ -47925,6 +49658,7 @@ function Net.send_to_api(user_text, opts)
       .. "- Or click + new chat to start fresh",
       math_floor(estimated_tokens / 1000),
       math_floor(token_budget / 1000)))
+    end
     S.scroll_to_bottom = true
     -- Probe lifecycle: turn aborted before any HTTP traffic.
     Net._finish_probe_turn(probe_turn, "aborted")
@@ -47944,13 +49678,14 @@ function Net.send_to_api(user_text, opts)
     -- The prompt the USER typed, not the notes this function prepended to
     -- it. Restoring the built text would put an INTERNAL CONTEXT NOTE in
     -- the input box for the user to re-send.
-    S.input_buf = S.pending_orig_prompt or user_text
+    if not attachment_override then S.input_buf = S.pending_orig_prompt or user_text end
     if msg_attachments and not attachment_override then
       S.attachments = msg_attachments
     end
     -- Clear pending_* / event-tracking state and restore last_run_error;
     -- mirrors the token-budget rollback above.
     S.pending_orig_prompt  = nil
+    S.pending_recovery_original_prompt = nil
     S.pending_typed_action_expected = false
     S.pending_typed_action_response_format = false
     S.pending_typed_action_profile = nil
@@ -47963,9 +49698,14 @@ function Net.send_to_api(user_text, opts)
     S.last_run_error       = _saved_last_run_error
     if fire_reason ~= "call_cap_exceeded" then
       Log.line("SEND-REFUSED", "reason=" .. tostring(fire_reason or "unknown"))
+      if attachment_override and Net._image_recovery_attempt_current(opts._image_recovery_attempt) then
+        Log.add_error(RA.t("message.saved_retry_send_failed", nil,
+          "This saved request could not be sent. It remains on its original error card. Your current draft is unchanged."))
+      else
       Log.add_error(
         "Couldn't send. Another request may still be in progress. "
         .. "Wait a moment and try again.")
+      end
     end
     -- Probe lifecycle: turn ended at fire_curl failure. Return a real
     -- dispatch result so recovery callers do not report a handled failure as
@@ -47981,10 +49721,26 @@ function Net.send_to_api(user_text, opts)
   -- handle stays alive on S.probe_turn and is ended at the canonical
   -- "turn completed successfully" site inside Net.try_finish_curl.
   -- Error/cancel exit paths close it at their own branch points.
+  if opts._image_recovery_attempt then
+    Net._image_recovery_attempt_accept(opts._image_recovery_attempt)
+  end
   return true, "accepted"
 end
 
-function Net.resend_saved_prompt(user_text, attachments)
+function Net.send_to_api(user_text, opts)
+  local owner = Net._image_send_owner_new(opts)
+  local results = table.pack(pcall(Net._send_to_api_image_inner, user_text, opts))
+  if type(opts) == "table" and opts._image_recovery_attempt
+      and (not results[1] or results[2] ~= true) then
+    Net._image_recovery_attempt_finish(opts._image_recovery_attempt, "send_failed")
+  end
+  owner.attachments = nil
+  if S.image_send_owners then S.image_send_owners[owner.id] = nil end
+  if not results[1] then error(results[2], 0) end
+  return table.unpack(results, 2, results.n)
+end
+
+function Net.resend_saved_prompt(user_text, attachments, recovery_original_prompt, recovery_attempt)
   user_text = tostring(user_text or ""):match("^%s*(.-)%s*$")
   local saved_attachments = type(attachments) == "table" and #attachments > 0
   if user_text == "" and not saved_attachments then
@@ -47993,6 +49749,8 @@ function Net.resend_saved_prompt(user_text, attachments)
   local call_ok, sent, send_err, send_handling = pcall(Net.send_to_api, user_text, {
     attachments = type(attachments) == "table" and attachments or {},
     force_provider = true,
+    recovery_original_prompt = recovery_original_prompt,
+    _image_recovery_attempt = recovery_attempt,
   })
   if not call_ok then
     Log.add_error(RA.t("message.resend_failed", nil,
@@ -48007,6 +49765,9 @@ function Net.resend_saved_prompt(user_text, attachments)
 end
 
 function Net.recovery_actions(msg)
+  if type(msg) == "table" and S.image_recovery_attempts
+      and S.image_recovery_attempts[msg.image_recovery_attempt_id] then return {} end
+  if type(msg) == "table" and msg.recovery_images_released == true then return {} end
   if Net._sweep_stale_local_escalation then
     Net._sweep_stale_local_escalation(msg)
   end
@@ -48051,11 +49812,21 @@ function Net.recovery_actions(msg)
 end
 
 function Net.dispatch_recovery(msg, action)
+  if type(msg) == "table" and S.image_recovery_attempts
+      and S.image_recovery_attempts[msg.image_recovery_attempt_id] then
+    return false, "recovery_attempt_busy", "boundary"
+  end
+  if type(msg) == "table" and msg.recovery_images_released == true then
+    return false, "saved_images_released", "boundary"
+  end
+  if type(msg) == "table" and not S.screen_reader_mode then
+    local ready, reason = Attach.image_originals_ready(msg.recovery_attachments, true)
+    if not ready then return false, reason, "boundary" end
+  end
   if type(msg) ~= "table" then
     return false, "recovery_unavailable", "boundary"
   end
   action = tostring(action or "")
-  msg.recovery_action = action
   local provider_id, model_id, model_label
   if action == "switch_fallback" then
     provider_id = msg.fallback_provider_id
@@ -48068,9 +49839,14 @@ function Net.dispatch_recovery(msg, action)
   else
     return false, "recovery_action_unavailable", "boundary"
   end
+  local attempt, attempt_error = Net._image_recovery_attempt_begin(msg, model_label)
+  if not attempt then return false, attempt_error, "boundary" end
+  local function dispatch_attempt()
+  msg.recovery_action = action
   if provider_id and model_id then
     local switched, switch_err = PROVIDERS.switch_to_model(provider_id, model_id)
     if not switched then
+      Net._image_recovery_attempt_finish(attempt, "switch_failed")
       msg.recovery_dispatch = "switch_failed"
       msg.recovery_dispatch_error = tostring(switch_err or "switch_failed")
       return false, "switch_failed", "boundary"
@@ -48083,26 +49859,34 @@ function Net.dispatch_recovery(msg, action)
   local sent, send_err, send_handling
   if msg.local_escalation_retry == true then
     sent, send_err, send_handling = Net.ask_model_instead(msg.recovery_prompt,
-      msg._local_escalation_source, true)
+      msg._local_escalation_source, true, {
+        attachments = type(attempt.attachments) == "table" and attempt.attachments or {},
+        recovery_original_prompt = msg.recovery_original_prompt,
+        _image_recovery_attempt = attempt,
+      })
   else
     sent, send_err, send_handling = Net.resend_saved_prompt(msg.recovery_prompt,
-      msg.recovery_attachments)
+      msg.recovery_attachments, msg.recovery_original_prompt, attempt)
   end
   if not sent then
+    Net._image_recovery_attempt_finish(attempt, "send_failed")
     msg.recovery_dispatch = "send_failed"
     return false, send_err, send_handling
   end
-  msg.recovery_dispatch = "sent"
-  msg.recovery_consumed = true
-  if msg.recovery == "google_model_capacity" then
-    msg.recovery_used = true
+  if attempt.phase == "provisional" then
+    msg.recovery_dispatch = "preparing"
   end
-  model_label = tostring(model_label or "the selected model")
-  msg.recovery_note = RA.t("message.recovery.sent_with_model", {
-    label = model_label,
-  }, "Message resent with " .. model_label .. ". " .. model_label
-    .. " is now selected for future messages.")
   return true, nil, nil
+  end
+  local results = table.pack(pcall(dispatch_attempt))
+  if not results[1] then
+    Net._image_recovery_attempt_finish(attempt, "send_exception")
+    Log.add_error(RA.t("message.send_failed", nil,
+      "Could not send request. Please try again."), nil, nil, nil,
+      Net._send_exception_extra("dispatch_recovery", results[2]))
+    return false, "send_exception", "surfaced"
+  end
+  return table.unpack(results, 2, results.n)
 end
 
 -- =============================================================================
@@ -48120,6 +49904,10 @@ function Net.conversation_has_content()
 end
 
 function Net.clear_conversation(opts)
+  Net._image_prepare_invalidate_all("chat_cleared")
+  if S.image_release_confirmation then
+    Net.cancel_saved_images_release(S.image_release_confirmation, "chat_cleared")
+  end
   if Attach and Attach.close_all_native_media then
     Attach.close_all_native_media()
   end
@@ -48166,6 +49954,7 @@ function Net.clear_conversation(opts)
   Net._restore_typed_action_escalation_model()
   S.pending_code         = nil
   S.pending_orig_prompt  = nil
+  S.pending_recovery_original_prompt = nil
   S.pending_typed_action_expected = false
   S.pending_typed_action_response_format = false
   S.pending_typed_action_profile = nil
@@ -49185,9 +50974,9 @@ function Net.process_response_buckets(text)
         return S.api_ref_message ~= nil or S.docs_already_sent
       elseif kw == "docs" and payload ~= "" then
         local canonical = CTX.docs_section_canonical(payload)
-        return canonical
-          and S.docs_section_sent
-          and S.docs_section_sent[canonical] == true
+        return canonical and (
+          (S.docs_section_sent and S.docs_section_sent[canonical] == true)
+          or (canonical == "theme" and S.theme_ref_message ~= nil))
       elseif kw == "docs_extended" then
         return S.docs_extended_already_sent == true
       elseif kw == "recent_reaper_changes" then
@@ -49319,7 +51108,8 @@ function Net.process_response_buckets(text)
       local canonical = CTX.docs_section_canonical(payload)
       if canonical then
         S.docs_section_sent = S.docs_section_sent or {}
-        if not S.docs_section_sent[canonical] then
+        if not S.docs_section_sent[canonical]
+            and not (canonical == "theme" and S.theme_ref_message ~= nil) then
           wants_docs_section = true
           docs_section_names[#docs_section_names+1] = canonical
         end
@@ -49684,7 +51474,8 @@ function Net.process_response_buckets(text)
         local canonical = CTX.docs_section_canonical(name)
         if canonical then
           S.docs_section_sent = S.docs_section_sent or {}
-          if not S.docs_section_sent[canonical] then
+          if not S.docs_section_sent[canonical]
+              and not (canonical == "theme" and S.theme_ref_message ~= nil) then
             wants_docs_section = true
             docs_section_names[#docs_section_names+1] = canonical
           end
@@ -49993,9 +51784,13 @@ function Net.process_response_buckets(text)
       for _, name in ipairs(docs_section_names) do
         local sec_content, sec_err = CTX.docs_section(name)
         if sec_content then
-          Net.sticky_set("docs:" .. name, sec_content)
-          S.docs_section_sent[name] = true
-          fetched_to_sticky[#fetched_to_sticky+1] = "docs:" .. name
+          if name == "theme" then
+            Net.copin_theme_reference(sec_content, fetched_to_sticky)
+          else
+            Net.sticky_set("docs:" .. name, sec_content)
+            S.docs_section_sent[name] = true
+            fetched_to_sticky[#fetched_to_sticky+1] = "docs:" .. name
+          end
         else
           Log.add_error(sec_err or ("Failed to load docs:" .. name))
         end
@@ -50520,10 +52315,6 @@ function Net.process_response_buckets(text)
         S._fx_inspect_tmp.id = identifier
         S._fx_inspect_tmp.names = fx_inspect_names
         S._fx_inspect_tmp.silent = fx_inspect_silent
-        S._fx_inspect_tmp.undo_open = undo_open ~= false
-        if S._fx_inspect_tmp.refresh_held == nil then
-          S._fx_inspect_tmp.refresh_held = true
-        end
       end
     end
 
@@ -50538,28 +52329,21 @@ function Net.process_response_buckets(text)
       -- finalize_context until it completes (or is cancelled).
       if S._fx_inspect_tmp then
         local fi = S._fx_inspect_tmp
-        local function close_fx_inspect_undo(label)
-          if fi and fi.undo_open then
-            reaper.Undo_EndBlock(label or "ReaAssist: fx_inspect", 0)
-            fi.undo_open = false
-          end
-        end
         local function cleanup_fx_inspect(release_refresh, label)
-          local ok, cleanup_err =
-            CTX.fx_inspect_cleanup(fi, release_refresh)
-          close_fx_inspect_undo(label)
+          local ok, cleanup_err = false, "scan ownership unavailable"
+          if fi.lease and CTX.scan_lease_finish then
+            ok, cleanup_err = CTX.scan_lease_finish(fi.lease)
+          end
           if not ok then
             Log.line("FX_INSPECT",
               "cleanup reported failure: " .. tostring(cleanup_err))
           end
           return ok
         end
-        -- ValidatePtr2: try_inspect_read already checks, but finalize_context
-        -- can also be entered directly (np>0 path) with no validation gap, or
-        -- after a deep scan where on_complete may have already deleted fi.tr.
-        -- A stale handle here would crash scan_fx_params on the first
-        -- TrackFX_* call.
-        if not reaper.ValidatePtr2(0, fi.tr, "MediaTrack*") then
+        -- Legacy staged inspection requires an existing captured lease.
+        -- Metadata-only inspection does not enter this branch.
+        if not (fi.lease and CTX.scan_lease_check
+            and CTX.scan_lease_check(fi.lease, fi.fx)) then
           cleanup_fx_inspect(true,
             "ReaAssist: fx_inspect (invalid track)")
           S._fx_inspect_tmp = nil
@@ -50575,11 +52359,10 @@ function Net.process_response_buckets(text)
         -- Wrap the shallow scan in xpcall so a thrown error (stale FX
         -- handle, REAPER returning nil from a probe, etc.) does not skip
         -- the cleanup at the end of this block, which would leave an
-        -- orphaned hidden temp track plus a stuck PreventUIRefresh(-1)
-        -- imbalance.
+        -- retained inspection track.
         local _scan_ok, params_list, max_group, total_count, needs_deep =
           xpcall(function()
-            return CTX.scan_fx_params(fi.tr, fi.fx)
+            return CTX.scan_fx_params(fi.tr, fi.fx, fi.lease)
           end, debug.traceback)
         if not _scan_ok then
           -- params_list holds the error+traceback string in the failure case.
@@ -50608,11 +52391,13 @@ function Net.process_response_buckets(text)
           Log.line("DEEP_SCAN", "chat: auto-triggering deep scan for " .. fi.id)
           local _started_ok = CTX.start_deep_scan({
             tr           = fi.tr,
+            lease        = fi.lease,
             fx_idx       = fi.fx,
             identifier   = fi.id,
             search_names = fi.names,
             origin       = "chat",
             on_complete  = function(dparams, dmax, dcount)
+              if S._fx_inspect_tmp ~= fi then return end
               FXCache.put_plugin(fi.id, dparams, dcount, dmax, false)
               if S._fx_cache_events then
                 local t = S._fx_cache_events
@@ -50628,9 +52413,6 @@ function Net.process_response_buckets(text)
                 fetched_to_sticky[#fetched_to_sticky+1] = fi_key
                 mark_fx_inspect_success(fi.names, false)
               end
-              -- PreventUIRefresh(-1) already done by scan_fx_params_deep_body;
-              -- see comment there about avoiding double-release crashes.
-              fi.refresh_held = false
               cleanup_fx_inspect(false, "ReaAssist: fx_inspect deep")
               S._fx_inspect_tmp   = nil
               S._deep_scan_started = false
@@ -50638,8 +52420,7 @@ function Net.process_response_buckets(text)
               finalize_context()
             end,
             on_cancel    = function(reason)
-              -- PreventUIRefresh(-1) already done by scan_fx_params_deep_body.
-              fi.refresh_held = false
+              if S._fx_inspect_tmp ~= fi then return end
               cleanup_fx_inspect(false,
                 "ReaAssist: fx_inspect (cancelled)")
               S._fx_inspect_tmp   = nil
@@ -50672,10 +52453,7 @@ function Net.process_response_buckets(text)
           if not _started_ok then
             -- start_deep_scan rejected the request (already active, missing
             -- opts, or _estimate_deep_probes threw). Neither on_complete nor
-            -- on_cancel will fire, so unwind the resources fx_inspect_load
-            -- set up: hidden temp track, PreventUIRefresh(+1), and any
-            -- legacy open Undo block. Without this the UI stops repainting
-            -- and stale cleanup state can bleed into the session.
+            -- on_cancel will fire, so finish only the captured lease.
             Log.line("DEEP_SCAN", "chat: start_deep_scan returned false for "
               .. fi.id .. "; unwinding fx_inspect resources")
             cleanup_fx_inspect(true,
@@ -50801,15 +52579,12 @@ function Net.process_response_buckets(text)
         history_content = history_content
           .. "(NOTE: You requested <context_needed>"
           .. tags_str
-          .. "</context_needed>, but this is a JSFX authoring/install "
+          .. "</context_needed>, but this is a JSFX authoring "
           .. "request. The pinned JSFX bundle is the applicable reference. "
           .. "Do NOT request prompt_bundle:plugin or any other "
           .. "<context_needed> tag for this turn. Generate the requested "
-          .. "```jsfx code block now. If the user also asked to create a "
-          .. "track and add the JSFX, include exactly one complete ```lua "
-          .. "companion block after the JSFX that creates/resolves the "
-          .. "track, adds the saved JSFX by its ReaAssist path, and adds "
-          .. "any requested marker.)\n\n"
+          .. "```jsfx code block now, with no ```lua block, even if the "
+          .. "user named a track.)\n\n"
         S._jsfx_context_hint = nil
         reuse_hint_fired = true
       end
@@ -50988,8 +52763,10 @@ function Net.process_response_buckets(text)
     -- synths) may need more than one frame. Max ~1 second (30 retries).
     if S._fx_inspect_tmp then
       local inspect_retries = 0
+      local inspect_owner = S._fx_inspect_tmp
       local function try_inspect_read()
-        local fi = S._fx_inspect_tmp
+        local fi = inspect_owner
+        if S._fx_inspect_tmp ~= fi then return end
         -- Guard: S._fx_inspect_tmp could have been cleared between defer
         -- cycles by another path (dev_signal cancel, project switch handler,
         -- etc.). Without this, the timeout branch's fi.tr / fi.names derefs
@@ -50998,15 +52775,9 @@ function Net.process_response_buckets(text)
           S._fx_inspect_tmp = nil
           return
         end
-        -- ValidatePtr2 before touching fi.tr: across up to 30 defer cycles
-        -- (~1s) the user could switch projects or delete the track, leaving
-        -- a dangling pointer that would crash TrackFX_GetNumParams.
-        if not reaper.ValidatePtr2(0, fi.tr, "MediaTrack*") then
-          reaper.PreventUIRefresh(-1)
-          if fi.undo_open then
-            reaper.Undo_EndBlock("ReaAssist: fx_inspect (invalid track)", 0)
-            fi.undo_open = false
-          end
+        if not (fi.lease and CTX.scan_lease_check
+            and CTX.scan_lease_check(fi.lease, fi.fx)) then
+          if fi.lease and CTX.scan_lease_finish then CTX.scan_lease_finish(fi.lease) end
           S._fx_inspect_tmp = nil
           if fail_plugin_pack_fallback(
               "generic_fx_inspect_track_invalidated") then
@@ -51031,14 +52802,7 @@ function Net.process_response_buckets(text)
           reaper.defer(try_inspect_read)
         else
           -- Timed out - clean up and report.
-          if reaper.ValidatePtr2(0, fi.tr, "MediaTrack*") then
-            reaper.DeleteTrack(fi.tr)
-          end
-          reaper.PreventUIRefresh(-1)
-          if fi.undo_open then
-            reaper.Undo_EndBlock("ReaAssist: fx_inspect (timeout)", 0)
-            fi.undo_open = false
-          end
+          if fi.lease and CTX.scan_lease_finish then CTX.scan_lease_finish(fi.lease) end
           S._fx_inspect_tmp = nil
           if fail_plugin_pack_fallback("generic_fx_inspect_timeout") then
             return
@@ -51331,6 +53095,7 @@ function Net._same_model_recovery(p, recovery_kind)
     model_id = model.id,
     model_label = model.label or model.id,
     recovery_prompt = S.pending_orig_prompt,
+    recovery_original_prompt = S.pending_recovery_original_prompt,
     recovery_attachments = S.pending_attachments,
     recovery_kind = recovery_kind,
   }
@@ -51564,6 +53329,7 @@ function Net._clear_terminal_curl_state()
   S.curl_launch_result_class = nil
   S.send_time = nil
   S.pending_orig_prompt = nil
+  S.pending_recovery_original_prompt = nil
   S.pending_output_note = nil
   S.pending_typed_action_expected = false
   S.pending_typed_action_response_format = false
@@ -51643,7 +53409,12 @@ function Net._handle_curl_exit_failure()
     S.curl_debug.exit_code = exit_code
     S.curl_debug.exit_meaning = exit_code == 0 and "success" or nil
   end
-  Net._capture_curl_http_status()
+  if S.engine_terminal_provider_failure ~= nil then
+    -- Synthetic Engine completion must not consume an older curl header file.
+    os.remove(tmp.headers)
+  else
+    Net._capture_curl_http_status()
+  end
   if exit_code == 0 then
     -- curl finished cleanly. Only now may tmp.out be parsed, so non-JSON
     -- responses (captive portals, proxy HTML) surface as a clear error instead
@@ -51669,10 +53440,22 @@ function Net._handle_curl_exit_failure()
   local engine_provider_error_message =
     type(S.engine_provider_error_message) == "string"
       and S.engine_provider_error_message or nil
-  local engine_provider_http_status = engine_provider_error_message
+  local engine_provider_http_status =
+    Net._bounded_http_status(S.engine_terminal_http_status)
+  local engine_provider_failure = S.engine_terminal_provider_failure == true
+  local engine_capacity_retry_safe = S.engine_terminal_capacity_retry_safe == true
+  local engine_response_processing = S.engine_terminal_response_processing == true
+  local engine_failure = S.request_lane == "engine"
     and type(S.curl_debug) == "table"
-    and Net._bounded_http_status(S.curl_debug.http_status) or nil
+    and type(S.curl_debug.engine_failure) == "table"
+    and S.curl_debug.engine_failure or nil
+  local engine_cancelled = engine_failure and engine_failure.state == "cancelled"
+  local engine_transport_failure = engine_failure and engine_failure.category == "transport"
   S.engine_provider_error_message = nil
+  S.engine_terminal_http_status = nil
+  S.engine_terminal_provider_failure = nil
+  S.engine_terminal_capacity_retry_safe = nil
+  S.engine_terminal_response_processing = nil
   local engine_stream_failure = type(S.curl_debug) == "table"
     and S.curl_debug.engine_stream_incomplete_reason ~= nil
   local curl_errors = {
@@ -51714,9 +53497,21 @@ function Net._handle_curl_exit_failure()
         .. "Try again; if it repeats, switch networks or disable VPN/proxy."),
   }
   local detail
-  if engine_stream_failure then
+  if engine_cancelled then
+    detail = RA.t("network.engine.cancelled", nil,
+      "The request stopped before it finished. It was not resent automatically. You can send your message again.")
+  elseif engine_response_processing then
+    detail = RA.t("network.engine.response_processing", nil,
+      "ReaAssist could not process the response. The request was not resent automatically. Try sending your message again. If this repeats, report the error.")
+  elseif engine_stream_failure then
     detail = RA.t("network.engine.stream_incomplete", nil,
       "ReaAssist could not verify that the response finished. The incomplete answer was discarded. Try sending your message again.")
+  elseif engine_provider_failure and engine_provider_http_status == 429 then
+    detail = RA.t("network.engine.provider_limit_unknown", nil,
+      "The provider returned HTTP 429. This can mean a temporary limit or an account quota. Wait and try again, or check your provider account.")
+    if engine_provider_error_message then
+      detail = detail .. "\n\n" .. engine_provider_error_message
+    end
   elseif engine_provider_error_message then
     local provider_context = tostring(prov_label or "Provider")
     if engine_provider_http_status then
@@ -51733,15 +53528,29 @@ function Net._handle_curl_exit_failure()
         message = engine_provider_error_message,
       }, provider_context .. ": " .. engine_provider_error_message)
     end
+  elseif engine_provider_failure then
+    detail = RA.t("network.engine.provider_http_refusal", {
+      status = tostring(engine_provider_http_status),
+    }, "The provider returned HTTP " .. tostring(engine_provider_http_status)
+      .. ". Try again later or check your provider account.")
+  elseif engine_transport_failure then
+    detail = RA.t("network.engine.transport_failure", nil,
+      "The connection failed before the response finished. The request was not resent automatically. Check your connection and try again.")
+  elseif engine_failure then
+    detail = RA.t("network.engine.failure", nil,
+      "ReaAssist could not complete this request. It was not resent automatically. Try sending your message again. If this repeats, report the error.")
   else
     detail = curl_errors[exit_code]
       or RA.t("network.curl.generic", nil,
         "A network error occurred. Please check your internet "
           .. "connection and try again.")
   end
-  local failure_kind = engine_stream_failure
+  local failure_kind = engine_cancelled and "engine_cancelled"
+    or engine_response_processing and "engine_response_processing"
+    or engine_stream_failure
     and "engine_stream_incomplete"
-    or engine_provider_error_message and "engine_provider_error"
+    or (engine_provider_failure or engine_provider_error_message) and "engine_provider_error"
+    or engine_failure and "engine_failure"
     or "curl_exit"
   local debug = Net._curl_failure_debug(exit_code, detail, failure_kind,
     engine_provider_error_message == nil)
@@ -51763,13 +53572,22 @@ function Net._handle_curl_exit_failure()
     debug.user_message = detail
   end
   S.send_time = nil
-  if engine_stream_failure then
+  if engine_failure and not engine_response_processing
+      and not engine_stream_failure
+      and not engine_provider_failure and not engine_provider_error_message then
+    Log.line("ENGINE", string.format("state=%s, category=%s, diagnostic=%s, code=%s",
+      engine_failure.state, engine_failure.category, engine_failure.diagnostic,
+      tostring(exit_code)))
+  elseif engine_response_processing then
+    Log.line("ENGINE", string.format("response_processing_failed, provider=%s, model=%s",
+      tostring(debug.provider_id or "?"), tostring(debug.model_id or "?")))
+  elseif engine_stream_failure then
     Log.line("ENGINE", string.format(
       "stream=%s, engine_error=%s, provider=%s, model=%s",
       tostring(debug.engine_stream_incomplete_reason or "unknown"),
       tostring(exit_code), tostring(debug.provider_id or "?"),
       tostring(debug.model_id or "?")))
-  elseif engine_provider_error_message then
+  elseif engine_provider_failure or engine_provider_error_message then
     Log.line("ENGINE", string.format(
       "provider_failure=http_%s, engine_error=%s, provider=%s, model=%s",
       tostring(debug.http_status or "unknown"), tostring(exit_code),
@@ -51834,6 +53652,7 @@ function Net._handle_curl_exit_failure()
           "Check that the server is running and the URL/port is correct.")
         or RA.t("settings.api_key.error.builtin_network_hint", nil,
           "Check your internet connection and try again.")
+      if engine_response_processing or engine_failure then api_keys.key_error_hint = nil end
       api_keys.key_error_url        = nil
       api_keys.key_error_url_label  = nil
       api_keys.restore_key_test_provider()
@@ -51841,9 +53660,9 @@ function Net._handle_curl_exit_failure()
       return true
     end
     -- Append rather than clobber (see timeout branch above).
-    Log.add_error(detail .. "\n\n"
+    Log.add_error((engine_response_processing or engine_failure) and detail or (detail .. "\n\n"
       .. RA.t("network.curl.back_online_settings", nil,
-        "Once you're back online, click the Settings button to try again."),
+        "Once you're back online, click the Settings button to try again.")),
       nil, nil, nil, Net._failed_request_extra(failure_kind, debug))
     api_keys.restore_key_test_provider()
     api_keys.finish_key_test_session()
@@ -51862,12 +53681,25 @@ function Net._handle_curl_exit_failure()
     return true
   end
   Net._clear_schannel_revocation_retry()
+  if engine_provider_failure and engine_provider_http_status == 503
+      and p_active.id == "google" then
+    if not engine_capacity_retry_safe then S.retry_saved_body = nil end
+    Net._handle_api_error(p_active, "503", nil, true, false)
+    if not S.retry_scheduled then Net._clear_terminal_curl_state() end
+    return true
+  end
   if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
     S.display_messages[S.pending_display_idx].request_status_text =
-      engine_stream_failure and "response error"
+      engine_cancelled and "cancelled"
+        or (engine_response_processing or engine_stream_failure) and "response error"
+        or (engine_provider_failure or engine_provider_error_message) and "provider error"
+        or engine_transport_failure and "network error"
+        or engine_failure and "response error"
         or (exit_code == 28 and "timeout" or "network error")
   end
-  local extra = Net._failed_request_extra(failure_kind, debug)
+  local extra = Net._failed_request_extra(
+    failure_kind == "engine_provider_error" and "provider_api_error" or failure_kind,
+    debug)
   if recovery then
     for key, value in pairs(recovery) do extra[key] = value end
   end
@@ -52138,6 +53970,27 @@ function Net._provider_error_identifier(value)
   return nil
 end
 
+function Net._credential_error_is_auth(err, identifier, chat_provider)
+  -- Funding contradictions cannot prove that the stored key was rejected.
+  for _, field in ipairs({ "code", "type", "status" }) do
+    local value = Net._provider_error_identifier(err[field])
+    value = value and value:lower() or ""
+    if value == "insufficient_quota" or value == "credit_balance_error"
+        or value == "credit_balance_exhausted" then
+      return false
+    end
+  end
+  if identifier == "invalid_api_key" then return true end
+  -- Preserve only this historical DeepSeek chat positive. Key tests do not
+  -- pass chat_provider and retain their existing explicit-code authority.
+  return chat_provider ~= nil and chat_provider.id == "deepseek"
+    and err.code == "invalid_request_error"
+    and err.type == "authentication_error"
+    and type(err.message) == "string"
+    and err.message:lower():match(
+      "^authentication fails, your api key: %S+ is invalid$") ~= nil
+end
+
 function Net._openai_error_envelope_fields(provider, err)
   if type(err) ~= "table" or err == JSON.NULL then
     return "", "", false, false
@@ -52146,10 +53999,7 @@ function Net._openai_error_envelope_fields(provider, err)
   local raw_type = Net._provider_error_identifier(err.type)
   local code = raw_code or raw_type or ""
   local message = type(err.message) == "string" and err.message or ""
-  local is_funding = code == "credit_balance_exhausted"
-    or code == "insufficient_quota"
-  local is_auth = not is_funding and ((code == "invalid_api_key")
-    or (message:lower():find("api key", 1, true) ~= nil))
+  local is_auth = Net._credential_error_is_auth(err, code, provider)
   local is_overloaded = (code == "server_error" or code == "overloaded")
     or Net._recoverable_openai_throttle(provider, code, message)
   return code, message, is_overloaded, is_auth
@@ -52322,6 +54172,7 @@ function Net._google_capacity_recovery(p)
     model_label = current_model and (current_model.label or current_model.id)
       or nil,
     recovery_prompt = S.pending_orig_prompt,
+    recovery_original_prompt = S.pending_recovery_original_prompt,
     recovery_attachments = S.pending_attachments,
   }
   if fallback then
@@ -52551,7 +54402,10 @@ function Net._handle_api_error(p, inner_type, api_err, is_overloaded, is_auth,
     end
     local recovery = Net._google_capacity_recovery(p)
     local msg
-    if recovery and recovery.fallback_model_id then
+    if (tonumber(S.retry_count) or 0) == 0 then
+      msg = RA.t("response.google_503_without_retry", nil,
+        "Google's Gemini service returned 503 UNAVAILABLE. The selected model is at capacity or temporarily unavailable. No automatic retry was made. Try again shortly or choose another model.")
+    elseif recovery and recovery.fallback_model_id then
       msg = RA.t("response.google_503_recovery", {
           label = recovery.fallback_label or "the fallback model",
         },
@@ -52916,11 +54770,29 @@ function Net._classify_engine_terminal_event(event, attempt, status,
   event.error_code = tonumber(status.error_code)
   local error_code = tonumber(status.error_code) or 0
   event.adapter_error_category =
-    (error_code == 1011 or error_code == 1012) and "stream"
+    status.canonical == true and status.terminal_category == "protocol" and "protocol"
+    or status.canonical == true and status.terminal_category == "provider" and "provider"
+    or (error_code == 1011 or error_code == 1012) and "stream"
     or (error_code == 1002 or error_code == 1004 or error_code == 1005)
       and "protocol"
     or (http_status and http_status >= 400) and "provider" or "unknown"
   event.http_status = http_status
+  -- Preserve bounded cause evidence before recovery clears the request state.
+  -- Never retain provider prose, URLs or adapter error messages here.
+  if type(Diag) == "table" and type(Diag.normalize_engine_failure) == "function" then
+    event.engine_failure = Diag.normalize_engine_failure({
+      category = status.terminal_category
+        or (tonumber(status.curl_code) and tonumber(status.curl_code) ~= 0
+          and "transport" or nil),
+      diagnostic = status.adapter_diagnostic,
+      state = attempt.cancel_requested and "cancelled" or "failed",
+    })
+  end
+  local curl_code = tonumber(status.curl_code)
+  if curl_code and curl_code >= 0 and curl_code <= 127
+      and curl_code == math.floor(curl_code) then
+    event.engine_curl_code = curl_code
+  end
   return event
 end
 
@@ -53023,7 +54895,33 @@ function Net._engine_terminal_failure(status, override_reason)
     status.request_sent = true
     status.error_msg = "Engine status contradicted delivered payload"
   end
-  if policy.pin_to_curl then
+  local http_status = Net._bounded_http_status(status.http_status)
+  local delivered_provider_failure = status.state == "error"
+    and status.terminal ~= false and status.request_sent == true
+    and Net._engine_transmission(status) == "sent"
+    and http_status ~= nil and http_status >= 400
+    and not policy.contradiction and S.engine_cancel_requested ~= true
+    and (status.canonical == true and status.terminal_category == "provider"
+      or (not status.canonical and status.terminal_category == nil
+        and tonumber(status.error_code) == 1099
+        and (status.curl_code == nil or tonumber(status.curl_code) == 0)
+        and S.engine_had_payload ~= true and S.engine_had_canonical_delta ~= true))
+  local capacity_retry_safe = delivered_provider_failure
+    and (not status.canonical or status.canonical_no_partial_content == true)
+  local response_processing = status.canonical == true
+    and status.response_processing == true
+  local settled_processing = response_processing and status.response_settled == true
+    and not policy.contradiction and S.engine_cancel_requested ~= true
+  local contained_terminal = status.canonical_terminal == true
+    and status.canonical == true and status.terminal == true
+    and status.request_sent == true and Net._engine_transmission(status) == "sent"
+    and not policy.contradiction
+    and (status.terminal_category == "protocol"
+      or status.terminal_category == "provider"
+      or status.terminal_category == "not_supported"
+      or status.terminal_category == "capacity")
+  if policy.pin_to_curl and not delivered_provider_failure and not settled_processing
+      and not contained_terminal then
     Net._engine_pin(override_reason
       or (provider_error_message and "Engine provider request failed")
       or status.error_msg
@@ -53031,7 +54929,6 @@ function Net._engine_terminal_failure(status, override_reason)
   end
   local attempt = Net._engine_attempt_for_recovery(
     S.engine_dispatch_snapshot, status, policy)
-  local http_status = Net._bounded_http_status(status.http_status)
   if type(S.engine_transport_event) == "table" then
     Net._classify_engine_terminal_event(S.engine_transport_event, attempt,
       status, http_status)
@@ -53041,7 +54938,8 @@ function Net._engine_terminal_failure(status, override_reason)
       Net._append_transport_event(S.engine_transport_event)
     end
   end
-  if Net._fallback_engine_request_to_curl(status, policy, attempt) then
+  if not response_processing
+      and Net._fallback_engine_request_to_curl(status, policy, attempt) then
     return true
   end
 
@@ -53059,15 +54957,32 @@ function Net._engine_terminal_failure(status, override_reason)
   Net._close_engine_handle()
   local error_code = tonumber(status.error_code) or 1099
   if type(S.curl_debug) == "table" then
-    S.curl_debug.http_status = http_status or S.curl_debug.http_status
+    S.curl_debug.http_status = http_status
+    if (status.canonical == true or error_code >= 1000 or status.state == "cancelled")
+        and type(Diag) == "table"
+        and type(Diag.normalize_engine_failure) == "function" then
+      S.curl_debug.engine_failure = Diag.normalize_engine_failure({
+        category = status.terminal_category
+          or (status.canonical ~= true and error_code == 1099
+            and tonumber(status.curl_code) and tonumber(status.curl_code) ~= 0
+            and "transport" or nil),
+        diagnostic = status.adapter_diagnostic,
+        state = status.state == "cancelled" and "cancelled" or "failed",
+      })
+    end
   end
-  Code.safe_write(tmp.err, provider_error_message
+  Code.safe_write(tmp.err, response_processing and "Engine response processing failed"
+    or (delivered_provider_failure or provider_error_message)
     and "Engine provider request failed"
     or tostring(status.error_msg or override_reason
       or "Engine transport failed"))
   Code.safe_write(tmp.exit, tostring(error_code))
   Net._clear_engine_request_state()
   S.engine_provider_error_message = provider_error_message
+  S.engine_terminal_http_status = http_status
+  S.engine_terminal_provider_failure = delivered_provider_failure
+  S.engine_terminal_capacity_retry_safe = capacity_retry_safe
+  S.engine_terminal_response_processing = response_processing
   S.curl_exited_clean = false
   return false
 end
@@ -53111,13 +55026,17 @@ function Net._engine_stream_incomplete_reason()
   return reason
 end
 
-local function inference_failure_status(status, message, error_code)
+local function inference_failure_status(status, message, error_code, processing_stage)
   status = type(status) == "table" and status or {}
   local state = tostring(status.state or "unknown")
   if state == "failed" then state = "error" end
   if state ~= "error" and state ~= "cancelled" then state = "unknown" end
   local http_status = Net._bounded_http_status(status.http_status)
   return {
+    canonical = true,
+    response_processing = processing_stage ~= nil,
+    response_settled = processing_stage == "settled"
+      and status.state == "completed" and status.terminal == true,
     state = state,
     terminal = status.terminal == true or state ~= "unknown",
     transmission = status.transmission,
@@ -53154,10 +55073,31 @@ local function retryable_inference_status_read(ok_call, status, read_failure)
     and read_failure.error == "internal"
 end
 
+function Net._record_engine_warnings(status)
+  if type(Diag) ~= "table" or type(Diag.normalize_engine_warnings) ~= "function" then
+    return
+  end
+  local warnings = Diag.normalize_engine_warnings(status.warnings)
+  if not warnings then return end
+  local handle = S.engine_handle
+  if type(handle) ~= "table" then return end
+  handle.warning_seen = handle.warning_seen or {}
+  for _, warning in ipairs(warnings) do
+    if not handle.warning_seen[warning] then
+      handle.warning_seen[warning] = true
+      Log.line("ENGINE", "compatibility warning: " .. warning)
+    end
+  end
+  if type(S.engine_transport_event) == "table" then
+    S.engine_transport_event.engine_warnings = warnings
+  end
+end
+
 function Net._read_inference_v1_status(handle)
   local ok_call, status, read_failure = pcall(
     Engine.inference_status, handle)
   if ok_call and valid_inference_status(status, handle.request_id) then
+    Net._record_engine_warnings(status)
     return status
   end
 
@@ -53167,6 +55107,7 @@ function Net._read_inference_v1_status(handle)
     S.engine_status_retry_used = true
     ok_call, status, read_failure = pcall(Engine.inference_status, handle)
     if ok_call and valid_inference_status(status, handle.request_id) then
+      Net._record_engine_warnings(status)
       return status
     end
   end
@@ -53225,7 +55166,13 @@ function Net._poll_inference_v1_request()
     if not ok_consume or accepted ~= true then
       return Net._engine_terminal_failure(inference_failure_status(status,
         "Engine canonical event rejected: " .. tostring(
-          ok_consume and consume_reason or accepted), 1012))
+          ok_consume and consume_reason or accepted), 1012, "processing"))
+    end
+    -- A start notice and a refusal are not partial answer delivery. Any other
+    -- accepted event conservatively prevents automatic capacity retry.
+    if event.kind ~= "response_started" and event.kind ~= "response_failed"
+        and event.kind ~= "response_cancelled" then
+      S.engine_had_canonical_content = true
     end
     consumed = consumed + 1
   end
@@ -53235,7 +55182,7 @@ function Net._poll_inference_v1_request()
     local ok_text, visible = pcall(accumulator.visible_text, accumulator)
     if not ok_text then
       return Net._engine_terminal_failure(inference_failure_status(status,
-        "Engine canonical provisional text failed", 1012))
+        "Engine canonical provisional text failed", 1012, "processing"))
     end
     Net._engine_update_provisional(visible)
   end
@@ -53266,7 +55213,7 @@ function Net._poll_inference_v1_request()
     accumulator.finalize, accumulator, status)
   if not ok_finalize then
     return Net._engine_terminal_failure(inference_failure_status(status,
-      "Engine canonical finalization raised: " .. tostring(result), 1012))
+      "Engine canonical finalization raised: " .. tostring(result), 1012, "processing"))
   end
   if type(result) ~= "table" then
     if outcome == "failed" or outcome == "cancelled" then
@@ -53275,9 +55222,11 @@ function Net._poll_inference_v1_request()
       local provider_error_message =
         type(evidence.provider_error_message) == "string"
           and evidence.provider_error_message or nil
-      local adapter_diagnostic = type(evidence.diagnostic) == "string"
-        and evidence.diagnostic or nil
-      if adapter_diagnostic then
+      local bounded_evidence = type(Diag) == "table"
+        and type(Diag.normalize_engine_failure) == "function"
+        and Diag.normalize_engine_failure(evidence) or nil
+      local adapter_diagnostic = bounded_evidence and bounded_evidence.diagnostic or nil
+      if adapter_diagnostic and adapter_diagnostic ~= "unknown" then
         Log.line("ENGINE", "adapter diagnostic: " .. adapter_diagnostic)
       end
       local failure = inference_failure_status(status,
@@ -53289,11 +55238,18 @@ function Net._poll_inference_v1_request()
       failure.transmission = evidence.transmission or status.transmission
       failure.request_sent = evidence.request_sent ~= false
       failure.recovery = evidence.recovery or status.recovery
+      failure.terminal_category = type(evidence.category) == "string"
+        and evidence.category or nil
+      failure.adapter_diagnostic = adapter_diagnostic
+      failure.canonical_terminal = true
+      failure.canonical_no_partial_content = S.engine_had_canonical_content ~= true
+        and type(evidence.discarded) == "table" and evidence.discarded.events == 0
+        and evidence.discarded.text_bytes == 0
       failure.provider_error_message = provider_error_message
       return Net._engine_terminal_failure(failure)
     end
     return Net._engine_terminal_failure(inference_failure_status(status,
-      "Engine canonical settlement failed: " .. tostring(outcome), 1012))
+      "Engine canonical settlement failed: " .. tostring(outcome), 1012, "processing"))
   end
 
   local p = PROVIDERS[S.pending_provider_idx] or PROVIDERS.active()
@@ -53306,13 +55262,13 @@ function Net._poll_inference_v1_request()
       or type(metadata) ~= "table" then
     return Net._engine_terminal_failure(inference_failure_status(status,
       "Engine compatibility bridge failed: " .. tostring(
-        ok_bridge and bridge_reason or response), 1012))
+        ok_bridge and bridge_reason or response), 1012, "settled"))
   end
   local ok_encode, raw = pcall(RA.JSON.encode, response)
   if not ok_encode or type(raw) ~= "string" or #raw < 2
       or not Code.safe_write(tmp.out, raw) then
     return Net._engine_terminal_failure(inference_failure_status(status,
-      "Engine compatibility response could not be encoded", 1012))
+      "Engine compatibility response could not be encoded", 1012, "settled"))
   end
 
   S.engine_settled_metadata = metadata
@@ -53767,6 +55723,7 @@ function Net.try_finish_curl()
   local text, raw_tok_in, raw_tok_out, tok_in_read, tok_in_create
   local visible_tok_out
   local empty_reason, refusal_text, reasoning_only_tokens
+  local openai_compatible_content_invalid
   local provider_reasoning, provider_reasoning_summary
   local provider_reasoning_truncated, provider_reasoning_summary_truncated
 
@@ -53834,6 +55791,7 @@ function Net.try_finish_curl()
     end
     -- Validate structure: {"choices":[{"message":{"content":"..."}}]}
     if type(resp.choices) ~= "table" or #resp.choices == 0
+       or type(resp.choices[1]) ~= "table"
        or type(resp.choices[1].message) ~= "table" then
       Net._handle_unexpected_response_shape(raw, resp, p,
         "choices[1].message.content")
@@ -53842,6 +55800,10 @@ function Net.try_finish_curl()
     local choice  = resp.choices[1]
     local message = choice.message
     text = message.content
+    if text == JSON.NULL then text = nil end
+    if text and type(text) ~= "string" then
+      openai_compatible_content_invalid = true
+    end
     -- Capture diagnostic fields so the empty-text branch can name the cause:
     --   finish_reason="length"  -> reasoning/output budget exhausted
     --   finish_reason="content_filter" -> safety filter blocked output
@@ -54075,6 +56037,13 @@ function Net.try_finish_curl()
     visible_tok_out ~= nil and reasoning_only_tokens or nil,
     priced_at_utc, usage_accounting, canonical_details, pricing_snapshot)
 
+  -- Retain billed usage before reporting malformed answer content.
+  if openai_compatible_content_invalid then
+    Net._handle_unexpected_response_shape(raw, resp, p,
+      "choices[1].message.content")
+    return
+  end
+
   -- Common post-parse: clean up text.
   if text then
     text = text:gsub("\n\n\n+", "\n\n")
@@ -54098,46 +56067,29 @@ function Net.try_finish_curl()
     -- cap; mostly defanged by the no-cap-sent change for cloud, but the
     -- failure can still happen at the model's real 128K ceiling on long
     -- complex prompts), silently re-fire the same user prompt with
-    -- thinking forced to "none" and a terse "code-only" repair nudge.
-    -- Single retry per user prompt -- if even thinking-off doesn't fit,
+    -- thinking lowered and a terse "code-only" repair nudge.
+    -- Single retry per user prompt. If the lowest effort doesn't fit,
     -- fall through to the visible error so the user can intervene.
     -- Skipped when the active provider doesn't expose thinking levels:
     -- there is nothing to retry with a different thinking setting.
     local _retry_prov = PROVIDERS[S.pending_provider_idx] or PROVIDERS.active()
-    -- "Thinking off" is provider-specific. For OpenAI/Gemini, override_idx=0
-    -- omits the reasoning_effort field which is effectively off. For
-    -- DeepSeek, omitting the "thinking" field falls through to its
-    -- server-side default (enabled), so a 0 override would NOT actually
-    -- disable reasoning -- it would re-fire with thinking still on and
-    -- usually fail the length cap again. Find the "off" entry by value
-    -- ("none" for OpenAI, "disabled" for DeepSeek) and use its idx;
-    -- providers without an explicit off entry (Gemini's Minimal/Low/Med/
-    -- High) fall back to 0 = omit, matching the existing behavior.
-    local _retry_off_idx = 0
-    if _retry_prov.thinking_levels then
-      for _i, _tl in ipairs(_retry_prov.thinking_levels) do
-        if _tl.value == "none" or _tl.value == "disabled" then
-          _retry_off_idx = _i; break
-        end
-      end
-    end
-    -- Don't fire the retry if we are already at the provider's off entry
-    -- (the prior request already had thinking off and still hit the cap;
-    -- another retry with the same setting won't change anything).
+    -- Retry at the lowest supported level. The 5.5 models use Low rather
+    -- than None; DeepSeek needs its explicit disabled entry. Gemini has no
+    -- off entry, so zero still omits the level field for its retry.
+    local _retry_model = _retry_prov.models
+      and _retry_prov.models[S.pending_model_idx or prefs.model_idx]
+    local _retry_off_idx = PROVIDERS.retry_thinking_idx(
+      _retry_prov, _retry_model)
+    -- Don't retry an unchanged level after it already hit the output cap.
     local _cur_idx = S.thinking_override_idx
       or S.pending_thinking_idx or prefs.thinking_idx
-    local _cur_tl  = _retry_prov.thinking_levels
-                     and _retry_prov.thinking_levels[_cur_idx]
-    local _cur_is_off = _cur_tl
-                        and (_cur_tl.value == "none"
-                             or _cur_tl.value == "disabled")
     if empty_reason == "length"
        and not S.length_retry_used
        and _retry_prov.thinking_levels
-       and not _cur_is_off
-       and _cur_idx > 0 then
+       and _cur_idx > 0
+       and (_retry_off_idx == 0 or _cur_idx > _retry_off_idx) then
       S.length_retry_used     = true
-      S.thinking_override_idx = _retry_off_idx  -- provider-aware "off"
+      S.thinking_override_idx = _retry_off_idx  -- provider-supported floor
       local detail = ""
       if reasoning_only_tokens and reasoning_only_tokens > 0 then
         local reported_visible = visible_tok_out
@@ -54150,7 +56102,10 @@ function Net.try_finish_curl()
       end
       Log.line("LENGTH-RETRY",
         "empty response from length cap" .. detail
-        .. "; retrying with thinking=none (user-invisible)")
+        .. "; retrying with thinking="
+        .. tostring(_retry_prov.thinking_levels[_retry_off_idx]
+          and _retry_prov.thinking_levels[_retry_off_idx].value or "omitted")
+        .. " (user-invisible)")
       local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
         .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply consumed "
         .. "the entire output token budget on internal reasoning and "
@@ -54456,6 +56411,11 @@ function Net.try_finish_curl()
   -- just "USER REQUEST: <text>" keeps the moving cache prefix lean.
   Net._restore_pending_user_history()
 
+  if S.pending_typed_action_expected == true
+      and not Net._drop_stale_typed_action_expectation(S.pending_orig_prompt or "") then
+    text = Code.normalize_typed_actions_response(text)
+  end
+
   if S.pending_conversation_delete
       and (text:find("```%s*reaassist%-actions")
         or text:find("```%s*jsfx") or text:find("```%s*eel")) then
@@ -54488,7 +56448,7 @@ function Net.try_finish_curl()
   -- Extract fenced code blocks.
   -- A response may contain both a JSFX block and a Lua block (e.g. "create this
   -- effect and add it to track 5"). Extract them separately so JSFX can be
-  -- auto-saved and the Lua companion script can be auto-run.
+  -- saved or added explicitly from its card; companion Lua is quarantined.
   local explanation = text
 
   -- 1. Extract JSFX blocks (```jsfx or ```eel fences).
@@ -54526,6 +56486,15 @@ function Net.try_finish_curl()
     _turn_no_guess.multiple_scripts = #lua_parts > 1
     _turn_no_guess.blocked_lua, _turn_no_guess.blocked_jsfx = lua_code, jsfx_code
     lua_code, jsfx_code = nil, nil
+  end
+  -- A JSFX card owns Save and Add. Its companion is not executable output,
+  -- so quarantine it before any Lua validation or multiple-script repair.
+  _turn_no_guess.jsfx_companion_ignored = nil
+  if jsfx_code and #lua_parts > 0 then
+    lua_code = nil
+    lua_parts = {}
+    _turn_no_guess.jsfx_companion_ignored = true
+    Log.line("JSFX-COMPANION", "Companion Lua omitted; use the JSFX card actions")
   end
   if #lua_parts > 1 and not _turn_no_guess.protected then
     Log.line("EXTRACT", "multiple Lua blocks: refusing to concatenate executable scripts")
@@ -54594,8 +56563,7 @@ function Net.try_finish_curl()
         .. "inside the fence must be desc:, and every section including "
         .. "@init, @slider, @block, and @sample that belongs to the effect "
         .. "must remain inside that one fence. Do not change the requested "
-        .. "design. Do not add Lua or a Lua companion unless the user "
-        .. "explicitly asked to load the JSFX onto a track. Respond as if "
+        .. "design. Do not add a ```lua block. Respond as if "
         .. "this is your FIRST reply -- do NOT apologize or mention a "
         .. "retry.)\n\nPREVIOUS RESPONSE OR JSFX BODY:\n```text\n"
         .. prior_response
@@ -54627,8 +56595,8 @@ function Net.try_finish_curl()
         .. "to create/write/return JSFX, but your previous reply returned "
         .. "Lua/ReaScript instead. Regenerate from scratch as exactly ONE "
         .. "```jsfx code block. Do NOT return Lua, do NOT call reaper.*, "
-        .. "and do NOT include a Lua companion unless the user explicitly "
-        .. "asked to load the generated JSFX onto a track. The first line "
+        .. "and do NOT include a ```lua block, even if the user named a "
+        .. "track. The first line "
         .. "inside the fence must be desc:. Use JSFX/EEL2 sections such as "
         .. "@init, @slider, and @sample as needed. Respond as if this is "
         .. "your FIRST reply -- do NOT apologize, do NOT mention a retry.)\n\n"
@@ -54650,64 +56618,12 @@ function Net.try_finish_curl()
     Log.add_error("The model returned Lua/ReaScript for a JSFX request even after a retry. Auto-run is blocked; ask again or switch to a stronger model for this JSFX.")
   end
 
-  if S.pending_jsfx_intent
-      and jsfx_code and not lua_code
-      and Code.prompt_requests_jsfx_track_companion
-      and Code.prompt_requests_jsfx_track_companion(S.pending_orig_prompt) then
-    -- THIS VALIDATOR NEVER ENDS THE TURN (round fifteen). Its second pass lets
-    -- the JSFX run, so a retry that cannot be dispatched must not cost the
-    -- user that JSFX. The counter is raised BEFORE the ask, so a refusal is
-    -- recorded as an attempt made rather than read as an unused retry by a
-    -- later pass of the same turn.
-    if (S.jsfx_companion_validator_retries or 0) < 2 then
-      S.jsfx_companion_retry_used = true
-      S.jsfx_companion_validator_retries =
-        (S.jsfx_companion_validator_retries or 0) + 1
-      local jsfx_ref = "ReaAssist/<saved JSFX filename>.jsfx"
-      if Code.derive_filename_jsfx then
-        local derived = Code.derive_filename_jsfx(jsfx_code)
-        if derived and derived ~= "" then
-          jsfx_ref = "ReaAssist/" .. derived
-        end
-      end
-      local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT "
-        .. "MENTION ANY OF THIS IN YOUR VISIBLE REPLY: The user asked "
-        .. "for a JSFX and also asked for it to be put on a track. Your "
-        .. "previous reply included the JSFX but omitted the Lua companion "
-        .. "that creates/selects the requested track, adds the saved JSFX "
-        .. "with `reaper.TrackFX_AddByName(track, \"" .. jsfx_ref
-        .. "\", false, -1)`, and performs any requested REAPER actions "
-        .. "such as markers. Store the TrackFX_AddByName return value and "
-        .. "check it immediately with `if fx < 0 then "
-        .. "...cleanup...; error(message, 0) end`; never leave the "
-        .. "AddByName result unassigned or unchecked. Regenerate the full "
-        .. "answer with exactly one "
-        .. "```jsfx block followed by exactly one complete ```lua block. "
-        .. "Keep the same JSFX design unless a syntax/safety fix is needed. "
-        .. "Respond as if this is your FIRST reply -- do NOT apologize, "
-        .. "do NOT mention a retry.)\n\nPrevious JSFX:\n```jsfx\n"
-        .. jsfx_code
-        .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
-      if Net.fire_optional_validator_retry({
-        kind = "jsfx",
-        log_tag = "JSFX-COMPANION-RETRY",
-        log_message = "JSFX track-install request returned no Lua companion; retrying",
-        history_content = history_content,
-        ctx_label = "jsfx_companion_retry",
-        retry_failed_key = "retry.reason.after_missing_jsfx_companion",
-        retry_failed_label = "after missing JSFX companion Lua",
-        failure_message = "Auto-retry after missing JSFX companion Lua did not go through. Please resend the last message.",
-      }) == "stop" then return end
-    end
-    Log.line("JSFX-COMPANION-VALIDATOR",
-      "JSFX track-install request still omitted companion Lua after retry")
-  end
-
   -- Recover once when a model returns apparent Lua but omits or breaks the
   -- ```lua fence. Never execute unfenced text directly: bare-Lua recovery is
   -- gated by a sandboxed syntax check, then the model must re-emit the same
   -- script through the normal fenced extraction path.
-  if not lua_code and not jsfx_code and not S.pending_jsfx_intent then
+  if not lua_code and not jsfx_code and not S.pending_jsfx_intent
+      and #lua_parts == 0 and not _turn_no_guess.protected then
     local function retry_lua_fence_retry(kind, previous_lua, ctx_label,
                                          log_tag, log_message, user_note,
                                          fail_message)
@@ -55190,7 +57106,9 @@ function Net.try_finish_curl()
     if type(Code.find_missing_fx_display_readback) == "function" then
       local missing_readback = Code.find_missing_fx_display_readback(lua_code,
         Net._turn_fx_param_omission_context(S.pending_orig_prompt) or S.pending_orig_prompt)
-      if missing_readback then
+      if missing_readback and missing_readback.advisory then
+        Log.line("FX-READBACK-ADVISORY", tostring(missing_readback.detail or ""))
+      elseif missing_readback then
         relevance = relevance or {}
         relevance[#relevance + 1] = missing_readback
       end
@@ -55343,6 +57261,7 @@ function Net.try_finish_curl()
             .. lua_code .. "\n\nUSER REQUEST:\n"
             .. (S.pending_orig_prompt or "")
         end
+        history_content = history_content .. "\n\nWrite fresh visible prose describing only the final corrected script. Remove any promise of an action removed during repair, including deletion. Do not copy the previous explanation."
         Net.fire_validator_retry({
           kind = "action_relevance",
           findings = relevance,
@@ -55964,13 +57883,20 @@ function Net.try_finish_curl()
         .. " to " .. tostring(finding.expected_name_display
           or finding.expected_name or "last child"))
     end
-    if did_folder_repair then bad_folder_boundary = nil end
+    if did_folder_repair then
+      bad_folder_boundary = Code.find_folder_child_boundary_misuse(lua_code, S.pending_orig_prompt)
+        or Code.find_default_folder_parent_misuse(lua_code, S.pending_orig_prompt)
+    end
     if bad_folder_boundary and #bad_folder_boundary > 0
         and not S.folder_boundary_retry_used then
       S.folder_boundary_retry_used = true
       local finding = bad_folder_boundary[1]
       local history_content
-      if finding.reason == "missing_parent_folder_track" then
+      if finding.reason == "default_parent_required" then
+        Log.line("FOLDER-PARENT-RETRY", "existing parent used without explicit reuse; requesting separate parent")
+        history_content = "(INTERNAL NOTE TO THE MODEL: Do not mention this internal correction in your visible reply. Respond as if this is the first reply. For folder organization, create a separate new parent track unless the user explicitly requests an existing parent. Insert it immediately before the first child and refresh indices after insertion. Preserve child names, order, routing and unrelated folder deltas. If grouping is ambiguous or children are noncontiguous, ask one focused question before making changes. Return the complete corrected script and an explanation describing only that script.)\n\nPrevious Lua to fix:\n```lua\n"
+          .. lua_code .. "\n```\n\nUSER REQUEST:\n" .. (S.pending_orig_prompt or "")
+      elseif finding.reason == "missing_parent_folder_track" then
         Log.line("FOLDER-PARENT-RETRY",
           "explicit folder parent appears omitted near line "
           .. tostring(finding.line or "?") .. "; retrying with folder-parent hint")
@@ -56051,9 +57977,12 @@ function Net.try_finish_curl()
     elseif bad_folder_boundary and #bad_folder_boundary > 0 then
       validator_gate_hit = true
       Log.line("FOLDER-BOUNDARY-VALIDATOR",
-        "folder close stayed on outside track after retry; auto-run blocked")
+        "folder validation still failed after retry; auto-run blocked")
       local finding = bad_folder_boundary[1]
-      if finding.reason == "missing_parent_folder_track" then
+      if finding.reason == "default_parent_required" then
+        Log.add_error(RA.t("validator.folder_default_parent_blocked", nil,
+          "The script would use an existing track as a folder parent without an explicit request. Auto-run is blocked. Ask for a separate parent or specify which existing track to use."))
+      elseif finding.reason == "missing_parent_folder_track" then
         local parent_name = tostring(finding.parent_display
           or finding.expected_name_display
           or finding.expected_name
@@ -56898,11 +58827,8 @@ function Net.try_finish_curl()
   end
   local typed_action_semantic_block_reason = nil
 
-  -- TYPED-ACTION FORMAT VALIDATOR: Typed-action output is intentionally
-  -- strict; the executor/parser only accepts a `reaassist-actions` fence.
-  -- If the model understood the schema but wrapped the valid JSON in a
-  -- generic json/unlabeled fence, retry once with a format-only correction
-  -- instead of accepting the wrong contract or surfacing an empty response.
+  -- Equivalent wrappers are normalized by the parser before this point.
+  -- Keep the bounded format correction for output it could not normalize.
   local typed_action_wrong_fence =
     (not typed_action_response_format
      and not typed_action_metrics.present and not code)
@@ -56990,10 +58916,10 @@ function Net.try_finish_curl()
     if typed_action_metrics.error == "" then
       typed_action_metrics.error = "missing_action_block"
     end
-    if not code and Net._try_typed_action_lua_fallback(
-        "typed_action_format_retry_failed",
-        typed_action_metrics.error) then
-      return
+    if not code then
+      local fired, reason = Net._try_typed_action_lua_fallback(
+        "typed_action_format_retry_failed", typed_action_metrics.error)
+      if Net._typed_retry_stops_response(fired, reason) then return end
     end
   end
 
@@ -57020,13 +58946,13 @@ function Net.try_finish_curl()
     if (selected_index_required or fast_schema_escalate)
        and (S.typed_action_schema_validator_retries or 0) < 1
        and type(typed_action_profile) == "table"
-       and type(typed_action_profile.fallback) == "table"
-       and Net._try_escalate_typed_actions(
-          selected_index_required
-            and "typed_action_selected_index_schema_failed"
-            or "typed_action_schema_fast_escalated",
-          schema_detail ~= "" and schema_detail or schema_err) then
-      return
+       and type(typed_action_profile.fallback) == "table" then
+      local fired, reason = Net._try_escalate_typed_actions(
+        selected_index_required
+          and "typed_action_selected_index_schema_failed"
+          or "typed_action_schema_fast_escalated",
+        schema_detail ~= "" and schema_detail or schema_err)
+      if Net._typed_retry_stops_response(fired, reason) then return end
     end
     if (S.typed_action_schema_validator_retries or 0) < 1 then
       S.typed_action_schema_validator_retries =
@@ -57069,10 +58995,11 @@ function Net.try_finish_curl()
       })
       return
     end
-    if Net._try_escalate_typed_actions(
+    do
+      local fired, reason = Net._try_escalate_typed_actions(
         "typed_action_schema_retry_failed",
-        schema_detail ~= "" and schema_detail or schema_err) then
-      return
+        schema_detail ~= "" and schema_detail or schema_err)
+      if Net._typed_retry_stops_response(fired, reason) then return end
     end
     typed_action_semantic_block_reason =
       schema_detail ~= "" and schema_detail or schema_err
@@ -57117,10 +59044,10 @@ function Net.try_finish_curl()
         and typed_action_profile.semantic_fast_escalate == true
         and missing_action_family
       if fast_semantic_escalate
-         and type(typed_action_profile.fallback) == "table"
-         and Net._try_escalate_typed_actions(
-          "typed_action_semantic_fast_escalated", semantic_detail) then
-        return
+         and type(typed_action_profile.fallback) == "table" then
+        local fired, reason = Net._try_escalate_typed_actions(
+          "typed_action_semantic_fast_escalated", semantic_detail)
+        if Net._typed_retry_stops_response(fired, reason) then return end
       end
       if (S.typed_action_semantic_validator_retries or 0)
           < (type(typed_action_profile) == "table"
@@ -57184,19 +59111,20 @@ function Net.try_finish_curl()
         })
         return
       end
-      if Net._try_escalate_typed_actions(
-          "typed_action_semantic_retry_failed", semantic_detail) then
-        return
+      do
+        local fired, reason = Net._try_escalate_typed_actions(
+          "typed_action_semantic_retry_failed", semantic_detail)
+        if Net._typed_retry_stops_response(fired, reason) then return end
       end
       local allows_lua_fallback =
         type(Code.typed_action_semantic_detail_allows_lua_fallback)
           == "function"
         and Code.typed_action_semantic_detail_allows_lua_fallback(
           semantic_detail, S.pending_orig_prompt or "")
-      if allows_lua_fallback
-         and Net._try_typed_action_lua_fallback(
-           "typed_action_semantic_exhausted", semantic_detail) then
-        return
+      if allows_lua_fallback then
+        local fired, reason = Net._try_typed_action_lua_fallback(
+          "typed_action_semantic_exhausted", semantic_detail)
+        if Net._typed_retry_stops_response(fired, reason) then return end
       end
       typed_action_semantic_block_reason = semantic_detail
       typed_action_metrics.valid = false
@@ -57368,24 +59296,6 @@ function Net.try_finish_curl()
         .. "tag. Just deliver the correct code with a normal brief "
         .. "description, as if you had gotten it right on the first try.)\n\n"
         .. "USER REQUEST:\n" .. (S.pending_orig_prompt or "")
-
-      -- Scrub the bad turn from history before firing the retry. By the
-      -- time the gate runs, the response handler has already appended
-      -- the assistant entry, so S.history tail is:
-      --    [..., user_original, assistant_bad]
-      -- We pop BOTH so the retry sees a clean prefix, then append the
-      -- enriched user message. Without popping the assistant, the retry
-      -- body carries the guessed code as a prior assistant turn, which
-      -- (a) poisons prefix caching across retries and (b) fights the
-      -- "respond as if this is your first reply" nudge by leaving an
-      -- earlier reply visible in history.
-      if #S.history > 0 and S.history[#S.history].role == "assistant" then
-        S.history[#S.history] = nil
-      end
-      if #S.history > 0 and S.history[#S.history].role == "user" then
-        S.history[#S.history] = nil
-      end
-      S.history[#S.history+1] = { role = "user", content = history_content }
 
       -- Reflect the docs inject in the pending user bubble's Show
       -- Details chip so the user can see (if they look) that docs
@@ -59363,6 +61273,12 @@ function Net.try_finish_curl()
           user_lines[#user_lines+1] =
             "line " .. tostring(e.create_line)
             .. " uses multiple assignment for CreateTrackSend"
+        elseif e.kind == "duplicate" then
+          user_lines[#user_lines+1] =
+            "lines " .. tostring(e.create_line)
+            .. " and " .. tostring(e.set_line)
+            .. " both create a send from `" .. tostring(e.source)
+            .. "` to `" .. tostring(e.dest) .. "`"
         elseif e.kind == "zero_check" then
           user_lines[#user_lines+1] =
             "line " .. tostring(e.set_line)
@@ -60132,6 +62048,43 @@ function Net.try_finish_curl()
     end
   end
 
+  -- FX-REPLACEMENT VALIDATOR: preserve fxident priority and the shared fxcheck
+  -- repair budget. A checked AddByName cannot undo an earlier FX deletion.
+  if lua_code and not docs_gate_hit and not validator_gate_hit
+      and not arity_gate_hit and not sendidx_gate_hit
+      and not timecode_workflow_gate_hit and not timecodefx_gate_hit
+      and not fxcheck_gate_hit and not fxident_gate_hit
+      and type(Code.find_fx_delete_before_create) == "function" then
+    local unsafe = Code.find_fx_delete_before_create(lua_code)
+    if unsafe and #unsafe > 0 then
+      local affected = {}
+      for _, row in ipairs(unsafe) do
+        affected[#affected + 1] = row.family .. " FX on " .. row.target
+          .. ": delete line " .. row.line .. ", add line " .. row.add_line
+      end
+      if (S.fxcheck_validator_retries or 0) < 1 then
+        S.fxcheck_validator_retries = (S.fxcheck_validator_retries or 0) + 1
+        Net.fire_validator_retry({
+          kind = "fxcheck",
+          ctx_label = "fxcheck_retry",
+          history_content = "(INTERNAL NOTE TO THE MODEL: The script deletes an existing FX before creating its replacement. Rewrite the complete action and its visible explanation. Create a new instance first with a negative instantiate value, immediately raise an error if creation fails, verify its identity and placement, then delete the old instance. On placement failure preserve the old effect and remove only the newly created instance. Preserve old settings until replacement admission. Refresh indices after moves; process multiple replacements backwards. Never use a search result as a newly created replacement, including same-identifier reinstalls. Do not mention this internal repair.)"
+            .. "\nAffected operations:\n" .. table.concat(affected, "\n")
+            .. "\n\n" .. (S.pending_output_note or "")
+            .. "\nPrevious Lua to fix:\n```lua\n" .. lua_code .. "\n```"
+            .. "\nUSER REQUEST:\n" .. (S.pending_orig_prompt or ""),
+          retry_failed_key = "retry.reason.for_unsafe_fx_replacement",
+          retry_failed_label = "for unsafe FX replacement",
+          failure_message = "The effect replacement could not be repaired. Please resend the last message.",
+        })
+        return
+      end
+      fxcheck_gate_hit = true
+      Log.line("FX-CHECK-VALIDATOR", "unsafe replacement order persists; auto-run blocked")
+      Log.add_error(RA.t("validator.fx_replacement_order_blocked", nil,
+        "The script would remove an existing effect before confirming its replacement. Auto-run is blocked to protect the existing effect and its settings. Ask for a corrected script."))
+    end
+  end
+
   -- HELPER-DEFINITION VALIDATOR: Scan for
   -- helper function calls (find_param, set_param_display, set_param_enum,
   -- set_param_enum_paced) that lack a matching `local function NAME(`
@@ -60511,9 +62464,6 @@ function Net.try_finish_curl()
   end
 
   -- Auto-run handling.
-  local jsfx_auto_status = nil
-  local jsfx_saved_path_for_msg = nil   -- saved path to carry on the message
-  local jsfx_saved_fx_name_for_msg = nil -- FX ref name to carry on the message
   local auto_ran_ok = false             -- V5: flag for the AUTO-RAN pill below code
   local auto_run_block_reason = _turn_no_guess.protected and
     (_turn_no_guess.policy and "no_guess_mapping_validator" or "no_guess_execution_contract_invalid") or nil
@@ -60681,7 +62631,9 @@ function Net.try_finish_curl()
       end
     end
   end
-  local typed_defer = { probe_turn = S.probe_turn }
+  local typed_defer = { probe_turn = S.probe_turn,
+    generation = TypedActionController.next_typed_action_run(),
+    history_message = S.history[_asst_hist_idx] }
   typed_defer.runtime_code = Code.typed_actions_artifact_text(text,
     typed_action_response_format)
   typed_defer.runtime_hash = type(Code.plugin_profile_code_key) == "function"
@@ -60711,6 +62663,11 @@ function Net.try_finish_curl()
     if not (typed_defer.pending and typed_defer.done) then
       return
     end
+    if not TypedActionController.typed_action_run_is_current(
+        typed_defer.message, typed_defer.generation) then
+      typed_defer.pending = false
+      return
+    end
     typed_defer.pending = false
     typed_action_metrics.deferred_pending = nil
     typed_action_metrics.executed = typed_defer.ok == true
@@ -60719,7 +62676,11 @@ function Net.try_finish_curl()
     if completed_result and completed_result.action_results then
       typed_action_metrics.action_results = completed_result.action_results
     end
-    local dmsg = S.display_messages[typed_defer.message_idx]
+    local dmsg = typed_defer.message
+    local history_message
+    for _, entry in ipairs(S.history or {}) do
+      if entry == typed_defer.history_message then history_message = entry; break end
+    end
     if typed_defer.ok then
       auto_ran_ok = true
       typed_action_metrics.error = nil
@@ -60735,10 +62696,10 @@ function Net.try_finish_curl()
           Log.line("TYPED-ACTIONS", "executed " .. counts_text)
         end
       end
-      if S.history[_asst_hist_idx] then
-        S.history[_asst_hist_idx].run_status = "ran_ok"
-        S.history[_asst_hist_idx].code_bytes = 0
-        S.history[_asst_hist_idx].code_type  = "typed_actions"
+      if history_message then
+        history_message.run_status = "ran_ok"
+        history_message.code_bytes = 0
+        history_message.code_type  = "typed_actions"
       end
       if not typed_defer.pruned then
         Net.sticky_prune_after_plugin_success(_turn_user_intent,
@@ -60750,16 +62711,18 @@ function Net.try_finish_curl()
       typed_action_metrics.error =
         (typed_defer.result and typed_defer.result.code) or "execution_failed"
       explanation = Code.typed_actions_user_failure_message(typed_defer.result)
-      if S.history[_asst_hist_idx] then
-        S.history[_asst_hist_idx].run_status = "errored"
-        S.history[_asst_hist_idx].code_bytes = 0
-        S.history[_asst_hist_idx].code_type  = "typed_actions"
+      if history_message then
+        history_message.run_status = "errored"
+        history_message.code_bytes = 0
+        history_message.code_type  = "typed_actions"
       end
     end
     if dmsg then
+      TypedActionController.copy_typed_action_completion(dmsg, typed_defer.result)
       dmsg._typed_action_run_project = completed_result
         and completed_result._execution_project or nil
       dmsg.content = explanation
+      TypedActionController.append_typed_action_completion_notice(dmsg)
       dmsg.auto_ran = auto_ran_ok
       dmsg.typed_actions = typed_action_metrics
       dmsg.run_status = typed_defer.ok and "ran_ok" or "errored"
@@ -60825,7 +62788,13 @@ function Net.try_finish_curl()
       and typed_action_lua_generation == nil then
     if typed_action_ready then
       local skip_typed = false
-      if not Code.project_is_active(S.pending_project) then
+      if not typed_defer.generation then
+        auto_run_block_reason = "run_identity_unavailable"
+        typed_action_metrics.error = "run_identity_unavailable"
+        explanation = TypedActionController.t("typed_actions.error.run_identity", nil,
+          "This edit could not start. Restart ReaAssist and try again.")
+        skip_typed = true
+      elseif not Code.project_is_active(S.pending_project) then
         auto_run_block_reason = "project_changed"
         typed_action_metrics.error = "project_changed"
         explanation = "Structured edit validated, but auto-run was paused "
@@ -60886,6 +62855,7 @@ function Net.try_finish_curl()
         local exec_pending = exec_ok and exec_result
           and exec_result.deferred == true
           and exec_result.completed ~= true
+        if not typed_defer.done then typed_defer.result = exec_result end
         typed_defer.execution_project = exec_result
           and exec_result._execution_project or nil
         if exec_pending then
@@ -60981,42 +62951,9 @@ function Net.try_finish_curl()
       end
     end
 
-    -- JSFX: auto-save to Effects/ReaAssist/ folder ONLY when a Lua companion
-    -- block is also present (meaning the user asked for it on a track).
-    -- If the user just asked for an example, there is no Lua block and the
-    -- JSFX is displayed but not saved.
-    local jsfx_to_save = not _turn_no_guess.protected and (jsfx_code or (code_type == "jsfx" and code))
-    if jsfx_to_save and lua_code then
-      local saved_path, fx_name = Code.auto_save_jsfx(jsfx_to_save)
-      if saved_path then
-        jsfx_saved_path_for_msg = saved_path
-        jsfx_saved_fx_name_for_msg = fx_name
-        -- Record the ceiling slot allocation for the host poll loop now
-        -- that we have a real on-disk file path to associate with it.
-        -- (Pre-injection bails left ceiling_inject_info nil, so this
-        -- no-ops on bail.)
-        if ceiling_inject_info then
-          Code.ceiling_record_slot(ceiling_inject_info, saved_path,
-            ceiling_inject_info.desc)
-        end
-        -- Patch the Lua companion to use the actual saved filename (may have a
-        -- numeric suffix if a file with the original name already existed).
-        if lua_code and fx_name and Code.rewrite_lua_companion_jsfx_refs then
-          lua_code = Code.rewrite_lua_companion_jsfx_refs(
-            lua_code, jsfx_to_save, fx_name)
-        end
-        if lua_code then
-          jsfx_auto_status = (RA and RA.t and RA.t("jsfx.done", nil,
-            "Done.")) or "Done."
-        else
-          jsfx_auto_status = (RA and RA.t and RA.t("jsfx.saved_to",
-            { path = saved_path }, "JSFX saved to " .. saved_path))
-            or ("JSFX saved to " .. saved_path)
-        end
-      end
-    end
-    -- Lua: auto-run (handles both standalone Lua and JSFX companion scripts).
-    local run_lua = not _turn_no_guess.protected and (lua_code or (code_type == "lua" and code))
+    -- JSFX cards never execute companion scripts, even if extraction changes.
+    local run_lua = not _turn_no_guess.protected and not jsfx_code
+      and (lua_code or (code_type == "lua" and code))
     if run_lua then
       S.pending_code = run_lua
       local skip_run = false
@@ -61155,11 +63092,9 @@ function Net.try_finish_curl()
       end
       local auto_risk = (not skip_run) and Code.scan_risky(run_lua) or nil
       if auto_risk then
-        auto_run_block_reason = "risky_code_confirmation"
-        S.risky_warn_code   = run_lua
-        S.risky_warn_idx    = #S.display_messages + 1
-        S.risky_warn_detail = auto_risk
-        S.open_risky_warn   = true
+        auto_run_block_reason = select(2, TypedActionController.stage_visual_lua_confirmation(
+          "risky", nil, #S.display_messages + 1, run_lua, auto_risk,
+          S.pending_project, true))
         skip_run = true
         if S.history[_asst_hist_idx] then
           S.history[_asst_hist_idx].run_status = "manual_run"
@@ -61167,10 +63102,9 @@ function Net.try_finish_curl()
       elseif not skip_run and prefs.auto_backup then
         local _, berr = Code.safety_backup()
         if berr == "unsaved" then
-          auto_run_block_reason = "backup_required"
-          S.backup_warn_code = run_lua
-          S.backup_warn_idx  = #S.display_messages + 1
-          S.open_backup_warn = true
+          auto_run_block_reason = select(2, TypedActionController.stage_visual_lua_confirmation(
+            "backup", nil, #S.display_messages + 1, run_lua, nil,
+            S.pending_project, true))
           skip_run = true
           if S.history[_asst_hist_idx] then
             S.history[_asst_hist_idx].run_status = "manual_run"
@@ -61322,6 +63256,11 @@ function Net.try_finish_curl()
     _turn_no_guess.parameter_targets, _turn_no_guess.parameter_context =
       Code.plugin_parameter_targets(_turn_user_intent, S.history)
   end
+  -- Explain why the companion disappeared before publishing the JSFX card.
+  if code_type == "jsfx" and _turn_no_guess.jsfx_companion_ignored then
+    explanation = (explanation or "") .. "\n\n" .. RA.t("jsfx.companion_ignored", nil,
+      "An extra script was omitted and did not run. Use the effect card to save or add the JSFX. Request other project changes separately.")
+  end
   S.display_messages[#S.display_messages+1] = {
     role       = "assistant",
     content    = explanation,
@@ -61355,11 +63294,7 @@ function Net.try_finish_curl()
         and type(Diag.sanitize_request_status) == "function"
         and Diag.sanitize_request_status(dmsg.request_status) or nil
     end)(),
-    transport_events = (function()
-      local dmsg = S.pending_display_idx
-        and S.display_messages[S.pending_display_idx] or nil
-      return dmsg and dmsg.transport_events or nil
-    end)(),
+    transport_events = Log.take_pending_transport_events(true),
     provider_id     = (function()
       local _p = PROVIDERS[S.pending_provider_idx] or PROVIDERS.active()
       return _p and _p.id or nil
@@ -61402,9 +63337,6 @@ function Net.try_finish_curl()
       or (jsfx_code and lua_code) or nil,  -- store companion for manual run
     lua_artifact    = code_type == "lua" and lua_artifact_info or nil,
     lua_companion_artifact = jsfx_code and lua_code and lua_artifact_info or nil,
-    jsfx_auto_saved = jsfx_auto_status,               -- status text from auto-save
-    jsfx_saved_path = jsfx_saved_path_for_msg,        -- path if already saved (avoids re-save)
-    jsfx_saved_fx_name = jsfx_saved_fx_name_for_msg,  -- FX ref name if already saved
     ceiling_injected = ceiling_inject_info ~= nil or nil,
     ceiling_inject_info = ceiling_inject_info,
     jsfx_user_text = jsfx_code and _turn_user_intent or nil,
@@ -61435,7 +63367,8 @@ function Net.try_finish_curl()
       if auto_run_block_reason
          and auto_run_block_reason ~= "auto_run_disabled"
          and auto_run_block_reason ~= "reusable_action_manual_only"
-         and auto_run_block_reason ~= "typed_action_lua_generation_only" then
+         and auto_run_block_reason ~= "typed_action_lua_generation_only"
+         and auto_run_block_reason ~= "confirmation_pending" then
         return "blocked"
       end
       if _rs == "semantic_incomplete"
@@ -61471,7 +63404,8 @@ function Net.try_finish_curl()
       if auto_run_block_reason
          and auto_run_block_reason ~= "auto_run_disabled"
          and auto_run_block_reason ~= "reusable_action_manual_only"
-         and auto_run_block_reason ~= "typed_action_lua_generation_only" then
+         and auto_run_block_reason ~= "typed_action_lua_generation_only"
+         and auto_run_block_reason ~= "confirmation_pending" then
         return auto_run_block_reason
       end
       if midi_input_gate_hit then
@@ -61509,12 +63443,10 @@ function Net.try_finish_curl()
   do
     local dmsg = S.display_messages[#S.display_messages]
     if dmsg then
-      if S.backup_warn_idx == #S.display_messages and S.backup_warn_code then
-        S.backup_warn_message = dmsg
-      end
-      if S.risky_warn_idx == #S.display_messages and S.risky_warn_code then
-        S.risky_warn_message = dmsg
-      end
+      TypedActionController.attach_visual_lua_confirmation("backup", dmsg,
+        #S.display_messages, auto_run_block_reason)
+      TypedActionController.attach_visual_lua_confirmation("risky", dmsg,
+        #S.display_messages, auto_run_block_reason)
       if dmsg.code_block then
         dmsg.generated_code = Code.generated_code_descriptor(
           dmsg.code_block, dmsg.code_type)
@@ -61669,6 +63601,15 @@ function Net.try_finish_curl()
     end
   end
   typed_defer.message_idx = #S.display_messages
+  typed_defer.message = S.display_messages[typed_defer.message_idx]
+  if typed_defer.message then
+    typed_defer.message._typed_action_run_generation = typed_defer.generation
+    if typed_defer.result and not typed_defer.pending then
+      TypedActionController.copy_typed_action_completion(
+        typed_defer.message, typed_defer.result)
+      TypedActionController.append_typed_action_completion_notice(typed_defer.message)
+    end
+  end
   if lua_defer_pending and type(S.lua_defer_run) == "table" then
     if type(S.lua_defer_run.bind) == "function" then
       S.lua_defer_run.bind(#S.display_messages, _asst_hist_idx, true,
@@ -61723,6 +63664,7 @@ function Net.try_finish_curl()
   -- S.pending_code alone since that carries generated Lua the user may still
   -- want to Run manually.
   S.pending_orig_prompt = nil
+  S.pending_recovery_original_prompt = nil
   S.pending_typed_action_expected = false
   S.pending_typed_action_response_format = false
   S.pending_typed_action_profile = nil
@@ -61797,7 +63739,27 @@ function RA.delete_extstate_key_all(ns, key)
   reaper.DeleteExtState(ns, key, true)
 end
 
+function RA.prepare_theme_backup_clear()
+  local manifest_ok, manifest = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__KEYS")
+  local journal_ok, journal = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__RESTORE")
+  if manifest_ok and manifest == "" and journal_ok and journal == "" then return true end
+  local ok, _, err, result = pcall(function() return Theme.restore_backups() end)
+  if not ok or err or (result and result.pending > 0) then
+    return false, (ok and err) or RA.t("code.theme_error.restore_pending", nil,
+      "Theme recovery is incomplete. Saved colors were kept for retry.")
+  end
+  manifest_ok, manifest = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__KEYS")
+  journal_ok, journal = pcall(reaper.GetExtState, "ReaAssist", "ThemeBackup__RESTORE")
+  if not manifest_ok or manifest ~= "" or not journal_ok or journal ~= "" then
+    return false, RA.t("code.theme_error.restore_pending", nil,
+      "Theme recovery is incomplete. Saved colors were kept for retry.")
+  end
+  return true, result and result.warning
+end
+
 function RA.clear_theme_backup_extstate()
+  local recovered, recovery_err = RA.prepare_theme_backup_clear()
+  if not recovered then return false, recovery_err end
   local ns = "ReaAssist"
   local manifest = reaper.GetExtState(ns, "ThemeBackup__KEYS")
   if manifest ~= "" then
@@ -61810,6 +63772,7 @@ function RA.clear_theme_backup_extstate()
   end
   RA.delete_extstate_key_all(ns, "ThemeBackup__KEYS")
   RA.delete_extstate_section(ns)
+  return true
 end
 
 function RA.ensure_factory_reset_temp_dir(factory_reset_data_dir_cleared)
@@ -61826,8 +63789,11 @@ end
 function RA.factory_reset_execute(opts)
   opts = opts or {}
   local keep_screen_reader = opts.keep_screen_reader == true
-  pcall(Theme.restore_backups)
-  pcall(RA.clear_theme_backup_extstate)
+  local recovered, recovery_err = RA.clear_theme_backup_extstate()
+  if not recovered then
+    reaper.ShowMessageBox(recovery_err, "ReaAssist", 0)
+    return false, recovery_err
+  end
   pcall(Custom.unregister_all)
   pcall(Net.gemini_cache_invalidate)
 
@@ -61847,7 +63813,7 @@ function RA.factory_reset_execute(opts)
   prefs.auto_backup           = true
   prefs.show_details          = false
   prefs.custom_instructions_enabled = false
-  prefs.debug_logging         = true
+  prefs.debug_logging         = false
   prefs.include_api_ref       = false
   prefs.include_snapshot      = true
   prefs.update_check          = true
@@ -62033,6 +63999,8 @@ function RA.factory_reset_execute(opts)
   end
   FXCache.invalidate()
   api_keys.screen     = "tos"
+  api_keys.visual_home_entered = false
+  api_keys.staged_reasoning_display_mode = nil
   api_keys.is_reentry = false
   S.refocus_prompt = true
   if I18N and I18N.set_language_code then
@@ -64189,15 +66157,113 @@ end
 -- lock, and the whole point of the second ask is that it can see an instance
 -- that started since the first. Without the reset it would answer with the
 -- first walk's listing, which is the one answer this gate must never give.
+-- Explicit recovery authority stays in this closure. Public review objects are
+-- display data and cannot create authority by changing their eligibility flags.
+do
+  local issued = setmetatable({}, { __mode = "k" })
+  local function same_review(review, captured)
+    if type(review) ~= "table" or getmetatable(review) ~= nil or type(review.records) ~= "table"
+        or getmetatable(review.records) ~= nil or review.error ~= captured.error
+        or #review.records ~= #captured.records then return false end
+    for i, rec in ipairs(captured.records) do
+      local shown = review.records[i]
+      if type(shown) ~= "table" or getmetatable(shown) ~= nil or shown.path ~= rec.path or shown.suffix ~= rec.suffix
+          or shown.raw ~= rec.raw or shown.kind ~= rec.kind or shown.eligible ~= rec.eligible
+          or shown.reason ~= rec.reason or type(shown.dependencies) ~= "table" or getmetatable(shown.dependencies) ~= nil
+          or #shown.dependencies ~= #rec.dependencies then return false end
+      for j, path in ipairs(rec.dependencies) do if shown.dependencies[j] ~= path then return false end end
+    end
+    return true
+  end
+  function Updater.legacy_instance_review()
+    local review, captured = { records = {} }, { records = {} }
+    local files, complete = RA.cleanup_file_snapshot(RA.TEMP_DIR, true)
+    local inventory = RA.instance_dependency_inventory()
+    if not complete then review.error = "Instance listing is incomplete. No records can be cleared." end
+    for _, name in ipairs(files) do
+      local suffix = name:match("^reaassist_life_(inst_[%w%-_]+)%.lock$")
+      if suffix and suffix ~= RA.instance_file_suffix() then
+        local path = RA.temp_life_path(suffix)
+        local raw = RA.read_instance_marker(path, 4096)
+        local kind = raw and RA.recoverable_instance_kind(raw, suffix)
+        if kind then
+          local eligible, reason, dependencies = RA.recoverable_instance_status(suffix, raw, inventory)
+          if not complete then eligible, reason = false, "incomplete" end
+          local rec = {path=path, suffix=suffix, raw=raw, kind=kind,
+            eligible=eligible, reason=reason, dependencies=dependencies}
+          local copy = {path=path, suffix=suffix, raw=raw, kind=kind,
+            eligible=eligible, reason=reason, dependencies={}}
+          for i, dep in ipairs(dependencies) do copy.dependencies[i] = dep end
+          review.records[#review.records+1], captured.records[#captured.records+1] = rec, copy
+        end
+      end
+    end
+    captured.error = review.error
+    issued[review] = captured
+    return review
+  end
+  function Updater.clear_legacy_instance_records(review, selected, attested)
+    local result = { ok=false, cleared={} }
+    local function fail(message, path) result.message, result.path = message, path; return result end
+    local captured = type(review) == "table" and issued[review]
+    if attested ~= true then return fail("Confirm that every other session sharing this folder is closed.") end
+    if not captured or not same_review(review, captured) or captured.error then return fail("The review changed or is incomplete. Review the records again.") end
+    if type(selected) ~= "table" or getmetatable(selected) ~= nil
+        or (Updater.is_busy and Updater.is_busy()) then return fail("ReaAssist is busy or the selection is invalid.") end
+    local approved, known = {}, {}
+    for _, rec in ipairs(captured.records) do known[rec.path] = rec end
+    for path, value in pairs(selected) do
+      if value ~= true or not known[path] or not known[path].eligible then return fail("The selection contains an unapproved record.", tostring(path)) end
+    end
+    for _, rec in ipairs(captured.records) do if selected[rec.path] == true then approved[#approved+1] = rec end end
+    if #approved == 0 then return fail("Select a reviewed record to clear.") end
+    local inventory = RA.instance_dependency_inventory()
+    local function check(rec)
+      if rec.path ~= RA.temp_life_path(rec.suffix) or RA.read_instance_marker(rec.path, 4096) ~= rec.raw then
+        return false, "The instance record changed or cannot be read."
+      end
+      local ok = RA.recoverable_instance_status(rec.suffix, rec.raw, inventory)
+      if not ok then return false, "The record has live evidence, dependencies, or an incomplete scan." end
+      if RA.read_instance_marker(rec.path, 4096) ~= rec.raw or RA.temp_instance_is_live(rec.suffix) then
+        return false, "The instance record changed or became active."
+      end
+      return true
+    end
+    -- Validate the whole selection before the first removal, then revalidate
+    -- each captured record at its mutation boundary. No companion is removed.
+    for _, rec in ipairs(approved) do
+      local ok, why = check(rec)
+      if not ok then return fail(why, rec.path) end
+    end
+    -- One final shared snapshot catches changes during whole-selection
+    -- preflight. Per-record boundaries recheck mutable lock protocols below.
+    inventory = RA.instance_dependency_inventory()
+    for _, rec in ipairs(approved) do
+      if not same_review(review, captured) then return fail("The review changed. Review the remaining records again.", rec.path) end
+      local ok, why = check(rec)
+      if not ok then return fail(why, rec.path) end
+      if not RA.instance_dependency_boundary(rec.suffix, inventory) then
+        return fail("Ownership dependencies changed or could not be checked. Review the remaining records again.", rec.path)
+      end
+      if RA.read_instance_marker(rec.path, 4096) ~= rec.raw or RA.temp_instance_is_live(rec.suffix) then
+        return fail("The instance record changed or became active.", rec.path)
+      end
+      local removed, answer = pcall(os.remove, rec.path)
+      if not removed or not answer then return fail("Removal was not confirmed. Review the remaining records again.", rec.path) end
+      result.cleared[#result.cleared+1] = rec.path
+    end
+    issued[review] = nil
+    result.ok = true
+    return result
+  end
+end
+
 function Updater.uninstall_foreign_instances()
   local out = {}
-  if type(reaper.EnumerateFiles) ~= "function" then return out end
   local mine = RA.instance_file_suffix()
-  pcall(reaper.EnumerateFiles, RA.TEMP_DIR, -1)
-  local idx = 0
-  while true do
-    local fn = reaper.EnumerateFiles(RA.TEMP_DIR, idx)
-    if not fn then break end
+  local files, complete = RA.cleanup_file_snapshot(RA.TEMP_DIR, true)
+  if not complete then out[#out + 1] = { instance="instance listing incomplete", verdict="unknown" } end
+  for _, fn in ipairs(files) do
     local suffix = fn:match("^reaassist_life_(inst_[%w%-_]+)%.lock$")
     if suffix and suffix ~= mine then
       local verdict = "unknown"
@@ -64208,7 +66274,6 @@ function Updater.uninstall_foreign_instances()
         out[#out + 1] = { instance = suffix, verdict = verdict }
       end
     end
-    idx = idx + 1
   end
   return out
 end
@@ -64222,7 +66287,7 @@ end
 -- removal. The first is advice about a moment that has passed by the time it
 -- is read; the second is taken with the lock held, and while that lock is held
 -- no other body writes a journal, quarantines a record, or applies anything.
-function Updater.uninstall_blockers()
+function Updater.uninstall_blockers(surface)
   local out = {}
   local layout_ok, layout_why = Updater.uninstall_layout()
   if not layout_ok then
@@ -64253,21 +66318,38 @@ function Updater.uninstall_blockers()
   end
   local others = Updater.uninstall_foreign_instances()
   if #others > 0 then
-    local names = {}
+    local names, ambiguous = {}, false
     for _, rec in ipairs(others) do
       names[#names + 1] = tostring(rec.instance) .. " (" .. tostring(rec.verdict) .. ")"
+      if rec.verdict ~= "alive" then ambiguous = true end
     end
     out[#out + 1] = {
       code = "instance",
       detail = table.concat(names, ", "),
-      message = Updater.uninstall_t("blocked.instance",
+      message = Updater.uninstall_t(ambiguous and (surface == "screen_reader"
+          and "blocked.instance_unresolved_sr" or "blocked.instance_unresolved") or "blocked.instance",
         { names = table.concat(names, "\n") },
         "Another copy of ReaAssist is open on this install, or one "
         .. "was open and ReaAssist cannot prove it has closed. Removing the "
         .. "program while it is running there would break that session, so "
-        .. "nothing was changed.\n\nClose ReaAssist in every other REAPER "
-        .. "window, then start the uninstall again.\n\nReaAssist read this "
-        .. "from:\n" .. table.concat(names, "\n")),
+        .. "nothing was changed."
+        .. (ambiguous and ((surface == "screen_reader"
+            and "\n\nClose any ReaAssist sessions using this folder. "
+              .. "Instance record review is available only in the standard ReaAssist interface. "
+              .. "Open Uninstall there and choose Review instance records. "
+              .. "Screen Reader Mode cannot review or clear these records. "
+            or "\n\nClose any ReaAssist sessions using this folder, then choose Review instance records. ")
+          .. "Only eligible records can be "
+          .. "cleared after your confirmation. Some records may remain protected "
+          .. "until their ownership or dependent files can be verified.")
+          or "\n\nClose ReaAssist in every other REAPER window, then start the uninstall again.")
+        .. "\n\nReaAssist read this "
+        .. "from:\n" .. table.concat(names, "\n"))
+        .. (ambiguous and ("\n\n" .. Updater.uninstall_t("blocked.credential_retention", nil,
+          "ReaAssist preserved scratch whose owner it cannot verify. This may "
+          .. "include plaintext request credentials, even in instance-suffixed "
+          .. "files. They are not deleted by age. Close every session sharing "
+          .. "this folder before reviewing any retained files.")) or ""),
     }
   end
   local lock_path = Updater.uninstall_launcher_lock_path()
@@ -67161,6 +69243,7 @@ function Updater.uninstall_plan(opts)
   opts = opts or {}
   local plan = {
     remove_user_data = opts.remove_user_data == true,
+    surface = opts.surface == "screen_reader" and "screen_reader" or nil,
     package_dir = tostring(RA.PACKAGE_DIR or ""),
     app_dir = tostring(RA.APP_DIR or ""),
     data_dir = tostring(RA.DATA_DIR or ""),
@@ -67204,7 +69287,7 @@ function Updater.uninstall_plan(opts)
     if state == Updater.OWNERSHIP_UNKNOWN then plan.unknown_owner = true end
     plan.launchers[#plan.launchers + 1] = entry
   end
-  plan.blockers = Updater.uninstall_blockers()
+  plan.blockers = Updater.uninstall_blockers(plan.surface)
   return plan
 end
 
@@ -67473,7 +69556,7 @@ function Updater.uninstall_execute(plan)
     return result
   end
   result.plan = plan
-  local advisory = Updater.uninstall_blockers()
+  local advisory = Updater.uninstall_blockers(plan.surface)
   if #advisory > 0 then
     result.stopped = "blocked"
     result.blockers = advisory
@@ -67634,7 +69717,7 @@ function Updater.uninstall_execute(plan)
   result.marker_path = plan.marker_path
   -- The authoritative gate. Taken with the lock held, so no other body can
   -- write a journal or quarantine a record between this and the first removal.
-  local blockers = Updater.uninstall_blockers()
+  local blockers = Updater.uninstall_blockers(plan.surface)
   if #blockers > 0 then return stop("blocked", blockers) end
   -- The user's own override sits among the application files, so it is rescued
   -- BEFORE anything is removed. A refusal here costs nothing, because nothing
@@ -67705,6 +69788,15 @@ function Updater.uninstall_execute(plan)
         .. tostring(launcher_lock) .. "\n\nClose any other REAPER window that "
         .. "is starting ReaAssist and try again."),
     } })
+  end
+  -- Restore only after lock acquisition and the refusal checks above. This
+  -- still precedes removal of any files that could contain recovery data.
+  if plan.remove_user_data then
+    local recovered, recovery_err = RA.prepare_theme_backup_clear()
+    if not recovered then
+      return stop("theme_recovery", { { code = "theme_recovery", message = recovery_err } })
+    end
+    result.theme_warning = recovery_err
   end
   result.mutated = true
   -- Recovery is walked with no shape. It is the launcher's folder end to end,
@@ -67850,12 +69942,10 @@ function Updater.uninstall_execute(plan)
   -- file this process holds open, which the operating system will not release
   -- while ReaAssist is running.
   if plan.remove_user_data then
-    pcall(function()
-      if Theme and Theme.restore_backups then Theme.restore_backups() end
-    end)
-    pcall(function()
-      if RA.clear_theme_backup_extstate then RA.clear_theme_backup_extstate() end
-    end)
+    local recovered, recovery_err = RA.clear_theme_backup_extstate()
+    if not recovered then
+      return stop("theme_recovery", { { code = "theme_recovery", message = recovery_err } })
+    end
     pcall(function()
       if RA.delete_extstate_section then RA.delete_extstate_section(CFG.EXT_NS) end
     end)
@@ -68009,6 +70099,12 @@ function Updater.uninstall_result_copy(result)
   local function line(s) out[#out + 1] = s end
   local function t(key, values, fallback)
     line(Updater.uninstall_t(key, values, fallback))
+  end
+  local function theme_warning_block()
+    if type(result.theme_warning) == "string" and result.theme_warning ~= "" then
+      line("")
+      line(result.theme_warning)
+    end
   end
   -- A NOTE THAT WOULD NOT COME BACK OFF IS ITS OWN PROBLEM AND GETS ITS OWN
   -- PARAGRAPH, in both stopped shapes. Every refusal's copy ends by telling
@@ -68497,6 +70593,7 @@ function Updater.uninstall_result_copy(result)
     -- does. "Nothing was changed" is true of this run and says nothing about
     -- that, so this report says both rather than keeping one of them.
     claims_block()
+    theme_warning_block()
     return (table.concat(out, "\n"):gsub("%s+$", ""))
   end
   if result.stopped then
@@ -68556,6 +70653,7 @@ function Updater.uninstall_result_copy(result)
         .. "now. ReaAssist wrote each one down and puts it back the next time "
         .. "it starts, if its own name is free again.")
     end
+    theme_warning_block()
     line("")
     t("result.finish_by_hand", nil,
       "To finish by hand, close REAPER and delete this folder:")
@@ -68675,6 +70773,7 @@ function Updater.uninstall_result_copy(result)
       .. "asks whether to install ReaAssist again, and saying yes removes the "
       .. "note:\n  " .. tostring(result.marker_path))
   end
+  theme_warning_block()
   line("")
   t("result.close_and_finish", nil,
     "Close ReaAssist now. To finish by hand, close REAPER and delete this "
@@ -69785,6 +71884,10 @@ function Loop.handle_ceiling_poll()
 
   -- Cheap fast path: skip the new-mute scan when nothing has fired
   -- anywhere since the last poll.
+  if S._ceiling_alert_held and next(S._ceiling_muted_fx) == nil then
+    S._ceiling_alert_held = nil
+    S._ceiling_alert_pending = false
+  end
   local any_eng = reaper.gmem_read(Code.CEILING_GMEM_GLOBAL_ENG)
   if (any_eng or 0) == 0 then return end
 
@@ -69961,6 +72064,7 @@ end
 function Code.ceiling_diagnose_one(slot)
   local muted = S._ceiling_muted_fx and S._ceiling_muted_fx[slot]
   if not muted or not muted.file then return end
+  if (S.input_buf ~= nil and S.input_buf ~= "") or #S.attachments > 0 then return end
 
   -- Confirm file still exists before attempting attach (the user could
   -- have deleted it manually since the slot was recorded).
@@ -70001,6 +72105,7 @@ What's causing the runaway, and what specific change would fix it? Do NOT modify
   -- wouldn't be flagged "newly muted" by the poll loop.
   S._ceiling_muted_fx     = S._ceiling_muted_fx or {}
   S._ceiling_muted_fx[slot] = nil
+  S._ceiling_alert_held = next(S._ceiling_muted_fx) ~= nil or nil
 
   -- Close the popup so the user can see the chat with the attachment.
   S._ceiling_alert_pending = false
@@ -70170,11 +72275,89 @@ function TypedActionController.message_undo_sent(msg)
 end
 
 function TypedActionController.message_has_applied_typed_action(msg)
-  return TypedActionController.message_has_typed_actions(msg)
-    and not TypedActionController.message_undo_sent(msg)
-    and (msg.auto_ran == true
-      or msg.run_status == "ran_ok"
-      or TypedActionController.typed_action_has_results(msg))
+  if not TypedActionController.message_has_typed_actions(msg) then return false end
+  if msg._typed_action_apply_state == "none" then return false end
+  if msg._typed_action_apply_state == "changed"
+      or msg._typed_action_apply_state == "unknown" then return true end
+  -- Older cards have no mutation accounting. Preserve their applied status.
+  return msg.auto_ran == true or msg.run_status == "ran_ok"
+    or TypedActionController.typed_action_has_results(msg)
+end
+
+function TypedActionController.next_typed_action_run()
+  local previous = S._typed_action_run_sequence or 0
+  if type(previous) ~= "number" or previous ~= previous
+      or previous < 0 or previous % 1 ~= 0
+      or previous >= 9007199254740991 then return nil end
+  S._typed_action_run_sequence = previous + 1
+  return S._typed_action_run_sequence
+end
+
+function TypedActionController.typed_action_run_is_current(msg, generation)
+  if type(msg) ~= "table" or generation == nil
+      or msg._typed_action_run_generation ~= generation then return false end
+  for _, current in ipairs(S.display_messages or {}) do
+    if current == msg then return true end
+  end
+  return false
+end
+
+function TypedActionController.copy_typed_action_completion(msg, result)
+  local state = type(result) == "table" and result._typed_action_apply_state
+  if state ~= "none" and state ~= "changed" and state ~= "unknown" then
+    state = "unknown"
+  end
+  msg._typed_action_apply_state = state
+  -- The receipt stays on the displayed card, outside metrics and run_result.
+  msg._typed_action_undo_receipt = state ~= "none"
+    and type(result) == "table" and result._typed_action_undo_receipt or nil
+end
+
+function TypedActionController.typed_action_completion_text(msg)
+  if msg._typed_action_apply_state == "none" then
+    return TypedActionController.t("typed_actions.status.no_change", nil,
+      "No project changes were made.")
+  elseif msg._typed_action_apply_state == "unknown" then
+    return TypedActionController.t("typed_actions.status.effect_uncertain", nil,
+      "Changes may have been made, but could not be confirmed.")
+  end
+  return TypedActionController.t("a11y.sr.apply_action_plan_done", nil,
+    "Structured edit ran.")
+end
+
+function TypedActionController.append_typed_action_completion_notice(msg)
+  if msg._typed_action_apply_state == "none"
+      or msg._typed_action_apply_state == "unknown" then
+    local notice = TypedActionController.typed_action_completion_text(msg)
+    msg.content = tostring(msg.content or "")
+    if not msg.content:find(notice, 1, true) then
+      msg.content = msg.content == "" and notice or msg.content .. "\n\n" .. notice
+    end
+  end
+end
+
+function TypedActionController.typed_action_undo_failure_text(reason)
+  if reason == "undo_uncertain" then
+    return TypedActionController.t("typed_actions.undo.uncertain", nil,
+      "Undo may have run. Review REAPER history before continuing.")
+  elseif reason == "undo_refused" then
+    return TypedActionController.t("typed_actions.undo.refused", nil,
+      "REAPER did not complete Undo. You can try again.")
+  end
+  return TypedActionController.t("typed_actions.undo.not_available", nil,
+    "This edit's Undo entry is no longer available.")
+end
+
+function TypedActionController.undo_typed_action_message(msg)
+  if not TypedActionController.message_can_undo_generated_action(msg) then
+    return false, "unavailable"
+  end
+  local ok, reason = Code.undo_typed_action_receipt(msg._typed_action_undo_receipt)
+  if ok then
+    msg.typed_action_undo_clicked = true
+    -- Keep changed/unknown after Undo so native Redo cannot enable duplicate apply.
+  end
+  return ok, reason
 end
 
 function TypedActionController.message_can_undo_generated_action(msg)
@@ -70182,8 +72365,9 @@ function TypedActionController.message_can_undo_generated_action(msg)
   if TypedActionController.message_has_typed_actions(msg) then
     return TypedActionController.message_has_applied_typed_action(msg)
       and type(Code) == "table"
-      and type(Code.project_is_active) == "function"
-      and Code.project_is_active(msg._typed_action_run_project)
+      and type(Code.typed_action_receipt_can_undo) == "function"
+      and type(Code.undo_typed_action_receipt) == "function"
+      and Code.typed_action_receipt_can_undo(msg._typed_action_undo_receipt)
   end
   local code = TypedActionController.generated_code_text(msg)
   if code == "" then return false end
@@ -70196,8 +72380,118 @@ function TypedActionController.message_can_undo_generated_action(msg)
   return false
 end
 
+function TypedActionController.capture_run_confirmation(kind, msg, idx, code, flags, expected_project)
+  local project = reaper.EnumProjects(-1)
+  if expected_project ~= nil and project ~= expected_project then return nil end
+  local identity = Code.conversation_project_identity(project)
+  if not identity then return nil end
+  return {
+    kind = kind, message = msg, message_idx = idx, code = code,
+    source_request = msg and msg.source_request, project = identity, project_pointer = project,
+    confirm_risky = flags and flags.confirm_risky == true,
+    skip_backup = flags and flags.skip_backup == true,
+  }
+end
+
+function TypedActionController.run_confirmation_matches(binding, kind, msg, idx, code, opts)
+  if type(binding) ~= "table" or binding.consumed then return false end
+  local project = reaper.EnumProjects(-1)
+  local identity = Code.conversation_project_identity(project)
+  return identity ~= nil and binding.project == identity
+    and binding.kind == kind and binding.message == msg
+    and binding.message_idx == idx and binding.code == code
+    and binding.source_request == (msg and msg.source_request)
+    and S.display_messages and S.display_messages[idx] == msg
+    and binding.confirm_risky == (opts.confirm_risky == true)
+    and binding.skip_backup == (opts.skip_backup == true)
+end
+
+function TypedActionController.consume_run_confirmation(binding, kind, msg, idx, code, opts)
+  local matches = TypedActionController.run_confirmation_matches(binding, kind, msg, idx, code, opts)
+  if type(binding) == "table" then binding.consumed = true end
+  return matches
+end
+
+function TypedActionController.run_confirmation_refusal()
+  return false, "confirmation_changed", TypedActionController.t(
+    "a11y.sr.run_confirmation_changed", nil,
+    "Nothing ran. The action or project changed, or its confirmation expired. Run again to review it.")
+end
+
+function TypedActionController.clear_visual_run_confirmation(kind)
+  local prefix = kind .. "_warn_"
+  for _, field in ipairs({"code", "idx", "message", "detail", "opts", "jsfx"}) do
+    S[prefix .. field] = nil
+  end
+  S["open_" .. kind .. "_warn"] = nil
+  S["_" .. kind .. "_confirmation_active"] = nil
+  if kind == "backup" then
+    S.backup_warn_typed_idx, S.backup_warn_typed_opts = nil, nil
+  end
+end
+
+function TypedActionController.visual_run_confirmation_pending()
+  if S.screen_reader_mode then return S._screen_reader_run_confirm ~= nil end
+  return S.open_backup_warn or S._backup_confirmation_active
+    or S.open_risky_warn or S._risky_confirmation_active
+    or S._screen_reader_run_confirm ~= nil
+end
+
+function TypedActionController.stage_visual_lua_confirmation(kind, msg, idx, code,
+    detail, expected_project, from_response, accepted_risky)
+  if from_response and TypedActionController.visual_run_confirmation_pending() then
+    return false, "confirmation_pending"
+  end
+  if from_response and S.screen_reader_mode then
+    TypedActionController.clear_visual_run_confirmation("backup")
+    TypedActionController.clear_visual_run_confirmation("risky")
+    return true, kind == "risky" and "risky_code_confirmation" or "backup_required"
+  end
+  local opts = {confirm_risky = kind == "risky" or accepted_risky == true,
+    skip_backup = kind == "backup", awaiting_message = msg == nil}
+  opts.binding = TypedActionController.capture_run_confirmation(
+    "lua", msg, idx, code, opts, expected_project)
+  if not opts.binding then return false, "project_changed" end
+  TypedActionController.clear_visual_run_confirmation("backup")
+  TypedActionController.clear_visual_run_confirmation("risky")
+  local prefix = kind .. "_warn_"
+  S[prefix .. "code"], S[prefix .. "idx"], S[prefix .. "message"] = code, idx, msg
+  S[prefix .. "detail"], S[prefix .. "opts"] = detail, opts
+  S["open_" .. kind .. "_warn"] = true
+  return true, kind == "risky" and "risky_code_confirmation" or "backup_required"
+end
+
+function TypedActionController.attach_visual_lua_confirmation(kind, msg, idx, reason)
+  local prefix = kind .. "_warn_"
+  local opts = S[prefix .. "opts"]
+  local wanted = kind == "risky" and "risky_code_confirmation" or "backup_required"
+  if reason ~= wanted or not opts or not opts.awaiting_message then return end
+  local binding = opts.binding
+  if not binding or S[prefix .. "idx"] ~= idx or not msg
+      or S[prefix .. "code"] ~= msg.code_block then
+    TypedActionController.clear_visual_run_confirmation(kind)
+    return
+  end
+  local attached = TypedActionController.capture_run_confirmation("lua", msg,
+    idx, S[prefix .. "code"], opts, binding.project_pointer)
+  if not attached or attached.project ~= binding.project then
+    TypedActionController.clear_visual_run_confirmation(kind)
+    return
+  end
+  opts.binding, opts.awaiting_message = attached, nil
+  S[prefix .. "message"] = msg
+end
+
 function TypedActionController.apply_typed_action_message(msg, message_idx, opts)
   opts = opts or {}
+  local plan_text = TypedActionController.generated_code_text(msg)
+  if opts.binding or opts.skip_backup or opts.confirm_risky then
+    if opts.confirm_risky or not TypedActionController.consume_run_confirmation(
+        opts.binding, "typed", msg, message_idx, plan_text, opts) then
+      return TypedActionController.run_confirmation_refusal()
+    end
+  end
+
   if not TypedActionController.message_has_typed_actions(msg) then
     return false, "no_plan", TypedActionController.t(
       "a11y.sr.apply_action_plan_unavailable", nil,
@@ -70225,14 +72519,20 @@ function TypedActionController.apply_typed_action_message(msg, message_idx, opts
       "Structured edit executor is unavailable.")
   end
 
-  if prefs and prefs.auto_backup and not opts.skip_backup
-      and Code and Code.safety_backup then
+  local run_project = opts.binding and opts.binding.project_pointer or reaper.EnumProjects(-1)
+  local run_identity = Code.conversation_project_identity(run_project)
+  if not run_identity then return TypedActionController.run_confirmation_refusal() end
+  if prefs and prefs.auto_backup and Code and Code.safety_backup then
     local _, berr = Code.safety_backup()
-    if berr == "unsaved" then
+    if berr == "unsaved" and not opts.skip_backup then
+      local next_opts = { skip_backup = true }
+      next_opts.binding = TypedActionController.capture_run_confirmation(
+        "typed", msg, message_idx, plan_text, next_opts)
+      if not next_opts.binding then return TypedActionController.run_confirmation_refusal() end
       return false, "backup_unsaved", TypedActionController.t(
         "a11y.sr.apply_action_plan_backup_unsaved", nil,
-        "Auto-backup is on, but the project has not been saved.")
-    elseif not Code.safety_backup_can_proceed(berr) then
+        "Auto-backup is on, but the project has not been saved."), next_opts
+    elseif berr ~= "unsaved" and not Code.safety_backup_can_proceed(berr) then
       return false, "backup_failed", TypedActionController.t(
         "a11y.sr.apply_action_plan_backup_failed",
         { error = tostring(berr) },
@@ -70240,7 +72540,9 @@ function TypedActionController.apply_typed_action_message(msg, message_idx, opts
     end
   end
 
-  local plan_text = TypedActionController.generated_code_text(msg)
+  if Code.conversation_project_identity(reaper.EnumProjects(-1)) ~= run_identity then
+    return TypedActionController.run_confirmation_refusal()
+  end
   if plan_text == "" then
     return false, "no_plan", TypedActionController.t(
       "a11y.sr.apply_action_plan_unavailable", nil,
@@ -70252,12 +72554,25 @@ function TypedActionController.apply_typed_action_message(msg, message_idx, opts
   local profile = Code and Code.typed_actions_model_profile
     and Code.typed_actions_model_profile(msg.provider_id, msg.model_id) or nil
 
+  local run_generation = TypedActionController.next_typed_action_run()
+  if not run_generation then
+    return false, "run_identity_unavailable", TypedActionController.t(
+      "typed_actions.error.run_identity", nil,
+      "This edit could not start. Restart ReaAssist and try again.")
+  end
+  msg._typed_action_run_generation = run_generation
+  local completion_done = false
+
   local function apply_result(done_ok, exec_result)
+    if completion_done
+        or not TypedActionController.typed_action_run_is_current(msg, run_generation) then
+      return false
+    end
+    completion_done = true
     local completed_result = exec_result
       and (exec_result.result or exec_result) or nil
-    local applied_now = completed_result
-      and type(completed_result.action_results) == "table"
-      and #completed_result.action_results > 0
+    TypedActionController.copy_typed_action_completion(msg, exec_result)
+    local applied_now = msg._typed_action_apply_state ~= "none"
     msg.auto_run_block_reason = nil
     msg.typed_actions = msg.typed_actions or { present = true }
     msg.typed_actions.deferred_pending = nil
@@ -70278,9 +72593,7 @@ function TypedActionController.apply_typed_action_message(msg, message_idx, opts
       msg.error_debug = nil
       msg.runtime_error = nil
       msg.typed_actions.error = nil
-      msg.content = TypedActionController.t(
-        "a11y.sr.apply_action_plan_done", nil,
-        "Structured edit ran.")
+      msg.content = TypedActionController.typed_action_completion_text(msg)
       if type(Code.typed_actions_display_text) == "function" then
         msg.typed_action_summary = Code.typed_actions_display_text(plan_text,
           msg.typed_actions.action_results)
@@ -70320,20 +72633,22 @@ function TypedActionController.apply_typed_action_message(msg, message_idx, opts
       end
     end
     S.status = done_ok and "idle" or "error"
+    return true
   end
 
   S.status = "running"
   local exec_ok, exec_result = Code.execute_typed_actions_from_text(plan_text, {
+    expected_project = run_project,
     allow_raw_json = true,
     user_text = user_text,
     profile = profile,
     on_done = function(done_ok, done_result)
-      apply_result(done_ok == true, done_result)
+      if not apply_result(done_ok == true, done_result) then return end
       S.scroll_to_bottom = true
       S.refocus_prompt = true
     end,
   })
-  local exec_pending = exec_ok and exec_result
+  local exec_pending = not completion_done and exec_ok and exec_result
     and exec_result.deferred == true
     and exec_result.completed ~= true
   if exec_pending then
@@ -70349,11 +72664,12 @@ function TypedActionController.apply_typed_action_message(msg, message_idx, opts
   end
 
   apply_result(exec_ok == true, exec_result)
+  if not TypedActionController.typed_action_run_is_current(msg, run_generation) then
+    return false, "stale_completion"
+  end
   S.refocus_prompt = true
   if exec_ok then
-    return true, nil, TypedActionController.t(
-      "a11y.sr.apply_action_plan_done", nil,
-      "Structured edit ran.")
+    return true, nil, TypedActionController.typed_action_completion_text(msg)
   end
   return false, "execution_failed",
     Code.typed_actions_user_failure_message(exec_result)
@@ -70592,7 +72908,10 @@ local function loop()
           RA.context_unavailable_message("before rescanning FX parameters")
       end
     end
-    if deep_scan.active then CTX.cancel_deep_scan() end
+    if deep_scan.active then
+      CTX.cancel_deep_scan()
+      CTX.pump_deep_scan()
+    end
   end
 
   -- Refresh the running lock (instance_id|timestamp) once per second. The
@@ -70620,7 +72939,8 @@ local function loop()
   -- ambiguous (so persisted tier is nil) and a Google key is configured.
   -- Wait until no other curl is in flight before firing -- the tier test
   -- shares the curl plumbing and would no-op silently otherwise.
-  if S.gemini_auto_retest_pending and not S.curl_pid then
+  if S.gemini_auto_retest_pending and not S.curl_pid
+      and S.turn_budget_confirmation == nil then
     local p = PROVIDERS and PROVIDERS.active and PROVIDERS.active() or nil
     if p and p.id == "google" then
       S.gemini_auto_retest_pending = false
@@ -70634,7 +72954,8 @@ local function loop()
   -- can't trap the queue indefinitely -- surface the failure through
   -- the normal in-flight error path so the user gets a clear message
   -- instead of waiting forever.
-  if S.key_test_armed and not S.curl_pid then
+  if S.key_test_armed and not S.curl_pid
+      and S.turn_budget_confirmation == nil then
     local armed = S.key_test_armed
     if not api_keys.key_test_context_current(armed.origin,
         armed.generation, armed.screen_context) then
@@ -70849,45 +73170,20 @@ local function loop()
       reaper.DeleteExtState(CFG.EXT_NS, "running", false)
     end
     reaper.DeleteExtState(CFG.EXT_NS, "request_close", false)
-    -- Delete any hidden temp tracks still owned by in-flight scans so the
-    -- user's project doesn't end with a stray hidden track if they close
-    -- mid-scan or a second instance forces this one to exit.
-    local _inflight = {}
-    if pref_plugins.scan  and pref_plugins.scan.track  then _inflight[#_inflight+1] = pref_plugins.scan.track  end
-    if fx_cache_ui.rescan and fx_cache_ui.rescan.track then _inflight[#_inflight+1] = fx_cache_ui.rescan.track end
-    if S._fx_inspect_tmp  and S._fx_inspect_tmp.tr     then _inflight[#_inflight+1] = S._fx_inspect_tmp.tr     end
-    if deep_scan.tr                                    then _inflight[#_inflight+1] = deep_scan.tr             end
-    for _, _tr in ipairs(_inflight) do
-      if reaper.ValidatePtr2(0, _tr, "MediaTrack*") then
-        pcall(reaper.DeleteTrack, _tr)
-      end
+    if CTX and CTX.scan_cleanup_all then pcall(CTX.scan_cleanup_all) end
+    -- Clear aliases only. The lease registry owns track deletion and refresh release.
+    if pref_plugins.scan then
+      pref_plugins.scan.track, pref_plugins.scan.lease = nil, nil
+      pref_plugins.scan.active, pref_plugins.scan.phase = false, "idle"
     end
-    -- Release scan cleanup scopes. See the matching block in atexit (above)
-    -- for why refresh owners and undo owners are counted separately.
-    local _refresh_owners = 0
-    if pref_plugins.scan  and pref_plugins.scan.track  then _refresh_owners = _refresh_owners + 1 end
-    if fx_cache_ui.rescan and fx_cache_ui.rescan.track then _refresh_owners = _refresh_owners + 1 end
-    if S._fx_inspect_tmp                               then _refresh_owners = _refresh_owners + 1 end
-    local _undo_owners = 0
-    if pref_plugins.scan and pref_plugins.scan.undo_open then
-      _undo_owners = _undo_owners + 1
-      pref_plugins.scan.undo_open = false
+    if fx_cache_ui.rescan then
+      fx_cache_ui.rescan.track, fx_cache_ui.rescan.lease = nil, nil
+      fx_cache_ui.rescan.active, fx_cache_ui.rescan.phase = false, "idle"
     end
-    if fx_cache_ui.rescan and fx_cache_ui.rescan.undo_open then
-      _undo_owners = _undo_owners + 1
-      fx_cache_ui.rescan.undo_open = false
-    end
-    if S._fx_inspect_tmp and S._fx_inspect_tmp.undo_open then
-      _undo_owners = _undo_owners + 1
-      S._fx_inspect_tmp.undo_open = false
-    end
-    local _refreshes = _refresh_owners
-    if deep_scan._ui_refresh_released then _refreshes = _refreshes - 1 end
-    if _refreshes < 0 then _refreshes = 0 end
-    for _ = 1, _refreshes do pcall(reaper.PreventUIRefresh, -1) end
-    for _ = 1, _undo_owners do
-      pcall(reaper.Undo_EndBlock, "ReaAssist: scan (closed at exit)", 0)
-    end
+    if fx_cache_ui.rescan_all then fx_cache_ui.rescan_all.active = false end
+    S._fx_inspect_tmp = nil
+    deep_scan.tr, deep_scan.lease, deep_scan.coro = nil, nil, nil
+    deep_scan.active, deep_scan.on_complete, deep_scan.on_cancel = false, nil, nil
   end
 end
 
@@ -70934,6 +73230,7 @@ function RA.pump_screen_reader_background()
       CTX.pump_deep_scan()
     elseif CTX.cancel_deep_scan then
       CTX.cancel_deep_scan()
+      if CTX.pump_deep_scan then CTX.pump_deep_scan() end
     end
   end
   if Updater and update then

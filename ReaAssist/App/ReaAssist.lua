@@ -4456,7 +4456,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.6.2", -- public release version
+  VERSION           = "1.6.3", -- public release version
   -- OpenRouter ships as dormant, tested plumbing in 1.6.0. The redesigned
   -- webview release enables its advanced-user UI in 2.0.0. Keep this false
   -- until that release so saved development keys or selections cannot expose
@@ -5003,6 +5003,7 @@ S = {
   retry_saved_provider_idx = nil,
   retry_saved_model_idx    = nil,
   retry_saved_thinking_idx = nil,
+  retry_saved_native_seed  = nil,     -- Engine seed for an Engine-origin retry
   schannel_revocation_retry_pending = false,
   schannel_revocation_retry_used = false,
   schannel_revocation_original_error = nil,
@@ -40013,6 +40014,7 @@ function Net.cancel_active_request(probe_reason)
   S.retry_saved_provider_idx = nil
   S.retry_saved_model_idx    = nil
   S.retry_saved_thinking_idx = nil
+  S.retry_saved_native_seed = nil
   S.engine_revising = false
   S.last_response_was_streamed = false
   Net._drop_engine_provisional()
@@ -40062,6 +40064,7 @@ function Net._abort_runaway_turn(probe_reason)
   S.retry_saved_provider_idx = nil
   S.retry_saved_model_idx    = nil
   S.retry_saved_thinking_idx = nil
+  S.retry_saved_native_seed = nil
   if Net._clear_schannel_revocation_retry then
     Net._clear_schannel_revocation_retry()
   end
@@ -43791,6 +43794,14 @@ function Net._retry_body_for_launch(body, engine_documents, engine_handle,
       and engine_start_failure == nil then
     return nil
   end
+  -- A started Engine dispatch consumes its image handles, so a scheduled
+  -- retry could only refuse after its countdown. Show the provider error now.
+  local media = type(engine_documents) == "table"
+    and engine_documents.input_media_handles or nil
+  if type(media) == "table" and #media > 0
+      and type(engine_handle) == "table" and engine_start_failure == nil then
+    return nil
+  end
   return body
 end
 
@@ -44109,6 +44120,13 @@ function Net.fire_curl(body, opts)
       and opts.native_seed.input_media_requires_engine == true
   if input_media_requires_engine and not engine_available then
     return false, engine_unavailable_reason or "input_media_engine_unavailable"
+  end
+  -- A scheduled retry of an Engine dispatch stays on the Engine. If its saved
+  -- seed no longer maps, the retry stops here; it never moves to curl.
+  if opts and opts.engine_lane_required == true and not engine_available then
+    local reason = engine_unavailable_reason or "engine_retry_unavailable"
+    Log.line("ENGINE", "scheduled Engine retry refused: " .. tostring(reason))
+    return false, reason
   end
   local requested_inputs, requested_outputs =
     Net._protocol_modality_capabilities(p, active_model, requested_protocol)
@@ -44452,11 +44470,16 @@ function Net.fire_curl(body, opts)
   S.pending_pricing_snapshot = dispatch_snapshot.pricing_snapshot
   S.timeout_extensions    = 0      -- watchdog clock just restarted; prior
                                    -- "Extend by Ns" clicks no longer apply
-  -- A cache-specific native start may already have reached the provider. Keep
-  -- automatic provider retries disabled for that immutable dispatch. A manual
-  -- resend takes a new cache snapshot and is the only permitted follow-up.
+  -- A cache-specific native start may already have reached the provider, and a
+  -- started image-handle dispatch has consumed its media. Net._retry_body_for_launch
+  -- keeps no automatic retry body for either. A manual resend is the only
+  -- permitted follow-up.
   S.retry_saved_body      = Net._retry_body_for_launch(
     body, engine_documents, engine_handle, engine_start_failure)
+  -- Keep the seed only for a retained Engine dispatch, so a scheduled retry
+  -- resends the same native request on the same lane. Curl stays curl.
+  S.retry_saved_native_seed = S.retry_saved_body ~= nil and engine_started
+    and opts and opts.native_seed or nil
   S.retry_saved_provider_idx = launch_provider_idx
   S.retry_saved_model_idx    = launch_model_idx
   S.retry_saved_thinking_idx = launch_thinking_idx
@@ -48327,6 +48350,7 @@ function Net._send_to_api_image_inner(user_text, opts)
   S.retry_saved_provider_idx = nil
   S.retry_saved_model_idx    = nil
   S.retry_saved_thinking_idx = nil
+  S.retry_saved_native_seed = nil
   Net._clear_schannel_revocation_retry()
 
   -- Capture current attachments and clear the queue before any early returns.
@@ -50061,6 +50085,7 @@ function Net.clear_conversation(opts)
   S.retry_saved_provider_idx = nil
   S.retry_saved_model_idx    = nil
   S.retry_saved_thinking_idx = nil
+  S.retry_saved_native_seed = nil
   Net._clear_schannel_revocation_retry()
   S.attachments          = {}
   S.attach_error         = nil
@@ -53358,6 +53383,7 @@ function Net._clear_terminal_curl_state()
   S.retry_saved_provider_idx = nil
   S.retry_saved_model_idx = nil
   S.retry_saved_thinking_idx = nil
+  S.retry_saved_native_seed = nil
   S.engine_revising = false
   S.last_response_was_streamed = false
   Net._drop_engine_provisional()
@@ -53683,7 +53709,10 @@ function Net._handle_curl_exit_failure()
   Net._clear_schannel_revocation_retry()
   if engine_provider_failure and engine_provider_http_status == 503
       and p_active.id == "google" then
-    if not engine_capacity_retry_safe then S.retry_saved_body = nil end
+    if not engine_capacity_retry_safe then
+      S.retry_saved_body = nil
+      S.retry_saved_native_seed = nil
+    end
     Net._handle_api_error(p_active, "503", nil, true, false)
     if not S.retry_scheduled then Net._clear_terminal_curl_state() end
     return true
@@ -54857,6 +54886,9 @@ function Net._fallback_engine_request_to_curl(status, policy, attempt)
   next_opts.model_idx = model_idx
   next_opts.thinking_idx = thinking_idx
   next_opts.engine_bypass = true
+  -- The guarded not-sent recovery applies to scheduled retries as it does to
+  -- first sends; the retry lane requirement covers only seed mapping.
+  next_opts.engine_lane_required = nil
   next_opts.engine_fallback_reason = reason
   next_opts.reuse_launch_accounting = true
   next_opts.transport_call_index = snapshot.call_index
@@ -56708,10 +56740,12 @@ function Net.try_finish_curl()
     -- The exclusions a no-code repair applies before it can spend a provider
     -- call, evaluated once: a protected no-guess turn, a reply that carries
     -- code, a typed-action turn, a turn that already spent its one no-code
-    -- retry, a question or read-only request, and a turn the context-loop
-    -- guard already declared terminal.
+    -- retry, a question or read-only request, a built-in starter card whose
+    -- prompt asks only for a prose capability overview, and a turn the
+    -- context-loop guard already declared terminal.
     local no_code_repair_allowed = not _turn_no_guess.protected and not lua_code
         and not jsfx_code
+        and not S.pending_starter_card_key
         and not early_typed_actions_present
         and not S.pending_typed_action_expected
         and not S.no_code_action_retry_used
@@ -72129,12 +72163,20 @@ function Loop.pump_curl_or_retry()
       })
       Code.safe_write(tmp.out, "")
       if S.retry_saved_body then
+        -- An Engine-origin retry resends its saved seed and must stay on the
+        -- Engine. The Schannel retry exists only for curl and keeps curl.
+        local retry_seed = not schannel_retry
+          and S.retry_saved_native_seed or nil
         local ok, reason = Net.fire_curl(S.retry_saved_body, {
           provider_idx = S.retry_saved_provider_idx,
           model_idx = S.retry_saved_model_idx,
           thinking_idx = S.retry_saved_thinking_idx,
           transport_retry = true,
           ssl_revoke_best_effort = schannel_retry,
+          native_seed = retry_seed,
+          engine_lane_required = retry_seed ~= nil or nil,
+          reasoning_display_mode = retry_seed
+            and retry_seed.reasoning_display_mode or nil,
         })
         if ok then
           S.status = "waiting"

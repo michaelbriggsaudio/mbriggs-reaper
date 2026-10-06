@@ -56,7 +56,7 @@ After installing, run the action "Script: ReaAssist.lua" from REAPER's Action Li
         <link rel="website" href="https://github.com/michaelbriggsaudio/mbriggs-reaper">GitHub Repository</link>
         <link rel="website" href="https://reaassist.app">ReaAssist Website</link>
       </metadata>
-      <version name="1.6.2" author="Michael Briggs" time="2026-10-06T15:45:54Z">
+      <version name="1.6.3" author="Michael Briggs" time="2026-10-06T21:53:51Z">
         <changelog><![CDATA[
 - Added GPT-6 Luna, GPT-6.1 Sol, and GPT-6 Astra, with updated cost estimates.
 
@@ -71,6 +71,8 @@ After installing, run the action "Script: ReaAssist.lua" from REAPER's Action Li
 - Improved provider error handling, including clearer API-key errors and recovery from incomplete or incompatible responses.
 
 - Updated network security components on macOS and Linux.
+
+- Improved helper engine stability.
         ]]></changelog>
         <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.6.2</source>
         <source main="main" file="ReaAssist_Screen_Reader_Mode.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist_Screen_Reader_Mode.lua?v=1.5.0</source>

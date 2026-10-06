@@ -1,6 +1,5 @@
 {
-  "version": "1.6.2",
-  "payload_ref": "74d17475b18717b4ea2250b03111e0546447509d",
+  "version": "1.6.3",
   "engine": {
     "schema": 1,
     "delivery": "shared-v1",
@@ -104,7 +103,7 @@
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "6b52cffba98c3d3dd859d9941e38584b5a38a59fe48de6745e11ee04fcb5e63a",
+      "sha256": "8771727438888a2a28e68a7c27da2b72584d071b2d4f9ada11ba3a819455192d",
       "critical": true
     },
     {

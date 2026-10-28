@@ -584,6 +584,11 @@ function CTX.tracks_from_snapshot_rows(count, rows, selected_rows, opts)
   local minimal = opts and opts.minimal
   local full = opts and opts.full
   local cap = (opts and opts.cap) or 60
+  -- Selected rows are rendered up to `cap` here. The full selection stays in
+  -- TARGET HINT when it is emitted, otherwise in the Selected tracks line, so
+  -- one complete list always remains. `selected_rows` is never modified.
+  local sel_note = CTX.selected_overflow_note(#selected_rows - cap,
+    opts and opts.hint_emitted)
   if minimal then
     if #selected_rows == 0 then
       return str_format(
@@ -595,7 +600,11 @@ function CTX.tracks_from_snapshot_rows(count, rows, selected_rows, opts)
         "Tracks (N=%d, showing selected only -- JSFX prompt) [idx|name|items|folder_delta]:",
         count),
     }
-    for _, row in ipairs(selected_rows) do out[#out + 1] = row.text end
+    for i, row in ipairs(selected_rows) do
+      if i > cap then break end
+      out[#out + 1] = row.text
+    end
+    if sel_note then out[#out + 1] = sel_note end
     return tbl_concat(out, "\n")
   end
   local lines = {
@@ -615,9 +624,12 @@ function CTX.tracks_from_snapshot_rows(count, rows, selected_rows, opts)
   local shown = 0
   for _, row in ipairs(selected_rows) do
     selected[row] = true
-    lines[#lines + 1] = row.text
-    shown = shown + 1
+    if shown < cap then
+      lines[#lines + 1] = row.text
+      shown = shown + 1
+    end
   end
+  if sel_note then lines[#lines + 1] = sel_note end
   local remaining_slots = cap - shown
   if remaining_slots < 0 then remaining_slots = 0 end
   for _, row in ipairs(rows) do
@@ -627,7 +639,10 @@ function CTX.tracks_from_snapshot_rows(count, rows, selected_rows, opts)
       remaining_slots = remaining_slots - 1
     end
   end
-  local omitted = count - shown
+  -- Selected rows hidden by the cap are reported by the note above, not here.
+  local hidden_selected = #selected_rows - cap
+  if hidden_selected < 0 then hidden_selected = 0 end
+  local omitted = count - shown - hidden_selected
   if omitted > 0 then
     lines[#lines + 1] = str_format(
       "(+%d more tracks omitted -- request <context_needed>tracks</context_needed> for the full track list if a hidden track name/index matters)",
@@ -636,15 +651,35 @@ function CTX.tracks_from_snapshot_rows(count, rows, selected_rows, opts)
   return tbl_concat(lines, "\n")
 end
 
-function CTX.selected_from_snapshot_rows(selected_rows)
+-- Note for selected rows a capped copy leaves out. `hidden` is the number of
+-- rows hidden; `hint_emitted` says whether TARGET HINT carries the full list.
+function CTX.selected_overflow_note(hidden, hint_emitted)
+  if not hidden or hidden <= 0 then return nil end
+  return str_format("(+%d more selected -- full list in %s)", hidden,
+    hint_emitted and "TARGET HINT" or "the Selected tracks line")
+end
+
+-- opts.hint_emitted: TARGET HINT is sent, so it holds the complete selection
+-- and this line renders at most opts.cap (default 60) rows. Without the hint
+-- this line is the one complete list and is never capped.
+function CTX.selected_from_snapshot_rows(selected_rows, opts)
   local selected = {}
+  local cap = (opts and opts.cap) or 60
+  local capped = opts and opts.hint_emitted
+  local total = 0
   for _, row in ipairs(selected_rows or {}) do
-    selected[#selected + 1] = str_format("%q (index %d)",
-      row.name or "", row.index or 0)
+    total = total + 1
+    if not capped or total <= cap then
+      selected[#selected + 1] = str_format("%q (index %d)",
+        row.name or "", row.index or 0)
+    end
   end
-  return #selected > 0
-    and ("Selected tracks: " .. tbl_concat(selected, ", "))
-    or  "Selected tracks: none"
+  if #selected == 0 then return "Selected tracks: none" end
+  local line = "Selected tracks: " .. tbl_concat(selected, ", ")
+  if capped and total > cap then
+    line = line .. " " .. CTX.selected_overflow_note(total - cap, true)
+  end
+  return line
 end
 
 -- CTX.track_flags(proj, opts) -> string
@@ -6215,7 +6250,15 @@ function CTX.plugin_pack_publish(load, integrity)
     .. " curated profile sections in "
     .. string.format("%.1f ms", owner.metrics.wall_ms))
   if reaper and reaper.defer and Code.ensure_preferred_from_chains then
-    reaper.defer(function() pcall(Code.ensure_preferred_from_chains) end)
+    -- Cached-only: never make REAPER's first native FX enumeration here.
+    local published_at = reaper.time_precise and reaper.time_precise() or nil
+    reaper.defer(function()
+      if published_at and Log.enabled and Log.enabled() then
+        Log.line("PLUGIN_PACK", string.format("first frame gap after publish %.1f ms",
+          (reaper.time_precise() - published_at) * 1000))
+      end
+      pcall(Code.ensure_preferred_from_chains, true)
+    end)
   end
   return true
 end
@@ -6421,7 +6464,7 @@ function CTX.plugin_profile_mode()
     and reaper.GetResourcePath() or ""
   local normalized = tostring(resource or ""):gsub("/", "\\")
     :gsub("\\+$", ""):lower()
-  if normalized ~= "c:\\reaper - test" then return "auto" end
+  if normalized ~= "c:\\reaper_test_v1" then return "auto" end
   local mode = reaper and reaper.GetExtState
     and tostring(reaper.GetExtState(
       CFG.EXT_NS, "dev_plugin_profile_mode") or ""):lower()
@@ -6822,11 +6865,15 @@ function CTX.populate_installed_fx()
     CTX._installed_fx_list_deduped = nil
   end
   CTX._installed_fx_list_hide_ff = hide_ff
-  if CTX._installed_fx_list then return CTX._installed_fx_list end
+  if CTX._installed_fx_list then
+    CTX.queue_pending_preferred_chains()
+    return CTX._installed_fx_list
+  end
   if not reaper.EnumInstalledFX then
     CTX._installed_fx_entries = {}
     return nil
   end
+  local enum_started = reaper.time_precise and reaper.time_precise() or nil
   CTX._installed_fx_list = {}
   CTX._installed_fx_entries = {}
   local idx = 0
@@ -6887,7 +6934,30 @@ function CTX.populate_installed_fx()
     end
     CTX._installed_fx_list_deduped = dedup
   end
+  if enum_started and Log and Log.enabled and Log.enabled() then
+    Log.line("PREF", str_format("populate_installed_fx enumerated %d entries in %.1f ms",
+      #CTX._installed_fx_list, (reaper.time_precise() - enum_started) * 1000))
+  end
+  CTX.queue_pending_preferred_chains()
   return CTX._installed_fx_list
+end
+
+-- Startup asks Code.ensure_preferred_from_chains for its cached-only form, which
+-- records Code._preferred_chains_pending instead of making REAPER's first
+-- (blocking) native enumeration. The first plug-in operation that fills the
+-- installed list runs the pending fill on a later frame, so that enumeration
+-- is never stacked with the fill. The first send flushes it synchronously
+-- (Code.flush_pending_preferred_chains) before preferred plug-ins are read.
+function CTX.queue_pending_preferred_chains()
+  if not (Code and Code._preferred_chains_pending and Code.flush_pending_preferred_chains)
+      or Code._preferred_chains_queued or not (reaper and reaper.defer) then
+    return
+  end
+  Code._preferred_chains_queued = true
+  reaper.defer(function()
+    Code._preferred_chains_queued = nil
+    pcall(Code.flush_pending_preferred_chains)
+  end)
 end
 
 -- =============================================================================
@@ -8343,6 +8413,8 @@ function CTX.preferred_plugins(filter_types)
       .. "use preferred_plugins:eq or preferred_plugins:compressor, reverb)"
   end
 
+  -- Run any startup-deferred default fill before reading the saved types.
+  if Code and Code.flush_pending_preferred_chains then Code.flush_pending_preferred_chains() end
   -- Read from the unified JSON cache.
   local cache = FXCache.load()
   local pref_types = cache.preferred_types or {}
@@ -8574,6 +8646,7 @@ function CTX.validate_pref_plugin_rows()
 end
 
 function CTX.load_pref_plugins()
+  if Code and Code.flush_pending_preferred_chains then Code.flush_pending_preferred_chains() end
   local cache = FXCache.load()
   local pref_types = cache.preferred_types or {}
   -- One-shot seed: if the cache has never carried preferred_aliases, populate
@@ -10371,6 +10444,7 @@ function CTX.prompt_named_preference_roles(user_text)
       or type(FXCache.get_preferred_types) ~= "function" then
     return nil
   end
+  if Code and Code.flush_pending_preferred_chains then Code.flush_pending_preferred_chains() end
   local saved_ok, saved = pcall(FXCache.get_preferred_types)
   if not saved_ok or type(saved) ~= "table" then return nil end
   local effective = {}
@@ -12029,6 +12103,9 @@ local _preempt_buckets_core
 -- A typed-action plan prompt is excluded, the same exclusion the core makes
 -- for every other bucket.
 function CTX.preempt_buckets_for_prompt(user_text)
+  -- First send: run any startup-deferred default fill so preferred plug-ins
+  -- are in place before they are read below.
+  if Code and Code.flush_pending_preferred_chains then Code.flush_pending_preferred_chains() end
   local injected = _preempt_buckets_core(user_text)
   if type(injected) ~= "table" then return injected end
   if type(user_text) ~= "string" or user_text == "" then return injected end
@@ -13261,8 +13338,15 @@ CTX.build_snapshot = function(proj, opts)
     }
   end
   local selected_rows = CTX.snapshot_selected_rows(track_rows)
+  -- TARGET HINT keeps the complete selection computed from the original
+  -- selected rows. The Tracks block and Selected tracks line render a capped
+  -- copy only while the hint is sent; otherwise the Selected tracks line is the
+  -- one complete list.
+  local hint = CTX.target_hint_from_selected_rows(selected_rows,
+    S.pending_orig_prompt)
+  local hint_emitted = hint ~= ""
   local tracks_txt = CTX.tracks_from_snapshot_rows(track_count, track_rows,
-    selected_rows, { minimal = minimal_tracks })
+    selected_rows, { minimal = minimal_tracks, hint_emitted = hint_emitted })
   local parts = {
     CTX.reaper_version(),
     CTX.tempo(proj),
@@ -13271,7 +13355,8 @@ CTX.build_snapshot = function(proj, opts)
     CTX.loop(proj),
     markers_txt,
     tracks_txt,
-    CTX.selected_from_snapshot_rows(selected_rows),
+    CTX.selected_from_snapshot_rows(selected_rows,
+      { hint_emitted = hint_emitted }),
     CTX.time_selection(proj),
     CTX.cursor(proj),
     CTX.selected_items(proj, {
@@ -13306,9 +13391,7 @@ CTX.build_snapshot = function(proj, opts)
   local body = "SESSION CONTEXT (multi-row sections use pipe-delimited rows -- "
     .. "see each section's [col|col|...] header for column names):\n"
     .. tbl_concat(parts, "\n") .. "\n\n"
-  local hint = CTX.target_hint_from_selected_rows(selected_rows,
-    S.pending_orig_prompt)
-  if hint ~= "" then body = body .. hint .. "\n\n" end
+  if hint_emitted then body = body .. hint .. "\n\n" end
   return body
 end
 

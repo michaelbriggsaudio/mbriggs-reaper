@@ -56,23 +56,35 @@ After installing, run the action "Script: ReaAssist.lua" from REAPER's Action Li
         <link rel="website" href="https://github.com/michaelbriggsaudio/mbriggs-reaper">GitHub Repository</link>
         <link rel="website" href="https://reaassist.app">ReaAssist Website</link>
       </metadata>
-      <version name="1.6.3" author="Michael Briggs" time="2026-10-06T21:53:51Z">
+      <version name="1.6.4" author="Michael Briggs" time="2026-10-28T03:22:04Z">
         <changelog><![CDATA[
-- Added GPT-6 Luna, GPT-6.1 Sol, and GPT-6 Astra, with updated cost estimates.
+- Added GPT-6.1 Terra, a mid-priced GPT model at about half the price of Sol. With its default Low thinking it completed 46 of 51 REAPER tasks in ReaAssist testing, so it's a good everyday choice when you use OpenAI. None to Max thinking are also available.
 
-- Replaced Claude Sonnet 5 with Sonnet 5.5 as the default Claude model, using Low thinking.
+- Claude now defaults to Haiku 5.5 with Low thinking, replacing Haiku 4.5. In ReaAssist testing it matched Sonnet 5.5 on REAPER tasks for about a tenth of the cost. Your saved model and thinking choices are unchanged. Sonnet 5.5 and Haiku 5.5 now also offer Xhigh and Max thinking.
 
-- Replaced Claude Opus 5 with Opus 5.5, with updated thinking options and cost estimates.
+- Response cards are more accurate: Undo is offered only when ReaAssist can confirm its change is the latest Undo step, and removing effects no longer reports "No project change".
 
-- Improved effect insertion and replacement checks, including requests involving existing effects. Plug-in parameter checks now handle known mappings and displayed values more accurately.
+- Fixed a pause of a few seconds when first opening ReaAssist after starting REAPER, during which you couldn't type or change settings.
 
-- Strengthened checks for track routing and folder organization. Failed or partial parameter changes are reported more accurately.
+- Improved guidance for delay plug-in settings and keyboard shortcut changes.
 
-- Improved provider error handling, including clearer API-key errors and recovery from incomplete or incompatible responses.
+- Clearer messages when a provider quota recovers after an earlier retry.
 
-- Updated network security components on macOS and Linux.
+- Improved helper engine compatibility with current Claude, OpenAI and Gemini responses, and with long folder paths on Windows.
 
-- Improved helper engine stability.
+- Generated scripts can no longer read or change your saved API keys or turn off ReaAssist's safety checks. Fixed REAPER sometimes not redrawing after a script reported an error.
+
+- Factory Reset now waits for any update in progress, removes saved API keys and contact details reliably, and tells you when something could not be removed.
+
+- Fixed first-time setup on Windows when your user folder name contains accented or non-English characters.
+
+- If ReaAssist hits an unexpected error, it now cancels any request in progress and closes cleanly with a short message.
+
+- Screenshot attachments no longer include ReaAssist's own menu or window. Screenshot is unavailable while ReaAssist is docked.
+
+- Improved privacy. Diagnostics no longer include custom provider names or local network addresses, temporary API key files are cleaned up sooner, and ReaAssist no longer deletes your own `reaassist_*` files in the REAPER resource folder.
+
+- Cost estimates now include Gemini 3.1 Pro's higher price for very long prompts and no longer treat unknown custom cache prices as free.
         ]]></changelog>
         <source main="main" file="ReaAssist.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist.lua?v=1.6.2</source>
         <source main="main" file="ReaAssist_Screen_Reader_Mode.lua">https://raw.githubusercontent.com/michaelbriggsaudio/mbriggs-reaper/main/ReaAssist/ReaAssist_Screen_Reader_Mode.lua?v=1.5.0</source>

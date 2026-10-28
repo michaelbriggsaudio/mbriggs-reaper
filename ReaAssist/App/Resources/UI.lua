@@ -17951,8 +17951,10 @@ function Render.custom_llm_screen()
           pout_n = pout_t ~= "" and tonumber(pout_t) or nil
         else
           pin_n = tonumber(pin_t == "" and "0" or pin_t)
-          pcache_n = tonumber(pcache_t == "" and "0" or pcache_t)
-          pcache_w_n = tonumber(pcache_w_t == "" and "0" or pcache_w_t)
+          -- A blank cache price stays unknown (nil), not free, so the cost
+          -- display and the turn cost limit do not count cached tokens at 0.
+          pcache_n = pcache_t ~= "" and tonumber(pcache_t) or nil
+          pcache_w_n = pcache_w_t ~= "" and tonumber(pcache_w_t) or nil
           pout_n = tonumber(pout_t == "" and "0" or pout_t)
         end
         local ctx_n    = tonumber(ctx_t2   == "" and tostring(CUSTOM_DEFAULT_CTX) or ctx_t2)
@@ -18980,22 +18982,22 @@ function Render.preferred_plugins_screen()
         local rkey = label_to_type_key(canonical)
         -- Commit preferred_types for just this row, without touching the
         -- others. (Other rows may still be dirty; they'll commit on Save.)
-        local cache = FXCache.load()
         local canonical_ident = ident
         if FXCache and FXCache.canonicalize_identifier then
           canonical_ident = FXCache.canonicalize_identifier(rkey, ident)
         end
-        if canonical_ident ~= ident then
-          Log.line("PREF", "per-row rescan canonicalized " .. rkey
-            .. " = " .. tostring(ident) .. " -> " .. tostring(canonical_ident))
-          pref_plugins.rows[rescan_row_idx].name = canonical_ident
-        end
-        cache.preferred_types[rkey] = canonical_ident
-        local err = FXCache.save(cache)
+        -- set_preferred_type runs the plausibility check (a compressor is
+        -- refused as the EQ preference), canonicalizes, and saves.
+        local err = FXCache.set_preferred_type(rkey, canonical_ident)
         if err then
           UI.show_float_toast(UI.t("settings.pref_plugins.toast.save_failed",
-            { error = err }, "Save failed: " .. err), "err")
+            { error = err }, "Save failed: " .. tostring(err)), "err")
         else
+          if canonical_ident ~= ident then
+            Log.line("PREF", "per-row rescan canonicalized " .. rkey
+              .. " = " .. tostring(ident) .. " -> " .. tostring(canonical_ident))
+            pref_plugins.rows[rescan_row_idx].name = canonical_ident
+          end
           -- fx_cache_rescan_start (sync failure) OR fx_cache_rescan_read
           -- (async completion) fires the toast directly, so no pending-
           -- ident tracking is needed on this side.
@@ -20454,6 +20456,46 @@ function Attach.kind_prefix(kind)
   return _ATTACH_KIND_PREFIX[kind] or "[TXT] "
 end
 
+-- Runs once per frame before the main window's Begin. After the Screenshot
+-- menu item is clicked the menu is closed, then the window is collapsed for
+-- UI.SCREENSHOT_HIDE_FRAMES frames so those frames reach the screen without the
+-- menu or the window body. The capture runs on the next frame and the window
+-- is restored in the same Begin. The capture never runs before the hidden
+-- frames have been drawn; a request whose frames stall past the time limit
+-- (window closed, REAPER busy) is dropped without capturing.
+-- Other applications and monitors stay in the capture; only ReaAssist's own
+-- surfaces are removed. A docked window is not collapsed by this.
+UI.SCREENSHOT_HIDE_FRAMES = 2
+UI.SCREENSHOT_HIDE_MAX_SECONDS = 10
+function UI.step_pending_screenshot()
+  local pending = S.attach_screenshot_pending
+  if not pending then return false end
+  if time_precise() - (pending.t0 or 0) > UI.SCREENSHOT_HIDE_MAX_SECONDS then
+    S.attach_screenshot_pending = nil
+    ImGui.ImGui_SetNextWindowCollapsed(RA.ctx, false, ImGui.ImGui_Cond_Always())
+    return false
+  end
+  -- Collapsing does not hide a docked window, so it would be in the picture.
+  if S._main_window_docked then
+    S.attach_screenshot_pending = nil
+    ImGui.ImGui_SetNextWindowCollapsed(RA.ctx, false, ImGui.ImGui_Cond_Always())
+    S.attach_error = UI.t("attach.error.screenshot_docked", nil,
+      "Screenshot is not available while ReaAssist is docked. Undock the "
+      .. "window and try again.")
+    S.attach_error_time = time_precise()
+    return false
+  end
+  if pending.frames >= UI.SCREENSHOT_HIDE_FRAMES then
+    S.attach_screenshot_pending = nil
+    ImGui.ImGui_SetNextWindowCollapsed(RA.ctx, false, ImGui.ImGui_Cond_Always())
+    Attach.screenshot()
+    return true
+  end
+  pending.frames = pending.frames + 1
+  ImGui.ImGui_SetNextWindowCollapsed(RA.ctx, true, ImGui.ImGui_Cond_Always())
+  return false
+end
+
 Attach.render_ui = function(fhs, avail_w)
   -- V5: the old "+" button has been removed. The paperclip icon inside the
   -- prompt row now opens ##attach_menu directly. We keep BeginPopup in this
@@ -20509,7 +20551,13 @@ Attach.render_ui = function(fhs, avail_w)
     if RA.IS_WINDOWS or RA.IS_MACOS then
       if ImGui.ImGui_MenuItem(RA.ctx,
           UI.t("attach.menu.screenshot", nil, "Screenshot")) then
-        Attach.screenshot()
+        -- Close the menu and capture a few frames later, after the window
+        -- has collapsed, so neither the open menu nor this window is in the
+        -- picture (UI.step_pending_screenshot).
+        if not S.attach_screenshot_pending then
+          S.attach_screenshot_pending = { frames = 0, t0 = time_precise() }
+        end
+        ImGui.ImGui_CloseCurrentPopup(RA.ctx)
       end
       if ImGui.ImGui_MenuItem(RA.ctx,
           UI.t("attach.menu.paste_image", nil, "Paste Image")) then
@@ -20788,6 +20836,9 @@ function Render.main_window()
   --    pops back to its pre-collapse dimensions instead of min.
   --    `_main_pre_collapse_w/h` is updated inside the if-visible
   --    block below (next to the GetWindowSize capture).
+  -- A pending screenshot collapses this window for a few frames before the
+  -- capture runs (UI.step_pending_screenshot).
+  UI.step_pending_screenshot()
   if S._main_was_visible ~= false then
     ImGui.ImGui_SetNextWindowSizeConstraints(RA.ctx, min_w, RA.SC(400), max_w, max_h)
   elseif S._main_pre_collapse_w then
@@ -20804,6 +20855,9 @@ function Render.main_window()
   local visible, open = ImGui.ImGui_Begin(RA.ctx,
     CFG._PRODUCT .. " v" .. CFG.VERSION, true,
     ImGui.ImGui_WindowFlags_NoNavInputs())
+  -- Read every frame for UI.step_pending_screenshot, which runs before Begin.
+  S._main_window_docked = type(ImGui.ImGui_IsWindowDocked) == "function"
+    and ImGui.ImGui_IsWindowDocked(RA.ctx) == true or false
 
   -- Track collapse state across frames so the size handling above
   -- knows whether to apply constraints or force-restore the
@@ -24023,6 +24077,8 @@ function Render.main_window()
             and msg.parameter_change_status ~= "changed"
             and msg.host_value_change_status ~= "changed"
             and msg.observable_change_status == "unchanged"
+            and not (type(Code.fx_removal_reported) == "function"
+              and Code.fx_removal_reported(msg.change_evidence))
           if msg.run_status == "ran_ok"
               and (has_fx_insert_failures or has_fx_insert_reuse
                 or has_parameter_warning or midi_notice
@@ -24817,7 +24873,7 @@ function Render.main_window()
     -- returning from help/overlay screens so Enter works immediately.
     local suppress_test_focus =
       tostring(reaper.GetResourcePath and reaper.GetResourcePath() or "")
-        :lower() == "c:\\reaper - test"
+        :lower() == "c:\\reaper_test_v1"
       and tostring(reaper.GetExtState(
         CFG.EXT_NS, "plugin_test_background_mode") or "") == "1"
     if (ImGui.ImGui_IsWindowAppearing(RA.ctx) or S.refocus_prompt)

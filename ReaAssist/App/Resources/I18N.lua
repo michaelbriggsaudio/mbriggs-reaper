@@ -26,6 +26,8 @@ I18N.catalogs = {
       ["network.engine.cancelled"] = "The request stopped before it finished. It was not resent automatically. You can send your message again.",
       ["network.engine.transport_failure"] = "The connection failed before the response finished. The request was not resent automatically. Check your connection and try again.",
       ["network.engine.provider_limit_unknown"] = "The provider returned HTTP 429. This can mean a temporary limit or an account quota. Wait and try again, or check your provider account.",
+      ["network.engine.provider_limit_allocation"] = "The provider reported an exhausted quota or credit allocation. Check your provider account or use another configured provider. ReaAssist did not retry after this response.",
+      ["network.engine.provider_limit_temporary"] = "The provider reported a temporary rate limit. Wait before sending this request again, or choose another model or provider. ReaAssist did not retry after this response.",
       ["network.engine.provider_http_refusal"] = "The provider returned HTTP {status}. Try again later or check your provider account.",
       ["response.google_503_without_retry"] = "Google's Gemini service returned 503 UNAVAILABLE. The selected model is at capacity or temporarily unavailable. No automatic retry was made. Try again shortly or choose another model.",
       ["retry.reason.for_unsafe_fx_replacement"] = "for unsafe FX replacement",
@@ -339,72 +341,88 @@ I18N.catalogs = {
       ["mode.model.paid_only"] = "paid only",
       ["mode.model.paid_only.tooltip"] =
         "Requires Google's paid API tier. Upgrade at aistudio.google.com/apikey.",
-      ["mode.model_tip.claude-haiku-4-5"] =
-        "Lowest-cost Claude. Use High thinking. Choose Sonnet 5.5 Low for complex work.",
+      ["mode.model_tip.claude-haiku-5-5"] =
+        "Default Claude for this app. Use Low thinking. Lowest-cost Claude; rates increase fivefold above 100k prompt tokens.",
       ["mode.model_tip.claude-sonnet-5-5"] =
-        "Default Claude for this app. Use Low thinking. Higher levels have not been bench tested.",
+        "Higher-cost Claude option. Use Low thinking. Highest completion rate in ReaAssist stress testing.",
       ["mode.model_tip.claude-opus-5-5"] =
-        "Premium Claude. Medium thinking is the default. Low is the lowest supported level.",
+        "Premium Claude. Medium thinking is the default. Only Low has been Bench tested.",
       ["mode.model_tip.gpt-6-luna"] =
-        "Default GPT for this app. Use Low thinking. Lowest-cost GPT-6; ReaAssist testing is pending.",
+        "Default GPT for this app. Use Low thinking. Lowest-cost GPT-6; Bench tested at None and Low.",
       ["mode.model_tip.gpt-6-sol"] =
         "More capable GPT-6. Use None thinking. Choose it for difficult work; ReaAssist testing is pending.",
-      ["mode.combo_hint.openai.gpt-6.1-sol.low"] = "Starting level | ReaAssist testing pending",
-      ["mode.combo_hint.openai.gpt-6.1-sol.medium"] = "More reasoning | ReaAssist testing pending",
-      ["mode.combo_hint.openai.gpt-6.1-sol.high"] = "High reasoning | ReaAssist testing pending",
-      ["mode.combo_hint.openai.gpt-6.1-sol.xhigh"] = "Extra-high reasoning | Higher token use possible | ReaAssist testing pending",
-      ["mode.combo_hint.openai.gpt-6.1-sol.max"] = "Maximum reasoning | Higher token use possible | ReaAssist testing pending",
-      ["mode.combo_hint.openai.gpt-6-astra.low"] = "Starting level | Premium cost | ReaAssist testing pending",
-      ["mode.combo_hint.openai.gpt-6-astra.medium"] = "More reasoning | Premium cost | ReaAssist testing pending",
-      ["mode.combo_hint.openai.gpt-6-astra.high"] = "High reasoning | Premium cost | ReaAssist testing pending",
-      ["mode.combo_hint.openai.gpt-6-astra.xhigh"] = "Extra-high reasoning | Premium cost | ReaAssist testing pending",
-      ["mode.combo_hint.openai.gpt-6-astra.max"] = "Maximum reasoning | Premium cost | ReaAssist testing pending",
+      ["mode.model_tip.gpt-6.1-terra"] =
+        "Mid-priced GPT model. Use Low thinking. Half the price of Sol; Bench tested on REAPER tasks.",
+      ["mode.combo_hint.openai.gpt-6.1-terra.none"] =
+        "No reasoning | Fastest Terra level | May reply without a script",
+      ["mode.combo_hint.openai.gpt-6.1-terra.low"] =
+        "Recommended level | Half the price of Sol | Bench tested on REAPER tasks",
+      ["mode.combo_hint.openai.gpt-6.1-terra.medium"] =
+        "More reasoning | Slower than Low with no gain in testing",
+      ["mode.combo_hint.openai.gpt-6.1-terra.high"] =
+        "High reasoning | Higher token use possible | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6.1-terra.xhigh"] =
+        "Extra-high reasoning | Higher token use possible | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6.1-terra.max"] =
+        "Maximum reasoning | Higher token use possible | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6.1-sol.low"] = "Recommended level | Higher GPT-6 cost | Bench tested on REAPER tasks",
+      ["mode.combo_hint.openai.gpt-6.1-sol.medium"] = "More reasoning | Higher token use possible | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6.1-sol.high"] = "High reasoning | Higher token use possible | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6.1-sol.xhigh"] = "Extra-high reasoning | Higher token use possible | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6.1-sol.max"] = "Maximum reasoning | Higher token use possible | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6-astra.low"] = "Default level | Premium cost | Bench tested on 2 tasks only",
+      ["mode.combo_hint.openai.gpt-6-astra.medium"] = "More reasoning | Premium cost | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6-astra.high"] = "High reasoning | Premium cost | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6-astra.xhigh"] = "Extra-high reasoning | Premium cost | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6-astra.max"] = "Maximum reasoning | Premium cost | Not measured yet",
       ["mode.model_tip.gpt-6.1-sol"] =
-        "Updated Sol model. Low thinking is the starting setting. ReaAssist testing is pending.",
+        "Higher-priced GPT model. Use Low thinking. Bench tested at Low; higher levels not measured yet.",
       ["mode.model_tip.gpt-6-astra"] =
-        "Premium GPT model. Low thinking is the starting setting. ReaAssist testing is pending.",
+        "Premium GPT model. Use Low thinking. Bench tested on two tasks only; higher levels not measured yet.",
       ["mode.model_tip.gemini-3.5-flash-lite"] =
-        "Lowest-cost Gemini. Use Low thinking. Choose it for budget-sensitive work; Flash 3.6 Minimal is stronger overall.",
+        "Lowest-cost Gemini. Use Low thinking. Choose it for budget-sensitive work; Flash 3.6 Minimal is the recommended Gemini.",
       ["mode.model_tip.gemini-3.6-flash"] =
         "Default Gemini for this app. Use Minimal thinking. Best tested balance of quality, speed, and cost.",
       ["mode.model_tip.gemini-3.8-flash"] =
-        "Optional Gemini model. Use Low thinking. It matched Flash 3.7 while using fewer tokens and costing less in testing.",
+        "Optional Gemini model. Use Low thinking. Matched Flash 3.6 Minimal in small tests, at a higher cost.",
       ["mode.model_tip.gemini-3.1-pro-preview"] =
         "Premium Gemini preview. Use Medium thinking. Capacity can be unreliable; Flash 3.6 Minimal is safer for coding.",
       ["mode.model_tip.deepseek-flash"] =
         "DeepSeek's latest Flash model. Use Non-Thinking. Supports images; off-peak rates are half the peak rates.",
-      ["mode.combo_hint.anthropic.claude-haiku-4-5.none"] =
-        "Simple requests | Lowest Claude cost | Very fast | Use Sonnet for complex work",
-      ["mode.combo_hint.anthropic.claude-haiku-4-5.low"] =
-        "Simple requests needing more reasoning | Lowest Claude cost | Very fast | Use Sonnet for complex work",
-      ["mode.combo_hint.anthropic.claude-haiku-4-5.medium"] =
-        "General work with caveats | Lowest Claude cost | Slow with retries | Use Sonnet for complex work",
-      ["mode.combo_hint.anthropic.claude-haiku-4-5.high"] =
-        "Recommended level | General work with caveats | Lowest Claude cost | Moderate speed | Use Sonnet 5.5 Low for complex work",
+      ["mode.combo_hint.anthropic.claude-haiku-5-5.low"] =
+        "Recommended level | Lowest Claude cost | Bench tested on REAPER tasks",
+      ["mode.combo_hint.anthropic.claude-haiku-5-5.medium"] =
+        "Higher effort | Slower than Low in testing | Bench tested on REAPER tasks",
+      ["mode.combo_hint.anthropic.claude-haiku-5-5.high"] =
+        "Higher effort | Higher token use possible | Not measured yet",
+      ["mode.combo_hint.anthropic.claude-haiku-5-5.xhigh"] =
+        "Very high effort | Higher token use possible | Not measured yet",
+      ["mode.combo_hint.anthropic.claude-haiku-5-5.max"] =
+        "Maximum effort | Higher token use possible | Not measured yet",
       ["mode.combo_hint.anthropic.claude-opus-5-5.low"] =
         "Lowest supported effort | Premium Claude cost | Bench tested on REAPER tasks",
       ["mode.combo_hint.anthropic.claude-sonnet-5-5.low"] =
-        "Default effort in ReaAssist | Bench tested on REAPER tasks",
+        "Recommended level | Higher Claude cost | Bench tested on REAPER tasks",
       ["mode.combo_hint.anthropic.claude-sonnet-5-5.medium"] =
-        "Higher effort | Bench data unavailable",
+        "Higher effort | Not measured yet",
       ["mode.combo_hint.anthropic.claude-sonnet-5-5.high"] =
-        "Higher effort | Higher token use possible | Bench data unavailable",
+        "Higher effort | Higher token use possible | Not measured yet",
       ["mode.combo_hint.anthropic.claude-sonnet-5-5.xhigh"] =
-        "Very high effort | Higher token use possible | Bench data unavailable",
+        "Very high effort | Higher token use possible | Not measured yet",
       ["mode.combo_hint.anthropic.claude-sonnet-5-5.max"] =
-        "Maximum effort | Higher token use possible | Bench data unavailable",
+        "Maximum effort | Higher token use possible | Not measured yet",
       ["mode.combo_hint.anthropic.claude-opus-5-5.medium"] =
-        "Default effort | General and complex work | Premium Claude cost | Bench data unavailable",
+        "Default effort | General and complex work | Premium Claude cost | Not measured yet",
       ["mode.combo_hint.anthropic.claude-opus-5-5.high"] =
-        "Higher effort | Difficult work | Higher token use possible | Bench data unavailable",
+        "Higher effort | Difficult work | Higher token use possible | Not measured yet",
       ["mode.combo_hint.openai.gpt-6-luna.none"] =
-        "No reasoning | General work | Lowest GPT-6 cost | ReaAssist testing pending",
+        "No reasoning | General work | Lowest GPT-6 cost | Bench tested on REAPER tasks",
       ["mode.combo_hint.openai.gpt-6-luna.low"] =
-        "Default level | Lowest GPT-6 cost | ReaAssist testing pending",
+        "Default level | Lowest GPT-6 cost | Bench tested on REAPER tasks",
       ["mode.combo_hint.openai.gpt-6-luna.medium"] =
-        "More reasoning | Higher token use possible | ReaAssist testing pending",
+        "More reasoning | Higher token use possible | Not measured yet",
       ["mode.combo_hint.openai.gpt-6-luna.high"] =
-        "High reasoning | Higher token use possible | ReaAssist testing pending",
+        "High reasoning | Higher token use possible | Not measured yet",
       ["mode.combo_hint.openai.gpt-6-sol.none"] =
         "Default level | Difficult work | Higher GPT-6 cost | ReaAssist testing pending",
       ["mode.combo_hint.openai.gpt-6-sol.low"] =
@@ -424,23 +442,23 @@ I18N.catalogs = {
       ["mode.combo_hint.google.gemini-3.6-flash.MINIMAL"] =
         "Recommended level | General and complex work | Best tested Gemini value | Fast",
       ["mode.combo_hint.google.gemini-3.6-flash.LOW"] =
-        "General and complex work | Higher measured cost | Slower than Minimal | No quality gain",
+        "More reasoning | Higher expected cost and latency | Not measured yet",
       ["mode.combo_hint.google.gemini-3.6-flash.MEDIUM"] =
-        "Complex code and debugging | Higher cost | Much slower | Try Minimal first",
+        "More reasoning | Higher expected cost and latency | Try Minimal first | Not measured yet",
       ["mode.combo_hint.google.gemini-3.6-flash.HIGH"] =
-        "Hard reasoning only | Highest Flash cost | Slowest | Avoid routine use",
+        "Maximum reasoning | Highest expected cost and latency | Avoid routine use | Not measured yet",
       ["mode.combo_hint.google.gemini-3.8-flash.LOW"] =
-        "Lowest supported level | Same tested pass rate as Flash 3.7 | Fewer tokens and lower cost | Similar speed",
+        "Lowest supported level | Higher cost than Flash 3.6 Minimal | Bench tested on REAPER tasks",
       ["mode.combo_hint.google.gemini-3.8-flash.MEDIUM"] =
-        "Bench data unavailable | More reasoning than Low | Higher expected cost and latency | Try Low first",
+        "More reasoning | Higher expected cost and latency | Try Low first | Not measured yet",
       ["mode.combo_hint.google.gemini-3.8-flash.HIGH"] =
-        "Bench data unavailable | Maximum reasoning | Highest expected cost and latency | Avoid routine use",
+        "Maximum reasoning | Highest expected cost and latency | Avoid routine use | Not measured yet",
       ["mode.combo_hint.google.gemini-3.1-pro-preview.LOW"] =
-        "Not recommended | Reduced reasoning | Highest Gemini cost | Use Flash 3.6 if capacity errors appear",
+        "Not recommended | Reduced reasoning | Highest Gemini cost | Not measured yet",
       ["mode.combo_hint.google.gemini-3.1-pro-preview.MEDIUM"] =
-        "Default Pro level in this app | Complex reasoning | Highest Gemini cost | Capacity can be unreliable",
+        "Default level | Highest Gemini cost | Capacity can be unreliable | Bench tested on REAPER tasks",
       ["mode.combo_hint.google.gemini-3.1-pro-preview.HIGH"] =
-        "Not recommended | Marginal gain over Medium | Highest Gemini cost | Capacity can be unreliable",
+        "Not recommended | Highest expected cost and latency | Not measured yet",
       ["mode.combo_hint.deepseek.deepseek-v4-flash.disabled"] =
         "Recommended level | General and complex work | Budget pricing | Fast | Off-peak rates are half price",
       ["mode.thinking.header"] = "Thinking:",
@@ -4617,6 +4635,30 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["settings.factory_reset.heading"] = "Delete all ReaAssist data?",
       ["settings.factory_reset.body"] =
         "This deletes settings, API keys, custom providers, feedback identity, logs, caches, and local Data files. ReaAssist will relaunch and start like a new install.",
+      -- Factory Reset refusals and partial result (1.6.4 audit #4). The body
+      -- authors the same English as its fallback.
+      ["settings.factory_reset.blocked.update"] =
+        "ReaAssist is in the middle of an update. Let it finish, then run Factory Reset again. Nothing was changed.",
+      ["settings.factory_reset.blocked.apply_lock"] =
+        "Another copy of ReaAssist is updating this install. Let it finish, then run Factory Reset again. Nothing was changed.",
+      ["settings.factory_reset.blocked.lock_create"] =
+        "ReaAssist could not create its update lock, so Factory Reset changed nothing.\n\nThe lock belongs in this folder:\n{path}\n\nMake sure the disk has free space and your account can write in that folder, then try again.",
+      ["settings.factory_reset.blocked.lock_blocked"] =
+        "ReaAssist cannot look inside the folder where it keeps its update lock, so it cannot tell whether another copy of ReaAssist is updating this install. Nothing was changed.\n\nThe folder is here:\n{path}\n\nGive your account permission to open it, then try again.",
+      ["settings.factory_reset.blocked.lock_undecidable"] =
+        "ReaAssist cannot tell whether another copy of ReaAssist is still updating this install, so Factory Reset changed nothing.\n\nThe lock is here:\n{path}\n\nIt was recorded by:\n{owner}\n\nClose any other REAPER window that is running ReaAssist and try again. If you are sure no other copy of ReaAssist is running on this computer, delete the {kind} named above and try again.",
+      ["settings.factory_reset.blocked.journal"] =
+        "An update on this install did not finish, and its recovery record is still here:\n{path}\n\nFactory Reset would delete that record, so nothing was changed. Restart ReaAssist and let it finish, undo or repair that update, then run Factory Reset again.",
+      ["settings.factory_reset.partial"] =
+        "Factory Reset could not remove everything. Some saved settings or files in the ReaAssist Data folder are still there.\n\nThe Data folder is here:\n{path}\n\nClose ReaAssist in every other REAPER window, then run Factory Reset again. If files are still left after that, close REAPER and delete the files inside that folder yourself, keeping internal_telemetry.flag if it is there.",
+      -- Frame guard (1.6.4 audit #6): shown once when a frame raised and
+      -- ReaAssist closed.
+      ["dialog.frame_error.closed"] =
+        "ReaAssist hit an unexpected error and closed. Any request in progress was cancelled. Open ReaAssist again to continue.\n\nError: {error}",
+      -- Screenshot attach (1.6.4 audit #11): collapsing cannot hide a docked
+      -- window, so the capture is cancelled instead.
+      ["attach.error.screenshot_docked"] =
+        "Screenshot is not available while ReaAssist is docked. Undock the window and try again.",
       -- Uninstaller. Every sentence the ownership-aware uninstaller says
       -- reaches the user through these keys, and the body authors the same
       -- English as its fallback, so a language pack that has never seen them
@@ -4958,6 +5000,21 @@ I18N.KEY_MIN_REVISION = {
   ["feedback.fallback.intro"] = 1,
   ["feedback.fallback.privacy"] = 1,
   ["feedback.fallback.failed"] = 1,
+  ["settings.factory_reset.blocked.update"] = 1,
+  ["settings.factory_reset.blocked.apply_lock"] = 1,
+  ["settings.factory_reset.blocked.lock_create"] = 1,
+  ["settings.factory_reset.blocked.lock_blocked"] = 1,
+  ["settings.factory_reset.blocked.lock_undecidable"] = 1,
+  ["settings.factory_reset.blocked.journal"] = 1,
+  ["settings.factory_reset.partial"] = 1,
+  ["dialog.frame_error.closed"] = 1,
+  ["attach.error.screenshot_docked"] = 1,
+  ["mode.combo_hint.openai.gpt-6.1-terra.none"] = 1,
+  ["mode.combo_hint.openai.gpt-6.1-terra.low"] = 1,
+  ["mode.combo_hint.openai.gpt-6.1-terra.medium"] = 1,
+  ["mode.combo_hint.openai.gpt-6.1-terra.high"] = 1,
+  ["mode.combo_hint.openai.gpt-6.1-terra.xhigh"] = 1,
+  ["mode.combo_hint.openai.gpt-6.1-terra.max"] = 1,
   ["mode.combo_hint.openai.gpt-6.1-sol.low"] = 1,
   ["mode.combo_hint.openai.gpt-6.1-sol.medium"] = 1,
   ["mode.combo_hint.openai.gpt-6.1-sol.high"] = 1,
@@ -4968,7 +5025,15 @@ I18N.KEY_MIN_REVISION = {
   ["mode.combo_hint.openai.gpt-6-astra.high"] = 1,
   ["mode.combo_hint.openai.gpt-6-astra.xhigh"] = 1,
   ["mode.combo_hint.openai.gpt-6-astra.max"] = 1,
+  ["mode.model_tip.gpt-6.1-terra"] = 1,
   ["mode.model_tip.gpt-6.1-sol"] = 1,
+  ["mode.model_tip.gemini-3.5-flash-lite"] = 1,
+  ["mode.combo_hint.google.gemini-3.6-flash.LOW"] = 1,
+  ["mode.combo_hint.google.gemini-3.6-flash.MEDIUM"] = 1,
+  ["mode.combo_hint.google.gemini-3.6-flash.HIGH"] = 1,
+  ["mode.combo_hint.google.gemini-3.1-pro-preview.LOW"] = 1,
+  ["mode.combo_hint.google.gemini-3.1-pro-preview.MEDIUM"] = 1,
+  ["mode.combo_hint.google.gemini-3.1-pro-preview.HIGH"] = 1,
   ["mode.model_tip.gpt-6-astra"] = 1,
   ["retry.reason.for_unsafe_fx_replacement"] = 1,
   ["validator.folder_default_parent_blocked"] = 1,
@@ -4978,6 +5043,8 @@ I18N.KEY_MIN_REVISION = {
   ["network.engine.cancelled"] = 1,
   ["network.engine.transport_failure"] = 1,
   ["network.engine.provider_limit_unknown"] = 1,
+  ["network.engine.provider_limit_allocation"] = 1,
+  ["network.engine.provider_limit_temporary"] = 1,
   ["network.engine.provider_http_refusal"] = 1,
   ["response.google_503_without_retry"] = 1,
   ["validator.fx_replacement_order_blocked"] = 1,
@@ -5143,8 +5210,12 @@ I18N.KEY_MIN_REVISION = {
   ["mode.combo_hint.anthropic.claude-opus-5-5.low"] = 1,
   ["mode.combo_hint.anthropic.claude-opus-5-5.medium"] = 1,
   ["mode.combo_hint.anthropic.claude-opus-5-5.high"] = 1,
-  ["mode.model_tip.claude-haiku-4-5"] = 1,
-  ["mode.combo_hint.anthropic.claude-haiku-4-5.high"] = 1,
+  ["mode.model_tip.claude-haiku-5-5"] = 1,
+  ["mode.combo_hint.anthropic.claude-haiku-5-5.low"] = 1,
+  ["mode.combo_hint.anthropic.claude-haiku-5-5.medium"] = 1,
+  ["mode.combo_hint.anthropic.claude-haiku-5-5.high"] = 1,
+  ["mode.combo_hint.anthropic.claude-haiku-5-5.xhigh"] = 1,
+  ["mode.combo_hint.anthropic.claude-haiku-5-5.max"] = 1,
   ["mode.combo_hint.openai.gpt-6-luna.none"] = 1,
   ["mode.combo_hint.openai.gpt-6-luna.low"] = 1,
   ["mode.combo_hint.openai.gpt-6-luna.medium"] = 1,

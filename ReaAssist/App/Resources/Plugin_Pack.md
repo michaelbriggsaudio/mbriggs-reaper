@@ -5,10 +5,10 @@
 <!-- builder_version:2 -->
 <!-- builder_script_sha256:8a7e968f1323dc59feceb215c460d67ccf103ae06c815d13d50c3785d2387166 -->
 <!-- section_count:66 -->
-<!-- source_set_sha256:404c2648a30f8475565e988cf27646756690bc06ab58e1fe881bbcb5a9a53eba -->
+<!-- source_set_sha256:de17fe466847545cdb3993c0b7779f7882a3968c676b5587d74fd3463ff58d74 -->
 <!-- stoplist_version:1 -->
 <!-- aggregate_injected_limit_bytes:98304 -->
-<!-- pack_revision:098e3921ff6cec42ae5dd2563ff35ca4451e78c9151d46f49af24dd33e5b45c4 -->
+<!-- pack_revision:3acfc78b2e24ee80ba3d1485b57aa3a8ccfaba5a0cd84d5791a0e9dc0343725a -->
 <!-- Plugin_Pack.md - markers are PLUGIN:Name (NOT SECTION:) because each block -->
 <!-- is a typed, addressable plugin entry served as plugin_ref:Name. SECTION: -->
 <!-- is reserved for generic on-demand buckets in API_Ref.md / Prompts.md.    -->
@@ -4970,7 +4970,7 @@ end)
 <!-- /PLUGIN:ReaComp -->
 
 <!-- PLUGIN:ReaDelay -->
-<!-- SECTION-REVISION:bf27aef6186463b8841469d7aaf095fc906982abdb1e8b5586459d619178df33 -->
+<!-- SECTION-REVISION:1cbee2ebdee97f99fa2771a9cfacdf37bfb53d6627d26d8cca4a9dcce1516f25 -->
 ## ReaDelay
 
 ```json plugin-route
@@ -4978,7 +4978,7 @@ end)
 ```
 
 ```json plugin-validate
-{"key":"readelay","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST","identifier":"ReaDelay","loaded_name":"VST: ReaDelay (Cockos)","parameter_count":{"mode":"exact","value":15},"required_parameters":[{"index":1,"name":"Dry","section":"","section_required":false},{"index":3,"name":"1: Length (time)","section":"","section_required":false},{"index":6,"name":"1: Lowpass","section":"","section_required":false},{"index":8,"name":"1: Resolution","section":"","section_required":false},{"index":11,"name":"1: Pan","section":"","section_required":false}],"observed_fingerprint_sha256":"848477142e5111653874aff0ab9fdb729bb8b0dad7babd74646e123aa1d8ac4d"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"8b845c5d6177ae73bd30df32f2645bc887b1bdfff747195541e02132225fba9b","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
+{"key":"readelay","safety":{"settle_ms":100,"heavy_selectors":[],"unsafe_to_sweep":[],"volatile_parameters":[]},"fingerprints":[{"format":"VST","identifier":"ReaDelay","loaded_name":"VST: ReaDelay (Cockos)","parameter_count":{"mode":"exact","value":15},"required_parameters":[{"index":1,"name":"Dry","section":"","section_required":false},{"index":3,"name":"1: Length (time)","section":"","section_required":false},{"index":6,"name":"1: Lowpass","section":"","section_required":false},{"index":8,"name":"1: Resolution","section":"","section_required":false},{"index":11,"name":"1: Pan","section":"","section_required":false}],"observed_fingerprint_sha256":"848477142e5111653874aff0ab9fdb729bb8b0dad7babd74646e123aa1d8ac4d"}],"status":"pilot","provenance":{"source":"Resources/Plugin_Ref.md","migrated_at":"2026-07-24","body_sha256":"6bb9de4617bb4206c53f3981193cd0ca34d5fc173c9cec452e86d5999370e18f","verified_at":"2026-07-24","reaper_profile":"C:\\REAPER - Test","inventory_sha256":"9df6b57a4b50a61d272496da983161b40aec3f169b45537720383c4495d201a1"}}
 ```
 
 <!-- CHUNK:control -->
@@ -4998,7 +4998,7 @@ idx  Name                  Default val   Min    Max    Notes
 1    Dry                   1.0           0.0    2.0    Dry level: 1.0=0dB
 2    1: Enabled            1.0           0.0    1.0    Tap 1 on/off
 3    1: Length (time)       0.0           0.0    1.0    Control units, not seconds; formatted display is ms
-4    1: Length (musical)    0.0078        0.0    1.0    Whole notes; raw = display/256 (default 0.0078 -> 2.00)
+4    1: Length (musical)    0.0078        0.0    1.0    Eighth-note count (8N); raw = count/256 (0.0078125 reads back 2.00)
 5    1: Feedback           0.0           0.0    2.0    Feedback: 0=off, 1.0=0dB
 6    1: Lowpass            1.0           0.0    1.0    Filter normalized (20000Hz)
 7    1: Hipass             0.0           0.0    1.0    Filter normalized (0Hz)
@@ -5013,17 +5013,26 @@ idx  Name                  Default val   Min    Max    Notes
 
 ### DELAY TIME
 
-There are two length params per tap. Use "Length (musical)" for tempo-synced delay,
-"Length (time)" for free-time delay. Its raw 0..1 value is not seconds:
-raw 0.125 was observed to display 1250.0 ms, not 125 ms. Do not pass seconds
-directly to this parameter. To set a specific delay in ms, use the maintained
-bounded numeric setter/readback search on "Length (time)" and compare the
-formatted number in milliseconds. For a slap delay, set Length (musical) to
-zero so its tempo-synced delay does not add to the free-time delay.
-Length (musical) is in whole notes and its raw value is display/256 (verified on
-REAPER 7.76: raw 0.25/256 = 0.000977 displays 0.25 = quarter note; the DEFAULT raw
-0.0078 displays 2.00 = TWO WHOLE NOTES). A tempo-synced recipe that does not set
-Length (musical) ships a 2-measure delay, not the echo the user asked for.
+There are two length params per tap. Use "Length (musical)" for tempo-synced
+delay and "Length (time)" for free-time delay. The free-time raw 0..1 value is
+not seconds: raw 0.125 displays 1250.0 ms. For a requested millisecond value,
+use bounded numeric setter/readback search and verify the formatted milliseconds.
+Set musical length to zero for a purely free-time delay.
+
+Length (musical) is measured in eighth notes (8N), not whole notes. Its raw
+value is the eighth-note count divided by 256. A synced eighth note is raw
+`1 / 256` and a quarter note is raw `2 / 256`. `TrackFX_GetFormattedParamValue`
+returns the count alone, `1.00` or `2.00`, without the 8N unit. Verify that
+number or the raw value from `TrackFX_GetParam`; never compare the readback to
+`1.00 8N`. Isolated REAPER 7.82 readback confirmed both values at 60 and
+120 BPM. The old raw `0.25 / 256` is only a quarter of an eighth note.
+Do not rely on the default or an existing tap value; set musical length explicitly.
+
+For a time-only change on an existing ReaDelay, preserve Wet, Dry, tap Enabled,
+Feedback and every unrelated control unless the user explicitly requests them.
+For a purely synced delay, set free-time length to zero and musical length to
+the requested eighth-note count. A dedicated-return mix change needs explicit
+intent or established routing evidence; a time request alone does not authorize it.
 
 ### DUPLICATE WET NAME
 
@@ -5090,19 +5099,19 @@ local mapped, guard_err = reaassist_resolve_profile_params(tr, fx, {
 if not mapped then error(guard_err) end
 reaper.TrackFX_SetParamNormalized(tr, fx, mapped[1], 0.125) -- Effect Wet: -12.0 dB
 reaper.TrackFX_SetParam(tr, fx, mapped[2], 0.0) -- Free-time length off
-reaper.TrackFX_SetParam(tr, fx, mapped[3], 0.25 / 256) -- Quarter note
+reaper.TrackFX_SetParam(tr, fx, mapped[3], 2 / 256) -- Quarter note: two eighth notes
 reaper.TrackFX_SetParamNormalized(tr, fx, mapped[4], 0.125) -- Feedback: -12.0 dB
 ```
 
 For any request combining quarter-note sync, zero free-time length and about
 -12 dB Wet/Feedback, all four writes above are mandatory. Copy the setter
 types and numeric expressions exactly. Do not omit Length (musical), use its
-default, substitute `2.00`, or use `TrackFX_SetParamNormalized` for that
+default, pass the displayed `2.00` as a raw value, or use `TrackFX_SetParamNormalized` for that
 control. Do not use raw `TrackFX_SetParam(..., 0.125)` for Wet or Feedback;
 that displays about -18 dB.
 
 The accepted GUI displays are effect Wet `-12.0`, Length (time) `0.0`, Length
-(musical) `0.25` and Feedback `-12.0`. If a write does not produce those
+(musical) `2.00` (two eighth notes) and Feedback `-12.0`. If a write does not produce those
 displays, the recipe did not succeed.
 
 For the natural request to give guitar a subtle quarter-note echo without

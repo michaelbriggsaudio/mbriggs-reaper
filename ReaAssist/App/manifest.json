@@ -1,19 +1,18 @@
 {
-  "version": "1.6.3",
-  "payload_ref": "3fd12fd87e326546889a5c3c9c778d9f61f6e8ae",
+  "version": "1.6.4",
   "engine": {
     "schema": 1,
     "delivery": "shared-v1",
-    "shared_path": "Helper-Engine/1.0.3",
-    "source_ref": "v1.6.2",
+    "shared_path": "Helper-Engine/1.0.4",
+    "source_ref": "v1.6.4",
     "source": {
-      "commit": "2c5b0675ea36b06dd693934deed67b7dd9ae9406",
-      "release": "kit-v1.0.3-prep-2c5b067",
-      "kit_sha256": "33a6320d3c7f313792a210f98e5394bd750a18e0e4d1a337114514f94dd12170"
+      "commit": "cb896cedc33d84cdf616948a90b081d0cbe05cdb",
+      "release": "kit-v1.0.4-prep-cb896ce",
+      "kit_sha256": "ffc2b2aec2cdc4eb88e2bc457e389f048f40d0138fe3d88aa38a01883b6f019d"
     },
     "descriptor": {
       "schema": 3,
-      "version": "1.0.3",
+      "version": "1.0.4",
       "core_abi": 2,
       "build_channel": "production",
       "subsystems": {
@@ -46,32 +45,32 @@
       "artifacts": {
         "win-x64": {
           "filename": "reaper_mbriggs_helper-x64.dll",
-          "sha256": "90dc15a86241678337e28bc40943b846ee460c4a90e42ead384bdb920c85b396",
+          "sha256": "fd33477904bcccae7350d066d24d2a3f719b0c834f0a195f1ff42596e97fc4d3",
           "signature": "signed-timestamped"
         },
         "win-arm64": {
           "filename": "reaper_mbriggs_helper-arm64.dll",
-          "sha256": "eb972a63fbee53931b05e7bcb092c4cac30cdd0383a9ef43c1683f614f7a547d",
+          "sha256": "4d5294a843674d13078666dd630ad98445dbad4be54e5b503e0b39b344278424",
           "signature": "signed-timestamped"
         },
         "mac-arm64": {
           "filename": "reaper_mbriggs_helper-arm64.dylib",
-          "sha256": "75fade85f4ce8d485432335cf07fc6dda6ce0b1a5c259818376a9df11b46fb47",
+          "sha256": "b505969317d9bd78e31750d57dda54e0c3def0ff8931b4798604f716f0d20905",
           "signature": "developer-id-notarized"
         },
         "mac-x64": {
           "filename": "reaper_mbriggs_helper-x86_64.dylib",
-          "sha256": "b00017968a9c5a30e40a4e54e3c7e2ab79e0ad2e1db9843d8085c6caaa8d9050",
+          "sha256": "697d18516b1f261a2e984b9b4b83c28370dea51efb10b0d85dc8a3a005e5dcde",
           "signature": "developer-id-notarized"
         },
         "linux-x64": {
           "filename": "reaper_mbriggs_helper-x86_64.so",
-          "sha256": "e9cb263c972f77ce1a2d720d4085860eb488837f46efd35ad5ec4296f28c7591",
+          "sha256": "2457ff16f0f8edc02557ebb19061b458c6f7fd9903c9d9507a9690f32bc11fbd",
           "signature": "sha256"
         },
         "linux-arm64": {
           "filename": "reaper_mbriggs_helper-aarch64.so",
-          "sha256": "6b7184dd86d48a13018fa7bd6bb97c46ead37ea8fc65565e8e436c7db0bf84cf",
+          "sha256": "f94c83ff98eb3f60ecb520e7929d2fceebce466c69b21b02e4a7e2667089516d",
           "signature": "sha256"
         }
       }
@@ -104,50 +103,50 @@
     },
     {
       "name": "ReaAssist.lua",
-      "sha256": "8771727438888a2a28e68a7c27da2b72584d071b2d4f9ada11ba3a819455192d",
+      "sha256": "2a14a222d7dd5e2dd075ba39181c47092f79da535fb597c285125fe5259193c1",
       "critical": true
     },
     {
       "name": "ReaAssist_Screen_Reader_Mode.lua",
-      "sha256": "6f4307988b07809a38118b82fb1a9f6e134e9ba04375c315c06482cc3afa8bf2"
+      "sha256": "6caf09e2be136117044ea640e3dbec1d7a4ea17ce94087e0c23076d1d6bc39aa"
     },
     {
       "name": "Resources/API_Ref.md",
-      "sha256": "0b1d5241bab64bec97afb22d2e3a93b6d41aecc894989667e4ecb1381a78417c",
+      "sha256": "9f1f75834eeab81f2c0e1290da61e76442fef63bcec3c6f1756697214d498360",
       "critical": true
     },
     {
       "name": "Resources/CodeRuntime.lua",
-      "sha256": "65d152d29a3da42b2485a8c0def6525453a7d5418550d6eed13baf51c877a4ed",
+      "sha256": "47554769846b1ed575eb500e18b581f8c0d82e267e02993145ed6b0e856e3406",
       "critical": true
     },
     {
       "name": "Resources/Context.lua",
-      "sha256": "c6ea78d430188a5b3b2212ac355213512595f24c4aade802a3655e15132badf4",
+      "sha256": "96747a14dfb8c53f03a541fd6e43215b4f6cceee963b5859838349172ed592e7",
       "critical": true
     },
     {
       "name": "Resources/Diag.lua",
-      "sha256": "30d90058cac63c95bed167cf771055302f09f4209f9291af8077d2cc0529ac48",
+      "sha256": "c07459060fa368e8ce060b21ef7ca6636dba9d909af02db6e631084fedc61fa0",
       "critical": true
     },
     {
       "name": "Resources/Engine.lua",
-      "sha256": "33a6320d3c7f313792a210f98e5394bd750a18e0e4d1a337114514f94dd12170",
+      "sha256": "ffc2b2aec2cdc4eb88e2bc457e389f048f40d0138fe3d88aa38a01883b6f019d",
       "critical": true
     },
     {
       "name": "Resources/I18N.lua",
-      "sha256": "713df997663b83dbb2a3d0a235582bca0b53eae82ab7f3e3518f85afbfa21800",
+      "sha256": "25780a005606e4129256b2116d0af1ab3a6fa75a40d5eec0df8f145a880ddd4f",
       "critical": true
     },
     {
       "name": "Resources/Plugin_Pack.md",
-      "sha256": "c44c2f92272f40c2c4105d2d8eb3131eab197aad24fb557f4eccee5c7c7f2b76"
+      "sha256": "c77e90ab6c55ed1a32b92525d8d69e383f62ecfbec9ac17d3412351871c1bfb5"
     },
     {
       "name": "Resources/Prompts.md",
-      "sha256": "d2598ab8fdacc4f28e9bb14908c748a83fe677feebde1a49b886c921444c451b",
+      "sha256": "a7a5f2056d76280e58fbc1056e20b7ea3546038f40e73ad0d2d59c2164dbec20",
       "critical": true
     },
     {
@@ -168,7 +167,7 @@
     },
     {
       "name": "Resources/Reaper_Recent_Changes.md",
-      "sha256": "08afffa83568c30f078bf978ad0745a7098936aae54d5ed5e12f6773b2ec5d0d"
+      "sha256": "9db798f3e9b488cc12782df905cab737ccb7de90ebc794498ae1784c191b6b48"
     },
     {
       "name": "Resources/Relaunch.lua",
@@ -177,12 +176,12 @@
     },
     {
       "name": "Resources/System_Prompt.md",
-      "sha256": "4c32a2f8e4c422c1c79ea748222d637cd51716a96692239e1e23e9464aa5e595",
+      "sha256": "a5b5ddabedfddda66a4cf53a15b8f6b3360a1ab91038209297b57863cd216bc3",
       "critical": true
     },
     {
       "name": "Resources/UI.lua",
-      "sha256": "9689565d68e36b778bd58895f795ea483d47196f70f4cd3c8e0da0c39dd95cc3",
+      "sha256": "92242b67edd73b269432e7a55216ac3431868a15c413378ca46664a6917e739f",
       "critical": true
     },
     {

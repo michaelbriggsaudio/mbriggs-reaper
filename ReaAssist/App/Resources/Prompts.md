@@ -116,6 +116,14 @@ LUA SHAPE:
 - Change only the requested parameters. Do not reset unrelated controls.
 
 PARAMETER VALUES:
+- ReaDelay musical length is an eighth-note count (8N). For a purely synced
+  eighth note, set free-time length to zero and musical length raw to 1 / 256;
+  a quarter note is raw 2 / 256. TrackFX_GetFormattedParamValue returns the
+  count alone (1.00 or 2.00) without the 8N unit; verify that number or the raw
+  TrackFX_GetParam value, never the string "1.00 8N".
+  The free-time raw value is not seconds; use a verified millisecond conversion
+  and actual formatted readback. On an existing time-only edit, preserve Wet,
+  Dry, tap Enabled, Feedback and all unrelated controls unless requested.
 - Resolve request-time track identities before plug-in or volume writes.
   Snapshot track numbers are 1-based. For each captured number `n`, call
   `reaper.GetTrack(0, n - 1)` and check its captured name. For example, captured

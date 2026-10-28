@@ -10532,6 +10532,14 @@ local function valid_terminal_common(event)
         or not valid_provider_error_message(event.provider_error_message)) then
     return false
   end
+  if event.provider_limit_classification ~= nil
+      and (event.kind ~= "response_failed" or transmission ~= "sent"
+        or event.category ~= "provider"
+        or (event.provider_limit_classification ~= "allocation_exhausted"
+          and event.provider_limit_classification ~= "temporary_throttle"
+          and event.provider_limit_classification ~= "unknown")) then
+    return false
+  end
   if event.diagnostic ~= nil
       and (event.kind ~= "response_failed"
         or not nonempty_bounded_string(event.diagnostic, 128)
@@ -10571,6 +10579,7 @@ local function copy_terminal_event(event)
   if event.provider_error_message ~= nil then
     copy.provider_error_message = event.provider_error_message
   end
+  copy.provider_limit_classification = event.provider_limit_classification
   if event.diagnostic ~= nil then copy.diagnostic = event.diagnostic end
   if event.kind == "response_completed" then
     copy.settlement = {}
@@ -10837,6 +10846,7 @@ local function terminal_failure_evidence(terminal)
     discarded = copy.discarded,
     diagnostic = copy.diagnostic,
     provider_error_message = copy.provider_error_message,
+    provider_limit_classification = copy.provider_limit_classification,
   }
 end
 

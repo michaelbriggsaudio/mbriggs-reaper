@@ -1,5 +1,35 @@
 # ReaAssist - Changelog
 
+## v1.6.4 - 2026-10-28
+
+- Added GPT-6.1 Terra, a mid-priced GPT model at about half the price of Sol. With its default Low thinking it completed 46 of 51 REAPER tasks in ReaAssist testing, so it's a good everyday choice when you use OpenAI. None to Max thinking are also available.
+
+- Claude now defaults to Haiku 5.5 with Low thinking, replacing Haiku 4.5. In ReaAssist testing it matched Sonnet 5.5 on REAPER tasks for about a tenth of the cost. Your saved model and thinking choices are unchanged. Sonnet 5.5 and Haiku 5.5 now also offer Xhigh and Max thinking.
+
+- Response cards are more accurate: Undo is offered only when ReaAssist can confirm its change is the latest Undo step, and removing effects no longer reports "No project change".
+
+- Fixed a pause of a few seconds when first opening ReaAssist after starting REAPER, during which you couldn't type or change settings.
+
+- Improved guidance for delay plug-in settings and keyboard shortcut changes.
+
+- Clearer messages when a provider quota recovers after an earlier retry.
+
+- Improved helper engine compatibility with current Claude, OpenAI and Gemini responses, and with long folder paths on Windows.
+
+- Generated scripts can no longer read or change your saved API keys or turn off ReaAssist's safety checks. Fixed REAPER sometimes not redrawing after a script reported an error.
+
+- Factory Reset now waits for any update in progress, removes saved API keys and contact details reliably, and tells you when something could not be removed.
+
+- Fixed first-time setup on Windows when your user folder name contains accented or non-English characters.
+
+- If ReaAssist hits an unexpected error, it now cancels any request in progress and closes cleanly with a short message.
+
+- Screenshot attachments no longer include ReaAssist's own menu or window. Screenshot is unavailable while ReaAssist is docked.
+
+- Improved privacy. Diagnostics no longer include custom provider names or local network addresses, temporary API key files are cleaned up sooner, and ReaAssist no longer deletes your own `reaassist_*` files in the REAPER resource folder.
+
+- Cost estimates now include Gemini 3.1 Pro's higher price for very long prompts and no longer treat unknown custom cache prices as free.
+
 ## v1.6.3 - 2026-10-06
 
 - Added GPT-6 Luna, GPT-6.1 Sol, and GPT-6 Astra, with updated cost estimates.

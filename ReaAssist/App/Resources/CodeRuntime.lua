@@ -20920,12 +20920,23 @@ local function sandbox_reaper_denied_reason(key)
   return nil
 end
 
+-- The proxy generated code receives is an empty table. The overrides stay in
+-- this closure, so every key is absent from the proxy and every assignment
+-- reaches __newindex, which refuses it. Lua calls __newindex only for absent
+-- keys: when the overrides were raw fields of the proxy, `reaper.defer = nil`
+-- removed the guard and the next lookup fell through to REAPER's own
+-- function. The sandbox exposes no rawset, setmetatable, getmetatable or
+-- debug. pairs lists the overrides through an iterator that never returns
+-- the private table itself.
 local function sandbox_api_proxy(api, overrides, label, dynamic_override)
-  overrides = overrides or {}
+  local private_overrides = overrides or {}
   label = label or "api"
   local dynamic_cache = {}
-  return setmetatable(overrides, {
+  return setmetatable({}, {
+    __metatable = false,
     __index = function(_, key)
+      local override = private_overrides[key]
+      if override ~= nil then return override end
       if label == "reaper" then
         local denied = sandbox_reaper_denied_reason(key)
         if denied then
@@ -20948,8 +20959,8 @@ local function sandbox_api_proxy(api, overrides, label, dynamic_override)
       error(tostring(label) .. "." .. tostring(key)
         .. " cannot be modified in ReaAssist's generated-code sandbox", 2)
     end,
-    __pairs = function(t)
-      return next, t, nil
+    __pairs = function()
+      return function(_, key) return next(private_overrides, key) end, nil, nil
     end,
   })
 end
@@ -20969,6 +20980,65 @@ local CODE_SANDBOX_BASE = {
   unpack     = table.unpack or unpack,
   xpcall     = xpcall,
 }
+
+-- ReaAssist keeps provider credentials in its own global ExtState section
+-- "reaassist" (CFG.EXT_NS): "api_key" (Anthropic), "api_key_<provider>"
+-- (built-in and custom providers) and "custom_<id>_extra_headers" (custom
+-- provider headers, which can carry a key). REAPER matches section and key
+-- names case-insensitively. Generated code sees these keys as absent: Get
+-- returns "", Has returns false, and Set and Delete do nothing. Every other
+-- key, including the ThemeBackup_* keys in the same section, passes through.
+function Code.sandbox_credential_extstate(section, key)
+  if type(section) == "number" then section = tostring(section) end
+  if type(section) ~= "string" or type(key) ~= "string" then return false end
+  -- REAPER reads each name as a C string, so only the part before an
+  -- embedded NUL reaches it; match on that part.
+  section = section:match("^[^\0]*")
+  key = key:match("^[^\0]*")
+  if section:lower():match("^%s*(.-)%s*$") ~= "reaassist" then return false end
+  local lowered = key:lower():match("^%s*(.-)%s*$")
+  return lowered == "api_key"
+    or lowered:sub(1, #"api_key_") == "api_key_"
+    or lowered:match("^custom_.+_extra_headers$") ~= nil
+end
+
+-- Adds the sandbox's GetExtState, HasExtState, SetExtState and
+-- DeleteExtState to overrides and returns overrides. api is REAPER's table;
+-- each call reads api at call time.
+function Code.sandbox_extstate_shadow(api, overrides)
+  overrides = overrides or {}
+  local function dropped(name, key)
+    Log.line("SCRIPT", name .. " ignored for ReaAssist credential key "
+      .. tostring(key))
+  end
+  for name, fn in pairs({
+    GetExtState = function(section, key, ...)
+      if Code.sandbox_credential_extstate(section, key) then return "" end
+      return api.GetExtState(section, key, ...)
+    end,
+    HasExtState = function(section, key, ...)
+      if Code.sandbox_credential_extstate(section, key) then return false end
+      return api.HasExtState(section, key, ...)
+    end,
+    SetExtState = function(section, key, ...)
+      if Code.sandbox_credential_extstate(section, key) then
+        dropped("SetExtState", key)
+        return
+      end
+      return api.SetExtState(section, key, ...)
+    end,
+    DeleteExtState = function(section, key, ...)
+      if Code.sandbox_credential_extstate(section, key) then
+        dropped("DeleteExtState", key)
+        return
+      end
+      return api.DeleteExtState(section, key, ...)
+    end,
+  }) do
+    overrides[name] = fn
+  end
+  return overrides
+end
 
 -- =============================================================================
 -- Run-result and diagnostic metadata helpers
@@ -21134,8 +21204,88 @@ function Code.current_undo_target_status(expected_label, project)
   return "displaced"
 end
 
+-- The project's current Undo head label, or nil when the host cannot be asked.
+function Code.current_undo_head_label(project)
+  if type(reaper) ~= "table" or type(reaper.Undo_CanUndo2) ~= "function" then
+    return nil
+  end
+  project = project or Code.active_project()
+  if not Code.project_pointer_exists(project) then return nil end
+  local ok, label = pcall(reaper.Undo_CanUndo2, project)
+  if not ok then return nil end
+  return tostring(label or "")
+end
+
+-- Ported from v2 for FB-20261009-05 (Michael, October 9). Card Undo checks
+-- only the head's label, and REAPER keeps the previous head for a block whose
+-- change it does not record (track selection, monitoring FX; measured in
+-- REAPER 7.82 on October 9) while the counter still advances. With a label
+-- that repeats, such as the default "ReaAssist", the card then undoes the
+-- earlier edit. A session token plus a serial make every label unique, and
+-- Code.execution_block_owns_head records whether this block pushed the head.
+--
+-- S.INSTANCE_ID identifies this session: it carries reaper.time_precise() and
+-- a random part, and REAPER's Undo history does not outlive its process.
+function Code.execution_undo_session_token()
+  local state = type(S) == "table" and S or nil
+  local cached = (state and state.execution_undo_session_token)
+    or Code._execution_undo_session_token
+  if type(cached) == "string" and cached ~= "" then return cached end
+  local seed = state and tostring(state.INSTANCE_ID or "") or ""
+  if seed == "" then
+    seed = tostring({}) .. "|" .. tostring(os.time())
+      .. "|" .. tostring(os.clock())
+  end
+  local hash = 5381
+  for index = 1, #seed do
+    hash = (hash * 33 + seed:byte(index)) % 2821109907456 -- 36^8
+  end
+  local digits, token = "0123456789abcdefghijklmnopqrstuvwxyz", ""
+  for _ = 1, 8 do
+    local digit = hash % 36
+    token = digits:sub(digit + 1, digit + 1) .. token
+    hash = hash // 36
+  end
+  Code._execution_undo_session_token = token
+  if state then state.execution_undo_session_token = token end
+  return token
+end
+
+-- The label one execution closes its Undo block under: the script's own label
+-- (prefixed with "ReaAssist: " when it lacks it) plus the session token and a
+-- serial, so no two blocks ReaAssist writes share a label.
+function Code.next_execution_undo_label(label)
+  local state = type(S) == "table" and S or nil
+  local serial = (state and tonumber(state.execution_undo_serial) or 0) + 1
+  if state then state.execution_undo_serial = serial end
+  label = tostring(label)
+  if not label:lower():match("^reaassist%f[^%w]") then label = "ReaAssist: " .. label end
+  return label .. " (#" .. Code.execution_undo_session_token()
+    .. "-" .. serial .. ")"
+end
+
+-- Is the current head of `project` the block this execution just closed? The
+-- unique label answers it. A pre-block head that already reads the label can
+-- only mean a colliding token, so ownership is refused: the counter cannot
+-- tell a kept head from a pushed one. head_before is nil when the host could
+-- not be asked; the label identity still governs.
+function Code.execution_block_owns_head(project, written_label, head_before)
+  written_label = tostring(written_label or "")
+  if written_label == "" then return false end
+  if Code.current_undo_head_label(project) ~= written_label then return false end
+  if head_before ~= nil and tostring(head_before) == written_label then
+    return false
+  end
+  return true
+end
+
 function Code.run_result_can_undo(run_result, project)
   if type(run_result) ~= "table" then return false end
+  -- Only a run that measured its own block pushing the head it named may
+  -- Undo. A false measurement means REAPER kept an earlier entry; a result
+  -- without the measurement, such as a card from before this check, cannot
+  -- tell those apart.
+  if run_result.undo_target_owned ~= true then return false end
   -- A note receipt alone does not establish which Undo state owns the edit.
   -- Keep the existing Undo gate until MIDI-only ownership is qualified.
   if run_result.change_evidence and run_result.change_evidence.midi_note_attributed
@@ -21177,6 +21327,18 @@ function Code.run_result_can_undo(run_result, project)
       and not independent_delta and not independent_fx_shape then
     ordinary_change = false
   end
+  -- A changed status that rests only on that hint grants no Undo on any run
+  -- status. Besides readbacks, the hint counts any accepted FX index, and a
+  -- block that changed nothing can leave an older entry with the same label
+  -- at the head. The run keeps only the authority its other evidence earns.
+  local observable_status = run_result.observable_change_status
+  if type(insert_evidence) == "table"
+      and insert_evidence.other_project_change_detected == true
+      and observable_status == "changed"
+      and not independent_delta and not independent_fx_shape then
+    ordinary_change = false
+    observable_status = "unchanged"
+  end
   local flags_value = run_result.undo_target_flags
   local undo_flags = (type(flags_value) == "number"
       or type(flags_value) == "string")
@@ -21188,10 +21350,11 @@ function Code.run_result_can_undo(run_result, project)
   -- Numeric host evidence currently comes only from SetMediaTrackInfo_Value.
   -- Its properties require the track-configuration Undo bit (1).
   local host_value_change = run_result.run_status == "ran_ok"
-    and run_result.observable_change_status == "unchanged"
+    and observable_status == "unchanged"
     and run_result.host_value_change_status == "changed"
     and undo_end_delta ~= nil
     and undo_end_delta > 0
+    and undo_end_delta < math.huge
     and undo_flags ~= nil
     and (undo_flags == -1 or (undo_flags & 1) ~= 0)
   -- A structural count can change while REAPER defers its project-state
@@ -21203,12 +21366,13 @@ function Code.run_result_can_undo(run_result, project)
     and structural_only_change
     and undo_end_delta ~= nil
     and undo_end_delta > 0
+    and undo_end_delta < math.huge
     and undo_flags == -1
   -- Parameter readbacks can change before REAPER advances its project counter
   -- at Undo_EndBlock. Admit that evidence only with a completed full Undo block;
   -- the project, counter and label checks below still establish ownership.
   local parameter_change = run_result.run_status == "ran_ok"
-    and run_result.observable_change_status == "unchanged"
+    and observable_status == "unchanged"
     and run_result.parameter_change_status == "changed"
     and type(parameters) == "table" and parameters.status == "changed"
     and type(changed_targets) == "number"
@@ -21831,6 +21995,113 @@ function Code.project_shape_change_evidence(before, after)
   return out
 end
 
+-- FX removal evidence for the result note only (FB-20260926-01). The M11
+-- report showed TrackFX_Delete leaving the project counter unmoved inside the
+-- open Undo block, so the run looked unchanged. This total never enters project_shape, the
+-- observable status or any Undo path: 1.6 cannot prove which Undo entry owns
+-- the removal. TrackFX_Delete counts the FX and record input FX of every
+-- track plus the master track's FX (its record FX are monitoring FX, outside
+-- the project); TakeFX_Delete counts the FX of every take. Each kind arms its
+-- own branch. Returns the total (nil when a count is unreadable or there are
+-- more than FX_REMOVAL_OBJECT_LIMIT tracks, items and takes) and whether the
+-- script armed either branch.
+local FX_REMOVAL_OBJECT_LIMIT = 20000
+function Code.fx_removal_total(project, code)
+  code = type(code) == "string" and code or ""
+  local tracks = code:find("TrackFX_Delete", 1, true) ~= nil
+  local takes = code:find("TakeFX_Delete", 1, true) ~= nil
+  if not tracks and not takes then return nil, false end
+  local function count(fn, ...)
+    if type(fn) ~= "function" then return nil end
+    local ok, value = pcall(fn, ...)
+    value = ok and type(value) == "number" and math.tointeger(value) or nil
+    if value == nil or value < 0 then return nil end
+    return value
+  end
+  -- The second value says whether the call itself succeeded, so a lookup
+  -- that throws is not mistaken for an empty result.
+  local function object(fn, ...)
+    if type(fn) ~= "function" then return nil, false end
+    local ok, value = pcall(fn, ...)
+    if ok then return value, true end
+    return nil, false
+  end
+  local total, visited = 0, 0
+  if tracks then
+    local track_count = count(reaper.CountTracks, project)
+    if track_count == nil or track_count > FX_REMOVAL_OBJECT_LIMIT then return nil, true end
+    visited = track_count
+    for index = 0, track_count - 1 do
+      local track = object(reaper.GetTrack, project, index)
+      local fx = track ~= nil and count(reaper.TrackFX_GetCount, track) or nil
+      local rec = track ~= nil and count(reaper.TrackFX_GetRecCount, track) or nil
+      if fx == nil or rec == nil then return nil, true end
+      total = total + fx + rec
+    end
+    local master = object(reaper.GetMasterTrack, project)
+    local master_fx = master ~= nil and count(reaper.TrackFX_GetCount, master) or nil
+    if master_fx == nil then return nil, true end
+    total = total + master_fx
+  end
+  if takes then
+    local item_count = count(reaper.CountMediaItems, project)
+    if item_count == nil or visited + item_count > FX_REMOVAL_OBJECT_LIMIT then
+      return nil, true
+    end
+    visited = visited + item_count
+    for index = 0, item_count - 1 do
+      local item = object(reaper.GetMediaItem, project, index)
+      local take_count = item ~= nil and count(reaper.CountTakes, item) or nil
+      if take_count == nil then return nil, true end
+      visited = visited + take_count
+      if visited > FX_REMOVAL_OBJECT_LIMIT then return nil, true end
+      for take_index = 0, take_count - 1 do
+        -- An empty take lane has no take and holds no FX. A lookup that
+        -- fails leaves the total unknown.
+        local take, looked_up = object(reaper.GetMediaItemTake, item, take_index)
+        if not looked_up then return nil, true end
+        if take ~= nil then
+          local fx = count(reaper.TakeFX_GetCount, take)
+          if fx == nil then return nil, true end
+          total = total + fx
+        end
+      end
+    end
+  end
+  return total, true
+end
+
+-- Two-sided comparison of Code.fx_removal_total for an armed script. Only a
+-- lower total is a removal; a replacement that keeps the total equal is not
+-- seen. A missing or invalid side is unknown.
+function Code.fx_removal_evidence(before, after)
+  local valid_before = math.type(before) == "integer" and before >= 0
+  local valid_after = math.type(after) == "integer" and after >= 0
+  if not valid_before or not valid_after then
+    return { status = "unknown" }
+  end
+  return {
+    status = after < before and "changed" or "unchanged",
+    fx_total_before = before,
+    fx_total_after = after,
+  }
+end
+
+-- True when a run's own action segment removed FX. Note text only: callers
+-- use it to drop the false "No project change" note, never to offer Undo.
+function Code.fx_removal_reported(change_evidence)
+  if type(change_evidence) ~= "table"
+      or change_evidence.attribution ~= "action_segment" then
+    return false
+  end
+  local removal = change_evidence.fx_removal
+  return type(removal) == "table" and removal.status == "changed"
+    and math.type(removal.fx_total_before) == "integer"
+    and math.type(removal.fx_total_after) == "integer"
+    and removal.fx_total_after >= 0
+    and removal.fx_total_after < removal.fx_total_before
+end
+
 -- Stable diagnostic key for generated source.
 function Code.plugin_profile_code_key(code)
   if type(RA) == "table" and type(RA.sha256_hex) == "function" then
@@ -21850,7 +22121,7 @@ function Code.plugin_test_runtime_event(stage, extra)
       return
     end
     if tostring(reaper.GetResourcePath() or ""):lower()
-        ~= "c:\\reaper - test" then
+        ~= "c:\\reaper_test_v1" then
       return
     end
     local nonce = tostring(reaper.GetExtState(
@@ -22195,6 +22466,10 @@ function Code.build_run_result(code_type, code, run_status, validation_status,
     result.undo_target_label = tostring(opts.undo_target_label)
     result.undo_target_status = tostring(opts.undo_target_status
       or Code.current_undo_target_status(result.undo_target_label))
+    -- The run's measurement of whether its own block pushed the head.
+    if opts.undo_target_owned == true or opts.undo_target_owned == false then
+      result.undo_target_owned = opts.undo_target_owned
+    end
   end
   local undo_flags_value = opts.undo_target_flags
   local undo_target_flags = (type(undo_flags_value) == "number"
@@ -22219,6 +22494,10 @@ function Code.build_run_result(code_type, code, run_status, validation_status,
     }
     if before ~= nil and after ~= nil then
       result.raw_project_state_change_delta = after - before
+    end
+    -- Note evidence only; Code.run_result_can_undo never reads it.
+    if type(opts.fx_removal_evidence) == "table" then
+      result.change_evidence.fx_removal = opts.fx_removal_evidence
     end
     if attributed_measurement and attributed_delta ~= nil then
       result.project_state_change_delta = attributed_delta
@@ -23771,6 +24050,8 @@ function Code.run(code, expected_project, conversation_delete, run_context)
     return shape
   end
   local project_shape_before = project_shape_snapshot()
+  local fx_removal_before, fx_removal_armed =
+    Code.fx_removal_total(execution_project, code)
   -- THE PROMPT THAT ASKED FOR THIS RUN, BOUND WHERE THE RUN IS CREATED. The
   -- substitution record reads it for the two exemptions of plan section 7.4,
   -- and it cannot be read from S.pending_orig_prompt when the notice is built:
@@ -24511,6 +24792,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
       changed_segment_count = defer_state.changed_segment_count,
       undo_target_label = undo_label,
       undo_target_status = undo_status,
+      undo_target_owned = defer_state.last_undo_owned,
       protected_call_failure_evidence =
         failure_kind == "protected_call_failure"
           and protected_call_failure_evidence() or nil,
@@ -24536,6 +24818,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
         deferred = source == "generated_lua_defer_callback" and true or nil,
         undo_target_label = undo_label,
         undo_target_status = undo_status,
+        undo_target_owned = defer_state.last_undo_owned,
         undo_target_flags = defer_state.last_undo_flags,
         undo_end_change_delta = defer_state.undo_end_change_delta,
         parameter_change_evidence =
@@ -24566,6 +24849,9 @@ function Code.run(code, expected_project, conversation_delete, run_context)
 
   local function finish_deferred_lua_run()
     if defer_state.pending > 0 then return end
+    -- The last callback has run or drained: no generated code of this run
+    -- can release a hold any more, whatever the outcome.
+    recover_generated_refresh()
     local parameter_evidence =
       Code.parameter_change_evidence(defer_state.parameter_writes)
     local host_value_evidence = Code.host_value_change_evidence(
@@ -24599,6 +24885,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
           deferred_pending = false,
           undo_target_label = defer_state.last_undo_label,
           undo_target_status = defer_state.last_undo_status,
+          undo_target_owned = defer_state.last_undo_owned,
           undo_target_flags = defer_state.last_undo_flags,
           undo_end_change_delta = defer_state.undo_end_change_delta,
           generated_refresh_recovered =
@@ -24647,8 +24934,9 @@ function Code.run(code, expected_project, conversation_delete, run_context)
   -- Wrap `reaper` so user-facing calls (dialogs, console output) are logged
   -- when debug logging is enabled. Every other allowed reaper.* call falls
   -- through to the real API via __index; denied APIs are blocked even when the
-  -- code aliases `reaper` or builds a function name dynamically.
-  local reaper_shim = sandbox_api_proxy(reaper, {
+  -- code aliases `reaper` or builds a function name dynamically. ReaAssist's
+  -- credential ExtState keys read as absent (Code.sandbox_extstate_shadow).
+  local reaper_shim = sandbox_api_proxy(reaper, Code.sandbox_extstate_shadow(reaper, {
     defer = function(fn)
       if defer_state.instruction_budget.exhausted then error(CODE_RUN_BUDGET_TOKEN, 0) end
       if type(fn) ~= "function" or type(reaper.defer) ~= "function" then
@@ -24694,6 +24982,8 @@ function Code.run(code, expected_project, conversation_delete, run_context)
         local callback_undo_flags = inner_undo_flags
         inner_undo_label = nil
         inner_undo_flags = -1
+        local callback_undo_head_before =
+          Code.current_undo_head_label(execution_project)
         reaper.Undo_BeginBlock()
         local callback_change_count_before =
           Code.project_change_count(execution_project)
@@ -24709,11 +24999,13 @@ function Code.run(code, expected_project, conversation_delete, run_context)
         record_change_segment(callback_change_count_before,
           callback_change_count_after)
         recover_generated_refresh()
-        local undo_label = inner_undo_label or callback_undo_label
-          or "ReaAssist"
+        local undo_label = Code.next_execution_undo_label(
+          inner_undo_label or callback_undo_label or "ReaAssist")
         local undo_flags = inner_undo_label and inner_undo_flags
           or callback_undo_flags or -1
         reaper.Undo_EndBlock(undo_label, undo_flags)
+        defer_state.last_undo_owned = Code.execution_block_owns_head(
+          execution_project, undo_label, callback_undo_head_before)
         defer_state.last_undo_label = undo_label
         defer_state.last_undo_flags = math.tointeger(tonumber(undo_flags))
         defer_state.last_undo_status =
@@ -24927,7 +25219,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
       end
       return 0
     end,
-  }, "reaper", function(key, value)
+  }), "reaper", function(key, value)
     if type(key) ~= "string" or type(value) ~= "function" then return nil end
     -- Other MIDI event writers can sort notes even when they edit CC or text.
     if key:match("^MIDI_Set") or key:match("^MIDI_Insert") or key:match("^MIDI_Delete") then
@@ -25014,6 +25306,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
   -- throw anywhere inside fn() cannot leave the stack unbalanced. The label
   -- the inner code passed to Undo_EndBlock ("ReaAssist: Create 10 tracks"
   -- etc.) is surfaced in REAPER's undo history via inner_undo_label.
+  local undo_head_before = Code.current_undo_head_label(execution_project)
   reaper.Undo_BeginBlock()
   local action_change_count_before = Code.project_change_count(execution_project)
   local ok, run_err, instruction_timeout, instruction_count =
@@ -25026,15 +25319,24 @@ function Code.run(code, expected_project, conversation_delete, run_context)
     defer_state.project_shape_change_evidence =
       Code.project_shape_change_evidence(
         project_shape_before, action_project_shape_after)
+    defer_state.fx_removal_evidence = fx_removal_armed
+      and Code.fx_removal_evidence(fx_removal_before,
+        (Code.fx_removal_total(execution_project, code))) or nil
   end
   local protected_failed =
     defer_state.protected_call_failures.failure_count > 0
-  if defer_state.pending == 0 or not ok or protected_failed then
+  -- A run that ends here with a failure leaves its callbacks only to drain,
+  -- so no later generated code can release a hold it left.
+  if defer_state.pending == 0 or not ok or protected_failed
+      or defer_state.reported_failure then
     recover_generated_refresh()
   end
-  local completed_undo_label = inner_undo_label or "ReaAssist"
+  local completed_undo_label = Code.next_execution_undo_label(
+    inner_undo_label or "ReaAssist")
   local completed_undo_flags = math.tointeger(tonumber(inner_undo_flags))
   reaper.Undo_EndBlock(completed_undo_label, inner_undo_flags)
+  defer_state.last_undo_owned = Code.execution_block_owns_head(
+    execution_project, completed_undo_label, undo_head_before)
   defer_state.last_undo_label = completed_undo_label
   defer_state.last_undo_flags = completed_undo_flags
   defer_state.last_undo_status =
@@ -25090,6 +25392,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
           defer_state.host_value_evidence_overflow),
         undo_target_label = defer_state.last_undo_label,
         undo_target_status = defer_state.last_undo_status,
+        undo_target_owned = defer_state.last_undo_owned,
         undo_target_flags = defer_state.last_undo_flags,
         undo_end_change_delta = defer_state.undo_end_change_delta,
       })
@@ -25110,6 +25413,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
         defer_state.host_value_evidence_overflow),
       project_shape_change_evidence =
         defer_state.project_shape_change_evidence,
+      fx_removal_evidence = defer_state.fx_removal_evidence,
       midi_note_change_evidence = defer_state.midi_note_receipt.evidence(),
       fx_insert_accepted_call_count = defer_state.successful_fx_insert_count,
       fx_insert_failure_evidence =
@@ -25126,6 +25430,7 @@ function Code.run(code, expected_project, conversation_delete, run_context)
         defer_state.generated_refresh_recovery_count,
       undo_target_label = defer_state.last_undo_label,
       undo_target_status = defer_state.last_undo_status,
+      undo_target_owned = defer_state.last_undo_owned,
       undo_target_flags = defer_state.last_undo_flags,
       undo_end_change_delta = defer_state.undo_end_change_delta,
     })

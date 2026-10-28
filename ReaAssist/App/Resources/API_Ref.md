@@ -6,8 +6,8 @@
 <!-- SECTION:core -->
 # REAPER ReaScript Lua API Reference
 
-Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.82),
-plus official Cockos changelog notes through REAPER v7.82.
+Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.83),
+plus official Cockos changelog notes through REAPER v7.83.
 Lua-only. All functions called as reaper.FunctionName().
 Use proj=0 for active project. Track/item indices in the API are 0-based.
 
@@ -644,6 +644,9 @@ index returned by TrackFX_AddByName is arg 2, not arg 1.
   REAPER 7.80+: `param.X.default_value` returns the normalized default value
   for parameter X when available. `param_hovered` returns the hovered parameter
   index, or -1 when no parameter is hovered, in supporting CLAP plug-ins.
+  REAPER 7.83+: `GainReduction_dB` returns the current gain reduction for
+  ReaComp and other supported compressors, including CLAP plug-ins that expose
+  it. Check retval; unsupported plug-ins and older REAPER return false.
   Check the boolean result before using either value; unsupported queries fail.
   REAPER 7.81+: `want_all_kb` reads the "Send all keyboard input to plug-in"
   setting. Convert the returned string to a number; nonzero means enabled.
@@ -1040,6 +1043,10 @@ inserted/skipped counts.
   Set with `reaper.GetSetProjectInfo(0, "PLAYBACK_STOP", stop_seconds, true)`.
   Check the installed REAPER version before using this new key; availability
   of GetSetProjectInfo alone does not establish support for every key.
+- `ARRANGE_PROJECT_H`, `ARRANGE_PROJECT_PINNED_H`, `ARRANGE_PROJECT_YOFFS`
+  (REAPER 7.83+, read-only): unpinned project area height, pinned project area
+  height, and unpinned scroll offset, in pixels. Check the installed REAPER
+  version before use, as for `PLAYBACK_STOP`.
 
 RULER LANE KEYS (REAPER 7.62+ / 7.65+ / 7.71+):
 - `RULER_HEIGHT`: ruler height in pixels.

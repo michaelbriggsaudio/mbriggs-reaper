@@ -1174,7 +1174,7 @@ local function _turn_generated_code(msg, redact_content)
   local code_type = msg.code_type
                or (type(msg.generated_code) == "table" and msg.generated_code.code_type)
                or "lua"
-  local measured_code = redact_content and Diag.redact(code) or code
+  local measured_code = redact_content and Diag.redact_log(code) or code
   local out = {
     code_type = tostring(code_type or "lua"),
     byte_count = #measured_code,
@@ -1215,7 +1215,7 @@ local function _turn_run_result(msg, err_kind, redact_content)
   if msg.manual_review_reason ~= nil
      and out.manual_review_reason == nil then
     out.manual_review_reason = redact_content
-      and Diag.redact(tostring(msg.manual_review_reason or ""))
+      and Diag.redact_log(tostring(msg.manual_review_reason or ""))
       or tostring(msg.manual_review_reason or "")
     has = true
   end
@@ -1373,7 +1373,7 @@ end
 local function _turn_to_table(msg, redact_content)
   if type(msg) ~= "table" then return { role = "?", content = "" } end
   local t = { role = msg.role }
-  t.content = redact_content and Diag.redact(msg.content or "") or (msg.content or "")
+  t.content = redact_content and Diag.redact_log(msg.content or "") or (msg.content or "")
   if msg.ts          then t.ts          = msg.ts end
   if msg.intent_tag  then t.intent_tag  = msg.intent_tag end
   if msg.docs_retry  ~= nil then t.docs_retry = msg.docs_retry end
@@ -1407,9 +1407,18 @@ local function _turn_to_table(msg, redact_content)
     elseif msg.thinking_level ~= nil then
       t.thinking_label = tostring(msg.thinking_level or "")
     end
-    if msg.model_label then t.model_label = msg.model_label end
+    if msg.model_label then
+      -- A custom provider's label is user-chosen text and can name a host.
+      if provider_id == "custom" then
+        t.model_label = "custom"
+      elseif redact_content then
+        t.model_label = Diag.redact_log(tostring(msg.model_label))
+      else
+        t.model_label = msg.model_label
+      end
+    end
     if msg.code_block then
-      t.code_block = redact_content and Diag.redact(msg.code_block) or msg.code_block
+      t.code_block = redact_content and Diag.redact_log(msg.code_block) or msg.code_block
       t.code_type  = msg.code_type
     end
     if msg.code_block_present ~= nil then
@@ -1436,7 +1445,7 @@ local function _turn_to_table(msg, redact_content)
     end
     if msg.manual_review_reason ~= nil then
       t.manual_review_reason = redact_content
-        and Diag.redact(tostring(msg.manual_review_reason or ""))
+        and Diag.redact_log(tostring(msg.manual_review_reason or ""))
         or tostring(msg.manual_review_reason or "")
     end
     if msg.auto_ran      ~= nil then t.auto_ran      = msg.auto_ran end
@@ -1524,7 +1533,13 @@ local function _turn_to_table(msg, redact_content)
       end
     end
     if msg.fallback_label ~= nil then
-      t.fallback_label = tostring(msg.fallback_label or "")
+      if t.fallback_provider_id == "custom" then
+        t.fallback_label = "custom"
+      elseif redact_content then
+        t.fallback_label = Diag.redact_log(tostring(msg.fallback_label or ""))
+      else
+        t.fallback_label = tostring(msg.fallback_label or "")
+      end
     end
     if msg.generated_code ~= nil or msg.code_block then
       t.generated_code = _turn_generated_code(msg, redact_content)
@@ -1533,7 +1548,7 @@ local function _turn_to_table(msg, redact_content)
       local typed_action_summary = tostring(msg.typed_action_summary or "")
       if typed_action_summary ~= "" then
         t.typed_action_summary = redact_content
-          and Diag.redact(typed_action_summary) or typed_action_summary
+          and Diag.redact_log(typed_action_summary) or typed_action_summary
       end
     end
     if msg.local_answer  ~= nil then t.local_answer  = msg.local_answer end
@@ -2401,6 +2416,12 @@ end
 function Diag.sanitize_error_debug(debug)
   if type(debug) ~= "table" then return _redact_payload_value(debug) end
   local out = _redact_payload_value(debug)
+  if debug.provider_limit_classification ~= nil then
+    local value = debug.provider_limit_classification
+    out.provider_limit_classification =
+      (value == "allocation_exhausted" or value == "temporary_throttle")
+        and value or "unknown"
+  end
   if debug.engine_failure ~= nil then
     out.engine_failure = Diag.normalize_engine_failure(debug.engine_failure)
   end
@@ -5774,6 +5795,18 @@ local function _flush_current_auto()
   if write_err then _report_write_failure(path, write_err) end
 end
 
+-- Writes the pending automatic-diagnostics record immediately, for a caller
+-- that is about to close without another tick (the frame guard). Consent and
+-- tier checks are the ones _flush_current_auto already applies. It runs even
+-- while an upload is in flight or before the first tick: uploads only send
+-- other launches' records (_process_auto_file skips the current owner), so
+-- this launch's pending file is never the one being sent.
+function Diag.flush_now()
+  auto_state.last_flush_at = 0
+  _flush_current_auto()
+  return true
+end
+
 local _dispatch_ready
 
 local function _send_first_chat_ping()
@@ -5909,6 +5942,29 @@ local function _dir_exists(dir)
   return false
 end
 
+-- Exact temp stems that ReaAssist 0.9.5 to 1.2.2 wrote into the REAPER resource
+-- folder as reaassist_<stem>_<action id>.<ext> (the id is a decimal number).
+-- Later releases keep these under Data/Temp. Anything else named reaassist_*
+-- in the resource folder belongs to the user and is never touched.
+local LEGACY_ROOT_TEMP_STEMS = {
+  txt = {
+    auth = true, cexit = true, exit = true, gauth = true, pid = true,
+    shaexit = true, shain = true, shaout = true, stderr = true,
+    uexit = true, update = true,
+  },
+  json = {
+    body = true, cbody = true, cresp = true, last_error = true, resp = true,
+  },
+  ps1 = { sha = true },
+  png = { clipboard = true, screenshot = true },
+}
+
+local function _legacy_root_temp_name(name)
+  local stem, ext = name:match("^reaassist_([a-z_]+)_%d+%.(%w+)$")
+  local by_ext = ext and LEGACY_ROOT_TEMP_STEMS[ext]
+  return by_ext ~= nil and by_ext[stem] == true
+end
+
 local function _temp_file_name(name, include_core_temp)
   if type(name) ~= "string" then return false end
   if name:match("^reaassist_fb_body_")
@@ -5917,11 +5973,7 @@ local function _temp_file_name(name, include_core_temp)
      or name:match("^reaassist_fb_exit_") then
     return true
   end
-  return include_core_temp and (
-    name:match("^reaassist_.+%.txt$")
-    or name:match("^reaassist_.+%.json$")
-    or name:match("^reaassist_.+%.ps1$")
-    or name:match("^reaassist_.+%.png$")) or false
+  return include_core_temp and _legacy_root_temp_name(name) or false
 end
 
 local function _cleanup_temp_files_in(dir, include_core_temp)
@@ -6071,6 +6123,10 @@ end
 local function _prepare_legacy_diag_storage(now)
   if legacy_storage_prepared then return end
   local cleanup_done = _legacy_cleanup_done()
+  if cleanup_done then
+    legacy_storage_prepared = true
+    return
+  end
   now = tonumber(now) or os.time()
   if now - (legacy_cleanup_last_attempt_at or 0) < 1 then return end
   legacy_cleanup_last_attempt_at = now

@@ -1641,7 +1641,10 @@ function ScreenReader.response_ready_ran_text(payload, long_form)
   if payload and payload.parameter_change_status ~= "changed"
       and payload.midi_note_change_evidence == nil
       and payload.host_value_change_status ~= "changed"
-      and payload.observable_change_status == "unchanged" then
+      and payload.observable_change_status == "unchanged"
+      and not (type(Code) == "table"
+        and type(Code.fx_removal_reported) == "function"
+        and Code.fx_removal_reported(payload.change_evidence)) then
     if interval_overlapped then
       return ScreenReader.t(
         "a11y.sr.response_ready_no_project_change_overlapped", nil,
@@ -4702,10 +4705,22 @@ function ScreenReader.open_factory_reset_confirm()
 end
 
 function ScreenReader.confirm_factory_reset()
-  local ok, err = AppController.factory_reset({
+  local ok, err, outcome = AppController.factory_reset({
     keep_screen_reader = true,
     keep_open = true,
   })
+  -- A partial reset changed the data in memory and left some files or saved
+  -- settings behind (1.6.4 audit #4). Read what was left and go on to first
+  -- setup as a full reset does; a refusal changed nothing and stays here.
+  if not ok and outcome == "partial" then
+    if S then S.script_open = true end
+    ScreenReader.set_status_after_rebuild(tostring(err or ScreenReader.t(
+      "a11y.sr.factory_reset_failed", nil,
+      "Factory reset could not be completed.")), true)
+    ScreenReader.focus_after_rebuild("terms_accept")
+    ScreenReader.open_view("terms")
+    return
+  end
   if not ok then
     ScreenReader.set_status_after_rebuild(tostring(err or ScreenReader.t(
       "a11y.sr.factory_reset_failed", nil,
@@ -11600,7 +11615,18 @@ function ScreenReader.heartbeat()
   end
 end
 
+-- Each frame runs under the shared frame guard (1.6.4 audit #6): the first
+-- unexpected raise is logged and recorded, the request in flight is
+-- cancelled, ScreenReader.finish runs and the loop is not deferred again.
 function ScreenReader.loop()
+  if RA and type(RA.run_guarded_frame) == "function" then
+    return RA.run_guarded_frame("screen_reader", ScreenReader.frame,
+      ScreenReader.finish)
+  end
+  return ScreenReader.frame()
+end
+
+function ScreenReader.frame()
   if not (S and S.script_open) then return ScreenReader.finish() end
   ScreenReader.heartbeat()
   if reagirl and reagirl.Gui_PreventCloseViaEscForOneCycle then
@@ -12538,8 +12564,8 @@ end
 function AppController.factory_reset(opts)
   opts = opts or {}
   if AppController.factory_reset_execute then
-    local ok, err = AppController.factory_reset_execute(opts)
-    if ok == false then return false, err end
+    local ok, err, outcome = AppController.factory_reset_execute(opts)
+    if ok == false then return false, err, outcome end
     if S and opts.keep_open ~= true then S.script_open = false end
     return true
   end
@@ -13353,18 +13379,18 @@ end
 -- never inherit these defaults. Bump TABLE_REVISION whenever an allowed tuple
 -- or frozen default changes.
 ScreenReaderLegacy = ScreenReaderLegacy or {}
-ScreenReaderLegacy.TABLE_REVISION = 5
+ScreenReaderLegacy.TABLE_REVISION = 7
 ScreenReaderLegacy.DEFAULT = {
   provider_id = "anthropic",
-  model_id = "claude-sonnet-5-5",
+  model_id = "claude-haiku-5-5",
   protocol_id = "anthropic_messages",
 }
 ScreenReaderLegacy.PROVIDERS = {
   anthropic = {
     protocol_id = "anthropic_messages",
-    default_model_id = "claude-sonnet-5-5",
+    default_model_id = "claude-haiku-5-5",
     models = {
-      ["claude-haiku-4-5"] = true,
+      ["claude-haiku-5-5"] = true,
       ["claude-sonnet-5-5"] = true,
       ["claude-opus-5-5"] = true,
     },
@@ -13374,6 +13400,7 @@ ScreenReaderLegacy.PROVIDERS = {
     default_model_id = "gpt-6-luna",
     models = {
       ["gpt-6-luna"] = true,
+      ["gpt-6.1-terra"] = true,
       ["gpt-6.1-sol"] = true,
       ["gpt-6-astra"] = true,
     },
@@ -13563,8 +13590,17 @@ function ScreenReaderLegacy._saved_tuple(store, providers, reaper_api, cfg)
     local raw_idx = ScreenReaderLegacy._trim(reaper_api.GetExtState(
       cfg.EXT_NS, "model_idx_" .. provider_id))
     if raw_idx ~= "" then
-      local model = provider.models and provider.models[tonumber(raw_idx)] or nil
-      if model and model.id then model_id = model.id end
+      -- A provider with legacy_model_order keeps the meaning of saved numbers
+      -- fixed while its displayed order can differ.
+      local legacy_id = type(provider.legacy_model_order) == "table"
+        and provider.legacy_model_order[tonumber(raw_idx)] or nil
+      if legacy_id then
+        model_id = legacy_id
+      elseif type(provider.legacy_model_order) ~= "table" then
+        local model = provider.models and provider.models[tonumber(raw_idx)]
+          or nil
+        if model and model.id then model_id = model.id end
+      end
     end
   end
   if model_id == "" and provider then

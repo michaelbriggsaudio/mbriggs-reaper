@@ -7,6 +7,17 @@ model training cutoffs. This is not the full changelog.
 If a user asks outside this slice, do not invent details. Say the installed
 REAPER changelog is authoritative, or ask for the relevant changelog lines.
 
+## REAPER 7.83 - October 24, 2026
+
+- The FX browser has a "Hidden FX" folder, and many legacy JSFX now start
+  there. A plug-in that seems to be missing may be in that folder.
+- Render settings add a $projectbase wildcard (project name without any
+  auto-increment suffix), an option to skip loudness calculation for faster
+  renders, and a setting to show or hide track meters while rendering.
+- In read mode, touching a control now overrides that parameter temporarily.
+- MIDI/OSC learn works for track volume, pan, width, mute, solo, record arm and
+  FX bypass, and for send volume, pan and mute.
+
 ## REAPER 7.82 - October 4, 2026
 
 - Theme scripts can enumerate available theme entries and distinguish colors

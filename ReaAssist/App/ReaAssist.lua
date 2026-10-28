@@ -3304,13 +3304,17 @@ function InstallerGfx.spawn_pipeline()
       "  Mark ('error:' + $_.ToString())",
       "}",
     }, "\n")
-    local sf = io.open(script_path, "w")
+    -- UTF-8 with a BOM, as the file's other .ps1 writers do. Without the BOM
+    -- Windows PowerShell 5.1 reads the script as the ANSI code page, so a
+    -- non-ASCII resource path (a user folder with an accented letter) turns
+    -- into a different path and the first Mark throws outside the try.
+    local sf = io.open(script_path, "wb")
     if not sf then
       InstallerGfx.fail("setup", InstallerGfx.t("error.write_script", nil,
         "Could not write install script."))
       return
     end
-    sf:write(script); sf:close()
+    sf:write("\239\187\191"); sf:write(script); sf:close()
     -- Spawn the script async. Mirrors the proven Net.fire_curl pattern:
     -- outer powershell launches `cmd /c <command>` via Start-Process
     -- with -WindowStyle Hidden so there's no flash AND the outer call
@@ -3410,25 +3414,16 @@ function InstallerGfx.poll_pipeline()
   end
   InstallerGfx._last_marker_poll = now
 
-  -- Hard timeout safety
-  if now - (InstallerGfx.pipeline_started_at or 0) > 120 then
-    InstallerGfx.fail("timeout",
-      InstallerGfx.t("error.timeout", nil,
-        "Install timed out after 2 minutes. Check your network connection and try again.\n\n"
-        .. "If this is a managed/enterprise Windows system, PowerShell policy "
-        .. "such as Constrained Language Mode may have blocked the installer. "
-        .. "Install the dependency manually or ask IT to allow the ReaAssist installer script."))
-    return
-  end
-
+  -- Read the marker before the timeout check, so a final marker that landed
+  -- after 120 s (a slow download that still finished) is reported as what it
+  -- says instead of as a timeout. Nil when the script has not written its
+  -- first marker yet.
+  local content
   local mf = io.open(InstallerGfx.marker_path, "r")
-  if not mf then return end  -- script hasn't written its first marker yet
-  local content = (mf:read("*a") or ""):gsub("[\r\n%s]+$", "")
-  mf:close()
-
-  -- Empty content = we caught the file mid-overwrite during a phase
-  -- transition. Treat as "still running" and re-poll next tick.
-  if content == "" then return end
+  if mf then
+    content = (mf:read("*a") or ""):gsub("[\r\n%s]+$", "")
+    mf:close()
+  end
 
   -- Intermediate phase markers: promote to InstallerGfx.state (drives
   -- the progress-bar fill in render_running) and update the on-screen
@@ -3444,6 +3439,21 @@ function InstallerGfx.poll_pipeline()
     installing  = InstallerGfx.t("status.installing", nil,
       "Installing to UserPlugins..."),
   }
+
+  -- Hard timeout safety, only while no final marker exists. Empty content
+  -- means we caught the file mid-overwrite during a phase transition.
+  local is_final = content ~= nil and content ~= "" and not PHASE_LABELS[content]
+  if not is_final and now - (InstallerGfx.pipeline_started_at or 0) > 120 then
+    InstallerGfx.fail("timeout",
+      InstallerGfx.t("error.timeout", nil,
+        "Install timed out after 2 minutes. Check your network connection and try again.\n\n"
+        .. "If this is a managed/enterprise Windows system, PowerShell policy "
+        .. "such as Constrained Language Mode may have blocked the installer. "
+        .. "Install the dependency manually or ask IT to allow the ReaAssist installer script."))
+    return
+  end
+  if content == nil or content == "" then return end
+
   if PHASE_LABELS[content] then
     InstallerGfx.state  = content
     InstallerGfx.status = PHASE_LABELS[content]
@@ -4309,6 +4319,13 @@ end
 reaper.RecursiveCreateDirectory(RA.DATA_DIR, 0)
 reaper.RecursiveCreateDirectory(RA.TEMP_DIR, 0)
 -- close deploy-lock scope
+-- macOS and Linux: Data/Temp holds the plaintext key scratch files curl reads,
+-- and the default umask leaves them readable by other local accounts. Limit
+-- the folder to this account once per launch (1.6.4 audit #9). A folder the
+-- deploy lock kept from being created makes this a quiet no-op.
+if not RA.IS_WINDOWS then
+  pcall(os.execute, "chmod 700 " .. Shell.sh_quote(RA.TEMP_DIR) .. " >/dev/null 2>&1")
+end
 -- Durable recovery state, under the package root beside Data/ (decision
 -- 10a.2). The launcher owns this folder: Recovery/Body/ holds the parked copy,
 -- Recovery/launcher_journal.json and Recovery/launcher.lock are its own, and
@@ -4456,7 +4473,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.6.3", -- public release version
+  VERSION           = "1.6.4", -- public release version
   -- OpenRouter ships as dormant, tested plumbing in 1.6.0. The redesigned
   -- webview release enables its advanced-user UI in 2.0.0. Keep this false
   -- until that release so saved development keys or selections cannot expose
@@ -4639,7 +4656,7 @@ function RA.test_update_override_allowed()
   local normalized = tostring(resource or ""):gsub("\\", "/")
     :gsub("/+$", ""):lower()
   if normalized == "c:/reaper - accessibility test"
-      or normalized == "c:/reaper - test" then
+      or normalized == "c:/reaper_test_v1" then
     return true, "test_profile"
   end
   -- Dev/ is local-only and sits beside the launchers at the package root; it
@@ -8591,8 +8608,12 @@ end
 -- Prices are USD per 1 million tokens.
 -- Sources: anthropic.com/pricing, openai.com/api/pricing,
 -- ai.google.dev/gemini-api/docs/pricing, api-docs.deepseek.com/quick_start/pricing
--- Last pricing re-check: 2026-09-02. Anthropic made Sonnet 5's $2 input and
+-- Pricing re-check: 2026-09-02. Anthropic made Sonnet 5's $2 input and
 -- $10 output rates permanent instead of applying the planned increase.
+-- Sonnet 5.5 cache-read re-check: 2026-10-07. The provider's prompt-caching
+-- section specifies $0.10 per million tokens (0.05x input); its overview and
+-- summary table still list $0.20. Source:
+-- https://platform.claude.com/docs/en/about-claude/pricing#prompt-caching
 -- =============================================================================
 -- Provider definitions
 -- =============================================================================
@@ -8630,7 +8651,7 @@ PROVIDERS = {
     console_label = "console.anthropic.com/settings/keys",
     billing_url   = "https://console.anthropic.com/settings/billing",
     billing_label = "console.anthropic.com/settings/billing",
-    default_model_idx = 2,
+    default_model_idx = 1,  -- Haiku 5.5 Low, the 1.6.4 Claude recommendation
     -- Anthropic thinking levels carry BOTH a budget_tokens (for the
     -- legacy manual-thinking shape, {"thinking":{"type":"enabled",
     -- "budget_tokens":N}}) AND an effort string (for the adaptive shape,
@@ -8654,8 +8675,8 @@ PROVIDERS = {
       { label = "Low",    value = "low",    budget_tokens = 2048,  effort = "low"    },
       { label = "Medium", value = "medium", budget_tokens = 8192,  effort = "medium" },
       { label = "High",   value = "high",   budget_tokens = 16384, effort = "high"   },
-      { label = "Xhigh",  value = "xhigh",  effort = "xhigh", model_id = "claude-sonnet-5-5" },
-      { label = "Max",    value = "max",    effort = "max", model_id = "claude-sonnet-5-5" },
+      { label = "Xhigh",  value = "xhigh",  effort = "xhigh", model_ids = { ["claude-sonnet-5-5"] = true, ["claude-haiku-5-5"] = true } },
+      { label = "Max",    value = "max",    effort = "max", model_ids = { ["claude-sonnet-5-5"] = true, ["claude-haiku-5-5"] = true } },
     },
     default_thinking_idx = 1,  -- None (matches pre-thinking-support behavior)
     -- price_cache_w reflects the 5-minute cache write rate (1.25x input).
@@ -8667,32 +8688,33 @@ PROVIDERS = {
     -- Anthropic's published model docs as of Sep 2026. Update when
     -- ceilings change.
     -- context_window: per-model context size used by the preflight token
-    -- gate. Haiku 4.5 stays at the 200K default (no field); Sonnet 5.5
-    -- and Opus 5.5 advertise 1M-token windows.
+    -- gate. The current Claude models advertise 1M-token windows.
+    -- Haiku 5.5 charges five times the base rates above 100K prompt tokens.
     -- thinking_style: which wire-format shape this model accepts.
     --   "claude_manual"   = {"thinking":{"type":"enabled","budget_tokens":N}}
     --   "claude_adaptive" = {"thinking":{"type":"adaptive"},
     --                        "output_config":{"effort":"<level>"}}
-    -- Haiku 4.5 accepts manual; Sonnet 5.5 / Opus 5.5 use adaptive
-    -- and reject manual budget_tokens.
+    -- All current Claude entries use adaptive and reject manual budgets.
     --
-    -- default_thinking_idx (per-model override): Haiku at None/Low
-    -- struggles on multi-step REAPER scripting and Medium needs a
-    -- retry on complex prompts, so Haiku defaults to High (4, 16K
-    -- budget) -- the only Haiku combo that handles complex routing/
-    -- FX work reliably at moderate latency. Sonnet 5.5 defaults to Low.
+    -- Haiku 5.5 defaults to Low after the matched 99-task comparison.
+    -- Sonnet 5.5 defaults to Low based on the existing comparison.
     -- Opus 5.5 defaults to Medium, Anthropic's published
     -- default; Low is the nearest supported choice for saved Opus 5 None.
     -- ReaAssist has not yet measured the Opus 5.5 effort levels.
     models = {
-      { label = "Haiku 4.5",  chip_label = "HAIKU",  id = "claude-haiku-4-5",
-        price_in = 1.00,  price_out = 5.00,  price_cache_r = 0.10, price_cache_w = 1.25, max_output = 64000,  thinking_style = "claude_manual",   default_thinking_idx = 4 },
+      { label = "Haiku 5.5", chip_label = "HAIKU", id = "claude-haiku-5-5",
+        legacy_ids = { ["claude-haiku-4-5"] = true, ["claude-haiku-4-5-20251001"] = true },
+        price_in = 0.10, price_out = 0.50, price_cache_r = 0.01, price_cache_w = 0.125,
+        long_context_threshold = 100000, long_context_input_multiplier = 5,
+        long_context_output_multiplier = 5,
+        max_output = 128000, context_window = 1000000, thinking_style = "claude_adaptive",
+        min_thinking_idx = 2, default_thinking_idx = 2 },
       -- Sonnet 5.5 rejects disabled thinking. Its between_tools mode needs
       -- Engine support, so this app exposes the five adaptive effort levels.
-      { label = "Sonnet 5.5", chip_label = "SONNET 5.5", id = "claude-sonnet-5-5",
+      { label = "Sonnet 5.5", chip_label = "SONNET", id = "claude-sonnet-5-5",
         legacy_ids = { ["claude-sonnet-5"] = true, ["claude-sonnet-4-6"] = true },
         price_tier = 2, descriptor = "balanced",
-        price_in = 2.00,  price_out = 10.00, price_cache_r = 0.20, price_cache_w = 2.50,
+        price_in = 2.00,  price_out = 10.00, price_cache_r = 0.10, price_cache_w = 2.50,
         max_output = 128000, context_window = 1000000, thinking_style = "claude_adaptive",
         min_thinking_idx = 2, default_thinking_idx = 2 },
       { label = "Opus 5.5",   chip_label = "OPUS",   id = "claude-opus-5-5",
@@ -8747,19 +8769,31 @@ PROVIDERS = {
     -- GPT-6 cache writes are billed at 1.25x uncached input; cache reads
     -- use each model's published rate. price_cache_w carries that write
     -- rate into live usage, session totals, budget checks, and Bench.
-    -- Luna offers None. Sol 6.1 and Astra require at least Low.
+    -- Luna and Terra 6.1 offer None. Sol 6.1 and Astra require at least Low.
     models = {
       { label = "GPT-6 Luna", chip_label = "LUNA", id = "gpt-6-luna",
         max_thinking_idx = 4,
         protocol = "openai_responses", price_in = 0.10, price_out = 0.50, price_cache_r = 0.01, price_cache_w = 0.125, max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 1, descriptor = "fast" },
-      { label = "GPT-6.1 Sol", chip_label = "SOL 6.1", id = "gpt-6.1-sol",
+      -- Terra 6.1 offers all six levels including None; the default is Low.
+      -- min_thinking_idx = 1 is explicit so a saved invalid level normalizes.
+      { label = "GPT-6.1 Terra", chip_label = "TERRA", id = "gpt-6.1-terra",
+        min_thinking_idx = 1, default_thinking_idx = 2,
+        protocol = "openai_responses", price_in = 1.00, price_out = 5.00, price_cache_r = 0.05, price_cache_w = 1.25, max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 2, descriptor = "balanced" },
+      { label = "GPT-6.1 Sol", chip_label = "SOL", id = "gpt-6.1-sol",
         min_thinking_idx = 2, default_thinking_idx = 2,
         legacy_ids = { ["gpt-6-sol"] = true },
-        protocol = "openai_responses", price_in = 2.00, price_out = 10.00, price_cache_r = 0.10, price_cache_w = 2.50, max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 2, descriptor = "balanced" },
+        protocol = "openai_responses", price_in = 2.00, price_out = 10.00, price_cache_r = 0.10, price_cache_w = 2.50, max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 3, descriptor = "balanced" },
       { label = "GPT-6 Astra", chip_label = "ASTRA", id = "gpt-6-astra",
         min_thinking_idx = 2, default_thinking_idx = 2,
         protocol = "openai_responses", price_in = 10.00, price_out = 50.00, price_cache_r = 1.00, price_cache_w = 12.50, max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 4, descriptor = "smart" },
     },
+    -- Saved model_idx_openai values predate Terra and the display order
+    -- above (Luna, Terra, Sol, Astra). They keep their original meaning
+    -- (1 Luna, 2 Sol, 3 Astra, 4 Terra) through this list; never index
+    -- models[] with a saved value for this provider. See
+    -- Store.legacy_model_idx.
+    legacy_model_order = { "gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra",
+      "gpt-6.1-terra" },
   },
   {
     id            = "google",
@@ -8789,10 +8823,13 @@ PROVIDERS = {
       { label = "High",    value = "HIGH"    },
     },
     default_thinking_idx = 3,  -- Medium (provider-wide fallback only)
-    -- price_cache_r is the text/image/video rate at the lower (<=200K for Pro)
-    -- prompt-size tier. Audio cache reads are ~2x and >200K Pro requests are
-    -- billed at 2x; the script has no per-request tier tracking so the
-    -- lower-tier value is used for the displayed cost estimate.
+    -- Prices are the <=200K prompt-token tier. Pro 3.1 bills prompts above
+    -- 200K at input 4.00, output 18.00 and cache read 0.40 per million
+    -- (Google's paid-tier page, checked 2026-10-26), which its
+    -- long_context_* fields apply: MODELS.calc_cost multiplies input and
+    -- cache reads by 2.0 and output by 1.5 once input plus cache tokens pass
+    -- the threshold. Audio cache reads are ~2x and are not tracked, so the
+    -- text/image/video cache rate is used for the displayed estimate.
     -- max_output: per-model output-token ceiling. Gemini accepts but does
     -- not require maxOutputTokens; we omit it from the request so the
     -- server applies its own default. Used here for the preflight reserve
@@ -8815,7 +8852,7 @@ PROVIDERS = {
         price_in = 0.30,  price_out = 2.50, price_cache_r = 0.03, price_tier = 1,
         is_flash = true, interactions_v1 = true, max_output = 65536,
         context_window = 1048576, default_thinking_idx = 2 },
-      { label = "Flash 3.6",      chip_label = "FLASH",      id = "gemini-3.6-flash",
+      { label = "Flash 3.6",      chip_label = "FLASH 3.6",  id = "gemini-3.6-flash",
         price_in = 1.50,  price_out = 7.50, price_cache_r = 0.15, price_tier = 2,
         price_schedule = {
           cutover_at_utc = 1798761600, -- 2027-01-01 00:00:00 UTC
@@ -8841,6 +8878,8 @@ PROVIDERS = {
         default_thinking_idx = 2, min_thinking_idx = 2 },
       { label = "Pro 3.1",        chip_label = "PRO",        id = "gemini-3.1-pro-preview",
         price_in = 2.00,  price_out = 12.00, price_cache_r = 0.20, price_tier = 4,
+        long_context_threshold = 200000, long_context_input_multiplier = 2.0,
+        long_context_output_multiplier = 1.5,
         paid_only = true, max_output = 65536, context_window = 1048576 },
     },
   },
@@ -9102,6 +9141,7 @@ function PROVIDERS.thinking_idx_allowed(p, m, idx)
   if not idx or idx < 1 or idx > #p.thinking_levels then return false end
   local level = p.thinking_levels[idx]
   if level.model_id and not (m and m.id == level.model_id) then return false end
+  if level.model_ids and not (m and level.model_ids[m.id]) then return false end
   if level.flash_only and not (m and m.is_flash) then return false end
   if m and m.min_thinking_idx and idx < m.min_thinking_idx then return false end
   if m and m.max_thinking_idx and idx > m.max_thinking_idx then return false end
@@ -9665,7 +9705,8 @@ function Store._provider_record_to_json(record)
     model_out.id = m.id or ""
     model_out.price_in = tonumber(m.price_in) or 0
     model_out.price_out = tonumber(m.price_out) or 0
-    model_out.price_cache_r = tonumber(m.price_cache_r) or 0
+    -- An unknown cache-hit price is left out so it reads back unknown.
+    model_out.price_cache_r = tonumber(m.price_cache_r)
     model_out.context_window = tonumber(m.context_window) or CUSTOM_DEFAULT_CTX
     model_out.notes = clean_notes
     local model_body = Store._extra_body_object(m.extra_body,
@@ -9789,7 +9830,8 @@ function Store._provider_record_from_json(src, index)
             id             = model_id,
             price_in       = tonumber(m.price_in) or 0,
             price_out      = tonumber(m.price_out) or 0,
-            price_cache_r  = tonumber(m.price_cache_r) or 0,
+            -- Blank stays unknown (1.6.4 audit #16, x-providers#22).
+            price_cache_r  = tonumber(m.price_cache_r),
             context_window = ctx,
             notes          = clean_notes,
             extra_body     = original_extra_body,
@@ -10442,6 +10484,21 @@ function Store.config_model_idx(provider, models, fallback)
   return Store._model_index_by_id(models, model_id) or fallback
 end
 
+-- Position in `models` for a saved legacy model_idx_<provider> value.
+-- Providers that carry legacy_model_order resolve the saved number through
+-- that id list, so reordering the displayed catalog never changes what an
+-- old saved value selects. Returns nil for a provider without the list or
+-- for a value outside it; callers then use their own positional handling.
+function Store.legacy_model_idx(provider, models, raw_idx)
+  local order = type(provider) == "table" and provider.legacy_model_order
+  if type(order) ~= "table" then return nil end
+  raw_idx = tonumber(raw_idx)
+  if not raw_idx or raw_idx < 1 or raw_idx ~= math.floor(raw_idx) then
+    return nil
+  end
+  return Store._model_index_by_id(models, order[raw_idx])
+end
+
 function Store.config_thinking_idx(provider, model)
   if not provider or not model or not model.id then return nil end
   local doc = Store.config_doc()
@@ -10630,8 +10687,11 @@ function Store.current_selection()
         if active_provider and p.id == active_provider.id then
           idx = prefs.model_idx
         else
+          local saved_raw = tonumber(
+            reaper.GetExtState(CFG.EXT_NS, "model_idx_" .. p.id))
           idx = Store._model_index_by_id(models, selection.model_id_by_provider[p.id])
-            or tonumber(reaper.GetExtState(CFG.EXT_NS, "model_idx_" .. p.id))
+            or Store.legacy_model_idx(p, models, saved_raw)
+            or (not p.legacy_model_order and saved_raw or nil)
         end
         local m = models and idx and models[idx] or nil
         if m and m.id then selection.model_id_by_provider[p.id] = m.id end
@@ -10784,13 +10844,52 @@ function Store.save_window_geometry(x, y, w, h)
     return nil
   end
 
-  doc.window = {
+  local window = {
     x = nx,
     y = ny,
     w = nw,
     h = nh,
   }
-  return Store.save_config()
+  local err = Store.save_config_window(window)
+  if not err then doc.window = window end
+  return err
+end
+
+-- A geometry save writes only `window` (1.6.4 audit #13). It runs every few
+-- seconds while the window moves and again at close, and a whole-document
+-- save from this process's memory would put back the theme, provider and
+-- migration changes another REAPER process saved since this one started.
+-- So it reads Config.json again through the normal reader (with its backup
+-- recovery), replaces `window` in what it read, and writes that through the
+-- atomic writer. Anything other than a clean, current-schema read writes
+-- nothing. The read must not change what other writers are allowed to do, so
+-- the reader's read-failure and write-lock marks are put back as they were:
+-- a startup read failure keeps blocking every write, and a transient failure
+-- here blocks none but this one.
+-- Another process can still save between this read and the replace; that
+-- lost-write window is the remaining race.
+function Store.save_config_window(window)
+  local path = RA.CONFIG_PATH
+  local prior_read_failed = Store._path_read_failed(path) and true or false
+  local prior_lock = Store._path_write_locked(path)
+  local disk, read_err = Store.read_json(path, nil, 1, true)
+  -- Restore marks this read may have cleared, but never clear a mark it set:
+  -- a newer schema, an ambiguous backup or a failed recovery found here must
+  -- keep refusing later whole-document saves for the rest of the session.
+  if prior_read_failed then Store._mark_read_failed(path) end
+  if prior_lock then Store._mark_write_locked(path, prior_lock) end
+  if read_err ~= nil or type(disk) ~= "table" then
+    local reason = "Config.json was not saved: re-read failed ("
+      .. tostring(read_err or "not an object") .. ")"
+    Store._log("STORE", "window geometry: " .. reason)
+    return reason
+  end
+  disk.window = { x = window.x, y = window.y, w = window.w, h = window.h }
+  local write_err = Store.write_json_atomic(path, disk, true)
+  if write_err then
+    Store._log("STORE", "window geometry: " .. tostring(write_err))
+  end
+  return write_err
 end
 
 function Store.clear_window_geometry()
@@ -13891,9 +13990,9 @@ local function parse_models_blob(raw)
         fields[#fields+1] = part
       end
       local id, pin, pout, ctx = fields[1], fields[2], fields[3], fields[4]
-      local pcache, notes = fields[5] or "0", fields[6] or ""
+      local pcache, notes = fields[5], fields[6] or ""
       if #fields == 5 and pcache ~= "" and not tonumber(pcache) then
-        notes, pcache = pcache, "0"
+        notes, pcache = pcache, nil
       end
       if id and id ~= "" and #fields >= 4 and #fields <= 6 then
         local ctx_n = tonumber(ctx) or CUSTOM_DEFAULT_CTX
@@ -13902,7 +14001,10 @@ local function parse_models_blob(raw)
           id             = id,
           price_in       = tonumber(pin)    or 0,
           price_out      = tonumber(pout)   or 0,
-          price_cache_r  = tonumber(pcache) or 0,
+          -- A blank or absent cache-hit price stays unknown, never free
+          -- (1.6.4 audit #16, x-providers#22): MODELS.price_estimate_known
+          -- then reports a reply with cached tokens as an unknown estimate.
+          price_cache_r  = tonumber(pcache),
           context_window = ctx_n,
           notes          = notes or "",
           extra_body     = extra or "",
@@ -13917,12 +14019,13 @@ local function encode_models_blob(models)
   local lines = {}
   for _, m in ipairs(models or {}) do
     local ctx    = tonumber(m.context_window) or CUSTOM_DEFAULT_CTX
-    local pcache = tonumber(m.price_cache_r)  or 0
+    -- An unknown cache-hit price is written blank so it reads back unknown.
+    local pcache = tonumber(m.price_cache_r)
     local base = (m.id or "") .. "|"
               .. tostring(m.price_in  or 0) .. "|"
               .. tostring(m.price_out or 0) .. "|"
               .. tostring(ctx) .. "|"
-              .. tostring(pcache) .. "|"
+              .. (pcache and tostring(pcache) or "") .. "|"
               .. (m.notes or "")
     local extra = m.extra_body or ""
     if extra ~= "" then
@@ -14215,7 +14318,7 @@ function Custom.build_provider(record)
       id             = m.id,
       price_in       = price_in,
       price_out      = price_out,
-      price_cache_r  = m.price_cache_r  or 0,
+      price_cache_r  = tonumber(m.price_cache_r),
       price_provenance = (price_in > 0 and price_out > 0)
         and "user_estimate" or "unknown",
       context_window = m.context_window or CUSTOM_DEFAULT_CTX,
@@ -16464,7 +16567,11 @@ function MODELS.refresh()
       and ScreenReaderLegacy.model_idx
       and ScreenReaderLegacy.model_idx(p, src))
     or Store.config_model_idx(
-      p, src, _prefs_load_idx(key, default_idx, src))
+      p, src,
+      Store.legacy_model_idx(p, src,
+        reaper.GetExtState(CFG.EXT_NS, key))
+      or (p.legacy_model_order and default_idx)
+      or _prefs_load_idx(key, default_idx, src))
   -- Load per-(provider,model) thinking_idx via the shared helper so all
   -- the cascade rules (per-model -> model default -> provider default
   -- -> 1) live in one place.
@@ -17409,15 +17516,16 @@ UI = {}
 -- already includes the word "thinking" so the suffix is dropped); the note
 -- redirects weak combos or calls out a quality property of strong ones.
 UI.MODEL_TIPS = {
-  ["claude-haiku-4-5"]               = "Lowest-cost Claude. Use High thinking. Choose Sonnet 5.5 Low for complex work.",
-  ["claude-sonnet-5-5"]              = "Default Claude for this app. Use Low thinking. Higher levels have not been bench tested.",
-  ["claude-opus-5-5"]                = "Premium Claude. Medium thinking is the default. Low is the lowest supported level.",
-  ["gpt-6-luna"]                     = "Default GPT for this app. Use Low thinking. Lowest-cost GPT-6; ReaAssist testing is pending.",
-  ["gpt-6.1-sol"]                    = "Updated Sol model. Low thinking is the starting setting. ReaAssist testing is pending.",
-  ["gpt-6-astra"]                    = "Premium GPT model. Low thinking is the starting setting. ReaAssist testing is pending.",
-  ["gemini-3.5-flash-lite"]          = "Lowest-cost Gemini. Use Low thinking. Choose it for budget-sensitive work; Flash 3.6 Minimal is stronger overall.",
+  ["claude-haiku-5-5"]               = "Default Claude for this app. Use Low thinking. Lowest-cost Claude; rates increase fivefold above 100k prompt tokens.",
+  ["claude-sonnet-5-5"]              = "Higher-cost Claude option. Use Low thinking. Highest completion rate in ReaAssist stress testing.",
+  ["claude-opus-5-5"]                = "Premium Claude. Medium thinking is the default. Only Low has been Bench tested.",
+  ["gpt-6-luna"]                     = "Default GPT for this app. Use Low thinking. Lowest-cost GPT-6; Bench tested at None and Low.",
+  ["gpt-6.1-terra"]                  = "Mid-priced GPT model. Use Low thinking. Half the price of Sol; Bench tested on REAPER tasks.",
+  ["gpt-6.1-sol"]                    = "Higher-priced GPT model. Use Low thinking. Bench tested at Low; higher levels not measured yet.",
+  ["gpt-6-astra"]                    = "Premium GPT model. Use Low thinking. Bench tested on two tasks only; higher levels not measured yet.",
+  ["gemini-3.5-flash-lite"]          = "Lowest-cost Gemini. Use Low thinking. Choose it for budget-sensitive work; Flash 3.6 Minimal is the recommended Gemini.",
   ["gemini-3.6-flash"]               = "Default Gemini for this app. Use Minimal thinking. Best tested balance of quality, speed, and cost.",
-  ["gemini-3.8-flash"]               = "Optional Gemini model. Use Low thinking. It matched Flash 3.7 while using fewer tokens and costing less in testing.",
+  ["gemini-3.8-flash"]               = "Optional Gemini model. Use Low thinking. Matched Flash 3.6 Minimal in small tests, at a higher cost.",
   ["gemini-3.1-pro-preview"]         = "Premium Gemini preview. Use Medium thinking. Capacity can be unreliable; Flash 3.6 Minimal is safer for coding.",
   ["deepseek-flash"]                 = "DeepSeek's latest Flash model. Use Non-Thinking. Supports images; off-peak rates are half the peak rates.",
 }
@@ -17458,45 +17566,54 @@ end
 -- through to nil and the line just doesn't render that frame.
 UI.COMBO_HINTS = {
   anthropic = {
-    ["claude-haiku-4-5"] = {
-      none   = "Simple requests | Lowest Claude cost | Very fast | Use Sonnet for complex work",
-      low    = "Simple requests needing more reasoning | Lowest Claude cost | Very fast | Use Sonnet for complex work",
-      medium = "General work with caveats | Lowest Claude cost | Slow with retries | Use Sonnet for complex work",
-      high   = "Recommended level | General work with caveats | Lowest Claude cost | Moderate speed | Use Sonnet 5.5 Low for complex work",
+    ["claude-haiku-5-5"] = {
+      low    = "Recommended level | Lowest Claude cost | Bench tested on REAPER tasks",
+      medium = "Higher effort | Slower than Low in testing | Bench tested on REAPER tasks",
+      high   = "Higher effort | Higher token use possible | Not measured yet",
+      xhigh  = "Very high effort | Higher token use possible | Not measured yet",
+      max    = "Maximum effort | Higher token use possible | Not measured yet",
     },
     ["claude-opus-5-5"] = {
       low    = "Lowest supported effort | Premium Claude cost | Bench tested on REAPER tasks",
-      medium = "Default effort | General and complex work | Premium Claude cost | Bench data unavailable",
-      high   = "Higher effort | Difficult work | Higher token use possible | Bench data unavailable",
+      medium = "Default effort | General and complex work | Premium Claude cost | Not measured yet",
+      high   = "Higher effort | Difficult work | Higher token use possible | Not measured yet",
     },
     ["claude-sonnet-5-5"] = {
-      low    = "Default effort in ReaAssist | Bench tested on REAPER tasks",
-      medium = "Higher effort | Bench data unavailable",
-      high   = "Higher effort | Higher token use possible | Bench data unavailable",
-      xhigh  = "Very high effort | Higher token use possible | Bench data unavailable",
-      max    = "Maximum effort | Higher token use possible | Bench data unavailable",
+      low    = "Recommended level | Higher Claude cost | Bench tested on REAPER tasks",
+      medium = "Higher effort | Not measured yet",
+      high   = "Higher effort | Higher token use possible | Not measured yet",
+      xhigh  = "Very high effort | Higher token use possible | Not measured yet",
+      max    = "Maximum effort | Higher token use possible | Not measured yet",
     },
   },
   openai = {
+    ["gpt-6.1-terra"] = {
+      none = "No reasoning | Fastest Terra level | May reply without a script",
+      low = "Recommended level | Half the price of Sol | Bench tested on REAPER tasks",
+      medium = "More reasoning | Slower than Low with no gain in testing",
+      high = "High reasoning | Higher token use possible | Not measured yet",
+      xhigh = "Extra-high reasoning | Higher token use possible | Not measured yet",
+      max = "Maximum reasoning | Higher token use possible | Not measured yet",
+    },
     ["gpt-6.1-sol"] = {
-      low = "Starting level | ReaAssist testing pending",
-      medium = "More reasoning | ReaAssist testing pending",
-      high = "High reasoning | ReaAssist testing pending",
-      xhigh = "Extra-high reasoning | Higher token use possible | ReaAssist testing pending",
-      max = "Maximum reasoning | Higher token use possible | ReaAssist testing pending",
+      low = "Recommended level | Higher GPT-6 cost | Bench tested on REAPER tasks",
+      medium = "More reasoning | Higher token use possible | Not measured yet",
+      high = "High reasoning | Higher token use possible | Not measured yet",
+      xhigh = "Extra-high reasoning | Higher token use possible | Not measured yet",
+      max = "Maximum reasoning | Higher token use possible | Not measured yet",
     },
     ["gpt-6-astra"] = {
-      low = "Starting level | Premium cost | ReaAssist testing pending",
-      medium = "More reasoning | Premium cost | ReaAssist testing pending",
-      high = "High reasoning | Premium cost | ReaAssist testing pending",
-      xhigh = "Extra-high reasoning | Premium cost | ReaAssist testing pending",
-      max = "Maximum reasoning | Premium cost | ReaAssist testing pending",
+      low = "Default level | Premium cost | Bench tested on 2 tasks only",
+      medium = "More reasoning | Premium cost | Not measured yet",
+      high = "High reasoning | Premium cost | Not measured yet",
+      xhigh = "Extra-high reasoning | Premium cost | Not measured yet",
+      max = "Maximum reasoning | Premium cost | Not measured yet",
     },
     ["gpt-6-luna"] = {
-      none   = "No reasoning | General work | Lowest GPT-6 cost | ReaAssist testing pending",
-      low    = "Default level | Lowest GPT-6 cost | ReaAssist testing pending",
-      medium = "More reasoning | Higher token use possible | ReaAssist testing pending",
-      high   = "High reasoning | Higher token use possible | ReaAssist testing pending",
+      none   = "No reasoning | General work | Lowest GPT-6 cost | Bench tested on REAPER tasks",
+      low    = "Default level | Lowest GPT-6 cost | Bench tested on REAPER tasks",
+      medium = "More reasoning | Higher token use possible | Not measured yet",
+      high   = "High reasoning | Higher token use possible | Not measured yet",
     },
   },
   google = {
@@ -17508,19 +17625,19 @@ UI.COMBO_HINTS = {
     },
     ["gemini-3.6-flash"] = {
       MINIMAL = "Recommended level | General and complex work | Best tested Gemini value | Fast",
-      LOW     = "General and complex work | Higher measured cost | Slower than Minimal | No quality gain",
-      MEDIUM  = "Complex code and debugging | Higher cost | Much slower | Try Minimal first",
-      HIGH    = "Hard reasoning only | Highest Flash cost | Slowest | Avoid routine use",
+      LOW     = "More reasoning | Higher expected cost and latency | Not measured yet",
+      MEDIUM  = "More reasoning | Higher expected cost and latency | Try Minimal first | Not measured yet",
+      HIGH    = "Maximum reasoning | Highest expected cost and latency | Avoid routine use | Not measured yet",
     },
     ["gemini-3.8-flash"] = {
-      LOW     = "Lowest supported level | Same tested pass rate as Flash 3.7 | Fewer tokens and lower cost | Similar speed",
-      MEDIUM  = "Bench data unavailable | More reasoning than Low | Higher expected cost and latency | Try Low first",
-      HIGH    = "Bench data unavailable | Maximum reasoning | Highest expected cost and latency | Avoid routine use",
+      LOW     = "Lowest supported level | Higher cost than Flash 3.6 Minimal | Bench tested on REAPER tasks",
+      MEDIUM  = "More reasoning | Higher expected cost and latency | Try Low first | Not measured yet",
+      HIGH    = "Maximum reasoning | Highest expected cost and latency | Avoid routine use | Not measured yet",
     },
     ["gemini-3.1-pro-preview"] = {
-      LOW     = "Not recommended | Reduced reasoning | Highest Gemini cost | Use Flash 3.6 if capacity errors appear",
-      MEDIUM  = "Default Pro level in this app | Complex reasoning | Highest Gemini cost | Capacity can be unreliable",
-      HIGH    = "Not recommended | Marginal gain over Medium | Highest Gemini cost | Capacity can be unreliable",
+      LOW     = "Not recommended | Reduced reasoning | Highest Gemini cost | Not measured yet",
+      MEDIUM  = "Default level | Highest Gemini cost | Capacity can be unreliable | Bench tested on REAPER tasks",
+      HIGH    = "Not recommended | Highest expected cost and latency | Not measured yet",
     },
   },
   deepseek = {
@@ -20435,7 +20552,7 @@ function Code.plugin_pack_dev_integrity_override()
   local resource = reaper and reaper.GetResourcePath
     and tostring(reaper.GetResourcePath() or "") or ""
   resource = resource:gsub("/", "\\"):gsub("\\+$", ""):lower()
-  if resource ~= "c:\\reaper - test" then return false end
+  if resource ~= "c:\\reaper_test_v1" then return false end
   local value = reaper and reaper.GetExtState
     and tostring(reaper.GetExtState(
       CFG.EXT_NS, "dev_plugin_pack_integrity_override") or "") or ""
@@ -20831,11 +20948,20 @@ end
 
 -- Walk every fallback chain and auto-assign pref_types[type] to the first
 -- installed entry, ONLY when no existing preference is set. Never overwrites
--- user choices. Called at script load and after installing bundled plugins.
+-- user choices. Startup passes cached_only: REAPER's first native FX
+-- enumeration blocks the UI for seconds on a large library, so with no
+-- installed list yet it only records Code._preferred_chains_pending and the
+-- first plug-in operation (or the first send) runs the fill.
 -- Idempotent; returns count of types newly assigned this call.
-function Code.ensure_preferred_from_chains()
+function Code.ensure_preferred_from_chains(cached_only)
   local chains = Code.get_fallback_chains()
   if not next(chains) then return 0 end
+  if cached_only and (not CTX._installed_fx_list
+      or CTX._installed_fx_list_hide_ff ~= (reaper.GetExtState(CFG.EXT_NS, "dev_hide_fabfilter") == "1")) then
+    Code._preferred_chains_pending = true
+    return 0
+  end
+  Code._preferred_chains_pending = nil
   CTX.populate_installed_fx()
   local installed = CTX._installed_fx_list or {}
   local cache = FXCache.load()
@@ -20894,6 +21020,9 @@ function Code.ensure_preferred_from_chains()
   -- canonical and the migration finds nothing to do for them.
   FXCache.canonicalize_all_preferred_types()
   if assigned > 0 then
+    -- The fill can now run after startup, so a page that cached its lists
+    -- on the mutation counter may already be open; signal the new defaults.
+    FXCache._mutation_count = (FXCache._mutation_count or 0) + 1
     if next(ephemeral_originals) then
       -- Snapshot-and-restore: write the rolled-back values to disk, then
       -- re-apply the in-memory overrides so the rest of the session keeps
@@ -20946,6 +21075,15 @@ function Code.ensure_preferred_from_chains()
     end
   end
   return assigned
+end
+
+-- Runs the fill that a cached-only startup call deferred. The flag is cleared
+-- before the run because the helper itself populates the installed list, so a
+-- re-entrant call cannot loop. No-op when nothing is pending.
+function Code.flush_pending_preferred_chains()
+  if not Code._preferred_chains_pending then return 0 end
+  Code._preferred_chains_pending = nil
+  return Code.ensure_preferred_from_chains()
 end
 
 -- =============================================================================
@@ -21776,20 +21914,50 @@ function FXCache.normalize_loaded(data)
   return FXCache.fresh(), false, "unsupported_version"
 end
 
+-- Set an FX_Cache.json this session cannot use aside before it starts a fresh
+-- cache (1.6.4 audit #14), so the user's preferred plug-ins stay recoverable.
+-- A damaged or unsupported file is renamed to FX_Cache.json.corrupt.<time>,
+-- a name FXCache.save never writes. When it cannot be moved, or could not be
+-- read at all, FX cache saves are refused for the rest of this session
+-- instead, so nothing writes over it. Returns true when the file is out of
+-- the way.
+function FXCache.set_aside(reason)
+  local path = RA.FX_CACHE_PATH
+  if reason ~= "read_failed" then
+    if Store._quarantine_json(path, reason) then return true end
+    -- Another process may already have moved the same file aside.
+    if not RA._file_exists(path) then return true end
+  end
+  Store._mark_write_locked(path, "the existing FX cache could not be read or "
+    .. "set aside (" .. tostring(reason) .. ")")
+  Log.line("FX_CACHE", "left " .. tostring(path) .. " in place ("
+    .. tostring(reason) .. "); FX cache saves are refused this session")
+  return false
+end
+
 function FXCache.load()
   if _fx_cache_mem then return _fx_cache_mem end
-  local ok_f, f = pcall(io.open, RA.FX_CACHE_PATH, "r")
+  local ok_f, f, open_err, open_code = pcall(io.open, RA.FX_CACHE_PATH, "r")
   if not ok_f or not f then
     -- Stamp _version on every fresh-table return so the schema invariant
     -- doesn't depend on a save round-trip to land. Earlier shape varied
     -- per branch (no-file / empty / corrupt / schema-mismatch) which left
     -- a brief window where _fx_cache_mem._version was nil.
+    -- A file that exists but cannot be opened is not written over.
+    if not ok_f or not Store._open_error_is_missing(open_err, open_code) then
+      FXCache.set_aside("read_failed")
+    end
     _fx_cache_mem = FXCache.fresh()
     return _fx_cache_mem
   end
-  local content = f:read("*a")
-  f:close()
-  if not content or content == "" then
+  local ok_r, content = pcall(f.read, f, "*a")
+  pcall(f.close, f)
+  if not ok_r or content == nil then
+    FXCache.set_aside("read_failed")
+    _fx_cache_mem = FXCache.fresh()
+    return _fx_cache_mem
+  end
+  if content == "" then
     _fx_cache_mem = FXCache.fresh()
     return _fx_cache_mem
   end
@@ -21800,7 +21968,8 @@ function FXCache.load()
     -- no breadcrumb to triage from -- only the schema-mismatch branch
     -- below logged.
     Log.line("FX_CACHE", "JSON decode failed (" .. tostring(err)
-      .. "); discarding cache")
+      .. "); setting the file aside and starting fresh")
+    FXCache.set_aside("decode failed: " .. tostring(err))
     _fx_cache_mem = FXCache.fresh()
     return _fx_cache_mem
   end
@@ -21830,9 +21999,13 @@ function FXCache.load()
   end
 
   if disposition ~= "current" then
+    -- A JSON number or boolean root cannot be indexed, so read the version
+    -- only from a table.
     Log.line("FX_CACHE", "rejected cache (" .. tostring(disposition)
-      .. ", file=" .. tostring(data._version) .. ", expected="
-      .. FXCACHE_VERSION .. "); starting fresh")
+      .. ", file=" .. tostring(type(data) == "table" and data._version or nil)
+      .. ", expected="
+      .. FXCACHE_VERSION .. "); setting the file aside and starting fresh")
+    FXCache.set_aside(disposition)
   end
   return _fx_cache_mem
 end
@@ -34784,7 +34957,7 @@ Code.MODEL_GUIDANCE_BY_MODEL = Code.MODEL_GUIDANCE_BY_MODEL or {
         sidechain_ducking_requires_send = true,
       },
     },
-    ["claude-haiku-4-5"] = {
+    ["claude-haiku-5-5"] = {
       key = "haiku_practical_track_templates",
       prompt = [[
 - Prefer a runnable script for ordinary safe ReaScript action requests like create, add, make, set up, route, select, or organize. Do not answer with only a prose question or summary when a practical default exists.
@@ -40113,6 +40286,27 @@ function Net._curl_launcher_failed()
   return false, "launcher_failed"
 end
 
+-- Launch one Gemini side-path curl (tier test, cache create, renew, delete)
+-- and report whether its launcher started (1.6.4 audit #8). The child deletes
+-- its own auth and body scratch once curl finishes. When the launcher fails
+-- there is no child to do that, so the plaintext key file and the body are
+-- removed here at once. Success uses the same test as Net.fire_curl: a zero
+-- exit from PowerShell on Windows, a zero status from the shell elsewhere.
+function Net._gemini_side_launch(command, timeout_ms, scratch)
+  local launched
+  if RA.IS_WINDOWS then
+    launched = Net._exec_process_result_class(
+      reaper.ExecProcess(command, timeout_ms)) == "zero_exit"
+  else
+    local result, _, exit_code = os.execute(command)
+    launched = Net._unix_launch_succeeded(result, exit_code)
+  end
+  if not launched then
+    for _, path in ipairs(scratch or {}) do os.remove(path) end
+  end
+  return launched
+end
+
 function Net._send_exception_extra(source, err)
   local detail = Net._debug_scrub(tostring(err or "unknown send exception"))
   if #detail > 2048 then
@@ -43180,6 +43374,7 @@ function Net._clear_engine_request_state(keep_wire)
   S.engine_status_retry_used = false
   S.engine_input_media_consumed = false
   S.engine_provider_error_message = nil
+  S.engine_provider_limit_classification = nil
   S.engine_terminal_http_status = nil
   S.engine_terminal_provider_failure = nil
   S.engine_terminal_capacity_retry_safe = nil
@@ -43749,9 +43944,14 @@ function Net._write_curl_body_for_launch(is_get, engine_started, body, optional)
   return Code.safe_write(tmp.body, body) == true
 end
 
+-- Windows writes a curl --config file (header = "..."). raw_lines writes the
+-- macOS/Linux form instead: one plain header per line for curl -H @file, so
+-- custom extra headers stay out of the command line that ps shows (1.6.4
+-- audit #9). Both forms refuse a line that could split or redirect.
 function Net._write_curl_auth_for_launch(engine_started, use_auth_file,
                                          auth_header, auth_value, optional,
-                                         extra_headers, include_content_type)
+                                         extra_headers, include_content_type,
+                                         raw_lines)
   os.remove(tmp.auth)
   if engine_started then return true end
   local headers = {}
@@ -43769,9 +43969,13 @@ function Net._write_curl_auth_for_launch(engine_started, use_auth_file,
       if header:find("%z") or header:match("^%s*@") then
         return false, "invalid_header"
       end
-      headers[index] = 'header = "' .. header:gsub("\\", "\\\\")
-        :gsub('"', '\\"'):gsub("\r", "\\r"):gsub("\n", "\\n")
-        :gsub("\t", "\\t"):gsub("\v", "\\v") .. '"'
+      if raw_lines == true then
+        if header:find("[\r\n]") then return false, "invalid_header" end
+      else
+        headers[index] = 'header = "' .. header:gsub("\\", "\\\\")
+          :gsub('"', '\\"'):gsub("\r", "\\r"):gsub("\n", "\\n")
+          :gsub("\t", "\\t"):gsub("\v", "\\v") .. '"'
+      end
     end
   end
   local content = table.concat(headers, "\n")
@@ -44332,8 +44536,8 @@ function Net.fire_curl(body, opts)
   end
   local auth_written, auth_write_error = Net._write_curl_auth_for_launch(
     engine_started, use_auth_file, p.auth_header, auth_value,
-    optional_dispatch, RA.IS_WINDOWS and extra_h_parts or nil,
-    RA.IS_WINDOWS and not is_get)
+    optional_dispatch, extra_h_parts,
+    RA.IS_WINDOWS and not is_get, not RA.IS_WINDOWS)
   if not auth_written then
     if optional_dispatch then
       Log.line(optional_log_tag, "the retry auth header could not be written: "
@@ -44397,23 +44601,21 @@ function Net.fire_curl(body, opts)
       return "'" .. path:gsub("'", "'\\''") .. "'"
     end
 
-    -- Build header flags for shell. Each header is wrapped with sq() so
-    -- $VAR, backticks, "\", and " in a custom provider header are treated
-    -- as literal bytes by the shell rather than expanded or parsed. The
-    -- header_is_safe() validator already rejects newlines and nulls; sq()
-    -- handles every other shell-meaningful character.
+    -- Header flags for the shell. The auth line and every custom extra
+    -- header are in tmp.auth, one per line, so their values (an Azure
+    -- api-key, a Cloudflare Access secret) never appear in the command line
+    -- that ps auxww shows for the whole request (1.6.4 audit #9). Only the
+    -- fixed content type stays inline.
+    local use_header_file = use_auth_file or #extra_h_parts > 0
     local h_flags = ""
-    if use_auth_file then
+    if use_header_file then
       h_flags = h_flags .. ' -H @' .. sq(tmp.auth)
-    end
-    for _, h in ipairs(extra_h_parts) do
-      h_flags = h_flags .. ' -H ' .. sq(h)
     end
     if not is_get then
       h_flags = h_flags .. ' -H ' .. sq("content-type: application/json")
     end
 
-    local cleanup = use_auth_file
+    local cleanup = use_header_file
       and (' ; rm -f ' .. sq(tmp.auth)) or ""
 
     local body_flags = is_get and "" or (' -d @' .. sq(tmp.body))
@@ -45140,6 +45342,9 @@ function Net.kill_curl(preserve_key_test)
     S.gemini_tier_pending = false
     os.remove(tmp.headers)
     Net._clear_curl_auth_scratch()
+    -- The probe's own key file (1.6.4 audit #8). curl has read it if it
+    -- started; if it has not started yet, it now fails without the key.
+    os.remove(tmp.gemini_auth)
     return
   end
   local f = io.open(tmp.pid, "r")
@@ -46491,6 +46696,7 @@ function Net.fire_gemini_tier_test()
     probe_kind = "gemini_tier_test",
   }
 
+  local launch_cmd, launch_timeout
   if RA.IS_WINDOWS then
     local function ps_escape(path) return path:gsub("'", "''") end
     local cmd_line = str_format(
@@ -46507,11 +46713,11 @@ function Net.fire_gemini_tier_test()
       .. ' -Command "Start-Process cmd -ArgumentList \'/c %s\''
       .. ' -WindowStyle Hidden"',
       ps_escape(cmd_line))
-    reaper.ExecProcess(ps_cmd, 5000)
+    launch_cmd, launch_timeout = ps_cmd, 5000
   else
     local function sq(path) return "'" .. path:gsub("'", "'\\''") .. "'" end
     -- Wrap entire pipeline in a subshell so & backgrounds curl+echo together.
-    local unix_curl = str_format(
+    launch_cmd = str_format(
       '(curl -sS --connect-timeout %d --max-time 30'
       .. ' -X POST %s'
       .. ' -H "content-type: application/json"'
@@ -46521,7 +46727,11 @@ function Net.fire_gemini_tier_test()
       sq(tmp.gemini_auth),
       sq(tmp.body), sq(tmp.out), sq(tmp.err),
       sq(tmp.gemini_auth), sq(tmp.exit))
-    os.execute(unix_curl)
+  end
+  if not Net._gemini_side_launch(launch_cmd, launch_timeout,
+      { tmp.gemini_auth, tmp.body }) then
+    Log.line("TIER-TEST", "launcher failed; auth and body scratch removed")
+    return false, "launcher_failed"
   end
 
   S.gemini_tier_pending = true
@@ -47098,6 +47308,7 @@ function Net.fire_gemini_cache_delete(cache_name)
   local url = str_format(
     "https://generativelanguage.googleapis.com/v1beta/%s",
     cache_name)
+  local launch_cmd, launch_timeout
   if RA.IS_WINDOWS then
     local cmd_line = str_format(
       'curl -s -X DELETE -H @"""%s""" """%s""" & del """%s"""',
@@ -47107,12 +47318,16 @@ function Net.fire_gemini_cache_delete(cache_name)
       .. ' -Command "Start-Process cmd -ArgumentList \'/c %s\''
       .. ' -WindowStyle Hidden"',
       cmd_line:gsub("'", "''"))
-    reaper.ExecProcess(ps_cmd, 2000)
+    launch_cmd, launch_timeout = ps_cmd, 2000
   else
     local function sq(path) return "'" .. path:gsub("'", "'\\''") .. "'" end
-    os.execute(str_format(
+    launch_cmd = str_format(
       '(curl -s -X DELETE -H @%s %s > /dev/null 2>&1 ; rm -f %s) &',
-      sq(tmp.cache_delete_auth), sq(url), sq(tmp.cache_delete_auth)))
+      sq(tmp.cache_delete_auth), sq(url), sq(tmp.cache_delete_auth))
+  end
+  if not Net._gemini_side_launch(launch_cmd, launch_timeout,
+      { tmp.cache_delete_auth }) then
+    Log.line("GEMINI_CACHE", "delete launcher failed; auth scratch removed")
   end
 end
 
@@ -47355,6 +47570,7 @@ function Net.fire_gemini_cache_create_curl()
   Code.safe_write(tmp.cache_out, "")
   Code.safe_write(tmp.cache_err, "")
 
+  local launch_cmd, launch_timeout
   if RA.IS_WINDOWS then
     local cmd_line = str_format(
       'curl -sS --connect-timeout 10 --max-time 30'
@@ -47372,10 +47588,10 @@ function Net.fire_gemini_cache_create_curl()
       .. ' -Command "Start-Process cmd -ArgumentList \'/c %s\''
       .. ' -WindowStyle Hidden"',
       cmd_line:gsub("'", "''"))
-    reaper.ExecProcess(ps_cmd, 5000)
+    launch_cmd, launch_timeout = ps_cmd, 5000
   else
     local function sq(path) return "'" .. path:gsub("'", "'\\''") .. "'" end
-    local unix_curl = str_format(
+    launch_cmd = str_format(
       '(curl -sS --connect-timeout 10 --max-time 30'
       .. ' -X POST %s'
       .. ' -H "content-type: application/json"'
@@ -47384,7 +47600,12 @@ function Net.fire_gemini_cache_create_curl()
       sq(url), sq(tmp.cache_auth),
       sq(tmp.cache_body), sq(tmp.cache_out), sq(tmp.cache_err),
       sq(tmp.cache_auth), sq(tmp.cache_exit))
-    os.execute(unix_curl)
+  end
+  if not Net._gemini_side_launch(launch_cmd, launch_timeout,
+      { tmp.cache_auth, tmp.cache_body }) then
+    S.gemini_cache_last_create_reason = "launcher_failed"
+    Log.line("GEMINI_CACHE", "create launcher failed; auth and body scratch removed")
+    return
   end
 
   S.gemini_cache_creating   = true
@@ -47533,6 +47754,7 @@ function Net.fire_gemini_cache_renew_curl()
   local url = str_format(
     "https://generativelanguage.googleapis.com/v1beta/%s",
     cache_name)
+  local launch_cmd, launch_timeout
   if RA.IS_WINDOWS then
     local cmd_line = str_format(
       'curl -s -X PATCH """%s"""'
@@ -47547,14 +47769,23 @@ function Net.fire_gemini_cache_renew_curl()
       .. ' -Command "Start-Process cmd -ArgumentList \'/c %s\''
       .. ' -WindowStyle Hidden"',
       cmd_line:gsub("'", "''"))
-    reaper.ExecProcess(ps_cmd, 2000)
+    launch_cmd, launch_timeout = ps_cmd, 2000
   else
     local function sq(path) return "'" .. path:gsub("'", "'\\''") .. "'" end
-    os.execute(str_format(
+    launch_cmd = str_format(
       '(curl -s -X PATCH -H "content-type: application/json"'
       .. ' -H @%s -d @%s %s > /dev/null 2>&1 ; rm -f %s %s) &',
       sq(tmp.cache_renew_auth), sq(tmp.cache_renew_body), sq(url),
-      sq(tmp.cache_renew_auth), sq(tmp.cache_renew_body)))
+      sq(tmp.cache_renew_auth), sq(tmp.cache_renew_body))
+  end
+  if not Net._gemini_side_launch(launch_cmd, launch_timeout,
+      { tmp.cache_renew_auth, tmp.cache_renew_body }) then
+    -- Nothing was sent, so the local expiry is not bumped and the next send
+    -- tries the renew again after the dedupe window.
+    S.gemini_cache_last_renew = os.time()
+    Log.line("GEMINI_CACHE", "renew launcher failed for " .. cache_name
+      .. "; auth and body scratch removed")
+    return
   end
   -- Optimistically bump local expiry. If the PATCH fails server-side, the
   -- next send hits 404 and Net.gemini_cache_invalidate clears state cleanly.
@@ -47609,6 +47840,11 @@ function Net.try_finish_gemini_cache_create()
     S.gemini_cache_signature = nil
     S.gemini_cache_last_create_reason = "watchdog_timeout"
     os.remove(tmp.cache_exit)
+    -- The child may never have reached its own cleanup (1.6.4 audit #8).
+    -- curl reads both files when it starts, so this cannot break a create
+    -- that is still running.
+    os.remove(tmp.cache_auth)
+    os.remove(tmp.cache_body)
     Code.safe_write(tmp.cache_out, "")
     return
   end
@@ -47798,7 +48034,7 @@ end
 -- shipping UI. It cannot inject text, click Send or alter the request.
 --
 -- The seam is inert unless all three conditions hold:
---   1. REAPER's exact resource path is C:\REAPER - Test.
+--   1. REAPER's exact resource path is C:\REAPER_Test_V1.
 --   2. A developer harness armed a non-empty one-shot case nonce in volatile
 --      ExtState.
 --   3. The normal prompt widget calls this immediately before Net.send_to_api.
@@ -47811,7 +48047,7 @@ function Net.log_plugin_test_gui_send(user_text, input_source)
       return
     end
     local resource_path = tostring(reaper.GetResourcePath() or "")
-    if resource_path:lower() ~= "c:\\reaper - test" then return end
+    if resource_path:lower() ~= "c:\\reaper_test_v1" then return end
     local nonce = tostring(reaper.GetExtState(
       CFG.EXT_NS, "plugin_test_case_nonce") or "")
     if nonce == "" then return end
@@ -51311,6 +51547,7 @@ function Net.process_response_buckets(text)
           S._context_reuse_hint = S._context_reuse_hint or {}
           S._context_reuse_hint[#S._context_reuse_hint+1] = "resolve:" .. rtype
         else
+        if Code.flush_pending_preferred_chains then Code.flush_pending_preferred_chains() end
         local pref = FXCache.get_preferred_types()
         local pref_ident = pref and pref[rtype]
         -- Dev-only FabFilter hide: treat a matching pref as absent so the
@@ -53188,6 +53425,11 @@ function Net._handle_watchdog_timeout()
     -- so the user doesn't gain Pro access; they just get a retest on
     -- next opportunity instead of being stuck.
     S.gemini_tier_pending = false
+    -- The child may never have reached its own cleanup (1.6.4 audit #8).
+    -- curl reads both files when it starts, so removing them here cannot
+    -- break a probe that is still running.
+    os.remove(tmp.gemini_auth)
+    os.remove(tmp.body)
     Log.line("TIER-TEST", "interpreted as: ambiguous (timeout; not persisted)")
     if UI and UI.show_float_toast then
       UI.show_float_toast(RA.t("gemini.toast.tier_timeout", nil,
@@ -53468,6 +53710,7 @@ function Net._handle_curl_exit_failure()
       and S.engine_provider_error_message or nil
   local engine_provider_http_status =
     Net._bounded_http_status(S.engine_terminal_http_status)
+  local engine_limit_classification = S.engine_provider_limit_classification
   local engine_provider_failure = S.engine_terminal_provider_failure == true
   local engine_capacity_retry_safe = S.engine_terminal_capacity_retry_safe == true
   local engine_response_processing = S.engine_terminal_response_processing == true
@@ -53478,6 +53721,7 @@ function Net._handle_curl_exit_failure()
   local engine_cancelled = engine_failure and engine_failure.state == "cancelled"
   local engine_transport_failure = engine_failure and engine_failure.category == "transport"
   S.engine_provider_error_message = nil
+  S.engine_provider_limit_classification = nil
   S.engine_terminal_http_status = nil
   S.engine_terminal_provider_failure = nil
   S.engine_terminal_capacity_retry_safe = nil
@@ -53533,8 +53777,16 @@ function Net._handle_curl_exit_failure()
     detail = RA.t("network.engine.stream_incomplete", nil,
       "ReaAssist could not verify that the response finished. The incomplete answer was discarded. Try sending your message again.")
   elseif engine_provider_failure and engine_provider_http_status == 429 then
-    detail = RA.t("network.engine.provider_limit_unknown", nil,
+    if engine_limit_classification == "allocation_exhausted" then
+      detail = RA.t("network.engine.provider_limit_allocation", nil,
+        "The provider reported an exhausted quota or credit allocation. Check your provider account or use another configured provider. ReaAssist did not retry after this response.")
+    elseif engine_limit_classification == "temporary_throttle" then
+      detail = RA.t("network.engine.provider_limit_temporary", nil,
+        "The provider reported a temporary rate limit. Wait before sending this request again, or choose another model or provider. ReaAssist did not retry after this response.")
+    else
+      detail = RA.t("network.engine.provider_limit_unknown", nil,
       "The provider returned HTTP 429. This can mean a temporary limit or an account quota. Wait and try again, or check your provider account.")
+    end
     if engine_provider_error_message then
       detail = detail .. "\n\n" .. engine_provider_error_message
     end
@@ -53580,6 +53832,12 @@ function Net._handle_curl_exit_failure()
     or "curl_exit"
   local debug = Net._curl_failure_debug(exit_code, detail, failure_kind,
     engine_provider_error_message == nil)
+  if engine_provider_failure and engine_provider_http_status == 429 then
+    debug.provider_limit_classification =
+      (engine_limit_classification == "allocation_exhausted"
+        or engine_limit_classification == "temporary_throttle")
+        and engine_limit_classification or "unknown"
+  end
   local recovery = exit_code == 28
     and not S.gemini_tier_pending and not S.key_test_pending
     and Net._same_model_recovery(p_active, "request_timeout") or nil
@@ -55011,6 +55269,11 @@ function Net._engine_terminal_failure(status, override_reason)
   Code.safe_write(tmp.exit, tostring(error_code))
   Net._clear_engine_request_state()
   S.engine_provider_error_message = provider_error_message
+  S.engine_provider_limit_classification =
+    delivered_provider_failure and http_status == 429
+      and (status.provider_limit_classification == "allocation_exhausted"
+        or status.provider_limit_classification == "temporary_throttle")
+      and status.provider_limit_classification or nil
   S.engine_terminal_http_status = http_status
   S.engine_terminal_provider_failure = delivered_provider_failure
   S.engine_terminal_capacity_retry_safe = capacity_retry_safe
@@ -55082,6 +55345,10 @@ local function inference_failure_status(status, message, error_code, processing_
       or "Engine inference request failed"),
     provider_error_message = type(status.provider_error_message) == "string"
       and status.provider_error_message or nil,
+    provider_limit_classification =
+      (status.provider_limit_classification == "allocation_exhausted"
+        or status.provider_limit_classification == "temporary_throttle")
+        and status.provider_limit_classification or nil,
   }
 end
 
@@ -55278,6 +55545,7 @@ function Net._poll_inference_v1_request()
         and type(evidence.discarded) == "table" and evidence.discarded.events == 0
         and evidence.discarded.text_bytes == 0
       failure.provider_error_message = provider_error_message
+      failure.provider_limit_classification = evidence.provider_limit_classification
       return Net._engine_terminal_failure(failure)
     end
     return Net._engine_terminal_failure(inference_failure_status(status,
@@ -61778,6 +62046,7 @@ function Net.try_finish_curl()
     -- validation and the retry hint.
     local pref_types = {}
     local hidden_prefs = {}
+    if Code.flush_pending_preferred_chains then pcall(Code.flush_pending_preferred_chains) end
     if FXCache and type(FXCache.get_preferred_types) == "function" then
       local ok, saved = pcall(FXCache.get_preferred_types)
       if ok and type(saved) == "table" then
@@ -63820,18 +64089,298 @@ function RA.ensure_factory_reset_temp_dir(factory_reset_data_dir_cleared)
   if temp_dir ~= "" then pcall(reaper.RecursiveCreateDirectory, temp_dir, 0) end
 end
 
+-- Every credential, contact and diagnostics key name ReaAssist writes to its
+-- ExtState section. Factory Reset and the uninstall data step delete these by
+-- name as well as through the ini scan, because the scan finds nothing when
+-- reaper-extstate.ini cannot be opened and nothing it has not yet written.
+-- Custom-provider ids are read from both the registered rows and the saved id
+-- list, so this has to run before Custom.unregister_all.
+RA.RESET_CUSTOM_KEY_SUFFIXES = {
+  "endpoint", "label", "timeout_secs", "connect_timeout", "allow_insecure",
+  "model_prefix", "extra_headers", "extra_body", "models",
+}
+RA.RESET_FIXED_KEYS = {
+  "api_key", "custom_provider_ids",
+  "bug_report_contact_name", "bug_report_contact_email",
+  "feedback_install_id", "diag_auto_tier",
+  "diag_auto_last_sent_at", "diag_auto_last_ping_at",
+}
+function RA.reset_extstate_keys()
+  local keys, seen, ids, seen_id = {}, {}, {}, {}
+  local function add(key)
+    if type(key) == "string" and key ~= "" and not seen[key] then
+      seen[key] = true
+      keys[#keys + 1] = key
+    end
+  end
+  local function add_id(id)
+    if type(id) == "string" and id ~= "" and not seen_id[id] then
+      seen_id[id] = true
+      ids[#ids + 1] = id
+    end
+  end
+  for _, key in ipairs(RA.RESET_FIXED_KEYS) do add(key) end
+  for _, provider in ipairs(PROVIDERS or {}) do
+    if type(provider) == "table" then
+      add(provider.key_extstate)
+      if provider.is_custom then add_id(provider.id) end
+    end
+  end
+  if Custom and Custom.load_ids then
+    local ok, saved = pcall(Custom.load_ids)
+    if ok and type(saved) == "table" then
+      for _, id in ipairs(saved) do add_id(id) end
+    end
+  end
+  for _, id in ipairs(ids) do
+    for _, suffix in ipairs(RA.RESET_CUSTOM_KEY_SUFFIXES) do
+      add("custom_" .. id .. "_" .. suffix)
+    end
+    add("api_key_" .. id)
+  end
+  return keys
+end
+
+-- Delete each named key with persist=true and count the ones still there
+-- afterwards. A probe that cannot answer counts as still there.
+function RA.delete_extstate_keys(ns, keys)
+  local left = 0
+  for _, key in ipairs(keys or {}) do
+    pcall(reaper.DeleteExtState, ns, key, true)
+    local ok, still
+    if type(reaper.HasExtState) == "function" then
+      ok, still = pcall(reaper.HasExtState, ns, key)
+      still = still == true
+    else
+      ok, still = pcall(reaper.GetExtState, ns, key)
+      still = type(still) == "string" and still ~= ""
+    end
+    if not ok or still then left = left + 1 end
+  end
+  return left
+end
+
+-- An update record Factory Reset must not delete: the live journal or its
+-- .tmp, the pre-B2.2d .invalid copies beside them in Data/Temp, or any
+-- quarantined evidence. Asked with the apply lock held, so no other body can
+-- write one between this answer and the walk.
+function RA.factory_reset_update_record()
+  local base = Updater.journal_path()
+  for _, path in ipairs({ base, base .. ".tmp", base .. ".invalid",
+      base .. ".tmp.invalid" }) do
+    if RA.path_present(path) then return path end
+  end
+  local quarantine = Updater.journal_quarantined()
+  if quarantine then return quarantine end
+  return nil
+end
+
+-- The refusal a failed acquisition produced, read from what the acquisition
+-- recorded rather than from a second look at the lock name.
+function RA.factory_reset_lock_refusal()
+  local in_log = Updater.uninstall_t("named_in_log", nil,
+    "(the ReaAssist log names it)")
+  local path = Updater._apply_lock_undecidable_path
+  local kind = Updater._apply_lock_undecidable_kind
+  if Updater._apply_lock_undecidable == nil then
+    if not Updater._lock_present(tmp.update_lock) then
+      local folder = tostring(RA.TEMP_DIR or in_log)
+      return RA.t("settings.factory_reset.blocked.lock_create", { path = folder },
+        "ReaAssist could not create its update lock, so Factory Reset changed "
+        .. "nothing.\n\nThe lock belongs in this folder:\n" .. folder
+        .. "\n\nMake sure the disk has free space and your account can write "
+        .. "in that folder, then try again.")
+    end
+    return RA.t("settings.factory_reset.blocked.apply_lock", nil,
+      "Another copy of ReaAssist is updating this install. Let it finish, "
+      .. "then run Factory Reset again. Nothing was changed.")
+  end
+  path = tostring(path or in_log)
+  if kind == "blocked" then
+    return RA.t("settings.factory_reset.blocked.lock_blocked", { path = path },
+      "ReaAssist cannot look inside the folder where it keeps its update "
+      .. "lock, so it cannot tell whether another copy of ReaAssist is "
+      .. "updating this install. Nothing was changed.\n\nThe folder is here:\n"
+      .. path .. "\n\nGive your account permission to open it, then try again.")
+  end
+  local owner = Updater._apply_lock_undecidable ~= ""
+    and tostring(Updater._apply_lock_undecidable)
+    or Updater.uninstall_t("unnamed_owner", nil,
+      "a copy of ReaAssist whose name could not be read")
+  local word = kind == "folder"
+    and Updater.uninstall_t("kind.folder", nil, "folder")
+    or Updater.uninstall_t("kind.file", nil, "file")
+  return RA.t("settings.factory_reset.blocked.lock_undecidable",
+    { path = path, owner = owner, kind = word },
+    "ReaAssist cannot tell whether another copy of ReaAssist is still "
+    .. "updating this install, so Factory Reset changed nothing.\n\nThe lock "
+    .. "is here:\n" .. path .. "\n\nIt was recorded by:\n" .. owner
+    .. "\n\nClose any other REAPER window that is running ReaAssist and try "
+    .. "again. If you are sure no other copy of ReaAssist is running on this "
+    .. "computer, delete the " .. word .. " named above and try again.")
+end
+
+-- MAY A FACTORY RESET START, AND IF SO IT NOW HOLDS THE APPLY LOCK (1.6.4
+-- audit #4). The reset empties Data/Temp, which is where the update journal
+-- and the apply lock live. Deleting a journal after a failed rollback lets the
+-- next startup sweep remove each .bak whose live file exists, which leaves a
+-- mixed install with no record of it. So the reset takes the same lock the
+-- updater takes, before anything it does can change state, and checks for a
+-- record only once it holds it: while the lock is held no other body writes a
+-- journal.
+--
+-- The same-process questions come first, because acquire_apply_lock adopts a
+-- lock that already names this instance, and releasing an adopted lock would
+-- take it away from this window's own download, apply or uninstall.
+-- Returns true with the lock held, or false and the sentence to show. A
+-- refusal releases what it took and leaves everything else as it was.
+function RA.factory_reset_admit()
+  if Updater.uninstall_barrier() then
+    return false, Updater.uninstall_t("blocked.reentry", nil,
+      "An uninstall has already run in this ReaAssist window. Close "
+      .. "it and start REAPER again before doing anything else.")
+  end
+  if Updater.is_busy() or Updater._apply_lock_held == true then
+    return false, RA.t("settings.factory_reset.blocked.update", nil,
+      "ReaAssist is in the middle of an update. Let it finish, then run "
+      .. "Factory Reset again. Nothing was changed.")
+  end
+  if not Updater.acquire_apply_lock() then
+    return false, RA.factory_reset_lock_refusal()
+  end
+  local checked, record = pcall(RA.factory_reset_update_record)
+  if not checked or record then
+    Updater.release_apply_lock()
+    local where = checked and tostring(record)
+      or Updater.uninstall_t("named_in_log", nil, "(the ReaAssist log names it)")
+    if not checked then
+      Log.line("UPDATE", "factory reset: the update record check raised: "
+        .. tostring(record))
+    end
+    return false, RA.t("settings.factory_reset.blocked.journal",
+      { path = where },
+      "An update on this install did not finish, and its recovery record is "
+      .. "still here:\n" .. where .. "\n\nFactory Reset would delete that "
+      .. "record, so nothing was changed. Restart ReaAssist and let it finish, "
+      .. "undo or repair that update, then run Factory Reset again.")
+  end
+  return true
+end
+
+-- What the Factory Reset walk leaves in Data/Temp on purpose (1.6.4 audit
+-- #4), by file or folder name: "lock" for the apply lock this reset is
+-- holding, in either shape, with its claim leftovers; "self" for this
+-- process's own life file and live marker, which are how another instance
+-- learns that the holder of that lock is still running; and "journal" for a
+-- journal-family name, which is left and counted as left, because one standing
+-- here belongs to a writer the lock should have kept out. Nil for the rest.
+function RA.factory_reset_temp_kind(name)
+  local function base(path, fallback)
+    return (tostring(path or ""):match("[^/\\]+$") or fallback):lower()
+  end
+  local lower = tostring(name or ""):lower()
+  local lock_name = base(tmp.update_lock, "update_apply.lock")
+  local journal_name = base(tmp.update_journal, "update_journal.json")
+  if lower:sub(1, #lock_name) == lock_name then return "lock" end
+  if lower == base(RA.temp_life_path(), "")
+      or lower == base(RA.temp_live_marker_path(), "") then
+    return "self"
+  end
+  if lower:sub(1, #journal_name) == journal_name then return "journal" end
+  return nil
+end
+
+function RA.factory_reset_partial_message()
+  local folder = tostring(RA.DATA_DIR or "")
+  return RA.t("settings.factory_reset.partial", { path = folder },
+    "Factory Reset could not remove everything. Some saved settings or files "
+    .. "in the ReaAssist Data folder are still there.\n\nThe Data folder is "
+    .. "here:\n" .. folder .. "\n\nClose ReaAssist in every other REAPER "
+    .. "window, then run Factory Reset again. If files are still left after "
+    .. "that, close REAPER and delete the files inside that folder yourself, "
+    .. "keeping internal_telemetry.flag if it is there.")
+end
+
+-- The reset holds the apply lock from before its first change until after its
+-- last one, and gives it back on every road out, including a raise. A partial
+-- reset is reported and never called complete, and it does not relaunch, so
+-- the message stays on screen.
 function RA.factory_reset_execute(opts)
+  opts = opts or {}
+  local keep_screen_reader = opts.keep_screen_reader == true
+  local admitted, refusal = RA.factory_reset_admit()
+  if not admitted then
+    reaper.ShowMessageBox(refusal, "ReaAssist", 0)
+    return false, refusal
+  end
+  local ran, ok, detail, data_cleared = pcall(RA.factory_reset_run, opts)
+  pcall(Updater.release_apply_lock)
+  if ran and ok == false then
+    reaper.ShowMessageBox(detail, "ReaAssist", 0)
+    return false, detail
+  end
+  local kept = 1
+  if ran then
+    kept = type(detail) == "number" and (math.tointeger(detail) or 1) or 1
+  else
+    Log.line("UPDATE", "factory reset: stopped by an error: " .. tostring(ok))
+  end
+  if kept > 0 then
+    RA.ensure_factory_reset_temp_dir(data_cleared)
+    if keep_screen_reader then
+      reaper.SetExtState(CFG.EXT_NS, "prefer_screen_reader", "1", true)
+    end
+    local partial = RA.factory_reset_partial_message()
+    -- Screen Reader Mode reads this message itself. The third value tells it
+    -- apart from a refusal: the data in memory was reset, so it goes on to
+    -- first setup, where a refusal (nothing changed) stays in Settings.
+    if S and S.screen_reader_mode then return false, partial, "partial" end
+    if UI and UI.show_float_toast then
+      UI.show_float_toast(partial, "err", true)
+    end
+    return true, "data_kept"
+  end
+  if S and S.screen_reader_mode then
+    RA.ensure_factory_reset_temp_dir(data_cleared)
+    if keep_screen_reader then
+      reaper.SetExtState(CFG.EXT_NS, "prefer_screen_reader", "1", true)
+    end
+    return true
+  end
+  if not (Updater and Updater.fire_relauncher_now
+      and Updater.fire_relauncher_now()) then
+    RA.ensure_factory_reset_temp_dir(data_cleared)
+    if UI and UI.show_float_toast then
+      UI.show_float_toast(
+        UI.t("settings.factory_reset.complete", nil,
+          "Reset complete. Close and reopen ReaAssist to finish."), "ok", true)
+    end
+  end
+  if keep_screen_reader then
+    reaper.SetExtState(CFG.EXT_NS, "prefer_screen_reader", "1", true)
+  end
+  return true
+end
+
+-- The reset itself, run with the apply lock held. Returns false and the
+-- sentence when theme recovery refuses (nothing else has changed yet), or
+-- true, the number of things it could not remove, and whether Data/ was
+-- walked.
+function RA.factory_reset_run(opts)
   opts = opts or {}
   local keep_screen_reader = opts.keep_screen_reader == true
   local recovered, recovery_err = RA.clear_theme_backup_extstate()
   if not recovered then
-    reaper.ShowMessageBox(recovery_err, "ReaAssist", 0)
     return false, recovery_err
   end
+  local reset_keys = RA.reset_extstate_keys()
   pcall(Custom.unregister_all)
   pcall(Net.gemini_cache_invalidate)
 
   RA.delete_extstate_section(CFG.EXT_NS)
+  -- By name too (1.6.4 audit #3): the ini scan above misses every key when
+  -- the ini cannot be opened.
+  local kept = RA.delete_extstate_keys(CFG.EXT_NS, reset_keys)
   reaper.DeleteExtState(CFG.EXT_NS, "running",       false)
   reaper.DeleteExtState(CFG.EXT_NS, "request_close", false)
   reaper.DeleteExtState(CFG.EXT_NS, "dev_signal",    false)
@@ -63895,11 +64444,17 @@ function RA.factory_reset_execute(opts)
 
   local factory_reset_data_dir_cleared = false
   do
+    -- A removal that refused is counted only when the name is still there
+    -- afterwards, so a file that was already gone is not a failure.
+    local function remove_counted(path)
+      if os.remove(path) then return end
+      if RA.path_present(path) then kept = kept + 1 end
+    end
     local function remove_family(path)
       if not path or path == "" then return end
-      os.remove(path)
-      os.remove(path .. ".tmp")
-      os.remove(path .. ".bak")
+      remove_counted(path)
+      remove_counted(path .. ".tmp")
+      remove_counted(path .. ".bak")
       local dir, base = tostring(path):match("^(.*[\\/])([^\\/]*)$")
       if dir and base and type(reaper.EnumerateFiles) == "function" then
         local names = {}
@@ -63913,7 +64468,7 @@ function RA.factory_reset_execute(opts)
           end
           index = index + 1
         end
-        for _, name in ipairs(names) do os.remove(dir .. name) end
+        for _, name in ipairs(names) do remove_counted(dir .. name) end
       end
     end
     -- Data/ is the package root's, so that is what the containment check is
@@ -63932,6 +64487,15 @@ function RA.factory_reset_execute(opts)
     local function sq(path) return "'" .. tostring(path or ""):gsub("'", "'\\''") .. "'" end
     local function norm_dir(path)
       return tostring(path or ""):gsub("[/\\]+$", ""):lower()
+    end
+    -- Data/Temp names the walk leaves alone; see RA.factory_reset_temp_kind.
+    local function temp_keep(dir, name)
+      if norm_dir(dir) ~= norm_dir(RA.TEMP_DIR) then return nil end
+      return RA.factory_reset_temp_kind(name)
+    end
+    local function telemetry_flag(dir, name)
+      return norm_dir(dir) == norm_dir(RA.DATA_DIR)
+        and tostring(name):lower() == "internal_telemetry.flag"
     end
     local function remove_dir(path)
       if not path or path == "" then return end
@@ -63956,6 +64520,9 @@ function RA.factory_reset_execute(opts)
       local sep = (dir:sub(-1) == "/" or dir:sub(-1) == "\\") and "" or RA.SEP
       local files = {}
       local idx = 0
+      -- A fresh listing: REAPER hands back its cached one otherwise, and a
+      -- file created since the last walk of this folder would be missed.
+      pcall(reaper.EnumerateFiles, dir, -1)
       while true do
         local fn = reaper.EnumerateFiles(dir, idx)
         if not fn then break end
@@ -63966,8 +64533,7 @@ function RA.factory_reset_execute(opts)
         -- Factory Reset preserves the internal-telemetry marker at the Data
         -- root. A reset development or test install must not silently rejoin
         -- the user statistics it is meant to be excluded from.
-        if not (norm_dir(dir) == norm_dir(RA.DATA_DIR)
-            and tostring(fn):lower() == "internal_telemetry.flag") then
+        if not telemetry_flag(dir, fn) and not temp_keep(dir, fn) then
           os.remove(dir .. sep .. fn)
         end
       end
@@ -63975,6 +64541,7 @@ function RA.factory_reset_execute(opts)
       if type(reaper.EnumerateSubdirectories) ~= "function" then return end
       local dirs = {}
       idx = 0
+      pcall(reaper.EnumerateSubdirectories, dir, -1)
       while true do
         local sub = reaper.EnumerateSubdirectories(dir, idx)
         if not sub then break end
@@ -63983,6 +64550,7 @@ function RA.factory_reset_execute(opts)
       end
       for _, sub in ipairs(dirs) do
         local child = dir .. sep .. sub
+        if temp_keep(dir, sub) then goto continue end
         -- Recurse FIRST, always, including into Data/Temp: only the Temp
         -- directory itself is kept (the store helpers expect it to exist),
         -- never its contents.
@@ -63997,10 +64565,51 @@ function RA.factory_reset_execute(opts)
         if norm_dir(child) ~= norm_dir(RA.TEMP_DIR) then
           remove_dir(child)
         end
+        ::continue::
       end
+    end
+    -- WHAT IS STILL THERE, asked of a fresh listing after the walk (main-42#5).
+    -- The walk's own removals cannot answer it: a refusal and a name that was
+    -- already gone look the same from os.remove. A folder left standing counts
+    -- once; Data/Temp is kept by design, so its contents are counted instead.
+    local function count_left(dir)
+      if type(reaper.EnumerateFiles) ~= "function" then return 1 end
+      local sep = (dir:sub(-1) == "/" or dir:sub(-1) == "\\") and "" or RA.SEP
+      local left = 0
+      pcall(reaper.EnumerateFiles, dir, -1)
+      local idx = 0
+      while true do
+        local fn = reaper.EnumerateFiles(dir, idx)
+        if not fn then break end
+        local keep = temp_keep(dir, fn)
+        if not (telemetry_flag(dir, fn) or keep == "lock" or keep == "self") then
+          left = left + 1
+        end
+        idx = idx + 1
+      end
+      if type(reaper.EnumerateSubdirectories) ~= "function" then return left end
+      local dirs = {}
+      pcall(reaper.EnumerateSubdirectories, dir, -1)
+      idx = 0
+      while true do
+        local sub = reaper.EnumerateSubdirectories(dir, idx)
+        if not sub then break end
+        dirs[#dirs + 1] = sub
+        idx = idx + 1
+      end
+      for _, sub in ipairs(dirs) do
+        local child = dir .. sep .. sub
+        if norm_dir(child) == norm_dir(RA.TEMP_DIR) then
+          left = left + count_left(child)
+        elseif temp_keep(dir, sub) ~= "lock" then
+          left = left + 1
+        end
+      end
+      return left
     end
     if safe_data_dir(RA.DATA_DIR) then
       clear_tree_contents(RA.DATA_DIR)
+      kept = kept + count_left(RA.DATA_DIR)
       factory_reset_data_dir_cleared = true
     else
       remove_family(RA.CONFIG_PATH)
@@ -64040,27 +64649,7 @@ function RA.factory_reset_execute(opts)
   if I18N and I18N.set_language_code then
     I18N.set_language_code("en")
   end
-
-  if S and S.screen_reader_mode then
-    RA.ensure_factory_reset_temp_dir(factory_reset_data_dir_cleared)
-    if keep_screen_reader then
-      reaper.SetExtState(CFG.EXT_NS, "prefer_screen_reader", "1", true)
-    end
-    return true
-  end
-  if not (Updater and Updater.fire_relauncher_now
-      and Updater.fire_relauncher_now()) then
-    RA.ensure_factory_reset_temp_dir(factory_reset_data_dir_cleared)
-    if UI and UI.show_float_toast then
-      UI.show_float_toast(
-        UI.t("settings.factory_reset.complete", nil,
-          "Reset complete. Close and reopen ReaAssist to finish."), "ok", true)
-    end
-  end
-  if keep_screen_reader then
-    reaper.SetExtState(CFG.EXT_NS, "prefer_screen_reader", "1", true)
-  end
-  return true
+  return true, kept, factory_reset_data_dir_cleared
 end
 
 -- =============================================================================
@@ -69983,6 +70572,13 @@ function Updater.uninstall_execute(plan)
     pcall(function()
       if RA.delete_extstate_section then RA.delete_extstate_section(CFG.EXT_NS) end
     end)
+    -- By name too, as Factory Reset does (1.6.4 audit #3): the ini scan above
+    -- deletes nothing when the ini cannot be opened.
+    pcall(function()
+      if RA.reset_extstate_keys and RA.delete_extstate_keys then
+        RA.delete_extstate_keys(CFG.EXT_NS, RA.reset_extstate_keys())
+      end
+    end)
     pcall(function()
       reaper.DeleteExtState(CFG.EXT_NS, "running", false)
       reaper.DeleteExtState(CFG.EXT_NS, "request_close", false)
@@ -72826,10 +73422,71 @@ function TypedActionController.request_lua_for_typed_action_message(msg,
     "Generating and validating the Lua/ReaScript version. The structured edit remains unchanged.")
 end
 
+-- FRAME GUARD (1.6.4 audit #6). Every defer loop (the visual app, both
+-- Bootstrap loops and Screen Reader Mode) runs its frame body through here.
+-- A raise in a frame used to end the script with REAPER's raw error dialog,
+-- leave an in-flight request running and record nothing. Now the first raise
+-- is written to the log and to Diag.errors, the request is cancelled through
+-- the normal cancel path, the loop's own close path runs, the user is told,
+-- and the loop is never deferred again. There are no retries: catching the
+-- error cannot restore a half-done updater step or unwind an ImGui stack, so
+-- a clean close is the only safe way on. Returns true when the body finished.
+function RA.run_guarded_frame(kind, body, close)
+  if RA._frame_failure then return false end
+  local ok, err = xpcall(body, debug.traceback)
+  if ok then return true end
+  RA.frame_failed(kind, err, close)
+  return false
+end
+
+function RA.frame_failed(kind, err, close)
+  if S then S.script_open = false end
+  if RA._frame_failure then return end
+  local text = tostring(err)
+  local first = text:match("^[^\n]*") or text
+  kind = tostring(kind or "main")
+  RA._frame_failure = { kind = kind, error = first }
+  local function try(fn, ...)
+    if type(fn) ~= "function" then return end
+    local ok, raised = pcall(fn, ...)
+    if not ok and Log and Log.line then
+      pcall(Log.line, "LOOP", kind .. " frame failure cleanup raised: "
+        .. tostring(raised))
+    end
+  end
+  try(Log and Log.line, "LOOP", kind
+    .. " frame raised; ReaAssist is closing: " .. text)
+  try(Diag and Diag.add_error, "Unexpected error in the " .. kind
+    .. " frame; ReaAssist closed: " .. first, text)
+  -- Diag.add_error only appends to memory, and the loop never ticks again, so
+  -- write the automatic-diagnostics record now (it honours consent and tier).
+  try(Diag and Diag.flush_now)
+  try(Net and Net.cancel_active_request)
+  try(close)
+  local fallback = "ReaAssist hit an unexpected error and closed. Any request "
+    .. "in progress was cancelled. Open ReaAssist again to continue.\n\nError: "
+    .. first
+  local ok_t, translated = pcall(RA.t, "dialog.frame_error.closed",
+    { error = first }, fallback)
+  local msg = (ok_t and type(translated) == "string" and translated ~= "")
+    and translated or fallback
+  if S and S.screen_reader_mode and reaper.osara_outputMessage then
+    try(reaper.osara_outputMessage, msg)
+  else
+    try(reaper.ShowMessageBox, msg, "ReaAssist", 0)
+  end
+end
+
 -- Screen Reader Mode's presentation layer lives in
 -- ReaAssist_Screen_Reader_Mode.lua. Keep ReaAssist.lua limited to shared
 -- app/controller plumbing so the normal visual app stays clean.
 local function loop()
+  RA.run_guarded_frame("main", Loop.frame, Loop.close_session)
+end
+
+-- One frame of the visual app. loop() runs it under RA.run_guarded_frame and
+-- it defers loop() again while the window stays open.
+function Loop.frame()
   if CFG._PRODUCT:lower() ~= CFG.EXT_NS then return end
 
   if not S.startup_first_frame_submitted then
@@ -73196,37 +73853,43 @@ local function loop()
   if S.script_open then
     reaper.defer(loop)
   else
-    -- Save window geometry for next launch. Skipped after Factory Reset
-    -- so freshly-cleared keys don't reappear before the user can verify.
-    if update._main_x and not S._suppress_geometry_save then
-      Store.save_window_geometry(
-        update._main_x, update._main_y, update._main_w, update._main_h)
-    end
-    -- Intentional close: clean up ExtState (atexit handles crashes).
-    set_toolbar(false)
-    -- Only clear "running" if it still belongs to this instance. During
-    -- auto-restart the new instance has already claimed the lock; we
-    -- don't want to wipe its claim on our way out.
-    local current = reaper.GetExtState(CFG.EXT_NS, "running")
-    if current:match("^([^|]+)") == S.INSTANCE_ID then
-      reaper.DeleteExtState(CFG.EXT_NS, "running", false)
-    end
-    reaper.DeleteExtState(CFG.EXT_NS, "request_close", false)
-    if CTX and CTX.scan_cleanup_all then pcall(CTX.scan_cleanup_all) end
-    -- Clear aliases only. The lease registry owns track deletion and refresh release.
-    if pref_plugins.scan then
-      pref_plugins.scan.track, pref_plugins.scan.lease = nil, nil
-      pref_plugins.scan.active, pref_plugins.scan.phase = false, "idle"
-    end
-    if fx_cache_ui.rescan then
-      fx_cache_ui.rescan.track, fx_cache_ui.rescan.lease = nil, nil
-      fx_cache_ui.rescan.active, fx_cache_ui.rescan.phase = false, "idle"
-    end
-    if fx_cache_ui.rescan_all then fx_cache_ui.rescan_all.active = false end
-    S._fx_inspect_tmp = nil
-    deep_scan.tr, deep_scan.lease, deep_scan.coro = nil, nil, nil
-    deep_scan.active, deep_scan.on_complete, deep_scan.on_cancel = false, nil, nil
+    Loop.close_session()
   end
+end
+
+-- The visual app's close path: a normal close runs it from Loop.frame, and a
+-- frame that raised runs it from RA.frame_failed.
+function Loop.close_session()
+  -- Save window geometry for next launch. Skipped after Factory Reset
+  -- so freshly-cleared keys don't reappear before the user can verify.
+  if update._main_x and not S._suppress_geometry_save then
+    Store.save_window_geometry(
+      update._main_x, update._main_y, update._main_w, update._main_h)
+  end
+  -- Intentional close: clean up ExtState (atexit handles crashes).
+  set_toolbar(false)
+  -- Only clear "running" if it still belongs to this instance. During
+  -- auto-restart the new instance has already claimed the lock; we
+  -- don't want to wipe its claim on our way out.
+  local current = reaper.GetExtState(CFG.EXT_NS, "running")
+  if current:match("^([^|]+)") == S.INSTANCE_ID then
+    reaper.DeleteExtState(CFG.EXT_NS, "running", false)
+  end
+  reaper.DeleteExtState(CFG.EXT_NS, "request_close", false)
+  if CTX and CTX.scan_cleanup_all then pcall(CTX.scan_cleanup_all) end
+  -- Clear aliases only. The lease registry owns track deletion and refresh release.
+  if pref_plugins.scan then
+    pref_plugins.scan.track, pref_plugins.scan.lease = nil, nil
+    pref_plugins.scan.active, pref_plugins.scan.phase = false, "idle"
+  end
+  if fx_cache_ui.rescan then
+    fx_cache_ui.rescan.track, fx_cache_ui.rescan.lease = nil, nil
+    fx_cache_ui.rescan.active, fx_cache_ui.rescan.phase = false, "idle"
+  end
+  if fx_cache_ui.rescan_all then fx_cache_ui.rescan_all.active = false end
+  S._fx_inspect_tmp = nil
+  deep_scan.tr, deep_scan.lease, deep_scan.coro = nil, nil, nil
+  deep_scan.active, deep_scan.on_complete, deep_scan.on_cancel = false, nil, nil
 end
 
 function RA.pump_screen_reader_background()
@@ -73942,7 +74605,13 @@ function Bootstrap.render_failed()
   end
 end
 
+-- Both Bootstrap loops run their frame under RA.run_guarded_frame (1.6.4
+-- audit #6). Their close path is S.script_open = false, which the guard sets.
 function Bootstrap.loop()
+  RA.run_guarded_frame("bootstrap", Bootstrap.frame)
+end
+
+function Bootstrap.frame()
   -- In-frame ReaImGui context check, one-shot. The init-time preflight
   -- can pass on macOS Tahoe even when the freshly-installed dylib isn't
   -- fully loaded; the failure surfaces on the first in-frame ImGui call
@@ -74073,6 +74742,10 @@ function Bootstrap.loop()
 end
 
 function Bootstrap.screen_reader_loop()
+  RA.run_guarded_frame("bootstrap_screen_reader", Bootstrap.screen_reader_frame)
+end
+
+function Bootstrap.screen_reader_frame()
   if not S.bootstrap_install_fired then
     S.bootstrap_install_fired = true
     if S.bootstrap_install_mode == nil then

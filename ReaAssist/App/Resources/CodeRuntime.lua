@@ -6169,6 +6169,24 @@ function Code.prompt_needs_loudness_bundle_clarification(user_text)
     or (lt:find("%f[%w]peak%f[%W]") ~= nil
       and lt:find("%f[%w]db%f[%W]") ~= nil)
   if not has_lufs or not has_peak_unit then return false end
+  -- Ask only when one sentence sets both targets. A long specification can
+  -- mention LUFS as background and "peak" or "dB" in unrelated plug-in
+  -- settings; that is not a loudness-bundle request.
+  local bundled_in_sentence = false
+  local sentences = (lt .. "\n"):gsub("[%.!%?;]%s", "\n")
+  for sentence in sentences:gmatch("[^\n]+") do
+    local sentence_lufs = sentence:find("%f[%w]lufs%f[%W]") ~= nil
+      or (sentence:find("%f[%w]integrated%f[%W]") ~= nil
+        and sentence:find("%f[%w]loudness%f[%W]") ~= nil)
+    local sentence_peak = sentence:find("%f[%w]dbfs%f[%W]") ~= nil
+      or (sentence:find("%f[%w]peak%f[%W]") ~= nil
+        and sentence:find("%f[%w]db%f[%W]") ~= nil)
+    if sentence_lufs and sentence_peak then
+      bundled_in_sentence = true
+      break
+    end
+  end
+  if not bundled_in_sentence then return false end
 
   local numeric_count = 0
   for _ in lt:gmatch("[%+%-]?%d+[%.,]?%d*") do
@@ -10467,9 +10485,43 @@ function Code.prompt_forbids_fx_addition(user_text)
           .. "%f[%W][^%.;,\n]-%s+on%s+[^%.;,\n]+", obj)
     end
   end
+  -- "No install/delete ... plugins" limits a different action, not FX
+  -- addition. Spanish and Portuguese prompts put the verb right after "no",
+  -- which the loose noun fallback below would otherwise read as "no plugins".
+  local other_action_verbs = {
+    install = true, uninstall = true, delete = true, remove = true,
+    change = true, modify = true, touch = true, rename = true, move = true,
+    replace = true, download = true, buy = true, bypass = true,
+    instalar = true, desinstalar = true, eliminar = true, borrar = true,
+    quitar = true, modificar = true, cambiar = true, tocar = true,
+    mover = true, reemplazar = true, descargar = true, comprar = true,
+    excluir = true, remover = true, apagar = true, deletar = true,
+    alterar = true, mexer = true, trocar = true, baixar = true,
+  }
+  -- "No eliminar ni agregar plugins" still forbids adding them.
+  local add_verbs = {
+    add = true, insert = true, load = true, put = true, use = true,
+    agregar = true, anadir = true, insertar = true, poner = true,
+    usar = true, cargar = true, adicionar = true, inserir = true,
+    colocar = true, incluir = true,
+  }
+  local function _loose_no_fx_ban(obj)
+    local pos = 1
+    while true do
+      local s, _, gap = hard_lt:find(
+        "%f[%w]no%s+([^%.;\n]-)%f[%w]" .. obj .. "%f[%W]", pos)
+      if not s then return false end
+      local other_action, add_action = false, false
+      for word in gap:gsub("\195\177", "n"):gmatch("[%a]+") do
+        if other_action_verbs[word] then other_action = true end
+        if add_verbs[word] then add_action = true end
+      end
+      if add_action or not other_action then return true end
+      pos = s + 2
+    end
+  end
   for _, obj in ipairs(objects) do
-    if hard_lt:find("%f[%w]no%s+new%s+[^%.;\n]*" .. obj .. "%f[%W]") then return true end
-    if hard_lt:find("%f[%w]no%s+[^%.;\n]*" .. obj .. "%f[%W]") then return true end
+    if _loose_no_fx_ban(obj) then return true end
     if hard_lt:find("%f[%w]do%s+not%s+add%s+[^%.;\n]*" .. obj .. "%f[%W]") then return true end
     if hard_lt:find("%f[%w]dont%s+add%s+[^%.;\n]*" .. obj .. "%f[%W]") then return true end
     if hard_lt:find("%f[%w]never%s+add%s+[^%.;\n]*" .. obj .. "%f[%W]") then return true end
@@ -13006,6 +13058,241 @@ function Code.find_unchecked_addbyname_results(lua_code)
     end
     return definitions == 1 and verified == true
   end
+  -- A local helper may store the AddByName result and return it unchanged
+  -- for its callers to check. Accept that only when the helper returns the
+  -- stored result right after the call, is only ever called directly, and
+  -- every call stores the result and stops on failure before anything else.
+  -- `error` counts as an exit only when every bare use of that name in the
+  -- code is a call. Any other use (`local error`, a parameter, a loop
+  -- variable, `error = ...`, `function error`) could rebind it.
+  local error_rebound = stripped:find("%f[%w_]function%s+error%f[^%w_]") ~= nil
+  -- An environment swap can replace the global `error` without naming it.
+  for _, word in ipairs({ "_ENV", "_G", "rawset", "setfenv", "getfenv",
+      "debug", "load", "loadstring", "setmetatable" }) do
+    if stripped:find("%f[%w_]" .. word .. "%f[^%w_]") then
+      error_rebound = true
+    end
+  end
+  if not error_rebound and type(Code.tokenize_lua) == "function" then
+    local rebind_ok, rebind_tokens = pcall(Code.tokenize_lua, stripped)
+    if not rebind_ok or type(rebind_tokens) ~= "table" then
+      error_rebound = true
+    else
+      for index, token in ipairs(rebind_tokens) do
+        if token.text == "error" and token.type ~= "str"
+            and token.type ~= "com" then
+          local back, ahead = index - 1, index + 1
+          while rebind_tokens[back] and rebind_tokens[back].type == "ws" do
+            back = back - 1
+          end
+          while rebind_tokens[ahead] and rebind_tokens[ahead].type == "ws" do
+            ahead = ahead + 1
+          end
+          local field = rebind_tokens[back]
+            and (rebind_tokens[back].text == "." or rebind_tokens[back].text == ":")
+          local nxt = rebind_tokens[ahead]
+          local after_nxt = rebind_tokens[ahead + 1]
+          local assigned = nxt and nxt.text == "="
+            and not (after_nxt and after_nxt.text == "=")
+          if assigned or (not field and not (nxt and nxt.text == "(")) then
+            error_rebound = true
+            break
+          end
+        end
+      end
+    end
+  end
+  local function _helper_name_for_scope(scope)
+    if not scope_rows or scope <= 0 then return nil end
+    local first
+    for index, row in ipairs(scope_rows) do
+      if row.scope == scope then first = index; break end
+    end
+    if not first then return nil end
+    local found = {}
+    for index = first - 1, 1, -1 do
+      local text = scope_rows[index].text
+      if not text:match("^%s*$") then
+        found[#found + 1] = text
+        if #found == 4 then break end
+      end
+    end
+    if found[1] ~= "(" or found[3] ~= "function" or found[4] ~= "local" then
+      return nil
+    end
+    local helper = found[2] and found[2]:match("^[%a_][%w_]*$")
+    return helper, scope_rows[first].first
+  end
+  local function _immediate_failure_stop(call_paren, name)
+    local call = stripped:sub(call_paren):match("^(%b())")
+    if not call then return false end
+    local tail = stripped:sub(call_paren + #call)
+    local condition, body_pos = tail:match("^[%s;]*if%s+(.-)%s+then()")
+    if not condition then return false end
+    condition = condition:gsub("%s+", "")
+    while condition:match("^%b()$") do condition = condition:sub(2, -2) end
+    if condition ~= name .. "<0" and condition ~= name .. "==-1"
+        and condition ~= name .. "<=-1" and condition ~= "0>" .. name
+        and condition ~= "-1==" .. name and condition ~= "-1>=" .. name then
+      return false
+    end
+    -- The failure branch is straight-line code: no nested block, loop, jump
+    -- or label can skip its exit. It must leave the caller by `return` or a
+    -- statement-level `error(...)` and never touch the failed result.
+    local exits = false
+    local body_tokens = Code.tokenize_lua(tail:sub(body_pos))
+    for index, token in ipairs(body_tokens) do
+      local word = token.text
+      if token.type == "kw" then
+        if word == "end" or word == "else" or word == "elseif" then break end
+        if word == "if" or word == "function" or word == "do"
+            or word == "while" or word == "for" or word == "repeat"
+            or word == "goto" or word == "break" then
+          return false
+        end
+        if word == "return" then exits = true end
+      elseif token.type ~= "str" and token.type ~= "com" then
+        if word == name or word == "::" or word == ":" and
+            body_tokens[index + 1] and body_tokens[index + 1].text == ":" then
+          return false
+        end
+        if word == "error" and not error_rebound then
+          local back = index - 1
+          while body_tokens[back] and (body_tokens[back].type == "ws"
+              or body_tokens[back].type == "com") do
+            back = back - 1
+          end
+          local before = body_tokens[back]
+          local starts_statement = before == nil
+            or before.text == ";" or before.text == ")"
+            or before.text == "]" or before.text == "}"
+            or (before.type == "kw" and (before.text == "true"
+              or before.text == "false" or before.text == "nil"))
+            or before.type == "id" or before.type == "num"
+            or before.type == "str"
+          local after = body_tokens[index + 1]
+          if after and after.type == "ws" then after = body_tokens[index + 2] end
+          if starts_statement and after and after.text == "(" then
+            exits = true
+          end
+        end
+      end
+    end
+    return exits
+  end
+  -- The returned name must be the helper's own binding: a parameter or a
+  -- top-level `local` of the helper. With no `local` below its top level and
+  -- no nested function to capture it, the assignment and the return that
+  -- follows resolve to that private declaration. Only a declaration before
+  -- the AddByName call is in scope there.
+  local function _helper_single_top_level_binding(scope, body_start, name,
+      call_pos)
+    local helper_end = body_start
+    for _, row in ipairs(scope_rows) do
+      if row.scope == scope then helper_end = row.last end
+    end
+    local tokens = Code.tokenize_lua(stripped:sub(body_start, helper_end))
+    local depth, in_params, declared = 0, true, false
+    local index, offset = 1, body_start
+    local starts = {}
+    for i, token in ipairs(tokens) do
+      starts[i] = offset
+      offset = offset + #token.text
+    end
+    while index <= #tokens do
+      local token = tokens[index]
+      local word = token.text
+      local before_call = starts[index] < call_pos
+      if in_params then
+        if word == ")" then
+          in_params = false
+        elseif word == name then
+          declared = true
+        end
+      elseif token.type == "kw" then
+        if word == "function" then return false end
+        if word == "if" or word == "do" or word == "repeat" then
+          depth = depth + 1
+        elseif word == "end" or word == "until" then
+          depth = depth - 1
+        elseif word == "local" then
+          if depth > 0 then return false end
+          -- Read the name list by Lua's grammar: names separated by commas,
+          -- each with an optional <attribute>, across any line layout.
+          local j, expect_name = index + 1, true
+          while tokens[j] do
+            local t = tokens[j]
+            if t.type == "ws" or t.type == "com" then
+              -- skip
+            elseif expect_name and t.type == "id" then
+              if t.text == name and before_call then declared = true end
+              expect_name = false
+            elseif not expect_name and t.text == "<" then
+              while tokens[j] and tokens[j].text ~= ">" do j = j + 1 end
+            elseif not expect_name and t.text == "," then
+              expect_name = true
+            else
+              break
+            end
+            j = j + 1
+          end
+        end
+      end
+      index = index + 1
+    end
+    return declared
+  end
+  local function _helper_callers_check_result(helper)
+    local definitions, calls, pos = 0, 0, 1
+    while true do
+      local s, e = stripped:find("%f[%w_]" .. helper .. "%f[^%w_]", pos)
+      if not s then break end
+      pos = e + 1
+      local before = stripped:sub(1, s - 1)
+      if before:match("local%s+function%s+$") then
+        definitions = definitions + 1
+      else
+        if before:match("[%.:]%s*$") then return false end
+        if not stripped:find("^%s*%(", e + 1) then return false end
+        local paren = stripped:find("(", e + 1, true)
+        local name, multi_assign, lhs = _assignment_info(s)
+        if not name or multi_assign then return false end
+        -- A fresh local: no earlier closure can capture this binding.
+        local line_start = before:match(".*()\n") or 1
+        if not before:sub(line_start):match("^%s*local%s+" .. name .. "%s*=%s*$") then
+          return false
+        end
+        if not _immediate_failure_stop(paren, name) then return false end
+        calls = calls + 1
+      end
+    end
+    return definitions == 1 and calls > 0
+  end
+  local function _helper_returns_checked_result(call_paren, name)
+    local scope = _scope_for_pos(call_paren)
+    local helper, body_start = _helper_name_for_scope(scope)
+    if not helper then return false end
+    -- Skipped `end`s may close only `if` blocks. In a loop, a later pass
+    -- could overwrite an earlier failed result before the return.
+    local body = stripped:sub(body_start, call_paren)
+    for _, word in ipairs({ "for", "while", "repeat", "goto" }) do
+      if body:find("%f[%w_]" .. word .. "%f[^%w_]") then return false end
+    end
+    local call = stripped:sub(call_paren):match("^(%b())")
+    if not call then return false end
+    local tail = stripped:sub(call_paren + #call)
+    tail = tail:gsub("^[%s;]+", "")
+    while tail:match("^end%f[^%w_]") do
+      tail = tail:gsub("^end[%s;]*", "", 1)
+    end
+    if not tail:match("^return%s+" .. name .. "[%s;]*end%f[^%w_]") then
+      return false
+    end
+    if not _helper_single_top_level_binding(scope, body_start, name, call_paren) then
+      return false
+    end
+    return _helper_callers_check_result(helper)
+  end
   local function _scan(fn)
     local pos = 1
     while true do
@@ -13053,7 +13340,10 @@ function Code.find_unchecked_addbyname_results(lua_code)
         if not checked and not _immediate_assert_guard(e, name)
            and not _immediate_success_branch(e, name)
            and not _success_guard_has_failure_else(line, name, last_line,
-             scan_lines) then
+             scan_lines)
+           and not ((lhs or ""):gsub("^%s*local%s+", ""):gsub("^%s+", "")
+               :gsub("%s+$", "") == name
+             and _helper_returns_checked_result(e, name)) then
           violations[#violations+1] = { name = name, line = line }
         end
       end

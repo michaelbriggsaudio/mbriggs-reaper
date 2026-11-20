@@ -26630,11 +26630,11 @@ function Render.main_window()
           .. "Note that ReaAssist never sends or receives audio. Only text, "
           .. "code, and project metadata."))
       ImGui.ImGui_Spacing(RA.ctx)
-      ImGui.ImGui_TextWrapped(RA.ctx, UI.t("dialog.gemini.body3", nil,
+      ImGui.ImGui_TextWrapped(RA.ctx, UI.t("dialog.gemini.body3_r3", nil,
         "For professional or client work, consider enabling billing on your "
           .. "Google account. Paid accounts are not used for training and have "
-          .. "higher rate limits. The Pro model has been hidden as it requires "
-          .. "a paid account. Flash and Flash Lite remain available."))
+          .. "higher rate limits. Gemini 4 Neon has been hidden as it requires "
+          .. "a paid account. The other Gemini models remain available."))
       ImGui.ImGui_Spacing(RA.ctx)
       PushStyleColor(RA.ctx, ImGui.ImGui_Col_Text(), TK.text_muted)
       ImGui.ImGui_TextWrapped(RA.ctx, UI.t("dialog.gemini.body4", nil,

@@ -1,6 +1,5 @@
 {
-  "version": "1.6.4",
-  "payload_ref": "d64ffa2e098d2f614cd435ddd699e8e053e34949",
+  "version": "1.6.5",
   "engine": {
     "schema": 1,
     "delivery": "shared-v1",
@@ -92,19 +91,19 @@
     },
     {
       "name": "App/ReaAssist.lua",
-      "sha256": "2a14a222d7dd5e2dd075ba39181c47092f79da535fb597c285125fe5259193c1"
+      "sha256": "1e0a1b2b2751ac1bca6512c9ad147131cf35acde180f2f8a51b243e446f61068"
     },
     {
       "name": "App/ReaAssist_Screen_Reader_Mode.lua",
-      "sha256": "6caf09e2be136117044ea640e3dbec1d7a4ea17ce94087e0c23076d1d6bc39aa"
+      "sha256": "dd268395b67e8303e0750ed69fa7271c0cce956756841644cda731fd25c77b05"
     },
     {
       "name": "App/Resources/API_Ref.md",
-      "sha256": "9f1f75834eeab81f2c0e1290da61e76442fef63bcec3c6f1756697214d498360"
+      "sha256": "ed4563528ceaae85262305b1e937ae514e3968cd8eca7b89b79bcfbfd76a4e54"
     },
     {
       "name": "App/Resources/CodeRuntime.lua",
-      "sha256": "47554769846b1ed575eb500e18b581f8c0d82e267e02993145ed6b0e856e3406"
+      "sha256": "932e9a83cd207d72d584385f5c167f2c88e3c948520eeae7804a69f447b79692"
     },
     {
       "name": "App/Resources/Context.lua",
@@ -120,7 +119,7 @@
     },
     {
       "name": "App/Resources/I18N.lua",
-      "sha256": "25780a005606e4129256b2116d0af1ab3a6fa75a40d5eec0df8f145a880ddd4f"
+      "sha256": "d775bb19a9236a1d2200f7a13cc4fd84fa9c3a472817f4952b6e68c39b1d8d74"
     },
     {
       "name": "App/Resources/Plugin_Pack.md",
@@ -148,7 +147,7 @@
     },
     {
       "name": "App/Resources/Reaper_Recent_Changes.md",
-      "sha256": "9db798f3e9b488cc12782df905cab737ccb7de90ebc794498ae1784c191b6b48"
+      "sha256": "f44c871531389420a69063a284d36111d30a85846bfdea2d2d429d9ece9478c9"
     },
     {
       "name": "App/Resources/Relaunch.lua",
@@ -160,7 +159,7 @@
     },
     {
       "name": "App/Resources/UI.lua",
-      "sha256": "92242b67edd73b269432e7a55216ac3431868a15c413378ca46664a6917e739f"
+      "sha256": "b4ac986d34995b7ec2697b4bc94525ea759ba4c0a02fbceefd45d4e82eb79a7b"
     },
     {
       "name": "App/Resources/fonts/Inter_18pt-Bold.ttf",
@@ -192,7 +191,7 @@
     },
     {
       "name": "App/manifest.json",
-      "sha256": "e89b561fcd1ddcddd348ad8143b31b667407624b7f3fffab34f9371123fe511a"
+      "sha256": "6e99a226876d8ea34533ea4abe4893f303c1f885393590b5d871a1546c1b9c34"
     },
     {
       "name": "ReaAssist.lua",

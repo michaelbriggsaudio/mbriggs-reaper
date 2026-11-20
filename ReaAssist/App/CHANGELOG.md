@@ -1,5 +1,21 @@
 # ReaAssist - Changelog
 
+## v1.6.5 - 2026-11-20
+
+- Added Gemini 4 Hydrogen as the new default Gemini model, replacing Gemini 3.8 Flash. With Medium thinking it completed 47 of 51 REAPER tasks in ReaAssist testing at about 4 cents per success, the best balance of quality and cost of any Gemini model tested. It also works with a free Google account.
+
+- Added Gemini 4 Neon, Google's premium model, replacing Gemini 3.1 Pro Preview. With Low thinking it completed 46 of 51 REAPER tasks. It needs a paid Google account and costs about twice as much per success as Hydrogen, so choose it when you want Google's top model; Hydrogen gave similar results in testing.
+
+- GPT-6.2 Sol and GPT-6.2 Astra replace GPT-6.1 Sol and GPT-6 Astra. Astra, OpenAI's premium model, completed 43 of 50 REAPER tasks with Low thinking and Sol completed 40 of 51. Both offer Low to Max thinking and use prompt caching to lower the cost of follow-up messages. GPT-6.1 Terra still scored highest (46 of 51) at the lowest cost per success, so it remains the best everyday OpenAI choice.
+
+- Your saved model and thinking choices carry over: Gemini 3.8 Flash and 3.1 Pro selections move to Hydrogen and Neon, and GPT-6.1 Sol and GPT-6 Astra selections move to the new versions.
+
+- More reliable Gemini responses. When a response hits Gemini's length limit, the automatic retry now uses the model's lowest thinking level instead of Google's highest, and when Hydrogen or Neon is busy, ReaAssist offers Flash 3.6 instead.
+
+- Fixed three cases where ReaAssist's safety checks blocked a correct script: a helper function that adds an effect and returns it, requests that say not to install or delete plug-ins (including in Spanish and Portuguese), and loudness requests that give a LUFS target and a peak limit in separate sentences.
+
+- Updated ReaAssist's REAPER reference through REAPER 7.86, including take markers with a length.
+
 ## v1.6.4 - 2026-10-28
 
 - Added GPT-6.1 Terra, a mid-priced GPT model at about half the price of Sol. With its default Low thinking it completed 46 of 51 REAPER tasks in ReaAssist testing, so it's a good everyday choice when you use OpenAI. None to Max thinking are also available.

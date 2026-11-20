@@ -4473,7 +4473,7 @@ end
 -- signals. A non-empty, non-self value triggers a graceful close.
 CFG = {
   EXT_NS            = "reaassist",
-  VERSION           = "1.6.4", -- public release version
+  VERSION           = "1.6.5", -- public release version
   -- OpenRouter ships as dormant, tested plumbing in 1.6.0. The redesigned
   -- webview release enables its advanced-user UI in 2.0.0. Keep this false
   -- until that release so saved development keys or selections cannot expose
@@ -8769,7 +8769,7 @@ PROVIDERS = {
     -- GPT-6 cache writes are billed at 1.25x uncached input; cache reads
     -- use each model's published rate. price_cache_w carries that write
     -- rate into live usage, session totals, budget checks, and Bench.
-    -- Luna and Terra 6.1 offer None. Sol 6.1 and Astra require at least Low.
+    -- Luna and Terra 6.1 offer None. Sol 6.2 and Astra 6.2 require at least Low.
     models = {
       { label = "GPT-6 Luna", chip_label = "LUNA", id = "gpt-6-luna",
         max_thinking_idx = 4,
@@ -8779,20 +8779,29 @@ PROVIDERS = {
       { label = "GPT-6.1 Terra", chip_label = "TERRA", id = "gpt-6.1-terra",
         min_thinking_idx = 1, default_thinking_idx = 2,
         protocol = "openai_responses", price_in = 1.00, price_out = 5.00, price_cache_r = 0.05, price_cache_w = 1.25, max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 2, descriptor = "balanced" },
-      { label = "GPT-6.1 Sol", chip_label = "SOL", id = "gpt-6.1-sol",
+      -- GPT-6.2 Sol and Astra replace GPT-6.1 Sol and GPT-6 Astra
+      -- (2026-11-17); legacy_ids keep saved selections of the retired ids on
+      -- the new rows. Both accept Low to Max and reject None and Minimal
+      -- (live probe 2026-11-17). Prices from the pricing page checked
+      -- 2026-11-17: Sol keeps 6.1 Sol's rates; Astra is 8.00 / 40.00 with
+      -- 0.40 cache read and 10.00 cache write.
+      { label = "GPT-6.2 Sol", chip_label = "SOL", id = "gpt-6.2-sol",
         min_thinking_idx = 2, default_thinking_idx = 2,
-        legacy_ids = { ["gpt-6-sol"] = true },
+        legacy_ids = { ["gpt-6-sol"] = true, ["gpt-6.1-sol"] = true },
+        inherit_legacy_thinking = true,
         protocol = "openai_responses", price_in = 2.00, price_out = 10.00, price_cache_r = 0.10, price_cache_w = 2.50, max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 3, descriptor = "balanced" },
-      { label = "GPT-6 Astra", chip_label = "ASTRA", id = "gpt-6-astra",
+      { label = "GPT-6.2 Astra", chip_label = "ASTRA", id = "gpt-6.2-astra",
         min_thinking_idx = 2, default_thinking_idx = 2,
-        protocol = "openai_responses", price_in = 10.00, price_out = 50.00, price_cache_r = 1.00, price_cache_w = 12.50, max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 4, descriptor = "smart" },
+        legacy_ids = { ["gpt-6-astra"] = true },
+        inherit_legacy_thinking = true,
+        protocol = "openai_responses", price_in = 8.00, price_out = 40.00, price_cache_r = 0.40, price_cache_w = 10.00, max_output = 128000, context_window = 1050000, long_context_threshold = 272000, long_context_input_multiplier = 2.0, long_context_output_multiplier = 1.5, price_tier = 4, descriptor = "smart" },
     },
     -- Saved model_idx_openai values predate Terra and the display order
     -- above (Luna, Terra, Sol, Astra). They keep their original meaning
     -- (1 Luna, 2 Sol, 3 Astra, 4 Terra) through this list; never index
     -- models[] with a saved value for this provider. See
     -- Store.legacy_model_idx.
-    legacy_model_order = { "gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra",
+    legacy_model_order = { "gpt-6-luna", "gpt-6.2-sol", "gpt-6.2-astra",
       "gpt-6.1-terra" },
   },
   {
@@ -8815,7 +8824,7 @@ PROVIDERS = {
     console_label = "aistudio.google.com/apikey",
     billing_url   = "https://aistudio.google.com/apikey",
     billing_label = "aistudio.google.com/apikey",
-    default_model_idx = 2,
+    default_model_idx = 3,  -- Hydrogen 4 (Medium)
     thinking_levels = {
       { label = "Minimal", value = "MINIMAL", flash_only = true },
       { label = "Low",     value = "LOW"     },
@@ -8823,12 +8832,9 @@ PROVIDERS = {
       { label = "High",    value = "HIGH"    },
     },
     default_thinking_idx = 3,  -- Medium (provider-wide fallback only)
-    -- Prices are the <=200K prompt-token tier. Pro 3.1 bills prompts above
-    -- 200K at input 4.00, output 18.00 and cache read 0.40 per million
-    -- (Google's paid-tier page, checked 2026-10-26), which its
-    -- long_context_* fields apply: MODELS.calc_cost multiplies input and
-    -- cache reads by 2.0 and output by 1.5 once input plus cache tokens pass
-    -- the threshold. Audio cache reads are ~2x and are not tracked, so the
+    -- Prices are per million tokens from aistudio.google.com/docs/pricing,
+    -- read 2026-11-17. Neither Gemini 4 row sets long_context_* fields.
+    -- Audio cache reads are ~2x and are not tracked, so the
     -- text/image/video cache rate is used for the displayed estimate.
     -- max_output: per-model output-token ceiling. Gemini accepts but does
     -- not require maxOutputTokens; we omit it from the request so the
@@ -8842,11 +8848,13 @@ PROVIDERS = {
     -- while Low was faster and slightly cheaper in the core and complex
     -- samples. Flash 3.6 defaults to Minimal (1): the ReaAssist comparison
     -- showed better pass rate, latency, and cost than Flash 3.5 at the same
-    -- level. Flash 3.8 defaults to Low (2), its lowest supported level.
-    -- Pro 3.1 inherits the provider Medium default.
-    -- Pro is "Medium if exposed, but not recommended" -- the long-
-    -- context surcharge tier + the cost of every Pro turn make it
-    -- the wrong daily-driver pick.
+    -- level. Hydrogen 4 defaults to Medium (3): 47 of 51 on the 2026-11-18
+    -- Bench against 42 of 48 at Low. Neon 4, the premium model, defaults
+    -- to Low (2): Low scored 46 of 51 in 23 s and Medium 47 of 51 in 39 s
+    -- (2026-11-19 Bench). Hydrogen and Neon refuse Minimal (live probes
+    -- 2026-11-18 and 2026-11-19), so both start at Low (min_thinking_idx 2).
+    -- Hydrogen is open to the free tier; Neon needs a paid Google account.
+    -- Gemini 4 models cache implicitly only. Neither price has a schedule.
     models = {
       { label = "Flash Lite 3.5", chip_label = "FLASH LITE", id = "gemini-3.5-flash-lite",
         price_in = 0.30,  price_out = 2.50, price_cache_r = 0.03, price_tier = 1,
@@ -8864,23 +8872,25 @@ PROVIDERS = {
         is_flash = true, interactions_v1 = true, max_output = 65536,
         context_window = 1048576,
         default_thinking_idx = 1 },
-      { label = "Flash 3.8",      chip_label = "FLASH 3.8",  id = "gemini-3.8-flash",
-        price_in = 1.50,  price_out = 7.50, price_cache_r = 0.15, price_tier = 2,
-        price_schedule = {
-          cutover_at_utc = 1798761600, -- 2027-01-01 00:00:00 UTC
-          before = { price_in = 0.75, price_out = 3.75,
-                     price_cache_r = 0.075 },
-          after = { price_in = 1.50, price_out = 7.50,
-                    price_cache_r = 0.15 },
-        },
-        is_flash = true, interactions_v1 = true, max_output = 65536,
-        context_window = 1048576,
+      -- Hydrogen 4 (the Gemini default, 2026-11-18) and Neon 4 (2026-11-19)
+      -- replace Flash 3.8 and Pro 3.1 Preview in the same row positions, so
+      -- saved model_idx_google numbers keep their meaning. legacy_ids keep a
+      -- saved retired id on the new row and inherit_legacy_thinking carries
+      -- its saved level (Low to High fit both rows). Neon also takes the
+      -- short-lived Carbon 4 id (local test profiles only).
+      { label = "Hydrogen 4",     chip_label = "HYDROGEN",   id = "gemini-4-hydrogen",
+        legacy_ids = { ["gemini-3.8-flash"] = true },
+        inherit_legacy_thinking = true,
+        price_in = 1.50,  price_out = 7.50, price_cache_r = 0.075, price_tier = 2,
+        max_output = 65536, context_window = 1048576,
+        default_thinking_idx = 3, min_thinking_idx = 2 },
+      { label = "Neon 4",         chip_label = "NEON",       id = "gemini-4-neon",
+        legacy_ids = { ["gemini-3.1-pro-preview"] = true,
+                       ["gemini-4-carbon"] = true },
+        inherit_legacy_thinking = true,
+        price_in = 3.00,  price_out = 15.00, price_cache_r = 0.15, price_tier = 4,
+        paid_only = true, max_output = 65536, context_window = 1048576,
         default_thinking_idx = 2, min_thinking_idx = 2 },
-      { label = "Pro 3.1",        chip_label = "PRO",        id = "gemini-3.1-pro-preview",
-        price_in = 2.00,  price_out = 12.00, price_cache_r = 0.20, price_tier = 4,
-        long_context_threshold = 200000, long_context_input_multiplier = 2.0,
-        long_context_output_multiplier = 1.5,
-        paid_only = true, max_output = 65536, context_window = 1048576 },
     },
   },
   {
@@ -9179,17 +9189,67 @@ function PROVIDERS.retry_thinking_idx(p, m)
   if (p.id == "anthropic" or p.id == "openai") and m and m.min_thinking_idx then
     return PROVIDERS.normalize_thinking_idx(p, m, m.min_thinking_idx)
   end
+  -- Gemini has no off entry, and an omitted thinkingLevel makes Google apply
+  -- its own default (High). Retry at the lowest level the row allows:
+  -- Minimal on Flash rows, Low on Hydrogen and Neon.
+  if p.id == "google" and m then
+    for idx = 1, #p.thinking_levels do
+      if PROVIDERS.thinking_idx_allowed(p, m, idx) then return idx end
+    end
+  end
   return 0
+end
+
+-- A row marked inherit_legacy_thinking keeps the level saved under a
+-- retired id (legacy_ids) until a level is saved under its own id (GPT-6.2
+-- Sol and Astra, 2026-11-17). chosen_id, the saved selection when it is one
+-- of the retired ids, is tried first, then the others in descending order
+-- (gpt-6.1-sol before gpt-6-sol). read(model_id) returns a saved level or
+-- nil. Returns the raw saved level or nil; callers normalize it.
+function PROVIDERS.legacy_thinking_idx(m, chosen_id, read)
+  if not (m and m.inherit_legacy_thinking == true
+      and type(m.legacy_ids) == "table") then
+    return nil
+  end
+  local ids = {}
+  for legacy_id, enabled in pairs(m.legacy_ids) do
+    if enabled == true and legacy_id ~= chosen_id then
+      ids[#ids + 1] = legacy_id
+    end
+  end
+  table.sort(ids, function(a, b) return a > b end)
+  if chosen_id and m.legacy_ids[chosen_id] == true then
+    table.insert(ids, 1, chosen_id)
+  end
+  for _, legacy_id in ipairs(ids) do
+    local saved = read(legacy_id)
+    if saved ~= nil then return saved end
+  end
+  return nil
 end
 
 function PROVIDERS.load_thinking_idx(p, m)
   if not p or not p.thinking_levels then return 0 end
+  local function saved_for(model_id)
+    return (Store and Store.config_thinking_idx
+              and Store.config_thinking_idx(p, { id = model_id }))
+      or tonumber(reaper.GetExtState(
+        CFG.EXT_NS, "thinking_idx_" .. p.id .. "_" .. model_id))
+  end
   local saved
   if m and m.id then
-    saved = (Store and Store.config_thinking_idx
-              and Store.config_thinking_idx(p, m))
-      or tonumber(reaper.GetExtState(
-        CFG.EXT_NS, "thinking_idx_" .. p.id .. "_" .. m.id))
+    saved = saved_for(m.id)
+    -- Read-only: Store.current_selection writes an inherited level under
+    -- the row's own id on the next save, before the retired selection id
+    -- is replaced by the row id.
+    if saved == nil and m.inherit_legacy_thinking == true then
+      local doc = Store and Store.config_doc and Store.config_doc()
+      local sel = type(doc) == "table" and doc.selection or nil
+      local chosen = type(sel) == "table"
+        and type(sel.model_id_by_provider) == "table"
+        and sel.model_id_by_provider[p.id] or nil
+      saved = PROVIDERS.legacy_thinking_idx(m, chosen, saved_for)
+    end
   end
   return PROVIDERS.normalize_thinking_idx(p, m, saved)
 end
@@ -10703,6 +10763,21 @@ function Store.current_selection()
               local saved = tonumber(selection.thinking_idx_by_provider_model[key])
                 or tonumber(reaper.GetExtState(
                   CFG.EXT_NS, "thinking_idx_" .. p.id .. "_" .. tm.id))
+              -- Carry a level saved under a retired id to the row's own key,
+              -- choosing by the previous selection id because this save
+              -- replaces it with the row id (PROVIDERS.legacy_thinking_idx).
+              if saved == nil and tm.inherit_legacy_thinking == true then
+                saved = PROVIDERS.legacy_thinking_idx(tm, prev_model_map[p.id],
+                  function(legacy_id)
+                    return tonumber(selection.thinking_idx_by_provider_model[
+                        p.id .. "/" .. legacy_id])
+                      or tonumber(reaper.GetExtState(CFG.EXT_NS,
+                        "thinking_idx_" .. p.id .. "_" .. legacy_id))
+                  end)
+                if saved ~= nil then
+                  saved = PROVIDERS.normalize_thinking_idx(p, tm, saved)
+                end
+              end
               if active_provider and p.id == active_provider.id
                  and models and models[prefs.model_idx]
                  and models[prefs.model_idx].id == tm.id
@@ -16536,8 +16611,8 @@ function MODELS.refresh()
   local p = PROVIDERS.active()
   -- Build the visible model list. For Gemini, hide paid-only models when the
   -- tier is known-free OR untested. Untested-as-free is the safer default:
-  -- showing Pro on a free-tier account that just hasn't tier-tested yet
-  -- means the user picks Pro, sends, and gets a confusing API error. The
+  -- showing Neon on a free-tier account that just hasn't tier-tested yet
+  -- means the user picks Neon, sends, and gets a confusing API error. The
   -- tier-test fires automatically right after a Google key save (see
   -- post_save_settle), so the nil window is short -- once it resolves,
   -- MODELS.refresh fires again and a paid user immediately sees the full
@@ -16557,11 +16632,18 @@ function MODELS.refresh()
   for i, m in ipairs(src) do MODELS[i] = m end
   -- Load per-provider model_idx.
   local key = "model_idx_" .. p.id
-  local default_idx
-  if p.id == "google" and S.gemini_paid_tier ~= true then
-    default_idx = math_min(2, #src)  -- Flash (mid) to match paid-tier default
-  else
-    default_idx = p.default_model_idx or #src
+  -- The provider default is resolved by id against the visible rows, so a
+  -- hidden paid-only row never shifts it. Hydrogen is open to the free tier,
+  -- so paid, free and unknown Gemini tiers all default to it.
+  local default_idx = p.default_model_idx or #src
+  do
+    local default_model = p.models and p.models[p.default_model_idx or 0]
+    if default_model then
+      for i, m in ipairs(src) do
+        if m.id == default_model.id then default_idx = i; break end
+      end
+    end
+    if default_idx > #src then default_idx = math_min(default_idx, #src) end
   end
   prefs.model_idx = (S.screen_reader_mode and ScreenReaderLegacy
       and ScreenReaderLegacy.model_idx
@@ -16716,7 +16798,7 @@ end
 
 -- Must run AFTER the ExtState tier/key load above: refresh()'s free-
 -- tier filter reads S.gemini_paid_tier, so calling it earlier would
--- leave paid_only models (Gemini Pro) visible to free-tier users.
+-- leave paid_only models (Gemini Neon) visible to free-tier users.
 MODELS.refresh()
 if S.screen_reader_mode and ScreenReaderLegacy
     and ScreenReaderLegacy.finalize_startup then
@@ -17521,13 +17603,27 @@ UI.MODEL_TIPS = {
   ["claude-opus-5-5"]                = "Premium Claude. Medium thinking is the default. Only Low has been Bench tested.",
   ["gpt-6-luna"]                     = "Default GPT for this app. Use Low thinking. Lowest-cost GPT-6; Bench tested at None and Low.",
   ["gpt-6.1-terra"]                  = "Mid-priced GPT model. Use Low thinking. Half the price of Sol; Bench tested on REAPER tasks.",
-  ["gpt-6.1-sol"]                    = "Higher-priced GPT model. Use Low thinking. Bench tested at Low; higher levels not measured yet.",
-  ["gpt-6-astra"]                    = "Premium GPT model. Use Low thinking. Bench tested on two tasks only; higher levels not measured yet.",
-  ["gemini-3.5-flash-lite"]          = "Lowest-cost Gemini. Use Low thinking. Choose it for budget-sensitive work; Flash 3.6 Minimal is the recommended Gemini.",
-  ["gemini-3.6-flash"]               = "Default Gemini for this app. Use Minimal thinking. Best tested balance of quality, speed, and cost.",
-  ["gemini-3.8-flash"]               = "Optional Gemini model. Use Low thinking. Matched Flash 3.6 Minimal in small tests, at a higher cost.",
-  ["gemini-3.1-pro-preview"]         = "Premium Gemini preview. Use Medium thinking. Capacity can be unreliable; Flash 3.6 Minimal is safer for coding.",
+  ["gpt-6.2-sol"]                    = "Higher-priced GPT model. Use Low thinking. Works, but GPT-6.1 Terra scored higher in ReaAssist testing at lower cost.",
+  ["gpt-6.2-astra"]                  = "Premium GPT model. Use Low thinking. Strong, but the most expensive OpenAI option; GPT-6.1 Terra is better value for most requests.",
+  ["gemini-3.5-flash-lite"]          = "Lowest-cost Gemini. Use Low thinking. Choose it for budget-sensitive work; Hydrogen 4 Medium is the recommended Gemini.",
+  ["gemini-3.6-flash"]               = "Fastest Gemini. Use Minimal thinking. Good for quick requests.",
+  ["gemini-4-hydrogen"]              = "Default Gemini for this app. Use Medium thinking. Best tested Gemini balance of quality and cost.",
+  ["gemini-4-neon"]                  = "Premium Gemini; needs a paid Google account. Use Low thinking. Came close to Hydrogen Medium in testing (46/51 against 47/51) at about 2.2 times the cost per success, and slower.",
   ["deepseek-flash"]                 = "DeepSeek's latest Flash model. Use Non-Thinking. Supports images; off-peak rates are half the peak rates.",
+}
+
+-- A reused key whose English changed gets a fresh key here, so a cached
+-- language pack that still carries the old translation under the old key
+-- cannot supply wording that no longer matches (the source-revision
+-- channel stays at 1). Maps the base key to its current key; UI.model_tip
+-- and UI.combo_hint resolve through it before the I18N lookup.
+UI.I18N_KEY_OVERRIDE = {
+  ["mode.model_tip.gemini-3.5-flash-lite"] =
+    "mode.model_tip.gemini-3.5-flash-lite.r2",
+  ["mode.model_tip.gemini-3.6-flash"] =
+    "mode.model_tip.gemini-3.6-flash.r2",
+  ["mode.combo_hint.google.gemini-3.6-flash.MINIMAL"] =
+    "mode.combo_hint.google.gemini-3.6-flash.MINIMAL.r2",
 }
 
 function UI.model_tip(model)
@@ -17537,12 +17633,14 @@ function UI.model_tip(model)
   if not fallback then return nil end
   if I18N and I18N.t then
     local key = "mode.model_tip." .. tostring(model.id)
+    key = UI.I18N_KEY_OVERRIDE[key] or key
     local text = I18N.t(key)
     if type(text) == "string" and text ~= "" and text ~= key then
       return text
     end
     if behavior_id ~= tostring(model.id) then
       key = "mode.model_tip." .. behavior_id
+      key = UI.I18N_KEY_OVERRIDE[key] or key
       text = I18N.t(key)
       if type(text) == "string" and text ~= "" and text ~= key then
         return text
@@ -17595,15 +17693,15 @@ UI.COMBO_HINTS = {
       xhigh = "Extra-high reasoning | Higher token use possible | Not measured yet",
       max = "Maximum reasoning | Higher token use possible | Not measured yet",
     },
-    ["gpt-6.1-sol"] = {
-      low = "Recommended level | Higher GPT-6 cost | Bench tested on REAPER tasks",
+    ["gpt-6.2-sol"] = {
+      low = "Default level | Higher GPT-6 cost | Weakest on complex scripts in testing",
       medium = "More reasoning | Higher token use possible | Not measured yet",
       high = "High reasoning | Higher token use possible | Not measured yet",
       xhigh = "Extra-high reasoning | Higher token use possible | Not measured yet",
       max = "Maximum reasoning | Higher token use possible | Not measured yet",
     },
-    ["gpt-6-astra"] = {
-      low = "Default level | Premium cost | Bench tested on 2 tasks only",
+    ["gpt-6.2-astra"] = {
+      low = "Default level | Premium cost | Strong in testing | Terra is better value",
       medium = "More reasoning | Premium cost | Not measured yet",
       high = "High reasoning | Premium cost | Not measured yet",
       xhigh = "Extra-high reasoning | Premium cost | Not measured yet",
@@ -17624,20 +17722,20 @@ UI.COMBO_HINTS = {
       HIGH    = "Hard reasoning only | Lowest Gemini cost | Slowest tested | No measured gain over Low",
     },
     ["gemini-3.6-flash"] = {
-      MINIMAL = "Recommended level | General and complex work | Best tested Gemini value | Fast",
+      MINIMAL = "Recommended level | Quick requests | Fastest Gemini | Bench tested on REAPER tasks",
       LOW     = "More reasoning | Higher expected cost and latency | Not measured yet",
       MEDIUM  = "More reasoning | Higher expected cost and latency | Try Minimal first | Not measured yet",
       HIGH    = "Maximum reasoning | Highest expected cost and latency | Avoid routine use | Not measured yet",
     },
-    ["gemini-3.8-flash"] = {
-      LOW     = "Lowest supported level | Higher cost than Flash 3.6 Minimal | Bench tested on REAPER tasks",
-      MEDIUM  = "More reasoning | Higher expected cost and latency | Try Low first | Not measured yet",
-      HIGH    = "Maximum reasoning | Highest expected cost and latency | Avoid routine use | Not measured yet",
+    ["gemini-4-hydrogen"] = {
+      LOW     = "Lowest supported level | Faster than Medium | Fewer passes in testing | Bench tested on REAPER tasks",
+      MEDIUM  = "Recommended level | General and complex work | Best tested Gemini value | Bench tested on REAPER tasks",
+      HIGH    = "Maximum reasoning | Highest expected cost and latency | Try Medium first | Not measured yet",
     },
-    ["gemini-3.1-pro-preview"] = {
-      LOW     = "Not recommended | Reduced reasoning | Highest Gemini cost | Not measured yet",
-      MEDIUM  = "Default level | Highest Gemini cost | Capacity can be unreliable | Bench tested on REAPER tasks",
-      HIGH    = "Not recommended | Highest expected cost and latency | Not measured yet",
+    ["gemini-4-neon"] = {
+      LOW     = "Default level | Premium Gemini cost | Slower than Hydrogen | Bench tested on REAPER tasks",
+      MEDIUM  = "More reasoning | Premium Gemini cost | Slower than Low | No clear gain over Low | Bench tested on REAPER tasks",
+      HIGH    = "Maximum reasoning | Highest expected cost and latency | Try Low first | Not measured yet",
     },
   },
   deepseek = {
@@ -17654,13 +17752,7 @@ UI.COMBO_HINTS = {
 -- source of the explanatory copy.
 UI.COMBO_TONES = {
   anthropic = {},
-  google = {
-    ["gemini-3.1-pro-preview"] = {
-      LOW = "warn",
-      MEDIUM = "warn",
-      HIGH = "warn",
-    },
-  },
+  google = {},
   deepseek = {},
 }
 
@@ -17689,12 +17781,14 @@ function UI.combo_hint(provider, model, thinking_level)
   if I18N and I18N.t then
     local prefix = "mode.combo_hint." .. tostring(provider.id) .. "."
     local i18n_key = prefix .. model_id .. "." .. tostring(key)
+    i18n_key = UI.I18N_KEY_OVERRIDE[i18n_key] or i18n_key
     local text = I18N.t(i18n_key)
     if type(text) == "string" and text ~= "" and text ~= i18n_key then
       return text
     end
     if hint_id ~= model_id then
       i18n_key = prefix .. hint_id .. "." .. tostring(key)
+      i18n_key = UI.I18N_KEY_OVERRIDE[i18n_key] or i18n_key
       text = I18N.t(i18n_key)
       if type(text) == "string" and text ~= "" and text ~= i18n_key then
         return text
@@ -37115,7 +37209,7 @@ function Net.build_body_openai(msgs, snapshot, msg_attachments)
     and type(model_id) == "string"
     and (model_id:match("^gpt%-5%.6") ~= nil
       or model_id:match("^gpt%-6%-") ~= nil
-      or model_id:match("^gpt%-6%.1%-") ~= nil)
+      or model_id:match("^gpt%-6%.%d+%-") ~= nil)
 
   -- GPT-5.6 and GPT-6 explicit caching: mark the stable core system prompt and disable
   -- the implicit latest-message breakpoint. This avoids paying a 1.25x write
@@ -38640,8 +38734,8 @@ function Net._call_cap_message()
     hint = RA.t("net.cap.call.hint_haiku", nil,
       "Try Sonnet 5.5 or Opus 5.5 for this request.")
   elseif pid == "google" and (tag("flash") or tag("nano")) then
-    hint = RA.t("net.cap.call.hint_gemini", nil,
-      "Try Gemini 3.1 Pro for this request.")
+    hint = RA.t("net.cap.call.hint_gemini_r2", nil,
+      "Try Gemini 4 Hydrogen for this request.")
   elseif pid == "openai" and tag("mini") then
     hint = RA.t("net.cap.call.hint_openai", nil,
       "Try a non-mini OpenAI model for this request.")
@@ -46584,13 +46678,13 @@ end
 -- =============================================================================
 -- Net.fire_gemini_tier_test
 -- =============================================================================
--- Fires a 1-token request using the Pro model to detect free vs paid tier.
+-- Fires a 1-token request using the paid-only model (Neon 4) to detect free vs paid tier.
 -- Free tier: response body contains positive quota evidence
 -- ("free_tier" metric text, or a quota limit/value of 0). Plain 429/403
 -- responses are ambiguous: paid accounts can hit transient per-minute
--- throttles, and treating those as "free" hides Pro/caching until manual
+-- throttles, and treating those as "free" hides Neon/caching until manual
 -- reclassification.
--- Paid tier: request succeeds (Pro accessible).
+-- Paid tier: request succeeds (Neon accessible).
 function Net._gemini_error_has_free_tier_signal(err)
   if type(err) ~= "table" then return false end
   local saw_free_tier, saw_quota_context, saw_zero_limit = false, false, false
@@ -46640,7 +46734,7 @@ function Net.fire_gemini_tier_test()
   local google_key = S.api_key_map.google
   if not google_key then return end
 
-  -- Find the Pro model ID from the provider's full model list.
+  -- Find the paid-only model ID (Neon 4) from the provider's full list.
   local google_prov = PROVIDERS.get("google")
   if not google_prov then return end
   local pro_id
@@ -46649,13 +46743,13 @@ function Net.fire_gemini_tier_test()
   end
   if not pro_id then return end
 
-  -- Pin thinkingLevel=LOW (the lowest setting Gemini Pro allows -- there is
-  -- no "off" for Pro models) so the tier-test request doesn't burn 20-60s on
+  -- Pin thinkingLevel=LOW (the lowest setting Neon allows -- there is
+  -- no "off" for it) so the tier-test request doesn't burn 20-60s on
   -- internal reasoning before hitting the 1-token output cap. Without this,
-  -- Pro defaults to MEDIUM thinking and the tier test routinely exceeds
+  -- the model applies its own thinking default and the tier test can exceed
   -- curl --max-time 30, leaving us at the mercy of the 180s watchdog and
   -- producing the "ambiguous (timeout)" classification on slow connections.
-  -- The tier test only needs to know whether Pro is *callable*, not whether
+  -- The tier test only needs to know whether Neon is *callable*, not whether
   -- it produces a useful response, so cheap thinking is fine.
   local body = '{"contents":[{"role":"user","parts":[{"text":"hi"}]}],'
     .. '"generationConfig":{"maxOutputTokens":1,'
@@ -46781,8 +46875,8 @@ function Net.handle_gemini_tier_test(raw)
     Store.set_gemini_paid_tier(true)
     interpretation = "paid"
     if UI and UI.show_float_toast then
-      UI.show_float_toast(RA.t("gemini.toast.pro_available", nil,
-        "Gemini Pro available"), "ok")
+      UI.show_float_toast(RA.t("gemini.toast.neon_available", nil,
+        "Gemini Neon available"), "ok")
     end
   elseif is_free then
     Store.set_gemini_paid_tier(false)
@@ -47384,7 +47478,7 @@ end
 -- Survives the cache reference (name/model/expires) across script restarts via
 -- State.json. Without this, every restart re-creates a fresh cache while the
 -- prior one continues billing storage server-side until its TTL expires --
--- typically ~$0.01 per restart on Gemini Pro and a 1-3s extra cold-start.
+-- typically ~$0.01 per restart on a premium Gemini model and a 1-3s extra cold-start.
 function Net.gemini_cache_persist()
   if not S.gemini_cache_name or S.gemini_cache_name == "" then return end
   if Store and Store.set_gemini_cache_state then
@@ -54431,14 +54525,20 @@ function Net._google_capacity_recovery(p)
     local preferred = models[p.default_model_idx or 0]
     if a == preferred then return a end
     if b == preferred then return b end
-    return b
+    -- Equal price and neither is the default: keep the earlier catalog row
+    -- (the Bench copy appends retired flash rows at the same base price).
+    return a
   end
-  local function best_flash_below(max_price)
+  -- inclusive: a non-flash current model may fall back to a flash row priced
+  -- at or below it (Hydrogen and Flash 3.6 share a 1.50 base input price).
+  -- Flash-to-flash recovery keeps the strict comparison.
+  local function best_flash_below(max_price, inclusive)
     local best
     for _, m in ipairs(models) do
       if m ~= current_model and m.is_flash and not m.paid_only then
         local price = model_price(m)
-        if not max_price or price < max_price then
+        if not max_price or price < max_price
+           or (inclusive and price <= max_price) then
           best = stronger_flash(best, m)
         end
       end
@@ -54449,7 +54549,7 @@ function Net._google_capacity_recovery(p)
   if current_model and current_model.is_flash and not current_model.paid_only then
     fallback = best_flash_below(model_price(current_model))
   elseif current_model and model_price(current_model) > 0 then
-    fallback = best_flash_below(model_price(current_model))
+    fallback = best_flash_below(model_price(current_model), true)
   else
     fallback = best_flash_below(nil)
   end
@@ -56183,11 +56283,11 @@ function Net.try_finish_curl()
         if S.pending_display_idx and S.display_messages[S.pending_display_idx] then
           S.display_messages[S.pending_display_idx].request_status_text = "api error"
         end
-        Log.add_error(RA.t("response.gemini_paid_required", nil,
-          "Gemini Pro requires a paid Google account. "
+        Log.add_error(RA.t("response.gemini_paid_required_r3", nil,
+          "Gemini 4 Neon requires a paid Google account. "
             .. "Your account appears to be on the free tier.\n\n"
-            .. "The model has been switched to Flash Lite. "
-            .. "To use Pro, enable billing at aistudio.google.com/apikey."))
+            .. "Choose another Gemini model, or enable billing at "
+            .. "aistudio.google.com/apikey."))
         return
       end
       Net._handle_api_error(p, status, resp.error.message, is_overloaded, is_auth,
@@ -56375,7 +56475,8 @@ function Net.try_finish_curl()
     local _retry_prov = PROVIDERS[S.pending_provider_idx] or PROVIDERS.active()
     -- Retry at the lowest supported level. The 5.5 models use Low rather
     -- than None; DeepSeek needs its explicit disabled entry. Gemini has no
-    -- off entry, so zero still omits the level field for its retry.
+    -- off entry, so its retry uses the row's lowest level (Minimal on Flash
+    -- rows, Low on Hydrogen and Neon).
     local _retry_model = _retry_prov.models
       and _retry_prov.models[S.pending_model_idx or prefs.model_idx]
     local _retry_off_idx = PROVIDERS.retry_thinking_idx(
@@ -56406,11 +56507,25 @@ function Net.try_finish_curl()
         .. tostring(_retry_prov.thinking_levels[_retry_off_idx]
           and _retry_prov.thinking_levels[_retry_off_idx].value or "omitted")
         .. " (user-invisible)")
+      -- Only an explicit Off entry is "reasoning disabled"; any other floor
+      -- names the level the retry actually runs at.
+      local _retry_level = _retry_prov.thinking_levels[_retry_off_idx]
+      local _retry_note
+      if _retry_level and (_retry_level.value == "none"
+          or _retry_level.value == "disabled") then
+        _retry_note = "This retry is firing with reasoning disabled."
+      elseif _retry_level then
+        _retry_note = "This retry is firing at the lowest reasoning level "
+          .. "this model allows (" .. tostring(_retry_level.label
+            or _retry_level.value) .. ")."
+      else
+        _retry_note = "This retry is firing with reduced reasoning."
+      end
       local history_content = "(INTERNAL NOTE TO THE MODEL -- DO NOT MENTION "
         .. "ANY OF THIS IN YOUR VISIBLE REPLY: Your previous reply consumed "
         .. "the entire output token budget on internal reasoning and "
-        .. "produced zero visible output. This retry is firing with "
-        .. "reasoning disabled. Deliver the answer concisely: a short "
+        .. "produced zero visible output. " .. _retry_note .. " "
+        .. "Deliver the answer concisely: a short "
         .. "lead sentence, the code block, and the standard tip line. "
         .. "Skip recap tables, explanations of decision steps, and any "
         .. "prose beyond what the user actually needs. Respond as if this "
@@ -56477,7 +56592,7 @@ function Net.try_finish_curl()
           or PROVIDERS.active()
         if empty_retry_provider.id == "google"
            and empty_retry_provider.thinking_levels then
-          S.thinking_override_idx = 1 -- lowest Gemini level; Pro bumps to LOW
+          S.thinking_override_idx = 1 -- lowest Gemini level; Hydrogen and Neon bump to LOW
           empty_retry_thinking_note =
             "; retrying with lowest Gemini thinking level"
         end

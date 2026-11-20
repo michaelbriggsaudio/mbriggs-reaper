@@ -13379,7 +13379,7 @@ end
 -- never inherit these defaults. Bump TABLE_REVISION whenever an allowed tuple
 -- or frozen default changes.
 ScreenReaderLegacy = ScreenReaderLegacy or {}
-ScreenReaderLegacy.TABLE_REVISION = 7
+ScreenReaderLegacy.TABLE_REVISION = 9
 ScreenReaderLegacy.DEFAULT = {
   provider_id = "anthropic",
   model_id = "claude-haiku-5-5",
@@ -13401,18 +13401,18 @@ ScreenReaderLegacy.PROVIDERS = {
     models = {
       ["gpt-6-luna"] = true,
       ["gpt-6.1-terra"] = true,
-      ["gpt-6.1-sol"] = true,
-      ["gpt-6-astra"] = true,
+      ["gpt-6.2-sol"] = true,
+      ["gpt-6.2-astra"] = true,
     },
   },
   google = {
     protocol_id = "google_generate_content",
-    default_model_id = "gemini-3.6-flash",
+    default_model_id = "gemini-4-hydrogen",
     models = {
       ["gemini-3.5-flash-lite"] = true,
       ["gemini-3.6-flash"] = true,
-      ["gemini-3.8-flash"] = true,
-      ["gemini-3.1-pro-preview"] = true,
+      ["gemini-4-hydrogen"] = true,
+      ["gemini-4-neon"] = true,
     },
   },
   deepseek = {

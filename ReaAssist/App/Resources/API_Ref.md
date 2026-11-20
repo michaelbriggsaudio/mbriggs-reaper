@@ -6,15 +6,15 @@
 <!-- SECTION:core -->
 # REAPER ReaScript Lua API Reference
 
-Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.83),
-plus official Cockos changelog notes through REAPER v7.83.
+Source: reaper.fm/sdk/reascript/reascripthelp.html (REAPER v7.86),
+plus official Cockos changelog notes through REAPER v7.86.
 Lua-only. All functions called as reaper.FunctionName().
 Use proj=0 for active project. Track/item indices in the API are 0-based.
 
 This is the CORE reference -- value scales, common patterns, tracks, track FX,
 markers, transport, undo, performance tips, and common pitfalls. Less-common
 surface lives in on-demand sections requested via `<context_needed>docs:NAME</context_needed>`:
-  docs:items      -- media items, takes, item grouping, splits, fades, item properties
+  docs:items      -- media items, takes, take markers, item grouping, splits, fades, item properties
   docs:take_fx    -- take FX (TakeFX_*); per-item / per-clip / per-take effects
   docs:routing    -- sends, receives, sidechain routing, hardware outputs, channel bit-packing, MIDI channel routing
   docs:envelopes  -- envelopes, automation, automation points, automation modes, envelope scaling, volume/pan envelopes
@@ -31,6 +31,13 @@ SetThemeColor) lives in the `theme` bucket.
 These are high-confusion post-7.62 additions. Use guards if supporting older
 REAPER installs: `if reaper.FunctionName then ... else ... end`.
 
+- REAPER 7.86+: take markers can have a length. Add the marker with
+  `local idx = reaper.SetTakeMarker(take, -1, name, srcpos)`, then set the
+  length with `reaper.SetTakeMarkerInfo(take, idx, "LENGTH", seconds)`; read it
+  with `reaper.GetTakeMarkerInfo(take, idx, "LENGTH")`. Guard both Info
+  functions. Below 7.86, add the marker without a length and tell the user the
+  length needs REAPER 7.86. More take-marker detail is in `docs:items`, not
+  `docs:take_fx`.
 - REAPER 7.82+: `reaper.EnumThemeColors(idx)` enumerates theme keys and their
   value types. Request `docs:theme` before writing enumeration code.
   Use a positive availability guard: `if reaper.EnumThemeColors then ...
@@ -1800,6 +1807,45 @@ PITFALL: for drum quantize, this API is best for moving markers that already
 exist. If the task is to discover hit locations from audio, create markers with
 REAPER's Dynamic Split / transient workflow first; do not add markers from a
 simple energy threshold unless the user explicitly chose that approximation.
+
+### TAKE MARKERS
+
+Take markers are named points inside a take, in source time (seconds from the
+start of the take's source media), not project time. They are not stretch
+markers and not project markers.
+
+`integer reaper.GetNumTakeMarkers(MediaItem_Take take)`
+
+`number retval, string name, optional integer color reaper.GetTakeMarker(MediaItem_Take take, integer idx)`
+  retval is the source position, or -1 when the marker does not exist.
+
+`integer reaper.SetTakeMarker(MediaItem_Take take, integer idx, string nameIn, optional number srcposIn, optional integer colorIn)`
+  idx < 0 adds a marker. Returns the index of the new or updated marker, which
+  can differ from idx when srcpos changes. Use the returned index afterwards.
+
+`boolean reaper.DeleteTakeMarker(MediaItem_Take take, integer idx)`
+  Later indices shift down. Delete from the highest index first.
+
+REAPER 7.86+: `number reaper.GetTakeMarkerInfo(MediaItem_Take take, integer idx, string attribute)`
+and `boolean reaper.SetTakeMarkerInfo(MediaItem_Take take, integer idx, string attribute, number value)`.
+The only documented attribute is `"LENGTH"`. The documentation gives no unit;
+treat it as source-time seconds, like srcpos, and read it back after setting.
+
+```lua
+-- Pattern: add a named take marker with a length at the start of the
+-- selected item's visible audio
+local item = reaper.GetSelectedMediaItem(0, 0)
+local take = item and reaper.GetActiveTake(item)
+if not take then error("Select an item first.", 0) end
+local srcpos = reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS")
+local idx = reaper.SetTakeMarker(take, -1, "Verse", srcpos)
+if reaper.SetTakeMarkerInfo then
+  reaper.SetTakeMarkerInfo(take, idx, "LENGTH", 2.0)
+else
+  -- Older REAPER: the marker exists without a length; tell the user.
+end
+reaper.UpdateItemInProject(item)
+```
 
 ### ITEM GROUPING (I_GROUPID)
 

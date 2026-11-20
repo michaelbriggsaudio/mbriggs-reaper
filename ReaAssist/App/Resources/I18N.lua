@@ -365,28 +365,28 @@ I18N.catalogs = {
         "Extra-high reasoning | Higher token use possible | Not measured yet",
       ["mode.combo_hint.openai.gpt-6.1-terra.max"] =
         "Maximum reasoning | Higher token use possible | Not measured yet",
-      ["mode.combo_hint.openai.gpt-6.1-sol.low"] = "Recommended level | Higher GPT-6 cost | Bench tested on REAPER tasks",
-      ["mode.combo_hint.openai.gpt-6.1-sol.medium"] = "More reasoning | Higher token use possible | Not measured yet",
-      ["mode.combo_hint.openai.gpt-6.1-sol.high"] = "High reasoning | Higher token use possible | Not measured yet",
-      ["mode.combo_hint.openai.gpt-6.1-sol.xhigh"] = "Extra-high reasoning | Higher token use possible | Not measured yet",
-      ["mode.combo_hint.openai.gpt-6.1-sol.max"] = "Maximum reasoning | Higher token use possible | Not measured yet",
-      ["mode.combo_hint.openai.gpt-6-astra.low"] = "Default level | Premium cost | Bench tested on 2 tasks only",
-      ["mode.combo_hint.openai.gpt-6-astra.medium"] = "More reasoning | Premium cost | Not measured yet",
-      ["mode.combo_hint.openai.gpt-6-astra.high"] = "High reasoning | Premium cost | Not measured yet",
-      ["mode.combo_hint.openai.gpt-6-astra.xhigh"] = "Extra-high reasoning | Premium cost | Not measured yet",
-      ["mode.combo_hint.openai.gpt-6-astra.max"] = "Maximum reasoning | Premium cost | Not measured yet",
-      ["mode.model_tip.gpt-6.1-sol"] =
-        "Higher-priced GPT model. Use Low thinking. Bench tested at Low; higher levels not measured yet.",
-      ["mode.model_tip.gpt-6-astra"] =
-        "Premium GPT model. Use Low thinking. Bench tested on two tasks only; higher levels not measured yet.",
-      ["mode.model_tip.gemini-3.5-flash-lite"] =
-        "Lowest-cost Gemini. Use Low thinking. Choose it for budget-sensitive work; Flash 3.6 Minimal is the recommended Gemini.",
-      ["mode.model_tip.gemini-3.6-flash"] =
-        "Default Gemini for this app. Use Minimal thinking. Best tested balance of quality, speed, and cost.",
-      ["mode.model_tip.gemini-3.8-flash"] =
-        "Optional Gemini model. Use Low thinking. Matched Flash 3.6 Minimal in small tests, at a higher cost.",
-      ["mode.model_tip.gemini-3.1-pro-preview"] =
-        "Premium Gemini preview. Use Medium thinking. Capacity can be unreliable; Flash 3.6 Minimal is safer for coding.",
+      ["mode.combo_hint.openai.gpt-6.2-sol.low"] = "Default level | Higher GPT-6 cost | Weakest on complex scripts in testing",
+      ["mode.combo_hint.openai.gpt-6.2-sol.medium"] = "More reasoning | Higher token use possible | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6.2-sol.high"] = "High reasoning | Higher token use possible | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6.2-sol.xhigh"] = "Extra-high reasoning | Higher token use possible | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6.2-sol.max"] = "Maximum reasoning | Higher token use possible | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6.2-astra.low"] = "Default level | Premium cost | Strong in testing | Terra is better value",
+      ["mode.combo_hint.openai.gpt-6.2-astra.medium"] = "More reasoning | Premium cost | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6.2-astra.high"] = "High reasoning | Premium cost | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6.2-astra.xhigh"] = "Extra-high reasoning | Premium cost | Not measured yet",
+      ["mode.combo_hint.openai.gpt-6.2-astra.max"] = "Maximum reasoning | Premium cost | Not measured yet",
+      ["mode.model_tip.gpt-6.2-sol"] =
+        "Higher-priced GPT model. Use Low thinking. Works, but GPT-6.1 Terra scored higher in ReaAssist testing at lower cost.",
+      ["mode.model_tip.gpt-6.2-astra"] =
+        "Premium GPT model. Use Low thinking. Strong, but the most expensive OpenAI option; GPT-6.1 Terra is better value for most requests.",
+      ["mode.model_tip.gemini-3.5-flash-lite.r2"] =
+        "Lowest-cost Gemini. Use Low thinking. Choose it for budget-sensitive work; Hydrogen 4 Medium is the recommended Gemini.",
+      ["mode.model_tip.gemini-3.6-flash.r2"] =
+        "Fastest Gemini. Use Minimal thinking. Good for quick requests.",
+      ["mode.model_tip.gemini-4-hydrogen"] =
+        "Default Gemini for this app. Use Medium thinking. Best tested Gemini balance of quality and cost.",
+      ["mode.model_tip.gemini-4-neon"] =
+        "Premium Gemini; needs a paid Google account. Use Low thinking. Came close to Hydrogen Medium in testing (46/51 against 47/51) at about 2.2 times the cost per success, and slower.",
       ["mode.model_tip.deepseek-flash"] =
         "DeepSeek's latest Flash model. Use Non-Thinking. Supports images; off-peak rates are half the peak rates.",
       ["mode.combo_hint.anthropic.claude-haiku-5-5.low"] =
@@ -439,26 +439,26 @@ I18N.catalogs = {
         "General and complex work | Lowest Gemini cost | Slower than Low | No measured gain",
       ["mode.combo_hint.google.gemini-3.5-flash-lite.HIGH"] =
         "Hard reasoning only | Lowest Gemini cost | Slowest tested | No measured gain over Low",
-      ["mode.combo_hint.google.gemini-3.6-flash.MINIMAL"] =
-        "Recommended level | General and complex work | Best tested Gemini value | Fast",
+      ["mode.combo_hint.google.gemini-3.6-flash.MINIMAL.r2"] =
+        "Recommended level | Quick requests | Fastest Gemini | Bench tested on REAPER tasks",
       ["mode.combo_hint.google.gemini-3.6-flash.LOW"] =
         "More reasoning | Higher expected cost and latency | Not measured yet",
       ["mode.combo_hint.google.gemini-3.6-flash.MEDIUM"] =
         "More reasoning | Higher expected cost and latency | Try Minimal first | Not measured yet",
       ["mode.combo_hint.google.gemini-3.6-flash.HIGH"] =
         "Maximum reasoning | Highest expected cost and latency | Avoid routine use | Not measured yet",
-      ["mode.combo_hint.google.gemini-3.8-flash.LOW"] =
-        "Lowest supported level | Higher cost than Flash 3.6 Minimal | Bench tested on REAPER tasks",
-      ["mode.combo_hint.google.gemini-3.8-flash.MEDIUM"] =
-        "More reasoning | Higher expected cost and latency | Try Low first | Not measured yet",
-      ["mode.combo_hint.google.gemini-3.8-flash.HIGH"] =
-        "Maximum reasoning | Highest expected cost and latency | Avoid routine use | Not measured yet",
-      ["mode.combo_hint.google.gemini-3.1-pro-preview.LOW"] =
-        "Not recommended | Reduced reasoning | Highest Gemini cost | Not measured yet",
-      ["mode.combo_hint.google.gemini-3.1-pro-preview.MEDIUM"] =
-        "Default level | Highest Gemini cost | Capacity can be unreliable | Bench tested on REAPER tasks",
-      ["mode.combo_hint.google.gemini-3.1-pro-preview.HIGH"] =
-        "Not recommended | Highest expected cost and latency | Not measured yet",
+      ["mode.combo_hint.google.gemini-4-hydrogen.LOW"] =
+        "Lowest supported level | Faster than Medium | Fewer passes in testing | Bench tested on REAPER tasks",
+      ["mode.combo_hint.google.gemini-4-hydrogen.MEDIUM"] =
+        "Recommended level | General and complex work | Best tested Gemini value | Bench tested on REAPER tasks",
+      ["mode.combo_hint.google.gemini-4-hydrogen.HIGH"] =
+        "Maximum reasoning | Highest expected cost and latency | Try Medium first | Not measured yet",
+      ["mode.combo_hint.google.gemini-4-neon.LOW"] =
+        "Default level | Premium Gemini cost | Slower than Hydrogen | Bench tested on REAPER tasks",
+      ["mode.combo_hint.google.gemini-4-neon.MEDIUM"] =
+        "More reasoning | Premium Gemini cost | Slower than Low | No clear gain over Low | Bench tested on REAPER tasks",
+      ["mode.combo_hint.google.gemini-4-neon.HIGH"] =
+        "Maximum reasoning | Highest expected cost and latency | Try Low first | Not measured yet",
       ["mode.combo_hint.deepseek.deepseek-v4-flash.disabled"] =
         "Recommended level | General and complex work | Budget pricing | Fast | Off-peak rates are half price",
       ["mode.thinking.header"] = "Thinking:",
@@ -2770,8 +2770,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Your Gemini API key appears to be on Google's free tier. On the free tier, Google may use your prompts and responses to improve their models. This can include human review of your data.",
       ["dialog.gemini.body2"] =
         "This means project details like track names, plugin settings, and any code you send could be seen by reviewers or used in training data. Note that ReaAssist never sends or receives audio. Only text, code, and project metadata.",
-      ["dialog.gemini.body3"] =
-        "For professional or client work, consider enabling billing on your Google account. Paid accounts are not used for training and have higher rate limits. The Pro model has been hidden as it requires a paid account. Flash and Flash Lite remain available.",
+      ["dialog.gemini.body3_r3"] =
+        "For professional or client work, consider enabling billing on your Google account. Paid accounts are not used for training and have higher rate limits. Gemini 4 Neon has been hidden as it requires a paid account. The other Gemini models remain available.",
       ["dialog.gemini.body4"] =
         "If you enable billing later, use the Test API Keys button on the Settings screen to update your account status.",
       ["dialog.gemini.understand"] = "I Understand",
@@ -2782,7 +2782,7 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
       ["dialog.gemini.mark_paid"] =
         "Incorrectly Detected as Free. Mark as Paid.",
       ["gemini.toast.verifying_tier"] = "Verifying Gemini tier...",
-      ["gemini.toast.pro_available"] = "Gemini Pro available",
+      ["gemini.toast.neon_available"] = "Gemini Neon available",
       ["gemini.toast.service_unavailable"] =
         "Gemini service unavailable - tier check will retry",
       ["gemini.toast.verify_failed_retry"] =
@@ -2872,8 +2872,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "Stopped after {calls} API calls in one turn to avoid runaway cost. {hint}",
       ["net.cap.call.hint_haiku"] =
         "Try Sonnet 5.5 or Opus 5.5 for this request.",
-      ["net.cap.call.hint_gemini"] =
-        "Try Gemini 3.1 Pro for this request.",
+      ["net.cap.call.hint_gemini_r2"] =
+        "Try Gemini 4 Hydrogen for this request.",
       ["net.cap.call.hint_openai"] =
         "Try a non-mini OpenAI model for this request.",
       ["net.cap.call.hint_small"] =
@@ -3152,8 +3152,8 @@ By clicking "I Agree," you confirm that you have read and agree to these Terms o
         "The custom provider returned JSON, but not in the OpenAI-compatible chat-completions shape ReaAssist expected. Check that this provider points to a chat-completions endpoint for the selected model, then try again.\n\nDetails were saved to the debug log.",
       ["response.gemini_cache_expired"] =
         "The Gemini context cache expired between sends. Please send your message again; a fresh cache will be created automatically.",
-      ["response.gemini_paid_required"] =
-        "Gemini Pro requires a paid Google account. Your account appears to be on the free tier.\n\nThe model has been switched to Flash Lite. To use Pro, enable billing at aistudio.google.com/apikey.",
+      ["response.gemini_paid_required_r3"] =
+        "Gemini 4 Neon requires a paid Google account. Your account appears to be on the free tier.\n\nChoose another Gemini model, or enable billing at aistudio.google.com/apikey.",
       ["response.provider_rate_limited_many"] =
         "The provider is rate-limiting ReaAssist right now. This turn already used {calls} hidden context/retry API calls, so the throttle can appear even though you only sent one visible message.\n\nWait about {seconds} seconds before trying again. ReaAssist keeps the original prompt attached during automatic throttle retries; if this message appears, those retries have already been exhausted for this turn.\n\nIf this keeps happening, try switching models in the dropdown.",
       ["response.provider_rate_limited_one"] =
@@ -5015,26 +5015,37 @@ I18N.KEY_MIN_REVISION = {
   ["mode.combo_hint.openai.gpt-6.1-terra.high"] = 1,
   ["mode.combo_hint.openai.gpt-6.1-terra.xhigh"] = 1,
   ["mode.combo_hint.openai.gpt-6.1-terra.max"] = 1,
-  ["mode.combo_hint.openai.gpt-6.1-sol.low"] = 1,
-  ["mode.combo_hint.openai.gpt-6.1-sol.medium"] = 1,
-  ["mode.combo_hint.openai.gpt-6.1-sol.high"] = 1,
-  ["mode.combo_hint.openai.gpt-6.1-sol.xhigh"] = 1,
-  ["mode.combo_hint.openai.gpt-6.1-sol.max"] = 1,
-  ["mode.combo_hint.openai.gpt-6-astra.low"] = 1,
-  ["mode.combo_hint.openai.gpt-6-astra.medium"] = 1,
-  ["mode.combo_hint.openai.gpt-6-astra.high"] = 1,
-  ["mode.combo_hint.openai.gpt-6-astra.xhigh"] = 1,
-  ["mode.combo_hint.openai.gpt-6-astra.max"] = 1,
+  ["mode.combo_hint.openai.gpt-6.2-sol.low"] = 1,
+  ["mode.combo_hint.openai.gpt-6.2-sol.medium"] = 1,
+  ["mode.combo_hint.openai.gpt-6.2-sol.high"] = 1,
+  ["mode.combo_hint.openai.gpt-6.2-sol.xhigh"] = 1,
+  ["mode.combo_hint.openai.gpt-6.2-sol.max"] = 1,
+  ["mode.combo_hint.openai.gpt-6.2-astra.low"] = 1,
+  ["mode.combo_hint.openai.gpt-6.2-astra.medium"] = 1,
+  ["mode.combo_hint.openai.gpt-6.2-astra.high"] = 1,
+  ["mode.combo_hint.openai.gpt-6.2-astra.xhigh"] = 1,
+  ["mode.combo_hint.openai.gpt-6.2-astra.max"] = 1,
   ["mode.model_tip.gpt-6.1-terra"] = 1,
-  ["mode.model_tip.gpt-6.1-sol"] = 1,
-  ["mode.model_tip.gemini-3.5-flash-lite"] = 1,
+  ["mode.model_tip.gpt-6.2-sol"] = 1,
+  ["mode.model_tip.gemini-3.5-flash-lite.r2"] = 1,
+  ["mode.model_tip.gemini-3.6-flash.r2"] = 1,
+  ["mode.model_tip.gemini-4-hydrogen"] = 1,
+  ["mode.model_tip.gemini-4-neon"] = 1,
   ["mode.combo_hint.google.gemini-3.6-flash.LOW"] = 1,
   ["mode.combo_hint.google.gemini-3.6-flash.MEDIUM"] = 1,
   ["mode.combo_hint.google.gemini-3.6-flash.HIGH"] = 1,
-  ["mode.combo_hint.google.gemini-3.1-pro-preview.LOW"] = 1,
-  ["mode.combo_hint.google.gemini-3.1-pro-preview.MEDIUM"] = 1,
-  ["mode.combo_hint.google.gemini-3.1-pro-preview.HIGH"] = 1,
-  ["mode.model_tip.gpt-6-astra"] = 1,
+  ["mode.combo_hint.google.gemini-3.6-flash.MINIMAL.r2"] = 1,
+  ["mode.combo_hint.google.gemini-4-hydrogen.LOW"] = 1,
+  ["mode.combo_hint.google.gemini-4-hydrogen.MEDIUM"] = 1,
+  ["mode.combo_hint.google.gemini-4-hydrogen.HIGH"] = 1,
+  ["mode.combo_hint.google.gemini-4-neon.LOW"] = 1,
+  ["mode.combo_hint.google.gemini-4-neon.MEDIUM"] = 1,
+  ["mode.combo_hint.google.gemini-4-neon.HIGH"] = 1,
+  ["dialog.gemini.body3_r3"] = 1,
+  ["gemini.toast.neon_available"] = 1,
+  ["net.cap.call.hint_gemini_r2"] = 1,
+  ["response.gemini_paid_required_r3"] = 1,
+  ["mode.model_tip.gpt-6.2-astra"] = 1,
   ["retry.reason.for_unsafe_fx_replacement"] = 1,
   ["validator.folder_default_parent_blocked"] = 1,
   ["jsfx.companion_ignored"] = 1,
@@ -5224,9 +5235,6 @@ I18N.KEY_MIN_REVISION = {
   ["mode.combo_hint.openai.gpt-6-sol.low"] = 1,
   ["mode.combo_hint.openai.gpt-6-sol.medium"] = 1,
   ["mode.combo_hint.openai.gpt-6-sol.high"] = 1,
-  ["mode.combo_hint.google.gemini-3.8-flash.HIGH"] = 1,
-  ["mode.combo_hint.google.gemini-3.8-flash.LOW"] = 1,
-  ["mode.combo_hint.google.gemini-3.8-flash.MEDIUM"] = 1,
   ["mode.model_tip.deepseek-flash"] = 1,
   ["mode.model_tip.claude-opus-5-5"] = 1,
   ["mode.model_tip.claude-sonnet-5-5"] = 1,
@@ -5240,7 +5248,6 @@ I18N.KEY_MIN_REVISION = {
   ["net.cap.call.hint_haiku"] = 1,
   ["settings.custom.tip.details.context_window"] = 1,
   ["settings.custom.tip.header.model_id"] = 1,
-  ["mode.model_tip.gemini-3.8-flash"] = 1,
   ["mode.model_tip.gpt-6-luna"] = 1,
   ["mode.model_tip.gpt-6-sol"] = 1,
   ["net.turn_budget.actual_cost_stop"] = 1,

@@ -7,6 +7,18 @@ model training cutoffs. This is not the full changelog.
 If a user asks outside this slice, do not invent details. Say the installed
 REAPER changelog is authoritative, or ask for the relevant changelog lines.
 
+## REAPER 7.84 to 7.86 - October 28 to November 13, 2026
+
+- Take markers can have a length (7.86). The take marker context menu has
+  "Edit take marker", a mouse modifier can drag to insert a marker with a
+  length, and the marker tints the item background for its duration.
+- REAPER 7.86 adds the .ReaperPkg package format for installing and
+  uninstalling JSFX, extensions and scripts.
+- Envelope point edits soft-snap to existing points (7.84). A preference can
+  make an edited point delete other points it passes over.
+- Preferences has a "Customization list" tab for viewing and resetting
+  customized settings and project defaults (7.85).
+
 ## REAPER 7.83 - October 24, 2026
 
 - The FX browser has a "Hidden FX" folder, and many legacy JSFX now start
